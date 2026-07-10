@@ -559,6 +559,10 @@ SimpleBroker's watcher lifecycle hooks while Weft still owns queue membership,
 priority, and dispatch policy. It does not open one Postgres `LISTEN` connection
 per watched queue. The important operational limit is therefore the number of
 concurrent Weft processes, plus short-lived command and startup spikes.
+When a running standalone `MultiQueueWatcher` adds or removes membership, its
+drive owner replaces that one fan-in waiter with the exact new queue set before
+closing the displaced waiter. `BaseTask` reactor membership remains fixed for
+the task lifetime; this dynamic contract applies only to standalone watchers.
 
 For production Postgres deployments, give Weft its own connection budget rather
 than relying on the application's normal database pool. A practical starting

@@ -2,6 +2,7 @@
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-3]
+- docs/specifications/07-System_Invariants.md [IMPL.10]
 - docs/specifications/07-System_Invariants.md [STATE.1], [QUEUE.6], [OBS.1]
 
 Background
@@ -15,8 +16,8 @@ transactions can span multiple Python calls, so a signal landing mid-SQL
 could self-deadlock the process or leave a transaction half-applied.
 
 The fix (Task A1) moves only the *call site*: the installed handler now
-calls ``BaseTask.note_termination_signal``, which only records the signum
-in a plain instance attribute (``_pending_termination_signum``). The task
+calls ``BaseTask.note_termination_signal``, which only appends the signum
+to an in-memory source mailbox. The task
 run loop (``BaseTask.process_once`` / ``Consumer.process_once``) checks for
 a pending signum at the top of every turn and, if present, invokes the
 existing (unmodified) ``handle_termination_signal`` from ordinary Python
@@ -27,12 +28,12 @@ Why the "signal lands mid-commit" race is structurally excluded
 Before this fix, the dangerous window was "a signal arrives while a broker
 transaction owned by the *signal-interrupted* frame is in flight," because
 the handler itself re-entered the broker from inside that frame. After this
-fix, the handler never touches the broker: it only writes a plain Python
-int to an instance attribute, which is safe to do from any point in the
+fix, the handler never touches the broker: it only appends a plain source
+entry to an in-memory deque, which is safe to do from any point in the
 target thread's execution (including between arbitrary bytecode
 instructions) because CPython signal handlers run between bytecodes on the
-main thread, and simple attribute assignment is atomic at the bytecode
-level. There is therefore no deterministic way to construct a variant of
+main thread, and deque append is atomic. There is therefore no deterministic
+way to construct a variant of
 "signal during commit, full result winds up in a cancelled task's outbox"
 against the fixed code: the only broker-visible work now happens from
 ``process_once()``, called from ordinary (non-signal) control flow, so it
@@ -47,6 +48,7 @@ import os
 import signal
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -276,7 +278,9 @@ def test_installed_signal_handler_only_records_state_no_broker_call() -> None:
     assert task.handled == []
 
 
-def test_note_termination_signal_kill_class_outranks_later_stop() -> None:
+def test_note_termination_signal_kill_class_outranks_later_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """KILL-class (SIGUSR1) must not be downgraded by a later STOP-class signal."""
 
     sigusr1 = getattr(signal, "SIGUSR1", None)
@@ -293,14 +297,25 @@ def test_note_termination_signal_kill_class_outranks_later_stop() -> None:
         context = harness.context
         task = Consumer(context.broker_target, spec, config=context.config)
         try:
+            applied: list[tuple[int, bool]] = []
+            monkeypatch.setattr(
+                task,
+                "_apply_termination_request",
+                lambda signum, *, parent_lost: applied.append((signum, parent_lost)),
+            )
             task.note_termination_signal(sigusr1)
             task.note_termination_signal(signal.SIGTERM)
-            assert task._pending_termination_signum == sigusr1
+            task.process_once()
+
+            assert applied == [(sigusr1, False)]
+            assert task._has_pending_termination_request() is False
         finally:
             task.stop(join=False)
 
 
-def test_note_termination_signal_last_stop_class_signal_wins() -> None:
+def test_note_termination_signal_last_stop_class_signal_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Among STOP-class signals, the most recently observed one is retained."""
 
     tid = str(time.time_ns())
@@ -310,11 +325,84 @@ def test_note_termination_signal_last_stop_class_signal_wins() -> None:
         context = harness.context
         task = Consumer(context.broker_target, spec, config=context.config)
         try:
+            applied: list[tuple[int, bool]] = []
+            monkeypatch.setattr(
+                task,
+                "_apply_termination_request",
+                lambda signum, *, parent_lost: applied.append((signum, parent_lost)),
+            )
             task.note_termination_signal(signal.SIGINT)
             task.note_termination_signal(signal.SIGTERM)
-            assert task._pending_termination_signum == signal.SIGTERM
+            task.process_once()
+
+            assert applied == [(signal.SIGTERM, False)]
+            assert task._has_pending_termination_request() is False
         finally:
             task.stop(join=False)
+
+
+def test_pending_source_snapshot_preserves_arrivals_during_drain(
+    broker_env,
+    unique_tid_signal_deferral: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot draining must leave concurrently appended sources for next turn."""
+
+    sigusr1 = getattr(signal, "SIGUSR1", None)
+    if sigusr1 is None:
+        pytest.skip("platform has no SIGUSR1")
+
+    db_path, _make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_command_taskspec(
+            unique_tid_signal_deferral,
+            sys.executable,
+            args=["-c", "pass"],
+        ),
+    )
+    applied: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        task,
+        "_apply_termination_request",
+        lambda signum, *, parent_lost: applied.append((signum, parent_lost)),
+    )
+    task.note_termination_signal(signal.SIGTERM)
+
+    class InjectingDeque(deque[tuple[str, int | None]]):
+        injected = False
+
+        def popleft(self) -> tuple[str, int | None]:
+            source = super().popleft()
+            if not self.injected:
+                self.injected = True
+                task.note_termination_signal(sigusr1)
+                task.note_parent_loss()
+            return source
+
+    task._pending_termination_sources = InjectingDeque(
+        task._pending_termination_sources
+    )
+
+    try:
+        task.process_once()
+
+        assert applied == [(signal.SIGTERM, False)]
+        assert task._has_pending_termination_request() is True
+        assert list(task._pending_termination_sources) == [
+            ("signal", sigusr1),
+            ("parent_loss", None),
+        ]
+
+        task.process_once()
+
+        assert applied == [
+            (signal.SIGTERM, False),
+            (sigusr1, True),
+        ]
+        assert task._has_pending_termination_request() is False
+    finally:
+        task.stop(join=False)
 
 
 def test_process_once_applies_pending_signal_and_clears_it(
@@ -337,7 +425,7 @@ def test_process_once_applies_pending_signal_and_clears_it(
         assert task.taskspec.state.status == "running"
 
         task.note_termination_signal(signal.SIGTERM)
-        assert task._pending_termination_signum == signal.SIGTERM
+        assert task._has_pending_termination_request() is True
         assert task._external_stop_handled is False
 
         deadline = time.monotonic() + 5.0
@@ -348,9 +436,11 @@ def test_process_once_applies_pending_signal_and_clears_it(
             task.wait_for_activity(timeout=TASK_PROCESS_POLL_INTERVAL)
 
         assert task.taskspec.state.status == "cancelled"
-        assert task._pending_termination_signum is None
+        assert task._has_pending_termination_request() is False
 
-        # A second turn must not re-apply / re-note the signal.
+        # A standalone process_once() does not own the outer lifecycle loop;
+        # the same owner may inspect another bounded stopping turn before the
+        # caller explicitly finalizes.
         noted_before = task._external_stop_handled
         task.process_once()
         assert task._external_stop_handled == noted_before

@@ -22,7 +22,6 @@ from weft._constants import (
     PARENT_LOSS_WAKE_INTERVAL_CEILING,
     PARENT_LOSS_WAKE_INTERVAL_FLOOR,
     TASK_PROCESS_POLL_INTERVAL,
-    TERMINAL_TASK_STATUSES,
 )
 
 from .taskspec import TaskSpec, apply_bundle_root_to_taskspec_payload
@@ -52,14 +51,16 @@ def _wake_task_stop_event(task: Any) -> None:
 
 
 def _request_parent_loss_shutdown(task: Any) -> None:
+    note_parent_loss = getattr(task, "note_parent_loss", None)
+    if callable(note_parent_loss):
+        note_parent_loss()
+        return
     handler = getattr(task, "handle_termination_signal", None)
     if callable(handler):
         handler(signal.SIGTERM)
-        _wake_task_stop_event(task)
         return
     if hasattr(task, "should_stop"):
         task.should_stop = True
-    _wake_task_stop_event(task)
 
 
 def _start_parent_loss_watcher(
@@ -69,6 +70,9 @@ def _start_parent_loss_watcher(
     poll_interval: float,
 ) -> threading.Event:
     parent_lost = threading.Event()
+    enable_watch = getattr(task, "enable_parent_loss_watch", None)
+    if callable(enable_watch):
+        enable_watch()
     wake_interval = min(
         max(poll_interval, PARENT_LOSS_WAKE_INTERVAL_FLOOR),
         PARENT_LOSS_WAKE_INTERVAL_CEILING,
@@ -78,7 +82,7 @@ def _start_parent_loss_watcher(
         while not parent_lost.is_set():
             if _parent_process_changed(initial_parent_pid):
                 parent_lost.set()
-                _wake_task_stop_event(task)
+                _request_parent_loss_shutdown(task)
                 return
             time.sleep(wake_interval)
 
@@ -110,6 +114,16 @@ def _task_process_entry(
     hard_exit_on_return: bool = False,
     detach_stdio: bool = False,
 ) -> None:
+    """Construct the task, install signal/parent-loss adapters, delegate once.
+
+    The launcher is a thin process adapter: ``BaseTask.run_until_stopped()``
+    alone evaluates terminal state, worker activity, waiting, and
+    finalization.
+
+    Spec:
+    - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.5]
+    - docs/specifications/07-System_Invariants.md [IMPL.10]
+    """
     if detach_stdio:
         _redirect_standard_streams_to_devnull()
 
@@ -119,50 +133,14 @@ def _task_process_entry(
     _install_signal_handlers(task)
     initial_parent_pid = os.getppid()
     stop_with_parent = _is_foreground_serve_task(task)
-    parent_lost = (
+    if stop_with_parent:
         _start_parent_loss_watcher(
             task,
             initial_parent_pid=initial_parent_pid,
             poll_interval=poll_interval,
         )
-        if stop_with_parent
-        else None
-    )
 
-    try:
-        while True:
-            if stop_with_parent and (
-                (parent_lost is not None and parent_lost.is_set())
-                or _parent_process_changed(initial_parent_pid)
-            ):
-                _request_parent_loss_shutdown(task)
-            task.process_once()
-            status = task.taskspec.state.status
-            has_worker_activity = getattr(task, "_has_worker_activity", None)
-            worker_activity = (
-                bool(has_worker_activity()) if callable(has_worker_activity) else False
-            )
-            if status in TERMINAL_TASK_STATUSES or (
-                task.should_stop and not worker_activity
-            ):
-                break
-            wait_timeout = poll_interval
-            next_wait_timeout = getattr(task, "next_wait_timeout", None)
-            if callable(next_wait_timeout):
-                candidate_timeout = next_wait_timeout()
-                if candidate_timeout is not None:
-                    wait_timeout = max(0.0, float(candidate_timeout))
-            wait_for_activity = getattr(task, "wait_for_activity", None)
-            if callable(wait_for_activity):
-                wait_for_activity(timeout=wait_timeout)
-            else:
-                time.sleep(wait_timeout)
-    finally:
-        stop = getattr(task, "stop", None)
-        if callable(stop):
-            stop(join=False)
-        else:
-            task.cleanup()
+    task.run_until_stopped(poll_interval=poll_interval)
 
     if hard_exit_on_return and os.name != "nt":
         os._exit(0)

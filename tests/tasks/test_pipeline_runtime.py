@@ -1,7 +1,12 @@
-"""Broker-backed tests for first-class pipeline runtime tasks."""
+"""Broker-backed tests for first-class pipeline runtime tasks.
+
+Spec references:
+- docs/specifications/07-System_Invariants.md [QUEUE.7]
+"""
 
 from __future__ import annotations
 
+import itertools
 import json
 import signal
 import time
@@ -10,15 +15,21 @@ from typing import Any
 
 import pytest
 
+import weft.core.tasks.pipeline as pipeline_module
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
     PIPELINE_OWNER_METADATA_KEY,
+    PIPELINE_RUNTIME_METADATA_KEY,
+    WEFT_ENDPOINTS_REGISTRY_QUEUE,
+    WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_PIPELINES_STATE_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_STREAMING_SESSIONS_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands import specs as spec_cmd
 from weft.context import build_context
@@ -94,6 +105,122 @@ def _load_task(root: Path, name: str) -> dict[str, Any]:
     return payload
 
 
+def _compiled_pipeline_taskspec_payload(
+    tmp_path: Path,
+    *,
+    stage_count: int = 1,
+) -> dict[str, Any]:
+    """Compile stages and their edges through the production path."""
+
+    root = prepare_project_root(tmp_path / "project")
+    ctx = build_context(spec_context=root)
+    stage_names = tuple(f"stage-{index}" for index in range(stage_count))
+    for stage_name in stage_names:
+        _write_json(ctx.weft_dir / "tasks" / f"{stage_name}.json", _task_payload())
+    compiled = compile_linear_pipeline(
+        load_pipeline_spec_payload(
+            {
+                "name": "pipe",
+                "stages": [
+                    {"name": stage_name, "task": stage_name}
+                    for stage_name in stage_names
+                ],
+            }
+        ),
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+    return compiled.pipeline_taskspec.model_dump(mode="json")
+
+
+_PIPELINE_FIXED_ROUTE_ROLES = (
+    "events",
+    "status",
+    "pipeline_registry",
+    "internal_spawn_requests",
+    "stage_ctrl_in",
+    "edge_ctrl_in",
+)
+_PIPELINE_BASE_AND_SUPPORT_ROLES = (
+    "inbox",
+    "reserved",
+    "outbox",
+    "ctrl_in",
+    "ctrl_out",
+    "global_log",
+    "tid_mappings",
+    "streaming_sessions",
+    "endpoints_registry",
+)
+_PIPELINE_FIXED_ROUTE_COLLISION_PAIRS = tuple(
+    (pipeline_role, other_role)
+    for pipeline_role in _PIPELINE_FIXED_ROUTE_ROLES
+    for other_role in _PIPELINE_BASE_AND_SUPPORT_ROLES
+) + tuple(itertools.combinations(_PIPELINE_FIXED_ROUTE_ROLES, 2))
+_PAYLOAD_MUTABLE_PIPELINE_ROLES = {
+    "inbox",
+    "outbox",
+    "ctrl_in",
+    "ctrl_out",
+    "events",
+    "status",
+    "stage_ctrl_in",
+    "edge_ctrl_in",
+}
+
+
+def _pipeline_topology_role_values(payload: dict[str, Any]) -> dict[str, str]:
+    runtime = payload["metadata"][PIPELINE_RUNTIME_METADATA_KEY]
+    tid = payload["tid"]
+    return {
+        "inbox": payload["io"]["inputs"]["inbox"],
+        "reserved": f"T{tid}.reserved",
+        "outbox": payload["io"]["outputs"]["outbox"],
+        "ctrl_in": payload["io"]["control"]["ctrl_in"],
+        "ctrl_out": payload["io"]["control"]["ctrl_out"],
+        "global_log": WEFT_GLOBAL_LOG_QUEUE,
+        "tid_mappings": WEFT_TID_MAPPINGS_QUEUE,
+        "streaming_sessions": WEFT_STREAMING_SESSIONS_QUEUE,
+        "endpoints_registry": WEFT_ENDPOINTS_REGISTRY_QUEUE,
+        "events": runtime["queues"]["events"],
+        "status": runtime["queues"]["status"],
+        "pipeline_registry": WEFT_PIPELINES_STATE_QUEUE,
+        "internal_spawn_requests": WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+        "stage_ctrl_in": runtime["stages"][0]["ctrl_in_queue"],
+        "edge_ctrl_in": runtime["edges"][0]["taskspec"]["io"]["control"]["ctrl_in"],
+    }
+
+
+def _set_pipeline_payload_role(
+    payload: dict[str, Any],
+    role: str,
+    queue_name: str,
+) -> None:
+    runtime = payload["metadata"][PIPELINE_RUNTIME_METADATA_KEY]
+    if role == "inbox":
+        payload["io"]["inputs"]["inbox"] = queue_name
+    elif role == "outbox":
+        payload["io"]["outputs"]["outbox"] = queue_name
+    elif role in {"ctrl_in", "ctrl_out"}:
+        payload["io"]["control"][role] = queue_name
+    elif role in {"events", "status"}:
+        runtime["queues"][role] = queue_name
+    elif role == "stage_ctrl_in":
+        runtime["stages"][0]["ctrl_in_queue"] = queue_name
+    elif role == "edge_ctrl_in":
+        runtime["edges"][0]["taskspec"]["io"]["control"]["ctrl_in"] = queue_name
+    else:  # pragma: no cover - test matrix guard
+        raise AssertionError(f"Role {role!r} is not payload-mutable")
+
+
+def _pipeline_role_error_label(role: str) -> str:
+    if role == "stage_ctrl_in":
+        return "stage_ctrl_in:"
+    if role == "edge_ctrl_in":
+        return "edge_ctrl_in:"
+    return role
+
+
 def _pipeline_owned_stage_spec(tid: str, *, function_target: str) -> TaskSpec:
     return TaskSpec(
         tid=tid,
@@ -115,6 +242,67 @@ def _pipeline_owned_stage_spec(tid: str, *, function_target: str) -> TaskSpec:
             },
         },
     )
+
+
+@pytest.mark.parametrize("events_queue", ("", "   "))
+def test_pipeline_owner_event_route_rejects_blank_queue_before_broker_side_effects(
+    tmp_path: Path,
+    events_queue: str,
+) -> None:
+    """Pipeline owner output remains a validated construction route [QUEUE.7]."""
+
+    tid = "1778089999999999199"
+    payload = _pipeline_owned_stage_spec(
+        tid,
+        function_target="tests.tasks.sample_targets:echo_payload",
+    ).model_dump(mode="json")
+    payload["metadata"][PIPELINE_OWNER_METADATA_KEY]["events_queue"] = events_queue
+    db_path = tmp_path / f"blank-owner-events-{len(events_queue)}.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        Consumer(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert "events_queue" in message
+    assert "non-empty" in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize("other_role", _PIPELINE_BASE_AND_SUPPORT_ROLES)
+def test_pipeline_owner_event_route_rejects_every_base_and_support_collision(
+    tmp_path: Path,
+    other_role: str,
+) -> None:
+    """Pipeline-owned Consumers isolate owner events from task routes [QUEUE.7]."""
+
+    tid = "1778089999999999198"
+    payload = _pipeline_owned_stage_spec(
+        tid,
+        function_target="tests.tasks.sample_targets:echo_payload",
+    ).model_dump(mode="json")
+    role_values = {
+        "inbox": payload["io"]["inputs"]["inbox"],
+        "reserved": f"T{tid}.reserved",
+        "outbox": payload["io"]["outputs"]["outbox"],
+        "ctrl_in": payload["io"]["control"]["ctrl_in"],
+        "ctrl_out": payload["io"]["control"]["ctrl_out"],
+        "global_log": WEFT_GLOBAL_LOG_QUEUE,
+        "tid_mappings": WEFT_TID_MAPPINGS_QUEUE,
+        "streaming_sessions": WEFT_STREAMING_SESSIONS_QUEUE,
+        "endpoints_registry": WEFT_ENDPOINTS_REGISTRY_QUEUE,
+    }
+    duplicate_queue = role_values[other_role]
+    payload["metadata"][PIPELINE_OWNER_METADATA_KEY]["events_queue"] = duplicate_queue
+    db_path = tmp_path / f"owner-events-{other_role}-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        Consumer(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert "pipeline_owner_events" in message
+    assert other_role in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
 
 
 def _entry_edge_spec(tid: str, *, override_input: Any = None) -> TaskSpec:
@@ -177,6 +365,171 @@ def _stage_output_edge_spec(tid: str, *, override_input: Any = None) -> TaskSpec
     }
     base_payload["metadata"][PIPELINE_OWNER_METADATA_KEY]["edge_name"] = "stage-to-next"
     return TaskSpec.model_validate(base_payload)
+
+
+def test_pipeline_edge_allows_compiled_source_target_and_owner_event_aliases(
+    tmp_path: Path,
+) -> None:
+    """The three compiled edge semantic aliases remain valid [QUEUE.7]."""
+
+    edge = PipelineEdgeTask(
+        tmp_path / "edge-allowed-aliases.sqlite3",
+        _entry_edge_spec("1778089999999999201"),
+    )
+    edge.cleanup()
+
+
+@pytest.mark.parametrize("malformation", ("missing", "none", "integer", "blank"))
+def test_pipeline_task_rejects_malformed_precompiled_edge_control_route(
+    tmp_path: Path,
+    malformation: str,
+) -> None:
+    """Every precompiled edge control output is valid before broker I/O [QUEUE.7]."""
+
+    payload = _compiled_pipeline_taskspec_payload(tmp_path)
+    runtime = payload["metadata"][PIPELINE_RUNTIME_METADATA_KEY]
+    control = runtime["edges"][0]["taskspec"]["io"]["control"]
+    if malformation == "missing":
+        control.pop("ctrl_in")
+    elif malformation == "none":
+        control["ctrl_in"] = None
+    elif malformation == "integer":
+        control["ctrl_in"] = 7
+    else:
+        control["ctrl_in"] = "   "
+    db_path = tmp_path / f"malformed-edge-control-{malformation}.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        PipelineTask(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert "edge" in message.lower()
+    assert "ctrl_in" in message
+    assert "non-empty" in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("extra_role", "other_role"),
+    tuple(
+        (extra_role, base_role)
+        for extra_role in ("source", "target", "events")
+        for base_role in ("inbox", "reserved", "outbox", "ctrl_in", "ctrl_out")
+        if (extra_role, base_role) not in {("source", "inbox"), ("target", "outbox")}
+    )
+    + (("source", "target"), ("source", "events"), ("target", "events")),
+)
+def test_pipeline_edge_rejects_unsafe_route_alias_before_broker_side_effects(
+    tmp_path: Path,
+    extra_role: str,
+    other_role: str,
+) -> None:
+    """Only the two compiled edge semantic aliases are accepted [QUEUE.7]."""
+
+    tid = "1778089999999999202"
+    payload = _entry_edge_spec(tid).model_dump(mode="json")
+    runtime = payload["metadata"][PIPELINE_EDGE_RUNTIME_METADATA_KEY]
+    base_values = {
+        "inbox": payload["io"]["inputs"]["inbox"],
+        "reserved": f"T{tid}.reserved",
+        "outbox": payload["io"]["outputs"]["outbox"],
+        "ctrl_in": payload["io"]["control"]["ctrl_in"],
+        "ctrl_out": payload["io"]["control"]["ctrl_out"],
+    }
+    runtime_keys = {
+        "source": "source_queue",
+        "target": "target_queue",
+        "events": "events_queue",
+    }
+    if other_role in runtime_keys:
+        duplicate_queue = f"edge.shared.{extra_role}-{other_role}"
+        runtime[runtime_keys[extra_role]] = duplicate_queue
+        runtime[runtime_keys[other_role]] = duplicate_queue
+    else:
+        duplicate_queue = base_values[other_role]
+        runtime[runtime_keys[extra_role]] = duplicate_queue
+    db_path = tmp_path / f"edge-{extra_role}-{other_role}-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        PipelineEdgeTask(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert extra_role in message
+    assert other_role in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("pipeline_role", "other_role"),
+    _PIPELINE_FIXED_ROUTE_COLLISION_PAIRS,
+)
+def test_pipeline_task_rejects_every_fixed_route_collision_before_broker_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pipeline_role: str,
+    other_role: str,
+) -> None:
+    """All PipelineTask fixed routes are pairwise distinct [QUEUE.7]."""
+
+    payload = _compiled_pipeline_taskspec_payload(tmp_path)
+    role_values = _pipeline_topology_role_values(payload)
+    if pipeline_role in _PAYLOAD_MUTABLE_PIPELINE_ROLES:
+        duplicate_queue = role_values[other_role]
+        _set_pipeline_payload_role(payload, pipeline_role, duplicate_queue)
+    elif other_role in _PAYLOAD_MUTABLE_PIPELINE_ROLES:
+        duplicate_queue = role_values[pipeline_role]
+        _set_pipeline_payload_role(payload, other_role, duplicate_queue)
+    else:
+        duplicate_queue = role_values[other_role]
+        constant_name = {
+            "pipeline_registry": "WEFT_PIPELINES_STATE_QUEUE",
+            "internal_spawn_requests": "WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE",
+        }[pipeline_role]
+        monkeypatch.setattr(pipeline_module, constant_name, duplicate_queue)
+    db_path = tmp_path / f"pipeline-{pipeline_role}-{other_role}-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        PipelineTask(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert _pipeline_role_error_label(pipeline_role) in message
+    assert _pipeline_role_error_label(other_role) in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize("route_family", ("stage", "edge"))
+def test_pipeline_task_rejects_duplicate_precompiled_child_control_routes(
+    tmp_path: Path,
+    route_family: str,
+) -> None:
+    """Distinct precompiled children retain distinct control outputs [QUEUE.7]."""
+
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=2)
+    runtime = payload["metadata"][PIPELINE_RUNTIME_METADATA_KEY]
+    if route_family == "stage":
+        routes = runtime["stages"]
+        duplicate_queue = routes[0]["ctrl_in_queue"]
+        routes[1]["ctrl_in_queue"] = duplicate_queue
+        role_prefix = "stage_ctrl_in"
+    else:
+        routes = runtime["edges"]
+        first_control = routes[0]["taskspec"]["io"]["control"]
+        second_control = routes[1]["taskspec"]["io"]["control"]
+        duplicate_queue = first_control["ctrl_in"]
+        second_control["ctrl_in"] = duplicate_queue
+        role_prefix = "edge_ctrl_in"
+    db_path = tmp_path / f"duplicate-{route_family}-controls.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        PipelineTask(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert f"{role_prefix}:0:" in message
+    assert f"{role_prefix}:1:" in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
 
 
 def test_pipeline_owned_stage_emits_success_owner_event_after_outbox_write(

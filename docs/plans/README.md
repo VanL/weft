@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 148 plan files in this directory.
+There are currently 150 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,8 @@ There are currently 148 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](./2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md) | PostgreSQL Dynamic Native-Waiter Rebind Plan | `draft` | none |
+| [`2026-07-09-reference-reactor-safety-hardening-plan.md`](./2026-07-09-reference-reactor-safety-hardening-plan.md) | Reference Reactor Safety Hardening Plan | `draft` | none |
 | [`2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](./2026-07-02-runtime-correctness-and-retention-remediation-plan.md) | Runtime Correctness and Retention Remediation Plan | `completed` | none |
 | [`2026-06-29-manager-task-spawned-retention-policy-plan.md`](./2026-06-29-manager-task-spawned-retention-policy-plan.md) | Manager Task-Spawned Retention Policy Plan | `completed` | none |
 | [`2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](./2026-06-20-weft-django-terminal-status-monitor-store-plan.md) | Weft Django Terminal Status Monitor Store Plan | `completed` | none |

@@ -1,9 +1,18 @@
-"""Task execution tests covering reservation flow and control handling."""
+"""Task execution tests covering reservation flow and control handling.
+
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.5]
+- docs/specifications/07-System_Invariants.md [QUEUE.7], [IMPL.10]
+"""
 
 from __future__ import annotations
 
 import base64
+import itertools
 import json
+import os
+import queue
+import signal
 import stat
 import sys
 import threading
@@ -24,20 +33,33 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_PING,
     CONTROL_STOP,
+    PARENT_LOSS_WAKE_INTERVAL_CEILING,
+    PIPELINE_OWNER_METADATA_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
+    TASKSPEC_TID_SHORT_LENGTH,
+    WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.core import launcher as launcher_module
 from weft.core.launcher import _request_parent_loss_shutdown, _task_process_entry
+from weft.core.manager import Manager
+from weft.core.monitor.task_monitor import TaskMonitor
 from weft.core.runners import RunnerOutcome
 from weft.core.tasks import Consumer
 from weft.core.tasks import base as base_module
 from weft.core.tasks import consumer as consumer_module
+from weft.core.tasks import sessions as sessions_module
 from weft.core.tasks.base import BaseTask, TaskWorkerResult
+from weft.core.tasks.heartbeat import HeartbeatTask
+from weft.core.tasks.monitor import Monitor
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
+from weft.core.tasks.pipeline import PipelineEdgeTask, PipelineTask
+from weft.core.tasks.service import ServiceTask
+from weft.core.tasks.sessions import AgentSession, CommandSession
 from weft.core.taskspec import (
     IOSection,
     ReservedPolicy,
@@ -49,6 +71,7 @@ from weft.core.taskspec import (
 PROCESS_SCRIPT = str((Path(__file__).resolve().parent / "process_target.py").resolve())
 _launcher_wait_calls: list[float | None] = []
 _launcher_process_calls = 0
+_launcher_run_calls = 0
 
 
 class LauncherWaitTask:
@@ -80,6 +103,12 @@ class LauncherWaitTask:
         del join
         self.should_stop = True
 
+    def run_until_stopped(self, *, poll_interval: float) -> None:
+        global _launcher_process_calls, _launcher_run_calls
+        _launcher_run_calls += 1
+        _launcher_process_calls = 2
+        _launcher_wait_calls.append(poll_interval)
+
 
 class LauncherTerminalTask(LauncherWaitTask):
     def process_once(self) -> None:
@@ -88,6 +117,12 @@ class LauncherTerminalTask(LauncherWaitTask):
         _launcher_process_calls = self.process_calls
         self.taskspec.mark_completed(return_code=0)
 
+    def run_until_stopped(self, *, poll_interval: float) -> None:
+        global _launcher_process_calls, _launcher_run_calls
+        del poll_interval
+        _launcher_run_calls += 1
+        _launcher_process_calls = 1
+
 
 class ReactorTestTask(BaseTask):
     """Small concrete task for BaseTask reactor worker tests."""
@@ -95,7 +130,15 @@ class ReactorTestTask(BaseTask):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.worker_results: list[TaskWorkerResult] = []
         self.worker_result_thread_ids: list[int] = []
+        self.reactor_turn_count = 0
+        self.handled_messages: list[str] = []
+        self.handled_message_event = threading.Event()
+        self.worker_result_event = threading.Event()
         super().__init__(*args, **kwargs)
+
+    def _process_reactor_turn(self) -> None:
+        self.reactor_turn_count += 1
+        super()._process_reactor_turn()
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         return {
@@ -110,13 +153,16 @@ class ReactorTestTask(BaseTask):
         timestamp: int,
         context: QueueMessageContext,
     ) -> None:
-        del message, timestamp, context
+        del timestamp, context
+        self.handled_messages.append(message)
+        self.handled_message_event.set()
 
     def _handle_worker_result(self, result: TaskWorkerResult) -> None:
         if result.error is not None:
             super()._handle_worker_result(result)
         self.worker_results.append(result)
         self.worker_result_thread_ids.append(threading.get_ident())
+        self.worker_result_event.set()
 
 
 class ErrorRecordingReactorTestTask(ReactorTestTask):
@@ -125,6 +171,1479 @@ class ErrorRecordingReactorTestTask(ReactorTestTask):
     def _handle_worker_result(self, result: TaskWorkerResult) -> None:
         self.worker_results.append(result)
         self.worker_result_thread_ids.append(threading.get_ident())
+
+
+def test_base_task_process_once_rejects_a_second_drive_thread_before_policy(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    task.process_once()
+    assert task.reactor_turn_count == 1
+
+    errors: list[BaseException] = []
+
+    def drive_from_foreign_thread() -> None:
+        try:
+            task.process_once()
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=drive_from_foreign_thread)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    try:
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
+        assert "reactor owner" in str(errors[0]).lower()
+        assert task.reactor_turn_count == 1
+    finally:
+        task.cleanup()
+
+
+def test_base_task_simultaneous_process_callers_choose_one_owner(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    barrier = threading.Barrier(3)
+    turn_entered = threading.Event()
+    release_turn = threading.Event()
+    outcomes: list[str] = []
+
+    class BlockingOwnerTask(ReactorTestTask):
+        def _process_reactor_turn(self) -> None:
+            turn_entered.set()
+            assert release_turn.wait(timeout=3.0)
+
+    db_path, _make_queue = broker_env
+    task = BlockingOwnerTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+
+    def drive() -> None:
+        barrier.wait(timeout=2.0)
+        try:
+            task.process_once()
+        except RuntimeError:
+            outcomes.append("rejected")
+        else:
+            outcomes.append("owner")
+
+    threads = [threading.Thread(target=drive) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait(timeout=2.0)
+    assert turn_entered.wait(timeout=2.0)
+    release_turn.set()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    try:
+        assert sorted(outcomes) == ["owner", "rejected"]
+    finally:
+        task.cleanup()
+
+
+def test_base_task_process_entry_publishes_turn_active_with_owner_claim(
+    broker_env,
+    unique_tid: str,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post_claim = threading.Event()
+    release_claim = threading.Event()
+    turn_entered = threading.Event()
+    release_turn = threading.Event()
+    stop_started = threading.Event()
+    stop_returned = threading.Event()
+
+    class BlockingTurnTask(ReactorTestTask):
+        def _block_turn(self) -> None:
+            turn_entered.set()
+            assert release_turn.wait(timeout=3.0)
+
+        def _process_reactor_turn(self) -> None:
+            self._block_turn()
+
+        def _process_stopping_reactor_turn(self) -> None:
+            self._block_turn()
+
+    db_path, _make_queue = broker_env
+    task = BlockingTurnTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    original_claim = task._claim_or_verify_drive_owner_locked
+
+    def pause_after_claim(current: threading.Thread) -> None:
+        original_claim(current)
+        post_claim.set()
+        assert release_claim.wait(timeout=3.0)
+
+    monkeypatch.setattr(
+        task,
+        "_claim_or_verify_drive_owner_locked",
+        pause_after_claim,
+    )
+
+    drive_thread = threading.Thread(target=task.process_once)
+    drive_thread.start()
+    assert post_claim.wait(timeout=2.0)
+
+    def stop_task() -> None:
+        stop_started.set()
+        task.stop()
+        stop_returned.set()
+
+    stop_thread = threading.Thread(target=stop_task)
+    stop_thread.start()
+    assert stop_started.wait(timeout=2.0)
+    assert not stop_returned.wait(timeout=0.05)
+    assert task._task_lifecycle.value != "closed"
+    assert task._queue_cache
+
+    release_claim.set()
+    assert turn_entered.wait(timeout=2.0)
+    assert not stop_returned.is_set()
+    assert task._task_lifecycle.value != "closed"
+    release_turn.set()
+
+    drive_thread.join(timeout=3.0)
+    stop_thread.join(timeout=3.0)
+    assert not drive_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert stop_returned.is_set()
+    assert task._task_lifecycle.value == "closed"
+    assert task._queue_cache == {}
+
+
+def test_base_task_run_loop_entry_publishes_active_with_owner_claim(
+    broker_env,
+    unique_tid: str,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post_claim = threading.Event()
+    release_claim = threading.Event()
+    loop_entered = threading.Event()
+    release_loop = threading.Event()
+    stop_started = threading.Event()
+    stop_returned = threading.Event()
+
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    original_claim = task._claim_or_verify_drive_owner_locked
+    original_pending = task._has_pending_termination_request
+
+    def pause_after_claim(current: threading.Thread) -> None:
+        original_claim(current)
+        post_claim.set()
+        assert release_claim.wait(timeout=3.0)
+
+    def pause_in_loop() -> bool:
+        loop_entered.set()
+        assert release_loop.wait(timeout=3.0)
+        return original_pending()
+
+    monkeypatch.setattr(
+        task,
+        "_claim_or_verify_drive_owner_locked",
+        pause_after_claim,
+    )
+    monkeypatch.setattr(task, "_has_pending_termination_request", pause_in_loop)
+
+    drive_thread = threading.Thread(target=task.run_until_stopped)
+    drive_thread.start()
+    assert post_claim.wait(timeout=2.0)
+
+    def stop_task() -> None:
+        stop_started.set()
+        task.stop()
+        stop_returned.set()
+
+    stop_thread = threading.Thread(target=stop_task)
+    stop_thread.start()
+    assert stop_started.wait(timeout=2.0)
+    assert not stop_returned.wait(timeout=0.05)
+    assert task._task_lifecycle.value != "closed"
+    assert task._queue_cache
+
+    release_claim.set()
+    assert loop_entered.wait(timeout=2.0)
+    assert not stop_returned.is_set()
+    assert task._task_lifecycle.value != "closed"
+    release_loop.set()
+
+    drive_thread.join(timeout=3.0)
+    stop_thread.join(timeout=3.0)
+    assert not drive_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert stop_returned.is_set()
+    assert task._task_lifecycle.value == "closed"
+    assert task._queue_cache == {}
+
+
+def test_base_task_rejects_reentrant_same_owner_turn(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    nested_errors: list[BaseException] = []
+
+    class ReentrantTurnTask(ReactorTestTask):
+        def _process_reactor_turn(self) -> None:
+            try:
+                self.process_once()
+            except BaseException as exc:
+                nested_errors.append(exc)
+
+    db_path, _make_queue = broker_env
+    task = ReentrantTurnTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    try:
+        task.process_once()
+
+        assert len(nested_errors) == 1
+        assert isinstance(nested_errors[0], RuntimeError)
+        assert "reentrant" in str(nested_errors[0]).lower()
+        assert task._turn_active is False
+    finally:
+        task.cleanup()
+
+
+def test_base_task_foreign_wait_rejects_before_waiter_effects(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    task.process_once()
+    ensure_calls = 0
+
+    class ImmediateWaiter:
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            return False
+
+    def ensure_waiter() -> ImmediateWaiter:
+        nonlocal ensure_calls
+        assert task._topology_manual_wait_thread is None
+        ensure_calls += 1
+        return ImmediateWaiter()
+
+    monkeypatch.setattr(task, "_ensure_multi_activity_waiter", ensure_waiter)
+    errors: list[BaseException] = []
+
+    def foreign_wait() -> None:
+        try:
+            task.wait_for_activity(timeout=0.01)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=foreign_wait)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    try:
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
+        assert ensure_calls == 0
+        task.wait_for_activity(timeout=0.01)
+        assert ensure_calls == 1
+        assert task._topology_manual_wait_thread is None
+    finally:
+        task.cleanup()
+
+
+def test_base_task_foreign_stop_finalizes_idle_manual_owner(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    task.process_once()
+    stop_thread = threading.Thread(target=task.stop)
+    stop_thread.start()
+    stop_thread.join(timeout=2.0)
+
+    assert not stop_thread.is_alive()
+    assert task._queue_cache == {}
+    assert task._task_lifecycle.value == "closed"
+    with pytest.raises(RuntimeError, match="closed"):
+        task.process_once()
+
+
+def test_base_task_foreign_stop_defers_cleanup_during_owned_standalone_wait(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    wait_entered = threading.Event()
+    release_wait = threading.Event()
+
+    def blocking_wait(_timeout: float | None) -> None:
+        wait_entered.set()
+        assert release_wait.wait(timeout=2.0)
+
+    task._wait_for_reactor_activity = blocking_wait  # type: ignore[method-assign]
+
+    def drive_and_wait() -> None:
+        task.process_once()
+        task.wait_for_activity(timeout=1.0)
+
+    owner_thread = threading.Thread(target=drive_and_wait)
+    owner_thread.start()
+    assert wait_entered.wait(timeout=2.0)
+
+    task.stop(join=False)
+
+    assert task._queue_cache
+    assert task._task_lifecycle.value == "stop_requested"
+
+    release_wait.set()
+    owner_thread.join(timeout=2.0)
+
+    assert not owner_thread.is_alive()
+    assert task._queue_cache == {}
+    assert task._task_lifecycle.value == "closed"
+
+
+def test_base_task_rejects_public_process_once_override() -> None:
+    with pytest.raises(TypeError, match="process_once"):
+
+        class InvalidProcessOverride(ReactorTestTask):
+            def process_once(self) -> None:
+                return
+
+
+def test_base_task_rejects_public_template_override_in_left_hand_mixin() -> None:
+    class ProcessOverrideMixin:
+        def process_once(self) -> None:
+            return
+
+    with pytest.raises(TypeError, match="process_once"):
+
+        class InvalidMixinOverride(ProcessOverrideMixin, ReactorTestTask):
+            pass
+
+
+@pytest.mark.parametrize("method_name", ["wait_for_activity", "stop", "cleanup"])
+def test_base_task_rejects_other_public_template_overrides(method_name: str) -> None:
+    namespace = {method_name: lambda self, *args, **kwargs: None}
+    with pytest.raises(TypeError, match=method_name):
+        type("InvalidPublicTemplateOverride", (ReactorTestTask,), namespace)
+
+
+def test_base_task_wait_for_activity_requires_an_established_owner(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="reactor owner"):
+            task.wait_for_activity(timeout=0.01)
+    finally:
+        task.cleanup()
+
+
+def test_base_task_run_until_stopped_finalizes_on_iteration_limit(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+
+    task.run_until_stopped(poll_interval=0.0, max_iterations=1)
+
+    assert task.reactor_turn_count == 1
+    assert task._queue_cache == {}
+    assert task.is_running() is False
+    task.stop()
+
+
+def test_stopping_turn_policy_is_shared_by_all_concrete_task_families() -> None:
+    """Every production task family inherits BaseTask's stopping turn [IMPL.10].
+
+    Plan Phase 3 red test 7 (plan section 13.1 item R-9): Consumer carries the
+    behavioral stop-with-pending-work coverage; this structural check makes
+    the shared-policy assumption explicit. A future per-family override of
+    ``_process_stopping_reactor_turn`` fails here until it brings its own
+    behavioral stopping coverage.
+    """
+
+    families = (
+        Consumer,
+        ServiceTask,
+        HeartbeatTask,
+        PipelineTask,
+        PipelineEdgeTask,
+        Monitor,
+        Manager,
+        TaskMonitor,
+    )
+    for family in families:
+        assert (
+            family._process_stopping_reactor_turn
+            is BaseTask._process_stopping_reactor_turn
+        ), (
+            f"{family.__name__} overrides the stopping turn without "
+            "per-family behavioral stopping coverage"
+        )
+
+
+def test_base_task_repeated_stop_does_not_duplicate_cleanup(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    """A second stop()/cleanup() re-runs no cleanup phase [IMPL.10].
+
+    Fires plan Phase 4 red test 6 (plan section 13.1 item R-8): repeated stop
+    must not re-open or re-close task queues and must not duplicate subtype,
+    base, or endpoint/control cleanup work.
+    """
+
+    subtype_cleanups = 0
+    base_cleanups = 0
+
+    class CountingCleanupTask(ReactorTestTask):
+        def _cleanup_task_resources(self, deadline: float) -> None:
+            nonlocal subtype_cleanups
+            subtype_cleanups += 1
+            super()._cleanup_task_resources(deadline)
+
+    db_path, _make_queue = broker_env
+    task = CountingCleanupTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    original_base_cleanup = task._cleanup_base_task_resources
+
+    def counting_base_cleanup(deadline: float) -> None:
+        nonlocal base_cleanups
+        base_cleanups += 1
+        original_base_cleanup(deadline)
+
+    object.__setattr__(task, "_cleanup_base_task_resources", counting_base_cleanup)
+
+    task.process_once()
+    task.stop()
+
+    assert task._task_lifecycle.value == "closed"
+    assert subtype_cleanups == 1
+    assert base_cleanups == 1
+    assert task._queue_cache == {}
+
+    task.stop()
+    task.cleanup()
+
+    assert task._task_lifecycle.value == "closed"
+    assert subtype_cleanups == 1, "second stop re-ran subtype cleanup"
+    assert base_cleanups == 1, "second stop re-ran base queue/waiter cleanup"
+    assert task._queue_cache == {}, "second stop re-opened task queues"
+
+
+def test_base_task_run_until_stopped_finalizes_when_turn_raises(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    class FailingTurnTask(ReactorTestTask):
+        def _process_reactor_turn(self) -> None:
+            raise ValueError("turn failed")
+
+    db_path, _make_queue = broker_env
+    task = FailingTurnTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="turn failed"):
+        task.run_until_stopped(poll_interval=0.0)
+
+    assert task._queue_cache == {}
+    assert task.is_running() is False
+
+
+@pytest.mark.parametrize("initial_exit", ["terminal", "stop_event", "max_zero"])
+def test_base_task_run_loop_skips_turn_for_initial_exit_state(
+    broker_env,
+    unique_tid: str,
+    initial_exit: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    max_iterations: int | None = None
+    if initial_exit == "terminal":
+        task.taskspec.mark_cancelled(reason="pre-terminal")
+    elif initial_exit == "stop_event":
+        task._stop_event.set()
+    else:
+        max_iterations = 0
+
+    task.run_until_stopped(
+        poll_interval=0.0,
+        max_iterations=max_iterations,
+    )
+
+    assert task.reactor_turn_count == 0
+    assert task._task_lifecycle.value == "closed"
+    assert task._queue_cache == {}
+
+
+def test_base_task_stop_join_false_defers_cleanup_to_active_driver(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingTurnTask(ReactorTestTask):
+        def _process_reactor_turn(self) -> None:
+            entered.set()
+            assert release.wait(timeout=3.0)
+
+    db_path, _make_queue = broker_env
+    task = BlockingTurnTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    drive_thread = threading.Thread(
+        target=lambda: task.run_until_stopped(max_iterations=1),
+    )
+    drive_thread.start()
+    assert entered.wait(timeout=2.0)
+
+    task.stop(join=False)
+    assert task._queue_cache
+
+    release.set()
+    drive_thread.join(timeout=3.0)
+    assert not drive_thread.is_alive()
+    assert task._queue_cache == {}
+
+
+def test_base_task_stop_timeout_leaves_resources_for_driver_finally(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingTurnTask(ReactorTestTask):
+        def _process_reactor_turn(self) -> None:
+            entered.set()
+            assert release.wait(timeout=3.0)
+
+    db_path, _make_queue = broker_env
+    task = BlockingTurnTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    drive_thread = threading.Thread(
+        target=lambda: task.run_until_stopped(max_iterations=1),
+    )
+    drive_thread.start()
+    assert entered.wait(timeout=2.0)
+
+    started_at = time.monotonic()
+    task.stop(timeout=0.05)
+    assert time.monotonic() - started_at < 0.5
+    assert task._queue_cache
+
+    release.set()
+    drive_thread.join(timeout=3.0)
+    assert not drive_thread.is_alive()
+    assert task._queue_cache == {}
+
+
+def test_base_task_cleanup_error_does_not_skip_shared_finalization(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    cleanup_calls = 0
+    cleanup_running_states: list[bool] = []
+
+    class FailingCleanupTask(ReactorTestTask):
+        def _cleanup_task_resources(self, deadline: float) -> None:
+            nonlocal cleanup_calls
+            del deadline
+            cleanup_calls += 1
+            cleanup_running_states.append(self.is_running())
+            raise ValueError("cleanup failed")
+
+    db_path, _make_queue = broker_env
+    task = FailingCleanupTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+
+    task.run_until_stopped(poll_interval=0.0, max_iterations=1)
+    task.stop()
+
+    assert cleanup_calls == 1
+    assert cleanup_running_states == [True]
+    assert task._queue_cache == {}
+    assert len(task._cleanup_errors) == 1
+    assert isinstance(task._cleanup_errors[0], ValueError)
+
+
+def test_base_task_finalizer_runs_subtype_cleanup_before_base_cleanup(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_order: list[str] = []
+
+    class OrderedCleanupTask(ReactorTestTask):
+        def _cleanup_task_resources(self, deadline: float) -> None:
+            del deadline
+            cleanup_order.append("task")
+
+    db_path, _make_queue = broker_env
+    task = OrderedCleanupTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    original_base_cleanup = task._cleanup_base_task_resources
+
+    monkeypatch.setattr(
+        task,
+        "_reset_multi_activity_waiter",
+        lambda: cleanup_order.append("waiter"),
+    )
+    monkeypatch.setattr(
+        task._strategy,
+        "close",
+        lambda: cleanup_order.append("strategy"),
+    )
+
+    def record_base_cleanup(deadline: float) -> None:
+        cleanup_order.append("base")
+        original_base_cleanup(deadline)
+
+    monkeypatch.setattr(task, "_cleanup_base_task_resources", record_base_cleanup)
+
+    task.run_until_stopped(poll_interval=0.0, max_iterations=0)
+
+    assert cleanup_order == ["task", "base", "waiter", "strategy"]
+
+
+def test_base_task_background_start_uses_task_loop_and_wakes_for_input(
+    broker_env,
+    unique_tid: str,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = ReactorTestTask(db_path, spec)
+    entered_real_wait = threading.Event()
+    real_wait = task._wait_for_reactor_activity
+
+    def entered_wait(timeout: float | None) -> None:
+        entered_real_wait.set()
+        real_wait(timeout)
+
+    monkeypatch.setattr(task, "_wait_for_reactor_activity", entered_wait)
+    thread = task.start()
+    assert entered_real_wait.wait(timeout=2.0)
+    assert task.is_running()
+
+    make_queue(spec.io.inputs["inbox"]).write("wake")
+    assert task.handled_message_event.wait(timeout=2.0)
+
+    task.stop()
+    thread.join(timeout=2.0)
+    assert task.handled_messages == ["wake"]
+    assert task._queue_cache == {}
+    assert task.is_running() is False
+
+
+def test_base_task_background_start_rejects_existing_manual_owner(
+    broker_env,
+    unique_tid: str,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    task.process_once()
+
+    try:
+        with pytest.raises(RuntimeError, match="cannot start|reactor owner"):
+            task.start()
+    finally:
+        task.cleanup()
+
+
+def test_base_task_worker_result_wakes_background_reactor_after_real_wait(
+    broker_env,
+    unique_tid: str,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    release_worker = threading.Event()
+    worker_started = threading.Event()
+
+    def worker() -> str:
+        worker_started.set()
+        assert release_worker.wait(timeout=3.0)
+        return "done"
+
+    task._submit_worker_call("blocked", worker)
+    assert worker_started.wait(timeout=2.0)
+    monkeypatch.setattr(task, "next_wait_timeout", lambda: 5.0)
+
+    entered_real_wait = threading.Event()
+    real_wait = task._wait_for_reactor_activity
+
+    def entered_wait(timeout: float | None) -> None:
+        entered_real_wait.set()
+        real_wait(timeout)
+
+    monkeypatch.setattr(task, "_wait_for_reactor_activity", entered_wait)
+    thread = task.start()
+    assert entered_real_wait.wait(timeout=2.0)
+
+    release_worker.set()
+    assert task.worker_result_event.wait(timeout=1.0)
+
+    task.stop()
+    thread.join(timeout=2.0)
+    assert [result.value for result in task.worker_results] == ["done"]
+
+
+def test_base_task_background_start_failure_rolls_back_owner_state(
+    broker_env,
+    unique_tid: str,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+
+    def fail_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(base_module.threading.Thread, "start", fail_start)
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        task.start()
+
+    assert task._task_lifecycle.value == "new"
+    assert task._drive_owner_thread is None
+    assert task._start_pending is False
+    task.cleanup()
+
+
+def test_base_task_stop_waits_for_starting_interlock(
+    broker_env,
+    unique_tid: str,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    start_entered = threading.Event()
+    release_start = threading.Event()
+    stop_returned = threading.Event()
+    start_errors: list[BaseException] = []
+    original_thread_start = threading.Thread.start
+
+    def blocked_thread_start(thread: threading.Thread) -> None:
+        start_entered.set()
+        assert release_start.wait(timeout=3.0)
+        original_thread_start(thread)
+
+    def start_task() -> None:
+        monkeypatch.setattr(threading.Thread, "start", blocked_thread_start)
+        try:
+            task.start()
+        except BaseException as exc:
+            start_errors.append(exc)
+
+    def stop_task() -> None:
+        task.stop()
+        stop_returned.set()
+
+    starter = threading.Thread(target=start_task)
+    stopper = threading.Thread(target=stop_task)
+    original_thread_start(starter)
+    assert start_entered.wait(timeout=2.0)
+    assert task._task_lifecycle.value == "starting"
+    assert task._start_pending is True
+
+    original_thread_start(stopper)
+    assert stop_returned.wait(timeout=0.05) is False
+
+    release_start.set()
+    starter.join(timeout=3.0)
+    stopper.join(timeout=3.0)
+
+    assert start_errors == []
+    assert stop_returned.is_set()
+    assert task._task_lifecycle.value == "closed"
+    assert task._queue_cache == {}
+
+
+def test_base_task_owner_stop_inside_turn_finalizes_after_unwind(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    cleanup_observations: list[bool] = []
+
+    class SelfStoppingTask(ReactorTestTask):
+        def _process_reactor_turn(self) -> None:
+            self.stop()
+            assert self._queue_cache
+
+        def _cleanup_task_resources(self, deadline: float) -> None:
+            del deadline
+            cleanup_observations.append(self.is_running())
+
+    db_path, _make_queue = broker_env
+    task = SelfStoppingTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+
+    task.process_once()
+
+    assert task._queue_cache == {}
+    assert cleanup_observations == [False]
+    assert task._task_lifecycle.value == "closed"
+
+
+def test_base_task_strategy_and_finalizer_close_once(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    starts = 0
+    closes = 0
+    original_start = task._start_strategy
+    original_close = task._strategy.close
+
+    def record_start() -> None:
+        nonlocal starts
+        starts += 1
+        original_start()
+
+    def record_close() -> None:
+        nonlocal closes
+        closes += 1
+        original_close()
+
+    monkeypatch.setattr(task, "_start_strategy", record_start)
+    monkeypatch.setattr(task._strategy, "close", record_close)
+
+    task.run_until_stopped(poll_interval=0.0, max_iterations=2)
+    task.stop()
+
+    assert starts == 1
+    assert closes == 1
+    assert task._finalizer.alive is False
+
+
+def test_base_task_cleanup_covers_primary_watcher_queue_handle(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    class AuxiliaryWatchedTask(ReactorTestTask):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.auxiliary_queue_name = f"auxiliary.{unique_tid}"
+            super().__init__(*args, **kwargs)
+
+        def _reactor_queue_roles(self) -> dict[str, str]:
+            roles = super()._reactor_queue_roles()
+            roles["auxiliary"] = self.auxiliary_queue_name
+            return roles
+
+        def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
+            configs = super()._build_queue_configs()
+            configs[self.auxiliary_queue_name] = self._read_queue_config(
+                self._handle_work_message
+            )
+            return configs
+
+    db_path, _make_queue = broker_env
+    task = AuxiliaryWatchedTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    primary_queue = task._queue_obj
+    assert any(primary_queue is queue for queue in task._queue_cache.values())
+
+    task.cleanup()
+
+    assert primary_queue._finalizer.alive is False
+
+
+def test_consumer_cleanup_propagates_one_deadline_to_owned_sessions(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    observed_deadlines: list[float] = []
+
+    class FakeAgentSession:
+        def close(self, *, deadline: float | None = None) -> None:
+            assert deadline is not None
+            observed_deadlines.append(deadline)
+
+    task._interactive_mode = True
+    task._agent_session = FakeAgentSession()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        task,
+        "_interactive_shutdown",
+        lambda *, deadline, reason=None: observed_deadlines.append(deadline),
+    )
+
+    started_at = time.monotonic()
+    task.stop(timeout=0.2)
+
+    assert len(observed_deadlines) == 2
+    assert observed_deadlines[0] == observed_deadlines[1]
+    assert started_at < observed_deadlines[0] <= started_at + 0.25
+
+
+def test_agent_session_close_caps_join_to_caller_deadline() -> None:
+    join_timeouts: list[float] = []
+
+    class FakeProcess:
+        pid = None
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            join_timeouts.append(float(timeout or 0.0))
+
+        def kill(self) -> None:
+            self.alive = False
+
+        def close(self) -> None:
+            return
+
+    class FakeQueue:
+        def put(self, _value: object) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def join_thread(self) -> None:
+            return
+
+    process = FakeProcess()
+    session = AgentSession(
+        process,  # type: ignore[arg-type]
+        FakeQueue(),  # type: ignore[arg-type]
+        FakeQueue(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    started_at = time.monotonic()
+    session.close(deadline=started_at + 0.05)
+
+    assert join_timeouts
+    assert 0.0 <= join_timeouts[0] <= 0.05
+    assert process.alive is False
+
+
+def test_agent_session_deadline_close_does_not_join_ipc_feeder_threads() -> None:
+    class FakeProcess:
+        pid = None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def close(self) -> None:
+            return
+
+    class DeadlineQueue:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+            self.join_calls = 0
+
+        def cancel_join_thread(self) -> None:
+            self.cancel_calls += 1
+
+        def close(self) -> None:
+            return
+
+        def join_thread(self) -> None:
+            self.join_calls += 1
+
+    request_queue = DeadlineQueue()
+    response_queue = DeadlineQueue()
+    session = AgentSession(
+        FakeProcess(),  # type: ignore[arg-type]
+        request_queue,  # type: ignore[arg-type]
+        response_queue,  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+
+    session.close(deadline=time.monotonic())
+
+    assert request_queue.cancel_calls == 1
+    assert response_queue.cancel_calls == 1
+    assert request_queue.join_calls == 0
+    assert response_queue.join_calls == 0
+
+
+def test_agent_session_deadline_preserves_process_tree_kill_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 456
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def kill(self) -> None:
+            self.alive = False
+
+    class FakeQueue:
+        pass
+
+    process = FakeProcess()
+    calls: list[tuple[int, float, bool]] = []
+
+    def terminate_tree(
+        pid: int,
+        *,
+        timeout: float,
+        kill_after: bool,
+    ) -> set[int]:
+        calls.append((pid, timeout, kill_after))
+        process.alive = False
+        return {pid}
+
+    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    session = AgentSession(
+        process,  # type: ignore[arg-type]
+        FakeQueue(),  # type: ignore[arg-type]
+        FakeQueue(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+
+    session.terminate(deadline=time.monotonic() + 0.2)
+
+    assert len(calls) == 1
+    pid, timeout, kill_after = calls[0]
+    assert pid == 456
+    assert 0.0 < timeout <= 0.1
+    assert kill_after is True
+
+
+def test_agent_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 654
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.kill_calls = 0
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.alive = False
+
+    class FakeQueue:
+        pass
+
+    process = FakeProcess()
+    calls: list[tuple[int, float, bool]] = []
+
+    def terminate_tree(
+        pid: int,
+        *,
+        timeout: float,
+        kill_after: bool,
+    ) -> set[int]:
+        calls.append((pid, timeout, kill_after))
+        return set()
+
+    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    session = AgentSession(
+        process,  # type: ignore[arg-type]
+        FakeQueue(),  # type: ignore[arg-type]
+        FakeQueue(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+
+    session.terminate(deadline=time.monotonic() - 1.0)
+
+    assert calls == [(654, 0.0, True)]
+    assert process.kill_calls == 1
+
+
+def test_command_session_expired_cleanup_deadline_does_not_start_fresh_wait() -> None:
+    class FakeProcess:
+        pid = None
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.kill_calls = 0
+
+        def poll(self) -> int | None:
+            return None if self.alive else -9
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.alive = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise AssertionError(f"fresh wait started with timeout={timeout}")
+
+        def terminate(self) -> None:
+            raise AssertionError("fresh graceful termination started after deadline")
+
+    process = FakeProcess()
+    session = CommandSession(
+        process,  # type: ignore[arg-type]
+        queue.Queue(),
+        queue.Queue(),
+        None,
+        None,
+    )
+
+    session.terminate(deadline=time.monotonic())
+
+    assert process.kill_calls == 1
+    assert process.alive is False
+
+
+def test_command_session_deadline_preserves_process_tree_kill_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 123
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def poll(self) -> int | None:
+            return None if self.alive else -9
+
+        def kill(self) -> None:
+            self.alive = False
+
+    process = FakeProcess()
+    calls: list[tuple[int, float, bool]] = []
+
+    def terminate_tree(
+        pid: int,
+        *,
+        timeout: float,
+        kill_after: bool,
+    ) -> set[int]:
+        calls.append((pid, timeout, kill_after))
+        process.alive = False
+        return {pid}
+
+    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    session = CommandSession(
+        process,  # type: ignore[arg-type]
+        queue.Queue(),
+        queue.Queue(),
+        None,
+        None,
+    )
+
+    session.terminate(deadline=time.monotonic() + 0.2)
+
+    assert len(calls) == 1
+    pid, timeout, kill_after = calls[0]
+    assert pid == 123
+    assert 0.0 < timeout <= 0.1
+    assert kill_after is True
+
+
+def test_command_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 789
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.kill_calls = 0
+
+        def poll(self) -> int | None:
+            return None if self.alive else -9
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.alive = False
+
+    process = FakeProcess()
+    calls: list[tuple[int, float, bool]] = []
+
+    def terminate_tree(
+        pid: int,
+        *,
+        timeout: float,
+        kill_after: bool,
+    ) -> set[int]:
+        calls.append((pid, timeout, kill_after))
+        return set()
+
+    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    session = CommandSession(
+        process,  # type: ignore[arg-type]
+        queue.Queue(),
+        queue.Queue(),
+        None,
+        None,
+    )
+
+    session.terminate(deadline=time.monotonic() - 1.0)
+
+    assert calls == [(789, 0.0, True)]
+    assert process.kill_calls == 1
+
+
+def test_base_task_direct_run_forever_sigint_handler_only_records(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    handler_observations: list[tuple[bool, tuple[tuple[str, int | None], ...]]] = []
+
+    class SigintTask(ReactorTestTask):
+        def _process_reactor_turn(self) -> None:
+            self._sigint_handler(signal.SIGINT, None)
+            handler_observations.append(
+                (
+                    self._stop_event.is_set(),
+                    tuple(self._pending_termination_sources),
+                )
+            )
+
+    db_path, _make_queue = broker_env
+    task = SigintTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+
+    task.run_forever()
+
+    assert handler_observations == [(False, (("signal", signal.SIGINT),))]
+    assert task.taskspec.state.status == "cancelled"
+    assert task._has_pending_termination_request() is False
+    assert task._task_lifecycle.value == "closed"
+
+
+class ReservedSupportCollisionReactorTestTask(ReactorTestTask):
+    """Expose the one derived base role that cannot be configured in TaskSpec."""
+
+    def __init__(
+        self,
+        *args: Any,
+        collision_queue: str,
+        **kwargs: Any,
+    ) -> None:
+        self._collision_queue = collision_queue
+        super().__init__(*args, **kwargs)
+
+    def _resolve_queue_names(self) -> dict[str, str]:
+        roles = super()._resolve_queue_names()
+        roles["reserved"] = self._collision_queue
+        return roles
+
+
+class CanonicalRoleReplacementReactorTestTask(ReactorTestTask):
+    """Attempt to replace one canonical semantic role declaration."""
+
+    def __init__(self, *args: Any, replacement_role: str, **kwargs: Any) -> None:
+        self._replacement_role = replacement_role
+        super().__init__(*args, **kwargs)
+
+    def _reactor_queue_roles(self) -> dict[str, str]:
+        roles = super()._reactor_queue_roles()
+        roles[self._replacement_role] = "replacement.queue"
+        return roles
+
+
+class CanonicalSupportReplacementReactorTestTask(ReactorTestTask):
+    """Attempt to replace one canonical support-route declaration."""
+
+    def __init__(self, *args: Any, replacement_role: str, **kwargs: Any) -> None:
+        self._replacement_role = replacement_role
+        super().__init__(*args, **kwargs)
+
+    def _reactor_support_routes(self) -> dict[str, str]:
+        routes = super()._reactor_support_routes()
+        routes[self._replacement_role] = "replacement.queue"
+        return routes
+
+
+class RoleSupportKeyOverlapReactorTestTask(ReactorTestTask):
+    """Attempt to reuse one task-role key as a support-route key."""
+
+    def __init__(self, *args: Any, overlap_role: str, **kwargs: Any) -> None:
+        self._overlap_role = overlap_role
+        super().__init__(*args, **kwargs)
+
+    def _reactor_support_routes(self) -> dict[str, str]:
+        routes = super()._reactor_support_routes()
+        routes[self._overlap_role] = "overlap.queue"
+        return routes
 
 
 def drain_queue(queue) -> list[str]:
@@ -209,6 +1728,371 @@ def make_command_taskspec(
         ),
         state=StateSection(),
     )
+
+
+def with_queue_role_overrides(
+    taskspec: TaskSpec,
+    **overrides: str,
+) -> TaskSpec:
+    """Return a validated TaskSpec with selected queue roles replaced."""
+
+    payload = taskspec.model_dump(mode="json")
+    io = payload["io"]
+    for role, value in overrides.items():
+        if role == "inbox":
+            io["inputs"]["inbox"] = value
+        elif role == "outbox":
+            io["outputs"]["outbox"] = value
+        else:
+            io["control"][role] = value
+    return TaskSpec.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("left_role", "right_role"),
+    list(
+        itertools.combinations(
+            ("inbox", "reserved", "outbox", "ctrl_in", "ctrl_out"),
+            2,
+        )
+    ),
+)
+def test_base_task_rejects_duplicate_queue_roles_before_broker_side_effects(
+    tmp_path: Path,
+    left_role: str,
+    right_role: str,
+) -> None:
+    """Construction rejects aliases before opening the broker database [QUEUE.7]."""
+
+    tid = "1778089999999999001"
+    db_path = tmp_path / f"duplicate-{left_role}-{right_role}.sqlite3"
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    role_values = {
+        "inbox": spec.io.inputs["inbox"],
+        "reserved": f"T{tid}.{QUEUE_RESERVED_SUFFIX}",
+        "outbox": spec.io.outputs["outbox"],
+        "ctrl_in": spec.io.control["ctrl_in"],
+        "ctrl_out": spec.io.control["ctrl_out"],
+    }
+    overrides = (
+        {right_role: role_values[left_role]}
+        if right_role != "reserved"
+        else {left_role: role_values[right_role]}
+    )
+    spec = with_queue_role_overrides(spec, **overrides)
+
+    with pytest.raises(ValueError) as exc_info:
+        ReactorTestTask(db_path, spec)
+
+    message = str(exc_info.value)
+    assert left_role in message
+    assert right_role in message
+    assert role_values[left_role if right_role != "reserved" else right_role] in message
+    assert db_path.exists() is False
+    tid_short = tid[-TASKSPEC_TID_SHORT_LENGTH:]
+    assert not any(tid_short in thread.name for thread in threading.enumerate())
+
+
+@pytest.mark.parametrize(
+    ("support_role", "support_queue"),
+    (
+        ("global_log", WEFT_GLOBAL_LOG_QUEUE),
+        ("tid_mappings", WEFT_TID_MAPPINGS_QUEUE),
+        ("streaming_sessions", WEFT_STREAMING_SESSIONS_QUEUE),
+        ("endpoints_registry", WEFT_ENDPOINTS_REGISTRY_QUEUE),
+    ),
+)
+@pytest.mark.parametrize(
+    "local_role",
+    ("inbox", "outbox", "ctrl_in", "ctrl_out"),
+)
+def test_base_task_rejects_support_route_collisions_before_broker_side_effects(
+    tmp_path: Path,
+    local_role: str,
+    support_role: str,
+    support_queue: str,
+) -> None:
+    """Every BaseTask support route is protected from local role aliases [QUEUE.7]."""
+
+    tid = "1778089999999999002"
+    db_path = tmp_path / f"support-{local_role}-{support_role}.sqlite3"
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    spec = with_queue_role_overrides(spec, **{local_role: support_queue})
+
+    with pytest.raises(ValueError) as exc_info:
+        ReactorTestTask(db_path, spec)
+
+    message = str(exc_info.value)
+    assert local_role in message
+    assert support_role in message
+    assert support_queue in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("support_role", "support_queue"),
+    (
+        ("global_log", WEFT_GLOBAL_LOG_QUEUE),
+        ("tid_mappings", WEFT_TID_MAPPINGS_QUEUE),
+        ("streaming_sessions", WEFT_STREAMING_SESSIONS_QUEUE),
+        ("endpoints_registry", WEFT_ENDPOINTS_REGISTRY_QUEUE),
+    ),
+)
+def test_base_task_rejects_derived_reserved_support_route_collision(
+    tmp_path: Path,
+    support_role: str,
+    support_queue: str,
+) -> None:
+    """The derived reserved role participates in support validation [QUEUE.7]."""
+
+    tid = "1778089999999999005"
+    db_path = tmp_path / f"support-reserved-{support_role}.sqlite3"
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        ReservedSupportCollisionReactorTestTask(
+            db_path,
+            spec,
+            collision_queue=support_queue,
+        )
+
+    message = str(exc_info.value)
+    assert "reserved" in message
+    assert support_role in message
+    assert support_queue in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    "canonical_role",
+    ("inbox", "reserved", "outbox", "ctrl_in", "ctrl_out"),
+)
+def test_base_task_rejects_canonical_semantic_role_replacement(
+    tmp_path: Path,
+    canonical_role: str,
+) -> None:
+    """Subtype declarations cannot hide canonical task roles [QUEUE.7]."""
+
+    tid = "1778089999999999006"
+    db_path = tmp_path / f"canonical-role-{canonical_role}.sqlite3"
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        CanonicalRoleReplacementReactorTestTask(
+            db_path,
+            spec,
+            replacement_role=canonical_role,
+        )
+
+    message = str(exc_info.value)
+    assert "Canonical queue role" in message
+    assert canonical_role in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    "canonical_support",
+    ("global_log", "tid_mappings", "streaming_sessions", "endpoints_registry"),
+)
+def test_base_task_rejects_canonical_support_route_replacement(
+    tmp_path: Path,
+    canonical_support: str,
+) -> None:
+    """Subtype declarations cannot hide canonical support routes [QUEUE.7]."""
+
+    tid = "1778089999999999007"
+    db_path = tmp_path / f"canonical-support-{canonical_support}.sqlite3"
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        CanonicalSupportReplacementReactorTestTask(
+            db_path,
+            spec,
+            replacement_role=canonical_support,
+        )
+
+    message = str(exc_info.value)
+    assert "Canonical support route" in message
+    assert canonical_support in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    "overlap_role",
+    ("inbox", "reserved", "outbox", "ctrl_in", "ctrl_out"),
+)
+def test_base_task_rejects_role_support_semantic_key_overlap(
+    tmp_path: Path,
+    overlap_role: str,
+) -> None:
+    """Role and support maps cannot silently overwrite semantic keys [QUEUE.7]."""
+
+    tid = "1778089999999999008"
+    db_path = tmp_path / f"role-support-overlap-{overlap_role}.sqlite3"
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        RoleSupportKeyOverlapReactorTestTask(
+            db_path,
+            spec,
+            overlap_role=overlap_role,
+        )
+
+    message = str(exc_info.value)
+    assert "duplicate semantic keys" in message
+    assert overlap_role in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("other_role", "queue_name"),
+    (
+        ("inbox", None),
+        ("reserved", None),
+        ("outbox", None),
+        ("ctrl_in", None),
+        ("ctrl_out", None),
+        ("global_log", WEFT_GLOBAL_LOG_QUEUE),
+        ("tid_mappings", WEFT_TID_MAPPINGS_QUEUE),
+        ("streaming_sessions", WEFT_STREAMING_SESSIONS_QUEUE),
+        ("endpoints_registry", WEFT_ENDPOINTS_REGISTRY_QUEUE),
+    ),
+)
+def test_pipeline_owned_consumer_rejects_owner_event_route_collision(
+    tmp_path: Path,
+    other_role: str,
+    queue_name: str | None,
+) -> None:
+    """Pipeline owner events cannot alias Consumer task routes [QUEUE.7]."""
+
+    tid = "1778089999999999009"
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    role_values = {
+        "inbox": spec.io.inputs["inbox"],
+        "reserved": f"T{tid}.{QUEUE_RESERVED_SUFFIX}",
+        "outbox": spec.io.outputs["outbox"],
+        "ctrl_in": spec.io.control["ctrl_in"],
+        "ctrl_out": spec.io.control["ctrl_out"],
+    }
+    duplicate_queue = queue_name or role_values[other_role]
+    payload = spec.model_dump(mode="json")
+    payload["metadata"][PIPELINE_OWNER_METADATA_KEY] = {
+        "pipeline_tid": "1778089999999999900",
+        "events_queue": duplicate_queue,
+        "role": "pipeline_stage",
+        "stage_name": "stage",
+    }
+    db_path = tmp_path / f"pipeline-owner-{other_role}-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        Consumer(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert "pipeline_owner_events" in message
+    assert other_role in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize("events_queue", ("", "   "))
+def test_pipeline_owned_consumer_rejects_blank_owner_event_route(
+    tmp_path: Path,
+    events_queue: str,
+) -> None:
+    """Pipeline owner event output must be a non-empty fixed route [QUEUE.7]."""
+
+    tid = "1778089999999999010"
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    payload = spec.model_dump(mode="json")
+    payload["metadata"][PIPELINE_OWNER_METADATA_KEY] = {
+        "pipeline_tid": "1778089999999999900",
+        "events_queue": events_queue,
+        "role": "pipeline_stage",
+        "stage_name": "stage",
+    }
+    db_path = tmp_path / f"pipeline-owner-blank-{len(events_queue)}.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        Consumer(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert "events_queue" in message
+    assert "non-empty" in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("role", "queue_name"),
+    (
+        ("inbox", "   "),
+        ("outbox", "\t"),
+        ("ctrl_in", ""),
+        ("ctrl_in", "   "),
+        ("ctrl_out", ""),
+        ("ctrl_out", "\n"),
+    ),
+)
+def test_base_task_rejects_empty_resolved_queue_roles_before_broker_side_effects(
+    tmp_path: Path,
+    role: str,
+    queue_name: str,
+) -> None:
+    """Configurable roles must resolve to non-blank queue names [QUEUE.7]."""
+
+    tid = "1778089999999999004"
+    db_path = tmp_path / f"empty-{role}-{len(queue_name)}.sqlite3"
+    spec = with_queue_role_overrides(
+        make_function_taskspec(tid, "tests.tasks.sample_targets:echo_payload"),
+        **{role: queue_name},
+    )
+
+    with pytest.raises(ValueError, match=rf"{role!s}.*non-empty"):
+        ReactorTestTask(db_path, spec)
+
+    assert db_path.exists() is False
+
+
+def test_base_task_rejects_runtime_queue_mutation(tmp_path: Path) -> None:
+    """Task reactors seal topology while standalone watchers remain dynamic [QUEUE.7]."""
+
+    db_path = tmp_path / "fixed-topology.sqlite3"
+    tid = "1778089999999999003"
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(tid, "tests.tasks.sample_targets:echo_payload"),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="topology is fixed.*add_queue"):
+            task.add_queue("late.queue", task._handle_work_message)
+        with pytest.raises(RuntimeError, match="topology is fixed.*remove_queue"):
+            task.remove_queue(task._queue_names["inbox"])
+    finally:
+        task.cleanup()
 
 
 def _instrument_streaming_queue(monkeypatch):
@@ -1311,6 +3195,74 @@ def test_consumer_active_wait_activity_ignores_reserved_work_queue(
     )
 
 
+def test_consumer_keeps_one_inflight_item_and_commits_in_source_order(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Port the reference single-inflight ordering guarantee to Weft [MF-2]."""
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(unique_tid, sys.executable, persistent=True)
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    class OrderedTaskRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def supports_stream_callbacks(self) -> bool:
+            return False
+
+        def run_with_hooks(
+            self,
+            work_item: Any,
+            **_kwargs: Any,
+        ) -> RunnerOutcome:
+            value = str(work_item["args"][0])
+            if value == "first":
+                first_started.set()
+                assert release_first.wait(timeout=2.0)
+            return RunnerOutcome(
+                status="ok",
+                value=value,
+                error=None,
+                stdout=None,
+                stderr=None,
+                returncode=0,
+                duration=0.0,
+            )
+
+    monkeypatch.setattr(consumer_module, "TaskRunner", OrderedTaskRunner)
+    inbox.write(json.dumps({"args": ["first"]}))
+    inbox.write(json.dumps({"args": ["second"]}))
+
+    try:
+        task.process_once()
+        assert first_started.wait(timeout=2.0)
+        assert reserved.peek_one() == json.dumps({"args": ["first"]})
+        assert inbox.peek_one() == json.dumps({"args": ["second"]})
+
+        task.process_once()
+        assert reserved.peek_one() == json.dumps({"args": ["first"]})
+        assert inbox.peek_one() == json.dumps({"args": ["second"]})
+
+        release_first.set()
+        _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
+        assert outbox.read_one() == "first"
+
+        _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
+        assert outbox.read_one() == "second"
+        assert reserved.peek_one() is None
+        assert inbox.peek_one() is None
+    finally:
+        release_first.set()
+        task.cleanup()
+
+
 def test_consumer_active_control_gets_turn_while_stream_events_remain(
     broker_env,
     unique_tid: str,
@@ -1506,7 +3458,7 @@ def test_base_task_wait_for_activity_caps_wait_while_worker_is_active(
     assert worker_started.wait(timeout=2.0)
 
     started_at = time.monotonic()
-    task.wait_for_activity(timeout=5.0)
+    task._wait_for_reactor_activity(timeout=5.0)
     elapsed = time.monotonic() - started_at
 
     assert elapsed < 0.5
@@ -1660,6 +3612,9 @@ def test_base_task_worker_error_is_raised_on_main_thread(
         "tests.tasks.sample_targets:echo_payload",
     )
     task = ReactorTestTask(db_path, spec)
+    # Claim drive ownership for this thread before the worker is submitted so
+    # the owner-verified wait below is legal even when the result is slow.
+    task.process_once()
     worker_started = threading.Event()
 
     def worker_body() -> str:
@@ -1683,10 +3638,11 @@ def test_task_process_entry_waits_through_activity_seam(
     broker_env,
     unique_tid: str,
 ) -> None:
-    global _launcher_process_calls
+    global _launcher_process_calls, _launcher_run_calls
     db_path, _make_queue = broker_env
     _launcher_wait_calls.clear()
     _launcher_process_calls = 0
+    _launcher_run_calls = 0
     spec = make_function_taskspec(
         unique_tid,
         "tests.tasks.sample_targets:echo_payload",
@@ -1702,16 +3658,18 @@ def test_task_process_entry_waits_through_activity_seam(
 
     assert _launcher_process_calls == 2
     assert _launcher_wait_calls == [0.125]
+    assert _launcher_run_calls == 1
 
 
 def test_task_process_entry_does_not_wait_after_terminal_turn(
     broker_env,
     unique_tid: str,
 ) -> None:
-    global _launcher_process_calls
+    global _launcher_process_calls, _launcher_run_calls
     db_path, _make_queue = broker_env
     _launcher_wait_calls.clear()
     _launcher_process_calls = 0
+    _launcher_run_calls = 0
     spec = make_function_taskspec(
         unique_tid,
         "tests.tasks.sample_targets:echo_payload",
@@ -1727,6 +3685,7 @@ def test_task_process_entry_does_not_wait_after_terminal_turn(
 
     assert _launcher_process_calls == 1
     assert _launcher_wait_calls == []
+    assert _launcher_run_calls == 1
 
 
 def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
@@ -1734,10 +3693,11 @@ def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    global _launcher_process_calls
+    global _launcher_process_calls, _launcher_run_calls
     db_path, _make_queue = broker_env
     _launcher_wait_calls.clear()
     _launcher_process_calls = 0
+    _launcher_run_calls = 0
     spec = make_function_taskspec(
         unique_tid,
         "tests.tasks.sample_targets:echo_payload",
@@ -1746,8 +3706,23 @@ def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
     def _unexpected_exit(_status: int) -> None:
         raise AssertionError("Windows task-process entries must not use os._exit")
 
-    monkeypatch.setattr(launcher_module.os, "name", "nt")
-    monkeypatch.setattr(launcher_module.os, "_exit", _unexpected_exit)
+    class _WindowsOS:
+        """Delegate to the real os module while reporting a Windows os.name.
+
+        Patch the launcher module's ``os`` binding, never the global os
+        module: this test drives a real in-process task with live background
+        threads, and a global ``os.name = "nt"`` lets pathlib hand out
+        WindowsPath objects on POSIX, corrupting any concurrent lazy import.
+        """
+
+        def __init__(self) -> None:
+            self.name = "nt"
+            self._exit = _unexpected_exit
+
+        def __getattr__(self, attr: str) -> Any:
+            return getattr(os, attr)
+
+    monkeypatch.setattr(launcher_module, "os", _WindowsOS())
 
     _task_process_entry(
         f"{LauncherTerminalTask.__module__}.{LauncherTerminalTask.__qualname__}",
@@ -1759,23 +3734,79 @@ def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
     )
 
     assert _launcher_process_calls == 1
+    assert _launcher_run_calls == 1
 
 
-def test_parent_loss_shutdown_wakes_task_stop_event() -> None:
+def test_parent_loss_shutdown_records_without_setting_task_stop_event() -> None:
     class ParentLossTask:
         def __init__(self) -> None:
             self._stop_event = threading.Event()
-            self.signals: list[int] = []
+            self.parent_loss_notes = 0
 
-        def handle_termination_signal(self, signum: int) -> None:
-            self.signals.append(signum)
+        def note_parent_loss(self) -> None:
+            self.parent_loss_notes += 1
 
     task = ParentLossTask()
 
     _request_parent_loss_shutdown(task)
 
-    assert task.signals
-    assert task._stop_event.is_set()
+    assert task.parent_loss_notes == 1
+    assert task._stop_event.is_set() is False
+
+
+def test_parent_loss_is_observed_after_bounded_owner_wait(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    task.process_once()
+    task.enable_parent_loss_watch()
+    entered_wait = threading.Event()
+    noted_parent_loss = threading.Event()
+    wait_timeouts: list[float | None] = []
+
+    class BlockingWaiter:
+        def wait(self, timeout: float | None) -> bool:
+            wait_timeouts.append(timeout)
+            entered_wait.set()
+            threading.Event().wait(timeout=timeout)
+            return False
+
+    monkeypatch.setattr(
+        task,
+        "_ensure_multi_activity_waiter",
+        lambda: BlockingWaiter(),
+    )
+
+    def note_parent_loss() -> None:
+        assert entered_wait.wait(timeout=2.0)
+        task.note_parent_loss()
+        noted_parent_loss.set()
+
+    notifier = threading.Thread(target=note_parent_loss)
+    notifier.start()
+    started_at = time.monotonic()
+    task.wait_for_activity(timeout=5.0)
+    elapsed = time.monotonic() - started_at
+    notifier.join(timeout=2.0)
+
+    try:
+        assert noted_parent_loss.is_set()
+        assert wait_timeouts == [PARENT_LOSS_WAKE_INTERVAL_CEILING]
+        assert elapsed < PARENT_LOSS_WAKE_INTERVAL_CEILING + 0.3
+        task.process_once()
+        assert task.taskspec.state.status == "cancelled"
+        assert task._has_pending_termination_request() is False
+    finally:
+        task.stop()
 
 
 def test_task_ignores_unknown_control_message(broker_env, unique_tid: str) -> None:

@@ -92,6 +92,7 @@ from weft._constants import (
     SERVICE_TYPE_MANAGER,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
+    TASK_CLEANUP_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -341,6 +342,8 @@ class Manager(ServiceTask):
         self._child_launch_started_ns: dict[str, int] = {}
         self._child_launch_stale_retries: dict[str, int] = {}
         self._child_launch_started_this_turn = False
+        self._active_cleanup_deadline: float | None = None
+        self._last_child_cleanup_survivors: tuple[dict[str, Any], ...] = ()
         self._idle_timeout: float = float(
             taskspec.metadata.get(
                 "idle_timeout",
@@ -369,7 +372,6 @@ class Manager(ServiceTask):
         self._stalled_control_message_id: int | None = None
         self._stalled_control_retry_after_ns = 0
         self._stalled_control_last_log_ns = 0
-        self._pending_termination_signal: int | None = None
         self._loop_iteration = 0
         self._serve_log_last_emit_ns: dict[str, int] = {}
         self._serve_log_last_state: dict[str, str] = {}
@@ -660,6 +662,33 @@ class Manager(ServiceTask):
     # ------------------------------------------------------------------
     # Queue configuration
     # ------------------------------------------------------------------
+    def _reactor_queue_roles(self) -> dict[str, str]:
+        """Declare Manager-owned watched and reserved reactor lanes.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        roles = super()._reactor_queue_roles()
+        # Blast radius: every fixed lane added to _build_queue_configs() must be
+        # declared here before dict keys can collapse an existing handler.
+        internal_inbox = self._queue_names.get("internal_inbox")
+        internal_reserved = self._queue_names.get("internal_reserved")
+        if internal_inbox is not None:
+            roles["internal_inbox"] = internal_inbox
+        if internal_reserved is not None:
+            roles["internal_reserved"] = internal_reserved
+        return roles
+
+    def _reactor_support_routes(self) -> dict[str, str]:
+        """Declare Manager's fixed service-registry route.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        routes = super()._reactor_support_routes()
+        routes["services_registry"] = WEFT_SERVICES_REGISTRY_QUEUE
+        return routes
+
     def _resolve_queue_names(self) -> dict[str, str]:
         """Map manager queue roles, including canonical internal spawn queues."""
 
@@ -1063,7 +1092,34 @@ class Manager(ServiceTask):
         for item in context.iter_items():
             if not isinstance(item, _ManagerChildLaunchRequest):
                 raise TypeError("manager child-launch worker received invalid work")
-            return self._run_child_launch_worker(item)
+            result = self._run_child_launch_worker(item)
+            process = result.process
+            if process is not None and (
+                context.stop_requested() or self._active_cleanup_deadline is not None
+            ):
+                deadline = self._active_cleanup_deadline or time.monotonic()
+                remaining = self._remaining_deadline(deadline)
+                pid = process.pid
+                if isinstance(pid, int) and pid > 0 and remaining > 0:
+                    # Split-budget KILL escalation; see _terminate_children.
+                    terminate_process_tree(
+                        pid,
+                        timeout=remaining / 2.0,
+                        kill_after=True,
+                    )
+                try:
+                    if process.is_alive():
+                        process.kill()
+                except (AssertionError, OSError, ValueError):
+                    logger.debug(
+                        "Failed to reap child launched during manager cleanup",
+                        exc_info=True,
+                    )
+                return _ManagerChildLaunchResult(
+                    request=item,
+                    error=RuntimeError("manager stopped while child launch completed"),
+                )
+            return result
         return None
 
     def _run_child_launch_worker(
@@ -3252,7 +3308,7 @@ class Manager(ServiceTask):
                     exc_info=True,
                 )
 
-    def _cleanup_children(self) -> bool:
+    def _cleanup_children(self, *, deadline: float | None = None) -> bool:
         autostart_child_exited = False
         child_exited = False
         for tid, child in list(self._child_processes.items()):
@@ -3267,7 +3323,13 @@ class Manager(ServiceTask):
                     # teardown belongs to explicit termination paths, not the
                     # hot loop that must stay responsive to new control
                     # messages.
-                    child.process.join(timeout=0.1)
+                    join_timeout = 0.1
+                    if deadline is not None:
+                        join_timeout = min(
+                            join_timeout,
+                            self._remaining_deadline(deadline),
+                        )
+                    child.process.join(timeout=join_timeout)
                 except (
                     AssertionError,
                     OSError,
@@ -3321,13 +3383,18 @@ class Manager(ServiceTask):
             self._invalidate_leadership_work_cache()
         return child_exited
 
-    def _terminate_children(self) -> None:
+    def _terminate_children(self, deadline: float) -> None:
+        """Stop tracked children under one absolute monotonic deadline.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
         children: dict[str, ManagedChild] = dict(self._child_processes)
         managed_pids: dict[str, set[int]] = {
             tid: self._managed_pids_for_child(tid) for tid in children
         }
 
-        self._wait_for_children_to_exit(timeout=1.0)
+        self._cleanup_children(deadline=deadline)
         children.update(self._child_processes)
         for tid in self._child_processes:
             managed_pids.setdefault(tid, set()).update(
@@ -3340,57 +3407,101 @@ class Manager(ServiceTask):
         for tid, child in list(self._child_processes.items()):
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
-        self._wait_for_children_to_exit(timeout=1.0)
+        grace_deadline = time.monotonic() + (self._remaining_deadline(deadline) / 2.0)
+        self._wait_for_children_to_exit(min(deadline, grace_deadline))
         children.update(self._child_processes)
         for tid in children:
             managed_pids.setdefault(tid, set()).update(
                 self._managed_pids_for_child(tid)
             )
 
+        survivors: list[dict[str, Any]] = []
         for tid, child in list(children.items()):
             try:
                 if child.process.is_alive():
                     try:
-                        child.process.join(timeout=0.2)
+                        child.process.join(
+                            timeout=min(
+                                0.2,
+                                self._remaining_deadline(deadline),
+                            )
+                        )
                     except (
                         AssertionError,
                         OSError,
                         ValueError,
                     ):  # pragma: no cover - defensive
                         pass
+                kill_issued = False
                 if child.process.is_alive():
-                    if child.process.pid is not None:
-                        terminate_process_tree(child.process.pid, timeout=0.5)
-                    try:
-                        child.process.join(timeout=2.0)
-                    except (
-                        AssertionError,
-                        OSError,
-                        ValueError,
-                    ):  # pragma: no cover - defensive
-                        pass
+                    remaining = self._remaining_deadline(deadline)
+                    if child.process.pid is not None and remaining > 0:
+                        # Split the remaining budget across the TERM wait and
+                        # the SIGKILL reap wait so escalation for
+                        # TERM-resistant descendants stays inside one caller
+                        # deadline instead of being dropped entirely.
+                        terminate_process_tree(
+                            child.process.pid,
+                            timeout=remaining / 2.0,
+                            kill_after=True,
+                        )
                     if child.process.is_alive():
                         try:
                             child.process.kill()
+                            kill_issued = True
                         except OSError:  # pragma: no cover - defensive
                             pass
-                        else:
-                            child.process.join(timeout=1.0)
                 managed_pids.setdefault(tid, set()).update(
                     self._managed_pids_for_child(tid)
                 )
                 for pid in managed_pids[tid]:
-                    terminate_process_tree(pid, timeout=0.2)
+                    remaining = self._remaining_deadline(deadline)
+                    if remaining <= 0:
+                        break
+                    terminate_process_tree(
+                        pid,
+                        timeout=remaining / 2.0,
+                        kill_after=True,
+                    )
+                try:
+                    still_alive = child.process.is_alive()
+                except (AssertionError, OSError, ValueError):
+                    still_alive = True
+                surviving_managed_pids = sorted(
+                    pid for pid in managed_pids.get(tid, set()) if self._pid_alive(pid)
+                )
+                if still_alive or surviving_managed_pids:
+                    survivors.append(
+                        {
+                            "tid": tid,
+                            "pid": child.process.pid,
+                            "managed_pids": sorted(managed_pids.get(tid, set())),
+                            "surviving_managed_pids": surviving_managed_pids,
+                            "kill_issued": kill_issued,
+                        }
+                    )
             finally:
                 self._child_processes.pop(tid, None)
 
-    def _wait_for_children_to_exit(self, *, timeout: float) -> None:
-        deadline = time.monotonic() + timeout
-        while self._child_processes and time.monotonic() < deadline:
-            self._cleanup_children()
+        self._last_child_cleanup_survivors = tuple(survivors)
+        if survivors:
+            logger.warning(
+                "Manager %s cleanup deadline left process survival uncertain: %s",
+                self.tid,
+                survivors,
+            )
+
+    def _wait_for_children_to_exit(self, deadline: float) -> None:
+        while self._child_processes and self._remaining_deadline(deadline) > 0:
+            self._cleanup_children(deadline=deadline)
             if not self._child_processes:
                 return
-            time.sleep(MANAGER_CHILD_EXIT_POLL_INTERVAL)
+            time.sleep(
+                min(
+                    MANAGER_CHILD_EXIT_POLL_INTERVAL,
+                    self._remaining_deadline(deadline),
+                )
+            )
 
     def _signal_children_to_stop(self) -> None:
         """Best-effort STOP broadcast to currently tracked child tasks."""
@@ -3527,75 +3638,43 @@ class Manager(ServiceTask):
         self._drain_stops_children = True
         self.should_stop = True
 
-    def note_termination_signal(self, signum: int) -> None:
-        """Record an external signal for processing on the manager loop.
-
-        Python signal handlers may run while the manager is inside a broker
-        operation. Starting a drain here would perform queue writes from inside
-        that interrupted stack frame and can re-enter backend drivers such as
-        psycopg. Keep this handler to plain in-memory state; ``process_once``
-        owns the broker-visible shutdown work.
-
-        Manager predates and fully supersedes ``BaseTask.note_termination_signal``
-        for its own instances: it already recorded signals in plain in-memory
-        state (this method, formerly named ``handle_termination_signal``) and
-        applied them from ``process_once`` via its own
-        ``_process_pending_termination_signal``. This override keeps that
-        existing, already-correct behavior (including its distinct SIGUSR1
-        handling) rather than switching Manager onto ``BaseTask``'s generic
-        ``_pending_termination_signum`` seam, which Manager's loop does not
-        consult.
-        """
-
-        sigusr1 = getattr(signal, "SIGUSR1", None)
-        if sigusr1 is not None and signum == sigusr1:
-            self._pending_termination_signal = signum
-            self._external_stop_handled = True
-            return
-
-        if self._external_stop_handled:
-            return
-        self._pending_termination_signal = signum
-        self._external_stop_handled = True
-
     def handle_termination_signal(self, signum: int) -> None:
-        """Deprecated alias retained for direct-call sites and tests.
-
-        Manager's real deferred-recording logic lives in
-        ``note_termination_signal``; this alias exists because some call sites
-        (e.g. ``launcher._request_parent_loss_shutdown``, which already runs
-        outside the signal frame) still probe for ``handle_termination_signal``
-        by name.
-        """
+        """Compatibility alias that records through the shared pending source."""
 
         self.note_termination_signal(signum)
 
-    def _process_pending_termination_signal(self) -> None:
-        """Apply a signal recorded by ``note_termination_signal``."""
+    def _apply_termination_request(
+        self,
+        signum: int,
+        *,
+        parent_lost: bool,
+    ) -> None:
+        """Preserve Manager drain policy while sharing BaseTask recording.
 
-        signum = self._pending_termination_signal
-        if signum is None:
-            return
-        self._pending_termination_signal = None
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
 
         sigusr1 = getattr(signal, "SIGUSR1", None)
         if sigusr1 is not None and signum == sigusr1:
-            self._terminate_children()
+            self._terminate_children(time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS)
             self._external_stop_handled = False
-            super().handle_termination_signal(signum)
+            del parent_lost
+            BaseTask.handle_termination_signal(self, signum)
             return
 
         if self._draining or self.should_stop:
             return
 
         try:
-            signal_name = signal.Signals(signum).name
+            signal_name = "parent loss" if parent_lost else signal.Signals(signum).name
         except ValueError:  # pragma: no cover - defensive
             signal_name = f"signal {signum}"
 
         self._begin_shutdown_drain(
             message_id=None,
-            reason=f"{signal_name} received",
+            reason=(
+                "Parent process exited" if parent_lost else f"{signal_name} received"
+            ),
             event=None,
             completion_event="task_signal_stop",
         )
@@ -6364,10 +6443,12 @@ class Manager(ServiceTask):
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
-    def _drain_active_child_launches_for_cleanup(self) -> None:
+    def _drain_active_child_launches_for_cleanup(self, deadline: float) -> None:
         """Commit in-flight child launches before child termination cleanup."""
 
-        while self._has_active_child_launches():
+        while (
+            self._has_active_child_launches() and self._remaining_deadline(deadline) > 0
+        ):
             handled = self._drain_worker_results()
             if not self._has_active_child_launches():
                 return
@@ -6381,15 +6462,23 @@ class Manager(ServiceTask):
                 self._active_child_launches.clear()
                 return
             self._sync_worker_result_event()
-            self._worker_result_event.wait(timeout=0.05)
+            self._worker_result_event.wait(
+                timeout=min(0.05, self._remaining_deadline(deadline))
+            )
 
-    def cleanup(self) -> None:
+    def _cleanup_task_resources(self, deadline: float) -> None:
+        """Release Manager-owned children and registrations by the deadline.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
         self._draining = True
-        self._drain_active_child_launches_for_cleanup()
-        self._terminate_children()
+        self._active_cleanup_deadline = deadline
+        self._drain_active_child_launches_for_cleanup(deadline)
+        self._terminate_children(deadline)
         self._cleanup_own_internal_reserved_queue()
         self._unregister_manager()
-        super().cleanup()
+        super()._cleanup_task_resources(deadline)
         self._unregister_atexit_callback()
 
     def next_wait_timeout(self) -> float | None:
@@ -6397,7 +6486,11 @@ class Manager(ServiceTask):
 
         now_ns = time.time_ns()
         timeouts: list[float] = []
-        if self.should_stop or self._draining or self._pending_termination_signal:
+        if (
+            self.should_stop
+            or self._draining
+            or self._has_pending_termination_request()
+        ):
             return 0.0
         if self._managed_internal_spawn_enqueued:
             return 0.0
@@ -6479,20 +6572,13 @@ class Manager(ServiceTask):
             )
         return min(timeouts) if timeouts else None
 
-    def wait_for_activity(self, timeout: float | None) -> None:
-        """Wait for queue activity while preserving the manager due-time ceiling.
+    def _process_reactor_turn(self) -> None:
+        """Run one Manager turn behind the owner-enforcing template.
 
-        Service supervision is driven by explicit due timers from
-        ``next_wait_timeout()``. The SimpleBroker activity waiter can wake the
-        manager early for queue work, but the supplied timeout remains the
-        supervision ceiling.
-
-        Spec: [MA-1.4], [MANAGER.15], [MANAGER.16]
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]
+        - docs/specifications/05-Message_Flow_and_State.md [MF-6]
         """
-
-        super().wait_for_activity(timeout=timeout)
-
-    def process_once(self) -> None:
         self._loop_iteration += 1
         self._child_launch_started_this_turn = False
         self._leader_probe_used_this_turn = False
@@ -6501,10 +6587,6 @@ class Manager(ServiceTask):
         self._drain_worker_results()
         self._retry_stale_child_launches()
         self._emit_manager_loop_summary()
-        self._process_pending_termination_signal()
-        if self.should_stop:
-            self._drain_worker_results()
-            return
         self._refresh_manager_registration()
         self._cleanup_stale_internal_reserved_queues()
         if self._draining:
@@ -6532,7 +6614,7 @@ class Manager(ServiceTask):
                 self._drain_worker_results()
                 return
         if not self._has_active_child_launches():
-            super().process_once()
+            super()._process_reactor_turn()
         else:
             self._drain_worker_results()
             self._maybe_emit_poll_report()
@@ -6813,7 +6895,7 @@ class Manager(ServiceTask):
                 self.tid,
                 len(self._child_processes),
             )
-            self._terminate_children()
+            self._terminate_children(time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS)
             self._cleanup_children()
         if not self._child_processes:
             self._finish_graceful_shutdown()

@@ -34,6 +34,8 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
+- [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
@@ -144,7 +146,12 @@ dispatch should not be reimplemented separately in every task class.
 **Purpose**: schedule multiple queues with explicit per-queue processing modes.
 
 _Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` —
-`MultiQueueWatcher`, `QueueMode`, `QueueMessageContext`.
+`MultiQueueWatcher`, `QueueMode`, `QueueMessageContext`, owner reservation in
+`run_in_thread()` / `run_forever()`, synchronous request handoff in
+`_submit_topology_mutation()`, and owner-confined replacement in
+`_apply_topology_mutation_on_owner()`. Firing coverage is in
+`tests/tasks/test_multiqueue_watcher.py`; BaseTask ownership preservation is in
+`tests/tasks/test_task_execution.py`.
 
 Current role:
 
@@ -159,6 +166,32 @@ Current role:
   scan queues. Backends without a native waiter may still perform a bounded
   positive-timeout pending precheck as the portable polling fallback
 - expose a small scheduling primitive that higher-level tasks reuse
+
+Standalone `MultiQueueWatcher` topology may change at runtime, but a running
+watcher's drive owner alone applies membership and waiter effects. Before a
+drive owner exists, `add_queue()` and `remove_queue()` apply synchronously.
+While `run()` or `run_in_thread()` owns the watcher, a foreign mutator submits
+a synchronous request and returns only after the owner applies or rejects it
+between wait and drain phases. A mutator invoked from the drive owner during
+dispatch is rejected before effects. The owner rebuilds the optional activity
+waiter from the exact committed activity-wait membership, replaces it through
+SimpleBroker's supported live strategy seam, and only then closes the displaced
+waiter. `PollingStrategy` remains the sole background wait path.
+Native-waiter unavailability commits the requested topology on bounded polling
+fallback; a later successful topology generation may attach native waiting
+again. The direct `MultiQueueWatcher.wait_for_activity(timeout)` API is for
+manual use only when no background drive is reserved or owned; one manual-wait
+owner excludes drive start and mutation, and closes its waiter after a
+concurrent stop. `BaseTask` does not enter that standalone manual-owner wrapper:
+its final reactor lifecycle calls the same protected broker-wait body under
+`BaseTask`'s existing drive/wait ownership guard. Public stop and topology
+commit share one serialization boundary: stop-first rejects the mutation
+without replacement; commit-first completes the mutation before shutdown. A
+main-thread SIGINT that lands inside waiter replacement is delivered as
+`KeyboardInterrupt` only after the request reaches a consistent published or
+rolled-back state. Empty membership uses polling state without invoking the
+multi-queue waiter factory with an empty list. `BaseTask` topology remains fixed
+and rejects both mutators.
 
 Why this exists:
 
@@ -185,8 +218,12 @@ Current responsibilities:
 - maintain TID mappings and process titles
 - own reserved-queue policy application
 - optionally claim and release one stable runtime endpoint name for the live task
-- expose `process_once()`, `run_until_stopped()`, and `next_wait_timeout()`
-  as the shared task-loop contract
+- expose `process_once()`, `wait_for_activity()`, `run_until_stopped()`,
+  `stop()`, `cleanup()`, and `next_wait_timeout()` as the shared task-loop
+  contract; the public turn/wait/stop/cleanup entry points are final
+  drive-owner-enforcing templates, and concrete policy extends the protected
+  `_process_reactor_turn()`, `_wait_for_reactor_activity()`, and
+  `_cleanup_task_resources()` hooks (see [CC-2.2.1] and [IMPL.10])
 - own `_submit_worker_lane(...)` as the neutral thread/result plumbing for
   local worker lanes, while `_submit_worker_call(...)` remains the
   broker-free wrapper used for ordinary Weft runtime worker callables
@@ -201,6 +238,104 @@ Why this exists:
 - control semantics should not drift between task types
 - reserved-queue policy belongs to task ownership, not to ad hoc helper code
 
+### 2.2.1 Reactor Ownership and Lifecycle [CC-2.2.1]
+
+_Implementation mapping_: `weft/core/tasks/base.py::BaseTask` owns the declared
+role inventory (`weft/core/tasks/base.py::BaseTask._reactor_queue_roles`,
+`weft/core/tasks/base.py::BaseTask._reactor_support_routes`,
+`weft/core/tasks/base.py::BaseTask._allowed_reactor_queue_aliases`), the public
+turn/lifecycle templates (`weft/core/tasks/base.py::BaseTask.process_once`,
+`weft/core/tasks/base.py::BaseTask.wait_for_activity`,
+`weft/core/tasks/base.py::BaseTask.run_until_stopped`,
+`weft/core/tasks/base.py::BaseTask.stop`,
+`weft/core/tasks/base.py::BaseTask.cleanup`), the drive-owner state machine,
+and the once-only watcher/resource finalizer
+(`weft/core/tasks/base.py::BaseTask._finalize_task_once`).
+`weft/core/launcher.py::_task_process_entry` is the process/signal/parent-loss
+adapter. `weft/core/tasks/consumer.py`, `weft/core/manager.py`,
+`weft/core/tasks/heartbeat.py`, `weft/core/tasks/pipeline.py`,
+`weft/core/tasks/service.py`, and `weft/core/tasks/monitor.py` contribute
+protected turn, topology, or cleanup policy without replacing the templates. TaskMonitor worker isolation
+and typed diagnostic return live in `weft/core/monitor/task_monitor.py`;
+worker-local sink counters and the single-handler-per-path writer lease live in
+`weft/core/monitor/external_log.py`. Firing coverage is in
+`tests/tasks/test_task_execution.py`, `tests/core/test_manager.py`,
+`tests/tasks/test_pipeline_runtime.py`,
+`tests/tasks/test_task_observer_behavior.py`,
+`tests/tasks/test_signal_deferral.py`, and `tests/tasks/test_task_monitor.py`.
+See [QUEUE.7], [IMPL.10], and [IMPL.11] in
+`docs/specifications/07-System_Invariants.md` for the invariant-level
+statements.
+
+`BaseTask` is the single owner of the public task-reactor interface.
+`process_once()` claims and verifies one driving thread before it invokes a
+concrete task's protected turn policy. After ownership is claimed, a different
+thread entering `process_once()`, the drive loop, `wait_for_activity()`, or a
+drive-owned topology mutation must fail before that entry point performs queue,
+waiter, TaskSpec, lifecycle, or worker-result effects. This is a reactor-drive
+ownership rule, not a claim that every read-only diagnostic helper is
+thread-confined. Concrete task classes customize the protected turn hook and
+optional protected owned-wait hook and must not replace public `process_once()`
+or `wait_for_activity()`; class creation rejects such an override. The strong
+`Thread` object is identity evidence; explicit startup-pending, turn-active,
+wait-active, and drive-loop-active state determines whether work can still touch
+reactor resources. `wait_for_activity()` publishes wait-active under the
+lifecycle lock before entering the protected wait and clears it in `finally`; a
+pending stop is finalized there when no drive loop owns the reactor. Numeric
+thread ident and raw `Thread.is_alive()` are diagnostic only.
+
+A live task reactor has fixed, declared construction topology. BaseTask declares
+`inbox`, `reserved`, `outbox`, `ctrl_in`, and `ctrl_out`, plus its fixed support
+routes for lifecycle logs, TID mappings, streaming sessions, and endpoint
+registration. A task subtype extends that inventory for every additional
+construction-fixed watched lane, reserve destination, support route, or durable
+route whose aliasing would change the task's meaning. Role names are pairwise
+distinct unless that subtype explicitly names and tests an intentional semantic
+alias, such as PipelineEdge `source_queue == inbox` and
+`target_queue == outbox`, or Monitor's default `downstream == outbox`.
+Validation occurs before `_build_queue_configs()`, any queue handle, broker file,
+lifecycle write, endpoint claim, or worker thread. Payload-directed Heartbeat
+destinations are runtime egress under [MF-3.2], not construction topology; their
+ingestion validator rejects self-routing into the Heartbeat task's own inbox,
+reserved, or control lanes and rejects the reserved `weft.` system queue
+namespace, while ordinary destination task queues remain valid. Standalone
+`MultiQueueWatcher` instances may still add or remove queues; `BaseTask`
+instances may not.
+
+`run_until_stopped()` owns the process, wait, and finalization loop for every
+task family. Background `run_forever()` and the spawned-task launcher delegate
+to that loop. Stop first records intent and wakes the loop. Finalization joins an
+external drive thread when requested, stops and joins local workers, and drains
+or terminates Manager children within one absolute remaining deadline, then
+closes reactor-owned resources exactly once only after no startup, turn, wait, or
+drive loop can still touch them. A timed-out active driver or standalone waiter
+retains its resources until its own finalizer runs; an idle manual owner's
+still-live application thread does not block finalization. For compatibility,
+`stop()` retains its
+`None` return and BaseWatcher-style bounded-wait contract; a timeout logs a
+warning and return is not proof of resource closure. The deadline bounds
+Weft-owned waits, not an OS/backend close already in progress. Callers that
+require joined completion must observe the drive thread or `is_running()` state.
+
+`stop()` and `cleanup()` are non-overridden public lifecycle templates. Concrete
+task families contribute ordered task-specific shutdown through a protected
+cleanup hook that receives the absolute deadline for any join/drain wait. The
+private finalizer invokes that hook, captures any failure, and always runs
+private BaseTask queue, waiter, strategy, thread-local, and weakref-finalizer
+cleanup afterward. It attempts all cleanup phases, records the first failure and
+logs later failures, then leaves `FINALIZING` for `CLOSED`; partial cleanup is not
+retried. A task-specific failure therefore cannot bypass shared cleanup.
+
+Worker-result delivery remains bounded and in-process. Ordinary task workers do
+not own Weft broker/store handles. The named TaskMonitor maintenance lanes retain
+their [OBS.13.10] exception. Their TaskSpec/config snapshots, queue/store handles,
+sink facades, lifecycle, and counters are worker-owned and close in that worker's
+`finally` path before the result is considered complete. Same-path sink facades
+intentionally lease one process-local writer/rotation owner; this is the only
+shared external-log object and it owns no task lifecycle or per-worker counters.
+A close failure yields a typed failed/pending maintenance result, never a
+successful result.
+
 ### 2.3 Specialized Task Types [CC-2.3]
 
 Concrete task classes express different queue behaviors on top of `BaseTask`.
@@ -214,7 +349,7 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/monitor/task_monitor.py`, `weft/core/tasks/pipeline.py`,
 `weft/core/tasks/debugger.py`, `weft/core/tasks/heartbeat.py`,
 `weft/core/tasks/interactive.py`, `weft/core/tasks/service.py`,
-`weft/core/tasks/sessions.py`;
+`weft/core/tasks/sessions.py`, `weft/core/manager.py`;
 task primitives are re-exported from `weft/core/tasks/__init__.py` where
 intended for package-level use. The internal `ServiceTask` helper is imported
 directly from `weft/core/tasks/service.py`, while the TaskMonitor runtime is
@@ -237,7 +372,7 @@ Current task families:
   but the service layer suppresses `task_activity` and poll-report rows in
   `weft.log.tasks` so long-lived manager, heartbeat, and TaskMonitor work
   cannot amplify the lifecycle log that cleanup itself consumes. It does not
-  implement `process_once()` and does not know about manager leadership,
+  implement a reactor turn policy and does not know about manager leadership,
   service keys, cleanup selection, heartbeat registration, or queue scheduling
   policy.
 - `Consumer`: reserves inbox messages on the main task reactor thread, runs
@@ -349,9 +484,10 @@ Current task families:
 - `HeartbeatTask`: manager-supervised internal interval emitter for
   runtime-scoped periodic queue writes. It exposes registration due time,
   idle shutdown, and singleton supersession checks through
-  `next_wait_timeout()` and returns from `process_once()` after one bounded
-  reactor turn; it does not run a private inner wait loop or task-local queue
-  pending probe. Queue readiness is owned by `MultiQueueWatcher`.
+  `next_wait_timeout()` and returns from its protected `_process_reactor_turn()`
+  hook after one bounded reactor turn; it does not run a private inner wait
+  loop or task-local queue pending probe. Queue readiness is owned by
+  `MultiQueueWatcher`.
 - `Debugger`: in-process diagnostic command surface for interactive debugging
 
 Interactive command sessions reuse the same task/runtime conventions rather
@@ -461,8 +597,14 @@ than growing process memory without bound. `weft/core/tasks/multiqueue_watcher.p
 owns queue readiness and lets task subclasses narrow what counts as wait
 activity when a queue already contains work owned by the current reactor turn,
 such as a Consumer reserved message while its worker lane is active.
-`weft/core/launcher.py` honors `next_wait_timeout()` and pending worker
-activity for spawned task processes; `weft/core/tasks/consumer.py` owns
+`weft/core/launcher.py` constructs the task, installs process-level signal and
+parent-loss adapters, and delegates execution to
+`weft/core/tasks/base.py::BaseTask.run_until_stopped`. BaseTask alone evaluates
+terminal state, pending worker activity, `next_wait_timeout()`, queue/local
+activity waiting, and finalization. The launcher must not maintain a parallel
+task-loop policy; launcher delegation is fired by
+`tests/tasks/test_task_execution.py`.
+`weft/core/tasks/consumer.py` owns
 work-item reservation, worker dispatch,
 main-thread finalization, and active control; `weft/core/tasks/runner.py` owns
 runner dispatch; `weft/cli/run.py` owns CLI submission and wait behavior.

@@ -1,4 +1,8 @@
-"""Tests for shared long-lived service task helpers."""
+"""Tests for shared long-lived service task helpers.
+
+Spec references:
+- docs/specifications/07-System_Invariants.md [IMPL.10]
+"""
 
 from __future__ import annotations
 
@@ -129,15 +133,20 @@ def drain_worker_results_until(
     *,
     timeout: float = 2.0,
 ) -> None:
-    """Drain worker results until a predicate is true or the deadline expires."""
+    """Drive owner turns until a predicate is true or the deadline expires.
+
+    The first ``process_once()`` claims reactor drive ownership for this
+    thread, so the later public ``wait_for_activity()`` calls are owner-legal
+    regardless of how quickly worker results arrive.
+    """
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        task._drain_worker_results()
+        task.process_once()
         if predicate():
             return
         task.wait_for_activity(timeout=0.01)
-    task._drain_worker_results()
+    task.process_once()
     if not predicate():
         raise AssertionError("worker result predicate was not satisfied")
 
@@ -210,6 +219,72 @@ def test_service_task_poll_reporting_is_disabled(
         task.stop()
 
     assert drain_log_events(log_queue) == []
+
+
+def test_service_task_cleanup_passes_one_absolute_deadline_to_worker_groups(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+    task._register_service_worker(
+        ServiceWorkerSpec(name="deadline", target=lambda _context: None)
+    )
+    observed_deadlines: list[float] = []
+
+    def record_stop(
+        _name: str,
+        *,
+        drain: bool = False,
+        deadline: float | None = None,
+    ) -> None:
+        del drain
+        assert deadline is not None
+        observed_deadlines.append(deadline)
+
+    monkeypatch.setattr(task, "_stop_service_worker", record_stop)
+    started_at = time.monotonic()
+    task.stop(timeout=0.2)
+
+    assert len(observed_deadlines) == 1
+    assert started_at < observed_deadlines[0] <= started_at + 0.25
+
+
+def test_service_task_full_sentinel_queue_respects_cleanup_deadline(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+
+    def blocked_target(_context: ServiceWorkerContext) -> None:
+        worker_entered.set()
+        assert release_worker.wait(timeout=3.0)
+
+    task._register_service_worker(
+        ServiceWorkerSpec(
+            name="blocked",
+            target=blocked_target,
+            input_queue_maxsize=1,
+        )
+    )
+    task._start_service_worker("blocked")
+    assert worker_entered.wait(timeout=2.0)
+    registration = task._service_worker_registrations["blocked"]
+    registration.input_queue.put_nowait("occupy-sentinel-slot")
+
+    started_at = time.monotonic()
+    task.stop(timeout=0.05)
+    elapsed = time.monotonic() - started_at
+    release_worker.set()
+    for thread in registration.threads:
+        thread.join(timeout=2.0)
+
+    assert elapsed < 0.3
+    assert task._task_lifecycle.value == "closed"
 
 
 def test_service_task_due_time_helpers_bound_waits(

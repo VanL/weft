@@ -123,7 +123,24 @@ class CommandSession:
     def returncode(self) -> int | None:
         return self._process.poll()
 
-    def terminate(self) -> None:
+    def terminate(self, *, deadline: float | None = None) -> None:
+        if deadline is not None:
+            try:
+                if self.is_alive():
+                    pid = self._process.pid
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if isinstance(pid, int) and pid > 0:
+                        terminate_process_tree(
+                            pid,
+                            timeout=remaining / 2.0 if remaining > 0 else 0.0,
+                            kill_after=True,
+                        )
+                    if self.is_alive():
+                        self._process.kill()
+            finally:
+                self.close()
+            return
+
         try:
             if self.is_alive():
                 pid = self._process.pid
@@ -425,7 +442,32 @@ class AgentSession:
     def is_alive(self) -> bool:
         return self._process.is_alive()
 
-    def terminate(self) -> None:
+    def terminate(self, *, deadline: float | None = None) -> None:
+        if deadline is not None:
+            if not self.is_alive():
+                try:
+                    self._process.join(
+                        timeout=min(0.2, max(0.0, deadline - time.monotonic()))
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                return
+
+            pid = self._process.pid
+            remaining = max(0.0, deadline - time.monotonic())
+            if isinstance(pid, int) and pid > 0:
+                terminate_process_tree(
+                    pid,
+                    timeout=remaining / 2.0 if remaining > 0 else 0.0,
+                    kill_after=True,
+                )
+            if self.is_alive():
+                try:
+                    self._process.kill()
+                except (OSError, ValueError):  # pragma: no cover - defensive
+                    pass
+            return
+
         if not self.is_alive():
             try:
                 self._process.join(timeout=0.2)
@@ -450,18 +492,26 @@ class AgentSession:
             self._process.kill()
             self._process.join(timeout=0.5)
 
-    def _close_ipc_resources(self) -> None:
+    def _close_ipc_resources(self, *, deadline: float | None = None) -> None:
         """Release multiprocessing handles owned by this session wrapper."""
 
         for mp_queue in (self._request_queue, self._response_queue):
+            if deadline is not None:
+                cancel_join = getattr(mp_queue, "cancel_join_thread", None)
+                if callable(cancel_join):
+                    try:
+                        cancel_join()
+                    except Exception:  # pragma: no cover - defensive cleanup
+                        pass
             try:
                 mp_queue.close()
             except Exception:  # pragma: no cover - defensive cleanup
                 pass
-            try:
-                mp_queue.join_thread()
-            except Exception:  # pragma: no cover - defensive cleanup
-                pass
+            if deadline is None:
+                try:
+                    mp_queue.join_thread()
+                except Exception:  # pragma: no cover - defensive cleanup
+                    pass
         try:
             self._process.close()
         except Exception:  # pragma: no cover - process may still be running
@@ -493,20 +543,26 @@ class AgentSession:
             self._last_metrics = self._monitor.last_metrics() or self._last_metrics
         return self._last_metrics
 
-    def close(self) -> None:
+    def close(self, *, deadline: float | None = None) -> None:
         if self._closed:
             return
         self._closed = True
         try:
             if self.is_alive():
                 self._request_queue.put(make_stop_request())
-                self._process.join(timeout=0.5)
+                join_timeout = 0.5
+                if deadline is not None:
+                    join_timeout = min(
+                        join_timeout,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                self._process.join(timeout=join_timeout)
         except Exception:  # pragma: no cover - defensive
             pass
         if self.is_alive():
-            self.terminate()
+            self.terminate(deadline=deadline)
         self.stop_monitor()
-        self._close_ipc_resources()
+        self._close_ipc_resources(deadline=deadline)
 
 
 class InProcessCommandSession:
@@ -567,7 +623,8 @@ class InProcessCommandSession:
     def returncode(self) -> int | None:
         return self._returncode
 
-    def terminate(self) -> None:
+    def terminate(self, *, deadline: float | None = None) -> None:
+        del deadline
         self._alive = False
         if self._returncode is None:
             self._returncode = -1

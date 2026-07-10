@@ -1,12 +1,31 @@
 # Changelog
 
-## Unreleased
+## [0.9.89] - 2026-07-10
 
 ### Changed
 
-- Raised the SimpleBroker floor to 5.1.0. `MultiQueueWatcher` now supplies its
-  fan-in activity waiter through SimpleBroker's watcher lifecycle hooks instead
-  of cloning the watcher retry loop.
+- **Breaking (embedders only):** `BaseTask` reactor safety hardening
+  ([CC-2.2.1], [QUEUE.7], [IMPL.10], [IMPL.11]). External `BaseTask`
+  subclasses that override public `process_once()`, `wait_for_activity()`,
+  `stop()`, or `cleanup()` now fail at class creation; move policy to the
+  protected `_process_reactor_turn()`, `_wait_for_reactor_activity()`, or
+  `_cleanup_task_resources(deadline)` hooks. Direct `wait_for_activity()`
+  callers must first establish the drive owner via `process_once()` or
+  `run_until_stopped()`. Construction now rejects queue-role aliasing across
+  task roles and protected Weft support queues, and Heartbeat registrations
+  targeting the task's own watched/reserved/control lanes or the reserved
+  `weft.` namespace are rejected at ingestion. Tasks constructed already
+  terminal or pre-stopped no longer receive an unconditional first launcher
+  turn. A repository search found no in-tree or documented external
+  subclassing relying on the old behavior.
+- Manager child teardown now escalates TERM-resistant descendant processes to
+  SIGKILL within the same absolute cleanup deadline (split TERM/KILL budget)
+  instead of leaving them alive after a SIGTERM-only tree pass.
+- Raised the SimpleBroker floor to 5.3.0 and the Postgres backend floor to
+  simplebroker-pg 3.2.0. `MultiQueueWatcher` now supplies its fan-in activity
+  waiter through SimpleBroker's watcher lifecycle hooks instead of cloning the
+  watcher retry loop, and a running standalone watcher rebuilds and replaces
+  that waiter on its drive owner whenever dynamic queue membership changes.
 
 ## 0.9.86 - 2026-07-03
 

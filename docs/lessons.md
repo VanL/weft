@@ -1083,3 +1083,23 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
   containers stuck in `Created`. Serialize tests that execute real Docker
   containers with a narrow cross-process lock; do not hide Docker lifecycle
   coverage behind mocks or broader suite serialization.
+
+## 2026-07-06 Cohesion Over File Size
+
+- File size alone is not a review finding and not grounds for a split. Agents
+  navigate by grep and read by offset, so a big well-named file is a
+  pre-joined index, while every module boundary is a place an agent must
+  correctly guess that relevant code lives elsewhere. Splitting genuinely
+  coupled code manufactures false seams, and false seams breed
+  parallel-implementation drift.
+- The real gates are two floors, and violating a floor is a finding at any
+  file size: (1) every implicit coupling gets an explicit marker at the edit
+  point; (2) every state machine gets a name and a contract test. Structural
+  coupling (a wide method surface over one schema, e.g.
+  `weft/core/manager.py`) is safe large under floor 1; behavioral coupling
+  (live state, e.g. the task status machine extracted into
+  `weft/core/task_lifecycle.py` / `weft/core/state_machines.py`) is what
+  justifies extraction — to create a testable boundary, not to shrink a file.
+- Full doctrine, including the parallel-write-slice cost of hot god files:
+  `docs/agent-context/engineering-principles.md` §11 ("Cohesion Over File
+  Size (Floors, Not Line Counts)").

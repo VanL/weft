@@ -235,6 +235,139 @@ def test_structured_ping_echoes_request_id_and_snapshot(broker_env, unique_tid):
     assert ping_response["runner"]
 
 
+@pytest.mark.parametrize(
+    "payload",
+    ["null", "[]", "42", "true", json.dumps("PING")],
+)
+def test_json_non_object_control_payload_is_acked_and_does_not_block_later_ping(
+    broker_env,
+    unique_tid,
+    payload: str,
+) -> None:
+    """Port the reference invalid-payload progress contract to Weft [MF-3]."""
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = Consumer(db_path, spec)
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+
+    try:
+        ctrl_in.write(payload)
+        task.process_once()
+
+        invalid_responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        assert len(invalid_responses) == 1
+        assert invalid_responses[0]["status"] == "unknown"
+        assert ctrl_in.peek_one() is None
+
+        ctrl_in.write(json.dumps({"command": "PING", "request_id": "progress"}))
+        _drive_task_until(task, lambda: ctrl_out.peek_one() is not None)
+
+        progress_responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        assert any(
+            response.get("message") == "PONG"
+            and response.get("request_id") == "progress"
+            for response in progress_responses
+        )
+        assert ctrl_in.peek_one() is None
+    finally:
+        task.cleanup()
+
+
+@pytest.mark.parametrize("command", ["", "DANCE"])
+def test_unknown_structured_control_echoes_request_id_and_allows_progress(
+    broker_env,
+    unique_tid,
+    command: str,
+) -> None:
+    """Empty and named unknown commands are exact-acked progress events [MF-3]."""
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = Consumer(db_path, spec)
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    request_id = f"unknown-{command or 'empty'}"
+
+    try:
+        ctrl_in.write(json.dumps({"command": command, "request_id": request_id}))
+        task.process_once()
+
+        responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        assert len(responses) == 1
+        assert responses[0]["command"] == command
+        assert responses[0]["status"] == "unknown"
+        assert responses[0]["tid"] == unique_tid
+        assert responses[0]["error"] == "Unsupported command"
+        assert responses[0]["request_id"] == request_id
+        assert ctrl_in.peek_one() is None
+
+        ctrl_in.write(json.dumps({"command": "PING", "request_id": "progress"}))
+        _drive_task_until(task, lambda: ctrl_out.peek_one() is not None)
+        later = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        assert any(
+            response.get("message") == "PONG"
+            and response.get("request_id") == "progress"
+            for response in later
+        )
+    finally:
+        task.cleanup()
+
+
+def test_control_ack_survives_task_reconstruction_without_replay(
+    broker_env,
+    unique_tid,
+) -> None:
+    """A deleted control row is not replayed after task reconstruction [MF-3]."""
+    db_path, make_queue = broker_env
+    ctrl_in_name = f"custom.control.{unique_tid}.in"
+    ctrl_out_name = f"custom.control.{unique_tid}.out"
+
+    def make_spec() -> TaskSpec:
+        return TaskSpec(
+            tid=unique_tid,
+            name="control-restart",
+            spec=SpecSection(
+                type="function",
+                function_target="tests.tasks.sample_targets:echo_payload",
+            ),
+            io=IOSection(
+                inputs={"inbox": f"T{unique_tid}.inbox"},
+                outputs={"outbox": f"T{unique_tid}.outbox"},
+                control={"ctrl_in": ctrl_in_name, "ctrl_out": ctrl_out_name},
+            ),
+            state=StateSection(),
+        )
+
+    ctrl_in = make_queue(ctrl_in_name)
+    ctrl_out = make_queue(ctrl_out_name)
+    first = Consumer(db_path, make_spec())
+    try:
+        ctrl_in.write(json.dumps({"command": "PING", "request_id": "first"}))
+        first.process_once()
+        assert ctrl_in.peek_one() is None
+        first_response = json.loads(ctrl_out.read_one())
+        assert first_response["request_id"] == "first"
+    finally:
+        first.cleanup()
+
+    replacement = Consumer(db_path, make_spec())
+    try:
+        ctrl_in.write(json.dumps({"command": "PING", "request_id": "barrier"}))
+        replacement.process_once()
+
+        responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        assert [response.get("request_id") for response in responses] == ["barrier"]
+        assert ctrl_in.peek_one() is None
+    finally:
+        replacement.cleanup()
+
+
 def test_task_can_register_pong_extension_provider(broker_env, unique_tid):
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")

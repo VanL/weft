@@ -88,7 +88,12 @@ file-backed SQLite path.
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/load.py`,
-`weft/core/tasks/multiqueue_watcher.py`, `weft/core/queue_wait.py`.
+`weft/core/tasks/multiqueue_watcher.py` (exact activity signatures,
+`_apply_topology_mutation_on_owner()`, and
+`PollingStrategy.replace_activity_waiter(...)` ownership),
+`weft/core/queue_wait.py`; native acceptance coverage is
+`test_postgres_background_dynamic_membership_rebinds_native_waiter` in
+`tests/tasks/test_multiqueue_watcher.py`.
 
 Current behavior:
 
@@ -103,6 +108,14 @@ Current behavior:
 - `MultiQueueWatcher` passes its fan-in waiter through SimpleBroker's watcher
   lifecycle hook rather than cloning the base watcher retry loop; Weft still
   owns queue membership, priority, and dispatch policy
+- a running standalone `MultiQueueWatcher` changes native waiter membership
+  only on its drive owner. The owner creates a replacement with
+  `simplebroker.create_activity_waiter_for_queues(...)`, installs it through
+  the public owner-confined `PollingStrategy.replace_activity_waiter(...)`
+  seam, and closes the returned displaced waiter. The replacement seam keeps
+  strategy data-version callbacks and local wake hints intact and accepts
+  `None` for polling fallback. Weft does not call backend-specific listener
+  APIs and does not use `PollingStrategy.start()` as a live replacement
 - when the backend returns a native activity waiter, Weft waits on that waiter
   and treats a `True` result as a queue-discovery hint; it must not perform a
   pre-wait SQL pending scan on every wait cycle
@@ -398,6 +411,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
 - [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](../plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md)

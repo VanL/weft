@@ -1,8 +1,15 @@
-"""Tests for Observer behavior."""
+"""Tests for Observer behavior.
+
+Spec references:
+- docs/specifications/07-System_Invariants.md [QUEUE.7]
+"""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 from weft._constants import (
     CONTROL_STOP,
@@ -114,6 +121,47 @@ def test_monitor_custom_target_queue(broker_env) -> None:
 
     downstream = make_queue(target_queue)
     assert downstream.read_one() == "sample"
+
+
+def test_monitor_allows_explicit_downstream_outbox_alias(tmp_path: Path) -> None:
+    """The forwarding monitor's downstream/outbox alias is intentional [QUEUE.7]."""
+
+    spec = make_observer_spec("1778089999999999301")
+    monitor = Monitor(
+        tmp_path / "monitor-outbox-alias.sqlite3",
+        spec,
+        observer=lambda _message, _timestamp: None,
+        downstream_queue=spec.io.outputs["outbox"],
+    )
+    monitor.cleanup()
+
+
+@pytest.mark.parametrize("local_role", ("inbox", "ctrl_in"))
+def test_monitor_rejects_unsafe_downstream_alias_before_broker_side_effects(
+    tmp_path: Path,
+    local_role: str,
+) -> None:
+    """Downstream forwarding cannot alias watched input/control lanes [QUEUE.7]."""
+
+    spec = make_observer_spec("1778089999999999302")
+    duplicate_queue = (
+        spec.io.inputs["inbox"] if local_role == "inbox" else spec.io.control["ctrl_in"]
+    )
+    db_path = tmp_path / f"monitor-{local_role}-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        Monitor(
+            db_path,
+            spec,
+            observer=lambda _message, _timestamp: None,
+            downstream_queue=duplicate_queue,
+        )
+
+    message = str(exc_info.value)
+    assert "downstream" in message
+    assert local_role in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
 
 
 def test_monitor_stop_command(broker_env) -> None:

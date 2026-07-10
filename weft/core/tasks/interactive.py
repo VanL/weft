@@ -488,7 +488,12 @@ class InteractiveTaskMixin(ABC):
         except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive session resources", exc_info=True)
 
-    def _interactive_shutdown(self, *, reason: str | None = None) -> None:
+    def _interactive_shutdown(
+        self,
+        *,
+        reason: str | None = None,
+        deadline: float | None = None,
+    ) -> None:
         session_obj = getattr(self, "_interactive_session", None)
         if not session_obj:
             return
@@ -497,12 +502,19 @@ class InteractiveTaskMixin(ABC):
             session.close_stdin()
         except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive stdin", exc_info=True)
-        deadline = time.monotonic() + INTERACTIVE_STOP_GRACE_SECONDS
-        while session.is_alive() and time.monotonic() < deadline:
+        shutdown_deadline = (
+            time.monotonic() + INTERACTIVE_STOP_GRACE_SECONDS
+            if deadline is None
+            else deadline
+        )
+        while session.is_alive() and time.monotonic() < shutdown_deadline:
             self._interactive_flush_outputs()
-            time.sleep(INTERACTIVE_STOP_POLL_INTERVAL)
+            remaining = max(0.0, shutdown_deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            time.sleep(min(INTERACTIVE_STOP_POLL_INTERVAL, remaining))
         if session.is_alive():
-            session.terminate()
+            session.terminate(deadline=shutdown_deadline)
         session.stop_monitor()
         self._interactive_flush_outputs()
         self._interactive_finalize_session(failure_reason=reason)

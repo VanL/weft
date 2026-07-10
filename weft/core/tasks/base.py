@@ -28,14 +28,17 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, Literal, cast, final
 
 from simplebroker import BrokerTarget, Queue
-from simplebroker.ext import BrokerError
+from simplebroker.ext import BrokerError, StopWatching
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_PAUSE,
@@ -48,14 +51,17 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    PARENT_LOSS_WAKE_INTERVAL_CEILING,
     PIPELINE_OWNER_METADATA_KEY,
     PONG_EXTENSION_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    QUEUE_PRIORITY_NORMAL,
     QUEUE_RESERVED_SUFFIX,
     STREAM_CHUNK_SIZE_BYTES,
+    TASK_CLEANUP_TIMEOUT_SECONDS,
     TASK_PROCESS_POLL_INTERVAL,
     TASK_REACTOR_WAKEUP_MAX_SECONDS,
     TASK_WORKER_RESULT_DRAIN_MAX_PER_TURN,
@@ -145,6 +151,21 @@ class TaskWorkerResult:
 
 
 PongExtensionProvider = Callable[[], Mapping[str, Any] | None]
+type TerminationRequestSource = tuple[
+    Literal["signal", "parent_loss"],
+    int | None,
+]
+
+
+class TaskReactorLifecycle(StrEnum):
+    """Internal BaseTask reactor-drive lifecycle."""
+
+    NEW = "new"
+    STARTING = "starting"
+    DRIVING = "driving"
+    STOP_REQUESTED = "stop_requested"
+    FINALIZING = "finalizing"
+    CLOSED = "closed"
 
 
 def _merge_host_process_observations(
@@ -170,6 +191,26 @@ class BaseTask(MultiQueueWatcher, ABC):
         ack="immediate",
         terminal_state="immediate",
     )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Reject replacement of BaseTask's public reactor templates."""
+
+        super().__init_subclass__(**kwargs)
+        protected_hooks = {
+            "process_once": "_process_reactor_turn",
+            "wait_for_activity": "_wait_for_reactor_activity",
+            "stop": "_cleanup_task_resources",
+            "cleanup": "_cleanup_task_resources",
+        }
+        for public_name, protected_name in protected_hooks.items():
+            resolved_method = getattr(cls, public_name)
+            base_template = getattr(BaseTask, public_name)
+            if resolved_method is base_template:
+                continue
+            raise TypeError(
+                f"{cls.__qualname__} must not override public {public_name}(); "
+                f"override {protected_name}() instead"
+            )
 
     # --- properties required by InteractiveTaskMixin ---------------------------------
     @property
@@ -239,7 +280,21 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._worker_lock = threading.Lock()
         self._worker_stopping = threading.Event()
 
+        self._task_lifecycle_lock = threading.Lock()
+        self._task_lifecycle = TaskReactorLifecycle.NEW
+        self._drive_owner_thread: threading.Thread | None = None
+        self._drive_owner_ident: int | None = None
+        self._start_pending = False
+        self._turn_active = False
+        self._wait_active = False
+        self._drive_loop_active = False
+        self._strategy_started = False
+        self._pending_termination_sources: deque[TerminationRequestSource] = deque()
+        self._parent_loss_watch_active = False
+        self._cleanup_errors: tuple[BaseException, ...] = ()
+
         self._queue_names = self._resolve_queue_names()
+        self._validate_reactor_topology()
         queue_configs = self._build_queue_configs()
 
         config_dict = dict(config) if config is not None else load_config()
@@ -258,7 +313,6 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._runtime_handle: RunnerHandle | None = None
         self._kill_requested = False
         self._external_stop_handled = False
-        self._pending_termination_signum: int | None = None
 
         super().__init__(
             queue_configs=queue_configs,
@@ -334,6 +388,110 @@ class BaseTask(MultiQueueWatcher, ABC):
             "reserved": reserved,
         }
 
+    def _reactor_queue_roles(self) -> dict[str, str]:
+        """Return construction-fixed task-local reactor roles.
+
+        Subclasses that add watched, reserved, or fixed output lanes must extend
+        this map so validation runs before queue configuration can collapse
+        duplicate queue-name keys.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        return {
+            "inbox": self._queue_names["inbox"],
+            "reserved": self._queue_names["reserved"],
+            "outbox": self._queue_names["outbox"],
+            "ctrl_in": self._queue_names["ctrl_in"],
+            "ctrl_out": self._queue_names["ctrl_out"],
+        }
+
+    def _reactor_support_routes(self) -> dict[str, str]:
+        """Return fixed BaseTask routes that must not alias reactor roles.
+
+        These queues are opened eagerly or lazily by shared task behavior. They
+        remain part of construction topology even when a particular task does
+        not exercise every route during its lifetime.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        routes = {
+            "global_log": WEFT_GLOBAL_LOG_QUEUE,
+            "tid_mappings": WEFT_TID_MAPPINGS_QUEUE,
+            "streaming_sessions": WEFT_STREAMING_SESSIONS_QUEUE,
+            "endpoints_registry": WEFT_ENDPOINTS_REGISTRY_QUEUE,
+        }
+        pipeline_owner = self.taskspec.metadata.get(PIPELINE_OWNER_METADATA_KEY)
+        if isinstance(pipeline_owner, dict):
+            events_queue = pipeline_owner.get("events_queue")
+            if not isinstance(events_queue, str) or not events_queue.strip():
+                raise ValueError(
+                    "Pipeline owner metadata events_queue must be a non-empty string"
+                )
+            routes["pipeline_owner_events"] = events_queue
+        return routes
+
+    def _allowed_reactor_queue_aliases(self) -> set[frozenset[str]]:
+        """Return named semantic aliases allowed by the concrete task policy."""
+
+        return set()
+
+    def _validate_reactor_topology(self) -> None:
+        """Reject empty or conflicting construction topology before broker I/O.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        queue_roles = self._reactor_queue_roles()
+        support_routes = self._reactor_support_routes()
+        canonical_roles = {
+            role: self._queue_names[role]
+            for role in ("inbox", "reserved", "outbox", "ctrl_in", "ctrl_out")
+        }
+        for role, expected_name in canonical_roles.items():
+            if queue_roles.get(role) != expected_name:
+                raise ValueError(
+                    f"Canonical queue role {role!r} must remain {expected_name!r}"
+                )
+        canonical_support = {
+            "global_log": WEFT_GLOBAL_LOG_QUEUE,
+            "tid_mappings": WEFT_TID_MAPPINGS_QUEUE,
+            "streaming_sessions": WEFT_STREAMING_SESSIONS_QUEUE,
+            "endpoints_registry": WEFT_ENDPOINTS_REGISTRY_QUEUE,
+        }
+        for role, expected_name in canonical_support.items():
+            if support_routes.get(role) != expected_name:
+                raise ValueError(
+                    f"Canonical support route {role!r} must remain {expected_name!r}"
+                )
+        overlapping_keys = set(queue_roles).intersection(support_routes)
+        if overlapping_keys:
+            raise ValueError(
+                "Reactor queue roles and support routes use duplicate semantic keys: "
+                f"{sorted(overlapping_keys)!r}"
+            )
+        roles = {**queue_roles, **support_routes}
+        for role, queue_name in roles.items():
+            if not isinstance(queue_name, str) or not queue_name.strip():
+                raise ValueError(
+                    f"Queue role {role!r} must resolve to a non-empty queue name"
+                )
+
+        allowed_aliases = self._allowed_reactor_queue_aliases()
+        role_items = list(roles.items())
+        for index, (left_role, left_name) in enumerate(role_items):
+            for right_role, right_name in role_items[index + 1 :]:
+                if left_name != right_name:
+                    continue
+                role_pair = frozenset((left_role, right_role))
+                if role_pair in allowed_aliases:
+                    continue
+                raise ValueError(
+                    f"Queue role {left_role!r} conflicts with role {right_role!r}: "
+                    f"both resolve to {left_name!r}"
+                )
+
     @abstractmethod
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Return queue configuration dictionaries consumed by MultiQueueWatcher.
@@ -341,6 +499,33 @@ class BaseTask(MultiQueueWatcher, ABC):
         Spec: [CC-2.1], [CC-2.2]
         """
         ...
+
+    def add_queue(
+        self,
+        queue_name: str,
+        handler: Callable[[str, int, QueueMessageContext], None],
+        *,
+        mode: QueueMode = QueueMode.READ,
+        reserved_queue: str | None = None,
+        error_handler: Callable[[Exception, str, int], bool | None] | None = None,
+        priority: int = QUEUE_PRIORITY_NORMAL,
+    ) -> None:
+        """Reject runtime mutation of a task's construction-fixed topology."""
+
+        del queue_name, handler, mode, reserved_queue, error_handler, priority
+        raise RuntimeError(
+            "BaseTask reactor topology is fixed after construction; "
+            "add_queue() is unsupported"
+        )
+
+    def remove_queue(self, queue_name: str) -> None:
+        """Reject runtime mutation of a task's construction-fixed topology."""
+
+        del queue_name
+        raise RuntimeError(
+            "BaseTask reactor topology is fixed after construction; "
+            "remove_queue() is unsupported"
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -635,10 +820,16 @@ class BaseTask(MultiQueueWatcher, ABC):
                 f"Task worker lane {result.lane!r} failed"
             ) from result.error
 
-    def _stop_worker_lanes(self, timeout: float = 2.0) -> None:
-        """Best-effort stop/join for worker lanes during task cleanup."""
+    @staticmethod
+    def _remaining_deadline(deadline: float) -> float:
+        """Return non-negative seconds remaining before an absolute deadline."""
+
+        return max(0.0, deadline - time.monotonic())
+
+    def _stop_worker_lanes(self, deadline: float) -> None:
+        """Best-effort stop/join for worker lanes under one absolute deadline."""
+
         self._worker_stopping.set()
-        deadline = time.monotonic() + max(0.0, timeout)
         while True:
             with self._worker_lock:
                 threads = [
@@ -647,37 +838,209 @@ class BaseTask(MultiQueueWatcher, ABC):
                 self._worker_threads = set(threads)
             if not threads:
                 return
-            remaining = deadline - time.monotonic()
+            remaining = self._remaining_deadline(deadline)
             if remaining <= 0:
                 return
             for thread in threads:
+                remaining = self._remaining_deadline(deadline)
+                if remaining <= 0:
+                    return
+                if thread is threading.current_thread():
+                    continue
                 thread.join(timeout=min(remaining, 0.05))
 
-    def cleanup(self) -> None:
-        """Close cached Queue objects and release backend resources.
+    def _cleanup_task_resources(self, deadline: float) -> None:
+        """Release subtype-owned resources before shared BaseTask cleanup.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
+        del deadline
+
+    def _cleanup_base_task_resources(self, deadline: float) -> None:
+        """Close BaseTask-owned resources under the caller's deadline.
 
         Spec: [CC-2.5], [SB-0.1]
         """
-        self._stop_worker_lanes()
-        self._reset_multi_activity_waiter()
-        self.unregister_endpoint_name()
-        self._end_streaming_session()
-        self._cleanup_standard_control_queues_on_exit()
+
+        failures: list[BaseException] = []
+
+        def attempt(label: str, operation: Callable[[], None]) -> None:
+            try:
+                operation()
+            except BaseException as exc:  # pragma: no cover - defensive cleanup
+                failures.append(exc)
+                logger.warning(
+                    "Task %s cleanup phase %s failed",
+                    self.tid,
+                    label,
+                    exc_info=True,
+                )
+
+        attempt("activity_waiter", self._reset_multi_activity_waiter)
+        strategy = getattr(self, "_strategy", None)
+        if strategy is not None and hasattr(strategy, "close"):
+            attempt("polling_strategy", strategy.close)
+        attempt("worker_lanes", lambda: self._stop_worker_lanes(deadline))
+        attempt("endpoint", self.unregister_endpoint_name)
+        attempt("streaming_session", self._end_streaming_session)
+        attempt("control_queues", self._cleanup_standard_control_queues_on_exit)
+        queue_handles: list[Queue] = list(self._queue_cache.values())
         seen_queue_ids: set[int] = set()
-        for queue in list(self._queue_cache.values()):
+        for queue in queue_handles:
             queue_id = id(queue)
             if queue_id in seen_queue_ids:
                 continue
             seen_queue_ids.add(queue_id)
             try:
                 queue.close()
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
+            except (BrokerError, OSError, RuntimeError) as exc:
+                failures.append(exc)
+                logger.warning(
                     "Failed to close queue %s during cleanup", queue, exc_info=True
                 )
         self._owned_queue_names.clear()
         self._queue_cache.clear()
         self._spilled_output_dirs.clear()
+        if failures:
+            raise failures[0]
+
+    def _run_task_specific_cleanup(self, deadline: float) -> None:
+        """Run the concrete task family's protected cleanup hook."""
+
+        self._cleanup_task_resources(deadline)
+
+    def _finalize_task_once(self, deadline: float) -> bool:
+        """Finalize task-owned resources at most once.
+
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1]
+        - docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
+        with self._task_lifecycle_lock:
+            if self._task_lifecycle is TaskReactorLifecycle.CLOSED:
+                return True
+            if self._task_lifecycle is TaskReactorLifecycle.FINALIZING:
+                return False
+            if (
+                self._start_pending
+                or self._turn_active
+                or self._wait_active
+                or self._drive_loop_active
+            ):
+                return False
+            self._task_lifecycle = TaskReactorLifecycle.FINALIZING
+
+        failures: list[BaseException] = []
+
+        def attempt(label: str, operation: Callable[[], None]) -> None:
+            try:
+                operation()
+            except BaseException as exc:  # pragma: no cover - cleanup boundary
+                failures.append(exc)
+                logger.warning(
+                    "Task %s finalization phase %s failed",
+                    self.tid,
+                    label,
+                    exc_info=True,
+                )
+
+        try:
+            attempt(
+                "task_resources",
+                lambda: self._run_task_specific_cleanup(deadline),
+            )
+            attempt(
+                "base_resources",
+                lambda: self._cleanup_base_task_resources(deadline),
+            )
+            attempt("thread_local", self._cleanup_thread_local)
+            finalizer = getattr(self, "_finalizer", None)
+            if finalizer is not None:
+                attempt("weakref_finalizer", finalizer.detach)
+        finally:
+            with self._task_lifecycle_lock:
+                self._cleanup_errors = tuple(failures)
+                self._start_pending = False
+                self._turn_active = False
+                self._wait_active = False
+                self._drive_loop_active = False
+                self._task_lifecycle = TaskReactorLifecycle.CLOSED
+                self._running_event.clear()
+        return True
+
+    def _request_stop_and_maybe_finalize(
+        self,
+        *,
+        join: bool,
+        timeout: float,
+    ) -> None:
+        """Record stop intent, optionally join the driver, and finalize safely."""
+
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._task_lifecycle_lock:
+            if self._task_lifecycle is TaskReactorLifecycle.CLOSED:
+                return
+            if self._task_lifecycle is TaskReactorLifecycle.FINALIZING:
+                return
+            self.should_stop = True
+            if self._task_lifecycle in {
+                TaskReactorLifecycle.NEW,
+                TaskReactorLifecycle.STARTING,
+                TaskReactorLifecycle.DRIVING,
+            }:
+                self._task_lifecycle = TaskReactorLifecycle.STOP_REQUESTED
+            owner = self._drive_owner_thread
+            active = (
+                self._start_pending
+                or self._turn_active
+                or self._wait_active
+                or self._drive_loop_active
+            )
+
+        self._stop_event.set()
+        strategy = getattr(self, "_strategy", None)
+        if strategy is not None and hasattr(strategy, "notify_activity"):
+            strategy.notify_activity()
+
+        current = threading.current_thread()
+        if active and owner is not None and owner is not current:
+            if not join:
+                return
+            remaining = self._remaining_deadline(deadline)
+            if remaining > 0:
+                owner.join(timeout=remaining)
+
+        with self._task_lifecycle_lock:
+            active = (
+                self._start_pending
+                or self._turn_active
+                or self._wait_active
+                or self._drive_loop_active
+            )
+        if active:
+            if join and self._remaining_deadline(deadline) <= 0:
+                logger.warning(
+                    "Task %s stop deadline expired while its drive remained active",
+                    self.tid,
+                )
+            return
+        self._finalize_task_once(deadline)
+
+    @final
+    def cleanup(self) -> None:
+        """Request stop and release resources through the shared finalizer.
+
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1]
+        - docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
+        self._request_stop_and_maybe_finalize(
+            join=True,
+            timeout=TASK_CLEANUP_TIMEOUT_SECONDS,
+        )
 
     def _standard_control_queue_names(self) -> tuple[str, str] | None:
         """Return task-local standard control queues owned by this task."""
@@ -710,27 +1073,21 @@ class BaseTask(MultiQueueWatcher, ABC):
                     exc_info=True,
                 )
 
-    def stop(self, *, join: bool = True, timeout: float = 2.0) -> None:
-        """Stop the watcher and release any cached queue handles.
+    @final
+    def stop(
+        self,
+        *,
+        join: bool = True,
+        timeout: float = TASK_CLEANUP_TIMEOUT_SECONDS,
+    ) -> None:
+        """Request stop and finalize when no drive can touch resources.
 
-        Spec: [CC-2.5]
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.5]
+        - docs/specifications/07-System_Invariants.md [IMPL.10]
         """
-        thread_ref = getattr(self, "_thread", None)
-        thread = thread_ref() if thread_ref is not None else None
-        cleanup_before_stop = (
-            thread is None
-            or not thread.is_alive()
-            or thread == threading.current_thread()
-        )
 
-        try:
-            if cleanup_before_stop:
-                self.cleanup()
-        finally:
-            super().stop(join=join, timeout=timeout)
-
-        if not cleanup_before_stop:
-            self.cleanup()
+        self._request_stop_and_maybe_finalize(join=join, timeout=timeout)
 
     def _get_reserved_queue(self) -> Queue:
         """Convenience accessor for the reserved queue used by reserve-mode processing.
@@ -751,25 +1108,123 @@ class BaseTask(MultiQueueWatcher, ABC):
             poll_interval: Sleep duration between iterations to avoid busy loops.
             max_iterations: Optional safety cap, primarily for tests.
 
-        Spec: [CC-2.5]
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.5]
+        - docs/specifications/07-System_Invariants.md [IMPL.10]
         """
 
+        current = threading.current_thread()
+        with self._task_lifecycle_lock:
+            self._claim_or_verify_drive_owner_locked(current)
+            if self._drive_loop_active or self._turn_active or self._wait_active:
+                raise RuntimeError(f"Task {self.tid} reactor drive loop is reentrant")
+            self._start_pending = False
+            self._drive_loop_active = True
+            self._drive_owner_ident = current.ident
+            if self._task_lifecycle is TaskReactorLifecycle.STARTING:
+                self._task_lifecycle = TaskReactorLifecycle.DRIVING
+        self._running_event.set()
+
         iterations = 0
-        while (not self.should_stop or self._has_worker_activity()) and not (
-            self._stop_event and self._stop_event.is_set()
-        ):
-            self.process_once()
-            iterations += 1
-            if max_iterations is not None and iterations >= max_iterations:
-                break
-            wait_timeout: float | None = poll_interval
-            candidate_timeout = self.next_wait_timeout()
-            if candidate_timeout is not None:
-                wait_timeout = max(0.0, float(candidate_timeout))
-            if wait_timeout is not None and (
-                wait_timeout > 0 or candidate_timeout is not None
-            ):
-                self.wait_for_activity(timeout=wait_timeout)
+        try:
+            while True:
+                with self._task_lifecycle_lock:
+                    lifecycle = self._task_lifecycle
+                if lifecycle in {
+                    TaskReactorLifecycle.FINALIZING,
+                    TaskReactorLifecycle.CLOSED,
+                }:
+                    break
+                if max_iterations is not None and iterations >= max_iterations:
+                    break
+
+                pending_termination = self._has_pending_termination_request()
+                if not pending_termination:
+                    if self._stop_event.is_set():
+                        break
+                    if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
+                        break
+                    if self.should_stop and not self._has_worker_activity():
+                        break
+
+                self.process_once()
+                iterations += 1
+                if max_iterations is not None and iterations >= max_iterations:
+                    break
+
+                if self._has_pending_termination_request():
+                    continue
+                if self._stop_event.is_set():
+                    break
+                if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
+                    break
+                if self.should_stop and not self._has_worker_activity():
+                    break
+                if self._has_pending_worker_results():
+                    continue
+
+                wait_timeout: float | None = poll_interval
+                candidate_timeout = self.next_wait_timeout()
+                if candidate_timeout is not None:
+                    wait_timeout = max(0.0, float(candidate_timeout))
+                if wait_timeout is not None and (
+                    wait_timeout > 0 or candidate_timeout is not None
+                ):
+                    self.wait_for_activity(timeout=wait_timeout)
+        finally:
+            with self._task_lifecycle_lock:
+                self._drive_loop_active = False
+                self._start_pending = False
+            self._finalize_task_once(time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS)
+
+    def run_in_thread(self) -> threading.Thread:
+        """Start the canonical BaseTask drive loop in a background thread."""
+
+        thread = threading.Thread(target=self.run_forever, daemon=True)
+        with self._task_lifecycle_lock:
+            if self._task_lifecycle is not TaskReactorLifecycle.NEW:
+                raise RuntimeError(
+                    f"Task {self.tid} cannot start from {self._task_lifecycle.value}"
+                )
+            if self._drive_owner_thread is not None:
+                raise RuntimeError(f"Task {self.tid} already has a reactor owner")
+            self._drive_owner_thread = thread
+            self._drive_owner_ident = None
+            self._start_pending = True
+            self._task_lifecycle = TaskReactorLifecycle.STARTING
+            self._thread = weakref.ref(thread)
+            try:
+                thread.start()
+            except BaseException:
+                self._thread = None
+                self._drive_owner_thread = None
+                self._drive_owner_ident = None
+                self._start_pending = False
+                self._task_lifecycle = TaskReactorLifecycle.NEW
+                raise
+        return thread
+
+    def run_forever(self) -> None:
+        """Run through the same task loop used by direct and spawned drivers.
+
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1]
+        - docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
+        signal_context: Any | None = None
+        try:
+            signal_context = self._setup_signal_handler()
+            self.run_until_stopped()
+        finally:
+            if signal_context is not None:
+                signal_context.__exit__(None, None, None)
+
+    def _sigint_handler(self, signum: int, frame: Any) -> None:
+        """Record SIGINT without locks, broker effects, or signal-frame raises."""
+
+        del frame
+        self.note_termination_signal(signum)
 
     def next_wait_timeout(self) -> float | None:
         """Return an optional wait timeout for the next task-loop turn.
@@ -783,12 +1238,114 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         return None
 
-    def process_once(self) -> None:
-        """Process a single scheduling round across all queues.
+    def _claim_or_verify_drive_owner_locked(
+        self,
+        current: threading.Thread,
+    ) -> None:
+        """Claim or verify ``current`` while the lifecycle lock is held."""
 
-        Spec: [CC-2.5], [MF-2]
+        if self._task_lifecycle in {
+            TaskReactorLifecycle.FINALIZING,
+            TaskReactorLifecycle.CLOSED,
+        }:
+            raise RuntimeError(
+                f"Task {self.tid} reactor is {self._task_lifecycle.value}"
+            )
+        owner = self._drive_owner_thread
+        if owner is None:
+            self._drive_owner_thread = current
+            self._drive_owner_ident = current.ident
+            if self._task_lifecycle is TaskReactorLifecycle.NEW:
+                self._task_lifecycle = TaskReactorLifecycle.DRIVING
+            return
+        if owner is not current:
+            raise RuntimeError(
+                f"Task {self.tid} reactor owner is {owner.name!r}; "
+                f"thread {current.name!r} cannot drive it"
+            )
+        if self._task_lifecycle is TaskReactorLifecycle.STARTING:
+            self._task_lifecycle = TaskReactorLifecycle.DRIVING
+            self._start_pending = False
+            self._drive_owner_ident = current.ident
+
+    def _verify_drive_owner_locked(self, current: threading.Thread) -> None:
+        """Verify ``current`` while the lifecycle lock is held."""
+
+        if self._task_lifecycle in {
+            TaskReactorLifecycle.FINALIZING,
+            TaskReactorLifecycle.CLOSED,
+        }:
+            raise RuntimeError(
+                f"Task {self.tid} reactor is {self._task_lifecycle.value}"
+            )
+        owner = self._drive_owner_thread
+        if owner is not current:
+            owner_name = owner.name if owner is not None else "<unclaimed>"
+            raise RuntimeError(
+                f"Task {self.tid} reactor owner is {owner_name!r}; "
+                f"thread {current.name!r} cannot drive it"
+            )
+
+    @final
+    def process_once(self) -> None:
+        """Process one owner-confined scheduling turn.
+
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.5]
+        - docs/specifications/05-Message_Flow_and_State.md [MF-2]
+        - docs/specifications/07-System_Invariants.md [IMPL.10]
         """
-        self._process_pending_termination_signal()
+        current = threading.current_thread()
+        with self._task_lifecycle_lock:
+            self._claim_or_verify_drive_owner_locked(current)
+            if self._turn_active or self._wait_active:
+                raise RuntimeError(f"Task {self.tid} reactor turn is reentrant")
+            self._turn_active = True
+        try:
+            self._process_pending_termination_signal()
+            if self.should_stop or not self._ensure_task_strategy_started():
+                self._process_stopping_reactor_turn()
+            else:
+                self._process_reactor_turn()
+        finally:
+            finalize_manual_turn = False
+            with self._task_lifecycle_lock:
+                self._turn_active = False
+                if (
+                    not self._drive_loop_active
+                    and self._task_lifecycle is TaskReactorLifecycle.STOP_REQUESTED
+                ):
+                    finalize_manual_turn = True
+            if finalize_manual_turn:
+                self._finalize_task_once(
+                    time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS
+                )
+
+    def _ensure_task_strategy_started(self) -> bool:
+        """Start the inherited polling strategy once on the drive owner.
+
+        Returns False when a concurrent stop request lands between the
+        template's ``should_stop`` check and strategy startup: SimpleBroker's
+        ``_start_strategy()`` re-checks the stop event and raises
+        ``StopWatching``, which must not escape the public turn template.
+        The caller treats that turn as a stopping turn.
+        """
+
+        if self._strategy_started:
+            return True
+        try:
+            self._start_strategy()
+        except StopWatching:
+            return False
+        self._strategy_started = True
+        return True
+
+    def _process_reactor_turn(self) -> None:
+        """Run the default concrete task policy for one reactor turn.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.5]
+        """
+
         worker_results_handled = self._drain_worker_results()
         if not self.should_stop:
             self._drain_queue()
@@ -799,6 +1356,16 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._drain_worker_results(max_results=remaining_worker_result_budget)
         self._maybe_emit_poll_report()
 
+    def _process_stopping_reactor_turn(self) -> None:
+        """Apply bounded local results without dispatching new queue work.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.5]
+        """
+
+        self._drain_worker_results()
+        self._maybe_emit_poll_report()
+
+    @final
     def wait_for_activity(self, timeout: float | None) -> None:
         """Wait for queue activity or local worker-result activity.
 
@@ -807,18 +1374,52 @@ class BaseTask(MultiQueueWatcher, ABC):
         wait so completed worker results cannot sit behind an unbounded queue
         wait.
 
-        Spec: [CC-2.1], [CC-2.5], [SB-0.4]
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.2.1], [CC-2.5]
+        - docs/specifications/07-System_Invariants.md [IMPL.10]
         """
+        current = threading.current_thread()
+        with self._task_lifecycle_lock:
+            self._verify_drive_owner_locked(current)
+            if self._turn_active or self._wait_active:
+                raise RuntimeError(f"Task {self.tid} reactor wait is reentrant")
+            self._wait_active = True
+        try:
+            self._wait_for_reactor_activity(timeout)
+        finally:
+            finalize_standalone_wait = False
+            with self._task_lifecycle_lock:
+                self._wait_active = False
+                if (
+                    not self._drive_loop_active
+                    and self._task_lifecycle is TaskReactorLifecycle.STOP_REQUESTED
+                ):
+                    finalize_standalone_wait = True
+            if finalize_standalone_wait:
+                self._finalize_task_once(
+                    time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS
+                )
+
+    def _wait_for_reactor_activity(self, timeout: float | None) -> None:
+        """Wait for owned queue or local worker-result activity.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
         if self._has_pending_worker_results():
             return
 
         wait_timeout = timeout
+        if self._parent_loss_watch_active and (
+            wait_timeout is None or wait_timeout > PARENT_LOSS_WAKE_INTERVAL_CEILING
+        ):
+            wait_timeout = PARENT_LOSS_WAKE_INTERVAL_CEILING
         if self._has_active_worker_threads() and (
             wait_timeout is None or wait_timeout > TASK_REACTOR_WAKEUP_MAX_SECONDS
         ):
             wait_timeout = TASK_REACTOR_WAKEUP_MAX_SECONDS
 
-        super().wait_for_activity(timeout=wait_timeout)
+        self._wait_for_activity_body(timeout=wait_timeout)
         if self._has_pending_worker_results():
             return
 
@@ -1364,31 +1965,85 @@ class BaseTask(MultiQueueWatcher, ABC):
         loop's next iteration (or bounded wait return) owns the
         broker-visible shutdown work via ``handle_termination_signal``.
 
-        KILL-class signals (``SIGUSR1``) outrank STOP-class signals
-        (``SIGTERM``/``SIGINT``) if both arrive before the pending signal is
-        processed: once a kill has been recorded, a later stop cannot
-        downgrade it.
+        The signal-frame path only appends a plain source entry. The owner
+        resolves priority from a bounded snapshot; entries appended while a
+        snapshot drains remain queued for the next owner turn.
         """
 
-        sigusr1 = getattr(signal, "SIGUSR1", None)
-        is_kill_class = sigusr1 is not None and signum == sigusr1
-        pending = self._pending_termination_signum
-        if pending is not None:
-            pending_is_kill_class = sigusr1 is not None and pending == sigusr1
-            if pending_is_kill_class and not is_kill_class:
-                return
-        self._pending_termination_signum = signum
+        self._pending_termination_sources.append(("signal", signum))
+
+    def note_parent_loss(self) -> None:
+        """Record parent loss for owner-thread termination policy."""
+
+        self._pending_termination_sources.append(("parent_loss", None))
+
+    def enable_parent_loss_watch(self) -> None:
+        """Bound future waits so a parent-loss note is observed promptly."""
+
+        self._parent_loss_watch_active = True
+
+    def _has_pending_termination_request(self) -> bool:
+        """Return whether a signal or parent-loss source awaits owner handling."""
+
+        return bool(self._pending_termination_sources)
+
+    def _take_pending_termination_snapshot(
+        self,
+    ) -> tuple[TerminationRequestSource, ...]:
+        """Drain only sources present at snapshot entry.
+
+        Signal and parent-watch callbacks only append to the right side of the
+        deque. Fixing the count before popping therefore leaves any arrivals
+        during this drain queued for the next owner turn.
+        """
+
+        source_count = len(self._pending_termination_sources)
+        return tuple(
+            self._pending_termination_sources.popleft() for _ in range(source_count)
+        )
 
     def _process_pending_termination_signal(self) -> None:
-        """Apply a signal recorded by ``note_termination_signal``.
+        """Apply pending signal and parent-loss sources on the drive owner.
 
         Spec: [MF-3]
         """
 
-        signum = self._pending_termination_signum
-        if signum is None:
+        sources = self._take_pending_termination_snapshot()
+        if not sources:
             return
-        self._pending_termination_signum = None
+
+        sigusr1 = getattr(signal, "SIGUSR1", None)
+        signum: int | None = None
+        parent_lost = False
+        for source_kind, source_signum in sources:
+            if source_kind == "parent_loss":
+                parent_lost = True
+                continue
+            assert source_signum is not None
+            if sigusr1 is not None and source_signum == sigusr1:
+                signum = source_signum
+                continue
+            if sigusr1 is None or signum != sigusr1:
+                signum = source_signum
+
+        resolved_signum = signum if signum is not None else signal.SIGTERM
+        self._apply_termination_request(
+            resolved_signum,
+            parent_lost=parent_lost,
+        )
+
+    def _apply_termination_request(
+        self,
+        signum: int,
+        *,
+        parent_lost: bool,
+    ) -> None:
+        """Apply one owner-thread termination policy request.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
+        del parent_lost
         self.handle_termination_signal(signum)
 
     def handle_termination_signal(self, signum: int) -> None:

@@ -5,7 +5,8 @@ queues, query Monitor tables, or decide deletion eligibility.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17], [IMPL.11]
+- docs/specifications/01-Core_Components.md [CC-2.2.1]
 """
 
 from __future__ import annotations
@@ -43,6 +44,120 @@ class _RaisingRotatingFileHandler(RotatingFileHandler):
         if exc is not None:
             raise exc
         super().handleError(record)
+
+
+class _PathWriter:
+    """One process-local rotating writer shared by same-path sink facades."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        digest = sha256(str(path).encode("utf-8")).hexdigest()[:16]
+        self.logger = logging.getLogger(f"weft.monitor.external_task_log.{digest}")
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
+        self.lock = threading.RLock()
+        self.handler: logging.Handler | None = None
+        self.refcount = 0
+
+    def ensure_handler(self) -> logging.Handler:
+        """Return the sole rotating handler, opening it when necessary."""
+
+        with self.lock:
+            if self.handler is not None:
+                return self.handler
+            if self.path.exists() and self.path.is_dir():
+                raise ExternalTaskLogError(
+                    f"external task-log path is a directory: {self.path}"
+                )
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            handler = _RaisingRotatingFileHandler(
+                self.path,
+                maxBytes=WEFT_LOG_TASKS_EXTERNAL_ROTATE_MAX_BYTES,
+                backupCount=WEFT_LOG_TASKS_EXTERNAL_ROTATE_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            self.logger.addHandler(handler)
+            self.handler = handler
+            return handler
+
+    def probe(self) -> None:
+        """Reopen the path under the writer lock to validate writability."""
+
+        with self.lock:
+            self._close_handler_locked()
+            self.ensure_handler()
+
+    def emit_text(self, body_json: str, *, level: int) -> None:
+        """Write and flush one complete JSONL row under the rotation lock."""
+
+        with self.lock:
+            handler = self.ensure_handler()
+            self.logger.log(level, body_json)
+            handler.flush()
+
+    def close(self) -> None:
+        """Close the sole handler after the final facade releases its lease."""
+
+        with self.lock:
+            self._close_handler_locked()
+
+    def _close_handler_locked(self) -> None:
+        handler = self.handler
+        if handler is None:
+            return
+        self.handler = None
+        self.logger.removeHandler(handler)
+        first_error: BaseException | None = None
+        try:
+            handler.flush()
+        except BaseException as exc:  # pragma: no cover - defensive close boundary
+            first_error = exc
+        try:
+            handler.close()
+        except BaseException as exc:  # pragma: no cover - defensive close boundary
+            if first_error is None:
+                first_error = exc
+        if first_error is not None:
+            raise first_error
+
+
+_PATH_WRITER_REGISTRY_LOCK = threading.Lock()
+_PATH_WRITER_REGISTRY: dict[Path, _PathWriter] = {}
+
+
+def _acquire_path_writer(path: Path) -> _PathWriter:
+    """Acquire one refcounted writer for a resolved path.
+
+    Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+    """
+
+    resolved_path = path.expanduser().resolve(strict=False)
+    with _PATH_WRITER_REGISTRY_LOCK:
+        writer = _PATH_WRITER_REGISTRY.get(resolved_path)
+        if writer is None:
+            writer = _PathWriter(resolved_path)
+            _PATH_WRITER_REGISTRY[resolved_path] = writer
+        writer.refcount += 1
+        return writer
+
+
+def _release_path_writer(writer: _PathWriter) -> None:
+    """Release a lease and close/remove the writer after the final lease.
+
+    Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+    """
+
+    with _PATH_WRITER_REGISTRY_LOCK:
+        registered = _PATH_WRITER_REGISTRY.get(writer.path)
+        if registered is not writer:
+            return
+        writer.refcount -= 1
+        if writer.refcount > 0:
+            return
+        _PATH_WRITER_REGISTRY.pop(writer.path, None)
+        writer.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,18 +227,12 @@ class ExternalTaskLogSink:
     """Small fail-closed JSONL sink backed by Python logging."""
 
     def __init__(self, *, path: Path, mode: str, monitor_tid: str) -> None:
-        self._path = path
+        self._writer = _acquire_path_writer(path)
+        self._path = self._writer.path
         self._mode = mode
         self._monitor_tid = monitor_tid
-        digest = sha256(str(path).encode("utf-8")).hexdigest()[:16]
-        self._logger = logging.getLogger(
-            f"weft.monitor.external_task_log.{digest}.{monitor_tid}"
-        )
-        self._logger.handlers.clear()
-        self._logger.setLevel(logging.DEBUG)
-        self._logger.propagate = False
         self._lock = threading.RLock()
-        self._handler: logging.Handler | None = None
+        self._closed = False
         self._healthy: bool | None = None
         self._last_error: str | None = None
         self._last_emit_at: int | None = None
@@ -164,15 +273,18 @@ class ExternalTaskLogSink:
         """Close the external JSONL handler and release its file handle."""
 
         with self._lock:
-            self._close_handler_locked()
+            if self._closed:
+                return
+            self._closed = True
+            _release_path_writer(self._writer)
 
     def probe(self) -> bool:
         """Reopen the handler to validate current path writability."""
 
         with self._lock:
-            self._close_handler_locked()
             try:
-                self._ensure_handler_locked()
+                writer = self._ensure_writer_lease_locked()
+                writer.probe()
             except (OSError, RuntimeError, ValueError) as exc:
                 self._healthy = False
                 self._last_error = str(exc)
@@ -180,17 +292,6 @@ class ExternalTaskLogSink:
             self._healthy = True
             self._last_error = None
             return True
-
-    def _close_handler_locked(self) -> None:
-        handler = self._handler
-        if handler is None:
-            return
-        try:
-            handler.flush()
-        finally:
-            self._logger.removeHandler(handler)
-            handler.close()
-            self._handler = None
 
     def record_blocked_deletions(self, count: int) -> None:
         """Record rows whose deletion was blocked by external emit failure."""
@@ -284,24 +385,15 @@ class ExternalTaskLogSink:
             return self._ensure_handler_locked()
 
     def _ensure_handler_locked(self) -> logging.Handler:
-        if self._handler is not None:
-            return self._handler
-        if self._path.exists() and self._path.is_dir():
-            raise ExternalTaskLogError(
-                f"external task-log path is a directory: {self._path}"
-            )
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        handler = _RaisingRotatingFileHandler(
-            self._path,
-            maxBytes=WEFT_LOG_TASKS_EXTERNAL_ROTATE_MAX_BYTES,
-            backupCount=WEFT_LOG_TASKS_EXTERNAL_ROTATE_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-        handler.setLevel(logging.DEBUG)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        self._logger.addHandler(handler)
-        self._handler = handler
-        return handler
+        return self._ensure_writer_lease_locked().ensure_handler()
+
+    def _ensure_writer_lease_locked(self) -> _PathWriter:
+        """Lazily reacquire a registered writer after an idempotent close."""
+
+        if self._closed:
+            self._writer = _acquire_path_writer(self._path)
+            self._closed = False
+        return self._writer
 
     def _emit(
         self,
@@ -312,9 +404,11 @@ class ExternalTaskLogSink:
     ) -> None:
         with self._lock:
             try:
-                handler = self._ensure_handler_locked()
-                self._logger.log(level, json.dumps(record, sort_keys=True, default=str))
-                handler.flush()
+                self._ensure_handler_locked()
+                self._writer.emit_text(
+                    json.dumps(record, sort_keys=True, default=str),
+                    level=level,
+                )
             except (OSError, RuntimeError, ValueError) as exc:
                 self._healthy = False
                 self._last_error = str(exc)
@@ -334,9 +428,8 @@ class ExternalTaskLogSink:
     ) -> None:
         with self._lock:
             try:
-                handler = self._ensure_handler_locked()
-                self._logger.log(level, body_json)
-                handler.flush()
+                self._ensure_handler_locked()
+                self._writer.emit_text(body_json, level=level)
             except (OSError, RuntimeError, ValueError) as exc:
                 self._healthy = False
                 self._last_error = str(exc)

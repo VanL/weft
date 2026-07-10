@@ -17,8 +17,10 @@ import itertools
 import logging
 import threading
 import time
+import weakref
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
@@ -70,6 +72,29 @@ class QueueRuntimeConfig:
     error_handler: Callable[[Exception, str, int], bool | None]
     reserved_queue_name: str | None = None
     priority: int = QUEUE_PRIORITY_NORMAL
+
+
+@dataclass(slots=True)
+class _TopologyMutation:
+    """One synchronous dynamic-topology request owned by the drive thread."""
+
+    kind: str
+    queue_name: str
+    handler: Callable[[str, int, QueueMessageContext], None] | None = None
+    mode: QueueMode = QueueMode.READ
+    reserved_queue_name: str | None = None
+    error_handler: Callable[[Exception, str, int], bool | None] | None = None
+    priority: int = QUEUE_PRIORITY_NORMAL
+    done: threading.Event = field(default_factory=threading.Event)
+    error: BaseException | None = None
+
+
+class _TopologyDriveError(Exception):
+    """Wrap an owner transaction defect that must enter inherited retry."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
 
 
 def _resolve_db_target(
@@ -262,6 +287,16 @@ class MultiQueueWatcher(BaseWatcher):
         self._multi_activity_waiter_signature: tuple[str, ...] | None = None
         self._pending_messages_precheck_confirmed = False
         self._next_inactive_probe_at = time.monotonic()
+        self._topology_lock = threading.RLock()
+        self._topology_mutations: deque[_TopologyMutation] = deque()
+        self._topology_pending = threading.Event()
+        self._topology_inflight: _TopologyMutation | None = None
+        self._topology_owner_thread: threading.Thread | None = None
+        self._topology_reserved_thread: threading.Thread | None = None
+        self._topology_manual_wait_thread: threading.Thread | None = None
+        self._topology_stopping = False
+        self._topology_sigint_critical = False
+        self._topology_deferred_sigint = False
 
         logger.debug(
             "MultiQueueWatcher initialized with queues: %s",
@@ -278,7 +313,8 @@ class MultiQueueWatcher(BaseWatcher):
 
         Spec: [CC-2.1]
         """
-        return list(self._queues.keys())
+        with self._topology_lock:
+            return list(self._queues.keys())
 
     def add_queue(
         self,
@@ -292,10 +328,57 @@ class MultiQueueWatcher(BaseWatcher):
     ) -> None:
         """Dynamically add a queue to the watcher.
 
-        Spec: [CC-2.1], [SB-0.4]
+        Spec: [CC-2.1], [SB-0.4], [QUEUE.8]
         """
-        if queue_name in self._queues:
-            raise ValueError(f"Queue '{queue_name}' already exists")
+        self._validate_add_arguments(
+            handler=handler,
+            mode=mode,
+            reserved_queue=reserved_queue,
+            error_handler=error_handler,
+            priority=priority,
+        )
+        request = _TopologyMutation(
+            kind="add",
+            queue_name=queue_name,
+            handler=handler,
+            mode=mode,
+            reserved_queue_name=reserved_queue,
+            error_handler=error_handler,
+            priority=priority,
+        )
+        self._submit_topology_mutation(request)
+
+    def remove_queue(self, queue_name: str) -> None:
+        """Remove a queue from the watcher.
+
+        Spec: [CC-2.1], [SB-0.4], [QUEUE.8]
+        """
+        self._submit_topology_mutation(
+            _TopologyMutation(kind="remove", queue_name=queue_name)
+        )
+
+    def get_queue(self, queue_name: str) -> Queue | None:
+        """Return the managed Queue instance for *queue_name* if present.
+
+        Spec: [SB-0.1]
+        """
+        with self._topology_lock:
+            config = self._queues.get(queue_name)
+        return config.queue if config else None
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers                                                   #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _validate_add_arguments(
+        *,
+        handler: Callable[[str, int, QueueMessageContext], None],
+        mode: QueueMode,
+        reserved_queue: str | None,
+        error_handler: Callable[[Exception, str, int], bool | None] | None,
+        priority: int,
+    ) -> None:
+        """Validate one public add request before it can have effects."""
         if not callable(handler):
             raise TypeError(f"handler must be callable, got {type(handler).__name__}")
         if error_handler is not None and not callable(error_handler):
@@ -307,70 +390,332 @@ class MultiQueueWatcher(BaseWatcher):
         if not isinstance(priority, int):
             raise TypeError(f"priority must be an int, got {type(priority).__name__}")
 
+    def _open_runtime_config(self, request: _TopologyMutation) -> QueueRuntimeConfig:
+        """Open the queue facade for an already validated add request."""
+        handler = request.handler
+        if handler is None:  # pragma: no cover - internal invariant
+            raise RuntimeError("add mutation is missing its handler")
         # Direct Queue ok here: MultiQueueWatcher owns dynamically watched queue
         # handles by design; see runtime-and-context-patterns.md section 2.
         queue_obj = Queue(
-            queue_name,
+            request.queue_name,
             db_path=self._db_path,
             persistent=self._persistent,
             config=self._config,
         )
-
         _detach_queue_stop_event(queue_obj)
-
-        self._queues[queue_name] = QueueRuntimeConfig(
-            name=queue_name,
+        return QueueRuntimeConfig(
+            name=request.queue_name,
             queue=queue_obj,
             handler=handler,
-            mode=mode,
-            error_handler=error_handler or self._default_error_handler,
-            reserved_queue_name=reserved_queue,
-            priority=priority,
+            mode=request.mode,
+            error_handler=request.error_handler or self._default_error_handler,
+            reserved_queue_name=request.reserved_queue_name,
+            priority=request.priority,
         )
+
+    def _submit_topology_mutation(self, request: _TopologyMutation) -> None:
+        """Apply before drive start or synchronously submit to the drive owner."""
+        current = threading.current_thread()
+        with self._topology_lock:
+            if self._topology_stopping or self._stop_event.is_set():
+                raise RuntimeError("watcher topology is stopping")
+            if self._topology_manual_wait_thread is not None:
+                raise RuntimeError("watcher topology is owned by a manual wait")
+            if self._topology_owner_thread is current:
+                raise RuntimeError("drive owner cannot mutate topology during dispatch")
+
+            if (
+                self._topology_owner_thread is None
+                and self._topology_reserved_thread is None
+            ):
+                self._apply_topology_mutation_before_start_locked(request)
+                return
+
+            self._topology_mutations.append(request)
+            self._topology_pending.set()
+            self._strategy.notify_activity()
+
+        request.done.wait()
+        if request.error is not None:
+            raise request.error
+
+    def _apply_topology_mutation_before_start_locked(
+        self,
+        request: _TopologyMutation,
+    ) -> None:
+        """Apply one mutation synchronously while no drive can exist."""
+        if request.kind == "add":
+            if request.queue_name in self._queues:
+                raise ValueError(f"Queue '{request.queue_name}' already exists")
+            self._queues[request.queue_name] = self._open_runtime_config(request)
+            self._pending_messages_precheck_confirmed = True
+        elif request.kind == "remove":
+            if request.queue_name not in self._queues:
+                raise ValueError(f"Queue '{request.queue_name}' not found")
+            del self._queues[request.queue_name]
+            self._active_queues = [
+                name for name in self._active_queues if name != request.queue_name
+            ]
+            self._queue_iterator = itertools.cycle(self._active_queues)
+        else:  # pragma: no cover - internal invariant
+            raise RuntimeError(f"unknown topology mutation: {request.kind}")
         self._queue_generation += 1
         self._reset_multi_activity_waiter()
 
-    def remove_queue(self, queue_name: str) -> None:
-        """Remove a queue from the watcher.
-
-        Spec: [CC-2.1]
-        """
-        if queue_name not in self._queues:
-            raise ValueError(f"Queue '{queue_name}' not found")
-        del self._queues[queue_name]
-        if queue_name in self._active_queues:
-            self._active_queues = [q for q in self._active_queues if q != queue_name]
-            self._queue_iterator = (
-                itertools.cycle(self._active_queues)
-                if self._active_queues
-                else itertools.cycle([])
+    def _create_candidate_activity_waiter(
+        self,
+        mapping: Mapping[str, QueueRuntimeConfig],
+    ) -> tuple[Any | None, tuple[str, ...]]:
+        """Build the optional native waiter for an exact candidate mapping."""
+        wait_configs = self._activity_wait_configs(mapping=mapping)
+        signature = tuple(config.name for config in wait_configs)
+        if not wait_configs:
+            return None, signature
+        try:
+            waiter = create_activity_waiter_for_queues(
+                [config.queue for config in wait_configs],
+                stop_event=self._stop_event,
             )
-        self._queue_generation += 1
-        self._reset_multi_activity_waiter()
+        except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
+            logger.debug(
+                "Multi-queue activity waiter unavailable; falling back to polling",
+                exc_info=True,
+            )
+            waiter = None
+        return waiter, signature
 
-    def get_queue(self, queue_name: str) -> Queue | None:
-        """Return the managed Queue instance for *queue_name* if present.
+    @staticmethod
+    def _close_candidate_resource_once(resource: Any | None) -> None:
+        """Close one rollback-owned resource without masking the cause."""
+        if resource is None:
+            return
+        try:
+            resource.close()
+        except Exception:  # pragma: no cover - defensive backend cleanup
+            logger.debug("Failed to close candidate topology resource", exc_info=True)
 
-        Spec: [SB-0.1]
+    @staticmethod
+    def _close_activity_waiter_once(waiter: Any | None) -> None:
+        """Close one displaced waiter once at its owner boundary."""
+        if waiter is None:
+            return
+        try:
+            waiter.close()
+        except Exception:  # pragma: no cover - defensive backend cleanup
+            logger.debug("Failed to close multi-queue activity waiter", exc_info=True)
+
+    def _publish_topology_locked(
+        self,
+        *,
+        mapping: dict[str, QueueRuntimeConfig],
+        generation: int,
+        signature: tuple[str, ...],
+        waiter: Any | None,
+        active_queues: list[str],
+        queue_iterator: itertools.cycle[str],
+        force_discovery: bool,
+    ) -> None:
+        """Publish prebuilt topology state after strategy replacement."""
+        self._queues = mapping
+        self._queue_generation = generation
+        self._multi_activity_waiter = waiter
+        self._multi_activity_waiter_generation = generation
+        self._multi_activity_waiter_signature = signature
+        self._active_queues = active_queues
+        self._queue_iterator = queue_iterator
+        if force_discovery:
+            self._pending_messages_precheck_confirmed = True
+
+    def _apply_topology_mutation_on_owner(self, request: _TopologyMutation) -> None:
+        """Build, replace, and publish one mutation on the drive owner.
+
+        Spec: [CC-2.1], [SB-0.4], [QUEUE.8]
         """
-        config = self._queues.get(queue_name)
-        return config.queue if config else None
+        candidate_config: QueueRuntimeConfig | None = None
+        candidate_waiter: Any | None = None
+        candidate_installed = False
+        candidate_rollback_owned = False
+        topology_published = False
+        strategy_changed = False
+        prior_installed_waiter: Any | None = None
+        displaced_waiter: Any | None = None
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers                                                   #
-    # ------------------------------------------------------------------ #
+        with self._topology_lock:
+            if self._topology_stopping or self._stop_event.is_set():
+                raise RuntimeError("watcher topology is stopping")
+            generation = self._queue_generation
+            prior_mapping = self._queues
+            prior_cached_waiter = self._multi_activity_waiter
+            strategy_had_native = self._strategy.uses_native_activity()
+            prior_installed_waiter = (
+                prior_cached_waiter if strategy_had_native else None
+            )
+            if request.kind == "add" and request.queue_name in prior_mapping:
+                raise ValueError(f"Queue '{request.queue_name}' already exists")
+            if request.kind == "remove" and request.queue_name not in prior_mapping:
+                raise ValueError(f"Queue '{request.queue_name}' not found")
+
+        try:
+            candidate_mapping = dict(prior_mapping)
+            if request.kind == "add":
+                candidate_config = self._open_runtime_config(request)
+                candidate_mapping[request.queue_name] = candidate_config
+            else:
+                del candidate_mapping[request.queue_name]
+
+            candidate_waiter, signature = self._create_candidate_activity_waiter(
+                candidate_mapping
+            )
+            candidate_rollback_owned = (
+                candidate_waiter is not None
+                and candidate_waiter is not prior_cached_waiter
+            )
+            active_queues = [
+                name for name in self._active_queues if name in candidate_mapping
+            ]
+            queue_iterator = itertools.cycle(active_queues)
+
+            with self._topology_lock:
+                if self._topology_stopping or self._stop_event.is_set():
+                    raise RuntimeError("watcher topology is stopping")
+                if self._queue_generation != generation:
+                    raise _TopologyDriveError(
+                        RuntimeError("topology generation changed outside drive owner")
+                    )
+
+                self._topology_sigint_critical = True
+                try:
+                    strategy_changed = candidate_waiter is not prior_installed_waiter
+                    displaced_waiter = self._strategy.replace_activity_waiter(
+                        candidate_waiter
+                    )
+                    candidate_installed = (
+                        strategy_changed and candidate_waiter is not None
+                    )
+                    try:
+                        self._publish_topology_locked(
+                            mapping=candidate_mapping,
+                            generation=generation + 1,
+                            signature=signature,
+                            waiter=candidate_waiter,
+                            active_queues=active_queues,
+                            queue_iterator=queue_iterator,
+                            force_discovery=request.kind == "add",
+                        )
+                        topology_published = True
+                    except BaseException:
+                        if strategy_changed:
+                            restored_candidate = self._strategy.replace_activity_waiter(
+                                displaced_waiter
+                            )
+                            if candidate_rollback_owned:
+                                self._close_activity_waiter_once(restored_candidate)
+                            candidate_rollback_owned = False
+                            candidate_installed = False
+                        raise
+                except Exception as exc:
+                    raise _TopologyDriveError(exc) from exc
+
+            close_candidates: list[Any] = []
+            for waiter in (prior_cached_waiter, displaced_waiter):
+                if (
+                    waiter is not None
+                    and waiter is not candidate_waiter
+                    and all(waiter is not seen for seen in close_candidates)
+                ):
+                    close_candidates.append(waiter)
+            for waiter in close_candidates:
+                self._close_activity_waiter_once(waiter)
+        finally:
+            if not topology_published:
+                if candidate_waiter is not None and not candidate_installed:
+                    if candidate_rollback_owned:
+                        self._close_candidate_resource_once(candidate_waiter)
+                if candidate_config is not None:
+                    self._close_candidate_resource_once(candidate_config.queue)
+
+    def _apply_pending_topology_mutations(self) -> None:
+        """Complete queued mutations in FIFO order on the drive owner."""
+        if threading.current_thread() is not self._topology_owner_thread:
+            return
+        if not self._topology_pending.is_set():
+            return
+        while True:
+            with self._topology_lock:
+                if not self._topology_mutations:
+                    self._topology_pending.clear()
+                    return
+                request = self._topology_mutations.popleft()
+                self._topology_inflight = request
+            retry_error: Exception | None = None
+            fatal_error: BaseException | None = None
+            try:
+                self._apply_topology_mutation_on_owner(request)
+            except _TopologyDriveError as exc:
+                request.error = exc.cause
+                retry_error = exc.cause
+            except Exception as exc:
+                request.error = exc
+            except BaseException as exc:
+                request.error = RuntimeError(
+                    "watcher drive exited during topology mutation"
+                )
+                with self._topology_lock:
+                    while self._topology_mutations:
+                        pending = self._topology_mutations.popleft()
+                        pending.error = RuntimeError(
+                            "watcher drive exited during topology mutation"
+                        )
+                        pending.done.set()
+                fatal_error = exc
+            finally:
+                with self._topology_lock:
+                    if self._topology_inflight is request:
+                        self._topology_inflight = None
+                    if not self._topology_mutations:
+                        self._topology_pending.clear()
+                request.done.set()
+            self._finish_topology_sigint_critical()
+            if fatal_error is not None:
+                raise fatal_error
+            if retry_error is not None:
+                raise retry_error
+
+    def _finish_topology_sigint_critical(self) -> None:
+        """Deliver a SIGINT deferred across an atomic topology transaction."""
+        self._topology_sigint_critical = False
+        if not self._topology_deferred_sigint:
+            return
+        self._topology_deferred_sigint = False
+        self.stop(join=False)
+        raise KeyboardInterrupt
+
+    def _sigint_handler(self, signum: int, frame: Any) -> None:
+        """Defer SIGINT only while waiter replacement is half-published."""
+        if self._topology_sigint_critical:
+            self._topology_deferred_sigint = True
+            self._stop_event.set()
+            self._strategy.notify_activity()
+            return
+        super()._sigint_handler(signum, frame)
+
     def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
         """Return whether *config* should wake ``wait_for_activity``."""
 
         del config
         return True
 
-    def _activity_wait_configs(self) -> list[QueueRuntimeConfig]:
+    def _activity_wait_configs(
+        self,
+        *,
+        mapping: Mapping[str, QueueRuntimeConfig] | None = None,
+    ) -> list[QueueRuntimeConfig]:
         """Return queue configs that should wake ``wait_for_activity``."""
 
         return [
             config
-            for config in self._queues.values()
+            for config in (self._queues if mapping is None else mapping).values()
             if self._queue_counts_as_wait_activity(config)
         ]
 
@@ -389,11 +734,7 @@ class MultiQueueWatcher(BaseWatcher):
             return
 
         self._strategy.detach_activity_waiter(expected=waiter)
-
-        try:
-            cast(Any, waiter).close()
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to close multi-queue activity waiter", exc_info=True)
+        self._close_activity_waiter_once(waiter)
 
     def _mark_pending_messages_prechecked(self) -> None:
         """Force the next drain to run broad inactive-queue discovery."""
@@ -442,10 +783,84 @@ class MultiQueueWatcher(BaseWatcher):
     def _create_activity_waiter(self, queue: Queue) -> Any | None:
         """Supply Weft's multi-queue waiter to SimpleBroker strategy startup."""
         del queue
+        self._apply_pending_topology_mutations()
         return self._ensure_multi_activity_waiter()
 
-    def wait_for_activity(self, timeout: float | None) -> None:
-        """Wait for possible queue activity without consuming messages.
+    def run_in_thread(self) -> threading.Thread:
+        """Reserve and start exactly one background drive thread.
+
+        Spec: [CC-2.1], [QUEUE.8]
+        """
+        with self._topology_lock:
+            if self._topology_stopping or self._stop_event.is_set():
+                raise RuntimeError("cannot start a stopped watcher")
+            if self._topology_manual_wait_thread is not None:
+                raise RuntimeError("cannot start a drive during a manual wait")
+            if (
+                self._topology_owner_thread is not None
+                or self._topology_reserved_thread is not None
+            ):
+                raise RuntimeError("watcher already has a drive owner")
+            thread = threading.Thread(target=self.run_forever, daemon=True)
+            self._topology_reserved_thread = thread
+            self._thread = weakref.ref(thread)
+            try:
+                thread.start()
+            except BaseException:
+                if self._topology_reserved_thread is thread:
+                    self._topology_reserved_thread = None
+                thread_ref = self._thread
+                if thread_ref is not None and thread_ref() is thread:
+                    self._thread = None
+                raise
+            return thread
+
+    def run_forever(self) -> None:
+        """Claim the drive owner around SimpleBroker's inherited retry loop.
+
+        Spec: [CC-2.1], [SB-0.4], [QUEUE.8]
+        """
+        current = threading.current_thread()
+        with self._topology_lock:
+            reservation = self._topology_reserved_thread
+            if (
+                self._topology_stopping or self._stop_event.is_set()
+            ) and reservation is not current:
+                raise RuntimeError("cannot start a stopped watcher")
+            if self._topology_owner_thread is not None:
+                raise RuntimeError("watcher already has a drive owner")
+            if self._topology_manual_wait_thread is not None:
+                raise RuntimeError("cannot start a drive during a manual wait")
+            if reservation is not None and reservation is not current:
+                raise RuntimeError("watcher drive is reserved by another thread")
+            self._topology_owner_thread = current
+            if reservation is current:
+                self._topology_reserved_thread = None
+            else:
+                self._thread = weakref.ref(current)
+        try:
+            super().run_forever()
+        finally:
+            with self._topology_lock:
+                self._reset_multi_activity_waiter()
+                if self._topology_inflight is not None:
+                    request = self._topology_inflight
+                    request.error = RuntimeError("watcher drive stopped")
+                    request.done.set()
+                    self._topology_inflight = None
+                if self._topology_owner_thread is current:
+                    self._topology_owner_thread = None
+                while self._topology_mutations:
+                    request = self._topology_mutations.popleft()
+                    request.error = RuntimeError("watcher drive stopped")
+                    request.done.set()
+                self._topology_pending.clear()
+                thread_ref = self._thread
+                if thread_ref is not None and thread_ref() is current:
+                    self._thread = None
+
+    def _wait_for_activity_body(self, timeout: float | None) -> None:
+        """Execute the shared broker wait without standalone ownership policy.
 
         Native waiters are hints only. Callers must still use the ordinary
         pending/drain path after this method returns.
@@ -475,9 +890,64 @@ class MultiQueueWatcher(BaseWatcher):
 
         self._stop_event.wait(timeout)
 
+    def wait_for_activity(self, timeout: float | None) -> None:
+        """Run one manual wait while excluding drive and topology ownership.
+
+        Spec: [CC-2.1], [SB-0.4], [QUEUE.8]
+        """
+        if timeout is None or timeout <= 0:
+            return
+        current = threading.current_thread()
+        with self._topology_lock:
+            if self._topology_stopping or self._stop_event.is_set():
+                return
+            if (
+                self._topology_owner_thread is not None
+                or self._topology_reserved_thread is not None
+            ):
+                raise RuntimeError("manual wait cannot overlap a background drive")
+            if self._topology_manual_wait_thread is not None:
+                raise RuntimeError("watcher already has a manual wait owner")
+            self._topology_manual_wait_thread = current
+
+        deferred_stop = False
+        try:
+            self._wait_for_activity_body(timeout)
+        finally:
+            with self._topology_lock:
+                if self._topology_manual_wait_thread is current:
+                    if self._topology_stopping or self._stop_event.is_set():
+                        self._reset_multi_activity_waiter()
+                        deferred_stop = True
+                    self._topology_manual_wait_thread = None
+            if deferred_stop:
+                super().stop(join=False)
+
     def stop(self, *, join: bool = True, timeout: float = 2.0) -> None:
-        """Stop the watcher and close its multi-queue activity waiter."""
-        self._reset_multi_activity_waiter()
+        """Stop the watcher and close its multi-queue activity waiter.
+
+        Spec: [CC-2.1], [QUEUE.8]
+        """
+        with self._topology_lock:
+            self._topology_stopping = True
+            self._stop_event.set()
+            self._strategy.notify_activity()
+            while self._topology_mutations:
+                request = self._topology_mutations.popleft()
+                request.error = RuntimeError("watcher topology is stopping")
+                request.done.set()
+            if self._topology_inflight is None:
+                self._topology_pending.clear()
+            no_owner = (
+                self._topology_owner_thread is None
+                and self._topology_reserved_thread is None
+                and self._topology_manual_wait_thread is None
+            )
+            if no_owner:
+                self._reset_multi_activity_waiter()
+            manual_wait_active = self._topology_manual_wait_thread is not None
+        if manual_wait_active:
+            return
         super().stop(join=join, timeout=timeout)
 
     def _has_pending_messages(self) -> bool:
@@ -485,6 +955,7 @@ class MultiQueueWatcher(BaseWatcher):
 
         Spec: [CC-2.1]
         """
+        self._apply_pending_topology_mutations()
         return any(
             self._queue_counts_as_wait_activity(config)
             and self._queue_has_pending(config.queue)
@@ -766,6 +1237,7 @@ class MultiQueueWatcher(BaseWatcher):
 
         Spec: [CC-2.1], [CC-2.5]
         """
+        self._apply_pending_topology_mutations()
         self._update_active_queues()
         if not self._active_queues:
             return

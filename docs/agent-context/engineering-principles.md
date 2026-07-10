@@ -237,6 +237,50 @@ the failure mode, and it is orthogonal to which design was chosen. (See
 `runbooks/adversarial-acceptance-probes.md` for the floor probes and
 `runbooks/writing-plans.md` for the deviation log.)
 
+## 11. Cohesion Over File Size (Floors, Not Line Counts)
+
+Large cohesive files are deliberate, not neglected debt. Do not propose or
+perform a file split on size grounds alone, and do not treat file size by
+itself as a review finding. This is the principle behind the "line count =
+god class" warning in AGENTS.md §1.1: generic heuristics point the wrong
+direction here.
+
+Why: agents navigate by grep and read by offset; a big well-named file is a
+pre-joined index. Every module boundary is a place an agent must correctly
+guess that relevant code lives elsewhere — agents miss at boundaries far more
+often than they miss things in front of them (lazy imports and indirection
+are invisible walls). Splitting genuinely coupled code manufactures false
+seams, and false seams breed parallel-implementation drift.
+
+Two floors (violating a floor IS a finding, however small the file):
+
+1. Every implicit coupling gets an explicit marker at the edit point — a
+   blast-radius comment, invariant note, or an enforcing helper for groups
+   that must change together. An agent should never need to already know the
+   file to edit it safely. (This is the file-local form of the Secondary
+   Rules blast-radius check.)
+2. Every state machine gets a name and a contract test — live runtime
+   coupling (queue reservation timing, reducer decision ordering, control
+   signal precedence) must be a named unit with its own firing test.
+   Unnamed state machines cannot be contract-tested and silently diverge.
+
+Distinguish the two kinds of coupling:
+
+- **Structural coupling** — a wide flat method surface sharing one schema —
+  is safe at any size under floor 1. `weft/core/manager.py` (~6,900 lines)
+  and `weft/core/monitor/task_monitor.py` (~5,700 lines) are this: many
+  methods over one queue/state contract, kept together on purpose.
+- **Behavioral coupling** — pieces interacting through live state — is where
+  floor 2 applies, and extraction is justified to create the testable
+  boundary, not to shrink the file. `weft/core/task_lifecycle.py` plus
+  `weft/core/state_machines.py` (contract-tested in
+  `tests/core/test_state_machines.py`) is the repo's model case: the task
+  status state machine was extracted into a named, table-tested unit while
+  the manager stayed large.
+
+Cost to price in: a hot god file serializes parallel agent write-slices —
+keep fan-out write scopes disjoint or sequence them.
+
 ## Warning Signs
 
 Sessions usually go sideways when one of these happens:

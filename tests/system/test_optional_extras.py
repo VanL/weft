@@ -72,6 +72,17 @@ def test_typed_package_markers_are_included_in_builds() -> None:
     )
 
 
+def test_simplebroker_floor_includes_dynamic_waiter_rebind_api() -> None:
+    """The root floor must include PollingStrategy live waiter replacement."""
+    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
+    minimum = _minimum_dependency_version(
+        root_pyproject["project"]["dependencies"],
+        "simplebroker",
+    )
+
+    assert _version_tuple(minimum) >= _version_tuple("5.3.0")
+
+
 def test_root_extras_do_not_undercut_local_extension_versions() -> None:
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
     docker_pyproject = _load_pyproject(

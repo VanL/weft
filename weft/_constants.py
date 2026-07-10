@@ -218,6 +218,9 @@ CONTROL_CONVERGENCE_ACTION_VALUES: Final[frozenset[str]] = frozenset(
 TASK_PROCESS_POLL_INTERVAL: Final[float] = 0.05
 """Polling interval for spawned task-process main loops between `process_once` calls."""
 
+TASK_CLEANUP_TIMEOUT_SECONDS: Final[float] = 2.0
+"""Default absolute wait budget for task finalization."""
+
 TASK_REACTOR_WAKEUP_MAX_SECONDS: Final[float] = 0.05
 """Maximum wait chunk while task worker lanes may produce local reactor results."""
 
@@ -542,6 +545,9 @@ QUEUE_PRIORITY_NORMAL: Final[int] = 100
 # Global Queue Names
 # ------------------
 # Spec: docs/specifications/00-Quick_Reference.md#queue-names
+WEFT_QUEUE_NAMESPACE_PREFIX: Final[str] = "weft."
+"""Reserved namespace prefix for Weft-owned broker queues."""
+
 WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 """Global queue for task state changes and events."""
 
@@ -776,6 +782,127 @@ removed N of M exact rows; per-row status unavailable"). The maintenance
 slice counts it as ``runtime_prune.partial_batches`` instead of treating it
 as a maintenance error.
 """
+
+# TaskMonitor maintenance-worker snapshot field policy. These immutable field
+# ledgers stay here with other runtime constants; live locks/registries remain
+# in their owning implementation modules.
+_WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "_delete_runtime_reserved_queue",
+        "_delete_terminal_control_queues",
+        "_queue_name_snapshot",
+        "_run_monitor_store_cycle",
+        "_run_task_monitor_cleanup_cycle",
+        "_worker_local_monitor_clone",
+    }
+)
+
+_WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
+    """
+    _active_queues _activity _caller_pid _check_counter _check_interval
+    _cleanup_errors _config _ctrl_out_queue_obj _db_path _default_error_handler
+    _deferred_task_log_last_error _deferred_task_log_last_flush_at
+    _deferred_task_log_pending _drive_loop_active _drive_owner_ident
+    _drive_owner_thread _endpoint_registration_message_id
+    _endpoint_registration_metadata _endpoint_registration_name _error_handler
+    _external_stop_handled _external_task_log_sink _external_task_log_status
+    _external_task_log_worker_latest_status
+    _external_task_log_worker_total_blocked_deletions
+    _external_task_log_worker_total_emitted _finalizer _first_cycle_pending
+    _handler _has_thread_db _heartbeat_error _heartbeat_id _heartbeat_registered
+    _inactive_probe_interval _kill_requested _last_candidate_class_counts
+    _last_candidates_seen _last_catchup_pending _last_checkpoint
+    _last_cleanup_policy_stats _last_cleanup_queue_stats
+    _last_collation_rows_processed _last_collation_store_error
+    _last_collation_summaries_emitted _last_collation_tasks_updated
+    _last_collation_terminal_tasks _last_control_cleanup_deadline_hit
+    _last_control_cleanup_family_limit_hit _last_control_cleanup_pending
+    _last_control_delete_errors _last_control_delete_warnings
+    _last_control_families_disposed _last_control_families_processed
+    _last_control_nonstandard_skipped _last_control_queues_deleted
+    _last_control_rows_deleted _last_control_rows_estimated_deleted
+    _last_cycle_at _last_deleted _last_error _last_errors
+    _last_maintenance_error _last_maintenance_run_at_ns
+    _last_maintenance_runtime_prune_candidates
+    _last_maintenance_runtime_prune_deleted
+    _last_maintenance_runtime_prune_partial_batches _last_maintenance_vacuum_ok
+    _last_monitor_store_families_retired _last_monitor_store_message_rows_deleted
+    _last_monitor_store_message_tombstones_pruned _last_orphan_task_log_recovery
+    _last_policy_progress _last_poll_report_at
+    _last_pre_checkpoint_task_log_recovery _last_processed
+    _last_processor_success _last_prune_records_scanned _last_reported
+    _last_reported_status _last_reserved_families_processed
+    _last_reserved_queues_deleted _last_reserved_rows_deleted
+    _last_reserved_rows_estimated_deleted _last_reserved_skipped_active
+    _last_reserved_skipped_not_ready _last_retained_task_log_ingest
+    _last_safe_to_delete_candidates _last_suspect_families_classified
+    _last_terminal_families_disposed _last_warnings _managed_pids
+    _monitor_config _monitor_store _monitor_store_status _multi_activity_waiter
+    _multi_activity_waiter_generation _multi_activity_waiter_signature
+    _next_cycle_due_monotonic _next_heartbeat_registration_attempt_monotonic
+    _next_inactive_probe_at _next_maintenance_due_monotonic
+    _next_runtime_cleanup_queue_discovery_due_monotonic _owned_queue_names
+    _parent_loss_watch_active _paused _pending_messages_precheck_confirmed
+    _pending_termination_sources _persistent
+    _persistent_service _pong_extension_provider _queue_cache _queue_generation
+    _queue_iterator _queue_name_map _queue_obj _queues _resource_monitor
+    _running_event _runtime_cleanup_queue_discovery_pending _runtime_handle
+    _serve_log_config_emitted _serve_log_last_emit_ns _serve_log_last_state
+    _service_lane_work_items _service_worker_lock _service_worker_registrations
+    _setproctitle_module _spilled_output_dirs _start_pending _stop_event
+    _stop_lock _strategy _strategy_started _streaming_session_info
+    _streaming_session_message_id _task_context_cache _task_lifecycle
+    _task_lifecycle_lock _task_observer _task_pid _task_pid_create_time
+    _taskspec_redaction_paths _taskspec_value _thread _thread_local
+    _topology_deferred_sigint _topology_inflight _topology_lock
+    _topology_manual_wait_thread _topology_mutations _topology_owner_thread
+    _topology_pending
+    _topology_reserved_thread _topology_sigint_critical _topology_stopping
+    _turn_active _wait_active
+    _waiting_on _wake_requested _worker_lane_snapshot_only _worker_lock
+    _worker_result_event _worker_result_queue _worker_stopping _worker_threads
+    _yield_strategy enable_process_title should_stop tid tid_short
+    _delete_runtime_reserved_queue _delete_terminal_control_queues
+    _queue_name_snapshot _run_monitor_store_cycle _run_task_monitor_cleanup_cycle
+    _worker_local_monitor_clone
+    """.split()
+)
+
+_WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
+    """
+    _active_queues _cleanup_errors _config _ctrl_out_queue_obj
+    _drive_loop_active _drive_owner_ident _drive_owner_thread
+    _endpoint_registration_message_id _endpoint_registration_metadata
+    _endpoint_registration_name _error_handler _external_stop_handled
+    _external_task_log_sink _external_task_log_status
+    _external_task_log_worker_latest_status
+    _external_task_log_worker_total_blocked_deletions
+    _external_task_log_worker_total_emitted _finalizer _handler _has_thread_db
+    _kill_requested _monitor_config _monitor_store _multi_activity_waiter
+    _multi_activity_waiter_generation _multi_activity_waiter_signature
+    _owned_queue_names _parent_loss_watch_active _paused
+    _pending_messages_precheck_confirmed _pending_termination_sources
+    _pong_extension_provider _queue_cache
+    _queue_iterator _queue_obj _queues _resource_monitor _running_event
+    _runtime_handle _service_lane_work_items _service_worker_lock
+    _service_worker_registrations _setproctitle_module _start_pending
+    _stop_event _stop_lock _strategy _strategy_started _streaming_session_info
+    _streaming_session_message_id _task_context_cache _task_lifecycle
+    _task_lifecycle_lock _task_observer _taskspec_value _thread _thread_local
+    _topology_deferred_sigint _topology_inflight _topology_lock
+    _topology_manual_wait_thread _topology_mutations _topology_owner_thread
+    _topology_pending
+    _topology_reserved_thread _topology_sigint_critical _topology_stopping
+    _turn_active _wait_active _worker_lane_snapshot_only _worker_lock
+    _worker_result_event
+    _worker_result_queue _worker_stopping _worker_threads should_stop
+    """.split()
+)
+
+_WORKER_SNAPSHOT_PLAIN_SHARE_FIELDS: Final[frozenset[str]] = frozenset(
+    {"_default_error_handler"}
+)
+_WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS: Final[frozenset[str]] = frozenset({"_db_path"})
 
 MANAGER_SERVE_LOG_SCHEMA: Final[str] = "weft.manager_serve_log"
 """JSONL schema name for foreground manager operational log records."""

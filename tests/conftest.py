@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,29 @@ from simplebroker import Queue
 from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.ext import RunnerHandle
+
+
+@pytest.fixture
+def thread_exception_guard() -> Iterator[list[threading.ExceptHookArgs]]:
+    """Capture threading.excepthook so a drive-thread exception fails the test.
+
+    Plan section 11.1: background-drive tests must not lose an unexpected
+    thread exception in test output. The teardown assertion fires when any
+    background thread died with an uncaught exception during the test.
+    """
+
+    errors: list[threading.ExceptHookArgs] = []
+    original = threading.excepthook
+    threading.excepthook = errors.append
+    try:
+        yield errors
+    finally:
+        threading.excepthook = original
+        assert not errors, (
+            "background thread raised uncaught exception(s): "
+            f"{[(e.exc_type.__name__, str(e.exc_value)) for e in errors]!r}"
+        )
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CLI_SUBPROCESS_TIMEOUT = 120.0 if os.name == "nt" else 60.0

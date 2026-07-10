@@ -105,6 +105,37 @@ class PipelineEdgeTask(BaseTask):
         self.taskspec.mark_running(pid=os.getpid())
         self._report_state_change(event="task_started")
 
+    def _reactor_queue_roles(self) -> dict[str, str]:
+        """Declare compiled edge source, target, and event routes.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        roles = super()._reactor_queue_roles()
+        # Blast radius: runtime edge routes participate in input handoff and
+        # checkpoint output even when only the canonical inbox is watched.
+        roles.update(
+            {
+                "source": self._runtime.source_queue,
+                "target": self._runtime.target_queue,
+                "events": self._runtime.events_queue,
+            }
+        )
+        return roles
+
+    def _allowed_reactor_queue_aliases(self) -> set[frozenset[str]]:
+        """Allow only aliases guaranteed by the compiled edge contract."""
+
+        aliases = super()._allowed_reactor_queue_aliases()
+        aliases.update(
+            {
+                frozenset(("source", "inbox")),
+                frozenset(("target", "outbox")),
+                frozenset(("events", "pipeline_owner_events")),
+            }
+        )
+        return aliases
+
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         return {
             self._queue_names["inbox"]: self._reserve_queue_config(
@@ -334,6 +365,47 @@ class PipelineTask(BaseTask):
         self._report_state_change(event="task_started")
         self._set_activity("bootstrapping")
 
+    def _reactor_queue_roles(self) -> dict[str, str]:
+        """Declare fixed pipeline event and status lanes.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        roles = super()._reactor_queue_roles()
+        # Blast radius: additions to the watched event lane or fixed status
+        # output must remain visible to construction validation.
+        roles.update(
+            {
+                "events": self._runtime.queues.events,
+                "status": self._runtime.queues.status,
+            }
+        )
+        return roles
+
+    def _reactor_support_routes(self) -> dict[str, str]:
+        """Declare pipeline registry and internal child-spawn routes.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        routes = super()._reactor_support_routes()
+        routes.update(
+            {
+                "pipeline_registry": WEFT_PIPELINES_STATE_QUEUE,
+                "internal_spawn_requests": WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+            }
+        )
+        for index, stage in enumerate(self._runtime.stages):
+            routes[f"stage_ctrl_in:{index}:{stage.name}"] = stage.ctrl_in_queue
+        for index, edge in enumerate(self._runtime.edges):
+            ctrl_in = edge.taskspec.get("io", {}).get("control", {}).get("ctrl_in")
+            if not isinstance(ctrl_in, str) or not ctrl_in.strip():
+                raise ValueError(
+                    f"Pipeline edge {edge.name!r} ctrl_in must be a non-empty string"
+                )
+            routes[f"edge_ctrl_in:{index}:{edge.name}"] = ctrl_in
+        return routes
+
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         return {
             self._queue_names["ctrl_in"]: self._peek_queue_config(
@@ -350,13 +422,14 @@ class PipelineTask(BaseTask):
         del message, timestamp, context
         logger.debug("Ignoring unexpected pipeline inbox message for %s", self.tid)
 
-    def process_once(self) -> None:
-        self._process_pending_termination_signal()
-        if self.should_stop:
-            return
+    def _process_reactor_turn(self) -> None:
+        """Bootstrap pipeline children, then run the base turn.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]
+        """
         if not self._bootstrapped:
             self._bootstrap_children()
-        super().process_once()
+        super()._process_reactor_turn()
 
     def _bootstrap_children(self) -> None:
         submitted_ctrl_queues: list[str] = []

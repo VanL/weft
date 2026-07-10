@@ -1,4 +1,10 @@
-"""Tests for Manager functionality."""
+"""Tests for Manager functionality.
+
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-2.2.1]
+- docs/specifications/05-Message_Flow_and_State.md [MF-6]
+- docs/specifications/07-System_Invariants.md [QUEUE.7], [IMPL.10]
+"""
 
 from __future__ import annotations
 
@@ -7,10 +13,12 @@ import json
 import multiprocessing
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
 import traceback
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +55,8 @@ from weft._constants import (
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
+    QUEUE_INTERNAL_RESERVED_SUFFIX,
+    QUEUE_RESERVED_SUFFIX,
     SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_SUPERSEDED,
@@ -289,6 +299,182 @@ def make_manager_spec(
         state=StateSection(),
         metadata=metadata,
     )
+
+
+def _manager_spec_with_queue_role(
+    tid: str,
+    role: str,
+    queue_name: str,
+) -> TaskSpec:
+    payload = make_manager_spec(tid).model_dump(mode="json")
+    if role == "inbox":
+        payload["io"]["inputs"]["inbox"] = queue_name
+    elif role == "outbox":
+        payload["io"]["outputs"]["outbox"] = queue_name
+    else:
+        payload["io"]["control"][role] = queue_name
+    return TaskSpec.model_validate(payload)
+
+
+def _manager_type_with_queue_name_overrides(
+    overrides: dict[str, str],
+) -> type[Manager]:
+    class QueueNameOverrideManager(Manager):
+        def _resolve_queue_names(self) -> dict[str, str]:
+            queue_names = super()._resolve_queue_names()
+            queue_names.update(overrides)
+            return queue_names
+
+    return QueueNameOverrideManager
+
+
+@pytest.mark.parametrize(
+    "extra_role",
+    ("internal_inbox", "internal_reserved", "services_registry"),
+)
+@pytest.mark.parametrize("base_role", ("inbox", "outbox", "ctrl_in", "ctrl_out"))
+def test_manager_rejects_extra_route_collisions_with_configurable_base_roles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_role: str,
+    base_role: str,
+) -> None:
+    """Manager extras cannot alias configured task-local roles [QUEUE.7]."""
+
+    tid = "1778089999999999101"
+    internal_reserved = f"T{tid}.{QUEUE_INTERNAL_RESERVED_SUFFIX}"
+    extra_values = {
+        "internal_inbox": WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+        "internal_reserved": internal_reserved,
+        "services_registry": WEFT_SERVICES_REGISTRY_QUEUE,
+    }
+    manager_type: type[Manager] = Manager
+    if extra_role == "internal_inbox" and base_role == "inbox":
+        duplicate_queue = WEFT_SPAWN_REQUESTS_QUEUE
+        monkeypatch.setattr(
+            manager_mod,
+            "WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE",
+            duplicate_queue,
+        )
+        spec = make_manager_spec(tid)
+    elif extra_role == "internal_reserved" and base_role == "inbox":
+        duplicate_queue = WEFT_SPAWN_REQUESTS_QUEUE
+        manager_type = _manager_type_with_queue_name_overrides(
+            {"internal_reserved": duplicate_queue}
+        )
+        spec = make_manager_spec(tid)
+    else:
+        duplicate_queue = extra_values[extra_role]
+        spec = _manager_spec_with_queue_role(tid, base_role, duplicate_queue)
+    db_path = tmp_path / f"manager-{extra_role}-{base_role}-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        manager_type(db_path, spec)
+
+    message = str(exc_info.value)
+    assert extra_role in message
+    assert base_role in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    "extra_role",
+    ("internal_inbox", "internal_reserved", "services_registry"),
+)
+def test_manager_rejects_extra_route_collision_with_derived_reserved_role(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_role: str,
+) -> None:
+    """The derived base reserved lane remains distinct from Manager extras."""
+
+    tid = "1778089999999999102"
+    base_reserved = f"T{tid}.{QUEUE_RESERVED_SUFFIX}"
+    manager_type: type[Manager] = Manager
+    if extra_role == "internal_inbox":
+        monkeypatch.setattr(
+            manager_mod,
+            "WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE",
+            base_reserved,
+        )
+    elif extra_role == "internal_reserved":
+        monkeypatch.setattr(
+            manager_mod,
+            "QUEUE_INTERNAL_RESERVED_SUFFIX",
+            QUEUE_RESERVED_SUFFIX,
+        )
+    else:
+        manager_type = _manager_type_with_queue_name_overrides(
+            {"reserved": WEFT_SERVICES_REGISTRY_QUEUE}
+        )
+    duplicate_queue = (
+        WEFT_SERVICES_REGISTRY_QUEUE
+        if extra_role == "services_registry"
+        else base_reserved
+    )
+    db_path = tmp_path / f"manager-{extra_role}-reserved-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        manager_type(db_path, make_manager_spec(tid))
+
+    message = str(exc_info.value)
+    assert extra_role in message
+    assert "reserved" in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("left_role", "right_role"),
+    tuple(
+        itertools.combinations(
+            ("internal_inbox", "internal_reserved", "services_registry"),
+            2,
+        )
+    ),
+)
+def test_manager_rejects_pairwise_extra_route_collisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    left_role: str,
+    right_role: str,
+) -> None:
+    """Manager internal and registry routes remain pairwise distinct [QUEUE.7]."""
+
+    tid = "1778089999999999103"
+    internal_reserved = f"T{tid}.{QUEUE_INTERNAL_RESERVED_SUFFIX}"
+    manager_type: type[Manager] = Manager
+    if (left_role, right_role) == ("internal_inbox", "internal_reserved"):
+        duplicate_queue = internal_reserved
+        monkeypatch.setattr(
+            manager_mod,
+            "WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE",
+            duplicate_queue,
+        )
+    elif (left_role, right_role) == ("internal_inbox", "services_registry"):
+        duplicate_queue = WEFT_SERVICES_REGISTRY_QUEUE
+        monkeypatch.setattr(
+            manager_mod,
+            "WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE",
+            duplicate_queue,
+        )
+    else:
+        duplicate_queue = WEFT_SERVICES_REGISTRY_QUEUE
+        manager_type = _manager_type_with_queue_name_overrides(
+            {"internal_reserved": duplicate_queue}
+        )
+
+    db_path = tmp_path / f"manager-{left_role}-{right_role}-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        manager_type(db_path, make_manager_spec(tid))
+
+    message = str(exc_info.value)
+    assert left_role in message
+    assert right_role in message
+    assert duplicate_queue in message
+    assert db_path.exists() is False
 
 
 def make_child_spec(size: int = 2 * 1024 * 1024) -> dict[str, object]:
@@ -716,6 +902,69 @@ if __name__ == "__main__":
     )
 
     parent_script = tmp_path / "manager_cleanup_spawn_child.py"
+    parent_script.write_text(
+        """
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def main() -> None:
+    subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if Path(sys.argv[2]).exists():
+            break
+        time.sleep(0.01)
+    time.sleep(60)
+
+
+if __name__ == "__main__":
+    main()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return parent_script, child_script
+
+
+def _write_term_trapping_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:
+    """Like _write_descendant_process_scripts, but the descendant ignores SIGTERM.
+
+    Fires the [IMPL.10] within-budget SIGKILL escalation requirement: a
+    TERM-resistant descendant must still die inside the caller's cleanup
+    deadline (plan section 13.1 item R-1).
+    """
+
+    child_script = tmp_path / "manager_cleanup_term_trapping_child.py"
+    child_script.write_text(
+        """
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+
+def main() -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(60)
+
+
+if __name__ == "__main__":
+    main()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parent_script = tmp_path / "manager_cleanup_spawn_term_trapping_child.py"
     parent_script.write_text(
         """
 from __future__ import annotations
@@ -1989,7 +2238,7 @@ def test_manager_leadership_yield_rate_gate_precedes_actionable_work(
 def _prime_manager_next_wait_baseline(manager: Manager, now_ns: int) -> None:
     manager.should_stop = False
     manager._draining = False
-    manager._pending_termination_signal = None
+    manager._pending_termination_sources.clear()
     manager._managed_internal_spawn_enqueued = False
     manager._stalled_control_retry_after_ns = 0
     manager._child_processes.clear()
@@ -2146,7 +2395,10 @@ def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services
     [
         ("should_stop", True),
         ("_draining", True),
-        ("_pending_termination_signal", signal.SIGTERM),
+        (
+            "_pending_termination_sources",
+            deque([("signal", signal.SIGTERM)]),
+        ),
         ("_managed_internal_spawn_enqueued", True),
     ],
 )
@@ -2243,7 +2495,7 @@ def test_manager_wait_for_activity_passes_timeout_to_shared_waiter(
         lambda: RecordingWaiter(),
     )
 
-    manager.wait_for_activity(timeout=0.2)
+    manager._wait_for_reactor_activity(timeout=0.2)
 
     assert timeouts == [0.2]
 
@@ -2280,7 +2532,7 @@ def test_manager_wait_for_activity_fallback_honors_timeout(
     )
     manager._stop_event = FakeStopEvent()
 
-    manager.wait_for_activity(timeout=0.2)
+    manager._wait_for_reactor_activity(timeout=0.2)
 
     assert reset_calls == [True]
     assert wait_timeouts == [0.2]
@@ -3629,10 +3881,9 @@ def test_manager_idle_shutdown_waits_for_missing_internal_service(
 
     try:
         manager.process_once()
+        assert manager.should_stop is False
     finally:
         manager.cleanup()
-
-    assert manager.should_stop is False
 
 
 def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
@@ -3759,9 +4010,8 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
         assert release_launch.wait(timeout=10.0)
         return FakeLaunchProcess(alive=False)
 
-    def fast_stop_worker_lanes(timeout: float = 2.0) -> None:
-        del timeout
-        original_stop_worker_lanes(timeout=0.05)
+    def fast_stop_worker_lanes(deadline: float) -> None:
+        original_stop_worker_lanes(min(deadline, time.monotonic() + 0.05))
 
     def run_cleanup() -> None:
         try:
@@ -3796,6 +4046,55 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
         )
         pytest.fail(f"cleanup thread did not exit:\n{stack}")
     assert not cleanup_errors
+
+
+def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
+    assert child_spec is not None
+
+    launch_entered = threading.Event()
+    release_launch = threading.Event()
+    termination_entered = threading.Event()
+    allow_termination = threading.Event()
+    process = FakeLaunchProcess(alive=True)
+
+    def blocked_launch(*args: object, **kwargs: object) -> FakeLaunchProcess:
+        del args, kwargs
+        launch_entered.set()
+        assert release_launch.wait(timeout=5.0)
+        return process
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", blocked_launch)
+    monkeypatch.setattr(manager_mod, "terminate_process_tree", lambda *a, **k: set())
+
+    def block_termination(_deadline: float) -> None:
+        termination_entered.set()
+        assert allow_termination.wait(timeout=3.0)
+
+    monkeypatch.setattr(manager, "_terminate_children", block_termination)
+
+    assert manager._launch_child_task(child_spec, None) is True
+    assert launch_entered.wait(timeout=2.0)
+
+    stop_thread = threading.Thread(target=lambda: manager.stop(timeout=0.05))
+    stop_thread.start()
+    assert termination_entered.wait(timeout=2.0)
+    assert process.is_alive() is True
+
+    release_launch.set()
+    deadline = time.monotonic() + 2.0
+    while process.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert process.is_alive() is False
+    assert child_spec.tid not in manager._child_processes
+    allow_termination.set()
+    stop_thread.join(timeout=2.0)
+    assert not stop_thread.is_alive()
 
 
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
@@ -4910,6 +5209,150 @@ def test_manager_cleanup_terminates_worker_descendants(
             _wait_for_pid_exit(worker_pid, timeout=2.0)
 
 
+def _spawn_sigterm_trapping_process(ready_file: Path) -> subprocess.Popen[bytes]:
+    """Spawn a real process that ignores SIGTERM, signal readiness, and sleep."""
+
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "open(sys.argv[1], 'w').write('ready'); "
+            "time.sleep(60)",
+            str(ready_file),
+        ]
+    )
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if ready_file.exists():
+            return process
+        time.sleep(0.01)
+    raise AssertionError("SIGTERM-trapping helper process never became ready")
+
+
+def test_manager_terminate_children_kills_sigterm_trapping_managed_pid(
+    manager_setup,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TERM-resistant managed pid dies within the cleanup deadline [IMPL.10].
+
+    Fires the within-budget SIGKILL escalation on the managed-pids rung:
+    `kill_after=False` alone leaves a SIGTERM-ignoring worker alive forever
+    (plan section 13.1 item R-1).
+    """
+
+    psutil = pytest.importorskip("psutil")
+    manager, _make_queue = manager_setup
+    trapping = _spawn_sigterm_trapping_process(tmp_path / "trapping-ready.txt")
+
+    class ExitedChild:
+        pid = trapping.pid + 100000
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    manager._child_processes["trapping"] = ManagedChild(
+        process=ExitedChild(),
+        ctrl_queue=None,
+        persistent=False,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_managed_pids_for_child",
+        lambda tid: {trapping.pid} if tid == "trapping" else set(),
+    )
+
+    try:
+        manager._terminate_children(time.monotonic() + 2.0)
+        assert trapping.wait(timeout=3.0) is not None
+        assert not _process_running(trapping.pid), (
+            "SIGTERM-trapping managed pid survived _terminate_children: "
+            "KILL escalation did not run within the deadline"
+        )
+    finally:
+        if trapping.poll() is None:
+            try:
+                psutil.Process(trapping.pid).kill()
+            except psutil.Error:
+                pass
+            trapping.wait(timeout=2.0)
+
+
+def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(
+    manager_setup,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The direct-child tree rung escalates to SIGKILL within budget [IMPL.10].
+
+    A live direct child whose descendant traps SIGTERM: the tree pass must
+    still remove the descendant inside the caller deadline (plan 13.1 R-1).
+    """
+
+    psutil = pytest.importorskip("psutil")
+    manager, _make_queue = manager_setup
+    parent_script, child_script = _write_term_trapping_descendant_scripts(tmp_path)
+    pidfile = tmp_path / "trapping-descendant.pid"
+    parent = subprocess.Popen(
+        [sys.executable, str(parent_script), str(child_script), str(pidfile)]
+    )
+    worker_pid = _wait_for_pidfile(pidfile, timeout=10.0)
+    assert _process_running(worker_pid)
+
+    class PopenChild:
+        pid = parent.pid
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return parent.poll() is None
+
+        def join(self, timeout: float | None = None) -> None:
+            try:
+                parent.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
+
+        def kill(self) -> None:
+            parent.kill()
+
+    manager._child_processes["tree"] = ManagedChild(
+        process=PopenChild(),
+        ctrl_queue=None,
+        persistent=False,
+    )
+    monkeypatch.setattr(manager, "_managed_pids_for_child", lambda tid: set())
+    monkeypatch.setattr(manager, "_send_stop_command", lambda *a, **k: None)
+
+    try:
+        manager._terminate_children(time.monotonic() + 2.0)
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if parent.poll() is not None and not _process_running(worker_pid):
+                break
+            time.sleep(0.05)
+        assert parent.poll() is not None
+        assert not _process_running(worker_pid), (
+            "SIGTERM-trapping descendant survived the direct-child tree rung"
+        )
+    finally:
+        for pid in (worker_pid,):
+            if _process_running(pid):
+                try:
+                    psutil.Process(pid).kill()
+                except psutil.Error:
+                    pass
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=2.0)
+
+
 def test_manager_cleanup_terminates_reaped_child_managed_pids(
     manager_setup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4949,10 +5392,97 @@ def test_manager_cleanup_terminates_reaped_child_managed_pids(
 
     monkeypatch.setattr(manager_mod, "terminate_process_tree", _record_terminate)
 
-    manager._terminate_children()
+    deadline = time.monotonic() + 1.0
+    manager._terminate_children(deadline)
 
     assert manager._child_processes == {}
-    assert terminated == [(515151, 0.2, True)]
+    assert len(terminated) == 1
+    assert terminated[0][0] == 515151
+    # Split budget: TERM wait consumes at most half the remaining deadline so
+    # the kill_after=True SIGKILL reap wait fits inside the same budget.
+    assert 0.0 < terminated[0][1] <= 0.5
+    assert terminated[0][2] is True
+
+
+def test_manager_cleanup_retains_live_managed_pid_after_wrapper_exit(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed survivors remain diagnosable after their wrapper exits [IMPL.10]."""
+
+    manager, _make_queue = manager_setup
+
+    class ExitedProcess:
+        pid = 424242
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    manager._child_processes["child"] = ManagedChild(
+        process=ExitedProcess(),
+        ctrl_queue=None,
+        persistent=False,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_managed_pids_for_child",
+        lambda tid: {515151} if tid == "child" else set(),
+    )
+    monkeypatch.setattr(manager, "_pid_alive", lambda pid: pid == 515151)
+    monkeypatch.setattr(
+        manager_mod,
+        "terminate_process_tree",
+        lambda *args, **kwargs: set(),
+    )
+
+    manager._terminate_children(time.monotonic())
+
+    assert manager._child_processes == {}
+    assert manager._last_child_cleanup_survivors == (
+        {
+            "tid": "child",
+            "pid": 424242,
+            "managed_pids": [515151],
+            "surviving_managed_pids": [515151],
+            "kill_issued": False,
+        },
+    )
+
+
+def test_manager_child_termination_uses_one_deadline_for_multiple_children(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    join_timeouts: list[float] = []
+
+    class StubbornProcess(FakeLaunchProcess):
+        def join(self, timeout: float | None = None) -> None:
+            join_timeouts.append(float(timeout or 0.0))
+
+    for index in range(3):
+        manager._child_processes[f"child-{index}"] = ManagedChild(
+            process=StubbornProcess(pid=424240 + index, alive=True),
+            ctrl_queue=None,
+            persistent=False,
+        )
+
+    monkeypatch.setattr(manager, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(manager, "_managed_pids_for_child", lambda _tid: set())
+    monkeypatch.setattr(manager_mod, "terminate_process_tree", lambda *a, **k: set())
+
+    started_at = time.monotonic()
+    manager._terminate_children(started_at + 0.08)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.25
+    assert manager._child_processes == {}
+    assert join_timeouts
+    assert sum(join_timeouts) <= 0.12
 
 
 def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> None:
@@ -5049,7 +5579,7 @@ def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
 
     manager.handle_termination_signal(signal.SIGTERM)
 
-    assert manager._pending_termination_signal == signal.SIGTERM
+    assert list(manager._pending_termination_sources) == [("signal", signal.SIGTERM)]
     assert manager._draining is False
     assert manager.should_stop is False
     assert manager.taskspec.state.status == "running"
@@ -5083,7 +5613,7 @@ def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
         drain_started = True
         raise AssertionError("signal handler must not synchronously start draining")
 
-    def fail_if_signal_handler_terminates_children() -> None:
+    def fail_if_signal_handler_terminates_children(_deadline: float) -> None:
         raise AssertionError("signal handler must not synchronously terminate children")
 
     try:
@@ -5093,7 +5623,9 @@ def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
         manager.handle_termination_signal(signal.SIGTERM)
 
         assert drain_started is False
-        assert manager._pending_termination_signal == signal.SIGTERM
+        assert list(manager._pending_termination_sources) == [
+            ("signal", signal.SIGTERM)
+        ]
         assert manager._draining is False
         assert manager.should_stop is False
         assert manager.taskspec.state.status == "running"
@@ -5103,7 +5635,7 @@ def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
 
     manager.process_once()
 
-    assert manager._pending_termination_signal is None
+    assert manager._has_pending_termination_request() is False
     assert manager.should_stop is True
     assert manager.taskspec.state.status == "cancelled"
 
@@ -5135,7 +5667,7 @@ def test_manager_drain_timeout_force_finishes_stubborn_children(
     )
     terminated = False
 
-    def finish_stubborn_child() -> None:
+    def finish_stubborn_child(_deadline: float) -> None:
         nonlocal terminated
         terminated = True
         manager._child_processes.clear()
@@ -5191,7 +5723,7 @@ def test_manager_sigusr1_keeps_kill_semantics(manager_setup) -> None:
     _child_tid, child_info = next(iter(manager._child_processes.items()))
 
     manager.handle_termination_signal(signal.SIGUSR1)
-    assert manager._pending_termination_signal == signal.SIGUSR1
+    assert list(manager._pending_termination_sources) == [("signal", signal.SIGUSR1)]
 
     manager.process_once()
 
@@ -5201,6 +5733,144 @@ def test_manager_sigusr1_keeps_kill_semantics(manager_setup) -> None:
 
     events = [json.loads(item) for item in drain(log_queue)]
     assert any(event.get("event") == "task_signal_kill" for event in events)
+
+
+@pytest.mark.skipif(
+    getattr(signal, "SIGUSR1", None) is None,
+    reason="SIGUSR1 not available",
+)
+def test_manager_sigusr1_outranks_pending_parent_loss(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    termination_deadlines: list[float] = []
+
+    monkeypatch.setattr(
+        manager,
+        "_terminate_children",
+        lambda deadline: termination_deadlines.append(deadline),
+    )
+    manager.note_parent_loss()
+    manager.note_termination_signal(signal.SIGUSR1)
+
+    manager.process_once()
+
+    assert termination_deadlines
+    assert manager._has_pending_termination_request() is False
+    assert manager.taskspec.state.status == "killed"
+    assert manager._draining is False
+
+
+def test_manager_parent_loss_enters_graceful_drain_with_live_children(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parent loss alone drains gracefully, never generic-cancels [IMPL.10].
+
+    Fires the first half of plan red test 27 (plan section 13.1 item R-3):
+    ``note_parent_loss()`` with a live child enters ``_begin_shutdown_drain``
+    with the parent-loss reason, sends the child a STOP control command, and
+    neither terminates children nor publishes a terminal manager state on
+    that owner turn.
+    """
+
+    manager, make_queue = manager_setup
+    live_child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+    class LiveChild:
+        pid = live_child.pid
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return live_child.poll() is None
+
+        def join(self, timeout: float | None = None) -> None:
+            try:
+                live_child.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
+
+    child_ctrl_queue = "T616161.ctrl_in"
+    manager._child_processes["616161"] = ManagedChild(
+        process=LiveChild(),
+        ctrl_queue=child_ctrl_queue,
+        persistent=False,
+    )
+    termination_deadlines: list[float] = []
+    monkeypatch.setattr(
+        manager,
+        "_terminate_children",
+        lambda deadline: termination_deadlines.append(deadline),
+    )
+
+    try:
+        manager.note_parent_loss()
+        manager.process_once()
+
+        assert manager._draining is True
+        assert manager._drain_reason == "Parent process exited"
+        assert manager._drain_stops_children is True
+        assert termination_deadlines == []
+        assert "616161" in manager._child_processes
+    finally:
+        live_child.kill()
+        live_child.wait(timeout=5.0)
+    assert manager.taskspec.state.status not in {
+        "completed",
+        "failed",
+        "timeout",
+        "cancelled",
+        "killed",
+    }
+    stop_commands = drain(make_queue(child_ctrl_queue))
+    assert CONTROL_STOP in stop_commands, (
+        f"child did not receive STOP during graceful drain: {stop_commands!r}"
+    )
+
+
+@pytest.mark.skipif(
+    getattr(signal, "SIGUSR1", None) is None,
+    reason="SIGUSR1 not available",
+)
+def test_manager_sigusr1_arriving_during_parent_snapshot_is_not_lost(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    termination_deadlines: list[float] = []
+
+    monkeypatch.setattr(
+        manager,
+        "_terminate_children",
+        lambda deadline: termination_deadlines.append(deadline),
+    )
+    manager.note_parent_loss()
+
+    class InjectingDeque(deque[tuple[str, int | None]]):
+        injected = False
+
+        def popleft(self) -> tuple[str, int | None]:
+            source = super().popleft()
+            if not self.injected:
+                self.injected = True
+                manager.note_termination_signal(signal.SIGUSR1)
+            return source
+
+    manager._pending_termination_sources = InjectingDeque(
+        manager._pending_termination_sources
+    )
+
+    manager.process_once()
+
+    assert list(manager._pending_termination_sources) == [("signal", signal.SIGUSR1)]
+    assert termination_deadlines == []
+
+    manager.process_once()
+
+    assert termination_deadlines
+    assert manager._kill_requested is True
+    assert manager._has_pending_termination_request() is False
 
 
 def test_manager_stop_command_does_not_launch_new_children_after_stop(

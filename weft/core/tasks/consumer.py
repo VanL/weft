@@ -115,8 +115,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self.taskspec.mark_running(pid=os.getpid())
         self._report_state_change(event="task_started")
 
-    def process_once(self) -> None:
-        self._process_pending_termination_signal()
+    def _process_reactor_turn(self) -> None:
+        """Run one Consumer turn behind the owner-enforcing template.
+
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]
+        - docs/specifications/05-Message_Flow_and_State.md [MF-2]
+        """
         self._in_reactor_turn = True
         try:
             if self._active_work_in_flight:
@@ -126,7 +131,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._drain_worker_results()
                 self._maybe_emit_poll_report()
             else:
-                super().process_once()
+                super()._process_reactor_turn()
         finally:
             self._in_reactor_turn = False
         if self._interactive_mode:
@@ -1199,22 +1204,21 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 kill_process_tree(pid, timeout=0.2)
         self._shutdown_agent_session()
 
-    def stop(self, *, join: bool = True, timeout: float = 2.0) -> None:
-        if self._interactive_mode:
-            self._interactive_shutdown()
-        self._shutdown_agent_session()
-        super().stop(join=join, timeout=timeout)
+    def _cleanup_task_resources(self, deadline: float) -> None:
+        """Release Consumer-owned sessions before shared task resources.
 
-    def cleanup(self) -> None:
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
         cleanup_enabled = getattr(
             self.taskspec.spec, "cleanup_on_exit", DEFAULT_CLEANUP_ON_EXIT
         )
 
         if self._interactive_mode:
-            self._interactive_shutdown()
+            self._interactive_shutdown(deadline=deadline)
 
-        self._stop_worker_lanes()
-        self._shutdown_agent_session()
+        self._stop_worker_lanes(deadline)
+        self._shutdown_agent_session(deadline=deadline)
 
         if cleanup_enabled:
             self._purge_start_tokens()
@@ -1222,7 +1226,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._purge_stream_markers()
             self._cleanup_spilled_outputs_if_needed()
 
-        super().cleanup()
+        super()._cleanup_task_resources(deadline)
 
     def _task_is_persistent(self) -> bool:
         return bool(getattr(self.taskspec.spec, "persistent", False))
@@ -1247,11 +1251,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self.register_managed_pid(session.pid)
         return session
 
-    def _shutdown_agent_session(self) -> None:
+    def _shutdown_agent_session(self, *, deadline: float | None = None) -> None:
         if self._agent_session is None:
             return
         try:
-            self._agent_session.close()
+            self._agent_session.close(deadline=deadline)
         finally:
             self._agent_session = None
 

@@ -1,4 +1,9 @@
-"""Task monitor task peek-loop tests."""
+"""Task monitor task peek-loop tests.
+
+Spec references:
+- docs/specifications/05-Message_Flow_and_State.md [MF-5]
+- docs/specifications/07-System_Invariants.md [QUEUE.7], [IMPL.11]
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,9 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from enum import Enum
+from pathlib import Path
+from types import BuiltinFunctionType, FunctionType
 from typing import Any
 
 import psutil
@@ -19,6 +27,11 @@ import weft.core.monitor.task_monitor as task_monitor_mod
 import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.service as service_task_mod
 from weft._constants import (
+    _WORKER_SNAPSHOT_EXPECTED_FIELDS,
+    _WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS,
+    _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS,
+    _WORKER_SNAPSHOT_PLAIN_SHARE_FIELDS,
+    _WORKER_SNAPSHOT_REPLACED_FIELDS,
     CONTROL_PING,
     CONTROL_STATUS,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
@@ -81,6 +94,816 @@ PROCESSOR_REQUESTS: list[TaskMonitorProcessorRequest] = []
 BLOCKING_PROCESSOR_STARTED = threading.Event()
 BLOCKING_PROCESSOR_RELEASE = threading.Event()
 BLOCKING_PROCESSOR_TIMEOUT_SECONDS = 5.0
+
+
+class _CloseRecordingProxy:
+    """Delegate to a real resource while recording and optionally failing close."""
+
+    def __init__(
+        self,
+        delegate: Any,
+        *,
+        name: str,
+        events: list[str],
+        fail: bool = False,
+    ) -> None:
+        self._delegate = delegate
+        self._name = name
+        self._events = events
+        self._fail = fail
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+    def close(self) -> None:
+        self._events.append(self._name)
+        self._delegate.close()
+        if self._fail:
+            raise RuntimeError(f"{self._name} close boom")
+
+
+class _MonitorStoreSetupFailureProxy(_CloseRecordingProxy):
+    """Fail one real-store setup step while retaining observable close."""
+
+    def __init__(
+        self,
+        delegate: Any,
+        *,
+        events: list[str],
+        failure_stage: str,
+    ) -> None:
+        super().__init__(delegate, name="store", events=events)
+        self._failure_stage = failure_stage
+
+    def ensure_schema(self) -> None:
+        if self._failure_stage == "ensure_schema":
+            raise RuntimeError("store setup boom")
+        self._delegate.ensure_schema()
+
+    def get_checkpoint(self, queue_name: str) -> int | None:
+        if self._failure_stage == "get_checkpoint":
+            raise RuntimeError("store checkpoint boom")
+        return self._delegate.get_checkpoint(queue_name)
+
+
+class _StatefulObserver:
+    """Mutable callable used to prove worker snapshots do not share observers."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, int]] = []
+
+    def __call__(self, queue: str, message: str, timestamp: int) -> None:
+        self.calls.append((queue, message, timestamp))
+
+
+@pytest.mark.parametrize("local_role", ("inbox", "outbox", "ctrl_in", "ctrl_out"))
+def test_task_monitor_rejects_service_registry_alias_for_configurable_base_roles(
+    tmp_path: Path,
+    local_role: str,
+) -> None:
+    """Protect the registry read from every configured base role [QUEUE.7]."""
+
+    payload = make_task_monitor_taskspec("1778089999999999401").model_dump(mode="json")
+    if local_role == "inbox":
+        payload["io"]["inputs"]["inbox"] = WEFT_SERVICES_REGISTRY_QUEUE
+    elif local_role == "outbox":
+        payload["io"]["outputs"]["outbox"] = WEFT_SERVICES_REGISTRY_QUEUE
+    else:
+        payload["io"]["control"][local_role] = WEFT_SERVICES_REGISTRY_QUEUE
+    db_path = tmp_path / f"task-monitor-service-{local_role}-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        TaskMonitor(
+            db_path,
+            TaskSpec.model_validate(payload),
+            observer=lambda _queue, _message, _timestamp: None,
+        )
+
+    message = str(exc_info.value)
+    assert local_role in message
+    assert "services_registry" in message
+    assert WEFT_SERVICES_REGISTRY_QUEUE in message
+    assert db_path.exists() is False
+
+
+def test_task_monitor_rejects_service_registry_alias_for_derived_reserved_role(
+    tmp_path: Path,
+) -> None:
+    """The derived reserved role participates in TaskMonitor topology [QUEUE.7]."""
+
+    class ReservedAliasTaskMonitor(TaskMonitor):
+        def _resolve_queue_names(self) -> dict[str, str]:
+            queue_names = super()._resolve_queue_names()
+            queue_names["reserved"] = WEFT_SERVICES_REGISTRY_QUEUE
+            return queue_names
+
+    db_path = tmp_path / "task-monitor-service-reserved-alias.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        ReservedAliasTaskMonitor(
+            db_path,
+            make_task_monitor_taskspec("1778089999999999402"),
+            observer=lambda _queue, _message, _timestamp: None,
+        )
+
+    message = str(exc_info.value)
+    assert "reserved" in message
+    assert "services_registry" in message
+    assert WEFT_SERVICES_REGISTRY_QUEUE in message
+    assert db_path.exists() is False
+
+
+def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(
+    broker_env,
+    tmp_path: Path,
+) -> None:
+    """Maintenance workers own snapshots and facades, not reactor state [IMPL.11]."""
+
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": "1",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "worker.jsonl"),
+        }
+    )
+    observer = _StatefulObserver()
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999402"),
+        observer=observer,
+        config=config,
+    )
+    task._config["WORKER_SNAPSHOT_TEST_NESTED"] = {"values": []}
+    task.taskspec.metadata["worker_snapshot_test_nested"] = {"values": []}
+    task.process_once()
+    task.wait_for_activity(timeout=0.0)
+    reset_scalar_fields = (
+        "_has_thread_db",
+        "_start_pending",
+        "_turn_active",
+        "_wait_active",
+        "_drive_loop_active",
+        "_strategy_started",
+        "_parent_loss_watch_active",
+        "_paused",
+        "_kill_requested",
+        "_external_stop_handled",
+        "should_stop",
+    )
+    original_scalar_values = {name: getattr(task, name) for name in reset_scalar_fields}
+    for name in reset_scalar_fields:
+        setattr(task, name, True)
+    try:
+        worker = task._worker_local_monitor_clone()
+    finally:
+        for name, value in original_scalar_values.items():
+            setattr(task, name, value)
+
+    try:
+
+        def is_immutable_snapshot_value(value: Any) -> bool:
+            if value is None or isinstance(
+                value,
+                (bool, int, float, str, bytes, Enum, FunctionType, BuiltinFunctionType),
+            ):
+                return True
+            if isinstance(value, tuple | frozenset):
+                return all(is_immutable_snapshot_value(item) for item in value)
+            return isinstance(value, type)
+
+        task_fields = frozenset(vars(task))
+        worker_fields = frozenset(vars(worker))
+        assert task_fields <= _WORKER_SNAPSHOT_EXPECTED_FIELDS
+        assert worker_fields == task_fields
+        assert (
+            _WORKER_SNAPSHOT_EXPECTED_FIELDS - task_fields
+            == _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS
+        )
+        explicitly_shared = (
+            _WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS | _WORKER_SNAPSHOT_PLAIN_SHARE_FIELDS
+        )
+        for name, owner_value in vars(task).items():
+            worker_value = vars(worker)[name]
+            if name in explicitly_shared:
+                assert worker_value is owner_value, name
+                continue
+            if is_immutable_snapshot_value(owner_value):
+                continue
+            assert worker_value is not owner_value, name
+
+        assert worker.taskspec is not task.taskspec
+        assert worker.taskspec.model_dump() == task.taskspec.model_dump()
+        assert worker.taskspec.state is not task.taskspec.state
+        assert worker.taskspec.metadata is not task.taskspec.metadata
+        assert (
+            worker.taskspec.metadata["worker_snapshot_test_nested"]
+            is not task.taskspec.metadata["worker_snapshot_test_nested"]
+        )
+        assert worker.taskspec.spec is task.taskspec.spec
+        assert worker.taskspec.io is task.taskspec.io
+        assert worker._config is not task._config
+        assert worker._config == task._config
+        assert (
+            worker._config["WORKER_SNAPSHOT_TEST_NESTED"]
+            is not task._config["WORKER_SNAPSHOT_TEST_NESTED"]
+        )
+        assert worker._monitor_config is not task._monitor_config
+        assert worker._external_task_log_sink is not task._external_task_log_sink
+        assert worker._external_task_log_sink is not None
+        assert task._external_task_log_sink is not None
+        assert (
+            worker._external_task_log_sink._writer
+            is task._external_task_log_sink._writer
+        )
+
+        for name in (
+            "_queue_cache",
+            "_queues",
+            "_stop_event",
+            "_running_event",
+            "_thread_local",
+            "_stop_lock",
+            "_task_lifecycle_lock",
+            "_worker_result_queue",
+            "_worker_result_event",
+            "_worker_lock",
+            "_worker_stopping",
+            "_service_worker_lock",
+            "_service_lane_work_items",
+            "_service_worker_registrations",
+            "_finalizer",
+        ):
+            assert getattr(worker, name) is not getattr(task, name), name
+        assert worker._queue_obj is None
+        assert worker._ctrl_out_queue_obj is None
+        assert worker._strategy is None
+        assert worker._multi_activity_waiter is None
+        assert task._drive_owner_thread is threading.current_thread()
+        assert worker._drive_owner_thread is None
+        assert task._task_lifecycle is base_task_mod.TaskReactorLifecycle.DRIVING
+        assert worker._task_lifecycle is base_task_mod.TaskReactorLifecycle.NEW
+        assert worker._task_context_cache is None
+        assert worker._task_observer is not observer
+        for name in reset_scalar_fields:
+            assert name in _WORKER_SNAPSHOT_REPLACED_FIELDS
+            assert getattr(worker, name) is False, name
+
+        owner_queue_ids = {
+            id(queue_obj)
+            for queue_obj in (
+                task._queue_obj,
+                task._ctrl_out_queue_obj,
+                *task._queue_cache.values(),
+                *(runtime.queue for runtime in task._queues.values()),
+            )
+            if queue_obj is not None
+        }
+        worker_queue_ids = {
+            id(queue_obj)
+            for queue_obj in (
+                worker._queue_obj,
+                worker._ctrl_out_queue_obj,
+                *worker._queue_cache.values(),
+                *(runtime.queue for runtime in worker._queues.values()),
+            )
+            if queue_obj is not None
+        }
+        assert owner_queue_ids
+        assert worker_queue_ids.isdisjoint(owner_queue_ids)
+
+        close_errors = worker._close_worker_local_resources()
+        assert close_errors == ()
+
+        task._external_task_log_sink.emit_json_text(
+            '{"owner":"reactor"}',
+            emitted_at_ns=1778089999999999403,
+        )
+    finally:
+        worker._close_worker_local_resources()
+        task.stop()
+
+    assert json.loads((tmp_path / "worker.jsonl").read_text(encoding="utf-8")) == {
+        "owner": "reactor"
+    }
+
+
+@pytest.mark.parametrize("failure_stage", ["ensure_schema", "get_checkpoint"])
+def test_task_monitor_builtin_worker_closes_store_and_fails_report_only_cycle_when_setup_fails(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    """Store setup failure is a closed, typed failed cycle in report-only mode."""
+
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999409"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    events: list[str] = []
+    real_open_monitor_store = task_monitor_mod.open_monitor_store
+
+    def failing_open_monitor_store(*args: Any, **kwargs: Any) -> Any:
+        return _MonitorStoreSetupFailureProxy(
+            real_open_monitor_store(*args, **kwargs),
+            events=events,
+            failure_stage=failure_stage,
+        )
+
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "open_monitor_store",
+        failing_open_monitor_store,
+    )
+    try:
+        result = task._run_builtin_cycle_worker(
+            task_monitor_mod._TaskMonitorBuiltinCycleWork(
+                request_id=f"store-setup-{failure_stage}",
+                now_ns=time.time_ns(),
+                task_log_owner="collated_store",
+            )
+        )
+
+        assert events == ["store"]
+        assert result.close_errors == ()
+        assert result.result.success is False
+        assert any("boom" in error for error in result.result.errors)
+        assert result.diagnostics is not None
+        assert result.diagnostics.monitor_store_status.available is False
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("resource", [[], _StatefulObserver()])
+def test_task_monitor_worker_snapshot_rejects_unclassified_stateful_field(
+    broker_env,
+    resource: Any,
+) -> None:
+    """New mutable or callable state requires an explicit snapshot policy."""
+
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999403"),
+        observer=lambda _queue, _message, _timestamp: None,
+    )
+    task._unknown_worker_resource = resource
+    try:
+        with pytest.raises(RuntimeError, match="unclassified fields") as exc_info:
+            task._worker_local_monitor_clone()
+        assert "_unknown_worker_resource" in str(exc_info.value)
+    finally:
+        del task._unknown_worker_resource
+        task.stop()
+
+
+def test_task_monitor_worker_close_attempts_all_resources_and_reports_failure(
+    broker_env,
+    tmp_path: Path,
+) -> None:
+    """A worker close failure is typed and does not skip later closes [IMPL.11]."""
+
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "close.jsonl"),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999404"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    worker = task._worker_local_monitor_clone()
+    events: list[str] = []
+    store = task_monitor_mod.open_monitor_store(
+        worker._monitor_context(),
+        config=worker._config,
+    )
+    store.ensure_schema()
+    assert worker._external_task_log_sink is not None
+    worker._monitor_store = _CloseRecordingProxy(
+        store,
+        name="store",
+        events=events,
+    )
+    worker._external_task_log_sink = _CloseRecordingProxy(
+        worker._external_task_log_sink,
+        name="sink",
+        events=events,
+        fail=True,
+    )
+    worker._queue_cache["worker.close"] = _CloseRecordingProxy(
+        make_queue("worker.close"),
+        name="queue",
+        events=events,
+    )
+
+    try:
+        close_errors = worker._close_worker_local_resources()
+
+        assert events == ["store", "sink", "queue"]
+        assert len(close_errors) == 1
+        assert "sink close boom" in close_errors[0]
+
+        task._external_task_log_sink.emit_json_text(
+            '{"owner":"still-open"}',
+            emitted_at_ns=1778089999999999405,
+        )
+    finally:
+        worker._close_worker_local_resources()
+        task.stop()
+
+    assert json.loads((tmp_path / "close.jsonl").read_text(encoding="utf-8")) == {
+        "owner": "still-open"
+    }
+
+
+def test_task_monitor_builtin_worker_close_failure_replaces_success(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Successful maintenance cannot publish success before resource close."""
+
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "typed-close.jsonl"),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999406"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    real_clone = task._worker_local_monitor_clone
+
+    def clone_with_failing_sink_close() -> TaskMonitor:
+        worker = real_clone()
+        assert worker._external_task_log_sink is not None
+        worker._external_task_log_sink = _CloseRecordingProxy(
+            worker._external_task_log_sink,
+            name="sink",
+            events=[],
+            fail=True,
+        )
+        return worker
+
+    monkeypatch.setattr(
+        task, "_worker_local_monitor_clone", clone_with_failing_sink_close
+    )
+    try:
+        result = task._run_builtin_cycle_worker(
+            task_monitor_mod._TaskMonitorBuiltinCycleWork(
+                request_id="typed-close",
+                now_ns=time.time_ns(),
+                task_log_owner="monitor_store",
+            )
+        )
+
+        assert result.result.success is False
+        assert len(result.close_errors) == 1
+        assert "sink close boom" in result.close_errors[0]
+        assert any(
+            "worker resource close failed" in error for error in result.result.errors
+        )
+        assert result.runtime_cleanup_ready is False
+    finally:
+        task.stop()
+
+
+def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runtime cleanup reports worker close failure as pending typed work."""
+
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "runtime-close.jsonl"),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999407"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    real_clone = task._worker_local_monitor_clone
+
+    def clone_with_failing_sink_close() -> TaskMonitor:
+        worker = real_clone()
+        assert worker._external_task_log_sink is not None
+        worker._external_task_log_sink = _CloseRecordingProxy(
+            worker._external_task_log_sink,
+            name="sink",
+            events=[],
+            fail=True,
+        )
+        return worker
+
+    monkeypatch.setattr(
+        task, "_worker_local_monitor_clone", clone_with_failing_sink_close
+    )
+    try:
+        result = task._run_terminal_control_cleanup_worker(
+            task_monitor_mod._TaskControlCleanupWork(
+                request_id="runtime-close",
+                now_ns=time.time_ns(),
+            )
+        )
+
+        assert result.cleanup.success is False
+        assert result.cleanup.pending is True
+        assert result.cleanup.next_slice_kind is None
+        assert len(result.close_errors) == 1
+        assert any(
+            "worker resource close failed" in error for error in result.cleanup.errors
+        )
+    finally:
+        task.stop()
+
+
+def test_task_monitor_control_cleanup_deferred_status_survives_refresh(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Control-cleanup worker deferred status persists across refresh [IMPL.11].
+
+    The owner merge must update the deferred backing fields and emit the same
+    health-transition/tid-mapping notification as the builtin path; merging
+    only the cached status object is reverted by the next refresh, which
+    rebuilds from the backing fields (plan section 13.1 item R-2).
+    """
+
+    from dataclasses import replace as dataclass_replace
+
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "deferred-merge.jsonl"),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999408"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    try:
+        transitions: list[tuple[Any, Any]] = []
+        monkeypatch.setattr(
+            task,
+            "_emit_external_task_log_health_transition",
+            lambda previous, current: transitions.append((previous, current)),
+        )
+        mapping_registrations: list[bool] = []
+        monkeypatch.setattr(
+            task,
+            "_register_tid_mapping",
+            lambda: mapping_registrations.append(True),
+        )
+
+        work = task_monitor_mod._TaskControlCleanupWork(
+            request_id="deferred-merge",
+            now_ns=time.time_ns(),
+        )
+        worker_status = dataclass_replace(
+            task._external_task_log_status,
+            healthy=False,
+            last_error="deferred boom",
+            last_emit_at=1778089999999999409,
+            deferred_pending=3,
+            last_deferred_error="deferred boom",
+        )
+        worker_result = task_monitor_mod._TaskControlCleanupWorkerResult(
+            work=work,
+            cleanup=task_monitor_mod._TaskControlCleanupResult(),
+            external_task_log_status=worker_status,
+        )
+        task._service_lane_work_items[
+            task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE
+        ] = work
+        task._handle_control_cleanup_worker_result(
+            base_task_mod.TaskWorkerResult(
+                lane=task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                value=worker_result,
+            )
+        )
+
+        assert task._external_task_log_status.deferred_pending == 3
+        assert task._deferred_task_log_pending == 3
+        assert task._deferred_task_log_last_error == "deferred boom"
+        assert task._external_task_log_status.healthy is False
+        assert task._external_task_log_status.last_error == "deferred boom"
+        assert task._external_task_log_status.last_emit_at == 1778089999999999409
+        assert transitions, "worker health regression emitted no transition event"
+        assert mapping_registrations, "worker status change did not re-register tid"
+
+        task._refresh_external_task_log_status()
+
+        assert task._external_task_log_status.deferred_pending == 3
+        assert task._external_task_log_status.last_deferred_error == "deferred boom"
+        assert task._external_task_log_status.healthy is False
+        assert task._external_task_log_status.last_error == "deferred boom"
+        assert task._external_task_log_status.last_emit_at == 1778089999999999409
+
+        task._probe_external_task_log_sink()
+
+        assert task._external_task_log_status.healthy is True
+        assert task._external_task_log_status.last_error is None
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("worker_kind", ["builtin", "runtime"])
+@pytest.mark.parametrize("failed_resource", ["store", "sink", "queue"])
+def test_task_monitor_worker_entry_close_failure_matrix_is_retryable(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    worker_kind: str,
+    failed_resource: str,
+) -> None:
+    """Both maintenance entries type every close failure and remain retryable."""
+
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(
+                tmp_path / f"{worker_kind}-{failed_resource}.jsonl"
+            ),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999408"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    events: list[str] = []
+    clone_threads: list[threading.Thread] = []
+    fail_close = {"enabled": True}
+    real_clone = task._worker_local_monitor_clone
+    real_open_monitor_store = task_monitor_mod.open_monitor_store
+
+    def recording_open_monitor_store(*args: Any, **kwargs: Any) -> Any:
+        store = real_open_monitor_store(*args, **kwargs)
+        return _CloseRecordingProxy(
+            store,
+            name="store",
+            events=events,
+            fail=fail_close["enabled"] and failed_resource == "store",
+        )
+
+    def recording_clone() -> TaskMonitor:
+        clone_threads.append(threading.current_thread())
+        worker = real_clone()
+        assert worker._external_task_log_sink is not None
+        worker._external_task_log_sink = _CloseRecordingProxy(
+            worker._external_task_log_sink,
+            name="sink",
+            events=events,
+            fail=fail_close["enabled"] and failed_resource == "sink",
+        )
+        worker._queue_cache["worker.close.matrix"] = _CloseRecordingProxy(
+            make_queue("worker.close.matrix"),
+            name="queue",
+            events=events,
+            fail=fail_close["enabled"] and failed_resource == "queue",
+        )
+        return worker
+
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "open_monitor_store",
+        recording_open_monitor_store,
+    )
+    monkeypatch.setattr(task, "_worker_local_monitor_clone", recording_clone)
+
+    if worker_kind == "runtime":
+        real_runtime_local = TaskMonitor._run_terminal_control_cleanup_worker_local
+
+        def runtime_local_with_diagnostics(
+            worker: TaskMonitor,
+            work: task_monitor_mod._TaskControlCleanupWork,
+        ) -> task_monitor_mod._TaskControlCleanupWorkerResult:
+            result = real_runtime_local(worker, work)
+            assert worker._external_task_log_sink is not None
+            worker._external_task_log_sink.record_blocked_deletions(3)
+            worker._refresh_external_task_log_status()
+            return result
+
+        monkeypatch.setattr(
+            TaskMonitor,
+            "_run_terminal_control_cleanup_worker_local",
+            runtime_local_with_diagnostics,
+        )
+
+    try:
+        if worker_kind == "builtin":
+            work: Any = task_monitor_mod._TaskMonitorBuiltinCycleWork(
+                request_id=f"{failed_resource}-builtin-close",
+                now_ns=time.time_ns(),
+                task_log_owner="monitor_store",
+            )
+            owner_diagnostic = 991
+            task._last_candidates_seen = owner_diagnostic
+            failed_result: Any = task._run_builtin_cycle_worker(work)
+            assert failed_result.result.success is False
+            assert len(failed_result.close_errors) == 1
+            assert failed_resource in failed_result.close_errors[0]
+            task._service_lane_work_items[
+                task_monitor_mod.TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE
+            ] = work
+            task._handle_builtin_cycle_worker_result(
+                base_task_mod.TaskWorkerResult(
+                    lane=task_monitor_mod.TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
+                    value=failed_result,
+                )
+            )
+            assert task._last_candidates_seen == owner_diagnostic
+        else:
+            work = task_monitor_mod._TaskControlCleanupWork(
+                request_id=f"{failed_resource}-runtime-close",
+                now_ns=time.time_ns(),
+            )
+            owner_diagnostic = task._external_task_log_status.total_blocked_deletions
+            owner_monitor_status = task._monitor_store_status
+            failed_result = task._run_terminal_control_cleanup_worker(work)
+            assert failed_result.cleanup.success is False
+            assert failed_result.cleanup.pending is True
+            assert len(failed_result.close_errors) == 1
+            assert failed_resource in failed_result.close_errors[0]
+            assert failed_result.external_task_log_status is not None
+            task._service_lane_work_items[
+                task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE
+            ] = work
+            task._handle_control_cleanup_worker_result(
+                base_task_mod.TaskWorkerResult(
+                    lane=task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                    value=failed_result,
+                )
+            )
+            assert (
+                task._external_task_log_status.total_blocked_deletions
+                == owner_diagnostic
+            )
+            assert task._monitor_store_status == owner_monitor_status
+
+        assert events == ["store", "sink", "queue"]
+
+        events.clear()
+        clone_threads.clear()
+        fail_close["enabled"] = False
+        if worker_kind == "builtin":
+            assert task._first_cycle_pending is True
+            task.process_once()
+            drive_task_monitor_until_idle(task)
+            assert task._last_processor_success is True
+            assert task._last_candidates_seen != owner_diagnostic
+        else:
+            task._maybe_start_terminal_control_cleanup_worker(now_ns=time.time_ns())
+            assert task._control_cleanup_work_in_flight is not None
+            drive_task_monitor_until_idle(task)
+            assert task._last_control_delete_errors == ()
+            assert task._last_control_cleanup_pending is False
+            assert (
+                task._external_task_log_status.total_blocked_deletions
+                > owner_diagnostic
+            )
+        assert clone_threads
+        assert all(thread is not threading.current_thread() for thread in clone_threads)
+        assert events[:3] == ["store", "sink", "queue"]
+    finally:
+        task.stop()
 
 
 def recording_processor(
@@ -451,6 +1274,38 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     ]
     assert payloads[0] in remaining
     assert payloads[1] in remaining
+
+
+def test_task_monitor_public_turn_applies_pending_sources_once(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999998"),
+        config=load_config({"WEFT_TASK_MONITOR_ENABLED": "0"}),
+    )
+    pending_calls = 0
+
+    def count_pending_application() -> None:
+        nonlocal pending_calls
+        pending_calls += 1
+
+    monkeypatch.setattr(
+        task,
+        "_process_pending_termination_signal",
+        count_pending_application,
+    )
+    try:
+        task.process_once()
+
+        assert pending_calls == 1
+    finally:
+        task.stop()
 
 
 def test_task_monitor_builtin_delete_removes_cleanup_rows(
@@ -2258,7 +3113,11 @@ def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
         }
     )
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    tids = ("1778084345905438750", "1778084345905438751")
+    tids = (
+        "1778084345905438750",
+        "1778084345905438751",
+        "1778084345905438752",
+    )
     for tid in tids:
         log_queue.write(
             json.dumps(
@@ -2280,7 +3139,7 @@ def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
         drive_task_monitor_until_idle(task)
         store = task._monitor_store
         assert store is not None
-        assert store.deferred_write_status().pending == 2
+        assert store.deferred_write_status().pending == 3
     finally:
         task.stop()
 
@@ -2291,25 +3150,132 @@ def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
     ] == []
 
     external_path.rmdir()
+    external_path.write_text("", encoding="utf-8")
+    flush_config = dict(config)
+    flush_config["WEFT_TASK_MONITOR_BATCH_SIZE"] = 1
     flush_task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999961"),
-        config=config,
+        config=flush_config,
+    )
+    probe_store = task_monitor_mod.open_monitor_store(
+        flush_task._monitor_context(),
+        config=flush_config,
     )
     try:
-        flush_task.process_once()
-        drive_task_monitor_until_idle(flush_task)
-        store = flush_task._monitor_store
-        assert store is not None
-        assert store.deferred_write_status().pending == 0
+        probe_store.ensure_schema()
+        assert external_path.read_text(encoding="utf-8") == ""
+        assert probe_store.deferred_write_status().pending == 3
+        expected_tids = [
+            record.body()["subject"]["tid"]
+            for record in probe_store.list_pending_deferred_writes(limit=10)
+        ]
+
+        for expected_pending in (2, 1, 0):
+            flush_task._next_cycle_due_monotonic = 0.0
+            flush_task.process_once()
+            drive_task_monitor_until_idle(flush_task)
+            assert probe_store.deferred_write_status().pending == expected_pending
+            records = [
+                json.loads(line)
+                for line in external_path.read_text(encoding="utf-8").splitlines()
+            ]
+            assert len(records) == 3 - expected_pending
+            assert flush_task._external_task_log_status.total_emitted == (
+                3 - expected_pending
+            )
     finally:
+        probe_store.close()
         flush_task.stop()
 
     records = [
         json.loads(line)
         for line in external_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert sorted(record["subject"]["tid"] for record in records) == sorted(tids)
+    assert [record["subject"]["tid"] for record in records] == expected_tids
+
+
+def test_task_monitor_deferred_output_retries_on_same_instance_after_transient_failure(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A later public cycle retries deferred output without reconstruction."""
+
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "same-instance.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 1,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999410"),
+        config=config,
+    )
+    store = task._ensure_monitor_store()
+    assert store is not None
+    report = {
+        "report_id": "same-instance-report",
+        "record_type": "task_lifetime_report",
+        "subject": {"tid": "1778084345905438760"},
+    }
+    store.upsert_deferred_write(
+        report=report,
+        external_error="seeded",
+        now_ns=1778089999999999411,
+    )
+    original_emit = task_monitor_mod.ExternalTaskLogSink.emit_json_text
+    attempts = 0
+
+    def fail_once(
+        sink: Any,
+        body_json: str,
+        *,
+        emitted_at_ns: int,
+    ) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise task_monitor_mod.ExternalTaskLogError("transient emit failure")
+        original_emit(sink, body_json, emitted_at_ns=emitted_at_ns)
+
+    monkeypatch.setattr(
+        task_monitor_mod.ExternalTaskLogSink,
+        "emit_json_text",
+        fail_once,
+    )
+    instance_id = id(task)
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert id(task) == instance_id
+        assert store.deferred_write_status().pending == 1
+        assert external_path.read_text(encoding="utf-8") == ""
+
+        task._next_cycle_due_monotonic = 0.0
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert id(task) == instance_id
+        assert store.deferred_write_status().pending == 0
+    finally:
+        task.stop()
+
+    [written] = [
+        json.loads(line)
+        for line in external_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert written == report
 
 
 def test_task_monitor_jsonl_then_delete_blocks_when_external_and_deferred_fail(
@@ -6038,9 +7004,10 @@ def test_task_monitor_jsonl_then_delete_reconciles_missing_manager_spawned_ref(
     assert len(manager_reports) == 2
 
 
-def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
+def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -6053,7 +7020,8 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "control.jsonl"),
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -6063,32 +7031,53 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
     task = TaskMonitor(db_path, spec, config=config)
     started = threading.Event()
     release = threading.Event()
+    real_local_worker = TaskMonitor._run_terminal_control_cleanup_worker_local
+    owner_sink = task._external_task_log_sink
+    owner_stop_event = task._stop_event
+    owner_lifecycle = task._task_lifecycle
+    owner_queue_cache = dict(task._queue_cache)
+    worker_observation: dict[str, Any] = {}
 
-    def slow_cleanup_worker(work):
+    def slow_cleanup_worker_local(
+        worker: TaskMonitor,
+        work: task_monitor_mod._TaskControlCleanupWork,
+    ) -> task_monitor_mod._TaskControlCleanupWorkerResult:
+        worker_observation["worker"] = worker
+        worker_observation["sink"] = worker._external_task_log_sink
+        worker_observation["stop_event"] = worker._stop_event
         started.set()
         assert release.wait(timeout=5.0)
-        return task_monitor_mod._TaskControlCleanupWorkerResult(
-            work=work,
-            cleanup=task_monitor_mod._TaskControlCleanupResult(),
-        )
+        return real_local_worker(worker, work)
 
     monkeypatch.setattr(
-        task,
-        "_run_terminal_control_cleanup_worker",
-        slow_cleanup_worker,
+        TaskMonitor,
+        "_run_terminal_control_cleanup_worker_local",
+        slow_cleanup_worker_local,
     )
     try:
         task._maybe_start_terminal_control_cleanup_worker(now_ns=time.time_ns())
         assert started.wait(timeout=10.0)
         assert task._control_cleanup_work_in_flight is not None
+        assert worker_observation["worker"] is not task
+        assert worker_observation["sink"] is not owner_sink
+        assert worker_observation["stop_event"] is not owner_stop_event
+        assert task._external_task_log_sink is owner_sink
+        assert task._stop_event is owner_stop_event
+        assert task._task_lifecycle is owner_lifecycle
+        assert task._queue_cache == owner_queue_cache
 
         for _ in range(3):
             task.process_once()
+        owner_lifecycle_after_drive = task._task_lifecycle
 
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
+        ctrl_in.write(
+            json.dumps({"command": CONTROL_STATUS, "request_id": "during-status"})
+        )
         pong = None
+        status = None
         deadline = time.monotonic() + 3.0
-        while pong is None and time.monotonic() < deadline:
+        while (pong is None or status is None) and time.monotonic() < deadline:
             task.wait_for_activity(timeout=min(0.1, task.next_wait_timeout()))
             task.process_once()
             responses = [json.loads(item) for item in ctrl_out.peek_generator()]
@@ -6101,8 +7090,20 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
                 ),
                 None,
             )
+            status = next(
+                (
+                    response
+                    for response in responses
+                    if response["command"] == CONTROL_STATUS
+                    and response.get("request_id") == "during-status"
+                ),
+                None,
+            )
         assert pong is not None
+        assert status is not None
         assert pong["message"] == "PONG"
+        assert status["status"] == "ok"
+        assert status["task_status"] == task.taskspec.state.status
         assert pong["control_cleanup_in_flight"] is True
         assert (
             pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"][
@@ -6110,10 +7111,18 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
             ]
             is True
         )
+        assert task._external_task_log_sink is owner_sink
+        assert task._stop_event is owner_stop_event
+        assert task._task_lifecycle is owner_lifecycle_after_drive
+        assert task._queue_cache == owner_queue_cache
 
         release.set()
         drive_task_monitor_until_idle(task)
         assert task._control_cleanup_work_in_flight is None
+        assert task._external_task_log_sink is owner_sink
+        assert task._stop_event is owner_stop_event
+        assert task._task_lifecycle is owner_lifecycle_after_drive
+        assert task._queue_cache == owner_queue_cache
     finally:
         release.set()
         task.stop()

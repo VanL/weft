@@ -32,6 +32,7 @@ from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
+    WEFT_QUEUE_NAMESPACE_PREFIX,
 )
 from weft.context import WeftContext
 from weft.core.endpoints import resolve_endpoint
@@ -139,11 +140,13 @@ class HeartbeatTask(ServiceTask):
             ),
         }
 
-    def process_once(self) -> None:
-        self._process_pending_termination_signal()
-        if self.should_stop:
-            return
+    def _process_reactor_turn(self) -> None:
+        """Run one bounded Heartbeat turn behind the owner template.
 
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]
+        - docs/specifications/05-Message_Flow_and_State.md [MF-3.2]
+        """
         self._drain_worker_results()
         if self._drain_one_control_message():
             self._maybe_emit_poll_report()
@@ -218,7 +221,8 @@ class HeartbeatTask(ServiceTask):
         del context
         try:
             mutation = HeartbeatMutation.model_validate_json(message)
-        except (ValidationError, json.JSONDecodeError) as exc:
+            self._validate_destination_queue(mutation)
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
             self._report_state_change(
                 event="heartbeat_request_invalid",
                 message_id=timestamp,
@@ -267,6 +271,41 @@ class HeartbeatTask(ServiceTask):
             destination_queue=registration.destination_queue,
         )
         self._delete_reserved_message(timestamp)
+
+    def _validate_destination_queue(self, mutation: HeartbeatMutation) -> None:
+        """Reject unsafe runtime egress before storing a registration.
+
+        Heartbeat destinations are payload-directed rather than construction
+        topology. Ordinary application and task-local queues remain valid, but
+        a heartbeat may not route back into its own input/reserved/control lanes
+        or any Weft-owned system queue.
+
+        Spec:
+        - docs/specifications/05-Message_Flow_and_State.md [MF-3.2]
+        - docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        if mutation.action == "cancel":
+            return
+        destination_queue = mutation.destination_queue
+        assert destination_queue is not None
+        self_routes = {
+            self._queue_names["inbox"],
+            self._queue_names["reserved"],
+            self._queue_names["ctrl_in"],
+            self._queue_names["ctrl_out"],
+        }
+        if destination_queue in self_routes:
+            raise ValueError(
+                "destination_queue must not target this Heartbeat task's "
+                f"input, reserved, or control lanes: {destination_queue!r}"
+            )
+        if destination_queue.startswith(WEFT_QUEUE_NAMESPACE_PREFIX):
+            raise ValueError(
+                "destination_queue must not use the reserved Weft queue "
+                f"namespace {WEFT_QUEUE_NAMESPACE_PREFIX!r}: "
+                f"{destination_queue!r}"
+            )
 
     @staticmethod
     def _serialize_message_payload(payload: Any) -> str:

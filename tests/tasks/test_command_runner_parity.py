@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -225,7 +226,24 @@ def test_docker_runner_is_skipped_on_windows(
     sandbox_profile: Path,
 ) -> None:
     plugin_module = pytest.importorskip("weft_docker.plugin")
-    monkeypatch.setattr(plugin_module.os, "name", "nt")
+
+    class _WindowsOS:
+        """Delegate to the real os module while reporting a Windows os.name.
+
+        Patch the plugin module's ``os`` binding, never the global os module:
+        a global ``os.name = "nt"`` lets pathlib hand out WindowsPath objects
+        on POSIX, which kills any concurrent lazy import that touches
+        importlib.resources (docker -> requests -> certifi) and leaves a
+        half-initialized ``requests`` in sys.modules for later tests.
+        """
+
+        def __init__(self) -> None:
+            self.name = "nt"
+
+        def __getattr__(self, attr: str) -> Any:
+            return getattr(os, attr)
+
+    monkeypatch.setattr(plugin_module, "os", _WindowsOS())
 
     with pytest.raises(pytest.skip.Exception, match="docker runner unavailable"):
         _skip_unavailable_runner("docker", sandbox_profile=sandbox_profile)

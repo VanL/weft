@@ -122,8 +122,14 @@ Current rules:
 Agent work follows the same outer reservation flow as command and function
 targets.
 
+Reactor ownership hardening does not replace Weft's reservation contract with
+peek/checkpoint delivery or a second durable output ledger. A crash still leaves
+the active input in `T{tid}.reserved` for the explicit [QUEUE.6] recovery policy.
+The SimpleBroker reference reactor's sidecar outbox is specific to its
+peek/checkpoint example and is not part of ordinary Weft task delivery.
+
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
-`weft/core/tasks/base.py`.
+`weft/core/tasks/base.py`, `tests/tasks/test_task_execution.py`.
 
 ### 3. Control Flow [MF-3]
 
@@ -204,7 +210,8 @@ The control plane is explicit:
 _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/core/manager.py`,
 `weft/commands/task_evidence.py`, `weft/commands/tasks.py`,
-`weft/commands/control_convergence.py`.
+`weft/commands/control_convergence.py`,
+`tests/tasks/test_control_channel.py`.
 
 Implementation plan backlinks:
 
@@ -300,6 +307,13 @@ Current rules:
   launch evidence for the same TID.
 - the heartbeat service is an interval emitter, not a scheduler: there is no
   cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
+- Heartbeat `destination_queue` remains payload-directed runtime egress, not a
+  construction-fixed reactor role. Upsert validation rejects a destination
+  equal to the Heartbeat task's own inbox, reserved, or control lanes and rejects
+  BaseTask's reserved `weft.` system queue namespace before storing the
+  registration. An ordinary destination task queue remains valid. Rejection uses
+  the existing invalid-request lifecycle event and reserved-on-error policy and
+  must not block a later valid mutation.
 - the supervised `TaskMonitor` uses heartbeat registrations for periodic
   wake messages to its own `T{tid}.inbox`; if registration is temporarily
   unavailable, the monitor records operational health and falls back to its
@@ -316,6 +330,11 @@ _Implementation mapping_: `weft/core/heartbeat.py`;
 `weft/core/tasks/heartbeat.py`; `weft/core/manager.py`;
 `weft/core/manager_services.py`; `weft/core/endpoints.py`;
 `weft/core/monitor/task_monitor.py`.
+`weft/core/tasks/heartbeat.py::HeartbeatTask._handle_work_message` validates
+payload-directed destinations against its resolved task-local roles and the
+reserved weft. system queue namespace before storing a registration;
+dynamic-egress rejection/progress coverage lives in
+`tests/tasks/test_heartbeat.py`.
 
 ### 4. Pipeline Flow [MF-4]
 
@@ -687,7 +706,8 @@ exact-message deletion;
 `weft/commands/_result_wait.py`;
 `weft/core/serve_log.py` manager-serve process-log record construction;
 `weft/commands/_task_history.py`;
-`weft/commands/_streaming.py`.
+`weft/commands/_streaming.py`;
+`tests/tasks/test_task_monitor.py`.
 
 Implementation plan backlink:
 [`2026-05-07-runtime-state-pruning-plan.md`](../plans/2026-05-07-runtime-state-pruning-plan.md).
@@ -808,11 +828,13 @@ _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_messa
 `Manager._handle_service_worker_event`, `Manager._handle_child_launch_result`,
 `Manager._commit_child_launch_success`, `Manager._control_allows_child_launch`,
 `Manager._tick_managed_service`,
-`Manager._enqueue_managed_service_request`, `Manager.process_once`;
+`Manager._enqueue_managed_service_request`,
+`weft/core/manager.py::Manager._process_reactor_turn`;
 `weft/core/manager_services.py`;
 `weft/core/spawn_requests.py`;
 `weft/cli/run.py`; `weft/commands/_spawn_submission.py` —
-`_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`.
+`_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`;
+`tests/core/test_manager.py`.
 
 Implementation plan backlinks:
 [`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md);
@@ -1283,6 +1305,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
 - [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
 - [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)

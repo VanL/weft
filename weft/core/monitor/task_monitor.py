@@ -15,21 +15,30 @@ Spec references:
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
+import queue as thread_queue
 import threading
 import time
-from collections import Counter
+import weakref
+from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
-from copy import copy
-from dataclasses import dataclass
+from copy import copy, deepcopy
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import BuiltinFunctionType, FunctionType, MethodType
 from typing import Any, cast
 
-from simplebroker.ext import BrokerError
+from simplebroker.ext import BaseWatcher, BrokerError
 from weft._constants import (
+    _WORKER_SNAPSHOT_EXPECTED_FIELDS,
+    _WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS,
+    _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS,
+    _WORKER_SNAPSHOT_PLAIN_SHARE_FIELDS,
+    _WORKER_SNAPSHOT_REPLACED_FIELDS,
     CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_FUNCTION_TARGET,
@@ -190,7 +199,7 @@ from weft.core.service_convergence import (
     manager_service_key,
     reduce_latest_by_service_owner,
 )
-from weft.core.tasks.base import ControlRequest, TaskWorkerResult
+from weft.core.tasks.base import ControlRequest, TaskReactorLifecycle, TaskWorkerResult
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
 from weft.core.tasks.service import (
     ServiceTask,
@@ -205,6 +214,10 @@ from weft.helpers import handle_has_live_host_process, iter_queue_entries
 logger = logging.getLogger(__name__)
 
 TaskMonitorCallback = Callable[[str, str, int], None]
+
+
+def _noop_worker_finalizer(_wref: weakref.ReferenceType[BaseWatcher]) -> None:
+    """Provide worker snapshots an identity-disjoint, broker-free finalizer."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +247,7 @@ class _TaskMonitorBuiltinCycleWorkerResult:
     result: TaskMonitorProcessorResult
     runtime_cleanup_ready: bool = False
     diagnostics: _TaskMonitorCachedDiagnostics | None = None
+    close_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +268,8 @@ class _TaskControlCleanupWorkerResult:
     work: _TaskControlCleanupWork
     cleanup: _TaskControlCleanupResult
     monitor_status: MonitorStoreStatus | None = None
+    external_task_log_status: ExternalTaskLogStatus | None = None
+    close_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -725,6 +741,11 @@ class TaskMonitor(ServiceTask):
             mode="collated",
             path=None,
         )
+        self._external_task_log_worker_latest_status: ExternalTaskLogStatus | None = (
+            None
+        )
+        self._external_task_log_worker_total_emitted = 0
+        self._external_task_log_worker_total_blocked_deletions = 0
         self._deferred_task_log_pending = 0
         self._deferred_task_log_last_error: str | None = None
         self._deferred_task_log_last_flush_at: int | None = None
@@ -745,35 +766,14 @@ class TaskMonitor(ServiceTask):
         if self._persistent_service:
             self._activate_monitor()
 
-    def cleanup(self) -> None:
-        """Release resources without cross-talk from worker-local copies."""
+    def _cleanup_task_resources(self, deadline: float) -> None:
+        """Close the reactor sink before inherited service/task resources.
 
-        if not getattr(self, "_worker_lane_snapshot_only", False):
-            self._close_external_task_log_sink()
-            super().cleanup()
-            return
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10], [IMPL.11]
+        """
 
-        store = self._monitor_store
-        if store is not None:
-            try:
-                store.close()
-            except (OSError, RuntimeError, ValueError):  # pragma: no cover - defensive
-                logger.debug(
-                    "Failed to close worker-local monitor store", exc_info=True
-                )
-            self._monitor_store = None
-
-        seen_queue_ids: set[int] = set()
-        for queue in list(self._queue_cache.values()):
-            queue_id = id(queue)
-            if queue_id in seen_queue_ids:
-                continue
-            seen_queue_ids.add(queue_id)
-            try:
-                queue.close()
-            except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
-                logger.debug("Failed to close worker-local queue", exc_info=True)
-        self._queue_cache = {}
+        self._close_external_task_log_sink()
+        super()._cleanup_task_resources(deadline)
 
     def _close_external_task_log_sink(self) -> None:
         """Close the external task-log sink owned by the reactor instance."""
@@ -792,12 +792,161 @@ class TaskMonitor(ServiceTask):
         The clone may open broker/store handles and mutate its own cached
         diagnostics. The reactor commits those diagnostics after the typed
         worker result returns.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
         """
 
+        snapshot_fields = frozenset(vars(self))
+        unknown_fields = snapshot_fields - _WORKER_SNAPSHOT_EXPECTED_FIELDS
+        if unknown_fields:
+            names = ", ".join(sorted(unknown_fields))
+            raise RuntimeError(
+                f"TaskMonitor worker snapshot has unclassified fields: {names}"
+            )
+
         worker = copy(self)
+        copy_fields = snapshot_fields - (
+            _WORKER_SNAPSHOT_REPLACED_FIELDS
+            | _WORKER_SNAPSHOT_PLAIN_SHARE_FIELDS
+            | _WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS
+            | _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS
+        )
+        for name in copy_fields:
+            value = vars(self)[name]
+            try:
+                copied_value = deepcopy(value)
+            except Exception as exc:
+                raise RuntimeError(
+                    "TaskMonitor worker snapshot field requires an explicit "
+                    f"copy/share decision: {name}"
+                ) from exc
+            if (
+                callable(value)
+                and not isinstance(
+                    value,
+                    (BuiltinFunctionType, FunctionType, MethodType, type),
+                )
+                and copied_value is value
+            ):
+                raise RuntimeError(
+                    "TaskMonitor worker snapshot callable remained identity-shared: "
+                    f"{name}"
+                )
+            setattr(worker, name, copied_value)
+
+        for name in _WORKER_SNAPSHOT_PLAIN_SHARE_FIELDS & snapshot_fields:
+            value = vars(self)[name]
+            if not isinstance(value, (BuiltinFunctionType, FunctionType, type)):
+                raise RuntimeError(
+                    "TaskMonitor worker snapshot plain-callable field became "
+                    f"stateful: {name}"
+                )
+            setattr(worker, name, value)
+
+        for name in _WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS & snapshot_fields:
+            value = vars(self)[name]
+            if callable(value):
+                raise RuntimeError(
+                    f"TaskMonitor worker snapshot shared field became callable: {name}"
+                )
+            setattr(worker, name, value)
+
+        for name in _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS & snapshot_fields:
+            value = vars(self)[name]
+            if isinstance(value, MethodType) and value.__self__ is self:
+                value = value.__func__.__get__(worker, type(worker))
+            elif isinstance(value, (BuiltinFunctionType, FunctionType, type)):
+                pass
+            elif callable(value):
+                copied_value = deepcopy(value)
+                if copied_value is value:
+                    raise RuntimeError(
+                        "TaskMonitor worker snapshot callable remained "
+                        f"identity-shared: {name}"
+                    )
+                value = copied_value
+            else:
+                raise RuntimeError(
+                    f"TaskMonitor worker snapshot callable field is invalid: {name}"
+                )
+            setattr(worker, name, value)
+
+        # TaskSpec's immutable spec/io FrozenDict values intentionally reject
+        # generic deepcopy. They are safe to share; copy the TaskSpec shell and
+        # its mutable state/metadata so worker updates cannot reach the owner.
+        worker_taskspec = self.taskspec.model_copy()
+        object.__setattr__(
+            worker_taskspec,
+            "state",
+            self.taskspec.state.model_copy(deep=True),
+        )
+        object.__setattr__(
+            worker_taskspec,
+            "metadata",
+            deepcopy(self.taskspec.metadata),
+        )
+        worker.taskspec = worker_taskspec
+        worker._config = deepcopy(self._config)
+        worker._monitor_config = TaskMonitorRuntimeConfig.from_config(worker._config)
         worker._monitor_store = None
+        worker._handler = None
+        worker._error_handler = None
+        object.__setattr__(worker, "_queue_obj", None)
+        worker._queues = {}
         worker._queue_cache = {}
         worker._owned_queue_names = set()
+        worker._active_queues = []
+        worker._queue_iterator = itertools.cycle([])
+        object.__setattr__(worker, "_strategy", None)
+        worker._multi_activity_waiter = None
+        worker._multi_activity_waiter_generation = None
+        worker._multi_activity_waiter_signature = None
+        worker._pending_messages_precheck_confirmed = False
+        worker._topology_lock = threading.RLock()
+        worker._topology_mutations = deque()
+        worker._topology_pending = threading.Event()
+        worker._topology_inflight = None
+        worker._topology_owner_thread = None
+        worker._topology_reserved_thread = None
+        worker._topology_manual_wait_thread = None
+        worker._topology_stopping = False
+        worker._topology_sigint_critical = False
+        worker._topology_deferred_sigint = False
+        worker._stop_event = threading.Event()
+        worker._running_event = threading.Event()
+        worker._thread = None
+        worker._thread_local = threading.local()
+        worker._has_thread_db = False
+        worker._stop_lock = threading.Lock()
+        object.__setattr__(worker, "_ctrl_out_queue_obj", None)
+        worker._task_context_cache = None
+        worker._task_lifecycle_lock = threading.Lock()
+        worker._task_lifecycle = TaskReactorLifecycle.NEW
+        worker._drive_owner_thread = None
+        worker._drive_owner_ident = None
+        worker._start_pending = False
+        worker._turn_active = False
+        worker._wait_active = False
+        worker._drive_loop_active = False
+        worker._strategy_started = False
+        worker._pending_termination_sources = deque()
+        worker._parent_loss_watch_active = False
+        worker._cleanup_errors = ()
+        worker._pong_extension_provider = None
+        worker._task_observer = worker._ignore_task_log_entry
+        worker._paused = False
+        worker._resource_monitor = None
+        worker._runtime_handle = None
+        worker._kill_requested = False
+        worker._external_stop_handled = False
+        worker.should_stop = False
+        worker._setproctitle_module = None
+        worker._external_task_log_worker_total_emitted = 0
+        worker._external_task_log_worker_total_blocked_deletions = 0
+        worker._worker_result_queue = thread_queue.Queue(
+            maxsize=self._worker_result_queue.maxsize
+        )
+        worker._worker_result_event = threading.Event()
         worker._worker_lock = threading.Lock()
         worker._worker_threads = set()
         worker._worker_stopping = threading.Event()
@@ -809,8 +958,88 @@ class TaskMonitor(ServiceTask):
         worker._endpoint_registration_message_id = None
         worker._streaming_session_info = None
         worker._streaming_session_message_id = None
+        owner_sink = self._external_task_log_sink
+        worker._external_task_log_sink = (
+            ExternalTaskLogSink(
+                path=owner_sink.path,
+                mode=worker._monitor_config.task_log_external_mode,
+                monitor_tid=worker.tid,
+            )
+            if owner_sink is not None
+            else None
+        )
+        worker._external_task_log_status = replace(
+            self._external_task_log_status,
+            last_emitted=0,
+            last_blocked_deletions=0,
+            total_emitted=0,
+            total_blocked_deletions=0,
+        )
+        worker._external_task_log_worker_latest_status = (
+            worker._external_task_log_status
+        )
         worker._worker_lane_snapshot_only = True
+        worker._finalizer = weakref.finalize(
+            worker,
+            cast(Any, _noop_worker_finalizer),
+            weakref.ref(cast(BaseWatcher, worker)),
+        )
         return worker
+
+    def _close_worker_local_resources(self) -> tuple[str, ...]:
+        """Close every worker-owned live resource and return ordered errors.
+
+        This helper deliberately bypasses public task lifecycle methods. A
+        maintenance snapshot has no reactor drive or control authority.
+
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1]
+        - docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
+
+        errors: list[str] = []
+        store = self._monitor_store
+        self._monitor_store = None
+        if store is not None:
+            try:
+                store.close()
+            except Exception as exc:  # pragma: no cover - defensive close boundary
+                errors.append(f"monitor_store: {exc}")
+
+        sink = self._external_task_log_sink
+        self._external_task_log_sink = None
+        if sink is not None:
+            try:
+                sink.close()
+            except Exception as exc:  # pragma: no cover - defensive close boundary
+                errors.append(f"external_task_log_sink: {exc}")
+
+        queues: list[Any] = []
+        queue_obj = self._queue_obj
+        object.__setattr__(self, "_queue_obj", None)
+        if queue_obj is not None:
+            queues.append(queue_obj)
+        queues.extend(self._queue_cache.values())
+        self._queue_cache = {}
+        for runtime_config in self._queues.values():
+            queues.append(runtime_config.queue)
+        self._queues = {}
+
+        seen_queue_ids: set[int] = set()
+        for queue_obj in queues:
+            queue_id = id(queue_obj)
+            if queue_id in seen_queue_ids:
+                continue
+            seen_queue_ids.add(queue_id)
+            try:
+                queue_obj.close()
+            except Exception as exc:  # pragma: no cover - defensive close boundary
+                errors.append(f"queue:{getattr(queue_obj, 'name', '?')}: {exc}")
+
+        finalizer = getattr(self, "_finalizer", None)
+        if finalizer is not None:
+            finalizer.detach()
+        return tuple(errors)
 
     def _capture_cached_diagnostics(self) -> _TaskMonitorCachedDiagnostics:
         """Capture cached TaskMonitor diagnostics from this instance."""
@@ -991,25 +1220,9 @@ class TaskMonitor(ServiceTask):
         )
         self._last_orphan_task_log_recovery = diagnostics.last_orphan_task_log_recovery
         self._last_collation_store_error = diagnostics.last_collation_store_error
-        previous_external_status = self._external_task_log_status
-        self._external_task_log_status = diagnostics.external_task_log_status
-        self._deferred_task_log_pending = (
-            diagnostics.external_task_log_status.deferred_pending
+        self._apply_worker_external_task_log_status(
+            diagnostics.external_task_log_status
         )
-        self._deferred_task_log_last_error = (
-            diagnostics.external_task_log_status.last_deferred_error
-        )
-        self._deferred_task_log_last_flush_at = (
-            diagnostics.external_task_log_status.last_deferred_flush_at
-        )
-        if previous_external_status.to_summary() != (
-            self._external_task_log_status.to_summary()
-        ):
-            self._register_tid_mapping()
-            self._emit_external_task_log_health_transition(
-                previous_external_status,
-                self._external_task_log_status,
-            )
         if diagnostics.monitor_store_status.available:
             if self._monitor_store is None:
                 try:
@@ -1212,7 +1425,10 @@ class TaskMonitor(ServiceTask):
         self,
         context: ServiceWorkerContext,
     ) -> _TaskMonitorBuiltinCycleWorkerResult | None:
-        """Run one queued built-in cycle work item."""
+        """Run one queued built-in cycle work item.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
 
         for item in context.iter_items():
             if not isinstance(item, _TaskMonitorBuiltinCycleWork):
@@ -1236,13 +1452,28 @@ class TaskMonitor(ServiceTask):
         self,
         context: ServiceWorkerContext,
     ) -> _TaskControlCleanupWorkerResult | None:
-        """Run one queued runtime-cleanup work item."""
+        """Run one queued runtime-cleanup work item.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
 
         for item in context.iter_items():
             if not isinstance(item, _TaskControlCleanupWork):
                 raise TypeError("task-monitor cleanup worker received invalid work")
             return self._run_terminal_control_cleanup_worker(item)
         return None
+
+    def _reactor_support_routes(self) -> dict[str, str]:
+        """Declare TaskMonitor's fixed service-registry read route.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        routes = super()._reactor_support_routes()
+        # Blast radius: runtime cleanup reads service ownership through a fresh
+        # context handle, but the fixed route still participates in topology.
+        routes["services_registry"] = WEFT_SERVICES_REGISTRY_QUEUE
+        return routes
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Configure task-local wake and control queues.
@@ -1317,13 +1548,14 @@ class TaskMonitor(ServiceTask):
                 break
         return count
 
-    def process_once(self) -> None:
+    def _process_reactor_turn(self) -> None:
         """Run one persistent monitor scheduling turn.
 
-        Spec: [CC-2.3], [MF-5]
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]
+        - docs/specifications/05-Message_Flow_and_State.md [MF-5]
         """
 
-        self._process_pending_termination_signal()
         worker_results_handled = self._drain_worker_results()
         if self.should_stop:
             return
@@ -1736,12 +1968,96 @@ class TaskMonitor(ServiceTask):
                 last_flush_at=self._deferred_task_log_last_flush_at,
             )
             return previous != self._external_task_log_status.to_summary()
-        self._external_task_log_status = sink.status().with_deferred(
+        facade_status = sink.status().with_deferred(
             pending=self._deferred_task_log_pending,
             last_error=self._deferred_task_log_last_error,
             last_flush_at=self._deferred_task_log_last_flush_at,
         )
+        worker_status = self._external_task_log_worker_latest_status
+        if worker_status is not None:
+            facade_status = replace(
+                facade_status,
+                healthy=worker_status.healthy,
+                last_error=worker_status.last_error,
+                last_emit_at=worker_status.last_emit_at,
+            )
+        self._external_task_log_status = replace(
+            facade_status,
+            total_emitted=(
+                facade_status.total_emitted
+                + self._external_task_log_worker_total_emitted
+            ),
+            total_blocked_deletions=(
+                facade_status.total_blocked_deletions
+                + self._external_task_log_worker_total_blocked_deletions
+            ),
+        )
         return previous != self._external_task_log_status.to_summary()
+
+    def _apply_worker_external_task_log_status(
+        self,
+        worker_status: ExternalTaskLogStatus,
+    ) -> None:
+        """Apply a worker's external status on the owner thread, durably.
+
+        Shared by the builtin-cycle and control-cleanup result paths so both
+        update the ``_deferred_task_log_*`` backing fields (which later
+        ``_refresh_external_task_log_status()`` calls rebuild status from) and
+        emit the same tid-mapping/health-transition notification. Merging only
+        the cached status object is reverted by the next refresh.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
+
+        previous_external_status = self._external_task_log_status
+        self._merge_worker_external_task_log_status(worker_status)
+        self._deferred_task_log_pending = worker_status.deferred_pending
+        self._deferred_task_log_last_error = worker_status.last_deferred_error
+        self._deferred_task_log_last_flush_at = worker_status.last_deferred_flush_at
+        if previous_external_status.to_summary() != (
+            self._external_task_log_status.to_summary()
+        ):
+            self._register_tid_mapping()
+            self._emit_external_task_log_health_transition(
+                previous_external_status,
+                self._external_task_log_status,
+            )
+
+    def _merge_worker_external_task_log_status(
+        self,
+        worker_status: ExternalTaskLogStatus,
+    ) -> None:
+        """Merge one worker facade's counter deltas into reactor diagnostics."""
+
+        self._external_task_log_worker_total_emitted += worker_status.total_emitted
+        self._external_task_log_worker_total_blocked_deletions += (
+            worker_status.total_blocked_deletions
+        )
+        self._external_task_log_worker_latest_status = worker_status
+        owner_status = (
+            self._external_task_log_sink.status()
+            if self._external_task_log_sink is not None
+            else disabled_external_task_log_status(
+                mode=self._monitor_config.task_log_external_mode,
+                path=self._monitor_config.task_log_external_path,
+            )
+        )
+        self._external_task_log_status = replace(
+            worker_status,
+            total_emitted=(
+                owner_status.total_emitted
+                + self._external_task_log_worker_total_emitted
+            ),
+            total_blocked_deletions=(
+                owner_status.total_blocked_deletions
+                + self._external_task_log_worker_total_blocked_deletions
+            ),
+        )
+
+    def _begin_external_task_log_sink_observation(self) -> None:
+        """Let a new local sink probe or emit supersede worker diagnostics."""
+
+        self._external_task_log_worker_latest_status = None
 
     def _probe_external_task_log_sink(self) -> None:
         """Probe external log writability once per monitor cycle."""
@@ -1750,6 +2066,7 @@ class TaskMonitor(ServiceTask):
         if sink is None:
             return
         previous = self._external_task_log_status
+        self._begin_external_task_log_sink_observation()
         sink.probe()
         changed = self._refresh_external_task_log_status()
         if not changed:
@@ -1802,6 +2119,7 @@ class TaskMonitor(ServiceTask):
             external_error = "external task-log sink is not configured"
         else:
             try:
+                self._begin_external_task_log_sink_observation()
                 sink.emit_lifetime_report(
                     report,
                     emitted_at_ns=emitted_at_ns,
@@ -1912,6 +2230,7 @@ class TaskMonitor(ServiceTask):
             limit=self._monitor_config.batch_size,
         ):
             try:
+                self._begin_external_task_log_sink_observation()
                 sink.emit_json_text(record.body_json, emitted_at_ns=now_ns)
             except ExternalTaskLogError as exc:
                 last_error = str(exc)
@@ -1957,19 +2276,30 @@ class TaskMonitor(ServiceTask):
             return None
         if self._monitor_store is not None:
             return self._monitor_store
+        store: MonitorStore | None = None
         try:
             store = open_monitor_store(self._monitor_context(), config=self._config)
             store.ensure_schema()
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
-        except (OSError, RuntimeError, ValueError) as exc:
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            close_error: str | None = None
+            if store is not None:
+                try:
+                    store.close()
+                except Exception as close_exc:  # pragma: no cover - defensive close
+                    close_error = f"monitor store close failed: {close_exc}"
             self._monitor_store = None
-            self._last_collation_store_error = str(exc)
+            error = str(exc)
+            if close_error is not None:
+                error = f"{error}; {close_error}"
+            self._last_collation_store_error = error
             self._monitor_store_status = MonitorStoreStatus(
                 enabled=True,
                 available=False,
-                error=str(exc),
+                error=error,
             )
             return None
+        assert store is not None
         self._monitor_store = store
         self._last_collation_store_error = None
         self._monitor_store_status = MonitorStoreStatus(
@@ -2788,6 +3118,7 @@ class TaskMonitor(ServiceTask):
             sink = self._external_task_log_sink
             if sink is None:
                 raise ExternalTaskLogError("external task-log sink is not configured")
+            self._begin_external_task_log_sink_observation()
             sink.emit_collated(
                 task_summary=task_summary,
                 emitted_at_ns=emitted_at_ns,
@@ -3287,7 +3618,10 @@ class TaskMonitor(ServiceTask):
         Monitor-store records. It must not mutate cached monitor fields
         directly; those are applied from its result on the reactor thread.
 
-        Spec: [CC-2.3], [MF-5]
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.3]
+        - docs/specifications/05-Message_Flow_and_State.md [MF-5]
+        - docs/specifications/07-System_Invariants.md [IMPL.11]
         """
 
         return self._start_registered_service_lane(
@@ -3300,10 +3634,70 @@ class TaskMonitor(ServiceTask):
         self,
         work: _TaskControlCleanupWork,
     ) -> _TaskControlCleanupWorkerResult:
-        """Run one runtime cleanup slice with fresh thread-local broker handles."""
+        """Run one runtime cleanup slice with isolated, finally-closed handles.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
+
+        worker = self._worker_local_monitor_clone()
+        initial_external_status = worker._external_task_log_status
+        try:
+            try:
+                worker_result = worker._run_terminal_control_cleanup_worker_local(work)
+            except Exception as exc:  # pragma: no cover - worker boundary
+                worker_result = _TaskControlCleanupWorkerResult(
+                    work=work,
+                    cleanup=_TaskControlCleanupResult(
+                        pending=True,
+                        errors=(str(exc),),
+                    ),
+                    monitor_status=MonitorStoreStatus(
+                        enabled=True,
+                        available=False,
+                        error=str(exc),
+                    ),
+                )
+            external_status = (
+                worker._external_task_log_status
+                if worker._external_task_log_status != initial_external_status
+                else None
+            )
+        finally:
+            close_errors = worker._close_worker_local_resources()
+
+        cleanup = worker_result.cleanup
+        if close_errors:
+            cleanup = replace(
+                cleanup,
+                pending=True,
+                errors=(
+                    *cleanup.errors,
+                    *(
+                        f"worker resource close failed: {error}"
+                        for error in close_errors
+                    ),
+                ),
+                next_slice_kind=None,
+            )
+        return replace(
+            worker_result,
+            cleanup=cleanup,
+            external_task_log_status=external_status,
+            close_errors=close_errors,
+        )
+
+    def _run_terminal_control_cleanup_worker_local(
+        self,
+        work: _TaskControlCleanupWork,
+    ) -> _TaskControlCleanupWorkerResult:
+        """Run the runtime cleanup body against a worker-local monitor.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
 
         try:
             store = open_monitor_store(self._monitor_context(), config=self._config)
+            self._monitor_store = store
             store.ensure_schema()
             if work.slice_kind == "terminal_control":
                 cleanup = self._run_terminal_control_cleanup_slice(
@@ -4787,7 +5181,10 @@ class TaskMonitor(ServiceTask):
         Cached monitor fields are committed from the returned result on the
         reactor thread.
 
-        Spec: [CC-2.3], [MF-5]
+        Spec:
+        - docs/specifications/01-Core_Components.md [CC-2.3]
+        - docs/specifications/05-Message_Flow_and_State.md [MF-5]
+        - docs/specifications/07-System_Invariants.md [IMPL.11]
         """
 
         return self._start_registered_service_lane(
@@ -4800,22 +5197,55 @@ class TaskMonitor(ServiceTask):
         self,
         work: _TaskMonitorBuiltinCycleWork,
     ) -> _TaskMonitorBuiltinCycleWorkerResult:
-        """Run one bounded built-in monitor cycle with worker-local handles."""
+        """Run one bounded built-in monitor cycle with worker-local handles.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
 
         worker = self._worker_local_monitor_clone()
-        result, runtime_cleanup_ready = worker._run_builtin_cycle_worker_local(work)
+        try:
+            try:
+                result, runtime_cleanup_ready = worker._run_builtin_cycle_worker_local(
+                    work
+                )
+            except Exception as exc:  # pragma: no cover - worker boundary
+                result = TaskMonitorProcessorResult(
+                    success=False,
+                    errors=(str(exc),),
+                )
+                runtime_cleanup_ready = False
+            diagnostics = worker._capture_cached_diagnostics()
+        finally:
+            close_errors = worker._close_worker_local_resources()
+        if close_errors:
+            result = replace(
+                result,
+                success=False,
+                errors=(
+                    *result.errors,
+                    *(
+                        f"worker resource close failed: {error}"
+                        for error in close_errors
+                    ),
+                ),
+            )
+            runtime_cleanup_ready = False
         return _TaskMonitorBuiltinCycleWorkerResult(
             work=work,
             result=result,
             runtime_cleanup_ready=runtime_cleanup_ready,
-            diagnostics=worker._capture_cached_diagnostics(),
+            diagnostics=diagnostics,
+            close_errors=close_errors,
         )
 
     def _run_builtin_cycle_worker_local(
         self,
         work: _TaskMonitorBuiltinCycleWork,
     ) -> tuple[TaskMonitorProcessorResult, bool]:
-        """Run built-in monitor work against this worker-local monitor copy."""
+        """Run built-in monitor work against this worker-local monitor copy.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
 
         self._last_cycle_at = work.now_ns
         self._last_policy_progress = ()
@@ -5167,7 +5597,7 @@ class TaskMonitor(ServiceTask):
                 worker_result = value
 
         self._last_cycle_at = work.now_ns
-        if worker_result.diagnostics is not None:
+        if worker_result.diagnostics is not None and not worker_result.close_errors:
             self._apply_cached_diagnostics(worker_result.diagnostics)
         self._finish_monitor_cycle(
             candidates=(),
@@ -5209,7 +5639,16 @@ class TaskMonitor(ServiceTask):
                 monitor_status = None
             else:
                 cleanup = worker_result.cleanup
-                monitor_status = worker_result.monitor_status
+                monitor_status = (
+                    None if worker_result.close_errors else worker_result.monitor_status
+                )
+                if (
+                    worker_result.external_task_log_status is not None
+                    and not worker_result.close_errors
+                ):
+                    self._apply_worker_external_task_log_status(
+                        worker_result.external_task_log_status
+                    )
 
         self._last_control_families_processed = cleanup.families_processed
         self._last_control_families_disposed = cleanup.families_disposed
@@ -5410,14 +5849,15 @@ class TaskMonitor(ServiceTask):
             apply=apply,
             task_log_cleanup_enabled=task_log_owner == "cleanup_policy",
         )
+        collation_errors = (
+            (self._last_collation_store_error,)
+            if task_log_owner == "collated_store"
+            and self._last_collation_store_error is not None
+            else ()
+        )
         if task_log_owner == "collated_store" and apply:
             ingest = self._last_retained_task_log_ingest
             pre_checkpoint = self._last_pre_checkpoint_task_log_recovery
-            collation_errors = (
-                (self._last_collation_store_error,)
-                if self._last_collation_store_error is not None
-                else ()
-            )
             errors = (
                 *cleanup.errors,
                 *ingest.store_write_errors,
@@ -5449,6 +5889,15 @@ class TaskMonitor(ServiceTask):
                 reported=cleanup.reported + self._last_collation_summaries_emitted,
                 errors=errors,
                 warnings=(*cleanup.warnings, *self._last_control_delete_warnings),
+            )
+        if collation_errors:
+            return TaskMonitorProcessorResult(
+                success=False,
+                processed=cleanup.processed,
+                deleted=cleanup.deleted,
+                reported=cleanup.reported,
+                errors=(*cleanup.errors, *collation_errors),
+                warnings=cleanup.warnings,
             )
         if task_log_owner != "raw_external" or not apply:
             return cleanup
@@ -5606,6 +6055,7 @@ class TaskMonitor(ServiceTask):
             ):
                 continue
             try:
+                self._begin_external_task_log_sink_observation()
                 sink.emit_raw(
                     queue=row.raw.queue,
                     message_id=row.raw.message_id,

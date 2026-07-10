@@ -426,7 +426,13 @@ class ServiceTask(BaseTask):
             return False
         return True
 
-    def _stop_service_worker(self, name: str, *, drain: bool = False) -> None:
+    def _stop_service_worker(
+        self,
+        name: str,
+        *,
+        drain: bool = False,
+        deadline: float | None = None,
+    ) -> None:
         """Request stop for one service-worker group."""
 
         with self._service_worker_lock:
@@ -440,10 +446,20 @@ class ServiceTask(BaseTask):
 
         for _ in range(worker_count):
             while True:
+                if deadline is not None:
+                    remaining = self._remaining_deadline(deadline)
+                    if remaining <= 0:
+                        break
+                    put_timeout = min(
+                        remaining,
+                        TASK_REACTOR_WAKEUP_MAX_SECONDS,
+                    )
+                else:
+                    put_timeout = TASK_REACTOR_WAKEUP_MAX_SECONDS
                 try:
                     input_queue.put(
                         _service_worker_stop,
-                        timeout=TASK_REACTOR_WAKEUP_MAX_SECONDS,
+                        timeout=put_timeout,
                     )
                     break
                 except thread_queue.Full:
@@ -452,13 +468,21 @@ class ServiceTask(BaseTask):
 
         if drain:
             while self._service_worker_snapshot(name).get("active"):
+                if deadline is not None and self._remaining_deadline(deadline) <= 0:
+                    return
                 handled = self._drain_worker_results()
                 if handled == 0:
                     if not self._has_active_worker_threads():
                         return
-                    self._worker_result_event.wait(
-                        timeout=TASK_REACTOR_WAKEUP_MAX_SECONDS
-                    )
+                    wait_timeout = TASK_REACTOR_WAKEUP_MAX_SECONDS
+                    if deadline is not None:
+                        wait_timeout = min(
+                            wait_timeout,
+                            self._remaining_deadline(deadline),
+                        )
+                        if wait_timeout <= 0:
+                            return
+                    self._worker_result_event.wait(timeout=wait_timeout)
 
     def _service_worker_snapshot(self, name: str | None = None) -> Mapping[str, Any]:
         """Return cached in-memory worker state for diagnostics."""
@@ -599,12 +623,15 @@ class ServiceTask(BaseTask):
             return
         super()._handle_worker_result(result)
 
-    def cleanup(self) -> None:
-        """Stop service-worker groups before shared task cleanup."""
+    def _cleanup_task_resources(self, deadline: float) -> None:
+        """Stop service-worker groups before parent task resources.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
 
         for name in tuple(self._service_worker_registrations):
-            self._stop_service_worker(name)
-        super().cleanup()
+            self._stop_service_worker(name, deadline=deadline)
+        super()._cleanup_task_resources(deadline)
 
     @staticmethod
     def _timeout_until_ns(due_ns: int, *, now_ns: int) -> float:

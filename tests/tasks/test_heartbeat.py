@@ -1,4 +1,9 @@
-"""Heartbeat task runtime tests."""
+"""Heartbeat task runtime tests.
+
+Spec references:
+- docs/specifications/05-Message_Flow_and_State.md [MF-3.2]
+- docs/specifications/07-System_Invariants.md [QUEUE.7]
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ import pytest
 
 import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.heartbeat as heartbeat_module
+from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     CONTROL_PING,
     HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS,
@@ -19,6 +25,8 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_QUEUE_NAMESPACE_PREFIX,
 )
 from weft.context import build_context
 from weft.core.tasks import HeartbeatTask
@@ -105,6 +113,101 @@ def test_heartbeat_service_accepts_upsert_and_cancel(workdir: Path) -> None:
         task.stop(join=False)
         task.cleanup()
         inbox.close()
+
+
+@pytest.mark.parametrize(
+    "destination_kind",
+    (
+        "inbox",
+        "reserved",
+        "ctrl_in",
+        "ctrl_out",
+        "weft.log.tasks",
+        "weft.state.services",
+        "weft.state.pipelines",
+        "weft.spawn.requests",
+        "weft.spawn.internal",
+        "weft.manager.ctrl_in",
+        "weft.manager.ctrl_out",
+        "weft.manager.outbox",
+        "weft.future_reserved",
+    ),
+)
+def test_heartbeat_rejects_unsafe_destination_and_later_input_progresses(
+    tmp_path: Path,
+    destination_kind: str,
+) -> None:
+    """Runtime egress rejects self/system routes without blocking later work [MF-3.2]."""
+
+    workdir = prepare_project_root(tmp_path)
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    inbox = context.queue(f"T{tid}.inbox", persistent=False)
+    reserved = context.queue(f"T{tid}.reserved", persistent=False)
+    task_log = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    task_local_destinations = {
+        "inbox": f"T{tid}.inbox",
+        "reserved": f"T{tid}.reserved",
+        "ctrl_in": f"T{tid}.ctrl_in",
+        "ctrl_out": f"T{tid}.ctrl_out",
+    }
+    destination_queue = task_local_destinations.get(
+        destination_kind,
+        destination_kind,
+    )
+    safe_destination = f"T{tid}1.inbox"
+    safe_queue = context.queue(safe_destination, persistent=False)
+
+    try:
+        inbox.write(
+            json.dumps(
+                {
+                    "action": "upsert",
+                    "heartbeat_id": "unsafe",
+                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
+                    "destination_queue": destination_queue,
+                    "message": "unsafe",
+                }
+            )
+        )
+        task.process_once()
+
+        assert "unsafe" not in task._registrations
+        assert reserved.peek_one() is not None
+        assert any(
+            json.loads(row).get("event") == "heartbeat_request_invalid"
+            for row in task_log.peek_generator()
+        )
+
+        inbox.write(
+            json.dumps(
+                {
+                    "action": "upsert",
+                    "heartbeat_id": "safe",
+                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
+                    "destination_queue": safe_destination,
+                    "message": "safe",
+                }
+            )
+        )
+        task.process_once()
+
+        registration = task._registrations["safe"]
+        assert registration.destination_queue == safe_destination
+        registration.next_due_at = time.monotonic() - 1.0
+        task._due_heap = [(registration.next_due_at, registration.heartbeat_id)]
+        task.process_once()
+        assert safe_queue.read_one() == "safe"
+        if destination_kind.startswith("weft."):
+            assert destination_queue.startswith(WEFT_QUEUE_NAMESPACE_PREFIX)
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        inbox.close()
+        reserved.close()
+        task_log.close()
+        safe_queue.close()
 
 
 def test_heartbeat_duplicate_upsert_replaces_existing_registration(
@@ -368,6 +471,7 @@ def test_heartbeat_pending_input_wakes_through_reactor_wait(
         assert task.next_wait_timeout() == pytest.approx(
             HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS
         )
+        task.process_once()
 
         inbox.write(json.dumps({"action": "cancel", "heartbeat_id": "build"}))
 
@@ -424,6 +528,7 @@ def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None
     ctrl_out = context.queue(f"T{tid}.ctrl_out", persistent=False)
 
     try:
+        task.process_once()
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping"}))
 
         assert task.next_wait_timeout() == pytest.approx(

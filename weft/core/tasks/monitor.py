@@ -45,6 +45,22 @@ class Monitor(BaseTask):
         self._downstream_queue = downstream_queue
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event)
 
+    def _reactor_queue_roles(self) -> dict[str, str]:
+        """Declare the fixed forwarding destination [QUEUE.7]."""
+
+        roles = super()._reactor_queue_roles()
+        # Blast radius: reserve-mode forwarding moves input directly to this
+        # route, so it must be validated alongside watched task lanes.
+        roles["downstream"] = self._downstream_queue or self._queue_names["outbox"]
+        return roles
+
+    def _allowed_reactor_queue_aliases(self) -> set[frozenset[str]]:
+        """Allow the Monitor's documented downstream/outbox alias."""
+
+        aliases = super()._allowed_reactor_queue_aliases()
+        aliases.add(frozenset(("downstream", "outbox")))
+        return aliases
+
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Reserve messages, forwarding them to the downstream queue while observing.
 

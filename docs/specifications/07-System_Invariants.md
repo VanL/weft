@@ -98,6 +98,57 @@ _Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/tasks/base.p
 - **QUEUE.6**: reserved-policy handling is explicit: `keep` leaves the
   reserved message in place, `requeue` moves it back to inbox, and `clear`
   deletes it
+- **QUEUE.7**: a live task declares every construction-fixed reactor role and
+  fixed support route that it watches, reserves into, or uses for durable task
+  or runtime output. The five BaseTask roles (`inbox`, `reserved`, `outbox`,
+  `ctrl_in`, `ctrl_out`), BaseTask support routes, and subtype-fixed roles are
+  pairwise distinct for the task lifetime, except for explicit, subtype-owned
+  semantic aliases named in code and firing tests. Runtime construction rejects
+  every other collision before building queue configs or opening or mutating
+  broker state. Payload-directed Heartbeat destinations are governed separately
+  by [MF-3.2] ingestion validation and are not construction-fixed roles. This
+  does not remove the standalone `MultiQueueWatcher` dynamic-topology API;
+  standalone mutation follows the drive-owner and exact-membership contract in
+  [QUEUE.8], [CC-2.1], and [SB-0.4]. `BaseTask` remains construction-fixed and
+  rejects runtime `add_queue()` and `remove_queue()`.
+
+  _Implementation mapping_: `BaseTask._reactor_queue_roles()`, its fixed support
+  route inventory, and `_allowed_reactor_queue_aliases()` define and validate
+  construction topology before queue configuration. Manager, PipelineTask,
+  PipelineEdgeTask, Monitor, and TaskMonitor extend the inventory for subtype
+  lanes, support routes, and named semantic aliases. Heartbeat validates
+  payload-directed destinations against the reserved `weft.` namespace at
+  message ingestion under [MF-3.2]. The canonical, support-route, subtype, and
+  Heartbeat dynamic-egress matrices in `tests/tasks/test_task_execution.py`,
+  `tests/core/test_manager.py`, `tests/tasks/test_pipeline_runtime.py`,
+  `tests/tasks/test_task_observer_behavior.py`, `tests/tasks/test_task_monitor.py`,
+  and `tests/tasks/test_heartbeat.py` fire this invariant.
+
+- **QUEUE.8**: a running standalone `MultiQueueWatcher` has one drive owner for
+  dynamic topology effects. Foreign `add_queue()` and `remove_queue()` calls
+  are synchronous requests applied in a deterministic linear order between
+  wait and drain phases; owner-thread mutation during dispatch is rejected
+  before effects. Public stop and topology commit use the same serialization
+  boundary, so no stop-first mutation can bind a waiter. Each committed
+  membership generation has one exact activity-wait signature. The owner
+  replaces the strategy's optional native waiter before closing the displaced
+  waiter, and stop cannot install a waiter after close. Native-waiter creation
+  failure leaves the committed topology on bounded polling fallback without
+  changing delivery semantics; a later topology generation may restore native
+  waiting. Empty activity membership installs no waiter without calling the
+  factory with an empty list. Main-thread SIGINT cannot expose or close a
+  half-published waiter; `KeyboardInterrupt` is delivered after request and
+  ownership cleanup. A direct/manual wait temporarily owns its waiter and
+  excludes drive start and mutation; stop signals that wait but does not close
+  its waiter from another thread.
+
+_Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` owns [QUEUE.8]
+through `MultiQueueWatcher._submit_topology_mutation()`,
+`_apply_pending_topology_mutations()`,
+`_apply_topology_mutation_on_owner()`, `run_in_thread()`, `run_forever()`,
+`wait_for_activity()`, and `stop()`. `tests/tasks/test_multiqueue_watcher.py`
+fires its SQLite, concurrency, cleanup, SIGINT, fallback, and real PostgreSQL
+paths.
 
 ### Resource Invariants
 
@@ -408,6 +459,66 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   that is outside the Weft-owned worker-lane contract. The TaskMonitor built-in
   cycle and runtime-cleanup lanes are the only Weft-owned broker/store worker
   exceptions.
+- **IMPL.10**: every task reactor instance has exactly one drive-owning thread.
+  `BaseTask.process_once()` enforces ownership before concrete turn policy;
+  `BaseTask.wait_for_activity()` verifies the same owner before waiter effects;
+  `BaseTask.run_until_stopped()` is the only task process/wait/finalize loop;
+  and stop never closes reactor-owned resources while startup, a turn, a
+  standalone wait, or a drive loop can still touch them. Startup, turn, wait,
+  and loop authority is published under the lifecycle lock; a standalone wait
+  that observes pending stop owns finalization after the protected wait unwinds.
+  Background, foreground, exceptional, and
+  manual exits converge on one idempotent finalizer with one absolute wait
+  deadline for driver/worker joins and Manager launch-drain/child-termination
+  escalation. Cleanup failures cannot strand `FINALIZING` or skip private base
+  cleanup. Public `wait_for_activity()`, `stop()`, and `cleanup()` cannot be
+  overridden; task-specific waiting and shutdown extend protected owned-wait
+  and deadline-aware cleanup hooks.
+
+  _Implementation mapping_: `BaseTask.process_once()`, `wait_for_activity()`,
+  `run_until_stopped()`, `run_forever()`, `stop()`, `cleanup()`, and
+  `_finalize_task_once()` in `weft/core/tasks/base.py` enforce drive
+  ownership, deadline propagation, and lifecycle ordering;
+  `weft/core/launcher.py::_task_process_entry` delegates once. Protected
+  cleanup hooks in Consumer, ServiceTask, Manager, and TaskMonitor receive the
+  absolute deadline; the private BaseTask cleanup phase always runs afterward.
+  Manager's protected termination-policy hook
+  (`weft/core/manager.py::Manager._apply_termination_request`) preserves
+  graceful drain and SIGUSR1 priority; Manager launch drain, child-exit
+  polling, joins, and process-tree escalation consume the same absolute
+  cleanup deadline with within-budget SIGKILL escalation for TERM-resistant
+  descendants. Cleanup diagnostics retain any still-live managed PIDs even
+  after the direct wrapper exits or the deadline expires. Lifecycle, signal,
+  managed-survivor, multi-child deadline, wait-owner,
+  stop-idempotence, and cleanup-failure tests in
+  `tests/tasks/test_task_execution.py`, `tests/tasks/test_signal_deferral.py`,
+  `tests/tasks/test_service_task.py`, and `tests/core/test_manager.py` fire
+  this invariant.
+- **IMPL.11**: TaskMonitor maintenance workers close every worker-owned queue,
+  Monitor store, TaskSpec/config snapshot, and external-sink facade in
+  `finally` and never share watcher, lifecycle, queue, store, sink counters,
+  or mutable task state with the reactor. Same-path sink facades lease one
+  process-local writer/rotation owner so only one live rotating handler exists
+  per resolved path. Built-in and runtime-cleanup results return frozen typed
+  diagnostics only after worker resources close; close failures produce
+  failed/pending results; cumulative external/deferred status is merged on the
+  reactor thread, including the deferred backing fields and health-transition
+  notification, so a later status refresh cannot revert a worker's result.
+
+  _Implementation mapping_: TaskMonitor built-in and runtime-cleanup
+  worker-context creation, snapshot/close helpers, typed results, and the
+  owner-thread diagnostic merge
+  (`_apply_worker_external_task_log_status`) live in
+  `weft/core/monitor/task_monitor.py`. Worker TaskSpec snapshots intentionally
+  identity-share the immutable frozen `spec`/`io` interiors while owning a
+  shell copy, deep-copied mutable `state`/`metadata`, and an independent
+  configuration snapshot. The single-handler-per-path writer
+  lease and worker-local sink counters live in
+  `weft/core/monitor/external_log.py`. The worker-snapshot isolation,
+  same-path rotation, jsonl-then-delete, retryable body/close failure,
+  close-order, deferred-status merge, and live-control tests in
+  `tests/tasks/test_task_monitor.py`, `tests/core/test_monitor_external_log.py`,
+  and `tests/core/test_monitor_store.py` fire this invariant.
 
 ### Manager Invariants
 
@@ -717,6 +828,8 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
+- [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
 - [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
 - [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -788,7 +790,22 @@ def test_docker_extension_tests_are_disabled_on_windows(
     """Windows release runs should not schedule Docker extension tests."""
 
     release = _load_release_module()
-    monkeypatch.setattr(release.os, "name", "nt")
+
+    class _WindowsOS:
+        """Delegate to the real os module while reporting a Windows os.name.
+
+        Patch the release module's ``os`` binding, never the global os module:
+        a global ``os.name = "nt"`` lets pathlib hand out WindowsPath objects
+        on POSIX and corrupts concurrent lazy imports in this process.
+        """
+
+        def __init__(self) -> None:
+            self.name = "nt"
+
+        def __getattr__(self, attr: str) -> Any:
+            return getattr(os, attr)
+
+    monkeypatch.setattr(release, "os", _WindowsOS())
 
     assert release._docker_available_for_tests() is False
 
