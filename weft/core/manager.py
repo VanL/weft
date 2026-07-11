@@ -3312,6 +3312,8 @@ class Manager(ServiceTask):
         autostart_child_exited = False
         child_exited = False
         for tid, child in list(self._child_processes.items()):
+            if deadline is not None and self._remaining_deadline(deadline) <= 0:
+                break
             if self._child_has_exited(child):
                 if self._child_terminal_proof_still_within_grace(tid, child):
                     continue
