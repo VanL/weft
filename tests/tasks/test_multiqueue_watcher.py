@@ -1075,6 +1075,7 @@ def test_background_mutation_committed_before_stop_returns_success(
     assert watcher._topology_stopping is False
     replace_release.set()
     mutator.join(timeout=2.0)
+    waiters[-1].release.set()
     stopper.join(timeout=2.0)
     drive.join(timeout=2.0)
 
