@@ -1695,6 +1695,44 @@ def test_delete_spawn_request_removes_queued_message(tmp_path: Path) -> None:
     assert deleted is True
 
 
+def test_enqueue_template_uses_committed_submission_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    taskspec = TaskSpec.model_validate(
+        {
+            "name": "implicit-id",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "weft_context": str(root),
+            },
+            "metadata": {},
+        },
+        context={"template": True, "auto_expand": False},
+    )
+    committed_id = 1777000000000000456
+    captured: dict[str, Any] = {}
+
+    def fail_preallocation(_context) -> str:
+        raise AssertionError("template enqueue must not preallocate a TID")
+
+    def fake_submit(*args: object, **kwargs: object) -> int:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return committed_id
+
+    monkeypatch.setattr(run_cmd, "_generate_tid", fail_preallocation)
+    monkeypatch.setattr(run_cmd, "submit_spawn_request", fake_submit)
+
+    submitted_id = _enqueue_taskspec(context, taskspec, None)
+
+    assert submitted_id == committed_id
+    assert captured["kwargs"]["tid"] is None
+
+
 def test_enqueue_taskspec_strips_reserved_internal_runtime_metadata_from_public_submission(
     tmp_path: Path,
 ) -> None:

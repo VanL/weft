@@ -16,6 +16,7 @@ from weft.commands.dump import cmd_dump
 from weft.commands.load import ImportReport, cmd_load
 from weft.context import WeftContext, build_context
 from weft.core.spawn_requests import submit_spawn_request
+from weft.core.taskspec import resolve_taskspec_payload
 
 pytestmark = [pytest.mark.shared]
 
@@ -359,7 +360,9 @@ def test_dump_load_preserves_spawn_request_message_id(tmp_path: Path) -> None:
     body, timestamp = rows[0]
     assert timestamp == tid
     payload = json.loads(body)
-    assert payload["taskspec"]["tid"] == str(tid)
+    assert payload["taskspec"].get("tid") is None
+    resolved = resolve_taskspec_payload(payload["taskspec"], tid=str(timestamp))
+    assert resolved["tid"] == str(tid)
 
 
 def test_dump_warns_when_claimed_messages_are_omitted(tmp_path: Path) -> None:

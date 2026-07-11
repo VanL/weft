@@ -1305,6 +1305,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](../plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md)
 - [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
 - [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)

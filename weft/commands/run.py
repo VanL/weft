@@ -427,13 +427,12 @@ def _enqueue_taskspec(
     allow_internal_runtime: bool = False,
 ) -> int:
     # Spec: docs/specifications/03-Manager_Architecture.md [MA-2], [MF-1]
-    task_tid = taskspec.tid or _generate_tid(context)
     return submit_spawn_request(
         context.broker_target,
         taskspec=taskspec,
         work_payload=work_payload,
         config=context.broker_config,
-        tid=task_tid,
+        tid=taskspec.tid,
         inherited_weft_context=taskspec.spec.weft_context,
         seed_start_envelope=seed_start_envelope,
         allow_internal_runtime=allow_internal_runtime,

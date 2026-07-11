@@ -80,6 +80,7 @@ from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
 )
+from weft.core.spawn_requests import submit_spawn_request
 from weft.core.tasks import (
     Consumer,
     HeartbeatTask,
@@ -1206,6 +1207,62 @@ def test_manager_launches_consumer_when_no_internal_task_class_is_set(
     assert child_spec is not None
 
     assert manager._resolve_child_task_class(child_spec) is Consumer
+
+
+def test_manager_resolves_implicit_spawn_from_committed_message_id(
+    manager_setup,
+    tmp_path: Path,
+) -> None:
+    manager, make_queue = manager_setup
+    stale_tid = "1777000000000000999"
+    bundle_root = tmp_path / "manager-child-bundle"
+    bundle_root.mkdir()
+    inherited_context = str(tmp_path / "inherited-context")
+    taskspec = TaskSpec(
+        tid=stale_tid,
+        name="implicit-child",
+        spec=SpecSection(
+            type="function",
+            function_target="tests.tasks.sample_targets:echo_payload",
+        ),
+        io=IOSection(
+            inputs={"inbox": f"T{stale_tid}.inbox"},
+            outputs={"outbox": f"T{stale_tid}.outbox"},
+            control={
+                "ctrl_in": f"T{stale_tid}.ctrl_in",
+                "ctrl_out": f"T{stale_tid}.ctrl_out",
+            },
+        ),
+        state=StateSection(),
+    )
+    taskspec.set_bundle_root(bundle_root)
+
+    submitted_id = submit_spawn_request(
+        manager._db_path,
+        taskspec=taskspec,
+        work_payload=None,
+        config=manager._config,
+        inherited_weft_context=inherited_context,
+    )
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    row = spawn_queue.read_one(with_timestamps=True)
+
+    assert row is not None
+    body, message_id = row
+    payload = json.loads(body)
+    assert payload["taskspec"]["tid"] == stale_tid
+    child_spec = manager._build_child_spec(payload, message_id)
+
+    assert child_spec is not None
+    resolved_tid = str(message_id)
+    assert submitted_id == message_id
+    assert child_spec.tid == resolved_tid
+    assert child_spec.io.inputs["inbox"] == f"T{resolved_tid}.inbox"
+    assert child_spec.io.outputs["outbox"] == f"T{resolved_tid}.outbox"
+    assert child_spec.io.control["ctrl_in"] == f"T{resolved_tid}.ctrl_in"
+    assert child_spec.io.control["ctrl_out"] == f"T{resolved_tid}.ctrl_out"
+    assert child_spec.get_bundle_root() == str(bundle_root.resolve())
+    assert child_spec.spec.weft_context == inherited_context
 
 
 def test_manager_launches_pipeline_task_for_reserved_internal_class(

@@ -309,17 +309,17 @@ def submit_prepared(
     """Write a previously prepared submission through the spawn queue."""
 
     normalized = normalize_taskspec(prepared.taskspec)
-    task_tid = normalized.tid or generate_tid(context)
-    submit_spawn_request(
+    submitted_tid = submit_spawn_request(
         context.broker_target,
         taskspec=normalized,
         work_payload=prepared.payload,
         config=context.broker_config,
-        tid=task_tid,
+        tid=normalized.tid,
         inherited_weft_context=normalized.spec.weft_context,
         seed_start_envelope=prepared.seed_start_envelope,
         allow_internal_runtime=prepared.allow_internal_runtime,
     )
+    task_tid = str(submitted_tid)
     ensure_manager_after_submission(context, submitted_tid=task_tid)
     return _receipt(prepared.name, task_tid)
 

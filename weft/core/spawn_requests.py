@@ -7,6 +7,7 @@ Spec references:
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -50,13 +51,13 @@ def _normalize_broker_target(target: BrokerTarget | str | Path) -> BrokerTarget 
 def _taskspec_payload_for_spawn(
     taskspec: TaskSpec | Mapping[str, Any],
     *,
-    tid: str,
+    tid: str | None,
     inherited_weft_context: str | None = None,
 ) -> dict[str, Any]:
     payload = (
         taskspec.model_dump(mode="json")
         if isinstance(taskspec, TaskSpec)
-        else dict(taskspec)
+        else copy.deepcopy(dict(taskspec))
     )
     bundle_root = (
         taskspec.get_bundle_root()
@@ -64,6 +65,15 @@ def _taskspec_payload_for_spawn(
         else bundle_root_from_taskspec_payload(payload)
     )
     apply_bundle_root_to_taskspec_payload(payload, bundle_root)
+    if tid is None:
+        spec_section = payload.get("spec")
+        if (
+            inherited_weft_context
+            and isinstance(spec_section, dict)
+            and not spec_section.get("weft_context")
+        ):
+            spec_section["weft_context"] = inherited_weft_context
+        return payload
     return resolve_taskspec_payload(
         payload,
         tid=tid,
@@ -162,7 +172,14 @@ def submit_spawn_request(
     allow_internal_runtime: bool = False,
     spawn_queue_name: str = WEFT_SPAWN_REQUESTS_QUEUE,
 ) -> int:
-    """Write a manager spawn request using exact-timestamp TID correlation."""
+    """Write a manager spawn request and return its authoritative TID.
+
+    Implicit submissions use SimpleBroker's committed ``Queue.write()`` ID.
+    Explicit ``tid`` submissions preserve exact-ID insertion for callers whose
+    task graph already embeds that identifier.
+
+    Spec: [MF-1], [MANAGER.4]
+    """
 
     if spawn_queue_name not in {
         WEFT_SPAWN_REQUESTS_QUEUE,
@@ -170,16 +187,7 @@ def submit_spawn_request(
     }:
         raise ValueError(f"unsupported spawn queue {spawn_queue_name!r}")
 
-    resolved_tid = (
-        str(tid)
-        if tid is not None
-        else str(
-            generate_spawn_request_timestamp(
-                broker_target,
-                config=config,
-            )
-        )
-    )
+    resolved_tid = str(tid) if tid is not None else None
     taskspec_payload = _taskspec_payload_for_spawn(
         taskspec,
         tid=resolved_tid,
@@ -217,7 +225,7 @@ def submit_spawn_request(
                 internal_endpoint_name
             )
     message_json = json.dumps(message)
-    message_timestamp = int(resolved_tid)
+    message_timestamp = int(resolved_tid) if resolved_tid is not None else None
 
     queue_config = dict(config) if config is not None else None
     # Direct Queue ok here: spawn submission receives only a broker target, before
@@ -229,6 +237,8 @@ def submit_spawn_request(
         config=queue_config,
     )
     try:
+        if message_timestamp is None:
+            return int(queue.write(message_json))
         with queue.get_connection() as db:
             _write_spawn_request_with_timestamp(
                 db,
