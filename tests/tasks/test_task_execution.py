@@ -74,11 +74,11 @@ _launcher_process_calls = 0
 _launcher_run_calls = 0
 
 
-def _assert_kill_escalation_timeout(timeout: float) -> None:
-    """Assert the 100ms kill-escalation cap with float boundary tolerance."""
+def _assert_timeout_with_boundary_tolerance(timeout: float, cap: float) -> None:
+    """Assert a timeout cap while tolerating float boundary representation."""
 
     assert timeout > 0.0
-    assert timeout <= 0.1 or timeout == pytest.approx(0.1, abs=1e-9)
+    assert timeout <= cap or timeout == pytest.approx(cap, abs=1e-9)
 
 
 class LauncherWaitTask:
@@ -1289,7 +1289,7 @@ def test_agent_session_close_caps_join_to_caller_deadline() -> None:
     session.close(deadline=started_at + 0.05)
 
     assert join_timeouts
-    assert 0.0 <= join_timeouts[0] <= 0.05
+    _assert_timeout_with_boundary_tolerance(join_timeouts[0], 0.05)
     assert process.alive is False
 
 
@@ -1385,7 +1385,7 @@ def test_agent_session_deadline_preserves_process_tree_kill_escalation(
     assert len(calls) == 1
     pid, timeout, kill_after = calls[0]
     assert pid == 456
-    _assert_kill_escalation_timeout(timeout)
+    _assert_timeout_with_boundary_tolerance(timeout, 0.1)
     assert kill_after is True
 
 
@@ -1515,7 +1515,7 @@ def test_command_session_deadline_preserves_process_tree_kill_escalation(
     assert len(calls) == 1
     pid, timeout, kill_after = calls[0]
     assert pid == 123
-    _assert_kill_escalation_timeout(timeout)
+    _assert_timeout_with_boundary_tolerance(timeout, 0.1)
     assert kill_after is True
 
 
