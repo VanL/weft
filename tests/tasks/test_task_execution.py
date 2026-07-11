@@ -74,6 +74,13 @@ _launcher_process_calls = 0
 _launcher_run_calls = 0
 
 
+def _assert_kill_escalation_timeout(timeout: float) -> None:
+    """Assert the 100ms kill-escalation cap with float boundary tolerance."""
+
+    assert timeout > 0.0
+    assert timeout <= 0.1 or timeout == pytest.approx(0.1, abs=1e-9)
+
+
 class LauncherWaitTask:
     def __init__(
         self,
@@ -1378,7 +1385,7 @@ def test_agent_session_deadline_preserves_process_tree_kill_escalation(
     assert len(calls) == 1
     pid, timeout, kill_after = calls[0]
     assert pid == 456
-    assert 0.0 < timeout <= 0.1
+    _assert_kill_escalation_timeout(timeout)
     assert kill_after is True
 
 
@@ -1508,7 +1515,7 @@ def test_command_session_deadline_preserves_process_tree_kill_escalation(
     assert len(calls) == 1
     pid, timeout, kill_after = calls[0]
     assert pid == 123
-    assert 0.0 < timeout <= 0.1
+    _assert_kill_escalation_timeout(timeout)
     assert kill_after is True
 
 
