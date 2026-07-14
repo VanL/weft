@@ -18,6 +18,7 @@ from typing import Any
 FIXTURE_TOOL_NAME = "return_token"
 FIXTURE_SERVER_NAME = "weft-mcp-fixture"
 FIXTURE_PROTOCOL_VERSION = "2025-11-05"
+FIXTURE_CALL_MARKER_ENV = "WEFT_MCP_FIXTURE_CALL_MARKER"
 
 
 def fixture_server_script_path() -> Path:
@@ -221,6 +222,9 @@ def main(argv: list[str] | None = None) -> int:
                     },
                 )
                 continue
+            call_marker = os.environ.get(FIXTURE_CALL_MARKER_ENV)
+            if call_marker:
+                Path(call_marker).write_text(token, encoding="utf-8")
             _write_message(
                 sys.stdout,
                 {

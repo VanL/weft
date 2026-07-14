@@ -5,7 +5,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from tests.fixtures.mcp_stdio_fixture import fixture_server_script_path
+from tests.fixtures.mcp_stdio_fixture import (
+    FIXTURE_CALL_MARKER_ENV,
+    fixture_server_script_path,
+)
 from weft.ext import (
     AgentMCPServerDescriptor,
     AgentToolProfileResult,
@@ -166,10 +169,15 @@ def claude_stdio_mcp_tool_profile(*, agent, tid):  # noqa: ANN001
     runtime_script = agent.runtime_config.get("mcp_server_script")
     if isinstance(runtime_script, str) and runtime_script.strip():
         script_path = runtime_script.strip()
+    server_env = {}
+    call_marker = agent.runtime_config.get("mcp_call_marker")
+    if isinstance(call_marker, str) and call_marker.strip():
+        server_env[FIXTURE_CALL_MARKER_ENV] = call_marker.strip()
     server = AgentMCPServerDescriptor(
         name="fixture-stdio-server",
         command=str(Path(sys.executable)),
         args=(script_path,),
+        env=server_env,
     )
     return AgentToolProfileResult(
         instructions="claude stdio mcp profile instructions",

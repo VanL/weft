@@ -620,7 +620,7 @@ class CodexProvider(_BaseTextProvider):
         return ProviderCLISessionContext(
             tempdir=tempdir,
             work_cwd=cwd,
-            process_cwd=str(tempdir),
+            process_cwd=cwd,
             env={},
         )
 
@@ -644,42 +644,37 @@ class CodexProvider(_BaseTextProvider):
             command.extend(["resume", "--last"])
         if model:
             command.extend(["--model", model])
-        profile = options.get("profile")
-        if profile is not None:
-            command.extend(["--profile", str(profile)])
-        if options.get("oss"):
-            command.append("--oss")
-        local_provider = options.get("local_provider")
-        if local_provider is not None:
-            command.extend(["--local-provider", str(local_provider)])
+        if session.turn_index == 0:
+            profile = options.get("profile")
+            if profile is not None:
+                command.extend(["--profile", str(profile)])
+            if options.get("oss"):
+                command.append("--oss")
+            local_provider = options.get("local_provider")
+            if local_provider is not None:
+                command.extend(["--local-provider", str(local_provider)])
         for config_value in options.get("config_overrides", ()):
             command.extend(["--config", str(config_value)])
-        sandbox = (
-            "read-only"
-            if authority_class == "bounded"
-            else tool_profile.workspace_access or options.get("sandbox")
-        )
-        if sandbox is not None:
-            command.extend(["--sandbox", str(sandbox)])
-        if options.get("full_auto"):
-            command.append("--full-auto")
+        if session.turn_index == 0:
+            sandbox = (
+                "read-only"
+                if authority_class == "bounded"
+                else tool_profile.workspace_access or options.get("sandbox")
+            )
+            if sandbox is not None:
+                command.extend(["--sandbox", str(sandbox)])
+            if options.get("full_auto"):
+                command.append("--full-auto")
         if options.get("dangerously_bypass_approvals_and_sandbox"):
             command.append("--dangerously-bypass-approvals-and-sandbox")
-        for add_dir in options.get("add_dirs", ()):
-            command.extend(["--add-dir", str(add_dir)])
+        if session.turn_index == 0:
+            for add_dir in options.get("add_dirs", ()):
+                command.extend(["--add-dir", str(add_dir)])
         if options.get("skip_git_repo_check") is True:
             command.append("--skip-git-repo-check")
-        command.extend(
-            [
-                "--color",
-                str(options.get("color", "never")),
-                "-C",
-                cwd,
-                "-o",
-                str(output_path),
-                prompt,
-            ]
-        )
+        if session.turn_index == 0:
+            command.extend(["--color", str(options.get("color", "never")), "-C", cwd])
+        command.extend(["-o", str(output_path), prompt])
         return ProviderCLIInvocation(
             command=tuple(command),
             output_path=output_path,
@@ -741,7 +736,8 @@ class GeminiProvider(_BaseTextProvider):
         )
         if isolated_runtime:
             command.extend(["--approval-mode", "plan"])
-        command.extend(["-p", prompt, "-y", "-o", "text"])
+        command.extend(["--skip-trust", "-p", prompt])
+        command.extend(["-o", "text"])
         return ProviderCLIInvocation(
             command=tuple(command),
             env=build_gemini_session_environment(tempdir) if isolated_runtime else None,
@@ -782,9 +778,13 @@ class GeminiProvider(_BaseTextProvider):
             command.extend(["--resume", "latest"])
         if model:
             command.extend(["-m", model])
-        if authority_class == "bounded" or tool_profile.workspace_access == "read-only":
+        isolated_runtime = (
+            authority_class == "bounded" or tool_profile.workspace_access == "read-only"
+        )
+        if isolated_runtime:
             command.extend(["--approval-mode", "plan"])
-        command.extend(["-p", prompt, "-y", "-o", "text"])
+        command.extend(["--skip-trust", "-p", prompt])
+        command.extend(["-o", "text"])
         return ProviderCLIInvocation(
             command=tuple(command),
             env=session.env,
@@ -986,10 +986,14 @@ class QwenProvider(_BaseTextProvider):
         del cwd, tempdir
         self.validate_model(model)
         self.validate_options(options)
-        command = [executable, "-p", prompt, "-y", "-o", "text"]
+        isolated_runtime = (
+            authority_class == "bounded" or tool_profile.workspace_access == "read-only"
+        )
+        command = [executable, "-p", prompt]
+        command.extend(["-o", "text"])
         if model:
             command.extend(["-m", model])
-        if authority_class == "bounded" or tool_profile.workspace_access == "read-only":
+        if isolated_runtime:
             command.extend(["--approval-mode", "plan"])
         if options.get("disable_extensions"):
             command.extend(["--extensions=", "--allowed-mcp-server-names="])
@@ -1034,10 +1038,14 @@ class QwenProvider(_BaseTextProvider):
             command.extend(["--session-id", session.session_id, "--chat-recording"])
         else:
             command.extend(["--resume", session.session_id, "--chat-recording"])
-        command.extend(["-p", prompt, "-y", "-o", "text"])
+        isolated_runtime = (
+            authority_class == "bounded" or tool_profile.workspace_access == "read-only"
+        )
+        command.extend(["-p", prompt])
+        command.extend(["-o", "text"])
         if model:
             command.extend(["-m", model])
-        if authority_class == "bounded" or tool_profile.workspace_access == "read-only":
+        if isolated_runtime:
             command.extend(["--approval-mode", "plan"])
         if options.get("disable_extensions"):
             command.extend(["--extensions=", "--allowed-mcp-server-names="])

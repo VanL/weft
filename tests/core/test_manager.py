@@ -4070,6 +4070,9 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
     def fast_stop_worker_lanes(deadline: float) -> None:
         original_stop_worker_lanes(min(deadline, time.monotonic() + 0.05))
 
+    def skip_full_queue_resource_cleanup(deadline: float) -> None:
+        del deadline
+
     def run_cleanup() -> None:
         try:
             manager.cleanup()
@@ -4080,6 +4083,11 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
 
     monkeypatch.setattr(manager_mod, "launch_task_process", blocked_launch)
     monkeypatch.setattr(manager, "_stop_worker_lanes", fast_stop_worker_lanes)
+    monkeypatch.setattr(
+        manager,
+        "_cleanup_base_task_resources",
+        skip_full_queue_resource_cleanup,
+    )
 
     assert manager._launch_child_task(child_spec, None) is True
     assert launch_entered.wait(timeout=3.0)
@@ -7491,6 +7499,13 @@ def test_manager_idle_timeout_waits_for_active_child_to_finish(
         while time.monotonic() - start < 0.35:
             manager.process_once()
             time.sleep(0.05)
+        if not manager._child_processes:
+            events = [json.loads(item) for item in drain(log_queue)]
+            pytest.fail(
+                "child exited before idle-timeout assertion; "
+                f"manager_should_stop={manager.should_stop!r}; "
+                f"events={events!r}"
+            )
         assert manager.should_stop is False
         assert manager._child_processes
 

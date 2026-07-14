@@ -2405,14 +2405,16 @@ def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
     constrained_backend = active_test_backend(os.environ) == "postgres"
     constrained_runtime = sys.platform == "win32" or constrained_backend
     run_timeout = 120.0 if constrained_runtime else 20.0
+    task_timeout = "0.5"
+    sleep_seconds = "5"
     rc, out, err = run_cli(
         "run",
         "--timeout",
-        "0.1",
+        task_timeout,
         "--",
         sys.executable,
         "-c",
-        "import time; time.sleep(1)",
+        f"import time; time.sleep({sleep_seconds})",
         cwd=workdir,
         harness=weft_harness,
         timeout=run_timeout,

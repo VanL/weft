@@ -248,12 +248,15 @@ authority class as a security control. As verified against
   `{"sandbox": "danger-full-access"}` in its Codex `provider_options`, so
   the builtin dockerized-agent Codex path appends
   `--sandbox danger-full-access` without separate caller input — the
-  container boundary, not the Codex sandbox, is the isolation there.
+  container boundary, not the Codex sandbox, is the isolation there. Persistent
+  Codex sessions apply cwd and sandbox flags on the first `exec` turn that
+  creates the session; resumed turns use `codex exec resume` and only repeat
+  flags that the resume subcommand accepts.
 - **`gemini`** and **`qwen`** (`GeminiProvider`, `QwenProvider`): append
   `--approval-mode plan` when `authority_class="bounded"` **or**
   `workspace_access="read-only"`. Neither provider has an unconditional
-  "skip permissions" flag; outside the bounded/read-only case they run with
-  no explicit approval-mode flag at all.
+  "skip permissions" / yolo flag; outside the bounded/read-only case they run
+  with no explicit approval-mode flag at all.
 - **`opencode`** (`OpencodeProvider`): does **not** declare
   `supports_bounded_authority`, so `authority_class="bounded"` is rejected by
   `validate_authority` before invocation is built. Every invocation —

@@ -55,9 +55,11 @@ def make_agent_section(
 def test_provider_cli_session_continues_across_turns(
     tmp_path,
     provider_name: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executable = str(write_provider_cli_wrapper(tmp_path, provider_name))
     model = "fixture-model" if provider_name in _MODEL_PROVIDERS else None
+    monkeypatch.chdir(tmp_path)
     agent = make_agent_section(
         executable=executable,
         provider_name=provider_name,
@@ -82,6 +84,11 @@ def test_provider_cli_session_continues_across_turns(
     assert second_payload["turn_index"] == 2
     assert second_payload["remembered"] == "phase2-token"
     assert second.metadata["session"]["turn_index"] == 2
+    if provider_name == "codex":
+        assert second_payload["cwd"] == str(tmp_path)
+        assert "color" not in second_payload["options"]
+        assert "sandbox" not in second_payload["options"]
+        assert "profile" not in second_payload["options"]
 
 
 def test_provider_cli_session_close_cleans_up_tempdir_after_failure(

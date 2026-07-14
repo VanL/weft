@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 151 plan files in this directory.
+There are currently 152 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 151 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-07-13-local-live-provider-release-tests-plan.md`](./2026-07-13-local-live-provider-release-tests-plan.md) | Local Live-Provider Release Tests Plan | `draft` | none |
 | [`2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](./2026-07-11-simplebroker-committed-write-id-adoption-plan.md) | SimpleBroker Committed Write ID Adoption Plan | `draft` | none |
 | [`2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](./2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md) | PostgreSQL Dynamic Native-Waiter Rebind Plan | `completed` | none |
 | [`2026-07-09-reference-reactor-safety-hardening-plan.md`](./2026-07-09-reference-reactor-safety-hardening-plan.md) | Reference Reactor Safety Hardening Plan | `completed` | none |

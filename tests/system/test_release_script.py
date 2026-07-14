@@ -591,6 +591,7 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
     ruff_check_command = commands[4]
     ruff_format_command = commands[5]
     mypy_command = commands[6]
+    live_provider_command = commands[7]
 
     assert sqlite_command[:15] == (
         "uv",
@@ -633,6 +634,15 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
     )
     assert django_command == release.DJANGO_INTEGRATION_TEST_COMMAND
     assert microsandbox_command == release.MICROSANDBOX_EXTENSION_TEST_COMMAND
+    assert live_provider_command == (
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "python",
+        "bin/pytest-live-providers",
+    )
+    assert commands[-1] == live_provider_command
     assert ruff_check_command == (
         "uv",
         "run",
@@ -703,6 +713,8 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
     assert release.PRECHECK_ENV_OVERRIDES == {
         "PYTEST_ADDOPTS": "-x --maxfail=1",
         "WEFT_EAGER_FAILURE_TRACEBACK": "1",
+        "WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS": "0",
+        "WEFT_RUN_LIVE_PROVIDER_CLI_TESTS": "0",
     }
 
 
@@ -717,6 +729,8 @@ def test_build_precheck_env_overrides_sets_worker_count(
     assert release.build_precheck_env_overrides() == {
         "PYTEST_ADDOPTS": "-x --maxfail=1",
         "WEFT_EAGER_FAILURE_TRACEBACK": "1",
+        "WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS": "0",
+        "WEFT_RUN_LIVE_PROVIDER_CLI_TESTS": "0",
         "PYTEST_XDIST_AUTO_NUM_WORKERS": "17",
     }
 

@@ -1107,6 +1107,30 @@ Before it tags and pushes, the helper runs:
 4. The Docker extension tests when Docker is available locally
 5. The macOS sandbox extension tests when running on macOS
 6. The Microsandbox extension tests
+7. The live provider CLI tests for every registered provider executable on
+   `PATH`
+
+The live provider precheck runs serially through the normal Consumer path. It
+tests one-shot and persistent conversations for every discovered provider, plus
+the Claude MCP path when Claude Code is available. It requires the local CLIs
+to be installed and authenticated. It runs after the deterministic test, lint,
+format, and type-check gates so a free failure does not incur provider calls.
+Finding no provider is an error, as is an explicitly selected provider that is
+missing. To run the same gate directly or limit it to required providers:
+
+```bash
+./.venv/bin/python bin/pytest-live-providers
+WEFT_LIVE_PROVIDER_CLI_TARGETS=claude_code,codex \
+  ./.venv/bin/python bin/pytest-live-providers
+```
+
+Provider-specific test models can be overridden with
+`WEFT_LIVE_PROVIDER_CLI_MODEL_<PROVIDER>`. The Qwen live smoke pins
+`z-ai/glm-4.5-air` by default because the current Qwen CLI/account defaults can
+resolve to an unavailable free model.
+
+This paid, credentialed gate runs only in the local release helper. The GitHub
+release gates do not run live provider tests.
 
 After the helper pushes `v0.1.1`, the release gate workflow will:
 

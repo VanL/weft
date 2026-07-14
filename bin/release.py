@@ -63,6 +63,14 @@ CONSTANTS_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(
     r'(?m)^__version__:\s*Final\[str\]\s*=\s*"([^"]+)"$'
 )
 PENDING_RELEASE_COMMIT: Final[str] = "<release-commit>"
+LIVE_PROVIDER_CLI_TEST_COMMAND: Final[tuple[str, ...]] = (
+    "uv",
+    "run",
+    "--extra",
+    "dev",
+    "python",
+    "bin/pytest-live-providers",
+)
 
 BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
     (
@@ -168,6 +176,7 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "--config-file",
         "pyproject.toml",
     ),
+    LIVE_PROVIDER_CLI_TEST_COMMAND,
 )
 DJANGO_INTEGRATION_TEST_COMMAND: Final[tuple[str, ...]] = (
     "uv",
@@ -248,6 +257,8 @@ MICROSANDBOX_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
 PRECHECK_ENV_OVERRIDES: Final[dict[str, str]] = {
     "PYTEST_ADDOPTS": "-x --maxfail=1",
     "WEFT_EAGER_FAILURE_TRACEBACK": "1",
+    "WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS": "0",
+    "WEFT_RUN_LIVE_PROVIDER_CLI_TESTS": "0",
 }
 TagAction = Literal[
     "create",

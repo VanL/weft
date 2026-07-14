@@ -1,0 +1,128 @@
+#!/usr/bin/env python
+"""Run the local live provider-cli release smoke tests once."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Final
+
+from weft.core.agents.provider_cli.registry import list_provider_cli_providers
+
+ROOT: Final[Path] = Path(__file__).resolve().parents[1]
+LIVE_PROVIDER_TARGET_ENV: Final[str] = "WEFT_LIVE_PROVIDER_CLI_TARGETS"
+RUN_LIVE_PROVIDER_ENV: Final[str] = "WEFT_RUN_LIVE_PROVIDER_CLI_TESTS"
+RUN_LIVE_PROVIDER_MCP_ENV: Final[str] = "WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS"
+
+
+def build_pytest_command(provider_names: Sequence[str]) -> tuple[str, ...]:
+    """Build the exact pytest command for live provider smoke coverage."""
+
+    smoke_nodes = tuple(
+        "tests/tasks/test_agent_execution.py::"
+        f"test_consumer_live_provider_cli_smoke[{provider_name}]"
+        for provider_name in provider_names
+    )
+    persistent_nodes = tuple(
+        "tests/tasks/test_agent_execution.py::"
+        f"test_consumer_live_provider_cli_persistent_smoke[{provider_name}]"
+        for provider_name in provider_names
+    )
+    mcp_nodes = (
+        (
+            "tests/tasks/test_agent_execution.py::"
+            "test_consumer_live_provider_cli_mcp_smoke",
+        )
+        if "claude_code" in provider_names
+        else ()
+    )
+    return (
+        sys.executable,
+        "-m",
+        "pytest",
+        "-m",
+        "",
+        "-n",
+        "0",
+        "-x",
+        "--maxfail=1",
+        "--override-ini=addopts=-ra -q --strict-markers",
+        *smoke_nodes,
+        *persistent_nodes,
+        *mcp_nodes,
+    )
+
+
+def resolve_live_provider_targets(explicit_targets: str | None) -> tuple[str, ...]:
+    """Resolve explicit or auto-discovered live provider targets."""
+
+    requested = {
+        entry.strip() for entry in (explicit_targets or "").split(",") if entry.strip()
+    }
+    if not requested:
+        return tuple(
+            provider.name
+            for provider in list_provider_cli_providers()
+            if shutil.which(provider.default_executable) is not None
+        )
+
+    registered_providers = list_provider_cli_providers()
+    providers = {provider.name: provider for provider in registered_providers}
+    known = set(providers)
+    unknown = sorted(requested - known)
+    if unknown:
+        raise ValueError(
+            "Unknown live provider target: "
+            f"{unknown[0]}. Known targets: {', '.join(sorted(known))}"
+        )
+
+    selected = tuple(
+        provider.name for provider in registered_providers if provider.name in requested
+    )
+    missing = tuple(
+        provider_name
+        for provider_name in selected
+        if shutil.which(providers[provider_name].default_executable) is None
+    )
+    if missing:
+        raise ValueError(
+            f"Selected provider_cli target(s) are not installed: {', '.join(missing)}"
+        )
+    return selected
+
+
+def main() -> int:
+    try:
+        provider_names = resolve_live_provider_targets(
+            os.environ.get(LIVE_PROVIDER_TARGET_ENV)
+        )
+    except ValueError as exc:
+        print(f"pytest-live-providers: {exc}", file=sys.stderr)
+        return 2
+    if not provider_names:
+        print(
+            "No registered provider_cli executable is available on PATH; "
+            f"set {LIVE_PROVIDER_TARGET_ENV}=<provider> after installing a CLI.",
+            file=sys.stderr,
+        )
+        return 1
+
+    env = os.environ.copy()
+    env[RUN_LIVE_PROVIDER_ENV] = "1"
+    env[LIVE_PROVIDER_TARGET_ENV] = ",".join(provider_names)
+    env[RUN_LIVE_PROVIDER_MCP_ENV] = "1" if "claude_code" in provider_names else "0"
+    env["PYTEST_ADDOPTS"] = ""
+    return subprocess.run(
+        build_pytest_command(provider_names),
+        cwd=ROOT,
+        env=env,
+        check=False,
+    ).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -6,9 +6,11 @@ import json
 import os
 import shutil
 import time
+from typing import Final
 
 import pytest
 
+from simplebroker import Queue
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
 from tests.fixtures.mcp_stdio_fixture import fixture_server_script_path
 from tests.fixtures.provider_cli_fixture import (
@@ -21,6 +23,7 @@ from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
 )
+from weft.core.agents.provider_cli.registry import get_provider_cli_provider
 from weft.core.agents.runtime import AgentExecutionResult
 from weft.core.tasks import Consumer
 from weft.core.tasks.runner import TaskRunner
@@ -34,6 +37,15 @@ from weft.core.taskspec import (
 )
 
 _MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+_LIVE_PROVIDER_TIMEOUT_SECONDS: Final[float] = 120.0
+"""Per-turn wait budget for authenticated provider CLI calls."""
+
+_LIVE_PROVIDER_FAILURE_STATES: Final[frozenset[str]] = frozenset(
+    {"failed", "timeout", "cancelled", "killed"}
+)
+_LIVE_PROVIDER_DEFAULT_MODELS: Final[dict[str, str]] = {
+    "qwen": "z-ai/glm-4.5-air",
+}
 
 
 def _drive_consumer_until(
@@ -54,6 +66,24 @@ def _drive_consumer_until(
         f"should_stop={task.should_stop!r}, "
         f"worker_activity={task._has_worker_activity()!r})"
     )
+
+
+def _drive_live_provider_until_output(task: Consumer, outbox: Queue) -> None:
+    """Wait for live output and surface terminal provider errors immediately."""
+
+    _drive_consumer_until(
+        task,
+        lambda: (
+            outbox.peek_one() is not None
+            or task.taskspec.state.status in _LIVE_PROVIDER_FAILURE_STATES
+        ),
+        timeout=_LIVE_PROVIDER_TIMEOUT_SECONDS,
+    )
+    if task.taskspec.state.status in _LIVE_PROVIDER_FAILURE_STATES:
+        pytest.fail(
+            f"Live provider task {task.taskspec.state.status}: "
+            f"{task.taskspec.state.error or 'no error detail'}"
+        )
 
 
 def test_consumer_agent_execution_payload_falls_back_on_circular_metadata() -> None:
@@ -128,10 +158,69 @@ def _provider_agent_overrides(
     }
 
 
+def _live_provider_agent_overrides(
+    *,
+    provider_name: str,
+    executable: str,
+) -> dict[str, object]:
+    """Return live-test overrides for an isolated temporary working directory."""
+
+    overrides = _provider_agent_overrides(
+        provider_name=provider_name,
+        executable=executable,
+        include_profiles=False,
+    )
+    model_env = f"WEFT_LIVE_PROVIDER_CLI_MODEL_{provider_name.upper()}"
+    overrides["model"] = os.environ.get(
+        model_env, _LIVE_PROVIDER_DEFAULT_MODELS.get(provider_name)
+    )
+    if provider_name == "codex":
+        overrides["options"] = {"skip_git_repo_check": True}
+    return overrides
+
+
+def test_live_provider_agent_overrides_allow_codex_in_isolated_workdir() -> None:
+    """The live Codex smoke should opt out of its git-repository requirement."""
+
+    overrides = _live_provider_agent_overrides(
+        provider_name="codex",
+        executable="/tools/codex",
+    )
+
+    assert overrides["options"] == {"skip_git_repo_check": True}
+
+
+def test_live_provider_agent_overrides_pin_qwen_model_by_default() -> None:
+    """The live Qwen smoke should not depend on mutable account defaults."""
+
+    overrides = _live_provider_agent_overrides(
+        provider_name="qwen",
+        executable="/tools/qwen",
+    )
+
+    assert overrides["model"] == "z-ai/glm-4.5-air"
+
+
+def test_live_provider_agent_overrides_accept_provider_model_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators can override live provider smoke models without editing tests."""
+
+    monkeypatch.setenv("WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN", "custom/qwen-model")
+
+    overrides = _live_provider_agent_overrides(
+        provider_name="qwen",
+        executable="/tools/qwen",
+    )
+
+    assert overrides["model"] == "custom/qwen-model"
+
+
 def make_agent_taskspec(
     tid: str,
     *,
     persistent: bool = False,
+    timeout: float = 30.0,
     tools: tuple[dict[str, object], ...] = (),
     reserved_error: ReservedPolicy = ReservedPolicy.KEEP,
     env: dict[str, str] | None = None,
@@ -144,7 +233,7 @@ def make_agent_taskspec(
         spec=SpecSection(
             type="agent",
             persistent=persistent,
-            timeout=30.0,
+            timeout=timeout,
             reserved_policy_on_error=reserved_error,
             env=env,
             working_dir=working_dir,
@@ -230,6 +319,8 @@ def test_task_runner_executes_provider_cli_agent_successfully(
         "profile instructions\n\n"
         "resolved:hello"
     )
+    if provider_name in {"gemini", "qwen"}:
+        assert "yes" not in payload["options"]
 
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
@@ -259,8 +350,13 @@ def test_task_runner_executes_provider_cli_agent_with_structured_tool_profile(
         assert payload["options"]["sandbox"] == "read-only"
     elif provider_name == "claude_code":
         assert payload["options"]["permission_mode"] == "plan"
-    elif provider_name in {"gemini", "qwen"}:
+    elif provider_name == "gemini":
         assert payload["options"]["approval_mode"] == "plan"
+        assert payload["options"]["skip_trust"] is True
+        assert "yes" not in payload["options"]
+    elif provider_name == "qwen":
+        assert payload["options"]["approval_mode"] == "plan"
+        assert "yes" not in payload["options"]
 
 
 @pytest.mark.parametrize(
@@ -295,7 +391,11 @@ def test_task_runner_executes_explicit_bounded_provider_cli_agent_successfully(
     payload = json.loads(outcome.value.aggregate_public_output())
     assert payload["provider"] == provider_name
     assert payload["options"][expected_option] == expected_value
+    if provider_name == "gemini":
+        assert payload["options"]["skip_trust"] is True
+        assert "yes" not in payload["options"]
     if provider_name == "qwen":
+        assert "yes" not in payload["options"]
         assert payload["options"]["extensions"] == ""
         assert payload["options"]["allowed_mcp_server_names"] == ""
 
@@ -684,6 +784,8 @@ def test_consumer_processes_provider_cli_with_explicit_mcp_tool_profile(
         "tests.fixtures.runtime_profiles_fixture:claude_stdio_mcp_tool_profile"
     )
     runtime_config["mcp_server_script"] = str(fixture_server_script_path())
+    call_marker = tmp_path / "mcp-call-marker"
+    runtime_config["mcp_call_marker"] = str(call_marker)
     agent_overrides["runtime_config"] = runtime_config
     task = Consumer(
         db_path,
@@ -703,6 +805,7 @@ def test_consumer_processes_provider_cli_with_explicit_mcp_tool_profile(
     payload = json.loads(outbox.read_one())
     assert payload["provider"] == "claude_code"
     assert payload["mcp_result"] == "phase3-mcp-token"
+    assert call_marker.read_text(encoding="utf-8") == "phase3-mcp-token"
     assert task.taskspec.state.status == "completed"
 
 
@@ -765,6 +868,55 @@ def test_consumer_applies_reserved_policy_on_provider_cli_failure(
     assert task.taskspec.state.status == "failed"
 
 
+def _require_live_provider_executable(
+    provider_name: str,
+    *,
+    require_mcp: bool = False,
+) -> str:
+    """Return a selected live provider executable or skip before selection."""
+
+    if os.environ.get("WEFT_RUN_LIVE_PROVIDER_CLI_TESTS") != "1":
+        pytest.skip("set WEFT_RUN_LIVE_PROVIDER_CLI_TESTS=1 to run live provider tests")
+    if require_mcp and os.environ.get("WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS") != "1":
+        pytest.skip(
+            "set WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS=1 to run live provider MCP tests"
+        )
+
+    target_list = {
+        entry.strip()
+        for entry in os.environ.get("WEFT_LIVE_PROVIDER_CLI_TARGETS", "").split(",")
+        if entry.strip()
+    }
+    if provider_name not in target_list:
+        pytest.skip(
+            f"add {provider_name} to WEFT_LIVE_PROVIDER_CLI_TARGETS to run its live smoke"
+        )
+
+    provider = get_provider_cli_provider(provider_name)
+    executable = shutil.which(provider.default_executable)
+    if executable is None:
+        pytest.fail(
+            f"{provider_name} executable is not installed: "
+            f"{provider.default_executable}"
+        )
+    return executable
+
+
+def test_live_provider_selection_fails_when_selected_executable_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selected live provider must fail instead of producing a green skip."""
+
+    monkeypatch.setenv("WEFT_RUN_LIVE_PROVIDER_CLI_TESTS", "1")
+    monkeypatch.setenv("WEFT_LIVE_PROVIDER_CLI_TARGETS", "codex")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
+    with pytest.raises(
+        pytest.fail.Exception, match="codex executable is not installed"
+    ):
+        _require_live_provider_executable("codex")
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_consumer_live_provider_cli_smoke(
@@ -773,38 +925,19 @@ def test_consumer_live_provider_cli_smoke(
     tmp_path,
     provider_name: str,
 ) -> None:
-    if os.environ.get("WEFT_RUN_LIVE_PROVIDER_CLI_TESTS") != "1":
-        pytest.skip("set WEFT_RUN_LIVE_PROVIDER_CLI_TESTS=1 to run live provider tests")
-    target_list = {
-        entry.strip()
-        for entry in os.environ.get("WEFT_LIVE_PROVIDER_CLI_TARGETS", "").split(",")
-        if entry.strip()
-    }
-    if provider_name not in target_list:
-        pytest.skip(
-            "add provider to WEFT_LIVE_PROVIDER_CLI_TARGETS to run its live smoke"
-        )
+    executable = _require_live_provider_executable(provider_name)
 
-    executable = shutil.which(
-        provider_name.removesuffix("_code")
-        if provider_name == "claude_code"
-        else provider_name
-    )
-    if executable is None:
-        pytest.skip(f"{provider_name} CLI is not installed")
-
-    agent_overrides = _provider_agent_overrides(
+    agent_overrides = _live_provider_agent_overrides(
         provider_name=provider_name,
-        executable=None,
-        include_profiles=False,
+        executable=executable,
     )
-    agent_overrides["model"] = None
 
     db_path, make_queue = broker_env
     task = Consumer(
         db_path,
         make_agent_taskspec(
             unique_tid,
+            timeout=_LIVE_PROVIDER_TIMEOUT_SECONDS,
             working_dir=str(tmp_path),
             agent_overrides=agent_overrides,
         ),
@@ -817,7 +950,7 @@ def test_consumer_live_provider_cli_smoke(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
     inbox.write(prompt)
 
-    _drive_consumer_until(task, lambda: outbox.peek_one() is not None, timeout=30.0)
+    _drive_live_provider_until_output(task, outbox)
 
     output = outbox.read_one()
     assert isinstance(output, str)
@@ -833,32 +966,12 @@ def test_consumer_live_provider_cli_persistent_smoke(
     tmp_path,
     provider_name: str,
 ) -> None:
-    if os.environ.get("WEFT_RUN_LIVE_PROVIDER_CLI_TESTS") != "1":
-        pytest.skip("set WEFT_RUN_LIVE_PROVIDER_CLI_TESTS=1 to run live provider tests")
-    target_list = {
-        entry.strip()
-        for entry in os.environ.get("WEFT_LIVE_PROVIDER_CLI_TARGETS", "").split(",")
-        if entry.strip()
-    }
-    if provider_name not in target_list:
-        pytest.skip(
-            "add provider to WEFT_LIVE_PROVIDER_CLI_TARGETS to run its live smoke"
-        )
+    executable = _require_live_provider_executable(provider_name)
 
-    executable = shutil.which(
-        provider_name.removesuffix("_code")
-        if provider_name == "claude_code"
-        else provider_name
-    )
-    if executable is None:
-        pytest.skip(f"{provider_name} CLI is not installed")
-
-    agent_overrides = _provider_agent_overrides(
+    agent_overrides = _live_provider_agent_overrides(
         provider_name=provider_name,
-        executable=None,
-        include_profiles=False,
+        executable=executable,
     )
-    agent_overrides["model"] = None
     agent_overrides["conversation_scope"] = "per_task"
 
     db_path, make_queue = broker_env
@@ -867,6 +980,7 @@ def test_consumer_live_provider_cli_persistent_smoke(
         make_agent_taskspec(
             unique_tid,
             persistent=True,
+            timeout=_LIVE_PROVIDER_TIMEOUT_SECONDS,
             working_dir=str(tmp_path),
             agent_overrides=agent_overrides,
         ),
@@ -880,14 +994,14 @@ def test_consumer_live_provider_cli_persistent_smoke(
         "Remember this exact token for the rest of this conversation: "
         f"{remember_token}. Reply with exactly OK."
     )
-    _drive_consumer_until(task, lambda: outbox.peek_one() is not None, timeout=30.0)
+    _drive_live_provider_until_output(task, outbox)
 
     first_output = outbox.read_one()
     assert isinstance(first_output, str)
     assert task.taskspec.state.status == "running"
 
     inbox.write("Reply with exactly the token I asked you to remember earlier.")
-    _drive_consumer_until(task, lambda: outbox.peek_one() is not None, timeout=30.0)
+    _drive_live_provider_until_output(task, outbox)
 
     second_output = outbox.read_one()
     assert isinstance(second_output, str)
@@ -903,37 +1017,22 @@ def test_consumer_live_provider_cli_mcp_smoke(
     unique_tid: str,
     tmp_path,
 ) -> None:
-    if os.environ.get("WEFT_RUN_LIVE_PROVIDER_CLI_TESTS") != "1":
-        pytest.skip("set WEFT_RUN_LIVE_PROVIDER_CLI_TESTS=1 to run live provider tests")
-    if os.environ.get("WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS") != "1":
-        pytest.skip(
-            "set WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS=1 to run live provider MCP tests"
-        )
-    target_list = {
-        entry.strip()
-        for entry in os.environ.get("WEFT_LIVE_PROVIDER_CLI_TARGETS", "").split(",")
-        if entry.strip()
-    }
-    if "claude_code" not in target_list:
-        pytest.skip(
-            "add claude_code to WEFT_LIVE_PROVIDER_CLI_TARGETS to run MCP live smoke"
-        )
-
-    executable = shutil.which("claude")
-    if executable is None:
-        pytest.skip("claude CLI is not installed")
-
-    agent_overrides = _provider_agent_overrides(
-        provider_name="claude_code",
-        executable=None,
-        include_profiles=False,
+    executable = _require_live_provider_executable(
+        "claude_code",
+        require_mcp=True,
     )
-    agent_overrides["model"] = None
+
+    agent_overrides = _live_provider_agent_overrides(
+        provider_name="claude_code",
+        executable=executable,
+    )
     runtime_config = dict(agent_overrides["runtime_config"])
     runtime_config["tool_profile_ref"] = (
         "tests.fixtures.runtime_profiles_fixture:claude_stdio_mcp_tool_profile"
     )
     runtime_config["mcp_server_script"] = str(fixture_server_script_path())
+    call_marker = tmp_path / "mcp-call-marker"
+    runtime_config["mcp_call_marker"] = str(call_marker)
     agent_overrides["runtime_config"] = runtime_config
 
     db_path, make_queue = broker_env
@@ -941,6 +1040,7 @@ def test_consumer_live_provider_cli_mcp_smoke(
         db_path,
         make_agent_taskspec(
             unique_tid,
+            timeout=_LIVE_PROVIDER_TIMEOUT_SECONDS,
             working_dir=str(tmp_path),
             agent_overrides=agent_overrides,
         ),
@@ -955,9 +1055,10 @@ def test_consumer_live_provider_cli_mcp_smoke(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
     inbox.write(prompt)
 
-    _drive_consumer_until(task, lambda: outbox.peek_one() is not None, timeout=30.0)
+    _drive_live_provider_until_output(task, outbox)
 
     output = outbox.read_one()
     assert isinstance(output, str)
     assert token in output.upper()
+    assert call_marker.read_text(encoding="utf-8") == token
     assert task.taskspec.state.status == "completed"

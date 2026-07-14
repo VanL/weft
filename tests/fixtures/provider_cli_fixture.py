@@ -235,7 +235,9 @@ def _run_codex(argv: list[str]) -> int:
     session_id: str | None = None
     use_latest = False
     i = 1
+    is_resume = False
     if i < len(argv) and argv[i] == "resume":
+        is_resume = True
         i += 1
         if i < len(argv) and argv[i] == "--last":
             use_latest = True
@@ -245,6 +247,19 @@ def _run_codex(argv: list[str]) -> int:
             i += 1
     while i < len(argv):
         arg = argv[i]
+        if is_resume and arg in {
+            "--color",
+            "--sandbox",
+            "--profile",
+            "--local-provider",
+            "--add-dir",
+            "--oss",
+            "--full-auto",
+            "-C",
+            "--cd",
+        }:
+            print(f"unsupported codex resume option: {arg}", file=sys.stderr)
+            return 2
         if arg == "--model":
             model = argv[i + 1]
             i += 2
@@ -355,6 +370,10 @@ def _run_gemini_or_qwen(argv: list[str], *, provider_name: str) -> int:
         if provider_name == "gemini" and arg == "--include-directories":
             options.setdefault("include_directories", []).append(argv[i + 1])
             i += 2
+            continue
+        if provider_name == "gemini" and arg == "--skip-trust":
+            options["skip_trust"] = True
+            i += 1
             continue
         if arg == "-y":
             options["yes"] = True
