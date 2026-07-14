@@ -25,6 +25,8 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 
 ## Runbooks
 
+- `external-skill-suites.md`: precedence and crosswalk for external skill
+  suites (superpowers, gstack, Every's compound engineering)
 - `runtime-and-context-patterns.md` — Context discovery, queue access,
   generator-based history reads, TaskSpec boundary rules, and runtime-only
   queue semantics.

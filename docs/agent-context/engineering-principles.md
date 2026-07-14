@@ -93,6 +93,18 @@ partial rename passes isolated checks and fails at runtime; the synchronized
 update is the fix, not a follow-up. This is the change-side companion to
 principle 3's "update forward" rule.
 
+The sanctioned exit is `runbooks/testing-patterns.md` Rule 5, and it
+is loud, concrete, and falsifiable — never silent. A valid substitute
+**always demonstrates the post-change correction**, and additionally
+either demonstrates the pre-change failure (or its root cause) or
+states why pre-change observation is impossible — never neither half.
+Category labels are not reasons: a docs-only change with a
+reproducible check available (a link check, a grep gate, a
+traceability run) has its failing test and must use it; a broken
+verification harness is a blocker to fix, not an exception to claim.
+Invoking Rule 5 without the demonstration is skipping the test, and
+skipping the test is not permitted at any task class.
+
 ## 5. Read Specs and Code Before Inference
 
 Do not infer behavior from module names or mental models alone. Read:
@@ -280,6 +292,35 @@ Distinguish the two kinds of coupling:
 
 Cost to price in: a hot god file serializes parallel agent write-slices —
 keep fan-out write scopes disjoint or sequence them.
+
+## 12. Coalesce on Events, Not Time; Every Fold Keeps a Cue
+
+Ledgers and plan directories are moment streams: raw, dated, append-only
+in spirit. Left alone they grow until agents stop reading them. The fix is
+periodic coalescing — distill cold entries into rules, harvest and retire
+completed plans, promote recurring workflows to skills — governed by three
+rules borrowed from tiered-memory design:
+
+- **Trigger on accumulation, not on the calendar.** Repos have different
+  pulse rates; event counts derived from a watermark scale automatically.
+  A stored counter is state that drifts; a derived count is always honest.
+- **Keep the recent tier verbatim.** Never summarize young, hot, or
+  still-cited entries — that destroys exactly the detail the next session
+  needs. Fold only what is cold and stable.
+- **A summary that cannot lead back to its constituents is broken, even if
+  it reads well.** Every fold leaves a date range and commit SHA in the
+  surviving line. Git is the archive; the cue is what makes the archive
+  reachable.
+
+Promotion and decay are citation-driven, not vibes-driven: an entry cited
+by later plans and reviews is promotion evidence; an uncited entry whose
+subject has churned is decay evidence. Presence in the always-read context
+is not evidence of usefulness — only explicit citation in work products
+counts. Golden rules and safety invariants carry an importance floor and
+never decay. Contradiction is resolved by editing the rule in place — with
+a revision marker `(revised YYYY-MM-DD; was: <gist>)` when the meaning
+changes, so citations to the rule stay interpretable across history — and
+the old version lives in git.
 
 ## Warning Signs
 

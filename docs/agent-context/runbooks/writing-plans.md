@@ -116,6 +116,15 @@ true:
 
 ## File Placement
 
+Classes 0–2 per the decision-hierarchy Task Classification ([DOM-15])
+do not produce plan files — their record lives in the commit history or
+handoff report. This runbook governs classes 3 and above. Class-3+
+plans carry a mandatory `Class:` line as prose immediately after the
+three-key metadata block (the block itself stays exactly
+Status/Source specs/Superseded by, per the plan-metadata test); a
+post-hoc class claim with no mid-flight escalator history is a review
+smell.
+
 - Put plans in `docs/plans/` — no other location (not `docs/superpowers/plans/`,
   not project subdirectories, not alongside specs).
 - **Always** use a date-prefixed filename: `YYYY-MM-DD-<descriptive-name>.md`.
@@ -631,8 +640,11 @@ Recommended prompt:
 
 > Read the plan at [path] and its `## Proposed Spec Delta` (if present),
 > including the named promotion strategy. Carefully examine the plan, the
-> proposed spec text, and the associated code. Look for errors, bad ideas, and
-> latent ambiguities. Don't do any implementation, but answer carefully: Could
+> proposed spec text, and the associated code. Look for errors, bad ideas,
+> latent ambiguities, and performative overengineering — process,
+> abstraction, or ceremony that does not address a real risk or improve
+> correctness; recommending removal is as valuable as recommending
+> additions. Don't do any implementation, but answer carefully: Could
 > you implement this confidently and correctly against the delta as promoted,
 > if asked?
 
@@ -711,6 +723,54 @@ When the touched spec already contains nearby implementation notes such as
 `_Implementation snapshot_`, `_Implementation status_`, or
 `_Implementation mapping_`, update those notes in the same change so the spec
 continues to describe current ownership and behavior accurately.
+
+## Plan Lifecycle and Retirement
+
+Plans move through: `draft` → `active` → `completed` or `superseded` →
+`retired`. Status lives in the plan index (`docs/plans/README.md`), not in
+ceremony inside the plan file.
+
+- **Active plans have a mutability boundary**: task instructions and
+  checklists stay current and mutable — stale instructions are worse than
+  edited ones, and git preserves prior versions; decision, deviation, and
+  review logs are append-only. At closure the whole plan becomes
+  immutable.
+- **Completed and superseded plans are harvest candidates.** They stay in
+  the tree until the coalescing sweep retires them.
+- **The harvest gate — all four before deletion, no exceptions:**
+  1. deviation log closed (no `pending` spec proposals)
+  2. durable rationale absorbed into the governing spec or implementation
+     doc (or explicitly judged not durable)
+  3. lessons extracted to `docs/lessons.md` where applicable
+  4. every spec `## Related Plans` backlink converted to the retired
+     citation form (below)
+- **Superseded plans additionally require** the superseding plan to name
+  what it inherits (open deviation rows, decided-but-unbuilt behavior)
+  before the predecessor retires.
+- **Retirement is two-step: soft-retire, then delete.** The sweep performs
+  the soft retirement — status flips to `retired-pending` in the index,
+  backlinks convert to the retired citation form, and the ledger line is
+  written (name, date range, one-sentence outcome, what absorbed it,
+  source SHA). Physical deletion happens in a dedicated follow-up change only
+  after a second agent or the user verifies the harvest gate. Never
+  soft-retire and delete in the same change, and never create a
+  retired/archived plans directory — git is the archive.
+- **Exemplar plans are exempt.** The status index may mark a plan
+  `exemplar` (bootstrap or operating-model foundation plans that serve as
+  onboarding examples). Exemplars are not retirement candidates until the
+  index note says their exemplar role has been superseded.
+- Record the source SHA as a mainline commit that actually contains the
+  plan's final state; with squash merges, the squashed mainline commit is
+  the one to cite.
+
+Retired-plan citation form: when a plan is retired, spec backlinks change
+from a live path to a non-path citation:
+`- retired: 2026-05-02-example-plan — source <source_sha>; see the ledger
+in docs/plans/README.md`. The source SHA is a commit verifiably
+containing the plan file. This keeps the traceability gate clean (no dead
+path claims) while preserving the retrieval cue. Do not leave live-path
+backlinks to deleted plans, and do not delete the backlink itself — the
+spec's plan history remains part of its record.
 
 ## Anti-Patterns
 

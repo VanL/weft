@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Structural gate for the [DOM-15] classification fixture table.
+
+Checks the enumerable contract of DOM-15 (the Enumerable Contracts
+principle, section 9 in this repository's engineering principles):
+  1. every fixture row names a known class (0-5, `Class N+P`, or an
+     explicit `Escalate to N` transition)
+  2. every class 0-5 and the +P modifier each appear in at least one
+     fixture
+  3. class-1 and class-2 fixtures state their negative-trigger facts
+  4. the subsume/cumulative rule sentence is present
+
+Exit codes (truthful in classes): 0 clean, 1 contract violation,
+2 invocation error. Never prints a traceback. Semantic classification
+of real tasks is judgment and is NOT checked here — see [DOM-15].
+
+Usage:
+  check-dom15-fixtures [--spec PATH] [--self-test]
+"""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+DEFAULT_SPEC = "docs/agent-context/decision-hierarchy.md"
+
+CLASS_CELL_RE = re.compile(
+    r"^(?:[0-5]\b|Class\s+[0-5]\+P\b|Escalate to [0-5]\b)"
+)
+NEGATIVE_FACT_MARKERS = (
+    # weft-local phrasings first; canonical bracket markers kept below
+    # because the embedded self-test corpus uses them
+    "no non-trivial or risky trigger",
+    "no risky or",
+    "not material",
+    "no [DOM-5]",
+    "no behavior change",
+    "no observable behavior",
+    "not [DOM-6]-material",
+    "nothing changes",
+    "intent evidence",
+    "spec-cited intent",
+    "the cited section is the intent evidence",
+)
+
+
+def strip_fenced_blocks(text: str) -> str:
+    """Remove fenced code blocks so grammar mimicry inside them is inert."""
+    out, fenced = [], False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fenced = not fenced
+            continue
+        if not fenced:
+            out.append(line)
+    return "\n".join(out)
+
+
+def extract_section(text: str) -> str | None:
+    lines = strip_fenced_blocks(text).splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and "[DOM-15]" in line:
+            start = i
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("## "):
+            end = j
+            break
+    return "\n".join(lines[start:end])
+
+
+def fixture_rows(section: str) -> list[tuple[str, str]]:
+    rows, in_table = [], False
+    for line in section.splitlines():
+        if line.startswith("| Fixture"):
+            in_table = True
+            continue
+        if in_table:
+            if not line.startswith("|"):
+                in_table = False
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) >= 2 and not set(cells[0]) <= {"-", " "}:
+                rows.append((cells[0], cells[1]))
+    return rows
+
+
+def check(section: str) -> list[str]:
+    problems: list[str] = []
+    rows = fixture_rows(section)
+    if not rows:
+        return ["no fixture table found in the [DOM-15] section"]
+
+    seen_classes: set[str] = set()
+    for fact, cls in rows:
+        if not CLASS_CELL_RE.match(cls):
+            problems.append(f"unknown class cell: {cls!r} (fixture: {fact[:50]}...)")
+            continue
+        if "+P" in cls:
+            seen_classes.add("+P")
+            seen_classes.add(cls.split()[1].split("+")[0])
+        elif cls.startswith("Escalate to"):
+            seen_classes.add(cls.split()[-1][0])
+        else:
+            seen_classes.add(cls[0])
+        if cls[0] in ("1", "2") and not cls.startswith("Escalate"):
+            if not any(m in fact for m in NEGATIVE_FACT_MARKERS):
+                problems.append(
+                    f"class-{cls[0]} fixture missing negative-trigger facts: {fact[:60]}..."
+                )
+
+    for required in ("0", "1", "2", "3", "4", "5", "+P"):
+        if required not in seen_classes:
+            problems.append(f"no fixture covers class {required}")
+
+    if "subsume" not in section:
+        problems.append("cumulative/subsume rule sentence is absent")
+    return problems
+
+
+GOOD_SAMPLE = """## 15. Task Classification [DOM-15]
+
+planning artifacts **subsume**: floors accumulate
+
+| Fixture (trigger facts stated) | Class |
+|---------|-------|
+| survey — nothing changes | 0 |
+| typo — no behavior change | 1 |
+| fix per spec — the cited section is the intent evidence; no [DOM-5] trigger fires | 2 |
+| multi-surface work | 3 |
+| CLI flag | 4 |
+| spec edit | 5 (strategy D) |
+| skill change | Class 3+P (effective 5) |
+| discovers risky trigger | Escalate to 4 at that moment |
+"""
+
+
+def self_test() -> int:
+    failures = []
+    if check(GOOD_SAMPLE):
+        failures.append(f"good sample should pass, got: {check(GOOD_SAMPLE)}")
+    mutations = {
+        "unknown class": GOOD_SAMPLE.replace("| 0 |", "| 9 |"),
+        "missing +P fixture": GOOD_SAMPLE.replace(
+            "| skill change | Class 3+P (effective 5) |\n", ""
+        ),
+        "stripped negative facts": GOOD_SAMPLE.replace(
+            "typo — no behavior change", "typo"
+        ),
+        "deleted subsume rule": GOOD_SAMPLE.replace("subsume", "combine"),
+    }
+    for name, mutated in mutations.items():
+        if not check(mutated):
+            failures.append(f"mutation not caught: {name}")
+    # probe: fenced grammar mimicry must be inert
+    fenced = GOOD_SAMPLE + "\n```\n| bogus | 9 |\n```\n"
+    if check(fenced):
+        failures.append("fenced-block fixture text was not ignored")
+    # probe: missing target is an invocation error, not a crash
+    if run(["--spec", "/nonexistent/dom15-spec.md"]) != 2:
+        failures.append("missing spec file did not exit with invocation-error class")
+    if failures:
+        for f in failures:
+            print(f"check-dom15-fixtures self-test FAIL: {f}")
+        return 1
+    print("check-dom15-fixtures self-test: all mutation cases and probes pass")
+    return 0
+
+
+def run(argv: list[str]) -> int:
+    spec = Path(DEFAULT_SPEC)
+    args = list(argv)
+    if "--spec" in args:
+        i = args.index("--spec")
+        try:
+            spec = Path(args[i + 1])
+        except IndexError:
+            print("check-dom15-fixtures: --spec requires a path")
+            return 2
+    try:
+        text = spec.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"check-dom15-fixtures: cannot read spec {spec}: {exc.strerror}")
+        return 2
+    section = extract_section(text)
+    if section is None:
+        print(f"check-dom15-fixtures: no [DOM-15] section in {spec}")
+        return 2
+    problems = check(section)
+    if problems:
+        for p in problems:
+            print(f"check-dom15-fixtures: {p}")
+        return 1
+    print(f"check-dom15-fixtures: {spec} [DOM-15] fixture contract OK")
+    return 0
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if "--self-test" in argv:
+        return self_test()
+    return run(argv)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # the no-traceback floor: fail loud, fail clean
+        print(f"check-dom15-fixtures: internal error: {exc}")
+        sys.exit(2)

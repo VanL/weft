@@ -1,5 +1,9 @@
 # Lessons Learned
 
+Startup context is the Golden Rules plus dated sections after the
+watermark in `docs/coalescing.md`; the rest of this ledger is
+searchable history.
+
 This file is the canonical ledger for durable lessons learned while working on
 Weft. Add short entries when a correction exposes a repeated failure mode or a
 runbook needs to become stricter.
@@ -85,7 +89,10 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
 ## 2026-07-02 Verification-Lessons Fold
 
 - 2026-07-02: Verification-lessons fold synced from agent-guidance (2026-07-02
-  working tree; record the commit SHA when agent-guidance commits). Source
+  working tree; pinned 2026-07-14: that fold landed as agent-guidance
+  `5927481`, and the 2026-07-14 wave adopted by
+  `docs/plans/2026-07-14-agent-guidance-propagation-plan.md` is
+  agent-guidance `2f7eff6`). Source
   incident record: the backstitch repo's `docs/lessons.md`. Note: weft is
   backstitch's external test corpus — the four baselined traceability-debt
   errors in backstitch's Weft gate are weft-side debt to burn down.

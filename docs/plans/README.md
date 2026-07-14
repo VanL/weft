@@ -23,8 +23,9 @@ There are currently 152 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-07-13-local-live-provider-release-tests-plan.md`](./2026-07-13-local-live-provider-release-tests-plan.md) | Local Live-Provider Release Tests Plan | `draft` | none |
-| [`2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](./2026-07-11-simplebroker-committed-write-id-adoption-plan.md) | SimpleBroker Committed Write ID Adoption Plan | `draft` | none |
+| [`2026-07-14-agent-guidance-propagation-plan.md`](./2026-07-14-agent-guidance-propagation-plan.md) | Agent-Guidance Propagation Plan (2026-07-14 wave) | `completed` | none |
+| [`2026-07-13-local-live-provider-release-tests-plan.md`](./2026-07-13-local-live-provider-release-tests-plan.md) | Local Live-Provider Release Tests Plan | `completed` | none |
+| [`2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](./2026-07-11-simplebroker-committed-write-id-adoption-plan.md) | SimpleBroker Committed Write ID Adoption Plan | `completed` | none |
 | [`2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](./2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md) | PostgreSQL Dynamic Native-Waiter Rebind Plan | `completed` | none |
 | [`2026-07-09-reference-reactor-safety-hardening-plan.md`](./2026-07-09-reference-reactor-safety-hardening-plan.md) | Reference Reactor Safety Hardening Plan | `completed` | none |
 | [`2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](./2026-07-02-runtime-correctness-and-retention-remediation-plan.md) | Runtime Correctness and Retention Remediation Plan | `completed` | none |
@@ -180,3 +181,11 @@ There are currently 152 plan files in this directory.
 
 - [`../specifications/README.md`](../specifications/README.md)
 - [`../specifications/09-Implementation_Plan.md`](../specifications/09-Implementation_Plan.md)
+
+## Retired Plans
+
+One line per retired plan; the body lives in git at the source SHA
+(see the Plan Lifecycle section of `../agent-context/runbooks/writing-plans.md`).
+
+| Plan | Dates | Outcome | Absorbed into | Source SHA |
+|------|-------|---------|---------------|------------|

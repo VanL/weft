@@ -69,6 +69,9 @@
   a different agent family than the authoring agent when one is available.
 - Larger changes should run an independent review after each meaningful slice
   and again before completion.
+- Classify every task per the decision-hierarchy Task Classification
+  ([DOM-15]); classes 3+ get a dated plan, classes 1–2 record their plan
+  in the commit message or handoff report.
 - New or updated plans must cite the exact spec file and section/reference code
   they implement, or state plainly that no spec exists.
 - Spec-driven work must update the touched spec with plan backlinks and keep
