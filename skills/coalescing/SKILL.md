@@ -10,8 +10,8 @@ units of work. (Adopted from agent-guidance @ 2f7eff6 via
 
 Run the compounding layer's maintenance pass: distill cold lesson entries
 into golden rules and runbook amendments, harvest and retire completed
-plans, promote recurring workflows to skills, and (in the guidance repo)
-fold cross-repo lessons upward. Keeps the always-read documentation tier
+plans, promote recurring workflows to skills, and propose cross-repo
+fold-ups upward when a rule generalizes beyond this repository. Keeps the always-read documentation tier
 small and hot while git history holds everything raw.
 
 ## When To Use
@@ -186,11 +186,13 @@ For each completed or superseded plan:
 - Presence in the always-read context is NOT promotion evidence; only
   explicit citation in work products counts.
 
-### 5. Guidance repo only: fold-up
+### 5. Cross-repo fold-up (role-symmetric)
 
-When a distilled rule generalizes beyond one repository, propose it to the
-guidance repo's ledger/principles with SHA-pinned provenance (repo, source
-SHA, date range). Independence check first: two repos exhibiting the same
+Any repository's sweep may find a rule that generalizes: **propose it
+upward** to the guidance repo's ledger/principles with SHA-pinned
+provenance (repo, source SHA, date range). **In the guidance repo**,
+candidates are tracked in its state file's fold-up tier and accepted
+only with the independence check below. Independence check first: two repos exhibiting the same
 rule counts as fold-up evidence only when the incidents or adaptations are
 independent — two descendants of one inherited/bootstrapped rule are one
 lineage, not two data points. Sibling repos re-sync from the guidance
