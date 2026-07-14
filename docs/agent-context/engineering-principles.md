@@ -280,7 +280,7 @@ Distinguish the two kinds of coupling:
 
 - **Structural coupling** — a wide flat method surface sharing one schema —
   is safe at any size under floor 1. `weft/core/manager.py` (~6,900 lines)
-  and `weft/core/monitor/task_monitor.py` (~5,700 lines) are this: many
+  and `weft/core/monitor/task_monitor.py` (~6,200 lines) are this: many
   methods over one queue/state contract, kept together on purpose.
 - **Behavioral coupling** — pieces interacting through live state — is where
   floor 2 applies, and extraction is justified to create the testable

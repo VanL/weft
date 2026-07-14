@@ -51,7 +51,7 @@ Read these before changing code:
 11. [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)
 12. [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md)
 13. [`README.md`](../../README.md)
-14. [`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md)
+14. `docs/TODO-simplebroker-backend-followups.md` (removed 2026-07-13; all follow-ups resolved, caveat now specified in `docs/specifications/04-SimpleBroker_Integration.md` and `10-CLI_Interface.md`)
 15. [`docs/plans/2026-04-06-postgres-backend-audit-and-shared-test-surface-plan.md`](./2026-04-06-postgres-backend-audit-and-shared-test-surface-plan.md)
 
 Source spec relationship:
@@ -252,7 +252,7 @@ Read first:
 - [`weft/context.py`](../../weft/context.py)
 - [`weft/commands/load.py`](../../weft/commands/load.py)
 - [`tests/conftest.py`](../../tests/conftest.py)
-- [`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md)
+- `docs/TODO-simplebroker-backend-followups.md` (removed 2026-07-13; all follow-ups resolved, caveat now specified in `docs/specifications/04-SimpleBroker_Integration.md` and `10-CLI_Interface.md`)
 
 Approach:
 
@@ -340,7 +340,7 @@ Files to modify:
 
 Read first:
 
-- [`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md)
+- `docs/TODO-simplebroker-backend-followups.md` (removed 2026-07-13; all follow-ups resolved, caveat now specified in `docs/specifications/04-SimpleBroker_Integration.md` and `10-CLI_Interface.md`)
 - [`weft/context.py`](../../weft/context.py)
 
 Approach:

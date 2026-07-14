@@ -1,6 +1,6 @@
 # Local Live-Provider Release Tests Plan
 
-Status: draft
+Status: completed
 Source specs: `docs/specifications/13-Agent_Runtime.md` [AR-2.1] for provider-adapter fixes; release-tooling changes have no governing product spec
 Superseded by: none
 

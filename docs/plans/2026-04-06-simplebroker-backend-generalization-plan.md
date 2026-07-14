@@ -76,7 +76,7 @@ Read these files in this order before editing code:
 6. [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)
 7. [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md)
 8. [`README.md`](../../README.md)
-9. [`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md)
+9. `docs/TODO-simplebroker-backend-followups.md` (removed 2026-07-13; all follow-ups resolved, caveat now specified in `docs/specifications/04-SimpleBroker_Integration.md` and `10-CLI_Interface.md`)
 10. [`weft/context.py`](../../weft/context.py)
 11. [`weft/commands/tidy.py`](../../weft/commands/tidy.py)
 12. [`weft/commands/load.py`](../../weft/commands/load.py)
@@ -596,14 +596,14 @@ Read first:
 [`README.md`](../../README.md),
 [`docs/specifications/04-SimpleBroker_Integration.md`](../specifications/04-SimpleBroker_Integration.md),
 [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md),
-[`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md),
+`docs/TODO-simplebroker-backend-followups.md` (removed 2026-07-13; all follow-ups resolved, caveat now specified in `docs/specifications/04-SimpleBroker_Integration.md` and `10-CLI_Interface.md`),
 the tests that still mention `.weft/broker.db`.
 
 Files to touch:
 [`README.md`](../../README.md),
 [`docs/specifications/04-SimpleBroker_Integration.md`](../specifications/04-SimpleBroker_Integration.md),
 [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md),
-[`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md),
+`docs/TODO-simplebroker-backend-followups.md` (removed 2026-07-13; all follow-ups resolved, caveat now specified in `docs/specifications/04-SimpleBroker_Integration.md` and `10-CLI_Interface.md`),
 and any tests whose assertions are no longer correct.
 
 Implementation notes:

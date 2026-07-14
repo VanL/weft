@@ -1,6 +1,6 @@
 # SimpleBroker Committed Write ID Adoption Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-1]; docs/specifications/07-System_Invariants.md [MANAGER.4]
 Superseded by: none
 
@@ -290,9 +290,10 @@ long-session test.
   manager scheduling.
 - Completed-work review found no code defects. It caught a stale focused-test
   filter and the missing [MANAGER.4] plan backlink; both were corrected before
-  final verification. The plan and index remain `draft` while this verified
-  slice is uncommitted, per the repository completion gate; promote both to
-  `completed` when the owner lands the change.
+  final verification. The plan and index were held at `draft` while this
+  verified slice was uncommitted, per the repository completion gate. The slice
+  landed in commit `c96ab1e` ("Update to use new simplebroker API") and shipped
+  in release v0.9.90, so both were promoted to `completed` on 2026-07-13.
 
 ## Fresh-Eyes Review
 

@@ -606,7 +606,7 @@ Example:
 ```bash
 uv run pytest tests/core/test_manager.py -q
 uv run pytest tests/commands/test_run.py -q
-uv run mypy weft extensions/weft_docker extensions/weft_macos_sandbox
+uv run mypy weft bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml
 uv run ruff check weft
 ```
 

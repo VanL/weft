@@ -233,10 +233,11 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   below define the manager-supervised `TaskMonitor` cleanup and collation
   contract.
   - **OBS.13.1**: Monitor-owned tables `weft_monitor_meta`,
-    `weft_monitor_task_collations`, and `weft_monitor_task_messages` are
-    derived operational state. The Monitor may create, verify, and additively
-    migrate only those tables inside an already initialized Weft broker
-    database; it must not create or initialize the broker database. The store
+    `weft_monitor_task_collations`, `weft_monitor_task_messages`, and
+    `weft_monitor_deferred_writes` are derived operational state. The Monitor
+    may create, verify, and additively migrate only those tables inside an
+    already initialized Weft broker database; it must not create or initialize
+    the broker database. The store
     may support command-layer derived status fallback after raw task-log
     retirement, but it must not become result authority, control authority, or
     lifecycle truth.

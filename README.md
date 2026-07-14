@@ -593,8 +593,18 @@ T{tid}.reserved   # Messages being processed (reservation pattern)
 T{tid}.outbox     # Results and output
 T{tid}.ctrl_in    # Control commands (STOP, STATUS, PING)
 T{tid}.ctrl_out   # Status responses
+```
 
+Pipelines get an analogous `P{tid}.*` queue set (`inbox`, `outbox`, `ctrl_in`,
+`ctrl_out`, plus `status` snapshots and private `events` coordination).
+
+Global queues:
+
+```
 weft.log.tasks           # Global state log (all tasks)
+weft.manager.ctrl_in     # Manager control input
+weft.manager.ctrl_out    # Manager control output
+weft.manager.outbox      # Manager informational output
 weft.spawn.requests      # Task spawn requests to manager
 weft.spawn.internal      # Manager-owned internal service spawn requests
 weft.state.services      # Runtime service-owner registry, including managers (runtime state)
@@ -694,13 +704,13 @@ Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
 
 ```bash
 # Initialize new project
-weft init [DIRECTORY] [--autostart/--no-autostart]
+weft init [DIRECTORY] [--autostart/--no-autostart] [-q/--quiet]
 
 # Show system status
 weft status [--all] [--status STATUS] [--json] [--watch] [--interval SECONDS] [--context PATH]
 
-# Task detail view
-weft task status TID [--process] [--watch] [--json] [--context PATH]
+# Task detail view (--ping proves current state via a keyed PING/PONG)
+weft task status TID [--process] [--watch] [--json] [--ping] [--context PATH]
 weft task tid [TID] [--pid PID] [--reverse FULL_TID] [--context PATH]
 
 # List tasks
@@ -715,27 +725,35 @@ weft task ping TID [--timeout FLOAT] [--context PATH]
 
 # Manager lifecycle
 weft manager start [--replace] [--context PATH]
-weft manager serve [--replace] [--context PATH]
+weft manager serve [--replace] [--level off|info|debug|trace] [--log-interval SECONDS] [--context PATH]
 weft manager stop [TID] [--force] [--timeout SECONDS] [--context PATH]
-weft manager list [--all] [--json] [--context PATH]
+weft manager list [--all] [--json] [--diagnostic] [--context PATH]
 weft manager status TID [--json] [--context PATH]
 
 # System maintenance
 weft system builtins [--json]  # shipped builtin inventory
 weft system tidy            # backend-native broker compaction
 weft system dump -o FILE
-weft system load --dry-run -i FILE  # preflight import; exits 3 on conflicts
-weft system load -i FILE            # import the dump
+weft system load --dry-run --input FILE  # preflight import; exits 3 on conflicts
+weft system load --input FILE            # import the dump
 
 # Prune stale broker rows (dry-run by default)
 weft system prune [--apply|--dry-run] [--family FAMILY] [--force] [--context PATH]
+# Scope and safety controls:
+#   [--queue GROUP]... [--min-age SECONDS] [--keep-recent-per-key N] [--keep-recent-per-task N]
+# Retention-family controls and reporting:
+#   [--task TID] [--retention-class CLASS]... [--archive PATH] [--limit N] [--json] [--report PATH]
 
 # Scan task evidence and emit JSONL (non-destructive)
-weft system task-monitor [--once|--follow] [--sink stdout|disk] [--log-dir PATH] [--checkpoint PATH] [--no-checkpoint] [--context PATH]
+weft system task-monitor [--once|--follow] [--sink stdout|disk] [--log-dir PATH] [--checkpoint PATH] [--no-checkpoint] [--since TIMESTAMP] [--limit N] [--json] [--context PATH]
 
 # Generate and store a reusable spec
 weft spec generate --type task > my-task.json
 weft spec create my-task --file my-task.json
+
+# List and inspect stored specs
+weft spec list [--type TEXT] [--json] [--context PATH]
+weft spec show NAME [--type TEXT] [--context PATH]
 
 # Validate a TaskSpec and optionally preflight runner/runtime availability
 weft spec validate --type task FILE [--load-runner] [--preflight]
@@ -797,7 +815,7 @@ container.
 excluding runtime-only `weft.state.*` queues. Message records carry the broker
 message ID in the `id` field, and `weft system load` preserves those IDs
 through SimpleBroker's import path. Claimed in-flight rows are omitted and
-reported in the dump summary. `weft system load -i FILE` mutates the target
+reported in the dump summary. `weft system load --input FILE` mutates the target
 context; use `--dry-run` for validation only. Dump files contain TaskSpec
 command arguments and `spec.env` values verbatim (dump/load is a
 fidelity-preserving surface, so nothing is redacted); the file is created
@@ -825,13 +843,16 @@ printf "hello\n" | weft run --pipeline etl-job
 --cpu N            # CPU limit (percentage)
 --env KEY=VALUE      # Environment variable
 --name TEXT          # Explicit task name
+--tag TAG            # Attach metadata tag (repeatable)
 --interactive / --non-interactive  # Line-oriented task IO
 --stream-output / --no-stream-output  # Stream stdout/stderr to queues
 --continuous / --once  # Continuously process spec queue messages
 --autostart/--no-autostart  # Enable/disable autostart manifests
 --arg VALUE          # Positional arg for --function (repeatable)
 --kw KEY=VALUE       # Keyword arg for --function (repeatable)
---input TEXT         # Explicit pipeline input
+--input TEXT         # Explicit pipeline input (-p is short for --pipeline)
+--json               # Emit JSON result
+-v, --verbose        # Show detailed output
 
 # Get results
 weft result TID [--timeout N] [--stream] [--json] [--error] [--context PATH]
@@ -842,15 +863,17 @@ weft result --all [--peek]
 
 ```bash
 # Direct queue access
+# read/peek/move share message selection: [-m ID] [--after TS] [--before TS] [--timestamps]
 weft queue read QUEUE [--json] [--all]
 weft queue write QUEUE [MESSAGE]
 weft queue write --endpoint NAME [MESSAGE]
 weft queue peek QUEUE [--json] [--all]
-weft queue move SOURCE DEST [--all]
-weft queue list [--json] [--stats] [--endpoints] [-p PATTERN]
+weft queue move SOURCE DEST [--all] [-n/--limit N] [--json]
+weft queue list [--json] [--stats] [--endpoints] [-p PATTERN] [--prefix TEXT]
 weft queue resolve ENDPOINT_NAME [--json]
-weft queue watch QUEUE [--json] [--peek]
-weft queue delete QUEUE
+weft queue watch QUEUE [--json] [--peek] [-n/--limit N] [--interval SECONDS] [--after TS] [--timestamps] [--quiet] [--move DEST]
+weft queue delete QUEUE [-m/--message ID]
+weft queue delete --all
 
 # Queue introspection
 weft queue exists NAME [--json]
@@ -1104,11 +1127,13 @@ Before it tags and pushes, the helper runs:
 1. The SQLite release precheck with xdist
 2. The PG-compatible release precheck with `uv run bin/pytest-pg --all`
 3. The Django integration tests
-4. The Docker extension tests when Docker is available locally
-5. The macOS sandbox extension tests when running on macOS
-6. The Microsandbox extension tests
-7. The live provider CLI tests for every registered provider executable on
-   `PATH`
+4. The Microsandbox extension tests
+5. The Docker extension tests when Docker is available locally
+6. The macOS sandbox extension tests when running on macOS
+7. The ruff check, ruff format, and mypy gates across the core package,
+   integrations, and extensions
+8. The live provider CLI tests for every registered provider executable on
+   `PATH` (always last, after every deterministic gate)
 
 The live provider precheck runs serially through the normal Consumer path. It
 tests one-shot and persistent conversations for every discovered provider, plus

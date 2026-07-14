@@ -51,13 +51,17 @@ Notes:
 - `weft.log.tasks` is runtime evidence used by Weft status, result, and
   debugging surfaces while retained. It is not legal, forensic, or audit
   evidence; retention is an operational policy.
-- `weft_monitor_meta`, `weft_monitor_task_collations`, and
-  `weft_monitor_task_messages` are Monitor-owned operational tables, not
-  queues. They are derived from `weft.log.tasks`, are not exposed through
-  `weft queue *`, and are not task lifecycle or result authority.
+- `weft_monitor_meta`, `weft_monitor_task_collations`,
+  `weft_monitor_task_messages`, and `weft_monitor_deferred_writes` are
+  Monitor-owned operational tables, not queues. They are derived from
+  `weft.log.tasks`, are not exposed through `weft queue *`, and are not task
+  lifecycle or result authority.
   `weft_monitor_task_messages` stores temporary pending raw-message references;
   completed raw-message refs are physically removed from the Monitor table
   rather than retained as queue-like tombstones.
+  `weft_monitor_deferred_writes` is the Monitor-owned durable-before-delete
+  outbox for `jsonl_then_delete` lifetime reports; deferred writes are retried
+  by bounded monitor cycles and are operational outbox state only.
 - `weft system prune` can explicitly dry-run or apply exact-message pruning.
   It defaults to runtime-only `weft.state.*` pruning. Retention families can
   also prune selected `weft.log.tasks` and task-local `T{tid}.*` rows with
@@ -143,6 +147,10 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 |----------|---------|
 | `WEFT_DEBUG` | Enable debug output in Weft helpers and CLI surfaces. |
 | `WEFT_LOGGING_ENABLED` | Enable Weft logging output. |
+| `WEFT_ENV_FILE` | Bootstrap dotenv-style file loaded before the full CLI import (see `10-CLI_Interface.md`). |
+| `WEFT_CONTEXT` | Explicit project context directory honored by queue and status command helpers (see `04-SimpleBroker_Integration.md`). |
+| `WEFT_MANAGER_SERVE_LOG_LEVEL` | Foreground `weft manager serve` operational-log verbosity: `off`, `info`, `debug`, or `trace`. Defaults to `off`. |
+| `WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS` | Throttle interval for repeated foreground manager operational-log events. Defaults to 5 seconds. |
 | `WEFT_REDACT_TASKSPEC_FIELDS` | Comma-separated TaskSpec field paths redacted from task-log events. |
 | `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
@@ -165,6 +173,8 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_TASK_MONITOR_LOG_SINK` | Operational output sink selector for monitor processors: `stdout`, `disk`, or `none`. |
 | `WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS` | Manager restart backoff after the supervised monitor exits. |
 | `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` | Whether the supervised monitor creates/verifies and uses its Monitor-owned durable collation tables. Defaults to true. |
+| `WEFT_TASK_MONITOR_MAINTENANCE` | Whether the supervised monitor runs periodic self-maintenance (backend vacuum plus runtime-state prune). Defaults to true. |
+| `WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS` | Minimum seconds between monitor self-maintenance passes. A wall-clock deadline, not a cycle count. Defaults to 3600 seconds. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |
 | `WEFT_LOGS_DIR` | Optional log-root override. Relative values resolve against the project root; absolute values are used directly. Defaults to `.weft/logs`. |
 | `WEFT_DEFAULT_DB_LOCATION` | Broker default database location for SimpleBroker project resolution. |
@@ -173,6 +183,10 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_PROJECT_CONFIG_NAME` | Optional override for the SimpleBroker project-config filename used by Weft. Defaults to `broker.toml`. |
 | `WEFT_PROJECT_SCOPE` | Whether SimpleBroker should search upward for a project-scoped target. |
 | `WEFT_BACKEND`, `WEFT_BACKEND_TARGET`, `WEFT_BACKEND_HOST`, `WEFT_BACKEND_PORT`, `WEFT_BACKEND_USER`, `WEFT_BACKEND_PASSWORD`, `WEFT_BACKEND_DATABASE`, `WEFT_BACKEND_SCHEMA` | Env-selected broker backend and connection details. They win for explicit-root resolution when no Weft-scoped broker config exists, but auto-discovery still prefers a Weft-scoped broker config or an existing legacy sqlite project first. |
+
+Internal supervision inputs (not operator configuration) are deliberately not
+indexed here; `WEFT_MANAGER_RUNTIME_HANDLE_JSON` is documented in
+`05-Message_Flow_and_State.md`.
 
 ## Spec Breaking Notes
 

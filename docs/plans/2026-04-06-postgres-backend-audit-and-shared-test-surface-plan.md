@@ -42,7 +42,7 @@ Read these before implementing anything:
 12. [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md)
 13. [`README.md`](../../README.md)
 14. [`docs/plans/2026-04-06-simplebroker-backend-generalization-plan.md`](./2026-04-06-simplebroker-backend-generalization-plan.md)
-15. [`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md)
+15. `docs/TODO-simplebroker-backend-followups.md` (removed 2026-07-13; all follow-ups resolved, caveat now specified in `docs/specifications/04-SimpleBroker_Integration.md` and `10-CLI_Interface.md`)
 
 Read these Weft runtime and test files next:
 

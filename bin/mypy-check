@@ -10,9 +10,12 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
+# Scope matches the CI mypy gate in .github/workflows/test.yml.
 exec "$PYTHON_BIN" -m mypy \
   --config-file="$CONFIG_FILE" \
   "$ROOT/weft" \
+  "$ROOT/bin" \
   "$ROOT/integrations/weft_django/weft_django" \
-  "$ROOT/extensions/weft_docker" \
-  "$ROOT/extensions/weft_macos_sandbox"
+  "$ROOT/extensions/weft_docker/weft_docker" \
+  "$ROOT/extensions/weft_macos_sandbox/weft_macos_sandbox" \
+  "$ROOT/extensions/weft_microsandbox/weft_microsandbox"

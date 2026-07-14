@@ -171,3 +171,8 @@ Weft is "SimpleBroker for processes":
 - history belongs in supporting docs or plans, not in behavior contracts
 
 ## Related Plans
+
+Implementation plans are historical execution records, not behavior contracts.
+The curated index of all plans, with status and supersession pointers, lives at
+[`docs/plans/README.md`](../plans/README.md). Individual specs carry plan
+backlinks next to the sections those plans implemented.

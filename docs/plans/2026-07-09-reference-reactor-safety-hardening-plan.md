@@ -2439,3 +2439,15 @@ remain uncommitted and unlanded.
   requires the upstream queue-layer fix, the current gate run, and
   independent completed-work closeout. Section 6.5 remains deferred and becomes
   a prerequisite if any listed production/runtime trigger fires.
+
+## Closeout (2026-07-13)
+
+The review verdict above is the historical pre-landing record; it was written
+while the worktree was uncommitted. The gates it names closed afterward: the
+implementation and Unit A/Unit B landed in commit `70df4cb` ("Harden reactor
+and watcher safety"), the plan index status was synchronized in `5447f13`, and
+the slice shipped in release v0.9.89. The `Status: completed` header reflects
+that landing. Section 6.5 remains deferred on its stated triggers. R-15's
+upstream SimpleBroker SQLite lease/WAL question lives with the retained
+reproducer in section 13.2 and the SimpleBroker repository; it is an upstream
+dependency concern and no longer gates this plan's status.

@@ -130,8 +130,8 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
 - When a task process exits, close every cached queue handle, not just
   "owned" auxiliary queues. Under SQLite this can look harmless; under
   Postgres it leaks connection-pool threads and prevents the process from
-  exiting cleanly. See [weft/core/tasks/base.py](/Users/van/Developer/weft/weft/core/tasks/base.py)
-  and [tests/commands/test_task_commands.py](/Users/van/Developer/weft/tests/commands/test_task_commands.py).
+  exiting cleanly. See [weft/core/tasks/base.py](../weft/core/tasks/base.py)
+  and [tests/commands/test_task_commands.py](../tests/commands/test_task_commands.py).
 - In tests that launch background managers or workers from a CLI subprocess,
   do not start that CLI with a short-lived inner `uv run` environment.
   Background children inherit `sys.executable`; if that interpreter comes from
@@ -1014,9 +1014,9 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
   enforcing an elapsed-time timeout. A polling loop can wake after the timeout
   boundary even when the child exited successfully inside the budget, so
   timeout classification must be gated on the runtime still being alive. See
-  [weft/core/runners/subprocess_runner.py](/Users/van/Developer/weft/weft/core/runners/subprocess_runner.py)
+  [weft/core/runners/subprocess_runner.py](../weft/core/runners/subprocess_runner.py)
   and
-  [tests/core/test_subprocess_runner.py](/Users/van/Developer/weft/tests/core/test_subprocess_runner.py).
+  [tests/core/test_subprocess_runner.py](../tests/core/test_subprocess_runner.py).
 
 ## 2026-05-31 Monitor Checkpoints And Status
 
