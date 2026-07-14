@@ -40,8 +40,8 @@ inside an authorized maintenance task (`skills/coalescing/SKILL.md`).
 
 | Tier | Checked through (date, SHA) | Counts at check | Reason deferred | Reconsider when |
 |------|------------------------------|-----------------|-----------------|-----------------|
-| Lessons | 2026-07-14, first sweep | 57 dated sections past (no) watermark — tripped; ~50 are past the age floor | First sweep conservative by declaration: a bulk fold of a 67KB ledger requires a dedicated authorized session with per-section dedup against the 10 Golden Rules and citation checks against 152 plans — folding under time pressure is how evidence gets destroyed | A dedicated sweep session is authorized |
-| Plans | 2026-07-14, first sweep | ~140 completed plans, no retired ledger entries — tripped | Bulk retirement needs exemplar tagging decisions and per-plan harvest gates; deferred to dedicated sessions, oldest-first | A dedicated sweep session is authorized |
+| Lessons | 2026-07-14, `1e2e16d` | 57 dated sections past (no) watermark — tripped; ~50 are past the age floor | First sweep conservative by declaration: a bulk fold of a 67KB ledger requires a dedicated authorized session with per-section dedup against the 10 Golden Rules and citation checks against 152 plans — folding under time pressure is how evidence gets destroyed | A dedicated sweep session is authorized |
+| Plans | 2026-07-14, `1e2e16d` | ~140 completed plans, no retired ledger entries — tripped | Bulk retirement needs exemplar tagging decisions and per-plan harvest gates; deferred to dedicated sessions, oldest-first | A dedicated sweep session is authorized |
 | Promotion | 2026-07-14, first sweep | not derived | Derive at a future sweep | — |
 
 ## Run Log
