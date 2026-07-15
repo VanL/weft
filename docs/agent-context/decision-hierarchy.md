@@ -113,8 +113,8 @@ classification of real tasks remains judgment, verified by the
 declared-claim line and by review; repositories with test harnesses
 additionally encode these fixtures as firing tests over their own
 tooling. Fixture rows state their trigger facts explicitly — class
-follows from the stated facts, never from file topology. Edits to
-Edits to the trigger lists update these fixtures in the same change: the
+follows from the stated facts, never from file topology. Edits to the
+trigger lists update these fixtures in the same change: the
 checker enforces presence, review enforces meaning.
 
 | Fixture (trigger facts stated) | Class |
