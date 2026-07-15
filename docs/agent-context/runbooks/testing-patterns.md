@@ -284,6 +284,59 @@ terminal observation, an unbounded test drain has no failure boundary.
 See engineering-principles §9 and
 `docs/agent-context/runbooks/adversarial-acceptance-probes.md`.
 
+### Pattern 10: Lifecycle Tests Assert the Wrong Boundary Under Load
+
+**Symptoms**
+
+- A process/task lifecycle test passes locally and alone, then flakes under
+  full-suite xdist, release-gate load, or on Windows CI.
+- The failure clusters at teardown: a task reports `cancelled`/`stopped`
+  before its worker process has actually exited, a tempdir will not delete
+  because a broker handle is still open, or a subprocess-tree timeout test
+  fires on a startup budget that was never realistic under load.
+
+**Why it happens**
+
+Under scheduler and backend pressure, the *observable status event* and the
+*real terminal cleanup boundary* separate in time. Tests that assert on the
+first status event, on a tight startup budget, or on `pid_exists()` alone are
+asserting a boundary that is not yet the one teardown depends on. On Windows,
+an open SQLite handle is a hard tempdir-deletion blocker and can outlive the
+last live PID; locked paths may also surface through 8.3 short-name segments
+(`RUNNER~1`).
+
+**What to do**
+
+- **Size waits for worst-case pressure, and fix it in the shared harness
+  default.** Default subprocess/completion/startup waits must survive
+  full-suite xdist and release-gate load, not just isolated local runs. When
+  several unrelated tests fail at the same fixed timeout, raise the shared
+  `WeftTestHarness` default and lock it with a regression test — do not raise
+  one flaky caller's per-test limit.
+- **Assert the real terminal boundary, not the first event.** Wait for a dead
+  PID (via `psutil`/`os.kill`, treating zombies as exited — `pid_exists()`
+  alone is too strict cross-platform), for the TID-mapping surface to show no
+  live `pid`/`managed_pids`, for the kill boundary itself on subprocess-tree
+  timeout tests, or for real broker-file releasability before disposing a
+  tempdir (`cleanup(preserve_database=True)` and normal `cleanup()` both need
+  the Windows releasability gate). Canonicalize reported and configured paths
+  with real-path semantics before classifying a lock.
+- **Prove the subtree existed before the wait.** Have the descendant publish
+  its own readiness signal as its first action and have the parent fixture
+  wait for it before entering a long sleep, so the test measures subtree
+  cleanup instead of scheduler luck.
+- **Exercise one teardown path at a time.** Combining a downstream REPL exit
+  (`quit()`) with a wrapper-level command (`:quit`) creates nondeterministic
+  teardown races under load. Capture the child return code and trailing
+  PTY/stderr output so a failure distinguishes slow startup from an early
+  exit. Tests that manage a harness manually must call `harness.cleanup()` in
+  `finally` before any direct `_tempdir.cleanup()`.
+
+(Distilled from 4 lessons.md sections, 2026-04-07..2026-04-09, source
+`1c997978`: "Interactive TTY Tests", "CLI Harness Timeouts", "Spawn-Heavy
+Timeout Tests", "Cancelled Task Teardown". Full raw entries:
+`git show 1c997978:docs/lessons.md`.)
+
 ## Verification Pattern
 
 For changes that touch queue semantics, manager behavior, or task lifecycle:

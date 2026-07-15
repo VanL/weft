@@ -86,6 +86,20 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
     with everything else. (See engineering-principles §9, testing-patterns
     Pattern 9, and `docs/agent-context/runbooks/adversarial-acceptance-probes.md`.)
 
+## Fold Records
+
+Cold dated sections that have been distilled into a runbook or Golden Rule and
+removed from the incident log below. The raw material is recoverable at the
+cited source SHA; each surviving distillation carries its own fold cue. This
+index is not a dated section and does not count toward the coalescing trigger.
+
+- 2026-07-15 — distilled 4 cold test-timing sections into
+  `docs/agent-context/runbooks/testing-patterns.md` Pattern 10 ("Lifecycle
+  Tests Assert the Wrong Boundary Under Load"): "Interactive TTY Tests"
+  (2026-04-07), "CLI Harness Timeouts" (2026-04-08), "Spawn-Heavy Timeout
+  Tests" (2026-04-09), "Cancelled Task Teardown" (2026-04-09). Raw entries:
+  `git show 1c997978:docs/lessons.md`.
+
 ## 2026-07-02 Verification-Lessons Fold
 
 - 2026-07-02: Verification-lessons fold synced from agent-guidance (2026-07-02
@@ -223,48 +237,6 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
 - If a document is human-clear but agent-ambiguous, tighten it immediately with
   clearer ownership, boundary, verification, and required-action language
   rather than trusting the next implementer to infer the right path.
-
-## 2026-04-07 Interactive TTY Tests
-
-- PTY-backed integration tests should exercise one shutdown path at a time.
-  Combining a downstream REPL exit command like `quit()` with a wrapper-level
-  command like `:quit` creates nondeterministic teardown races under slower
-  backends and full-suite load.
-- PTY-backed prompt tests need startup timeouts sized for full-suite xdist
-  pressure, not just single-test runs. When the prompt does not appear, capture
-  the child return code and trailing PTY output so the failure distinguishes
-  slow startup from an early process exit.
-- Spawned-process teardown tests should treat zombie processes as exited.
-  `pid_exists()` alone is too strict for cross-platform process cleanup checks
-  and can create false failures after the process has already terminated.
-
-## 2026-04-08 CLI Harness Timeouts
-
-- Shared CLI integration helpers must size their default subprocess and
-  completion waits for full-suite xdist and release-gate load, not just for
-  isolated local runs. When multiple unrelated CLI tests fail at the same
-  fixed timeout, move the fix to the shared harness default instead of raising
-  per-test limits.
-- `WeftTestHarness.cleanup(preserve_database=True)` must wait for actual broker
-  file release, not just process quiescence. On Windows, recently exited
-  managers/tasks and recently closed broker handles can leave `weft-tests.db`
-  undeletable for a short period after the last live PID disappears, so the
-  preserve-cleanup contract must gate return on database releasability when the
-  caller may immediately dispose the tempdir.
-- Windows CI can need materially longer than a local developer machine for that
-  releasability probe to turn green. Keep the extra wait budget in the shared
-  harness cleanup path, and lock it with a regression test, rather than raising
-  one flaky caller's timeout.
-- Tests that manage `WeftTestHarness` manually must always call
-  `harness.cleanup()` in `finally` before any direct `_tempdir.cleanup()`.
-  Jumping straight to tempdir cleanup on failure skips worker teardown and can
-  leak harness environment overrides into later tests, which turns one broken
-  test into a misleading cascade.
-- Windows cleanup errors may report locked tempdir paths through 8.3 short-name
-  segments such as `RUNNER~1`. Harness classifiers must canonicalize both the
-  reported filename and configured database artifacts with real-path semantics,
-  and should not depend only on artifacts that still exist after partial
-  cleanup.
 
 ## 2026-04-08 Interactive Contract
 
@@ -612,17 +584,6 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
   a stale or synthetic record, and treating it as kill-authoritative can signal
   the current pytest worker or another unrelated process during cleanup.
 
-## 2026-04-09 Spawn-Heavy Timeout Tests
-
-- Timeout tests for subprocess trees must assert the kill boundary, not a tight
-  startup budget. In xdist-heavy runs, one second is not enough headroom for
-  spawned Python worker startup, interpreter import, parent process launch, and
-  child process launch.
-- When a test needs proof that a descendant existed before timeout cleanup, the
-  descendant should publish its own readiness signal as its first action and the
-  parent fixture should wait briefly for that signal before entering its long
-  sleep. That makes the test measure subtree cleanup instead of scheduler luck.
-
 ## 2026-04-12 Local Test Tooling
 
 - Developer-facing docs must say plainly that local `pytest`, `mypy`, and
@@ -655,19 +616,6 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
 - Tests for detached bootstrap should prove structural separation, not only
   happy-path liveness. On POSIX, a strong proof is that the live manager is no
   longer in the caller CLI process group after `manager start` returns.
-
-## 2026-04-09 Cancelled Task Teardown
-
-- Cancelled-task integration tests must not stop at the first `control_stop`
-  or cancelled status event when fixture teardown still has to reap live task
-  PIDs. On slower Windows runners, the task can report cancellation before the
-  worker process has fully exited, and that leaves teardown to do the hard
-  cleanup work under much worse timing.
-- For CLI cancellation tests that exercise real task processes, wait for the
-  TID-mapping surface to show no live `pid` or `managed_pids` before returning
-  from the test. That keeps the assertion aligned with the real cleanup
-  boundary and avoids cross-platform teardown flakes that only show up under
-  CI load.
 
 ## 2026-04-14 Explicit Preflight Boundaries
 
