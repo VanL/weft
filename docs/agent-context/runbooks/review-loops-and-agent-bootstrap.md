@@ -54,15 +54,29 @@ record reviewer availability when it materially affected the review choice.
 
 Recommended prompt:
 
-> Read the plan at [path] and its `## Proposed Spec Delta` (if present),
-> including the named promotion strategy. Carefully examine the plan, the
-> proposed spec text, and the associated code. Look for errors, bad ideas,
-> latent ambiguities, and performative overengineering — process,
-> abstraction, or ceremony that does not address a real risk or improve
-> correctness; recommending removal is as valuable as recommending
-> additions. Don't do any implementation, but answer carefully: Could
-> you implement this confidently and correctly against the delta as promoted,
-> if asked?
+> Read the plan at [path] — including its `## Proposed Spec Delta` and
+> promotion strategy, if present — and review the associated code and
+> documentation. Look for errors, bad ideas, and latent ambiguities.
+> Watch out for performative overengineering — tests or processes that
+> add ceremony without meaningfully addressing a real-world risk
+> identified in the code.
+>
+> Check specifically for invariants: what must not be changed (where
+> this repository keeps a standing-invariants registry, check the plan
+> against it). If you need to propose a new invariant, or there is a
+> meaningful risk that would be raised by implementing this plan,
+> describe that risk with a directive to raise it for human review.
+>
+> You must answer PASS or BLOCKED, followed by your analysis of any
+> blocking issues, based upon your answers to these two questions:
+> 1. If asked, could you implement this plan as written confidently and
+>    correctly?
+> 2. Would implementing this plan meaningfully impair or degrade the
+>    system, its security, or its robustness?
+
+A BLOCKED verdict must trace to question 1 or question 2; anything else
+the reviewer wants to say is a finding or a raise-for-human-review
+directive, never a block.
 
 Give the reviewer:
 
@@ -98,6 +112,45 @@ Ask the reviewer to focus on:
 - missing verification
 - missing doc maintenance
 - drift from the plan or spec
+
+## Scoped Change Review Prompt
+
+For reviewing a bounded change (a fix, a revert, a revision to an
+approved plan) rather than a whole plan. The brackets are the brief's
+required-shape elements (see `skills/call-agent/SKILL.md` step 2): if
+you cannot fill one, you have not decided the review's scope yet — decide
+it before dispatching, not in follow-ups. Filling the brackets IS the
+scope decision.
+
+> You are reviewing a single change, not the subsystem it touches.
+> Do not implement or modify anything.
+>
+> **Unit under review:** [the delta — files, diff, or plan section] at
+> baseline [SHA]. For a plan revision: the delta from the reviewed
+> baseline [SHA] plus its Revision Log rationale.
+> **Goal of the change:** [one sentence].
+> **Explicitly accepted risks — do not re-litigate:** [list, or "none
+> declared"].
+> **Standing constraints this change must not cross:** [key invariants,
+> or the repo's invariants registry path, or "none registered"].
+> **Pre-existing concerns** (concurrency, error shapes, validation,
+> policy, lifecycle, style) are out-of-scope observations unless THIS
+> change makes them worse.
+>
+> Output: a findings table — ID | severity (P1–P3/nit) | location |
+> finding | **suggested** disposition. Severity is your claim about
+> impact; whether anything blocks is decided at disposition, not by you.
+> Scope expansions go in a separate "Observations (not actionable this
+> pass)" section for the owner — never as blockers. Prefer removing
+> unnecessary work over adding it. Verdict line: `no blocker` or
+> `blocker: F<ids>`, naming only findings within the unit under review.
+
+Round-2 variant (after dispositions — never before):
+
+> Round-2 verification, scoped ONLY to these accepted findings and their
+> fixes: [IDs, one line each]. Verify each fix; report any NEW defect the
+> fixes introduced. Do not revisit declined or out-of-scope findings —
+> they are closed by their disposition rows. Verdict: PASS / FAIL.
 
 ## Feedback Loop
 
@@ -143,3 +196,14 @@ Recommended structure:
 - why it matters
 - what file, section, or step is affected
 - whether the reviewer could implement or sign off confidently after the fix
+
+**Verdict vocabulary, by review type:**
+
+- **Plan reviews (the Planning Review Prompt):** `PASS` / `BLOCKED`,
+  derived from the two questions (implementable-confidently;
+  would-not-degrade). A block traces to one of the two questions or it is
+  not a block.
+- **Scoped-change reviews (the Scoped Change Review Prompt):**
+  `no blocker` / `blocker: F<ids>`, naming only findings within the unit
+  under review; round-2 variants answer `PASS` / `FAIL` over accepted
+  finding IDs only.

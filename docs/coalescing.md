@@ -20,6 +20,19 @@ inside an authorized maintenance task (`skills/coalescing/SKILL.md`).
   by `tests/specs/test_plan_metadata.py`) — completed plans with no
   retired-ledger line.
 
+**Triggers are event-derived and denominated in this repo's fold unit.**
+Counts are computed from the ledger and the current tree, never stored,
+and count only cold, unfolded material — entries within the age floor or
+already folded are not eligible. The progress model must match the fold
+unit: this repo's fold unit is the **theme cluster** (not a date prefix),
+so its progress is tracked by the `## Fold Records` index in
+`docs/lessons.md`, not a date watermark — a date cursor would falsely
+claim older unfolded material behind it was folded (see the Watermarks
+note below). Adopted via
+`docs/plans/2026-07-17-agent-guidance-propagation-plan.md` from
+agent-guidance @ `b248e1c`; two independent lineages — mm's per-section
+recalibration and weft's own date-cursor failure — established the rule.
+
 ## Thresholds
 
 | Tier | Trigger (derived count) | Threshold | Age floor |
@@ -44,8 +57,10 @@ older unfolded sections (2026-04-03, 04-04, 04-06) behind it, so advancing a
 date cursor would falsely claim they were folded. Honest accounting here comes
 from removing folded sections from the ledger (the dated-section count drops)
 plus the `## Fold Records` index in `docs/lessons.md`, not from a date
-watermark. This is the concrete evidence for the "denominate the trigger in
-the fold unit" hypothesis (see the 2026-07-15 run-log line).
+watermark. This is the concrete evidence behind the fold-unit-denomination
+rule now stated in the model preamble above: weft's confirmed date-cursor
+failure is one of that rule's two independent lineages (see the 2026-07-15
+run-log line).
 
 ## Deferral State
 

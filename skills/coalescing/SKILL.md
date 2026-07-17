@@ -71,6 +71,19 @@ file owns the repo-local ledger format: when it declares a derivation
 command, use that command — the bullet grep below is the default for
 dated-bullet ledgers only.
 
+**Denominate the count in the repo's fold unit, and count only
+fold-eligible material.** A trigger is actionable only when its unit
+matches how the repo actually folds: a domain-grouped ledger counts per
+section, not repo-wide, and a repo-wide hot-inclusive count nags without
+pointing at a foldable cluster. Count only cold, unfolded material —
+entries within the age floor or already folded are not eligible and must
+not inflate the count. The progress model must match the fold unit too:
+domain-grouped ledgers carry per-section watermarks; a ledger folded by
+theme-cluster across dates uses a fold-records index, not a date cursor —
+a date cursor falsely claims older unfolded material behind it was folded.
+(This repo's ledger is theme-clustered: see the fold unit declared in
+`docs/coalescing.md` and its `## Fold Records` index in `docs/lessons.md`.)
+
 - Lessons past watermark — dated entries newer than the lessons watermark:
 
   ```bash
@@ -117,12 +130,21 @@ For each tripped or requested fold:
    never as a duplicate rule. Duplicate distillation is a defect.
 3. For each genuinely new cold cluster of 3+ entries, draft the
    distillation: a new or amended Golden Rule, an engineering-principles
-   section, or a runbook amendment. **Verify the rule against the
-   citations** — check what the entries actually said, not what memory
-   says they said; memory-drafted rules overclaim. When a fold changes an
-   existing rule's meaning, annotate it in place —
-   `(revised YYYY-MM-DD; was: <gist>)` — so citations to the rule stay
-   interpretable across history.
+   section, or a runbook amendment. **Verify the distillation across three
+   tiers** — text fidelity (it says what the entries said, grepped both
+   directions, not what memory says they said; memory-drafted rules
+   overclaim), symbol liveness (named functions, files, and flags still
+   exist), and — whenever the distillation is phrased as a present-tense
+   behavior claim, especially text landing in an implementation doc —
+   **behavioral parity**: reproduce that the code still does what the rule
+   claims. The first two tiers are mechanical; the third is mandatory for
+   any current-behavior claim. Verifying the incoming lessons is not
+   enough: a fold that touches a runbook or spec also **re-verifies the
+   pre-existing code examples adjacent to its edits** — those examples are
+   status claims too, and a stale one sits in the exact pattern the
+   incoming lesson warns about. When a fold changes an existing rule's
+   meaning, annotate it in place — `(revised YYYY-MM-DD; was: <gist>)` —
+   so citations to the rule stay interpretable across history.
 4. Write the distillation and its fold cue in the surviving text:
    `(distilled from N entries, YYYY-MM-DD..YYYY-MM-DD, source <source_sha>)`.
    The cue names the pre-fold commit that contains the raw material — never
@@ -137,7 +159,14 @@ For each tripped or requested fold:
 6. Decay evidence is multi-signal: absence of citation alone never
    justifies a fold — agents follow rules without citing them. Weigh
    recent incidents, test coverage, review recurrence, last validation,
-   and importance class. Golden rules and safety invariants are exempt
+   and importance class. A lesson that encodes an **upstream framework
+   fact** (not a house choice) carries a version-bound decay clock
+   instead: when the pinned dependency makes the violation loudly
+   impossible — a removed API, an import that now raises — the lesson has
+   **expired** and folds to git with the version fact as its cue, no
+   distillation target owed. A still-live framework fact is platform
+   documentation, not a convention: scatter it to the nearest topic doc,
+   never a "our conventions" home. Golden rules and safety invariants are exempt
    from automated decay entirely (importance floor); they change only by
    explicit revision, supersession, or deprecation, always with the
    `(revised YYYY-MM-DD; was: <gist>)` marker. An uncited cold entry with
@@ -183,6 +212,13 @@ For each completed or superseded plan:
   flaky wait, a missing fixture path) are three themes — do not cluster on
   a shared keyword.
 - A rule that applies to almost every change strengthens a runbook instead.
+- **Before designing an extraction for a very large section, check theme
+  coherence.** A section that trips only because it is large may be a
+  chronological catch-all — a dumping ground spanning many domains, not one
+  theme. Its fix is reclassification: extract only the genuinely homeless
+  coherent clusters to their real homes and leave the misfiled remainder
+  for its own domain's pass. Do not force a mega-runbook over unrelated
+  material just to make the count drop.
 - Presence in the always-read context is NOT promotion evidence; only
   explicit citation in work products counts.
 
@@ -216,6 +252,13 @@ repo's committed SHA — never from a working tree.
    line.
 5. Commit per the session's authorization; if the sweep stays uncommitted,
    it must have been additive-only (see step 2 of the lessons tier).
+6. **When the sweep runs beside live concurrent sessions**, coalesce
+   defensively: defer any rule whose domain is under active rework — fold
+   it at a later sweep, not now — keep edits to contested files as
+   localized additive inserts with no reflow, and report the exact insert
+   regions (file, subsection, approximate line) so the landing agent can
+   stage the sweep's hunks selectively and reconcile them with the other
+   session's edits.
 
 ## Output Standard
 

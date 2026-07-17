@@ -88,6 +88,16 @@ the plan as authoritative.
 - Treat DRY, YAGNI, and red-green TDD as planning requirements, not slogans:
   name the existing helper to reuse, the abstraction not to add, and the
   failing test or equivalent proof for each behavior change.
+- **Plans record completed work and evidence, never transient repository
+  state.** "X is uncommitted," "currently in the worktree," "awaiting
+  staging" are claims that fall false the moment the work lands — and a
+  plan becomes immutable at closure, so a transient claim frozen into it
+  is *guaranteed* to end up wrong. State what was done and the evidence
+  that proves it (files, gates, SHAs once they exist); express landing
+  mechanics as instructions ("land by explicit file-list staging against
+  the delta table"), never as descriptions of the current tree. Transient
+  state belongs in the conversation, the commit message, the handoff
+  report, or a status-index qualifier that is expected to clear.
 - For risky work, write rollback and rollout notes early enough to shape the
   task breakdown.
 - Required reading should describe the current structure and load-bearing path,
@@ -735,6 +745,15 @@ ceremony inside the plan file.
   edited ones, and git preserves prior versions; decision, deviation, and
   review logs are append-only. At closure the whole plan becomes
   immutable.
+- **Approval attaches to the text that was reviewed, not to the file
+  name.** Mutability within approved scope is free, but a revision that
+  changes invariants, ownership, authority, or blast radius re-enters
+  classification and review — the reviewer's unit is the delta from the
+  reviewed text plus the stated reason for it, never the revised text
+  standalone. (Evidence: mm's July 2026 lifecycle incident propagated
+  entirely through in-place revisions of an approved plan; mm's revision
+  re-gate, reviewed-baseline pin, and Revision Log are the upstream
+  fold-up candidates.)
 - **Completed and superseded plans are harvest candidates.** They stay in
   the tree until the coalescing sweep retires them.
 - **The harvest gate — all four before deletion, no exceptions:**

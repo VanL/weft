@@ -58,9 +58,35 @@ Per review-loops §3–§4: embed the plan/delta content verbatim in the
 prompt (do not assume the reviewer can find files), list the files it
 should read, include the review stance (errors, bad ideas, latent
 ambiguities, performative overengineering), and demand explicit
-[P1]/[P2] markers plus a PASS/BLOCKED verdict when gating. Prepend a
-boundary line: "You are reviewing; do not implement or modify
+[P1]/[P2] markers plus a PASS/BLOCKED verdict when gating (for plan
+reviews, derived from the two gate questions in review-loops's Planning
+Review Prompt; scoped-change reviews use `no blocker`/`blocker: F<ids>`).
+Prepend a boundary line: "You are reviewing; do not implement or modify
 anything. Stay within this repository's files."
+
+**The brief is a required-shape artifact — a reviewer is only as good
+as the frame it receives.** Every review brief states, explicitly:
+(1) the **unit under review** — this delta at this baseline, never
+"review this subsystem"; (2) **explicitly accepted risks**, named so
+the reviewer cannot re-litigate them; (3) the **pre-existing rule** —
+concerns predating the change are out-of-scope observations *unless
+this change worsens them*; (4) the **disposition contract** — findings
+carry *suggested* dispositions, expansions are labeled for owner
+decision and never arrive as blockers (severity is the reviewer's
+claim; blocking is a disposition-time decision); (5) **prefer removing
+unnecessary work**; (6) an **observations outlet** — a separate,
+non-actionable section for out-of-scope concerns, so broad looking is
+encouraged while narrow acting is enforced. A brief missing an element
+is malformed: fix the brief, not the reviewer's output. The
+fill-every-bracket template (and its round-2 variant) is the
+Scoped Change Review Prompt section of
+`review-loops-and-agent-bootstrap.md` — filling the brackets IS the
+scope decision; if a bracket resists filling, the scope is undecided
+and the dispatch is premature. Two named anti-patterns:
+**severity-as-mandate** (requesting "blocking findings" pre-decides
+disposition) and **resolution-polling** (asking whether an
+undispositioned or declined finding is "resolved" re-opens it — round-2
+briefs enumerate accepted finding IDs only).
 
 Write long prompts to a temp file and pass `"$(cat "$F")"` — never
 fight shell quoting inline.
