@@ -1320,6 +1320,39 @@ def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
             kill_process_tree(target_pid)
 
 
+def test_force_kill_task_processes_accepts_dead_after_verified_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verified host PID that exits during the force-kill attempt counts as
+    converged even when the process helper cannot return a killed PID."""
+
+    entry = {
+        "runtime_handle": _runtime_handle(
+            "host",
+            "runtime-123",
+            host_pids=[33333],
+            metadata={"scope": "test"},
+        ),
+    }
+    kill_calls: list[int] = []
+    monkeypatch.setattr(
+        task_cmd,
+        "pid_matches_create_time",
+        lambda pid, create_time: pid == 33333,
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "kill_process_tree",
+        lambda pid, timeout=0.2: kill_calls.append(pid) or set(),
+    )
+    monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: False)
+
+    task_killed = task_cmd._force_kill_task_processes(entry)
+
+    assert task_killed is True
+    assert kill_calls == [33333]
+
+
 def test_force_kill_task_processes_preserves_liveness_fallback_without_create_time(
     tmp_path,
 ) -> None:

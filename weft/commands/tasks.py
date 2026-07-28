@@ -1488,7 +1488,8 @@ def _force_kill_task_processes(task_entry: dict[str, Any] | None) -> bool:
                 create_time,
             )
             continue
-        if kill_process_tree(pid_value, timeout=0.2):
+        killed = kill_process_tree(pid_value, timeout=0.2)
+        if killed or not _pid_exists(pid_value):
             task_killed = True
     return task_killed
 
