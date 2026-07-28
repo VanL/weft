@@ -915,6 +915,8 @@ class TaskMonitor(ServiceTask):
         worker._stop_event = threading.Event()
         worker._running_event = threading.Event()
         worker._thread = None
+        if "_run_thread" in vars(worker):
+            worker._run_thread = None
         worker._thread_local = threading.local()
         worker._has_thread_db = False
         worker._stop_lock = threading.Lock()

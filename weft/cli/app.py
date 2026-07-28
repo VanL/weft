@@ -937,6 +937,7 @@ def init(
             exists=False,
             file_okay=False,
             dir_okay=True,
+            metavar="DIRECTORY",
             writable=True,
             resolve_path=True,
         ),
@@ -1405,6 +1406,7 @@ def run_command(
                 "Explicit task name. For persistent runs, also claims the named "
                 "runtime endpoint"
             ),
+            metavar="TEXT",
         ),
     ] = None,
     interactive: Annotated[

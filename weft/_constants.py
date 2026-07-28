@@ -846,7 +846,7 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _pending_termination_sources _persistent
     _persistent_service _pong_extension_provider _queue_cache _queue_generation
     _queue_iterator _queue_name_map _queue_obj _queues _resource_monitor
-    _running_event _runtime_cleanup_queue_discovery_pending _runtime_handle
+    _run_thread _running_event _runtime_cleanup_queue_discovery_pending _runtime_handle
     _serve_log_config_emitted _serve_log_last_emit_ns _serve_log_last_state
     _service_lane_work_items _service_worker_lock _service_worker_registrations
     _setproctitle_module _spilled_output_dirs _start_pending _stop_event
@@ -883,7 +883,7 @@ _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     _owned_queue_names _parent_loss_watch_active _paused
     _pending_messages_precheck_confirmed _pending_termination_sources
     _pong_extension_provider _queue_cache
-    _queue_iterator _queue_obj _queues _resource_monitor _running_event
+    _queue_iterator _queue_obj _queues _resource_monitor _run_thread _running_event
     _runtime_handle _service_lane_work_items _service_worker_lock
     _service_worker_registrations _setproctitle_module _start_pending
     _stop_event _stop_lock _strategy _strategy_started _streaming_session_info
