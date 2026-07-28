@@ -285,6 +285,7 @@ class MultiQueueWatcher(BaseWatcher):
         self._multi_activity_waiter: Any | None = None
         self._multi_activity_waiter_generation: int | None = None
         self._multi_activity_waiter_signature: tuple[str, ...] | None = None
+        self._closed_activity_waiter_ids: set[int] = set()
         self._pending_messages_precheck_confirmed = False
         self._next_inactive_probe_at = time.monotonic()
         self._topology_lock = threading.RLock()
@@ -495,11 +496,14 @@ class MultiQueueWatcher(BaseWatcher):
         except Exception:  # pragma: no cover - defensive backend cleanup
             logger.debug("Failed to close candidate topology resource", exc_info=True)
 
-    @staticmethod
-    def _close_activity_waiter_once(waiter: Any | None) -> None:
+    def _close_activity_waiter_once(self, waiter: Any | None) -> None:
         """Close one displaced waiter once at its owner boundary."""
         if waiter is None:
             return
+        waiter_id = id(waiter)
+        if waiter_id in self._closed_activity_waiter_ids:
+            return
+        self._closed_activity_waiter_ids.add(waiter_id)
         try:
             waiter.close()
         except Exception:  # pragma: no cover - defensive backend cleanup
@@ -858,6 +862,12 @@ class MultiQueueWatcher(BaseWatcher):
                 thread_ref = self._thread
                 if thread_ref is not None and thread_ref() is current:
                     self._thread = None
+
+    def _cleanup_runtime_resources(self) -> None:
+        """Detach Weft-owned waiters before inherited strategy cleanup."""
+
+        self._reset_multi_activity_waiter()
+        super()._cleanup_runtime_resources()
 
     def _wait_for_activity_body(self, timeout: float | None) -> None:
         """Execute the shared broker wait without standalone ownership policy.

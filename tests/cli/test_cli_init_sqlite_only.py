@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -63,4 +64,5 @@ def test_cli_init_allows_configured_project_file_without_default_db(
     assert rc == 0
     assert "Initialized Weft project" in out
     assert err == ""
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert (project_root / ".weft" / "broker.db").is_file()

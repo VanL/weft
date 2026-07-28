@@ -7,6 +7,7 @@ Spec references:
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -44,6 +45,14 @@ def _project_config_path(root: Path, config: Mapping[str, Any]) -> Path:
     return root / path_prefix / config_name
 
 
+def _tighten_existing_project_broker_config(path: Path) -> None:
+    """Restrict an existing Weft-owned SimpleBroker project config to 0600."""
+
+    if not path.is_file():
+        return
+    os.chmod(path, 0o600)
+
+
 def cmd_init(
     directory: Path | None = None,
     *,
@@ -63,10 +72,11 @@ def cmd_init(
     config = load_config(overrides) if overrides is not None else load_config()
     root = Path(directory or Path.cwd()).expanduser().resolve()
     backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
+    project_broker_config_path = _project_config_path(root, config)
     if (
         backend_name == "sqlite"
         and not config.get("BROKER_DEFAULT_DB_NAME")
-        and not _project_config_path(root, config).is_file()
+        and not project_broker_config_path.is_file()
     ):
         if not quiet:
             print(
@@ -75,6 +85,7 @@ def cmd_init(
             )
         return EXIT_ERROR
     try:
+        _tighten_existing_project_broker_config(project_broker_config_path)
         broker_target = resolve_context_broker_target(root, config=config)
         result = int(sb_cmd_init(broker_target, quiet=True))
     except Exception as exc:  # pragma: no cover - defensive

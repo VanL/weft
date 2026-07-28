@@ -800,7 +800,8 @@ _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS: Final[frozenset[str]] = frozenset(
 _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     """
     _active_queues _activity _caller_pid _check_counter _check_interval
-    _cleanup_errors _config _ctrl_out_queue_obj _db_path _default_error_handler
+    _cleanup_errors _closed_activity_waiter_ids _config _ctrl_out_queue_obj
+    _db_path _default_error_handler
     _deferred_task_log_last_error _deferred_task_log_last_flush_at
     _deferred_task_log_pending _drive_loop_active _drive_owner_ident
     _drive_owner_thread _endpoint_registration_message_id
@@ -870,7 +871,8 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
 
 _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     """
-    _active_queues _cleanup_errors _config _ctrl_out_queue_obj
+    _active_queues _cleanup_errors _closed_activity_waiter_ids _config
+    _ctrl_out_queue_obj
     _drive_loop_active _drive_owner_ident _drive_owner_thread
     _endpoint_registration_message_id _endpoint_registration_metadata
     _endpoint_registration_name _error_handler _external_stop_handled

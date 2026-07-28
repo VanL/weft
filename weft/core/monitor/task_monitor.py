@@ -922,6 +922,7 @@ class TaskMonitor(ServiceTask):
         worker._stop_lock = threading.Lock()
         object.__setattr__(worker, "_ctrl_out_queue_obj", None)
         worker._task_context_cache = None
+        worker._closed_activity_waiter_ids = set()
         worker._task_lifecycle_lock = threading.Lock()
         worker._task_lifecycle = TaskReactorLifecycle.NEW
         worker._drive_owner_thread = None
