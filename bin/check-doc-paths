@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Gate: every backticked repo-relative path claim in weft's guidance
+surfaces must resolve. Prose binds only what gets checked (engineering
+principle 9, "Enumerable Contracts Get Executable Gates"); path claims
+are the corpus's most common rot class.
+
+Adopted from agent-guidance @ 51626db via
+docs/plans/2026-07-28-agent-guidance-propagation-plan.md. Weft-local
+adaptations: the scan surfaces are weft's layout (docs/specifications,
+not docs/specs; no docs/README.md), the claim pattern covers the
+bin/ tools and tests/specs/ gates weft's guidance cites by path, and
+the hub-only --scaffold mode is dropped.
+
+Usage:
+  check-doc-paths [--root DIR]
+
+Exit 0 when every claim resolves; exit 1 listing the danglers.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Surfaces whose path claims are normative. docs/lessons.md and
+# docs/plans/ are excluded: lessons legitimately cite foreign/sibling
+# paths as history, and plans cite paths that may retire after closure.
+SCAN_DIRS = ["docs/agent-context", "docs/specifications", "skills"]
+SCAN_FILES = ["AGENTS.md", "docs/coalescing.md"]
+
+# A claim is a single-line backticked token that looks like a repo path.
+CLAIM_RE = re.compile(r"`((?:docs|skills|bin|tests)/[A-Za-z0-9_./-]+)`")
+
+# Suffixes/patterns that are templates or globs, not claims.
+NON_CLAIM = re.compile(r"[*{}<>]|YYYY|<[a-z]|\.\.\.")
+
+
+def iter_files(root: Path):
+    for d in SCAN_DIRS:
+        p = root / d
+        if p.is_dir():
+            yield from sorted(p.rglob("*.md"))
+            yield from sorted(p.rglob("*.yaml"))
+    for f in SCAN_FILES:
+        p = root / f
+        if p.is_file():
+            yield p
+
+
+def check_tree(root: Path) -> int:
+    failures = []
+    for f in iter_files(root):
+        text = f.read_text(errors="replace")
+        for m in CLAIM_RE.finditer(text):
+            claim = m.group(1)
+            if NON_CLAIM.search(claim):
+                continue
+            target = root / claim
+            if not (target.exists() or target.is_symlink()):
+                line = text.count("\n", 0, m.start()) + 1
+                failures.append(
+                    f"{f.relative_to(root)}:{line}: `{claim}` does not resolve"
+                )
+    if failures:
+        print(f"check-doc-paths: {len(failures)} dangling path claim(s):")
+        for fail in failures:
+            print(f"  {fail}")
+        return 1
+    print(f"check-doc-paths: OK ({root})")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=str(REPO_ROOT))
+    args = ap.parse_args()
+    return check_tree(Path(args.root))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

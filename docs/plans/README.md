@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 154 plan files in this directory.
+There are currently 155 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 154 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-07-28-agent-guidance-propagation-plan.md`](./2026-07-28-agent-guidance-propagation-plan.md) | Agent-Guidance Propagation Plan (2026-07-28 delta wave) | `completed` | none |
 | [`2026-07-17-agent-guidance-propagation-plan.md`](./2026-07-17-agent-guidance-propagation-plan.md) | Agent-Guidance Propagation Plan (2026-07-17 delta wave) | `completed` | none |
 | [`2026-07-14-agent-guidance-propagation-plan.md`](./2026-07-14-agent-guidance-propagation-plan.md) | Agent-Guidance Propagation Plan (2026-07-14 wave) | `completed` | none |
 | [`2026-07-13-local-live-provider-release-tests-plan.md`](./2026-07-13-local-live-provider-release-tests-plan.md) | Local Live-Provider Release Tests Plan | `completed` | none |

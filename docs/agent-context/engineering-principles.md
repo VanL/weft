@@ -230,6 +230,24 @@ verification failure, not a style nit. (See testing-patterns Pattern 9 and
 This is the gate-side companion to principle 4.2: updating all consumers keeps
 a contract synchronized; enumerating it in a machine check keeps it honest.
 
+The principle applies to the guidance corpus itself, not only to product
+contracts. Documentation gates in this repo:
+
+- `tests/specs/test_plan_metadata.py` — the plan-status contract (closed
+  vocabulary, normalized metadata block, index/file agreement).
+- `tests/specs/test_spec_hygiene.py` — spec/code traceability hygiene.
+- `bin/check-dom15-fixtures` — the task-classification fixture table.
+- `bin/coalesce-check` — the coalescing layer's retrieval contract: every
+  run-log SHA and `git show <sha>:<path>` cue resolves, and pins absent
+  from published history are reported as `local-only pin`.
+- `bin/check-doc-paths` — every backticked repo-relative path claim in
+  the guidance surfaces resolves. **Advisory, not yet blocking**: at
+  adoption (2026-07-28) it reported eight pre-existing dangling claims,
+  several of which are deliberately aspirational (planned test
+  directories, a planned-strategy spec). Triage them and decide which
+  are rot before promoting this to a required gate — see
+  `docs/plans/2026-07-28-agent-guidance-propagation-plan.md`.
+
 ## 10. Variation Is Declared; Deficiency Is Gated
 
 Plans bend on contact with reality, and different pressures produce

@@ -9,9 +9,10 @@ and this file own process).
 Owner: any agent that observes a tripped threshold at session start.
 Boundary: lessons, plans, and skill/runbook promotion. Specs and
 implementation notes are living documents and are never coalesced.
-Verification: the run log below plus `tests/specs/` doc gates. Required
-action: the session-start check is **read-only**; all writes happen only
-inside an authorized maintenance task (`skills/coalescing/SKILL.md`).
+Verification: the run log below, `bin/coalesce-check`, plus
+`tests/specs/` doc gates. Required action: the session-start check is
+**read-only**; all writes happen only inside an authorized maintenance
+task (`skills/coalescing/SKILL.md`).
 
 **Local derivation commands** (this file owns the repo-local format):
 - Lessons: dated H2 sections — `grep -cE '^## 20[0-9]{2}-' docs/lessons.md`
@@ -19,6 +20,21 @@ inside an authorized maintenance task (`skills/coalescing/SKILL.md`).
 - Plans: metadata `Status:` headers (the plan-metadata contract enforced
   by `tests/specs/test_plan_metadata.py`) — completed plans with no
   retired-ledger line.
+
+**Executable check.** `bin/coalesce-check` implements the lessons
+derivation above and audits this file's retrieval contract: it resolves
+every backticked SHA (here, then in sibling repos), checks every
+`git show <sha>:<path>` cue, and reports pins that are not in
+`origin/main` as `local-only pin`. This file remains the spec — when
+the two disagree, the declared commands win and the script is the
+defect. Exit 1 means a cue is unretrievable anywhere, which is a broken
+retrieval contract; local-only pins are reported but not fatal, because
+publication is the owner's call. Adopted 2026-07-28 from agent-guidance
+@ `51626db` via
+`docs/plans/2026-07-28-agent-guidance-propagation-plan.md`; weft is the
+motivating case — the 2026-07-28 field audit found this file's cues
+true locally but unverifiable from the published mirror, and the tool's
+first run here confirmed it (two local-only pins).
 
 **Triggers are event-derived and denominated in this repo's fold unit.**
 Counts are computed from the ledger and the current tree, never stored,

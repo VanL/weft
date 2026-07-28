@@ -738,7 +738,36 @@ continues to describe current ownership and behavior accurately.
 
 Plans move through: `draft` → `active` → `completed` or `superseded` →
 `retired`. Status lives in the plan index (`docs/plans/README.md`), not in
-ceremony inside the plan file.
+ceremony inside the plan file. That arrow diagram is the inherited
+upstream lifecycle and describes intent, not weft's recorded tokens —
+the next bullet states the statuses this repo actually allows and gates.
+
+- **The status vocabulary is closed, and the index is gated.** This
+  repo's valid statuses are exactly `completed` and `draft`, declared
+  in the `## Status Taxonomy` section of `docs/plans/README.md` and
+  enforced by `tests/specs/test_plan_metadata.py`: every plan carries a
+  normalized three-key metadata block (`Status`, `Source specs`,
+  `Superseded by`, in that order) directly under its title, every plan
+  file is indexed, and the index row's status must match the file's.
+  An unknown status, a missing or misordered block, an unindexed plan,
+  or a `Superseded by` pointer to a missing file all fail the gate.
+  Consequences: the index is the derivation source for the coalescing
+  plans tier and its gate runs before the count — never fall back past
+  a structured index to free-form headers, and never rewrite status
+  data to make the gate pass; a checker failure blocks derivation until
+  repaired or explicitly deferred. The upstream standard additionally
+  defines a `status-review` quarantine — a conservative state for plans
+  whose evidence cannot distinguish active from completed, which never
+  counts as completed, is never a retirement candidate, and never
+  silently ages into either. Weft has no such
+  status today; adopting one changes the test contract and is an open
+  owner decision recorded in
+  `docs/plans/2026-07-28-agent-guidance-propagation-plan.md`. Until it
+  is decided, a plan whose status is genuinely ambiguous stays at its
+  current status with the ambiguity stated in the plan body, never
+  promoted to `completed` to make a count tidy. (Adopted from
+  agent-guidance 2026-07-28; upstream source taut's status-index
+  contract, its commit `3706d73`.)
 
 - **Active plans have a mutability boundary**: task instructions and
   checklists stay current and mutable — stale instructions are worse than

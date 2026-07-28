@@ -4,15 +4,19 @@ Status: Active — governed by the coalescing model in
 `docs/coalescing.md` (adopted from agent-guidance [DOM-14]). The
 session-start trigger check is read-only; sweeps run only as authorized
 units of work. (Adopted from agent-guidance @ 2f7eff6 via
-`docs/plans/2026-07-14-agent-guidance-propagation-plan.md`.)
+`docs/plans/2026-07-14-agent-guidance-propagation-plan.md`; last
+re-synced from agent-guidance @ `51626db` via
+`docs/plans/2026-07-28-agent-guidance-propagation-plan.md`.)
 
 ## Purpose
 
-Run the compounding layer's maintenance pass: distill cold lesson entries
-into golden rules and runbook amendments, harvest and retire completed
-plans, promote recurring workflows to skills, and propose cross-repo
-fold-ups upward when a rule generalizes beyond this repository. Keeps the always-read documentation tier
-small and hot while git history holds everything raw.
+Run the compounding layer's maintenance pass: repair defects in the
+memory surfaces, distill cold lesson entries into golden rules and
+runbook amendments, harvest and retire completed plans, promote
+recurring workflows to skills, and propose cross-repo fold-ups upward
+when a rule generalizes beyond this repository. Keeps the always-read
+documentation tier small, accurate, and hot while git history holds
+everything raw.
 
 ## When To Use
 
@@ -66,6 +70,28 @@ small and hot while git history holds everything raw.
 
 ### 1. Derive the trigger counts (never trust a stored number)
 
+**Inspect and repair the coalescing surfaces first.** An authorized
+sweep is maintenance as well as compaction: before trusting a trigger
+count, inspect the affected ledger, index, watermark, cue, ownership
+record, and executable gate. Repair a defect in the same wave when all
+three hold — (1) it is inside the coalescing boundary (memory accuracy,
+derivability, retrieval, traceability, promotion ownership, or the
+coalescing gates); (2) the repair is reversible; (3) current-tree or
+source-SHA evidence determines the correction. Merely logging a
+repairable in-boundary defect is not a completed sweep. Coalescing is
+not generic cleanup: product behavior, unrelated documentation, and
+speculative redesign stay out of scope. Defer instead when the repair
+is ambiguous, destructive, or needs new authority — record the evidence
+gap, owner, and reconsideration condition; deletion, watermark
+advancement, plan soft-retirement, and archival transitions retain
+their landing-authorization requirements. Record every maintenance
+repair in the run log; a deferred defect is recorded as a blocker, not
+presented as maintenance accomplished. (Adopted from taut's
+repair-in-sweep doctrine — its commit `3706d73` — folded up to
+agent-guidance by owner direction 2026-07-28 and landed here via
+`docs/plans/2026-07-28-agent-guidance-propagation-plan.md`. Weft is not
+a lineage for this rule.)
+
 Read the watermarks in `docs/coalescing.md`, then compute. The state
 file owns the repo-local ledger format: when it declares a derivation
 command, use that command — the bullet grep below is the default for
@@ -95,7 +121,24 @@ a date cursor falsely claims older unfolded material behind it was folded.
 - Completed-unretired plans — derivation chain, in order:
   1. rows in the `docs/plans/README.md` status index with status
      `completed` or `superseded`, no `exemplar` marker, and no matching
-     line in the Retired Plans ledger;
+     line in the Retired Plans ledger (`superseded` and `exemplar` are
+     inherited hub vocabulary that weft's status contract does not
+     allow — read them as "if present"; see P2 in the 2026-07-28
+     propagation plan). **This repo's index is already
+     structured and gated, and that gate runs first.** Weft's plan
+     status lives in a normalized metadata block whose vocabulary is
+     closed and machine-enforced by
+     `tests/specs/test_plan_metadata.py` (unknown status, missing or
+     misordered metadata block, unindexed plan file, missing index row,
+     stale index status, or a dangling `Superseded by` pointer all
+     fail). Run that gate before deriving: a failure blocks the count
+     until it is repaired or the deferral is recorded explicitly —
+     never fall back past a structured index to free-form headers, and
+     never rewrite status data to make the gate pass. Where a repo's
+     vocabulary carries a review-quarantine status for plans whose
+     evidence cannot distinguish active from completed, those rows are
+     conservative and never count as completed; weft has no such status
+     today (open proposal — see the 2026-07-28 propagation plan);
   2. if no status index exists, `Status:` headers inside the plan files;
   3. if neither exists, the tier is **not derivable** — record
      "plans tier blocked: no status source" in the run log and move on.
@@ -117,6 +160,14 @@ contains the raw material about to be folded — check with
 `git show <source_sha>:docs/lessons.md`. If the entries exist only in the
 worktree, there is no valid source yet: the destructive phase is blocked
 until the raw state is committed (or the sweep stays additive-only).
+**Cue portability:** this repository has a published mirror
+(`origin`), so a cue must resolve in the published history too — a SHA
+that survives only on this machine is a claim the world cannot verify.
+Weft is the motivating case: the 2026-07-28 field audit found exactly
+this here, cues true locally but unverifiable from the published
+mirror. If the pin is not yet published, the run-log line says
+`local-only pin`; `bin/coalesce-check` reports both conditions
+mechanically.
 
 For each tripped or requested fold:
 
@@ -284,5 +335,8 @@ When the sweep is done, these exist and are verifiable:
 - If the harvest gate keeps blocking on the same item class, the gap is
   upstream (plans closing with open deviation logs) — fix the completion
   gate usage, not the sweep.
-- When an executable `coalesce-check` script exists, replace step 1's
-  manual derivation with it and keep the commands here as the fallback.
+- The executable checker now exists: run `bin/coalesce-check` for step
+  1's derivation and for the cue/publication audit. The commands
+  written here and in `docs/coalescing.md` remain the fallback and the
+  spec the script implements — when they disagree, the declared
+  commands win and the script is the defect.
