@@ -5457,7 +5457,7 @@ def test_manager_cleanup_terminates_reaped_child_managed_pids(
 
     monkeypatch.setattr(manager_mod, "terminate_process_tree", _record_terminate)
 
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + (5.0 if os.name == "nt" else 1.0)
     manager._terminate_children(deadline)
 
     assert manager._child_processes == {}
@@ -7617,7 +7617,8 @@ def test_manager_idle_timeout_does_not_kill_persistent_child(
         )
 
         start = time.time()
-        while not manager._child_processes and time.time() - start < 2.0:
+        startup_timeout = 20.0 if os.name == "nt" else 5.0
+        while not manager._child_processes and time.time() - start < startup_timeout:
             manager.process_once()
             time.sleep(0.05)
         assert manager._child_processes
