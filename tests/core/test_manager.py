@@ -5457,7 +5457,8 @@ def test_manager_cleanup_terminates_reaped_child_managed_pids(
 
     monkeypatch.setattr(manager_mod, "terminate_process_tree", _record_terminate)
 
-    deadline = time.monotonic() + (5.0 if os.name == "nt" else 1.0)
+    cleanup_budget = 5.0 if os.name == "nt" else 1.0
+    deadline = time.monotonic() + cleanup_budget
     manager._terminate_children(deadline)
 
     assert manager._child_processes == {}
@@ -5465,7 +5466,7 @@ def test_manager_cleanup_terminates_reaped_child_managed_pids(
     assert terminated[0][0] == 515151
     # Split budget: TERM wait consumes at most half the remaining deadline so
     # the kill_after=True SIGKILL reap wait fits inside the same budget.
-    assert 0.0 < terminated[0][1] <= 0.5
+    assert 0.0 < terminated[0][1] <= cleanup_budget / 2.0
     assert terminated[0][2] is True
 
 
