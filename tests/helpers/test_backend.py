@@ -8,6 +8,7 @@ import os
 import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from simplebroker.ext import get_backend_plugin
 
@@ -62,6 +63,26 @@ def _project_config_path(root: Path, *, env: Mapping[str, str] | None = None) ->
     return root / prefix / name
 
 
+def _passwordless_dsn(dsn: str) -> str:
+    """Return a Postgres DSN safe to persist in project config."""
+
+    parsed = urlsplit(dsn)
+    if not parsed.scheme or not parsed.netloc or parsed.password is None:
+        return dsn
+
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+
+    username = parsed.username or ""
+    netloc = f"{quote(unquote(username), safe='')}@{host}" if username else host
+    return urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+    )
+
+
 def postgres_env_overrides_for_root(
     root: Path,
     *,
@@ -101,7 +122,7 @@ def _write_postgres_project_config(
             [
                 "version = 1",
                 'backend = "postgres"',
-                f'target = "{dsn}"',
+                f'target = "{_passwordless_dsn(dsn)}"',
                 "",
                 "[backend_options]",
                 f'schema = "{schema}"',
@@ -110,6 +131,7 @@ def _write_postgres_project_config(
         ),
         encoding="utf-8",
     )
+    os.chmod(config_path, 0o600)
     return config_path
 
 

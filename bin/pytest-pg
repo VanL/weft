@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Final, Literal
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTEST_WORKER_COUNT_HELPER = ROOT / "bin" / "pytest-worker-count"
@@ -227,18 +227,43 @@ def _start_postgres_container() -> tuple[str, str]:
 def _build_test_env(*, dsn: str) -> dict[str, str]:
     """Build the environment used for PG-backed Weft test runs."""
 
+    passwordless_dsn, password = _split_dsn_password(dsn)
     env = os.environ.copy()
     for key in BACKEND_ENV_KEYS:
         env.pop(key, None)
     env["BROKER_TEST_BACKEND"] = "postgres"
     env["SIMPLEBROKER_PG_TEST_DSN"] = dsn
     env["BROKER_BACKEND"] = "postgres"
-    env["BROKER_BACKEND_TARGET"] = dsn
+    env["BROKER_BACKEND_TARGET"] = passwordless_dsn
     env["WEFT_BACKEND"] = "postgres"
-    env["WEFT_BACKEND_TARGET"] = dsn
+    env["WEFT_BACKEND_TARGET"] = passwordless_dsn
+    if password is not None:
+        env["BROKER_BACKEND_PASSWORD"] = password
+        env["WEFT_BACKEND_PASSWORD"] = password
     if "PYTEST_XDIST_AUTO_NUM_WORKERS" not in env:
         env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = _pytest_worker_count()
     return env
+
+
+def _split_dsn_password(dsn: str) -> tuple[str, str | None]:
+    """Return ``(passwordless_dsn, password)`` for a Postgres test DSN."""
+
+    parsed = urlsplit(dsn)
+    if not parsed.scheme or not parsed.netloc or parsed.password is None:
+        return dsn, None
+
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+
+    username = parsed.username or ""
+    netloc = f"{quote(unquote(username), safe='')}@{host}" if username else host
+    passwordless = urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+    )
+    return passwordless, unquote(parsed.password)
 
 
 def _pytest_worker_count() -> str:

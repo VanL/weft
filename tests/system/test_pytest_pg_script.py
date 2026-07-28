@@ -177,14 +177,14 @@ def test_build_test_env_owns_backend_connection_env(
 
     assert env["BROKER_BACKEND"] == "postgres"
     assert env["BROKER_BACKEND_TARGET"] == (
-        "postgresql://postgres:postgres@127.0.0.1:33017/weft_test"
+        "postgresql://postgres@127.0.0.1:33017/weft_test"
     )
     assert env["WEFT_BACKEND"] == "postgres"
     assert env["WEFT_BACKEND_TARGET"] == (
-        "postgresql://postgres:postgres@127.0.0.1:33017/weft_test"
+        "postgresql://postgres@127.0.0.1:33017/weft_test"
     )
-    assert "BROKER_BACKEND_PASSWORD" not in env
-    assert "WEFT_BACKEND_PASSWORD" not in env
+    assert env["BROKER_BACKEND_PASSWORD"] == "postgres"
+    assert env["WEFT_BACKEND_PASSWORD"] == "postgres"
     assert "BROKER_BACKEND_SCHEMA" not in env
     assert "WEFT_BACKEND_SCHEMA" not in env
 

@@ -68,6 +68,12 @@ from simplebroker import (
     resolve_broker_target,
     target_for_directory,
 )
+from simplebroker.project import (
+    find_project_config as find_broker_project_config,
+)
+from simplebroker.project import (
+    project_config_path_for_directory,
+)
 from weft._constants import (
     BROKER_PROJECT_CONFIG_FILENAME,
     POSTGRES_BACKEND_INSTALL_HINT,
@@ -335,6 +341,9 @@ def resolve_context_broker_target(
     """
 
     resolved_root = Path(root).expanduser().resolve()
+    _tighten_project_broker_config_path(
+        project_config_path_for_directory(resolved_root, config=dict(config))
+    )
     target = target_for_directory(resolved_root, config=dict(config))
     return _with_project_root(target, resolved_root)
 
@@ -385,6 +394,28 @@ def normalize_backend_resolution_error(exc: Exception) -> Exception:
 # ---------------------------------------------------------------------------
 
 
+def _tighten_project_broker_config_path(config_path: Path | None) -> None:
+    """Best-effort owner-only mode repair for Weft-owned broker config files."""
+
+    if config_path is None or not config_path.is_file() or os.name != "posix":
+        return
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        return
+
+
+def _tighten_discovered_project_broker_config(
+    start_dir: Path,
+    config: Mapping[str, Any],
+) -> None:
+    """Tighten the project broker config SimpleBroker would discover."""
+
+    _tighten_project_broker_config_path(
+        find_broker_project_config(start_dir, config=dict(config))
+    )
+
+
 def _resolve_root_and_target(
     spec_context: str | os.PathLike[str] | None,
     config: dict[str, Any],
@@ -398,6 +429,7 @@ def _resolve_root_and_target(
             raise normalize_backend_resolution_error(exc) from exc
 
     start_dir = Path.cwd().resolve()
+    _tighten_discovered_project_broker_config(start_dir, config)
     try:
         discovered_target = resolve_broker_target(start_dir, config=config)
     except RuntimeError as exc:
