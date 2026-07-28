@@ -366,7 +366,10 @@ Implementation:
   ```python
   ping: Annotated[
       bool,
-      typer.Option("--ping", help="Send a keyed PING and use the matched PONG as current-state proof"),
+      typer.Option(
+          "--ping",
+          help="Send a keyed PING and use the matched PONG as current-state proof",
+      ),
   ] = False
   ```
 
@@ -524,7 +527,11 @@ Implementation:
 
   ```python
   logs_dir_config = resolved_config.get("WEFT_LOGS_DIR")
-  logs_dir = _resolve_project_path(root, logs_dir_config) if logs_dir_config else weft_dir / "logs"
+  logs_dir = (
+      _resolve_project_path(root, logs_dir_config)
+      if logs_dir_config
+      else weft_dir / "logs"
+  )
   ```
 
   Use an existing path helper if one already exists. If not, add a narrow

@@ -198,7 +198,9 @@ class CleanupPolicyContext:
 class CleanupPolicy(Protocol):
     name: CleanupPolicyName
 
-    def run(self, work: CleanupPolicyWork, context: CleanupPolicyContext) -> CleanupPolicyResult:
+    def run(
+        self, work: CleanupPolicyWork, context: CleanupPolicyContext
+    ) -> CleanupPolicyResult:
         """Run one bounded policy unit."""
 ```
 
@@ -569,8 +571,9 @@ Tasks:
 4. Add a single registry helper:
 
    ```python
-   def cleanup_policy_registry(context: CleanupPolicyContext) -> Mapping[CleanupPolicyName, CleanupPolicy]:
-       ...
+   def cleanup_policy_registry(
+       context: CleanupPolicyContext,
+   ) -> Mapping[CleanupPolicyName, CleanupPolicy]: ...
    ```
 
    If context construction is awkward, create the registry in

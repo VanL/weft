@@ -165,10 +165,11 @@ The new surface, end to end:
 ```python
 q = Queue("jobs", db_path="app.db")
 
-q.peek_many(10)                            # unchanged: pending rows only
-q.peek_many(10, include_claimed=True)      # pending + claimed, ordered by message ID
-q.peek_one(exact_timestamp=mid, include_claimed=True)   # finds the row even if claimed
-for row in q.peek_generator(include_claimed=True): ...
+q.peek_many(10)  # unchanged: pending rows only
+q.peek_many(10, include_claimed=True)  # pending + claimed, ordered by message ID
+q.peek_one(exact_timestamp=mid, include_claimed=True)  # finds the row even if claimed
+for row in q.peek_generator(include_claimed=True):
+    ...
 ```
 
 ```bash
@@ -325,9 +326,7 @@ def test_exact_id_peek_finds_claimed_row_only_with_flag(tmp_path: Path) -> None:
     assert q.read() == "m0"
 
     assert q.peek_one(exact_timestamp=ids[0]) is None
-    assert (
-        q.peek_one(exact_timestamp=ids[0], include_claimed=True) == "m0"
-    )
+    assert q.peek_one(exact_timestamp=ids[0], include_claimed=True) == "m0"
 
 
 def test_generator_paginates_across_claimed_boundary(tmp_path: Path) -> None:
@@ -701,7 +700,9 @@ def test_peek_only_claimed_queue_exit_codes(workdir: Path) -> None:
     assert run_cli("read", "jobs", cwd=workdir)[0] == 0  # queue now only-claimed
 
     assert run_cli("peek", "jobs", cwd=workdir)[0] == 2
-    code, out, _err = run_cli("peek", "jobs", "--include-claimed", "--json", cwd=workdir)
+    code, out, _err = run_cli(
+        "peek", "jobs", "--include-claimed", "--json", cwd=workdir
+    )
     assert code == 0
     assert json.loads(out.splitlines()[0])["message"] == "m0"
 
@@ -809,9 +810,7 @@ def test_include_claimed_superset_and_exact_id(pg_core: BrokerCore) -> None:
     assert pg_core.claim_one("jobs", with_timestamps=False) == "m0"
 
     assert pg_core.peek_many("jobs", 10, with_timestamps=False) == ["m1", "m2"]
-    merged = pg_core.peek_many(
-        "jobs", 10, with_timestamps=True, include_claimed=True
-    )
+    merged = pg_core.peek_many("jobs", 10, with_timestamps=True, include_claimed=True)
     assert [body for body, _ in merged] == ["m0", "m1", "m2"]
     assert [ts for _, ts in merged] == ids
 

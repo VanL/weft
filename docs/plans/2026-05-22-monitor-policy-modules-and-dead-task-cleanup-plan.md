@@ -235,8 +235,9 @@ def tid_mapping_candidates(
     config: TaskMonitorCleanupConfig,
     now_ns: int,
     exclude_tids: set[str],
-) -> tuple[list[CleanupCandidate], CleanupQueueStats, tuple[CleanupPolicyStats, ...]]:
-    ...
+) -> tuple[
+    list[CleanupCandidate], CleanupQueueStats, tuple[CleanupPolicyStats, ...]
+]: ...
 ```
 
 If importing `TaskMonitorCleanupConfig` from `cleanup.py` creates an import
@@ -369,8 +370,7 @@ def delete_terminal_control_queues(
     record: MonitorTaskCollationRecord,
     *,
     existing_queue_names: set[str] | None = None,
-) -> TaskControlCleanupResult:
-    ...
+) -> TaskControlCleanupResult: ...
 ```
 
 If that extraction makes the code harder to read, leave the deletion method in
@@ -446,11 +446,12 @@ STANDARD_TASK_QUEUE_SUFFIXES = (
     QUEUE_CTRL_OUT_SUFFIX,
 )
 
-def standard_task_queue_tid(queue_name: str) -> str | None:
-    ...
 
-def standard_task_queue_identity(queue_name: str) -> tuple[str, str] | None:
-    ...
+def standard_task_queue_tid(queue_name: str) -> str | None: ...
+
+
+def standard_task_queue_identity(queue_name: str) -> tuple[str, str] | None: ...
+
 
 def dead_task_tids_from_queue_names(
     queue_names: Iterable[str],
@@ -458,8 +459,7 @@ def dead_task_tids_from_queue_names(
     live_tids: set[str],
     now_ns: int,
     min_age_seconds: float,
-) -> tuple[str, ...]:
-    ...
+) -> tuple[str, ...]: ...
 ```
 
 Rules:
@@ -718,8 +718,7 @@ def fetch_task_log_coalesce_groups_for_tids(
     tids: Sequence[str],
     *,
     limit: int,
-) -> tuple[TaskLogCoalesceGroup, ...]:
-    ...
+) -> tuple[TaskLogCoalesceGroup, ...]: ...
 ```
 
 Each coalesce group must include the TID, exact `weft.log.tasks` message IDs,
@@ -733,8 +732,7 @@ def list_task_log_messages_for_tids(
     tids: Sequence[str],
     *,
     limit: int,
-) -> tuple[MonitorRawMessageRef, ...]:
-    ...
+) -> tuple[MonitorRawMessageRef, ...]: ...
 ```
 
 Preferred Monitor-store SQL shape:

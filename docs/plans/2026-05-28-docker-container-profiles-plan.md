@@ -355,8 +355,7 @@ Post-deploy or runtime observation for adopters:
          working_dir: str | None,
          bundle_root: str | None,
          preflight: bool = False,
-     ) -> MaterializedContainerProfile:
-         ...
+     ) -> MaterializedContainerProfile: ...
      ```
    - Return fields should include:
      - merged `runner_options`

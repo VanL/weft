@@ -399,6 +399,7 @@ class MicrosandboxSpec:
     workspace: WorkspaceSpec
     timeout_seconds: float | None
 
+
 @dataclass(frozen=True, slots=True)
 class MicrosandboxRunResult:
     sandbox_id: str | None

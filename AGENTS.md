@@ -302,10 +302,15 @@ from weft.core.taskspec import TaskSpec
 # Good
 def process(data: str | None = None) -> dict[str, Any]: ...
 def fetch(ids: list[int]) -> Sequence[Result]: ...
+
+
 callback: Callable[[str, int], bool]
+
 
 # Bad
 def process(data: Optional[str] = None) -> Dict[str, Any]: ...
+
+
 from typing import List, Dict, Optional  # Don't import these
 ```
 
@@ -354,7 +359,9 @@ def load_config() -> dict[str, Any]:
     """
     return {
         "debug": os.environ.get("WEFT_DEBUG", "").lower() in ("1", "true"),
-        "db_path": os.environ.get("WEFT_DB_PATH", str(Path.home() / ".weft" / "weft.db")),
+        "db_path": os.environ.get(
+            "WEFT_DB_PATH", str(Path.home() / ".weft" / "weft.db")
+        ),
     }
 ```
 
@@ -417,6 +424,7 @@ Spec references:
 ```python
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+
 class LimitsSection(BaseModel):
     """Resource limits for task execution (Spec: [CC-1])."""
 
@@ -443,6 +451,7 @@ class LimitsSection(BaseModel):
 ```python
 from dataclasses import dataclass
 
+
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
     """Result of a managed process execution."""
@@ -462,6 +471,7 @@ class ProcessResult:
 **Protocol for duck-typed interfaces**:
 ```python
 from typing import Protocol
+
 
 class SQLRunner(Protocol):
     """Interface for SQL execution."""
@@ -483,6 +493,7 @@ class SQLRunner(Protocol):
 ```python
 class WeftError(Exception):
     """Base exception for all Weft errors."""
+
     pass
 
 
@@ -544,6 +555,7 @@ tests/
 import pytest
 from pathlib import Path
 
+
 @pytest.fixture
 def unique_tid() -> str:
     """Generate a unique task ID for testing."""
@@ -596,11 +608,14 @@ def test_timeout_kills_long_running_process(broker_env, unique_tid):
     ...
 
 
-@pytest.mark.parametrize("exit_code,expected_status", [
-    (0, "completed"),
-    (1, "failed"),
-    (137, "killed"),
-])
+@pytest.mark.parametrize(
+    "exit_code,expected_status",
+    [
+        (0, "completed"),
+        (1, "failed"),
+        (137, "killed"),
+    ],
+)
 def test_exit_code_maps_to_status(exit_code, expected_status, broker_env):
     """Test exit code to status mapping."""
     ...
@@ -624,6 +639,7 @@ logger.error("Task failed", extra={"tid": tid, "error": str(e)}, exc_info=True)
 ```python
 from contextlib import contextmanager
 from collections.abc import Iterator
+
 
 @contextmanager
 def mutations_allowed(obj: TaskSpec) -> Iterator[None]:

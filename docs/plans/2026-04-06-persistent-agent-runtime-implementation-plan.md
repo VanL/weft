@@ -709,11 +709,9 @@ Add the long-lived subprocess/session path needed for
 
 ```python
 class AgentRuntimeSession(Protocol):
-    def execute(self, raw_work_item: Any) -> dict[str, Any]:
-        ...
+    def execute(self, raw_work_item: Any) -> dict[str, Any]: ...
 
-    def close(self) -> None:
-        ...
+    def close(self) -> None: ...
 ```
 
 - The runtime registry should expose both:

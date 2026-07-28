@@ -1671,9 +1671,7 @@ pytestmark = [pytest.mark.shared]
 
 
 def test_load_without_project_settings_returns_empty(tmp_path: Path) -> None:
-    settings = load_provider_cli_project_settings(
-        "claude_code", spec_context=tmp_path
-    )
+    settings = load_provider_cli_project_settings("claude_code", spec_context=tmp_path)
     assert settings.executable is None
 
 
@@ -1687,9 +1685,7 @@ def test_ensure_then_load_round_trip(tmp_path: Path) -> None:
     assert result.action == "created"
     assert result.executable == "/usr/local/bin/claude"
 
-    settings = load_provider_cli_project_settings(
-        "claude_code", spec_context=tmp_path
-    )
+    settings = load_provider_cli_project_settings("claude_code", spec_context=tmp_path)
     assert settings.executable == "/usr/local/bin/claude"
 
 

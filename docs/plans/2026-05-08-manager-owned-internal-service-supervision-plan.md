@@ -382,6 +382,7 @@ class ManagedServiceSpec:
     autostart_source: str | None = None
     priority: int = 100
 
+
 @dataclass(slots=True)
 class ManagedServiceState:
     launched_once: bool = False

@@ -163,9 +163,9 @@ The public surface added to simplebroker:
 ```python
 from simplebroker import Queue
 from simplebroker.ext import (
-    RESERVED_TABLE_NAMES,      # frozenset of broker-owned table names
-    SidecarSession,            # the session handle type
-    SidecarUnavailableError,   # raised by non-SQL backends (Redis)
+    RESERVED_TABLE_NAMES,  # frozenset of broker-owned table names
+    SidecarSession,  # the session handle type
+    SidecarUnavailableError,  # raised by non-SQL backends (Redis)
 )
 
 q = Queue("jobs", db_path="app.db")
@@ -378,9 +378,7 @@ class SidecarSession:
 
     __slots__ = ("_closed", "_execute")
 
-    def __init__(
-        self, execute: Callable[..., Iterable[tuple[Any, ...]]]
-    ) -> None:
+    def __init__(self, execute: Callable[..., Iterable[tuple[Any, ...]]]) -> None:
         self._execute = execute
         self._closed = False
 
@@ -706,9 +704,7 @@ def test_transaction_rolls_back_on_exception(tmp_path: Path) -> None:
     with pytest.raises(_Boom):
         with Queue("jobs", db_path=db).get_connection() as conn:
             with conn.sidecar(transaction=True) as session:
-                session.run(
-                    "INSERT INTO app_kv (k, v) VALUES (?, ?)", ("d", "4")
-                )
+                session.run("INSERT INTO app_kv (k, v) VALUES (?, ?)", ("d", "4"))
                 raise _Boom()
 
     with Queue("jobs", db_path=db).get_connection() as conn:
@@ -744,9 +740,7 @@ git commit -m "Cover sidecar transaction commit and rollback semantics"
 def test_queue_sidecar_ephemeral(tmp_path: Path) -> None:
     q = Queue("jobs", db_path=_db(tmp_path))
     with q.sidecar(transaction=True) as session:
-        session.run(
-            "CREATE TABLE IF NOT EXISTS app_kv (k TEXT PRIMARY KEY, v TEXT)"
-        )
+        session.run("CREATE TABLE IF NOT EXISTS app_kv (k TEXT PRIMARY KEY, v TEXT)")
         session.run("INSERT INTO app_kv (k, v) VALUES (?, ?)", ("e", "5"))
     with q.sidecar() as session:
         rows = list(session.run("SELECT v FROM app_kv", fetch=True))
@@ -898,12 +892,9 @@ def test_sidecar_write_retries_until_external_lock_clears(
             try:
                 with q.sidecar(transaction=True) as session:
                     session.run(
-                        "CREATE TABLE IF NOT EXISTS app_kv "
-                        "(k TEXT PRIMARY KEY, v TEXT)"
+                        "CREATE TABLE IF NOT EXISTS app_kv (k TEXT PRIMARY KEY, v TEXT)"
                     )
-                    session.run(
-                        "INSERT INTO app_kv (k, v) VALUES (?, ?)", ("g", "7")
-                    )
+                    session.run("INSERT INTO app_kv (k, v) VALUES (?, ?)", ("g", "7"))
             except Exception as exc:  # pragma: no cover - failure diagnostics
                 errors.append(exc)
             finally:
@@ -963,9 +954,7 @@ def test_sidecar_tables_survive_queue_traffic_and_vacuum(
     assert q.read() == "m0"  # claim one message so vacuum has work to do
 
     with q.sidecar(transaction=True) as session:
-        session.run(
-            "CREATE TABLE IF NOT EXISTS app_state (k TEXT PRIMARY KEY, v TEXT)"
-        )
+        session.run("CREATE TABLE IF NOT EXISTS app_state (k TEXT PRIMARY KEY, v TEXT)")
         session.run("INSERT INTO app_state (k, v) VALUES (?, ?)", ("h", "8"))
 
     with q.get_connection() as conn:
@@ -1276,17 +1265,12 @@ pytestmark = [pytest.mark.pg_only]
 def test_sidecar_round_trip_on_postgres(pg_core: BrokerCore) -> None:
     with pg_core.sidecar(transaction=True) as session:
         session.run(
-            "CREATE TABLE IF NOT EXISTS app_sidecar_kv "
-            "(k TEXT PRIMARY KEY, v TEXT)"
+            "CREATE TABLE IF NOT EXISTS app_sidecar_kv (k TEXT PRIMARY KEY, v TEXT)"
         )
-        session.run(
-            "INSERT INTO app_sidecar_kv (k, v) VALUES (?, ?)", ("a", "1")
-        )
+        session.run("INSERT INTO app_sidecar_kv (k, v) VALUES (?, ?)", ("a", "1"))
     with pg_core.sidecar() as session:
         rows = list(
-            session.run(
-                "SELECT v FROM app_sidecar_kv WHERE k = ?", ("a",), fetch=True
-            )
+            session.run("SELECT v FROM app_sidecar_kv WHERE k = ?", ("a",), fetch=True)
         )
     assert rows == [("1",)]
 ```
@@ -1689,9 +1673,7 @@ class _NoPrivateRunnerBroker:
 
     def __getattr__(self, name: str) -> Any:
         if name == "_runner":
-            raise AssertionError(
-                "MonitorStore must not reach into broker._runner"
-            )
+            raise AssertionError("MonitorStore must not reach into broker._runner")
         return getattr(object.__getattribute__(self, "_inner"), name)
 
 
@@ -1747,24 +1729,22 @@ wiring is wrong — fix the test setup before proceeding.
   2. Add to `MonitorStore`, right after the `_access` method (store.py:1552–1557):
 
 ```python
-    @contextmanager
-    def _sidecar_session(
-        self, *, transaction: bool = False
-    ) -> Iterator[SidecarSession]:
-        """Yield a broker sidecar session, mapping capability errors.
+@contextmanager
+def _sidecar_session(self, *, transaction: bool = False) -> Iterator[SidecarSession]:
+    """Yield a broker sidecar session, mapping capability errors.
 
-        SidecarUnavailableError only originates from ``broker.sidecar()``
-        itself (non-SQL backends), so mapping it here cannot mask errors
-        raised by Monitor-store SQL inside the block.
-        """
-        with self._context.broker() as broker:
-            try:
-                with broker.sidecar(transaction=transaction) as session:
-                    yield session
-            except SidecarUnavailableError as exc:
-                raise MonitorStoreUnavailable(
-                    f"Monitor store requires a SQL broker backend: {exc}"
-                ) from exc
+    SidecarUnavailableError only originates from ``broker.sidecar()``
+    itself (non-SQL backends), so mapping it here cannot mask errors
+    raised by Monitor-store SQL inside the block.
+    """
+    with self._context.broker() as broker:
+        try:
+            with broker.sidecar(transaction=transaction) as session:
+                yield session
+        except SidecarUnavailableError as exc:
+            raise MonitorStoreUnavailable(
+                f"Monitor store requires a SQL broker backend: {exc}"
+            ) from exc
 ```
 
   3. Migrate `ensure_schema` (store.py:1566–1599) as the template. **Important:** the

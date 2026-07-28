@@ -364,8 +364,7 @@ Implement:
       *,
       max_workers: int,
       deadline_reached: Callable[[], bool],
-  ) -> CleanupExecutorResult:
-      ...
+  ) -> CleanupExecutorResult: ...
   ```
 
 Rules:

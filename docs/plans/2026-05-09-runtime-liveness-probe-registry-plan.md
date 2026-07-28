@@ -137,10 +137,12 @@ Rollback:
    RuntimeLiveness = Literal["live", "stale", "unknown"]
    RuntimeLivenessProbe = Callable[[RunnerHandle], RuntimeLiveness]
 
+
    def register_runtime_liveness_probe(
        key: str,
        probe: RuntimeLivenessProbe,
    ) -> None: ...
+
 
    def runtime_liveness_from_registered_probe(
        handle: RunnerHandle,

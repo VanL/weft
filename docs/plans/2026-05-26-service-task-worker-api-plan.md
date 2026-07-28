@@ -298,15 +298,13 @@ class ServiceWorkerTarget(Protocol):
         context: ServiceWorkerContext,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 ```
 
 The target contract is:
 
 ```python
-def target(context: ServiceWorkerContext, *args: Any, **kwargs: Any) -> Any:
-    ...
+def target(context: ServiceWorkerContext, *args: Any, **kwargs: Any) -> Any: ...
 ```
 
 Core types:

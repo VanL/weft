@@ -310,8 +310,7 @@ store access code:
 
 ```python
 @contextmanager
-def _write_transaction(runner: _SQLRunner) -> Iterator[None]:
-    ...
+def _write_transaction(runner: _SQLRunner) -> Iterator[None]: ...
 ```
 
 Required behavior:

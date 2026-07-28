@@ -202,6 +202,7 @@ PruneApplication = Literal["dry_run", "delete"]
 PruneArchivePolicy = Literal["not_allowed", "required", "best_effort"]
 PruneForcePolicy = Literal["disabled", "enabled"]
 
+
 @dataclass(frozen=True, slots=True)
 class PruneConfig:
     family: PruneFamily

@@ -882,7 +882,9 @@ Poor tests for this release look like this:
 Suggested helper for tests, if repeated locally:
 
 ```python
-def _terminal_envelopes(messages: list[str], *, tid: str, source: str) -> list[dict[str, object]]:
+def _terminal_envelopes(
+    messages: list[str], *, tid: str, source: str
+) -> list[dict[str, object]]:
     envelopes = []
     for raw in messages:
         try:

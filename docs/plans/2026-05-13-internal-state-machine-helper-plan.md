@@ -195,6 +195,7 @@ StateT = TypeVar("StateT", bound=str)
 InputT = TypeVar("InputT")
 ActionT = TypeVar("ActionT", bound=str)
 
+
 @dataclass(frozen=True, slots=True)
 class Transition(Generic[StateT, InputT, ActionT]):
     id: str
@@ -204,6 +205,7 @@ class Transition(Generic[StateT, InputT, ActionT]):
     predicate: Callable[[StateT, InputT], bool]
     reason: str
 
+
 @dataclass(frozen=True, slots=True)
 class StateDecision(Generic[StateT, ActionT]):
     source: StateT
@@ -211,6 +213,7 @@ class StateDecision(Generic[StateT, ActionT]):
     action: ActionT
     transition_id: str
     reason: str
+
 
 class StateMachine(Generic[StateT, InputT, ActionT]):
     def __init__(
@@ -224,8 +227,9 @@ class StateMachine(Generic[StateT, InputT, ActionT]):
         allow_terminal_outgoing: bool = False,
     ) -> None: ...
 
-    def decide(self, current: StateT, input: InputT) -> StateDecision[StateT, ActionT]:
-        ...
+    def decide(
+        self, current: StateT, input: InputT
+    ) -> StateDecision[StateT, ActionT]: ...
 ```
 
 This exact spelling may change during implementation if type checking requires

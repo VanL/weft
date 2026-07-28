@@ -176,7 +176,7 @@ weft system tidy
 The Python client surface mirrors that with one dot per space:
 
 ```python
-client.submit(...)              # hot path — no noun prefix
+client.submit(...)  # hot path — no noun prefix
 client.submit_spec(ref)
 client.submit_pipeline(ref)
 client.submit_command(cmd)
@@ -185,7 +185,7 @@ task.stop()
 task.kill()
 task.result()
 
-client.tasks.list(...)          # noun-first for everything else
+client.tasks.list(...)  # noun-first for everything else
 client.queues.peek(name)
 client.queues.read(name)
 client.managers.start()
@@ -893,17 +893,20 @@ the end of this task, even if some new methods still stub.
 ```python
 def test_public_names_are_importable() -> None:
     from weft.client import Task, TaskEvent, TaskResult, TaskSnapshot, WeftClient
+
     assert Task is not None
     assert WeftClient is not None
 
 
 def test_submitted_task_is_not_public() -> None:
     import weft.client as client_mod
+
     assert not hasattr(client_mod, "SubmittedTask")
 
 
 def test_legacy_forwarders_exist_during_migration(harness) -> None:
     from weft.client import WeftClient
+
     client = WeftClient.from_context(harness.root)
     assert callable(client.submit_taskspec)
     assert callable(client.result)
