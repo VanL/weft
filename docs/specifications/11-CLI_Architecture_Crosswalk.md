@@ -30,7 +30,7 @@ command grows beyond its owning module.
 | `task` | `weft/commands/tasks.py`, `weft/commands/status.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | TID lookup, list, stop, kill, and task-level status built on shared snapshot and control helpers |
 | `manager` / `serve` | `weft/commands/manager.py`, `weft/commands/serve.py`, `weft/core/manager_runtime.py` | manage the canonical manager lifecycle and registry control |
 | `queue` | `weft/commands/queue.py` | direct SimpleBroker queue access |
-| `spec` | `weft/commands/specs.py`, `weft/commands/validate_taskspec.py` | stored spec management, resolution, builtin task-spec discovery, and explicit TaskSpec validation |
+| `spec` | `weft/commands/specs.py`, `weft/cli/validate_taskspec.py` | stored spec management, resolution, builtin task-spec discovery, structured TaskSpec validation, and CLI rendering |
 | `system` | `weft/commands/builtins.py`, `weft/commands/tidy.py`, `weft/commands/dump.py`, `weft/commands/load.py` | builtin inventory plus maintenance and broker-state operations |
 
 ## Current Helper Boundaries [CLI-X2]

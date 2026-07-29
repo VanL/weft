@@ -1,6 +1,6 @@
 # Validation Capability and CLI Layering Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-3.3]; docs/specifications/09-Implementation_Plan.md [IP-1], [IP-1.0], [IP-1.1]; docs/specifications/10-CLI_Interface.md [CLI-1.4.1]
 Superseded by: none
 
@@ -292,7 +292,8 @@ Rollback and rollout:
   `docs/specifications/09-Implementation_Plan.md`, and
   `docs/specifications/10-CLI_Interface.md` at plan authoring time
 - Plan type: **implementation with spec revision**
-- Promotion baseline identifier: _record after Task 1_
+- Promotion baseline identifier:
+  `671e7939a8d86e08f47e1fa237afa4e17ba8eef4`
 
 ## 4c. Proposed Spec Delta
 
@@ -676,5 +677,28 @@ recording the baseline.
 - Round-2 result: the fix preserves both ingestion contracts, shares all
   validation after ingestion, and introduced no new defect.
 
-The plan remains `draft` pending owner approval, but it has no open independent
-review blocker.
+The planning review closed with no open blocker before implementation began.
+
+## 12. Implementation Review and Verification
+
+Implemented 2026-07-29.
+
+External implementation reviewer: `claude -p`.
+
+- Round 1: **BLOCKED**. The renderer treated parameterization/run-input
+  failures as if every later preflight stage had completed, emitting false
+  success lines. It also lacked the required byte-stable CLI characterization.
+- Disposition: accepted. Pre-preflight failures now stop all preflight success
+  rendering. Deterministic CLI tests pin the complete adapter-failure output,
+  missing-file contract, and pipeline task-option rejection.
+- Round 2: **PASS**. The reviewer verified the renderer correction and the
+  characterization tests, with no new material finding.
+
+Verification evidence:
+
+- full suite: `2395 passed, 14 skipped`
+- full mypy target: 193 source files, no issues
+- Ruff: passed
+- plan metadata and DOM-15 fixture gates: passed
+- documentation path check: eight pre-existing dangling example paths; none
+  introduced by this slice

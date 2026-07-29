@@ -12,6 +12,7 @@ from tests.helpers.weft_harness import (
     DEFAULT_TASK_COMPLETION_TIMEOUT,
     WeftTestHarness,
 )
+from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.client import (
     ControlRejected,
@@ -558,6 +559,25 @@ def test_specs_namespace_create_validate_and_delete_roundtrip() -> None:
         assert shown["name"] == "stored-via-client"
         assert deleted == record.path
         assert not record.path.exists()
+
+
+def test_specs_namespace_preflight_reports_missing_agent_runtime() -> None:
+    with WeftTestHarness() as harness:
+        client = WeftClient(path=harness.root)
+        taskspec = create_valid_provider_cli_agent_taskspec(
+            executable="/nonexistent/provider-cli",
+        )
+
+        validation = client.specs.validate(
+            taskspec.model_dump(mode="json"),
+            preflight=True,
+        )
+
+        assert validation.valid is False
+        assert validation.warnings == []
+        assert "Unable to locate executable" in validation.errors_by_stage[
+            "agent_runtime"
+        ]["agent_runtime"]
 
 
 def test_specs_namespace_validate_uses_bound_client_context(

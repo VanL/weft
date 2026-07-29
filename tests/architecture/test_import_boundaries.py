@@ -140,6 +140,8 @@ def test_run_support_mirror_module_is_deleted() -> None:
 
 def test_internal_import_boundaries() -> None:
     violations: list[str] = []
+    rich_imports_seen: list[str] = []
+    rich_violations: list[str] = []
     typer_violations: list[str] = []
 
     for edge in _iter_import_edges(PACKAGE_ROOT):
@@ -150,6 +152,14 @@ def test_internal_import_boundaries() -> None:
         if target == "typer" or target.startswith("typer."):
             if not _is_module_or_child(edge.source_module, "weft.cli"):
                 typer_violations.append(
+                    f"{edge.path}:{edge.lineno} imports {target} from {edge.source_module}"
+                )
+            continue
+
+        if target == "rich" or target.startswith("rich."):
+            rich_imports_seen.append(f"{edge.path}:{edge.lineno}")
+            if not _is_module_or_child(edge.source_module, "weft.cli"):
+                rich_violations.append(
                     f"{edge.path}:{edge.lineno} imports {target} from {edge.source_module}"
                 )
             continue
@@ -194,6 +204,8 @@ def test_internal_import_boundaries() -> None:
                 )
 
     assert not violations, "\n".join(violations)
+    assert rich_imports_seen, "Rich boundary guard has no positive import fixture"
+    assert not rich_violations, "\n".join(rich_violations)
     assert not typer_violations, "\n".join(typer_violations)
 
 

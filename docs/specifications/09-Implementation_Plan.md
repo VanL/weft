@@ -58,9 +58,10 @@ packages.
   lifecycle commands over the shared runtime helper.
 - `weft/commands/queue.py` owns direct queue operations, endpoint resolution,
   queue watching, and alias management.
-- `weft/commands/specs.py` and `weft/commands/validate_taskspec.py` own the
-  CLI-facing spec management and validation surfaces; `weft/core/spec_store.py`
-  owns the shared `NAME|PATH` resolution logic; `weft/core/taskspec/parameterization.py`
+- `weft/commands/specs.py` owns stored-spec management and structured
+  validation; `weft/cli/validate_taskspec.py` owns TaskSpec validation
+  rendering and exit-code adaptation; `weft/core/spec_store.py` owns the
+  shared `NAME|PATH` resolution logic; `weft/core/taskspec/parameterization.py`
   and `weft/core/taskspec/run_input.py` own submission-time materialization and
   run-input shaping; `weft/core/pipelines.py` owns pipeline validation and
   compilation.
@@ -113,6 +114,12 @@ capabilities, not a separate runtime API.
 - Realtime event iteration peeks task-log, outbox, and terminal-control
   surfaces instead of consuming them. That lets HTTP/SSE/WebSocket-style
   diagnostics coexist with `weft result`, `weft run`, and Python result waits.
+- `WeftClient.specs.validate` uses the same ordered task-spec validation
+  capability as `weft spec validate`. Its `SpecValidationResult` preserves the
+  existing `valid`, `spec_type`, `errors`, `warnings`, and `payload` fields and
+  exposes fatal errors by validation stage. A failed requested stage sets
+  `valid` false; `warnings` remain non-fatal. Pipeline validation explicitly
+  rejects task-only runner-loading and preflight options.
 
 This shape exists because framework integrations need a small stable substrate
 API, but Weft still needs one queue-first source of truth. Django or other
@@ -136,7 +143,7 @@ Client API parity matrix:
 | Task list/stats/watch/TID resolution | `namespace` | `client.tasks.list`, `client.tasks.stats`, `client.tasks.status`, `client.tasks.watch`, `client.tasks.resolve_tid` | Same status reconstruction as CLI task/status surfaces. |
 | Queue read/write/peek/move/list/watch/delete/broadcast | `namespace` | `client.queues.*` | Direct wrappers over public queue commands, including endpoint write/resolve and aliases. |
 | Manager start/serve/stop/list/status | `namespace` | `client.managers.*` | `stop()` may target a TID or the active manager; diagnostics remain CLI-only. |
-| Spec create/list/show/delete/validate/generate | `namespace` | `client.specs.*` | Shares command-layer stored-spec and validation helpers. |
+| Spec create/list/show/delete/validate/generate | `namespace` | `client.specs.*` | Uses `weft.commands.specs.validate_spec_source` and the shared command-layer stored-spec helpers. |
 | System status/tidy/dump/load/builtins | `namespace` | `client.system.*` | Public maintenance helpers with typed results. |
 | Manager diagnostics | `cli_only` | `weft manager list --diagnostic` | Operator/debug output lacks a stable typed result contract. |
 | Foreground task monitor scan | `cli_only` | `weft system task-monitor` | Operator maintenance and cleanup diagnostics, not a stable task-client API. |
@@ -185,6 +192,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
 - [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 
 ## Related Documents

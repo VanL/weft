@@ -257,6 +257,7 @@ class SpecValidationResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     payload: dict[str, Any] | None = None
+    errors_by_stage: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

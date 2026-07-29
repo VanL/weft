@@ -19,6 +19,7 @@ from weft._constants import (
     __version__,
     get_weft_directory_name,
 )
+from weft.cli.validate_taskspec import cmd_validate_taskspec
 from weft.commands import cmd_init, cmd_status, cmd_tidy
 from weft.commands import manager as manager_cmd
 from weft.commands import queue as queue_cmd
@@ -38,7 +39,6 @@ from weft.commands.task_monitor import (
     TaskMonitorSinkName,
     run_task_monitor,
 )
-from weft.commands.validate_taskspec import cmd_validate_taskspec
 from weft.ext import RunnerHandle
 
 from .run import cmd_run, render_spec_aware_run_help

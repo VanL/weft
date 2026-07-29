@@ -61,6 +61,54 @@ def test_validate_taskspec_failure(workdir):
     assert "outbox" in out
 
 
+def test_validate_taskspec_missing_explicit_file_preserves_exit_contract(
+    workdir,
+) -> None:
+    missing = workdir / "missing-taskspec.json"
+    env = os.environ.copy()
+    env.update({"COLUMNS": "200", "NO_COLOR": "1", "TERM": "dumb"})
+
+    rc, out, err = run_cli(
+        "spec",
+        "validate",
+        "--type",
+        "task",
+        missing,
+        cwd=workdir,
+        env=env,
+    )
+
+    assert rc == 1
+    assert out == f"Error: File not found: {missing}"
+    assert err == ""
+
+
+@pytest.mark.parametrize("option", ["--load-runner", "--preflight"])
+def test_validate_pipeline_rejects_task_only_option(workdir, option: str) -> None:
+    path = workdir / "pipeline.json"
+    write_taskspec(
+        path,
+        {
+            "name": "pipeline",
+            "stages": [{"name": "only", "task": "stage1"}],
+        },
+    )
+
+    rc, out, err = run_cli(
+        "spec",
+        "validate",
+        "--type",
+        "pipeline",
+        path,
+        option,
+        cwd=workdir,
+    )
+
+    assert rc == 2
+    assert out == ""
+    assert err == "--load-runner and --preflight only apply to task specs"
+
+
 def test_validate_taskspec_agent_summary(workdir):
     taskspec = create_valid_agent_taskspec()
     spec_path = workdir / "agent_taskspec.json"
@@ -506,4 +554,55 @@ def test_validate_taskspec_run_input_missing_adapter_ref_fails(workdir) -> None:
     assert rc == 1
     assert "Run-input validation failed" in out
     assert "helper_module" in out
+    assert err == ""
+
+
+def test_validate_taskspec_adapter_failure_short_circuits_preflight(workdir) -> None:
+    bundle_dir = workdir / "invalid_run_input_bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    write_taskspec(
+        bundle_dir / "taskspec.json",
+        {
+            "name": "invalid-run-input-bundle",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "run_input": {
+                    "adapter_ref": "helper_module:missing",
+                    "arguments": {
+                        "prompt": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+            },
+            "metadata": {},
+        },
+    )
+    env = os.environ.copy()
+    env.update({"COLUMNS": "100", "NO_COLOR": "1", "TERM": "dumb"})
+
+    rc, out, err = run_cli(
+        "spec",
+        "validate",
+        "--type",
+        "task",
+        bundle_dir,
+        "--preflight",
+        cwd=workdir,
+        env=env,
+    )
+
+    assert rc == 1
+    assert out == (
+        "✓ TaskSpec is valid\n"
+        "✗ Run-input validation failed\n\n"
+        "               Validation Errors               \n"
+        "┏━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+        "┃ Field     ┃ Error                           ┃\n"
+        "┡━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩\n"
+        "│ run_input │ No module named 'helper_module' │\n"
+        "└───────────┴─────────────────────────────────┘"
+    )
     assert err == ""

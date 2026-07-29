@@ -729,9 +729,23 @@ Current validation is layered:
   gate; the task attempts startup on the canonical execution path and reports
   concrete startup failures there
 
-_Implementation mapping_: `weft/core/runner_validation.py`,
-`weft/commands/validate_taskspec.py`,
-`weft/core/agents/validation.py`.
+Task-spec validation and optional preflight are shared command-capability
+behavior. Source-specific ingestion may preserve established error contracts,
+but all successfully ingested task specs converge on the same ordered
+validation engine and structured result. CLI adapters own terminal rendering
+and exit-code selection.
+
+Every public validation surface that accepts runner-loading or preflight
+options must honor them through that shared capability. Preflight implies
+runner loading. A failed requested validation or preflight stage produces an
+invalid result with a fatal error; it is not downgraded to a warning and is
+not silently skipped. A surface that cannot honor an option rejects it
+explicitly.
+
+_Implementation mapping_: `weft/commands/specs.py` owns the structured,
+ordered validation capability; `weft/cli/validate_taskspec.py` owns terminal
+rendering and exit-code adaptation; `weft/core/runner_validation.py` and
+`weft/core/agents/validation.py` own runner and agent-runtime probes.
 
 ### 3.4 Monitoring Ownership [CC-3.4]
 
@@ -764,6 +778,7 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
 - [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
 - [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)

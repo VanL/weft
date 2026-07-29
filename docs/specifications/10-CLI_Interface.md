@@ -18,7 +18,7 @@ _Implementation mapping_: `weft/cli/app.py` (command registration),
 `weft/commands/tasks.py`, `weft/commands/specs.py`,
 `weft/commands/builtins.py`, `weft/commands/init.py`, `weft/commands/dump.py`,
 `weft/commands/load.py`, `weft/commands/tidy.py`,
-`weft/commands/validate_taskspec.py`.
+`weft/cli/validate_taskspec.py`.
 
 See also:
 
@@ -559,9 +559,9 @@ Current rules:
 
 ### `spec validate` - Validate a task or pipeline spec [CLI-1.4.1]
 
-_Implementation mapping_: `weft/commands/specs.py` `validate_spec()`;
-task-spec runner validation reuses `weft/commands/validate_taskspec.py`
-`cmd_validate_taskspec()`, `weft/core/runner_validation.py`, and
+_Implementation mapping_: `weft/commands/specs.py` owns structured validation;
+`weft/cli/validate_taskspec.py` owns `cmd_validate_taskspec()` rendering and
+exit adaptation; runner validation reuses `weft/core/runner_validation.py` and
 `weft/core/agents/validation.py`.
 
 Current validation layers:
@@ -854,6 +854,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
 - [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 - [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
