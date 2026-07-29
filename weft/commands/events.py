@@ -13,18 +13,18 @@ from collections.abc import Iterator
 from dataclasses import asdict
 from typing import Any
 
+import weft.commands.task_evidence as task_evidence
+import weft.commands.tasks as task_ops
 from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft.commands import tasks as task_ops
 from weft.commands.types import TaskEvent
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import iter_queue_entries, iter_queue_json_entries
 
-from . import task_evidence
 from ._result_wait import (
     append_public_value,
     terminal_error_message,

@@ -25,6 +25,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import weft.commands.specs as spec_cmd
 from simplebroker import Queue
 from weft._constants import (
     CONTROL_KILL,
@@ -38,7 +39,6 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft.commands import specs as spec_cmd
 from weft.commands._result_wait import await_one_shot_result
 from weft.commands._streaming import (
     collect_interactive_queue_output as _collect_interactive_queue_output,

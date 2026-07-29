@@ -20,7 +20,7 @@ from weft.core.agents.validation import (
 )
 from weft.core.environment_profiles import materialize_runner_environment
 from weft.core.runner_validation import validate_runner_capabilities
-from weft.core.runners import RunnerOutcome
+from weft.core.runners.outcome import RunnerOutcome
 from weft.core.taskspec import apply_bundle_root_to_taskspec_payload
 from weft.ext import RunnerHandle
 

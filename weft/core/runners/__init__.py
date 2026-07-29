@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from .host import RunnerOutcome
+from .outcome import RunnerOutcome
 
 __all__ = ["RunnerOutcome"]

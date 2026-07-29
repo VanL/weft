@@ -768,7 +768,9 @@ That means:
 
 _Implementation mapping_: `weft/core/resource_monitor.py`,
 `weft/core/runner_diagnostics.py`, `weft/core/runners/host.py`,
-`weft/core/runners/subprocess_runner.py`, `weft/core/tasks/sessions.py`,
+`weft/core/runners/subprocess_runner.py`; the shared result contract lives in
+`weft/core/runners/outcome.py`. Session and task ownership lives in
+`weft/core/tasks/sessions.py`,
 `weft/core/tasks/consumer.py`. Monitor-owned durable collation is implemented
 by `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`,
 `weft/core/monitor/collation.py`, and `weft/core/monitor/task_monitor.py`.
@@ -778,6 +780,7 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
 - [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
 - [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)

@@ -18,18 +18,17 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
 from functools import lru_cache
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any, TextIO, cast
 
-import weft.core.agents  # noqa: F401 - register built-in agent runtimes
 from simplebroker import BrokerTarget
 from weft._constants import (
     ACTIVE_CONTROL_POLL_INTERVAL,
     AGENT_SESSION_READY_TIMEOUT_SECONDS,
 )
+from weft.core.agents import register_builtin_agent_runtimes
 from weft.core.agents.runtime import (
     execute_agent_target,
     normalize_agent_work_item,
@@ -37,6 +36,7 @@ from weft.core.agents.runtime import (
 )
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.core.runner_diagnostics import runner_diagnostics
+from weft.core.runners.outcome import RunnerOutcome
 from weft.core.runners.subprocess_runner import (
     prepare_command_invocation,
     run_monitored_subprocess,
@@ -68,26 +68,7 @@ from weft.helpers import (
     terminate_process_tree,
 )
 
-
-@dataclass(slots=True)
-class RunnerOutcome:
-    """Result returned after executing a work item."""
-
-    status: str
-    value: Any | None
-    error: str | None
-    stdout: str | None
-    stderr: str | None
-    returncode: int | None
-    duration: float
-    metrics: ResourceMetrics | None = None
-    worker_pid: int | None = None
-    runtime_handle: RunnerHandle | None = None
-    diagnostics: dict[str, Any] | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.status == "ok"
+register_builtin_agent_runtimes()
 
 
 def _host_handle(pid: int | None) -> RunnerHandle | None:

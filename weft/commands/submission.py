@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import weft.commands.specs as specs
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
@@ -25,7 +26,6 @@ from weft._constants import (
     SUBMIT_OVERRIDE_NAMES,
 )
 from weft._exceptions import InvalidTID, SpecNotFound
-from weft.commands import specs
 from weft.commands.manager import _ensure_manager, _generate_tid
 from weft.commands.types import PreparedSubmissionRequest, SubmittedTaskReceipt
 from weft.context import WeftContext

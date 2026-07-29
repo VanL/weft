@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import weft.core.task_evidence as task_evidence
 from simplebroker.ext import BrokerError
 from weft._constants import (
     TASK_MONITOR_CHECKPOINT_PATH,
@@ -33,7 +34,6 @@ from weft._constants import (
     TASKSPEC_TID_SHORT_LENGTH,
 )
 from weft.context import WeftContext, build_context
-from weft.core import task_evidence
 from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,

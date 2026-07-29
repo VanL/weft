@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 
+import weft.core.task_evidence as task_evidence
 from simplebroker.ext import BrokerError
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
@@ -57,7 +58,6 @@ from weft._constants import (
     WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
 )
 from weft.context import WeftContext
-from weft.core import task_evidence
 from weft.helpers import iter_queue_entries
 
 TaskLogObserver = Callable[[str, str, int], None]

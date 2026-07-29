@@ -530,7 +530,9 @@ _Implementation mapping:_ `weft/core/agents/backends/llm.py` --
 `_resolve_model`. Tool conversion: `_to_llm_tool`. Output extraction:
 `_extract_outputs`. Message flattening: `_content_to_prompt`. Plugin module
 registration: `_register_plugin_modules`. Backend is registered via
-`weft/core/agents/backends/__init__.py`.
+`weft/core/agents/backends/__init__.py` when the host/runtime boundary
+explicitly requests built-in registration; importing schema or validation
+modules alone does not load backend adapters.
 
 ### `provider_cli` backend
 
@@ -856,6 +858,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
 - [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)

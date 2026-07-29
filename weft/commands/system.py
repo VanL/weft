@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+import weft.commands.task_evidence as task_evidence
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
@@ -76,7 +77,6 @@ from weft.helpers import (
     pid_is_live,
 )
 
-from . import task_evidence
 from ._dump_support import cmd_dump
 from ._load_support import cmd_load
 from ._tidy_support import cmd_tidy

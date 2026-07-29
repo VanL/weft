@@ -1,7 +1,7 @@
 # Import Boundary Remediation Plan
 
-Status: draft
-Source specs: docs/specifications/00-Overview_and_Architecture.md §System Architecture/Runtime Layers; docs/specifications/01-Core_Components.md [CC-3.4]; docs/specifications/09-Implementation_Plan.md [IP-1], [IP-1.0]
+Status: completed
+Source specs: docs/specifications/00-Overview_and_Architecture.md §System Architecture/Runtime Layers; docs/specifications/01-Core_Components.md [CC-3.4]; docs/specifications/09-Implementation_Plan.md [IP-1], [IP-1.0]; docs/specifications/13-Agent_Runtime.md [AR-7]
 Superseded by: none
 
 Class: 4 — Architectural and public-surface preserving. This plan changes
@@ -248,6 +248,7 @@ Rollback:
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| Task 2 import isolation / [AR-7] | Lazy package facades prevent validation capability imports from loading Rich. | The package facades were made lazy, and built-in agent adapter registration was also moved from `weft.core.agents` import time to the explicit host/runtime registration boundary. | `commands.specs` imports agent validation. Python initializes `weft.core.agents` first, and its prior registration side effect loaded `llm`, which loaded Rich. Deferring adapter loading is required for the plan's fresh-process contract while preserving registration before execution. | Closed: [AR-7] now records explicit registration ownership; runtime behavior is unchanged. |
 
 ## 4b. Spec Baseline
 
@@ -506,3 +507,41 @@ All four were corrected in Tasks 1 and 4 and in the overlap contract.
 
 Round 2: **PASS**. The same reviewer verified the four corrections and reported
 no remaining or new material defects in the reviewed scope.
+
+## 12. Implementation Review and Verification
+
+Implemented and independently reviewed on 2026-07-29.
+
+External reviewer: Grok CLI.
+
+Round 1: **BLOCKED**.
+
+1. `weft.core.agents.backends.__all__` still advertised `LLMBackend` and
+   `ProviderCLIBackend` after their eager imports were removed, breaking direct
+   and star imports.
+2. The explicit registration boundary lacked fresh-process tests proving a
+   schema-only package import does not register adapters and a host import does.
+3. The architecture tests asserted the clean graph but did not contain
+   synthetic mutation proofs for restored facade and runner-cycle back-edges.
+
+Disposition:
+
+- added lazy compatibility exports and identity/star-import tests for both
+  backend classes;
+- added fresh-process negative and positive registration tests; and
+- extracted a source parser seam and added mutation proofs for relative and
+  absolute facade back-edges, a function-local runner cycle, and a
+  `TYPE_CHECKING` non-cycle.
+
+Round 2: **PASS**. Grok verified all three dispositions, found no regression,
+and independently ran the architecture suite (`32 passed`).
+
+Final verification:
+
+- full suite: `2418 passed, 14 skipped`
+- full repository mypy: `Success: no issues found in 194 source files`
+- Ruff: passed
+- DOM-15 fixtures: passed
+- documentation path check: no new dangling claims; the same eight pre-existing
+  repository-wide claims remain
+- whitespace/error check: passed

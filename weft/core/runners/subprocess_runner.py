@@ -13,7 +13,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, Any
 
 from simplebroker import BrokerTarget
 from weft._constants import (
@@ -25,11 +25,9 @@ from weft._constants import (
 )
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.core.runner_diagnostics import runner_diagnostics
+from weft.core.runners.outcome import RunnerOutcome
 from weft.ext import RunnerHandle
 from weft.helpers import safe_cancel
-
-if TYPE_CHECKING:
-    from weft.core.runners.host import RunnerOutcome
 
 
 def prepare_command_invocation(
@@ -85,8 +83,6 @@ def run_monitored_subprocess(
 
     Spec: [RM-5.1], [RM-5.2]
     """
-    from weft.core.runners.host import RunnerOutcome
-
     last_metrics: ResourceMetrics | None = None
     actual_worker_pid = worker_pid if worker_pid is not None else process.pid
     if on_worker_started is not None:

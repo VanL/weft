@@ -92,6 +92,10 @@ When a change crosses a boundary, update the governing spec and the module
 docstrings together. A new abstraction is justified only when it removes real
 duplication or protects one of these ownership lines.
 
+The public `weft`, `weft.commands`, and `weft.core` package facades preserve
+their documented exports lazily. Implementation leaves import sibling modules
+directly instead of reaching back through those compatibility facades.
+
 ## Public Python Client Surface [IP-1.1]
 
 The current `weft.client` package is a stable adapter over shipped command
@@ -192,6 +196,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
 - [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 

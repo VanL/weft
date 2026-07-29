@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+import weft.commands.task_evidence as task_evidence
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
@@ -27,7 +28,6 @@ from weft.core.pipelines import pipeline_public_queues
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import closing_queue_iterator, iter_queue_json_entries
 
-from . import task_evidence
 from ._result_wait import (
     append_public_value,
     await_one_shot_result,

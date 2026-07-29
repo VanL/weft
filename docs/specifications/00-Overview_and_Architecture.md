@@ -168,6 +168,8 @@ SimpleBroker queues and broker target
 
 _Implementation mapping per layer_:
 
+- **Public package facades**: lazy compatibility exports in `weft/__init__.py`,
+  `weft/commands/__init__.py`, and `weft/core/__init__.py`
 - **CLI and client adapters**: `weft/cli/`, `weft/client/`
 - **Shared application capabilities**: `weft/commands/`
 - **Context resolution**: `weft/context.py`
@@ -225,6 +227,7 @@ The companion file answers "what may exist later."
 
 ## Related Documents
 
+- [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)
 - [`03-Manager_Architecture.md`](03-Manager_Architecture.md)

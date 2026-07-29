@@ -25,7 +25,7 @@ There are currently 160 plan files in this directory.
 | --- | --- | --- | --- |
 | [`2026-07-29-deduplication-and-test-integrity-plan.md`](./2026-07-29-deduplication-and-test-integrity-plan.md) | Deduplication and Test Integrity Plan | `draft` | none |
 | [`2026-07-29-task-snapshot-reducer-plan.md`](./2026-07-29-task-snapshot-reducer-plan.md) | Task Snapshot Reducer Plan | `draft` | none |
-| [`2026-07-29-import-boundary-remediation-plan.md`](./2026-07-29-import-boundary-remediation-plan.md) | Import Boundary Remediation Plan | `draft` | none |
+| [`2026-07-29-import-boundary-remediation-plan.md`](./2026-07-29-import-boundary-remediation-plan.md) | Import Boundary Remediation Plan | `completed` | none |
 | [`2026-07-29-validation-capability-layering-plan.md`](./2026-07-29-validation-capability-layering-plan.md) | Validation Capability and CLI Layering Plan | `completed` | none |
 | [`2026-07-29-structural-review-remediation-plan.md`](./2026-07-29-structural-review-remediation-plan.md) | Structural Review Remediation Plan | `draft` | none |
 | [`2026-07-28-agent-guidance-propagation-plan.md`](./2026-07-28-agent-guidance-propagation-plan.md) | Agent-Guidance Propagation Plan (2026-07-28 delta wave) | `completed` | none |

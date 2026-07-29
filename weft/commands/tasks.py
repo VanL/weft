@@ -19,6 +19,8 @@ from dataclasses import replace
 from fnmatch import fnmatchcase
 from typing import Any
 
+import weft.commands.system as status_cmd
+import weft.commands.task_evidence as task_evidence
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -49,8 +51,6 @@ from weft.helpers import (
     terminate_process_tree,
 )
 
-from . import system as status_cmd
-from . import task_evidence
 from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
 from .control_convergence import (
     ControlConvergenceEvidence,
