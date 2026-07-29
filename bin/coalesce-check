@@ -31,6 +31,7 @@ informational — publication discipline is the owner's call.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -42,8 +43,16 @@ STATE = REPO_ROOT / "docs" / "coalescing.md"
 SHA_RE = re.compile(r"`([0-9a-f]{7,40})`")
 CUE_RE = re.compile(r"git show ([0-9a-f]{7,40}):([A-Za-z0-9_./-]+)")
 
-SIBLINGS = ["agent-theory", "mm", "taut", "backstitch", "engram", "simplebroker"]
-SIBLING_ROOT = REPO_ROOT.parent
+# Foreign attribution is a REPORTING aid, never a resolution mechanism: it
+# names repositories this repo's own citations refer to, makes no filesystem
+# assumption, and resolves nothing.
+FOREIGN_MARKERS = ("agent-theory", "agent-guidance", "mm", "weft", "taut",
+                   "backstitch", "engram", "simplebroker")
+
+# Opt-in local convenience, unset by default. A sibling working copy is an
+# environment fact, not a portability claim: anything found this way is
+# reported separately and never counted as verified.
+SIBLING_ROOT = os.environ.get("COALESCE_SIBLING_ROOT")
 
 # Weft's declared lessons derivation: dated H2 sections.
 LESSON_RE = re.compile(r"^## 20[0-9]{2}-", re.M)
@@ -57,21 +66,30 @@ def git(*args: str, repo: Path | None = None) -> subprocess.CompletedProcess:
     )
 
 
-def resolve_anywhere(sha: str) -> str | None:
-    r"""A SHA claim is satisfied when it resolves in an identifiable repo:
-    this one first, then each sibling. The state file's run-log rows cite
-    evidence across several repos in one cell, so per-occurrence context
-    attribution is unreliable; resolve-anywhere matches the actual cue
-    contract (retrievable somewhere identified)."""
-    if git("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0:
-        return "local"
-    for name in SIBLINGS:
-        cand = SIBLING_ROOT / name
-        if (cand / ".git").exists():
-            if git("cat-file", "-e", f"{sha}^{{commit}}", repo=cand).returncode == 0:
-                return name
-    return None
+def attributed_repo(text: str, pos: int) -> str | None:
+    """Does the citation name the repository it came from? Reporting only."""
+    ctx = text[max(0, pos - 80):pos].lower()
+    hits = [m for m in FOREIGN_MARKERS if m in ctx]
+    return max(hits, key=len) if hits else None
 
+
+def resolves_locally(sha: str) -> bool:
+    return git("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+
+
+def in_local_checkout(sha: str) -> str | None:
+    """Opt-in only (COALESCE_SIBLING_ROOT). Environment-dependent by nature,
+    so the caller reports it as such and never as verification."""
+    if not SIBLING_ROOT:
+        return None
+    root = Path(SIBLING_ROOT)
+    if not root.is_dir():
+        return None
+    for cand in sorted(root.iterdir()):
+        if (cand / ".git").exists() and \
+                git("cat-file", "-e", f"{sha}^{{commit}}", repo=cand).returncode == 0:
+            return cand.name
+    return None
 
 def main() -> int:
     if not STATE.is_file():
@@ -89,30 +107,31 @@ def main() -> int:
 
     broken: list[str] = []
     local_only: list[str] = []
-    sibling_hits: list[str] = []
-    seen: set[str] = set()
-    for sha, _pos in sha_hits:
+    broken, local_only, foreign = [], [], []
+    seen = set()
+    for sha, pos in sha_hits:
         if sha in seen:
             continue
         seen.add(sha)
-        where = resolve_anywhere(sha)
-        if where is None:
-            broken.append(f"`{sha}` does not resolve locally or in any sibling")
-        elif where != "local":
-            sibling_hits.append(f"{sha} ({where})")
-        elif remote_ok:
-            if git("merge-base", "--is-ancestor", sha, "origin/main").returncode != 0:
+        if resolves_locally(sha):
+            if remote_ok and git("merge-base", "--is-ancestor", sha,
+                                 "origin/main").returncode != 0:
                 local_only.append(sha)
+            continue
+        who = attributed_repo(text, pos)
+        if who:
+            extra = in_local_checkout(sha)
+            foreign.append(f"{sha} @ {who}" +
+                           (f" (present in a local checkout of {extra})" if extra else ""))
+        else:
+            broken.append(f"`{sha}` resolves nowhere here and names no "
+                          "repository — a cue must say where it is retrievable")
 
     for sha, path in cues:
-        if git("cat-file", "-e", f"{sha}:{path}").returncode != 0:
-            where = resolve_anywhere(sha)
-            found = False
-            if where and where != "local":
-                cand = SIBLING_ROOT / where
-                found = git("cat-file", "-e", f"{sha}:{path}", repo=cand).returncode == 0
-            if not found:
-                broken.append(f"cue `git show {sha}:{path}` does not resolve")
+        if not (resolves_locally(sha) and
+                git("cat-file", "-e", f"{sha}:{path}").returncode == 0):
+            broken.append(f"cue `git show {sha}:{path}` does not resolve here")
+
 
     lessons = REPO_ROOT / "docs" / "lessons.md"
     count = 0
@@ -121,11 +140,11 @@ def main() -> int:
 
     print(
         f"coalesce-check: {len(seen)} SHA claim(s) "
-        f"({len(sibling_hits)} verified in siblings), "
+        f"({len(foreign)} foreign claim(s)), "
         f"{len(cues)} retrieval cue(s); lessons dated H2 sections: {count}"
     )
-    if sibling_hits:
-        print("  sibling-resolved: " + ", ".join(sibling_hits))
+    if foreign:
+        print(f"  foreign claim ({len(foreign)}) — not verifiable in this repository;\n    check the citing repository: " + ", ".join(foreign))
     if local_only:
         print(
             f"  local-only pin ({len(local_only)}): " + ", ".join(local_only)
