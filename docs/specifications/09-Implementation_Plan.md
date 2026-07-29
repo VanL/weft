@@ -171,6 +171,7 @@ let us use red-green TDD without booting managers or over-mocking processes.
 
 | Seam | File | Purpose | Test shape |
 | --- | --- | --- | --- |
+| Public task snapshot reconstruction | `weft/commands/_task_snapshot_reducer.py` | Fold ordered lifecycle events and reconcile already-acquired task-local, runtime, service-owner, and manager evidence into the public status snapshot. | Literal event folds and concrete evidence values with fixed clocks; real queues remain in command integration tests. |
 | Task evidence classification | `weft/core/task_evidence.py` | Reduce logs, control envelopes, outbox evidence, and runtime evidence into public task status/result evidence. | Table-driven inputs with no subprocesses; assert priority and reconciliation invariants. |
 | Control convergence | `weft/commands/control_convergence.py` | Decide when STOP/KILL has enough evidence to report success, fallback, rejection, or timeout. | Pure reducer cases before command-layer integration tests. |
 | TaskSpec validation and materialization | `weft/core/taskspec/` | Validate immutable execution config and expand run inputs. | Model validation and materialization cases with explicit invalid inputs. |
@@ -196,6 +197,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-task-snapshot-reducer-plan.md`](../plans/2026-07-29-task-snapshot-reducer-plan.md)
 - [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
 - [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)

@@ -1,6 +1,6 @@
 # Task Snapshot Reducer Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/09-Implementation_Plan.md [IP-1], [IP-1.0]
 Superseded by: none
 
@@ -336,10 +336,11 @@ involved.
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| Verification §7 / [MF-5] | Run C901 against both `system.py` and the reducer as a zero-error command. | The reducer and `_collect_task_snapshot_records` have no C901 violations. A whole-file `system.py` C901 invocation still reports three unrelated pre-existing functions: `_stale_liveness_reason`, `_collect_internal_service_snapshots`, and `_watch_task_events`. | Expanding this behavior-preserving snapshot slice into three unrelated system-command refactors would violate scope. The targeted reducer gate plus absence of a collector finding proves the planned complexity result. | Closed as a verification-command correction; no spec behavior changes. |
 
 ## 4b. Spec Baseline
 
-- `a391a59b345a8e37dc6d5c362525f84be0f70343` —
+- `a692c08becd6db2d8c0672828ce487dc10b08354` —
   `docs/specifications/05-Message_Flow_and_State.md` and
   `docs/specifications/09-Implementation_Plan.md`
 - Plan type: behavior-preserving structural refactor; no proposed behavior
@@ -564,3 +565,43 @@ contract, and acquisition sentinels.
 
 Round 3: **PASS**. The same reviewer verified the remaining probe-planning
 correction and reported no new material defect.
+
+## 12. Implementation Result
+
+Completed 2026-07-29.
+
+- Extracted the ordered event fold, staged probe policy, final reconciliation,
+  snapshot construction, filtering, and ordering into the pure
+  `weft/commands/_task_snapshot_reducer.py` module.
+- Reduced `_collect_task_snapshot_records` to queue replay, evidence
+  acquisition, reduction, and ordering. Queue, clock, process, manager,
+  service-registry, and runner-plugin I/O remain in `system.py`.
+- Kept `TaskSnapshot`, `CollectedTaskSnapshot`, and
+  `_runner_name_for_snapshot` compatibility paths available from
+  `weft.commands.system`.
+- Added direct policy tests, real-queue collector tests, conditional-probe
+  sentinels, exact payload assertions, and a source-level purity guard.
+- Mutation proof caught deliberate inversions of terminal-regression
+  protection, claimed-result probing, manager supersession, local-evidence
+  probe guarding, and mapping-over-event precedence.
+
+Implementation review:
+
+- Grok round 1: **PASS**, with non-blocking observations about a duplicated
+  service-key policy and a missing function separator.
+- The service-key policy was consolidated in the reducer, the dead system copy
+  was removed, and formatting was corrected.
+- Grok round 2: **PASS**. The reviewer confirmed behavior equivalence and the
+  pure boundary after consolidation.
+
+Verification:
+
+- focused snapshot, status, and task-evidence suites: 83 passed
+- full suite: 2442 passed, 14 skipped
+- mypy: 195 source files, no issues
+- Ruff: passed
+- reducer C901 gate: passed; the collector has no C901 finding. The three
+  unrelated pre-existing `system.py` findings are recorded in §4a.
+- DOM-15 fixture contract: passed
+- documentation path check: unchanged repository baseline of eight dangling
+  claims, none introduced or touched by this plan

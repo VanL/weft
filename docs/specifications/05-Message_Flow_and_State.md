@@ -696,8 +696,10 @@ supervised monitor task;
 processor contract;
 `weft/core/task_evidence.py` shared lifecycle/result evidence classification;
 `weft/core/outbox.py` shared outbox decoding;
-`weft/commands/status.py` and `weft/commands/system.py` log replay and snapshot
-collection;
+`weft/commands/system.py` queue/runtime evidence acquisition and ordered log
+replay; `weft/commands/_task_snapshot_reducer.py` pure event folding, evidence
+precedence, snapshot construction, filtering, and ordering;
+`weft/commands/status.py` status capability adaptation;
 `weft/commands/result.py` materialization and completion waits;
 `weft/commands/task_evidence.py` compatibility re-exports;
 `weft/commands/task_monitor.py` archive summaries and checkpoints;
@@ -708,6 +710,9 @@ exact-message deletion;
 `weft/commands/_task_history.py`;
 `weft/commands/_streaming.py`;
 `tests/tasks/test_task_monitor.py`.
+
+Plan backlink:
+[`docs/plans/2026-07-29-task-snapshot-reducer-plan.md`](../plans/2026-07-29-task-snapshot-reducer-plan.md).
 
 Implementation plan backlink:
 [`2026-05-07-runtime-state-pruning-plan.md`](../plans/2026-05-07-runtime-state-pruning-plan.md).

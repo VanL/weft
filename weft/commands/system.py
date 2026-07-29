@@ -4,6 +4,7 @@ Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
 - docs/specifications/01-Core_Components.md [CC-3.2], [CC-3.4]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-5]
 """
 
 from __future__ import annotations
@@ -24,10 +25,8 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
-    INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
-    INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     LIVE_SERVICE_STATUSES,
     NON_LIVE_RUNTIME_STATES,
@@ -38,7 +37,6 @@ from weft._constants import (
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     STATUS_WATCH_MIN_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
-    TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_CONTEXT_ENV,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -79,9 +77,26 @@ from weft.helpers import (
 
 from ._dump_support import cmd_dump
 from ._load_support import cmd_load
+from ._task_snapshot_reducer import (
+    CollectedTaskSnapshot,
+    FoldedTaskRecord,
+    RuntimeObservation,
+    SnapshotEvidence,
+    SnapshotProbePlan,
+    TaskSnapshot,
+    order_task_snapshots,
+    plan_snapshot_probes,
+    prepare_snapshot,
+    reduce_task_event,
+    reduce_task_snapshot,
+    runner_name_for_snapshot,
+    service_key_from_taskspec,
+)
 from ._tidy_support import cmd_tidy
 
 StatusMapping = Mapping[str, int | float | str | None]
+_runner_name_for_snapshot = runner_name_for_snapshot
+_service_key_from_taskspec_payload = service_key_from_taskspec
 
 
 def _to_int(value: object) -> int:
@@ -139,66 +154,6 @@ class BrokerStatusSnapshot:
                 size_line,
             )
         )
-
-
-@dataclass(frozen=True)
-class TaskSnapshot:
-    tid: str
-    tid_short: str
-    name: str
-    status: str
-    event: str
-    activity: str | None
-    waiting_on: str | None
-    started_at: int | None
-    completed_at: int | None
-    last_timestamp: int
-    duration_seconds: float | None
-    runner: str | None
-    runtime_handle: dict[str, Any] | None
-    runtime: dict[str, Any] | None
-    metadata: dict[str, Any]
-    pipeline_status: dict[str, Any] | None = None
-    reconciliation: dict[str, Any] | None = None
-    runner_diagnostics: dict[str, Any] | None = None
-    return_code: int | None = None
-    error: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = {
-            "tid": self.tid,
-            "tid_short": self.tid_short,
-            "name": self.name,
-            "status": self.status,
-            "event": self.event,
-            "activity": self.activity,
-            "waiting_on": self.waiting_on,
-            "started_at": self.started_at,
-            "completed_at": self.completed_at,
-            "return_code": self.return_code,
-            "error": self.error,
-            "last_timestamp": self.last_timestamp,
-            "duration_seconds": self.duration_seconds,
-            "runner": self.runner,
-            "runtime_handle": self.runtime_handle,
-            "runtime": self.runtime,
-            "metadata": self.metadata,
-        }
-        if self.pipeline_status is not None:
-            payload["pipeline_status"] = self.pipeline_status
-        if self.reconciliation is not None:
-            payload["reconciliation"] = self.reconciliation
-        if self.runner_diagnostics is not None:
-            payload["runner_diagnostics"] = self.runner_diagnostics
-        return payload
-
-
-@dataclass(frozen=True, slots=True)
-class CollectedTaskSnapshot:
-    """Internal snapshot plus TaskSpec payload collected in the same replay."""
-
-    snapshot: TaskSnapshot
-    taskspec_payload: dict[str, Any] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,43 +555,6 @@ def _known_internal_service_keys() -> tuple[str, str]:
     return (INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR)
 
 
-def _metadata_claims_internal_service(
-    metadata: Mapping[str, Any],
-    key: str,
-) -> bool:
-    if metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY) != key:
-        return False
-    if metadata.get("internal") is True:
-        return True
-    role = metadata.get("role")
-    if key == INTERNAL_SERVICE_KEY_HEARTBEAT and role == "heartbeat_service":
-        return True
-    if key == INTERNAL_SERVICE_KEY_TASK_MONITOR and role == "task_monitor":
-        return True
-    runtime_class = metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
-    return (
-        key == INTERNAL_SERVICE_KEY_HEARTBEAT
-        and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
-    ) or (
-        key == INTERNAL_SERVICE_KEY_TASK_MONITOR
-        and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-    )
-
-
-def _service_key_from_taskspec_payload(
-    taskspec_payload: Mapping[str, Any],
-) -> str | None:
-    metadata = taskspec_payload.get("metadata")
-    if not isinstance(metadata, Mapping):
-        return None
-    key = metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY)
-    if not isinstance(key, str) or key not in _known_internal_service_keys():
-        return None
-    if not _metadata_claims_internal_service(metadata, key):
-        return None
-    return key
-
-
 def _service_key_from_spawn_payload(payload: Mapping[str, Any]) -> str | None:
     taskspec_payload = payload.get("taskspec")
     if isinstance(taskspec_payload, Mapping):
@@ -796,160 +714,6 @@ def _stale_liveness_reason(
     return None
 
 
-def _stale_liveness_reconciliation(
-    *,
-    reason: str,
-    lifecycle_status: str,
-    public_status: str,
-    service_key: str | None = None,
-    active_service_tid: str | None = None,
-) -> dict[str, Any]:
-    internal_service_reasons = {
-        "superseded_internal_service_record",
-        "internal_service_runtime_missing_after_stale_window",
-    }
-    payload: dict[str, Any] = {
-        "classification": (
-            reason if reason in internal_service_reasons else "stale_liveness"
-        ),
-        "reason": reason,
-        "lifecycle_status": lifecycle_status,
-        "public_status": public_status,
-        "evidence_source": (
-            "service-registry" if reason in internal_service_reasons else "runtime"
-        ),
-    }
-    if service_key is not None:
-        payload["service_key"] = service_key
-    if active_service_tid is not None:
-        payload["active_service_tid"] = active_service_tid
-    return payload
-
-
-def _reconcile_lifecycle_status(
-    payload: Mapping[str, Any],
-    state: Mapping[str, Any],
-) -> tuple[str, str | None]:
-    """Choose lifecycle status from one task-log payload before liveness checks."""
-
-    payload_status = payload.get("status")
-    if isinstance(payload_status, str) and payload_status in TERMINAL_TASK_STATUSES:
-        return payload_status, None
-
-    state_status = state.get("status")
-    if isinstance(state_status, str) and state_status in TERMINAL_TASK_STATUSES:
-        return state_status, None
-
-    completed_at = state.get("completed_at")
-    event = payload.get("event")
-    if (
-        isinstance(completed_at, int)
-        and isinstance(event, str)
-        and event in TERMINAL_TASK_EVENTS
-    ):
-        return TERMINAL_TASK_EVENTS[event], "contradictory_terminal_event_status"
-
-    if isinstance(payload_status, str) and payload_status:
-        return payload_status, None
-    if isinstance(state_status, str) and state_status:
-        return state_status, None
-    return "created", None
-
-
-def _reconciliation_diagnostic(
-    *,
-    lifecycle_status: str,
-    status_reason: str | None,
-    runtime_handle: RunnerHandle | None,
-    runtime_description: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Build optional public reconciliation metadata for status conflicts."""
-
-    if lifecycle_status not in TERMINAL_TASK_STATUSES:
-        return None
-
-    runtime_live, runtime_evidence, runtime_strength = _runtime_evidence_details(
-        handle=runtime_handle,
-        runtime_description=runtime_description,
-    )
-
-    if status_reason == "contradictory_terminal_event_status":
-        diagnostic: dict[str, Any] = {
-            "classification": "runtime_conflict"
-            if runtime_live
-            else "stale_status_payload",
-            "reason": status_reason,
-            "lifecycle_status": lifecycle_status,
-            "runtime_evidence": runtime_evidence,
-            "runtime_evidence_strength": runtime_strength,
-        }
-        if runtime_live:
-            diagnostic["runtime_status"] = "running"
-        return diagnostic
-
-    if not runtime_live:
-        return None
-
-    if runtime_evidence == "host-pid" and runtime_strength == "weak":
-        reason = "weak_host_pid_ignored_for_terminal_lifecycle"
-    else:
-        reason = "terminal_lifecycle_with_live_runtime"
-    return {
-        "classification": "runtime_conflict",
-        "reason": reason,
-        "lifecycle_status": lifecycle_status,
-        "runtime_status": "running",
-        "runtime_evidence": runtime_evidence,
-        "runtime_evidence_strength": runtime_strength,
-    }
-
-
-def _superseded_manager_reconciliation(
-    *,
-    active_manager_tid: str,
-) -> dict[str, Any]:
-    """Build reconciliation metadata for a non-active manager task row."""
-
-    return {
-        "classification": "superseded_manager_record",
-        "reason": "different_active_manager_selected",
-        "lifecycle_status": "failed",
-        "active_manager_tid": active_manager_tid,
-    }
-
-
-def _is_manager_task_payload(taskspec: Mapping[str, Any]) -> bool:
-    """Return whether a TaskSpec payload describes a manager task."""
-
-    metadata = taskspec.get("metadata")
-    return isinstance(metadata, Mapping) and metadata.get("role") == "manager"
-
-
-def _runner_name_for_snapshot(
-    *,
-    taskspec: Mapping[str, Any],
-    mapping_entry: Mapping[str, Any] | None,
-) -> str | None:
-    if mapping_entry is not None:
-        mapped_runner = mapping_entry.get("runner")
-        if isinstance(mapped_runner, str) and mapped_runner.strip():
-            return mapped_runner
-        runtime_handle = _runtime_handle_from_mapping(mapping_entry)
-        if runtime_handle is not None:
-            return runtime_handle.runner
-
-    spec = taskspec.get("spec")
-    if not isinstance(spec, Mapping):
-        return None
-    runner = spec.get("runner")
-    if not isinstance(runner, Mapping):
-        return "host"
-    name = runner.get("name", "host")
-    if isinstance(name, str) and name.strip():
-        return name
-    return "host"
-
-
 def _describe_runtime_handle(handle: RunnerHandle | None) -> dict[str, Any] | None:
     if handle is None:
         return None
@@ -978,6 +742,106 @@ def _describe_runtime_handle(handle: RunnerHandle | None) -> dict[str, Any] | No
     return runtime.to_dict()
 
 
+def _collect_snapshot_evidence(
+    ctx: WeftContext,
+    record: FoldedTaskRecord,
+    *,
+    mapping_entry: Mapping[str, Any] | None,
+    selected_active_manager_tid: str | None,
+    service_owner_index: _InternalServiceOwnerEvidenceIndex,
+    now_ns: int,
+) -> tuple[SnapshotProbePlan, SnapshotEvidence]:
+    """Acquire only the runtime and queue observations requested by policy."""
+
+    taskspec = record.taskspec_payload
+    if taskspec is None:
+        raise ValueError("snapshot evidence requires a TaskSpec-bearing record")
+    runtime_entry = _merge_runtime_entry(mapping_entry, record.event_payload)
+    runtime_handle = _runtime_handle_from_mapping(runtime_entry or {})
+    runner = runner_name_for_snapshot(
+        taskspec=taskspec,
+        mapping_entry=runtime_entry,
+    )
+    runtime_description = _describe_runtime_handle(runtime_handle)
+
+    local_evidence: task_evidence.TaskEvidenceSnapshot | None = None
+    if record.status not in TERMINAL_TASK_STATUSES:
+        local_evidence = task_evidence.task_local_terminal_evidence(
+            ctx,
+            tid=record.tid,
+            taskspec_payload=taskspec,
+        )
+    draft = prepare_snapshot(record, local_evidence=local_evidence)
+
+    stale_liveness_reason = None
+    active_service_tid = None
+    if local_evidence is None or not local_evidence.terminal:
+        internal_service_key = _service_key_from_taskspec_payload(taskspec)
+        internal_service = internal_service_key is not None or _is_internal_service_record(
+            {"metadata": record.metadata}
+        )
+        stale_liveness_reason = _stale_liveness_reason(
+            record.status,
+            tid=record.tid,
+            runner_name=runner,
+            mapping_entry=runtime_entry,
+            runtime_description=runtime_description,
+            last_timestamp=record.last_timestamp,
+            now_ns=now_ns,
+            has_live_manager_record=record.tid == selected_active_manager_tid,
+            internal_service=internal_service,
+            internal_service_key=internal_service_key,
+            service_owner_index=service_owner_index,
+        )
+        active_service = (
+            service_owner_index.live_owner_for_key(internal_service_key)
+            if internal_service_key is not None
+            else None
+        )
+        active_service_tid = (
+            active_service.tid if active_service is not None else None
+        )
+    probe_plan = plan_snapshot_probes(
+        draft,
+        stale_liveness_reason=stale_liveness_reason,
+    )
+
+    runtime_observation = None
+    if probe_plan.acquire_runtime_observation:
+        live, source, strength = _runtime_evidence_details(
+            handle=runtime_handle,
+            runtime_description=runtime_description,
+        )
+        runtime_observation = RuntimeObservation(
+            live=live,
+            evidence=source,
+            strength=strength,
+        )
+
+    claimed_outbox = None
+    if probe_plan.acquire_claimed_outbox:
+        outbox_name, _ctrl_out_name = task_evidence.queue_names_for_tid(
+            record.tid,
+            taskspec,
+        )
+        claimed_outbox = task_evidence.claimed_outbox_result_evidence(
+            ctx,
+            tid=record.tid,
+            outbox_name=outbox_name,
+            taskspec_payload=taskspec,
+        )
+
+    return probe_plan, SnapshotEvidence(
+        resolved_runtime_entry=runtime_entry,
+        runtime_handle=runtime_handle,
+        runtime_description=runtime_description,
+        runtime_observation=runtime_observation,
+        claimed_outbox=claimed_outbox,
+        active_service_tid=active_service_tid,
+        selected_active_manager_tid=selected_active_manager_tid,
+    )
+
+
 def _collect_task_snapshot_records(
     ctx: WeftContext,
     *,
@@ -1001,7 +865,7 @@ def _collect_task_snapshot_records(
     service_owner_index = _InternalServiceOwnerEvidenceIndex.from_evidence(
         registry_evidence
     )
-    records: dict[str, dict[str, Any]] = {}
+    records: dict[str, FoldedTaskRecord] = {}
     tid_mapping_entries = _latest_tid_mapping_entries(ctx)
     try:
         selected_manager = _select_active_manager(ctx)
@@ -1023,314 +887,37 @@ def _collect_task_snapshot_records(
             tid = payload.get("tid")
             if not isinstance(tid, str):
                 continue
-
-            if (
-                tid_filters is not None
-                and tid not in tid_filters
-                and tid[-TASKSPEC_TID_SHORT_LENGTH:] not in tid_filters
-            ):
-                continue
-
-            record = records.setdefault(
-                tid,
-                {
-                    "tid": tid,
-                    "tid_short": tid[-TASKSPEC_TID_SHORT_LENGTH:],
-                    "name": tid,
-                    "status": "created",
-                    "event": "unknown",
-                    "activity": None,
-                    "waiting_on": None,
-                    "started_at": None,
-                    "completed_at": None,
-                    "return_code": None,
-                    "error": None,
-                    "last_timestamp": timestamp,
-                    "taskspec": None,
-                    "metadata": {},
-                    "event_payload": None,
-                    "runner_diagnostics": None,
-                    "status_reason": None,
-                },
+            reduced = reduce_task_event(
+                records.get(tid),
+                payload,
+                timestamp,
+                tid_filters=tid_filters,
             )
-            event = payload.get("event", "unknown")
-            current_status = record.get("status")
-            current_terminal = (
-                isinstance(current_status, str)
-                and current_status in TERMINAL_TASK_STATUSES
-            )
-
-            if event == "task_activity":
-                if current_terminal:
-                    continue
-                record["last_timestamp"] = timestamp
-                if isinstance(event, str):
-                    record["event"] = event
-                status = payload.get("status")
-                if isinstance(status, str) and status:
-                    record["status"] = status
-                if record["status"] in TERMINAL_TASK_STATUSES:
-                    record["activity"] = None
-                    record["waiting_on"] = None
-                else:
-                    activity = payload.get("activity")
-                    waiting_on = payload.get("waiting_on")
-                    record["activity"] = (
-                        activity.strip()
-                        if isinstance(activity, str) and activity.strip()
-                        else None
-                    )
-                    record["waiting_on"] = (
-                        waiting_on.strip()
-                        if isinstance(waiting_on, str) and waiting_on.strip()
-                        else None
-                    )
-                continue
-
-            taskspec = payload.get("taskspec")
-            if not isinstance(taskspec, dict):
-                continue
-
-            name = taskspec.get("name") or payload.get("name") or tid
-            state_raw = taskspec.get("state") or {}
-            state = state_raw if isinstance(state_raw, Mapping) else {}
-            status, status_reason = _reconcile_lifecycle_status(payload, state)
-            incoming_terminal = (
-                isinstance(status, str) and status in TERMINAL_TASK_STATUSES
-            )
-            if current_terminal and not incoming_terminal:
-                continue
-            record["last_timestamp"] = timestamp
-            if isinstance(event, str):
-                record["event"] = event
-            started_at = state.get("started_at")
-            completed_at = state.get("completed_at")
-            return_code = state.get("return_code")
-            state_error = state.get("error")
-            payload_error = payload.get("error")
-            metadata = taskspec.get("metadata") or {}
-            record["name"] = str(name)
-            record["status"] = str(status)
-            record["started_at"] = started_at if isinstance(started_at, int) else None
-            record["completed_at"] = (
-                completed_at if isinstance(completed_at, int) else None
-            )
-            record["return_code"] = (
-                return_code if isinstance(return_code, int) else None
-            )
-            record["error"] = (
-                payload_error
-                if isinstance(payload_error, str) and payload_error
-                else state_error
-                if isinstance(state_error, str) and state_error
-                else None
-            )
-            record["taskspec"] = taskspec
-            record["metadata"] = metadata if isinstance(metadata, dict) else {}
-            record["event_payload"] = dict(payload)
-            diagnostics = payload.get("runner_diagnostics")
-            record["runner_diagnostics"] = (
-                dict(diagnostics) if isinstance(diagnostics, Mapping) else None
-            )
-            record["status_reason"] = status_reason
-            if record["status"] in TERMINAL_TASK_STATUSES:
-                record["activity"] = None
-                record["waiting_on"] = None
-            else:
-                activity = payload.get("activity")
-                waiting_on = payload.get("waiting_on")
-                if isinstance(activity, str) and activity.strip():
-                    record["activity"] = activity.strip()
-                if isinstance(waiting_on, str) and waiting_on.strip():
-                    record["waiting_on"] = waiting_on.strip()
+            if reduced is not None:
+                records[tid] = reduced
     finally:
         log_queue.close()
 
     records_out: list[CollectedTaskSnapshot] = []
     for tid, record in records.items():
-        taskspec = record.get("taskspec")
-        if not isinstance(taskspec, dict):
+        if record.taskspec_payload is None:
             continue
-        mapping_entry = tid_mapping_entries.get(tid)
-        runtime_entry = _merge_runtime_entry(
-            mapping_entry,
-            record.get("event_payload")
-            if isinstance(record.get("event_payload"), Mapping)
-            else None,
+        probe_plan, evidence = _collect_snapshot_evidence(
+            ctx,
+            record,
+            mapping_entry=tid_mapping_entries.get(tid),
+            selected_active_manager_tid=selected_active_manager_tid,
+            service_owner_index=service_owner_index,
+            now_ns=now_ns,
         )
-        runtime_handle = _runtime_handle_from_mapping(runtime_entry or {})
-        runner = _runner_name_for_snapshot(
-            taskspec=taskspec,
-            mapping_entry=runtime_entry,
+        snapshot = reduce_task_snapshot(
+            probe_plan,
+            evidence,
+            now_ns=now_ns,
         )
-        runtime_description = _describe_runtime_handle(runtime_handle)
-        status_reason = record.get("status_reason")
-        lifecycle_status = str(record.get("status") or "created")
-        internal_service_key = _service_key_from_taskspec_payload(taskspec)
-        internal_service = (
-            internal_service_key is not None or _is_internal_service_record(record)
-        )
-        local_evidence: task_evidence.TaskEvidenceSnapshot | None = None
-        if lifecycle_status not in TERMINAL_TASK_STATUSES:
-            local_evidence = task_evidence.task_local_terminal_evidence(
-                ctx,
-                tid=tid,
-                taskspec_payload=taskspec,
-            )
-        if local_evidence is not None and local_evidence.terminal:
-            public_status = local_evidence.status
-            stale_liveness_reason = None
-        else:
-            public_status = lifecycle_status
-            stale_liveness_reason = _stale_liveness_reason(
-                lifecycle_status,
-                tid=tid,
-                runner_name=runner,
-                mapping_entry=runtime_entry,
-                runtime_description=runtime_description,
-                last_timestamp=int(record.get("last_timestamp") or 0),
-                now_ns=now_ns,
-                has_live_manager_record=tid == selected_active_manager_tid,
-                internal_service=internal_service,
-                internal_service_key=internal_service_key,
-                service_owner_index=service_owner_index,
-            )
-            if stale_liveness_reason in {
-                "superseded_internal_service_record",
-                "internal_service_runtime_missing_after_stale_window",
-            }:
-                public_status = "failed"
-        reconciliation = _reconciliation_diagnostic(
-            lifecycle_status=public_status,
-            status_reason=status_reason if isinstance(status_reason, str) else None,
-            runtime_handle=runtime_handle,
-            runtime_description=runtime_description,
-        )
-        if local_evidence is not None and local_evidence.reconciliation is not None:
-            reconciliation = local_evidence.reconciliation
-        elif lifecycle_status not in TERMINAL_TASK_STATUSES:
-            outbox_name, _ctrl_out_name = task_evidence.queue_names_for_tid(
-                tid,
-                taskspec,
-            )
-            claimed_evidence = task_evidence.claimed_outbox_result_evidence(
-                ctx,
-                tid=tid,
-                outbox_name=outbox_name,
-                taskspec_payload=taskspec,
-            )
-            if claimed_evidence is not None:
-                local_evidence = claimed_evidence
-                reconciliation = claimed_evidence.reconciliation
-                public_status = claimed_evidence.status
-            elif stale_liveness_reason is not None:
-                active_service = (
-                    service_owner_index.live_owner_for_key(internal_service_key)
-                    if internal_service_key is not None
-                    else None
-                )
-                reconciliation = _stale_liveness_reconciliation(
-                    reason=stale_liveness_reason,
-                    lifecycle_status=lifecycle_status,
-                    public_status=public_status,
-                    service_key=internal_service_key,
-                    active_service_tid=(
-                        active_service.tid if active_service is not None else None
-                    ),
-                )
-
-        if (
-            lifecycle_status not in TERMINAL_TASK_STATUSES
-            and (local_evidence is None or not local_evidence.terminal)
-            and _is_manager_task_payload(taskspec)
-            and selected_active_manager_tid is not None
-            and tid != selected_active_manager_tid
-        ):
-            public_status = "failed"
-            reconciliation = _superseded_manager_reconciliation(
-                active_manager_tid=selected_active_manager_tid,
-            )
-
-        started_at = record.get("started_at")
-        completed_at = record.get("completed_at")
-        return_code = record.get("return_code")
-        error = record.get("error")
-        if local_evidence is not None:
-            if local_evidence.return_code is not None:
-                return_code = local_evidence.return_code
-            if local_evidence.error is not None:
-                error = local_evidence.error
-            if (
-                not isinstance(completed_at, int)
-                and local_evidence.observed_at is not None
-                and local_evidence.classification != "claimed_result_without_terminal"
-            ):
-                completed_at = local_evidence.observed_at
-            if local_evidence.observed_at is not None:
-                record["last_timestamp"] = max(
-                    int(record.get("last_timestamp") or 0),
-                    local_evidence.observed_at,
-                )
-        if isinstance(started_at, int) and not isinstance(completed_at, int):
-            duration = max(0.0, (now_ns - started_at) / 1_000_000_000)
-        elif isinstance(started_at, int) and isinstance(completed_at, int):
-            duration = max(0.0, (completed_at - started_at) / 1_000_000_000)
-        else:
-            duration = None
-
-        activity = record.get("activity")
-        waiting_on = record.get("waiting_on")
-        if public_status in TERMINAL_TASK_STATUSES:
-            activity = None
-            waiting_on = None
-
-        snapshot = TaskSnapshot(
-            tid=tid,
-            tid_short=record["tid_short"],
-            name=str(record.get("name") or tid),
-            status=public_status,
-            event=str(record.get("event") or "unknown"),
-            activity=activity if isinstance(activity, str) else None,
-            waiting_on=waiting_on if isinstance(waiting_on, str) else None,
-            started_at=started_at if isinstance(started_at, int) else None,
-            completed_at=completed_at if isinstance(completed_at, int) else None,
-            return_code=return_code if isinstance(return_code, int) else None,
-            error=error if isinstance(error, str) else None,
-            last_timestamp=int(record.get("last_timestamp") or 0),
-            duration_seconds=duration,
-            runner=runner,
-            runtime_handle=runtime_handle.to_dict()
-            if runtime_handle is not None
-            else None,
-            runtime=runtime_description,
-            metadata=record["metadata"]
-            if isinstance(record.get("metadata"), dict)
-            else {},
-            reconciliation=reconciliation,
-            runner_diagnostics=(
-                dict(record["runner_diagnostics"])
-                if isinstance(record.get("runner_diagnostics"), dict)
-                else None
-            ),
-        )
-        records_out.append(
-            CollectedTaskSnapshot(snapshot=snapshot, taskspec_payload=taskspec)
-        )
-
-    result = records_out
-    if not include_terminal:
-        result = [
-            record
-            for record in result
-            if record.snapshot.status not in TERMINAL_TASK_STATUSES
-        ]
-    result.sort(
-        key=lambda record: (
-            record.snapshot.status not in {"running", "spawning"},
-            record.snapshot.tid,
-        )
-    )
-    return result
+        if snapshot is not None:
+            records_out.append(snapshot)
+    return order_task_snapshots(records_out, include_terminal=include_terminal)
 
 
 def _service_evidence_from_child_task(
