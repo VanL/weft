@@ -42,7 +42,7 @@ STATE = REPO_ROOT / "docs" / "coalescing.md"
 SHA_RE = re.compile(r"`([0-9a-f]{7,40})`")
 CUE_RE = re.compile(r"git show ([0-9a-f]{7,40}):([A-Za-z0-9_./-]+)")
 
-SIBLINGS = ["agent-guidance", "mm", "taut", "backstitch", "engram", "simplebroker"]
+SIBLINGS = ["agent-theory", "mm", "taut", "backstitch", "engram", "simplebroker"]
 SIBLING_ROOT = REPO_ROOT.parent
 
 # Weft's declared lessons derivation: dated H2 sections.
