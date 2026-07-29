@@ -1,6 +1,6 @@
 # Deduplication and Test Integrity Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/02-TaskSpec.md [TS-1]; docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/08-Testing_Strategy.md [TS-0], [TS-1]; docs/specifications/09-Implementation_Plan.md [IP-1], [IP-1.0]
 Superseded by: none
 
@@ -180,10 +180,11 @@ rollout ordering exists.
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| [TS-1] / Task 4 | Add a keyed-PING custom-control routing test. | Strengthened the existing real custom-control reconstruction test with default-queue traps before and after reconstruction. | The existing test already drove keyed PING through custom ctrl-in/out; adding a second test would duplicate the path. The traps add the missing proof that default control queues remain untouched. | Closed; no behavior change. |
 
 ## 4b. Spec Baseline
 
-- `a391a59b345a8e37dc6d5c362525f84be0f70343` —
+- `05070d79193f6098e18a3b23d6aa935ca98242d2` —
   `docs/specifications/02-TaskSpec.md`,
   `docs/specifications/05-Message_Flow_and_State.md`,
   `docs/specifications/08-Testing_Strategy.md`, and
@@ -434,3 +435,50 @@ queue-routing tests for all five roles, and no normative spec delta.
 
 Round 2: **PASS**. The same reviewer verified all three corrections and
 reported no remaining material defect.
+
+## 12. Implementation Result
+
+Completed 2026-07-29.
+
+- Consolidated manager-record conversion in
+  `weft/commands/manager.py::_manager_snapshot`.
+- Consolidated runtime description and structured stdout/stderr extraction in
+  `weft/core/task_evidence.py`, with the command compatibility shim
+  re-exporting both helpers.
+- Consolidated optional-deadline math in `weft/commands/tasks.py`; event
+  iteration now calls that canonical helper set.
+- Deleted the four reverified unreferenced task helpers and all duplicate
+  converter/deadline definitions.
+- Replaced fixture-restating queue tests with exact reactor topology checks and
+  real custom work, PING, STOP, and reserved-message routes.
+- Guaranteed one legal transition in both generated lifecycle properties and
+  asserted that at least one operation succeeds.
+- Added a live environment-loader versus AST-derived explicit-normalizer key
+  parity guard with exact directional exceptions.
+
+Mutation proof caught deliberate changes to manager field conversion, runtime
+description, stdout type guarding, deadline equality, custom outbox
+resolution, all-transition rejection, and an unpaired normalizer key. The
+complete manager dataclass oracle and malformed/timestamp tables make every
+converter field and coercion branch observable.
+
+Implementation review:
+
+- Grok round 1: **PASS**, with non-blocking requests for explicit default
+  control-queue isolation and a direct null runtime-handle case.
+- Both observations were addressed.
+- Grok round 2: **PASS**. The reviewer confirmed the added assertions are
+  observable, non-vacuous, and not coupled to private queue maps.
+
+Verification:
+
+- all focused command, client, task, TaskSpec, evidence, and configuration
+  suites passed
+- full suite: 2471 passed, 14 skipped
+- mypy: 195 source files, no issues
+- Ruff: passed
+- definition/reference scans: one canonical definition per behavior; all four
+  dead-helper symbols absent
+- DOM-15 fixture contract: passed
+- documentation path check: unchanged repository baseline of eight dangling
+  claims, none introduced by this plan

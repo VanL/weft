@@ -751,7 +751,9 @@ def _runtime_handle_from_mapping(entry: dict[str, Any] | None) -> RunnerHandle |
         return None
 
 
-def _runtime_description(handle: RunnerHandle | None) -> dict[str, Any] | None:
+def describe_runtime(handle: RunnerHandle | None) -> dict[str, Any] | None:
+    """Describe a runtime handle through its authoritative runner boundary."""
+
     if handle is None:
         return None
     if handle.control.get("authority") == "external-supervisor":
@@ -787,7 +789,7 @@ def runtime_evidence(
     """Return live runtime evidence from the latest TID mapping."""
 
     handle = _runtime_handle_from_mapping(mapping_entry)
-    runtime = _runtime_description(handle)
+    runtime = describe_runtime(handle)
     live = False
     if handle is not None and handle.control.get("authority") == "host-pid":
         live = handle_has_live_host_process(handle)

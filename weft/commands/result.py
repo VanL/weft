@@ -778,17 +778,6 @@ def _await_single_result(
     return status, result_value, error_message
 
 
-def _split_stdio(value: Any) -> tuple[str | None, str | None]:
-    if not isinstance(value, dict):
-        return None, None
-    stdout = value.get("stdout")
-    stderr = value.get("stderr")
-    return (
-        stdout if isinstance(stdout, str) else None,
-        stderr if isinstance(stderr, str) else None,
-    )
-
-
 def await_task_result(
     context: WeftContext,
     tid: str,
@@ -860,7 +849,7 @@ def await_task_result(
         initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
         initial_result_surface_had_activity=materialized.result_surface_had_activity,
     )
-    stdout, stderr = _split_stdio(value)
+    stdout, stderr = task_evidence.split_stdio(value)
     return TaskResult(
         tid=normalized_tid,
         status=status,

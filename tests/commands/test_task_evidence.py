@@ -16,11 +16,128 @@ from weft.commands import tasks as task_cmd
 from weft.context import build_context
 from weft.core import task_evidence
 from weft.core.tasks import Consumer
+from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
 
 LIVE_PONG_PROBE_TIMEOUT = 20.0
 LIVE_PONG_DRIVE_TIMEOUT = 25.0
+
+
+def _runner_handle(
+    *,
+    authority: str = "runner",
+    observations: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> RunnerHandle:
+    return RunnerHandle(
+        runner="fixture",
+        kind="container",
+        id="runtime-1",
+        control={"authority": authority},
+        observations=observations or {},
+        metadata=metadata or {},
+    )
+
+
+def test_describe_runtime_uses_external_supervisor_observations() -> None:
+    handle = _runner_handle(
+        authority="external-supervisor",
+        observations={"container_pid": 7, "shared": "observation"},
+        metadata={"image": "fixture:latest", "shared": "metadata"},
+    )
+
+    assert task_evidence.describe_runtime(handle) == {
+        "runner": "fixture",
+        "id": "runtime-1",
+        "state": "unknown",
+        "metadata": {
+            "container_pid": 7,
+            "image": "fixture:latest",
+            "shared": "metadata",
+        },
+    }
+
+
+def test_describe_runtime_returns_none_without_a_handle() -> None:
+    assert task_evidence.describe_runtime(None) is None
+
+
+def test_describe_runtime_returns_plugin_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Plugin:
+        def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription:
+            assert handle.id == "runtime-1"
+            return RunnerRuntimeDescription(
+                runner=handle.runner,
+                id=handle.id,
+                state="running",
+                metadata={"cpu_percent": 0.5},
+            )
+
+    monkeypatch.setattr(
+        task_evidence,
+        "require_runner_plugin",
+        lambda _name: Plugin(),
+    )
+
+    assert task_evidence.describe_runtime(_runner_handle()) == {
+        "runner": "fixture",
+        "id": "runtime-1",
+        "state": "running",
+        "metadata": {"cpu_percent": 0.5},
+    }
+
+
+def test_describe_runtime_preserves_none_from_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Plugin:
+        def describe(self, _handle: RunnerHandle) -> None:
+            return None
+
+    monkeypatch.setattr(
+        task_evidence,
+        "require_runner_plugin",
+        lambda _name: Plugin(),
+    )
+
+    assert task_evidence.describe_runtime(_runner_handle()) is None
+
+
+def test_describe_runtime_converts_plugin_failure_to_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_lookup(_name: str) -> object:
+        raise RuntimeError("describe failed")
+
+    monkeypatch.setattr(task_evidence, "require_runner_plugin", fail_lookup)
+
+    assert task_evidence.describe_runtime(_runner_handle()) == {
+        "runner": "fixture",
+        "id": "runtime-1",
+        "state": "unknown",
+        "metadata": {"describe_error": "describe failed"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({"stdout": "out", "stderr": "err"}, ("out", "err")),
+        ({"stdout": 1, "stderr": ["err"]}, (None, None)),
+        ({"stdout": "out"}, ("out", None)),
+        (["not", "structured"], (None, None)),
+        ("plain text", (None, None)),
+        (None, (None, None)),
+    ],
+)
+def test_split_stdio_accepts_only_structured_string_fields(
+    value: Any,
+    expected: tuple[str | None, str | None],
+) -> None:
+    assert task_evidence.split_stdio(value) == expected
 
 
 def _taskspec_payload(

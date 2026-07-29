@@ -41,6 +41,46 @@ from weft.helpers import (
 pytestmark = [pytest.mark.shared]
 
 
+@pytest.mark.parametrize(
+    ("timeout", "expected"),
+    [
+        (None, None),
+        (-5.0, 100.0),
+        (0.0, 100.0),
+        (5.0, 105.0),
+    ],
+)
+def test_deadline_from_timeout_clamps_at_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    timeout: float | None,
+    expected: float | None,
+) -> None:
+    monkeypatch.setattr(task_cmd.time, "monotonic", lambda: 100.0)
+
+    assert task_cmd._deadline_from_timeout(timeout) == expected
+
+
+@pytest.mark.parametrize(
+    ("deadline", "remaining", "expired"),
+    [
+        (None, None, False),
+        (99.0, 0.0, True),
+        (100.0, 0.0, True),
+        (101.0, 1.0, False),
+    ],
+)
+def test_deadline_helpers_share_exact_expiry_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    deadline: float | None,
+    remaining: float | None,
+    expired: bool,
+) -> None:
+    monkeypatch.setattr(task_cmd.time, "monotonic", lambda: 100.0)
+
+    assert task_cmd._remaining_timeout(deadline) == remaining
+    assert task_cmd._deadline_expired(deadline) is expired
+
+
 class _FakeQueueChangeMonitor:
     def __init__(self, queues, *, config=None) -> None:
         del config

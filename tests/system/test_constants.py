@@ -1,6 +1,7 @@
 """Tests for the _constants module."""
 
 import ast
+import inspect
 import os
 import re
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+import weft._constants as constants
 from weft._constants import (
     AGENT_SESSION_READY_TIMEOUT_SECONDS,
     COMMAND_SESSION_POST_TERMINATION_WAIT,
@@ -96,6 +98,99 @@ from weft._constants import (
     compile_config,
     load_config,
 )
+
+
+def _resolve_normalized_key(node: ast.expr) -> str:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        assert hasattr(constants, node.id), (
+            f"normalizer key name {node.id!r} is not defined in weft._constants"
+        )
+        value = getattr(constants, node.id)
+        assert isinstance(value, str), (
+            f"normalizer key name {node.id!r} must resolve to str, "
+            f"got {type(value).__name__}"
+        )
+        return value
+    raise AssertionError(f"unsupported normalizer key expression: {ast.dump(node)}")
+
+
+def _explicit_normalizer_keys() -> set[str]:
+    tree = ast.parse(inspect.getsource(constants._normalize_weft_override_value))
+    keys: set[str] = set()
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            if isinstance(node, (ast.IfExp, ast.While)):
+                assert not any(
+                    isinstance(part, ast.Name) and part.id == "name"
+                    for part in ast.walk(node.test)
+                ), (
+                    "unsupported normalizer control-flow condition at "
+                    f"line {node.lineno}: {ast.dump(node.test)}"
+                )
+            if isinstance(node, ast.Match):
+                assert not (
+                    isinstance(node.subject, ast.Name) and node.subject.id == "name"
+                ), (
+                    "unsupported normalizer match statement at "
+                    f"line {node.lineno}: {ast.dump(node.subject)}"
+                )
+            continue
+
+        if not any(
+            isinstance(part, ast.Name) and part.id == "name"
+            for part in ast.walk(node.test)
+        ):
+            continue
+        comparison = node.test
+        assert isinstance(comparison, ast.Compare), (
+            "unsupported normalizer condition at "
+            f"line {node.lineno}: {ast.dump(comparison)}"
+        )
+        assert (
+            isinstance(comparison.left, ast.Name)
+            and comparison.left.id == "name"
+            and len(comparison.ops) == 1
+            and len(comparison.comparators) == 1
+        ), (
+            "normalizer comparisons must have the form name == KEY or "
+            f"name in {{KEYS}} at line {node.lineno}: {ast.dump(comparison)}"
+        )
+        operator = comparison.ops[0]
+        values = comparison.comparators[0]
+        if isinstance(operator, ast.Eq):
+            keys.add(_resolve_normalized_key(values))
+            continue
+        assert isinstance(operator, ast.In) and isinstance(
+            values, (ast.Set, ast.List, ast.Tuple)
+        ), (
+            "normalizer comparisons must use == or a literal membership "
+            f"collection at line {node.lineno}: {ast.dump(comparison)}"
+        )
+        keys.update(_resolve_normalized_key(item) for item in values.elts)
+
+    return keys
+
+
+def test_env_loader_and_explicit_override_normalizer_keys_stay_in_parity() -> None:
+    """Default-backed loader keys and explicit normalizers differ only by policy."""
+
+    with patch.dict(os.environ, {}, clear=True):
+        loader_keys = set(constants._load_weft_env_vars())
+    normalizer_keys = _explicit_normalizer_keys()
+    loader_only = {"WEFT_MANAGER_RUNTIME_HANDLE_JSON"}
+    normalizer_only = {
+        "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
+        "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED",
+        "WEFT_TASK_MONITOR_CLEANUP_WORKERS",
+        constants.MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
+    }
+
+    assert loader_keys - normalizer_keys == loader_only
+    assert normalizer_keys - loader_keys == normalizer_only
+    assert loader_keys - loader_only == normalizer_keys - normalizer_only
 
 _RUNTIME_OBJECT_ALLOWLIST = {
     "extensions/weft_docker/weft_docker/agent_runner.py": {"_WORK_ITEM_MISSING"},

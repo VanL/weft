@@ -2191,6 +2191,47 @@ def test_task_processes_function_target_and_writes_outbox(
     assert terminal["return_code"] == 0
 
 
+def test_task_routes_work_through_custom_inbox_and_outbox(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    custom_inbox_name = f"custom.work.{unique_tid}.in"
+    custom_outbox_name = f"custom.work.{unique_tid}.out"
+    spec = with_queue_role_overrides(
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+        inbox=custom_inbox_name,
+        outbox=custom_outbox_name,
+        ctrl_in=f"custom.work.{unique_tid}.ctrl_in",
+        ctrl_out=f"custom.work.{unique_tid}.ctrl_out",
+    )
+    task = Consumer(db_path, spec)
+    custom_inbox = make_queue(custom_inbox_name)
+    custom_outbox = make_queue(custom_outbox_name)
+    default_inbox = make_queue(f"T{unique_tid}.inbox")
+    default_outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
+    custom_inbox.write(json.dumps({"args": ["custom"], "kwargs": {"suffix": "!"}}))
+    default_inbox.write(json.dumps({"args": ["default-trap"]}))
+
+    try:
+        _drive_consumer_until(
+            task,
+            lambda: (
+                custom_outbox.peek_one() is not None
+                or default_outbox.peek_one() is not None
+            ),
+        )
+
+        assert custom_outbox.read_one() == "custom!"
+        assert default_outbox.peek_one() is None
+        assert default_inbox.peek_one() == json.dumps({"args": ["default-trap"]})
+    finally:
+        task.cleanup()
+
+
 def test_run_work_item_executes_payload(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
@@ -4305,21 +4346,27 @@ def test_reserved_policy_clear_on_stop(broker_env, unique_tid: str) -> None:
 
 def test_reserved_policy_requeue_on_stop(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
-    spec = make_function_taskspec(
-        unique_tid,
-        "tests.tasks.sample_targets:echo_payload",
-        reserved_stop=ReservedPolicy.REQUEUE,
+    custom_inbox_name = f"custom.requeue.{unique_tid}.in"
+    custom_ctrl_in_name = f"custom.requeue.{unique_tid}.ctrl_in"
+    spec = with_queue_role_overrides(
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+            reserved_stop=ReservedPolicy.REQUEUE,
+        ),
+        inbox=custom_inbox_name,
+        ctrl_in=custom_ctrl_in_name,
     )
     task = Consumer(db_path, spec)
 
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     reserved.write("job")
-    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_in = make_queue(custom_ctrl_in_name)
     ctrl_in.write(CONTROL_STOP)
 
     task.process_once()
 
-    inbox = make_queue(spec.io.inputs["inbox"])
+    inbox = make_queue(custom_inbox_name)
     assert inbox.read_one() == "job"
     assert reserved.has_pending() is False
 

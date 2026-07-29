@@ -634,8 +634,8 @@ def test_mapping_runtime_fields_override_event_runtime_fields(
     )
     described: list[RunnerHandle | None] = []
     monkeypatch.setattr(
-        system,
-        "_describe_runtime_handle",
+        system.task_evidence,
+        "describe_runtime",
         lambda handle: described.append(handle)
         or {"runner": handle.runner, "id": handle.id, "state": "unknown"},
     )

@@ -30,6 +30,7 @@ from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.status import cmd_status, collect_status
 from weft.context import build_context
+from weft.core import task_evidence as core_task_evidence
 from weft.core.runners import host as host_runner
 from weft.core.service_convergence import (
     build_manager_service_payload,
@@ -837,7 +838,7 @@ def test_cmd_status_json_includes_runner_runtime_details(
             )
 
     monkeypatch.setattr(
-        status_cmd,
+        core_task_evidence,
         "require_runner_plugin",
         lambda name: FakeRunnerPlugin(),
     )
@@ -918,7 +919,7 @@ def test_task_status_does_not_apply_host_pid_identity_to_docker_runtime(
 
     monkeypatch.setattr(status_cmd, "_task_process_alive", fail_host_liveness_check)
     monkeypatch.setattr(
-        status_cmd,
+        core_task_evidence,
         "require_runner_plugin",
         lambda name: FakeRunnerPlugin(),
     )
@@ -1295,7 +1296,7 @@ def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task
             )
 
     monkeypatch.setattr(
-        status_cmd,
+        core_task_evidence,
         "require_runner_plugin",
         lambda name: FakeRunnerPlugin(),
     )
@@ -2168,7 +2169,7 @@ def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
             )
 
     monkeypatch.setattr(
-        status_cmd,
+        core_task_evidence,
         "require_runner_plugin",
         lambda name: FakeRunnerPlugin(),
     )
@@ -2293,7 +2294,7 @@ def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
         status_cmd, "handle_has_live_host_process", lambda handle: False
     )
     monkeypatch.setattr(
-        status_cmd,
+        core_task_evidence,
         "require_runner_plugin",
         lambda name: FakeRunnerPlugin(),
     )

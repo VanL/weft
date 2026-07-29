@@ -626,7 +626,7 @@ Current rules:
   `reconciliation` diagnostics, but it must not rewrite a terminal task back to
   `running`
 - shared task evidence classification lives in
-  `weft/commands/task_evidence.py`; status, task inspection, known-TID terminal
+  `weft/core/task_evidence.py`; status, task inspection, known-TID terminal
   snapshots, and result helpers reuse that interpretation instead of each
   inventing their own priority rules
 - shared task evidence priority is: terminal task-log lifecycle proof, typed
@@ -694,7 +694,8 @@ _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
 supervised monitor task;
 `weft/core/monitor/runtime.py` task-monitor runtime config, candidate, and
 processor contract;
-`weft/core/task_evidence.py` shared lifecycle/result evidence classification;
+`weft/core/task_evidence.py` shared lifecycle/result evidence classification,
+runtime description, and structured stdout/stderr extraction;
 `weft/core/outbox.py` shared outbox decoding;
 `weft/commands/system.py` queue/runtime evidence acquisition and ordered log
 replay; `weft/commands/_task_snapshot_reducer.py` pure event folding, evidence
@@ -1310,6 +1311,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
 - [`docs/plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](../plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md)
 - [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
 - [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)

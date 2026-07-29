@@ -45,12 +45,16 @@ packages.
 - `weft/core/manager_runtime.py` owns detached manager bootstrap,
   shared manager start/stop coordination, and TID generation for submission
   paths; `weft/commands/manager.py` and `weft/commands/serve.py` are the
-  command-side capability surfaces.
+  command-side capability surfaces. `weft/commands/manager.py::_manager_snapshot`
+  is the single manager-record conversion path used by manager and system
+  status capabilities.
 - `weft/commands/_spawn_submission.py` owns queue-first spawn reconciliation
   after a TID has been submitted.
 - `weft/commands/result.py`, `weft/commands/_result_wait.py`,
   `weft/commands/_streaming.py`, and `weft/core/queue_wait.py` own the
   result surface and the shared waiting/streaming behavior behind it.
+  Result, task, and system commands consume runtime descriptions and
+  structured stdout/stderr extraction from `weft/core/task_evidence.py`.
 - `weft/commands/status.py`, `weft/commands/tasks.py`, and
   `weft/commands/_task_history.py` own task inspection, short/full TID
   handling, and pipeline-aware status reconstruction.
@@ -172,7 +176,7 @@ let us use red-green TDD without booting managers or over-mocking processes.
 | Seam | File | Purpose | Test shape |
 | --- | --- | --- | --- |
 | Public task snapshot reconstruction | `weft/commands/_task_snapshot_reducer.py` | Fold ordered lifecycle events and reconcile already-acquired task-local, runtime, service-owner, and manager evidence into the public status snapshot. | Literal event folds and concrete evidence values with fixed clocks; real queues remain in command integration tests. |
-| Task evidence classification | `weft/core/task_evidence.py` | Reduce logs, control envelopes, outbox evidence, and runtime evidence into public task status/result evidence. | Table-driven inputs with no subprocesses; assert priority and reconciliation invariants. |
+| Task evidence classification | `weft/core/task_evidence.py` | Reduce logs, control envelopes, outbox evidence, and runtime evidence into public task status/result evidence; describe runner runtime handles; extract structured stdout/stderr. | Table-driven inputs with no subprocesses; assert priority, field guards, fallback, and reconciliation invariants. |
 | Control convergence | `weft/commands/control_convergence.py` | Decide when STOP/KILL has enough evidence to report success, fallback, rejection, or timeout. | Pure reducer cases before command-layer integration tests. |
 | TaskSpec validation and materialization | `weft/core/taskspec/` | Validate immutable execution config and expand run inputs. | Model validation and materialization cases with explicit invalid inputs. |
 | Pipeline compilation | `weft/core/pipelines.py` | Validate and compile stored pipeline stage references. | Pure pipeline specs plus command integration for stored reference loading. |
@@ -197,6 +201,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
 - [`docs/plans/2026-07-29-task-snapshot-reducer-plan.md`](../plans/2026-07-29-task-snapshot-reducer-plan.md)
 - [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)

@@ -19,12 +19,97 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.commands import manager as manager_cmd
+from weft.commands.types import ManagerSnapshot
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.service_convergence import build_manager_service_payload
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_manager_snapshot_converts_every_public_field() -> None:
+    runtime_handle = {
+        "runner": "host",
+        "kind": "process",
+        "id": "42",
+        "control": {"authority": "host-pid"},
+    }
+    record = {
+        "tid": 1761000000000000000,
+        "status": "active",
+        "name": "primary",
+        "runtime_handle": runtime_handle,
+        "timestamp": "1761000000000000123",
+        "role": "manager",
+        "requests": "requests",
+        "internal_requests": "internal-requests",
+        "internal_reserved": "internal-reserved",
+        "outbox": "outbox",
+        "ctrl_in": "ctrl-in",
+        "ctrl_out": "ctrl-out",
+    }
+
+    snapshot = manager_cmd._manager_snapshot(record)
+
+    assert snapshot == ManagerSnapshot(
+        tid="1761000000000000000",
+        status="active",
+        name="primary",
+        runtime_handle=runtime_handle,
+        timestamp=1761000000000000123,
+        role="manager",
+        requests="requests",
+        internal_requests="internal-requests",
+        internal_reserved="internal-reserved",
+        outbox="outbox",
+        ctrl_in="ctrl-in",
+        ctrl_out="ctrl-out",
+    )
+    assert snapshot.runtime_handle is not runtime_handle
+
+
+@pytest.mark.parametrize(
+        ("timestamp", "expected"),
+        [
+            (123, 123),
+            (123.0, None),
+        ("123", 123),
+        ("12.5", None),
+        ("not-a-timestamp", None),
+        (None, None),
+    ],
+)
+def test_manager_snapshot_coerces_only_numeric_timestamps(
+    timestamp: object,
+    expected: int | None,
+) -> None:
+    snapshot = manager_cmd._manager_snapshot({"timestamp": timestamp})
+
+    assert snapshot.timestamp == expected
+
+
+def test_manager_snapshot_discards_malformed_optional_fields() -> None:
+    snapshot = manager_cmd._manager_snapshot(
+        {
+            "runtime_handle": ["not", "a", "mapping"],
+            "role": 1,
+            "requests": {},
+            "internal_requests": [],
+            "internal_reserved": 2,
+            "outbox": False,
+            "ctrl_in": object(),
+            "ctrl_out": (),
+        }
+    )
+
+    assert snapshot == ManagerSnapshot(
+        tid="",
+        status="unknown",
+        name="",
+        runtime_handle=None,
+        timestamp=None,
+    )
 
 
 def _host_runtime_handle(pid: int) -> dict[str, object]:

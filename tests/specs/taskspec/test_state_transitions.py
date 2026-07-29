@@ -155,27 +155,33 @@ _STATUS_OPERATIONS = {
     "cancelled": lambda taskspec: taskspec.mark_cancelled(reason="generated"),
     "killed": lambda taskspec: taskspec.mark_killed(reason="generated"),
 }
+_LEGAL_INITIAL_STATUS_OPERATIONS = ("started", "running", "failed", "cancelled")
 
 
 @pytest.mark.property
 @given(
-    operations=st.lists(
+    initial_operation=st.sampled_from(_LEGAL_INITIAL_STATUS_OPERATIONS),
+    tail=st.lists(
         st.sampled_from(tuple(_STATUS_OPERATIONS)),
-        min_size=1,
-        max_size=12,
+        min_size=0,
+        max_size=11,
     )
 )
 def test_generated_status_operation_sequences_never_leave_terminal_state(
-    operations: list[str],
+    initial_operation: str,
+    tail: list[str],
 ) -> None:
     taskspec = fixtures.create_minimal_taskspec()
 
     terminal_status: str | None = None
-    for operation in operations:
+    successful_operations = 0
+    for operation in (initial_operation, *tail):
         try:
             _STATUS_OPERATIONS[operation](taskspec)
         except ValueError:
             pass
+        else:
+            successful_operations += 1
 
         if terminal_status is not None:
             assert taskspec.state.status == terminal_status
@@ -186,3 +192,4 @@ def test_generated_status_operation_sequences_never_leave_terminal_state(
             assert taskspec.state.started_at is not None
         if taskspec.state.status in terminal_task_lifecycle_statuses:
             assert taskspec.state.completed_at is not None
+    assert successful_operations >= 1

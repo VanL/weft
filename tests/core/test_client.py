@@ -480,7 +480,10 @@ def test_system_and_manager_namespaces_expose_shared_runtime_state() -> None:
 
         assert manager_tid
         assert manager_snapshot is not None
-        assert any(item.tid == manager_tid for item in status_snapshot.managers)
+        system_manager = next(
+            item for item in status_snapshot.managers if item.tid == manager_tid
+        )
+        assert system_manager == manager_snapshot
 
 
 def test_tasks_watch_yields_terminal_snapshot() -> None:

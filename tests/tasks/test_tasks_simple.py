@@ -105,22 +105,28 @@ class TestTaskSimple:
             tempdir.cleanup()
 
     def test_required_queues(self):
-        """Test that TaskSpec has required queues."""
+        """Task resolves all five default reactor queue roles."""
         tempdir, db_path = self._db_path()
         try:
             taskspec = fixtures.create_minimal_taskspec()
             task = Consumer(str(db_path), taskspec)
 
-            # Check that required queues exist
-            assert "ctrl_in" in task.taskspec.io.control
-            assert "ctrl_out" in task.taskspec.io.control
-            assert "outbox" in task.taskspec.io.outputs
+            prefix = f"T{taskspec.tid}"
+            expected = {
+                "inbox": f"{prefix}.inbox",
+                "reserved": f"{prefix}.reserved",
+                "outbox": f"{prefix}.outbox",
+                "ctrl_in": f"{prefix}.ctrl_in",
+                "ctrl_out": f"{prefix}.ctrl_out",
+            }
+            assert task._reactor_queue_roles() == expected
+            assert task._ctrl_out_queue.name == expected["ctrl_out"]
             task.cleanup()
         finally:
             tempdir.cleanup()
 
     def test_custom_taskspec_queues(self):
-        """Test that custom queues from taskspec are preserved."""
+        """Canonical custom queues drive the reactor; extra inputs do not."""
         tempdir, db_path = self._db_path()
         try:
             taskspec = TaskSpec(
@@ -130,8 +136,8 @@ class TestTaskSimple:
                 spec=SpecSection(type="command", process_target="echo"),
                 io=IOSection(
                     inputs={
+                        "inbox": "custom.inbox",
                         "data": "custom.data.queue",
-                        "config": "custom.config.queue",
                     },
                     outputs={"outbox": "custom.outbox"},
                     control={
@@ -144,12 +150,17 @@ class TestTaskSimple:
 
             task = Consumer(str(db_path), taskspec=taskspec)
 
-            # Check custom queues are preserved
-            assert task.taskspec.io.inputs["data"] == "custom.data.queue"
-            assert task.taskspec.io.inputs["config"] == "custom.config.queue"
-            assert task.taskspec.io.outputs["outbox"] == "custom.outbox"
-            assert task.taskspec.io.control["ctrl_in"] == "custom.control.in"
-            assert task.taskspec.io.control["ctrl_out"] == "custom.control.out"
+            roles = task._reactor_queue_roles()
+            assert roles == {
+                "inbox": "custom.inbox",
+                "reserved": f"T{taskspec.tid}.reserved",
+                "outbox": "custom.outbox",
+                "ctrl_in": "custom.control.in",
+                "ctrl_out": "custom.control.out",
+            }
+            assert task._ctrl_out_queue.name == "custom.control.out"
+            assert "data" not in roles
+            assert "custom.data.queue" not in roles.values()
             task.cleanup()
         finally:
             tempdir.cleanup()

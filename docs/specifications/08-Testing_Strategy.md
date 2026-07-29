@@ -82,14 +82,19 @@ Coverage policy:
   `test_test_audit_policy.py`.
 - `tests/system/` holds repository-level checks for constants, helper behavior,
   backend test plumbing, and release-script invariants. It also contains pure
-  property tests for finite configuration-parser boundaries.
+  property tests for finite configuration-parser boundaries and a live parity
+  guard between default-backed environment-loader keys and explicit
+  override-normalizer branches.
 - `tests/tasks/` covers execution, reservation flow, control messages, process
   titles, observability, interactive behavior, pipeline runtime, and
-  task-endpoint behavior.
+  task-endpoint behavior. Real queue tests verify custom inbox, outbox, and
+  control routing while the reserved lane remains TID-derived.
 - `tests/taskspec/` covers TaskSpec validation, immutability, defaults, and
   state transitions. Property tests supplement the examples for generated
   TaskSpec payload resolution, immutable `spec`/`io` sections, resource-limit
-  validation, metric peaks, and timestamp coherence.
+  validation, metric peaks, and timestamp coherence. Generated transition
+  sequences include one guaranteed-legal prefix so invariant assertions cannot
+  pass without exercising a transition.
 - `tests/helpers/` and `tests/fixtures/` provide shared harness, backend, and
   scenario setup for the above suites. They are support code, not their own
   test contract.
@@ -115,6 +120,7 @@ Coverage policy:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
 - [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 

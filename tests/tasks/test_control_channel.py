@@ -346,6 +346,10 @@ def test_control_ack_survives_task_reconstruction_without_replay(
 
     ctrl_in = make_queue(ctrl_in_name)
     ctrl_out = make_queue(ctrl_out_name)
+    default_ctrl_in = make_queue(f"T{unique_tid}.ctrl_in")
+    default_ctrl_out = make_queue(f"T{unique_tid}.ctrl_out")
+    default_trap = json.dumps({"command": "PING", "request_id": "default-trap"})
+    default_ctrl_in.write(default_trap)
     first = Consumer(db_path, make_spec())
     try:
         ctrl_in.write(json.dumps({"command": "PING", "request_id": "first"}))
@@ -353,6 +357,8 @@ def test_control_ack_survives_task_reconstruction_without_replay(
         assert ctrl_in.peek_one() is None
         first_response = json.loads(ctrl_out.read_one())
         assert first_response["request_id"] == "first"
+        assert default_ctrl_in.peek_one() == default_trap
+        assert default_ctrl_out.peek_one() is None
     finally:
         first.cleanup()
 
@@ -364,6 +370,8 @@ def test_control_ack_survives_task_reconstruction_without_replay(
         responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
         assert [response.get("request_id") for response in responses] == ["barrier"]
         assert ctrl_in.peek_one() is None
+        assert default_ctrl_in.peek_one() == default_trap
+        assert default_ctrl_out.peek_one() is None
     finally:
         replacement.cleanup()
 

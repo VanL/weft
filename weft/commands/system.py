@@ -45,11 +45,13 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft._runner_plugins import require_runner_plugin
 from weft.builtins import builtin_task_catalog
-from weft.commands.manager import _list_manager_records, _select_active_manager
+from weft.commands.manager import (
+    _list_manager_records,
+    _manager_snapshot,
+    _select_active_manager,
+)
 from weft.commands.types import (
-    ManagerSnapshot,
     ServiceSnapshot,
     SystemLoadResult,
     SystemStatusSnapshot,
@@ -607,7 +609,7 @@ def _service_runtime_liveness(
     description = (
         runtime_description
         if isinstance(runtime_description, Mapping)
-        else _describe_runtime_handle(handle)
+        else task_evidence.describe_runtime(handle)
     )
     live, _evidence, _strength = _runtime_evidence_details(
         handle=handle,
@@ -714,34 +716,6 @@ def _stale_liveness_reason(
     return None
 
 
-def _describe_runtime_handle(handle: RunnerHandle | None) -> dict[str, Any] | None:
-    if handle is None:
-        return None
-    if handle.control.get("authority") == "external-supervisor":
-        return {
-            "runner": handle.runner,
-            "id": handle.id,
-            "state": "unknown",
-            "metadata": {
-                **dict(handle.observations),
-                **dict(handle.metadata),
-            },
-        }
-    try:
-        plugin = require_runner_plugin(handle.runner)
-        runtime = plugin.describe(handle)
-    except Exception as exc:  # pragma: no cover - defensive integration guard
-        return {
-            "runner": handle.runner,
-            "id": handle.id,
-            "state": "unknown",
-            "metadata": {"describe_error": str(exc)},
-        }
-    if runtime is None:
-        return None
-    return runtime.to_dict()
-
-
 def _collect_snapshot_evidence(
     ctx: WeftContext,
     record: FoldedTaskRecord,
@@ -762,7 +736,7 @@ def _collect_snapshot_evidence(
         taskspec=taskspec,
         mapping_entry=runtime_entry,
     )
-    runtime_description = _describe_runtime_handle(runtime_handle)
+    runtime_description = task_evidence.describe_runtime(runtime_handle)
 
     local_evidence: task_evidence.TaskEvidenceSnapshot | None = None
     if record.status not in TERMINAL_TASK_STATUSES:
@@ -1698,46 +1672,6 @@ def cmd_status(
         )
 
     return 0, payload
-
-
-def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
-    return ManagerSnapshot(
-        tid=str(record.get("tid", "")),
-        status=str(record.get("status", "unknown")),
-        name=str(record.get("name", "")),
-        runtime_handle=(
-            dict(record["runtime_handle"])
-            if isinstance(record.get("runtime_handle"), dict)
-            else None
-        ),
-        timestamp=(
-            int(record["timestamp"])
-            if isinstance(record.get("timestamp"), int | float | str)
-            and str(record.get("timestamp")).isdigit()
-            else None
-        ),
-        role=record.get("role") if isinstance(record.get("role"), str) else None,
-        requests=(
-            record.get("requests") if isinstance(record.get("requests"), str) else None
-        ),
-        internal_requests=(
-            record.get("internal_requests")
-            if isinstance(record.get("internal_requests"), str)
-            else None
-        ),
-        internal_reserved=(
-            record.get("internal_reserved")
-            if isinstance(record.get("internal_reserved"), str)
-            else None
-        ),
-        outbox=record.get("outbox") if isinstance(record.get("outbox"), str) else None,
-        ctrl_in=record.get("ctrl_in")
-        if isinstance(record.get("ctrl_in"), str)
-        else None,
-        ctrl_out=(
-            record.get("ctrl_out") if isinstance(record.get("ctrl_out"), str) else None
-        ),
-    )
 
 
 def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:

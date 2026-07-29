@@ -203,10 +203,6 @@ def _queue_names_for_tid(
     return task_evidence.queue_names_for_tid(tid, taskspec_payload)
 
 
-def _split_stdio(value: Any) -> tuple[str | None, str | None]:
-    return task_evidence.split_stdio(value)
-
-
 def _peek_final_outbox_snapshot(
     ctx: WeftContext,
     *,
@@ -316,66 +312,16 @@ def _remaining_timeout(deadline: float | None) -> float | None:
     return max(0.0, deadline - time.monotonic())
 
 
+def _deadline_expired(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
 def _raise_watch_timeout(
     *,
     tid: str,
     timeout: float | None,
 ) -> None:
     raise TimeoutError(f"Timed out after {timeout} seconds watching task {tid}")
-
-
-def _mapping_has_prior_live_proof(mapping_entry: dict[str, Any] | None) -> bool:
-    if not isinstance(mapping_entry, dict):
-        return False
-    if isinstance(mapping_entry.get("runtime_handle"), dict):
-        return True
-    return bool(_host_pids_from_mapping(mapping_entry))
-
-
-def _runtime_snapshot_from_mapping(
-    tid: str,
-    mapping_entry: dict[str, Any] | None,
-) -> TaskTerminalSnapshot | None:
-    evidence = task_evidence.runtime_evidence(
-        tid=tid,
-        mapping_entry=mapping_entry,
-    )
-    if evidence is None:
-        return None
-    return task_evidence.terminal_snapshot_from_evidence(evidence)
-
-
-def _bounded_log_terminal_snapshot(
-    ctx: WeftContext,
-    *,
-    tid: str,
-) -> tuple[TaskTerminalSnapshot | None, bool, int | None]:
-    evidence, prior_live, prior_live_at = task_evidence.bounded_log_terminal_evidence(
-        ctx,
-        tid=tid,
-    )
-    snapshot = (
-        task_evidence.terminal_snapshot_from_evidence(evidence)
-        if evidence is not None
-        else None
-    )
-    return snapshot, prior_live, prior_live_at
-
-
-def _stale_observer_snapshot(
-    *,
-    tid: str,
-    prior_live: bool,
-    prior_live_at: int | None,
-) -> TaskTerminalSnapshot | None:
-    evidence = task_evidence.stale_observer_evidence(
-        tid=tid,
-        prior_live=prior_live,
-        prior_live_at=prior_live_at,
-    )
-    if evidence is None:
-        return None
-    return task_evidence.terminal_snapshot_from_evidence(evidence)
 
 
 def task_terminal_snapshot(
@@ -958,7 +904,7 @@ def watch_task_status(
                 yield snapshot
                 if snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
                     return
-            if deadline is not None and time.monotonic() >= deadline:
+            if _deadline_expired(deadline):
                 _raise_watch_timeout(tid=full_tid, timeout=timeout)
             remaining = _remaining_timeout(deadline)
             wait_timeout = (
@@ -1093,7 +1039,7 @@ def _pipeline_task_snapshot(
         runtime_handle = (
             runtime_handle_obj.to_dict() if runtime_handle_obj is not None else None
         )
-        runtime = status_cmd._describe_runtime_handle(runtime_handle_obj)
+        runtime = task_evidence.describe_runtime(runtime_handle_obj)
 
     activity = pipeline_status.get("activity")
     waiting_on = pipeline_status.get("waiting_on")

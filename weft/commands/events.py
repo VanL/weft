@@ -52,22 +52,6 @@ def _is_cancelled(cancel_event: Any | None) -> bool:
     return bool(cancel_event is not None and cancel_event.is_set())
 
 
-def _deadline_from_timeout(timeout: float | None) -> float | None:
-    if timeout is None:
-        return None
-    return time.monotonic() + max(0.0, timeout)
-
-
-def _remaining_timeout(deadline: float | None) -> float | None:
-    if deadline is None:
-        return None
-    return max(0.0, deadline - time.monotonic())
-
-
-def _timed_out(deadline: float | None) -> bool:
-    return deadline is not None and time.monotonic() >= deadline
-
-
 def _raise_follow_timeout(
     *,
     tid: str,
@@ -171,7 +155,7 @@ def iter_task_events(
     """Yield raw lifecycle events for one task."""
 
     normalized_tid = normalize_tid(tid)
-    deadline = _deadline_from_timeout(timeout)
+    deadline = task_ops._deadline_from_timeout(timeout)
     log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     monitor = QueueChangeMonitor([log_queue], config=context.config)
     last_timestamp: int | None = int(normalized_tid) - 1
@@ -207,14 +191,14 @@ def iter_task_events(
                 last_timestamp = max_scanned_timestamp
             if terminal_seen or not follow:
                 return
-            if _timed_out(deadline):
+            if task_ops._deadline_expired(deadline):
                 _raise_follow_timeout(
                     tid=normalized_tid,
                     operation="events",
                     timeout=timeout,
                 )
             if not saw_event:
-                remaining = _remaining_timeout(deadline)
+                remaining = task_ops._remaining_timeout(deadline)
                 wait_timeout = 0.1 if remaining is None else min(0.1, remaining)
                 monitor.wait(wait_timeout)
     finally:
@@ -231,7 +215,7 @@ def follow_task_events(
     """Yield raw events followed by one synthetic final result event."""
 
     normalized_tid = normalize_tid(tid)
-    deadline = _deadline_from_timeout(timeout)
+    deadline = task_ops._deadline_from_timeout(timeout)
     event_timeout: TimeoutError | None = None
     try:
         yield from iter_task_events(
@@ -243,7 +227,7 @@ def follow_task_events(
     except TimeoutError as exc:
         event_timeout = exc
 
-    remaining = _remaining_timeout(deadline)
+    remaining = task_ops._remaining_timeout(deadline)
     if remaining is not None and remaining <= 0:
         if event_timeout is None:
             _raise_follow_timeout(
@@ -294,9 +278,9 @@ def iter_task_realtime_events(
     """
 
     normalized_tid = normalize_tid(tid)
-    deadline = _deadline_from_timeout(timeout)
+    deadline = task_ops._deadline_from_timeout(timeout)
     materialization_timeout = 0.2 if follow else 0.0
-    remaining = _remaining_timeout(deadline)
+    remaining = task_ops._remaining_timeout(deadline)
     if remaining is not None:
         materialization_timeout = min(materialization_timeout, remaining)
     materialized = _await_result_materialization(
@@ -453,8 +437,11 @@ def iter_task_realtime_events(
                     + WEFT_COMPLETED_RESULT_GRACE_SECONDS
                     - time.monotonic()
                 )
-                if terminal_grace_remaining > 0 and not _timed_out(deadline):
-                    remaining = _remaining_timeout(deadline)
+                if (
+                    terminal_grace_remaining > 0
+                    and not task_ops._deadline_expired(deadline)
+                ):
+                    remaining = task_ops._remaining_timeout(deadline)
                     wait_timeout = (
                         min(0.05, terminal_grace_remaining)
                         if remaining is None
@@ -488,7 +475,7 @@ def iter_task_realtime_events(
                         and time.monotonic() < grace_deadline
                         and not _is_cancelled(cancel_event)
                     ):
-                        remaining = _remaining_timeout(deadline)
+                        remaining = task_ops._remaining_timeout(deadline)
                         grace_remaining = max(0.0, grace_deadline - time.monotonic())
                         wait_timeout = (
                             min(0.05, grace_remaining)
@@ -500,7 +487,7 @@ def iter_task_realtime_events(
                             context,
                             outbox_name=outbox_name,
                         )
-                    if result_value is None and _timed_out(deadline):
+                    if result_value is None and task_ops._deadline_expired(deadline):
                         _raise_follow_timeout(
                             tid=normalized_tid,
                             operation="realtime result",
@@ -530,14 +517,14 @@ def iter_task_realtime_events(
 
             if not follow:
                 return
-            if _timed_out(deadline):
+            if task_ops._deadline_expired(deadline):
                 _raise_follow_timeout(
                     tid=normalized_tid,
                     operation="realtime events",
                     timeout=timeout,
                 )
             if not saw_event:
-                remaining = _remaining_timeout(deadline)
+                remaining = task_ops._remaining_timeout(deadline)
                 wait_timeout = 0.1 if remaining is None else min(0.1, remaining)
                 monitor.wait(wait_timeout)
     finally:
