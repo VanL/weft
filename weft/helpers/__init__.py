@@ -464,16 +464,17 @@ def terminate_process_tree(
     if not signaled:
         return set()
 
-    _gone, alive = psutil.wait_procs(signaled, timeout=timeout)
+    gone, alive = psutil.wait_procs(signaled, timeout=timeout)
     if alive and kill_after:
         for proc in alive:
             try:
                 proc.kill()
             except psutil.Error:
                 continue
-        psutil.wait_procs(alive, timeout=timeout)
+        killed_gone, _still_alive = psutil.wait_procs(alive, timeout=timeout)
+        gone.extend(killed_gone)
 
-    terminated: set[int] = set()
+    terminated: set[int] = {proc.pid for proc in gone}
     for proc in signaled:
         try:
             if not proc.is_running():
@@ -505,10 +506,11 @@ def kill_process_tree(root_pid: int, *, timeout: float = 0.5) -> set[int]:
         else:
             killed.append(proc)
 
+    gone: list[psutil.Process] = []
     if killed:
-        psutil.wait_procs(killed, timeout=timeout)
+        gone, _alive = psutil.wait_procs(killed, timeout=timeout)
 
-    terminated: set[int] = set()
+    terminated: set[int] = {proc.pid for proc in gone}
     for proc in killed:
         try:
             if not proc.is_running():

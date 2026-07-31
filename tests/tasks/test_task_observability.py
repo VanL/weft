@@ -502,8 +502,9 @@ def test_state_logging_respects_redaction(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 
+    unredacted_tid = str(int(unique_tid) + 1)
     spec = build_function_spec(
-        unique_tid,
+        unredacted_tid,
         env={"SECRET": "value", "VISIBLE": "keep"},
         metadata={"sensitive": "top", "notes": "ok"},
     )

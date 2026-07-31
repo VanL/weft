@@ -463,6 +463,10 @@ class ServiceTask(BaseTask):
                     )
                     break
                 except thread_queue.Full:
+                    try:
+                        input_queue.get_nowait()
+                    except thread_queue.Empty:
+                        pass
                     if self._worker_stopping.is_set():
                         break
 
