@@ -4126,6 +4126,7 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
     termination_entered = threading.Event()
     allow_termination = threading.Event()
     process = FakeLaunchProcess(alive=True)
+    stop_errors: list[BaseException] = []
 
     def blocked_launch(*args: object, **kwargs: object) -> FakeLaunchProcess:
         del args, kwargs
@@ -4140,12 +4141,26 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
         termination_entered.set()
         assert allow_termination.wait(timeout=3.0)
 
+    def skip_full_queue_resource_cleanup(deadline: float) -> None:
+        del deadline
+
+    def run_stop() -> None:
+        try:
+            manager.stop(timeout=0.05)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            stop_errors.append(exc)
+
     monkeypatch.setattr(manager, "_terminate_children", block_termination)
+    monkeypatch.setattr(
+        manager,
+        "_cleanup_base_task_resources",
+        skip_full_queue_resource_cleanup,
+    )
 
     assert manager._launch_child_task(child_spec, None) is True
     assert launch_entered.wait(timeout=2.0)
 
-    stop_thread = threading.Thread(target=lambda: manager.stop(timeout=0.05))
+    stop_thread = threading.Thread(target=run_stop)
     stop_thread.start()
     assert termination_entered.wait(timeout=2.0)
     assert process.is_alive() is True
@@ -4159,7 +4174,15 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
     assert child_spec.tid not in manager._child_processes
     allow_termination.set()
     stop_thread.join(timeout=2.0)
-    assert not stop_thread.is_alive()
+    if stop_thread.is_alive():
+        frame = sys._current_frames().get(stop_thread.ident)
+        stack = (
+            "".join(traceback.format_stack(frame, limit=24))
+            if frame is not None
+            else "<no frame>"
+        )
+        pytest.fail(f"stop thread did not exit:\n{stack}")
+    assert not stop_errors
 
 
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
