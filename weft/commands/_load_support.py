@@ -1,7 +1,7 @@
 """Import Weft broker state from SimpleBroker dump format.
 
 Spec references:
-- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.2], [SB-0.4]
 - docs/specifications/10-CLI_Interface.md [CLI-6]
 """
 
@@ -266,11 +266,11 @@ def _parse_import_file(input_file: TextIO) -> ImportPlan:
             if (
                 isinstance(message_id, bool)
                 or not isinstance(message_id, int)
-                or message_id < 0
+                or message_id <= 0
             ):
                 raise _dump_error(
                     line_num,
-                    "message record requires a non-negative integer 'id' field",
+                    "message record requires a positive integer 'id' field",
                 )
 
             if _is_runtime_name(queue_name):

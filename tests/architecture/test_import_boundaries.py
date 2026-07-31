@@ -13,9 +13,20 @@ from typing import Literal
 
 import pytest
 
+import simplebroker
+import simplebroker.ext as simplebroker_ext
+from simplebroker import commands as simplebroker_commands
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = REPO_ROOT / "weft"
 DJANGO_INTEGRATION_ROOT = REPO_ROOT / "integrations" / "weft_django" / "weft_django"
+SIMPLEBROKER_CONSUMER_ROOTS = (
+    PACKAGE_ROOT,
+    REPO_ROOT / "tests",
+    REPO_ROOT / "integrations",
+    REPO_ROOT / "extensions",
+    REPO_ROOT / "bin",
+)
 ALLOWED_ANYWHERE = (
     "weft._constants",
     "weft._exceptions",
@@ -549,6 +560,146 @@ def test_no_private_simplebroker_reaches() -> None:
             if needle in text:
                 offenders.append(f"{path}: {needle}")
     assert offenders == []
+
+
+def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]:
+    surface_exports = {
+        "simplebroker": set(simplebroker.__all__) | {"commands"},
+        "simplebroker.commands": set(simplebroker_commands.__all__),
+        "simplebroker.ext": set(simplebroker_ext.__all__),
+    }
+    violations: list[str] = []
+    tree = ast.parse(source, filename=filename)
+    module_aliases: dict[str, str] = {}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                module = imported.name
+                if module != "simplebroker" and not module.startswith(
+                    "simplebroker."
+                ):
+                    continue
+                if module not in surface_exports:
+                    violations.append(
+                        f"{filename}:{node.lineno} imports unsupported {module}"
+                    )
+                    continue
+                if module != "simplebroker" and imported.asname is None:
+                    violations.append(
+                        f"{filename}:{node.lineno} imports {module} without "
+                        "an explicit alias"
+                    )
+                    continue
+                module_aliases[imported.asname or "simplebroker"] = module
+            continue
+
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module = node.module or ""
+        if module != "simplebroker" and not module.startswith("simplebroker."):
+            continue
+        if module not in surface_exports:
+            violations.append(
+                f"{filename}:{node.lineno} imports unsupported {module}"
+            )
+            continue
+
+        for imported in node.names:
+            if imported.name not in surface_exports[module]:
+                violations.append(
+                    f"{filename}:{node.lineno} imports non-exported "
+                    f"{module}.{imported.name}"
+                )
+                continue
+            if module == "simplebroker" and imported.name == "commands":
+                module_aliases[imported.asname or imported.name] = (
+                    "simplebroker.commands"
+                )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+            continue
+        module = module_aliases.get(node.value.id)
+        if module is None or node.attr == "__all__":
+            continue
+        if node.attr not in surface_exports[module]:
+            violations.append(
+                f"{filename}:{node.lineno} reaches non-exported "
+                f"{module}.{node.attr}"
+            )
+
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "getattr"
+            or len(node.args) < 2
+            or not isinstance(node.args[0], ast.Name)
+            or not isinstance(node.args[1], ast.Constant)
+            or not isinstance(node.args[1].value, str)
+        ):
+            continue
+        module = module_aliases.get(node.args[0].id)
+        attribute = node.args[1].value
+        if module is None or attribute in surface_exports[module]:
+            continue
+        violations.append(
+            f"{filename}:{node.lineno} reaches non-exported "
+            f"{module}.{attribute} via getattr"
+        )
+
+    return violations
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_fragment"),
+    [
+        ("import simplebroker.ext as ext\next.BrokerError\n", None),
+        (
+            "import simplebroker.commands\nsimplebroker.commands.MAX_MESSAGE_SIZE\n",
+            "without an explicit alias",
+        ),
+        (
+            "import simplebroker.commands as commands\ncommands.MAX_MESSAGE_SIZE\n",
+            "reaches non-exported simplebroker.commands.MAX_MESSAGE_SIZE",
+        ),
+        (
+            "from simplebroker import commands\ngetattr(commands, "
+            '"MAX_MESSAGE_SIZE")\n',
+            "via getattr",
+        ),
+    ],
+)
+def test_simplebroker_surface_guard_fires_for_import_forms(
+    source: str,
+    expected_fragment: str | None,
+) -> None:
+    violations = _simplebroker_surface_violations(source, filename="synthetic.py")
+
+    if expected_fragment is None:
+        assert violations == []
+    else:
+        assert any(expected_fragment in violation for violation in violations)
+
+
+def test_weft_uses_only_supported_simplebroker_surfaces() -> None:
+    """Weft consumers stay on root, ext, and command-layer public exports."""
+
+    violations: list[str] = []
+
+    for root in SIMPLEBROKER_CONSUMER_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            violations.extend(
+                _simplebroker_surface_violations(
+                    path.read_text(encoding="utf-8"),
+                    filename=str(path),
+                )
+            )
+
+    assert not violations, "\n".join(violations)
 
 
 def test_weft_has_no_eager_import_cycles() -> None:

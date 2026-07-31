@@ -213,6 +213,47 @@ def test_cmd_load_actual_import(tmp_path: Path) -> None:
     assert queues["test.queue"] == ["test message"]
 
 
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_cmd_load_rejects_reserved_zero_id_before_writes(
+    tmp_path: Path,
+    dry_run: bool,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    before = _snapshot_broker_state(ctx)
+    export_path = tmp_path / "reserved-zero-id.jsonl"
+    records = [
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": 0,
+        },
+        {"type": "alias", "alias": "zero-alias", "target": "zero.queue"},
+        {
+            "type": "message",
+            "queue": "zero.queue",
+            "id": 0,
+            "body": "must not be written",
+        },
+    ]
+    export_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    exit_code, message = cmd_load(
+        input_file=str(export_path),
+        dry_run=dry_run,
+        context_path=str(ctx.root),
+    )
+
+    assert exit_code == 1
+    assert "positive integer 'id'" in (message or "")
+    assert _snapshot_broker_state(ctx) == before
+
+
 def test_load_missing_file(tmp_path: Path) -> None:
     """Test load with missing input file."""
 

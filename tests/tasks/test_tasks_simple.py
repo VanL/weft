@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from simplebroker.db import BrokerDB
+from simplebroker import BrokerTarget
 from tests.fixtures import taskspecs as fixtures
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -49,18 +49,23 @@ class TestTaskSimple:
         finally:
             tempdir.cleanup()
 
-    def test_task_initialization_with_brokerdb(self):
-        """Test Task initialization with BrokerDB instance."""
+    def test_task_initialization_with_broker_target(self):
+        """Test Task initialization with a public BrokerTarget."""
         tempdir, db_path = self._db_path()
-        db = BrokerDB(str(db_path))
         try:
+            target = BrokerTarget(
+                backend_name="sqlite",
+                target=str(db_path.resolve()),
+                backend_options={"sentinel": "retained"},
+                project_root=db_path.parent.resolve(),
+            )
             taskspec = fixtures.create_minimal_taskspec()
-            task = Consumer(db, taskspec)
+            task = Consumer(target, taskspec)
             assert task.tid == taskspec.tid
+            assert task._db_path == target
             assert hasattr(task, "taskspec")
             task.cleanup()
         finally:
-            db.close()
             tempdir.cleanup()
 
     def test_task_with_stop_event(self):

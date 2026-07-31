@@ -29,7 +29,7 @@ from typing import Any, TextIO, cast
 import psutil
 
 from simplebroker import Queue
-from simplebroker import commands as sb_commands
+from simplebroker import resolve_config as resolve_broker_config
 from simplebroker.ext import BrokerError
 from weft._constants import (
     ATOMIC_WRITE_RETRY_ATTEMPTS,
@@ -134,7 +134,7 @@ def resolve_broker_max_message_size(config: Mapping[str, Any]) -> int:
     """Return the effective broker message-size limit for the active context."""
     raw_value = config.get("BROKER_MAX_MESSAGE_SIZE")
     if raw_value in (None, ""):
-        return int(getattr(sb_commands, "MAX_MESSAGE_SIZE", 10 * 1024 * 1024))
+        raw_value = resolve_broker_config(config)["BROKER_MAX_MESSAGE_SIZE"]
 
     try:
         max_bytes = int(str(raw_value))

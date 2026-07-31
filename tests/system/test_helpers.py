@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+import weft.helpers as helpers_module
 from tests.conftest import _register_cli_outputs
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.helpers import (  # noqa: D401 - module already documented
@@ -37,6 +38,7 @@ from weft.helpers import (  # noqa: D401 - module already documented
     parse_tid,
     pid_is_live,
     reload_config,
+    resolve_broker_max_message_size,
     resolve_cli_command,
     safe_cancel,
     send_log,
@@ -94,6 +96,20 @@ def test_iter_queue_entries_closes_underlying_generator_on_early_close() -> None
     entries.close()
 
     assert queue.raw_entries.closed is True
+
+
+def test_resolve_broker_max_message_size_uses_public_config_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config: dict[str, object] = {}
+
+    def fake_resolve_config(candidate: object) -> dict[str, int]:
+        assert candidate is config
+        return {"BROKER_MAX_MESSAGE_SIZE": 1_234}
+
+    monkeypatch.setattr(helpers_module, "resolve_broker_config", fake_resolve_config)
+
+    assert resolve_broker_max_message_size(config) == 1_234
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")

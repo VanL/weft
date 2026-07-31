@@ -12,9 +12,8 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from simplebroker import Queue, create_activity_waiter_for_queues
+from simplebroker import Queue, QueueWatcher, create_activity_waiter_for_queues
 from simplebroker.ext import BrokerError
-from simplebroker.watcher import QueueWatcher
 from weft._constants import (
     QUEUE_CHANGE_MONITOR_JOIN_TIMEOUT_SECONDS,
     QUEUE_CHANGE_MONITOR_WAITER_TIMEOUT_SECONDS,

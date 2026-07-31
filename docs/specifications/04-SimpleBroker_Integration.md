@@ -8,6 +8,7 @@ workflow on top of that.
 
 _Implementation mapping_: `weft/context.py`, `weft/commands/queue.py`,
 `weft/commands/init.py`, `weft/commands/load.py`,
+`weft/commands/_load_support.py`,
 `weft/core/tasks/multiqueue_watcher.py`, `weft/core/tasks/base.py`,
 `weft/core/endpoints.py`, `weft/core/agents/provider_cli/settings.py`.
 
@@ -57,12 +58,20 @@ Current consequences:
 SimpleBroker message IDs are durable and ordered. Weft relies on that instead
 of generating a second ID space.
 
+_Implementation mapping_: import validation in
+`weft/commands/_load_support.py`; runtime ID use in
+`weft/core/tasks/base.py` and `weft/core/manager.py`.
+
 Current use:
 
 - spawn-request message IDs become task TIDs
 - queue history is reconstructed from append-only broker data
 - operator tooling can correlate task lifecycle to queue operations without a
   side database
+
+SimpleBroker reserves message ID `0` as its lower-bound/checkpoint origin.
+Weft may select legacy zero-ID rows for recovery where SimpleBroker permits it,
+but it must not create or import a message with ID `0`.
 
 ### Safe Patterns [SB-0.3]
 
@@ -88,6 +97,7 @@ file-backed SQLite path.
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/load.py`,
+`weft/commands/_load_support.py`,
 `weft/core/tasks/multiqueue_watcher.py` (exact activity signatures,
 `_apply_topology_mutation_on_owner()`, and
 `PollingStrategy.replace_activity_waiter(...)` ownership),
@@ -394,6 +404,8 @@ Current implications:
   IDs for spawn requests, so an import path that cannot perform exact-ID
   import must fail before writes begin rather than silently allocate new
   message IDs.
+- Dump message records must carry positive integer IDs. Load rejects reserved
+  ID `0` during validation, before aliases or messages are written.
 - Spawn-request submission writes generated and caller-supplied TIDs through
   SimpleBroker's public `insert_messages()` API rather than rewriting the
   TaskSpec TID.
@@ -411,6 +423,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-31-simplebroker-6-api-migration-plan.md`](../plans/2026-07-31-simplebroker-6-api-migration-plan.md)
 - [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
 - [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)

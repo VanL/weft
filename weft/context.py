@@ -68,10 +68,10 @@ from simplebroker import (
     resolve_broker_target,
     target_for_directory,
 )
-from simplebroker.project import (
+from simplebroker.ext import (
     find_project_config as find_broker_project_config,
 )
-from simplebroker.project import (
+from simplebroker.ext import (
     project_config_path_for_directory,
 )
 from weft._constants import (
