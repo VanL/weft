@@ -578,9 +578,10 @@ def test_specs_namespace_preflight_reports_missing_agent_runtime() -> None:
 
         assert validation.valid is False
         assert validation.warnings == []
-        assert "Unable to locate executable" in validation.errors_by_stage[
-            "agent_runtime"
-        ]["agent_runtime"]
+        assert (
+            "Unable to locate executable"
+            in validation.errors_by_stage["agent_runtime"]["agent_runtime"]
+        )
 
 
 def test_specs_namespace_validate_uses_bound_client_context(

@@ -192,6 +192,7 @@ def test_env_loader_and_explicit_override_normalizer_keys_stay_in_parity() -> No
     assert normalizer_keys - loader_keys == normalizer_only
     assert loader_keys - loader_only == normalizer_keys - normalizer_only
 
+
 _RUNTIME_OBJECT_ALLOWLIST = {
     "extensions/weft_docker/weft_docker/agent_runner.py": {"_WORK_ITEM_MISSING"},
     "extensions/weft_docker/weft_docker/plugin.py": {"_PLUGIN"},

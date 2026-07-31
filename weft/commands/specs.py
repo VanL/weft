@@ -456,9 +456,7 @@ def validate_spec_source(
             spec_type=SPEC_TYPE_PIPELINE,
             errors=[] if valid else list(normalized_errors.values()),
             payload=payload,
-            errors_by_stage=(
-                {} if valid else {"schema": normalized_errors}
-            ),
+            errors_by_stage=({} if valid else {"schema": normalized_errors}),
         )
     return _validation_failure(
         spec_type=effective_type,

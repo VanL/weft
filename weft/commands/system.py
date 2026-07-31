@@ -751,8 +751,9 @@ def _collect_snapshot_evidence(
     active_service_tid = None
     if local_evidence is None or not local_evidence.terminal:
         internal_service_key = _service_key_from_taskspec_payload(taskspec)
-        internal_service = internal_service_key is not None or _is_internal_service_record(
-            {"metadata": record.metadata}
+        internal_service = (
+            internal_service_key is not None
+            or _is_internal_service_record({"metadata": record.metadata})
         )
         stale_liveness_reason = _stale_liveness_reason(
             record.status,
@@ -772,9 +773,7 @@ def _collect_snapshot_evidence(
             if internal_service_key is not None
             else None
         )
-        active_service_tid = (
-            active_service.tid if active_service is not None else None
-        )
+        active_service_tid = active_service.tid if active_service is not None else None
     probe_plan = plan_snapshot_probes(
         draft,
         stale_liveness_reason=stale_liveness_reason,

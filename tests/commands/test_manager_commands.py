@@ -70,10 +70,10 @@ def test_manager_snapshot_converts_every_public_field() -> None:
 
 
 @pytest.mark.parametrize(
-        ("timestamp", "expected"),
-        [
-            (123, 123),
-            (123.0, None),
+    ("timestamp", "expected"),
+    [
+        (123, 123),
+        (123.0, None),
         ("123", 123),
         ("12.5", None),
         ("not-a-timestamp", None),

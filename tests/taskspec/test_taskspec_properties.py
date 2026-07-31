@@ -225,7 +225,7 @@ _LEGAL_INITIAL_STATUS_OPERATIONS = ("started", "running", "failed", "cancelled")
         st.sampled_from(tuple(_STATUS_OPERATIONS)),
         min_size=0,
         max_size=11,
-    )
+    ),
 )
 def test_status_operation_sequences_preserve_timestamp_invariants(
     initial_operation: str,

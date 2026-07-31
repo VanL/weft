@@ -358,11 +358,7 @@ def _strongly_connected_components(
 
 
 def _fresh_import_modules(statement: str) -> set[str]:
-    script = (
-        "import json, sys\n"
-        f"{statement}\n"
-        "print(json.dumps(sorted(sys.modules)))\n"
-    )
+    script = f"import json, sys\n{statement}\nprint(json.dumps(sorted(sys.modules)))\n"
     completed = subprocess.run(
         [sys.executable, "-c", script],
         cwd=REPO_ROOT,
@@ -576,9 +572,7 @@ def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]
         if isinstance(node, ast.Import):
             for imported in node.names:
                 module = imported.name
-                if module != "simplebroker" and not module.startswith(
-                    "simplebroker."
-                ):
+                if module != "simplebroker" and not module.startswith("simplebroker."):
                     continue
                 if module not in surface_exports:
                     violations.append(
@@ -600,9 +594,7 @@ def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]
         if module != "simplebroker" and not module.startswith("simplebroker."):
             continue
         if module not in surface_exports:
-            violations.append(
-                f"{filename}:{node.lineno} imports unsupported {module}"
-            )
+            violations.append(f"{filename}:{node.lineno} imports unsupported {module}")
             continue
 
         for imported in node.names:
@@ -625,8 +617,7 @@ def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]
             continue
         if node.attr not in surface_exports[module]:
             violations.append(
-                f"{filename}:{node.lineno} reaches non-exported "
-                f"{module}.{node.attr}"
+                f"{filename}:{node.lineno} reaches non-exported {module}.{node.attr}"
             )
 
     for node in ast.walk(tree):
@@ -823,8 +814,7 @@ def test_type_checking_runner_backedge_does_not_create_runtime_cycle() -> None:
         known_modules=known_modules,
     )
     subprocess_edges = _parse_import_edges(
-        "if TYPE_CHECKING:\n"
-        "    from weft.core.runners.host import RunnerOutcome\n",
+        "if TYPE_CHECKING:\n    from weft.core.runners.host import RunnerOutcome\n",
         source_module="weft.core.runners.subprocess_runner",
         current_package="weft.core.runners",
         path=Path("subprocess_runner.py"),
@@ -832,21 +822,27 @@ def test_type_checking_runner_backedge_does_not_create_runtime_cycle() -> None:
     )
 
     assert subprocess_edges[0].type_checking
-    assert _strongly_connected_components(
-        [
-            (edge.source_module, edge.target_module)
-            for edge in host_edges + subprocess_edges
-            if not edge.type_checking
-        ]
-    ) == []
+    assert (
+        _strongly_connected_components(
+            [
+                (edge.source_module, edge.target_module)
+                for edge in host_edges + subprocess_edges
+                if not edge.type_checking
+            ]
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize("facade", ["weft.commands", "weft.core"])
 def test_leaf_modules_do_not_import_their_own_package_facade(facade: str) -> None:
-    assert _own_facade_violations(
-        _iter_import_edges(PACKAGE_ROOT),
-        facade=facade,
-    ) == []
+    assert (
+        _own_facade_violations(
+            _iter_import_edges(PACKAGE_ROOT),
+            facade=facade,
+        )
+        == []
+    )
 
 
 def test_root_constants_import_does_not_initialize_upper_layers() -> None:

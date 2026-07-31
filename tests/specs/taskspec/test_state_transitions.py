@@ -165,7 +165,7 @@ _LEGAL_INITIAL_STATUS_OPERATIONS = ("started", "running", "failed", "cancelled")
         st.sampled_from(tuple(_STATUS_OPERATIONS)),
         min_size=0,
         max_size=11,
-    )
+    ),
 )
 def test_generated_status_operation_sequences_never_leave_terminal_state(
     initial_operation: str,

@@ -126,19 +126,10 @@ def _reduce(
 
 
 def test_reduce_task_event_rejects_malformed_and_filtered_rows() -> None:
-    assert (
-        reduce_task_event(None, _event(tid=1), 1, tid_filters=None)
-        is None
-    )
-    assert (
-        reduce_task_event(None, _event(), 1, tid_filters={"not-this-task"})
-        is None
-    )
+    assert reduce_task_event(None, _event(tid=1), 1, tid_filters=None) is None
+    assert reduce_task_event(None, _event(), 1, tid_filters={"not-this-task"}) is None
     assert reduce_task_event(None, _event(), 1, tid_filters={TID}) is not None
-    assert (
-        reduce_task_event(None, _event(), 1, tid_filters={TID[-10:]})
-        is not None
-    )
+    assert reduce_task_event(None, _event(), 1, tid_filters={TID[-10:]}) is not None
 
 
 def test_reduce_task_event_preserves_activity_and_terminal_precedence() -> None:
@@ -521,9 +512,7 @@ def test_evidence_acquisition_skips_local_and_claimed_for_terminal_rows(
         _record(status="completed", completed_at=3_000_000_000),
         mapping_entry=None,
         selected_active_manager_tid=None,
-        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence(
-            []
-        ),
+        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence([]),
         now_ns=5_000_000_000,
     )
     assert plan.acquire_runtime_observation
@@ -569,9 +558,7 @@ def test_evidence_acquisition_preserves_local_claimed_probe_guard(
         _record(),
         mapping_entry=None,
         selected_active_manager_tid=None,
-        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence(
-            []
-        ),
+        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence([]),
         now_ns=5_000_000_000,
     )
     assert plan.acquire_claimed_outbox is (not with_reconciliation)
@@ -608,9 +595,7 @@ def test_evidence_acquisition_skips_runtime_diagnostic_for_nonterminal_rows(
         _record(),
         mapping_entry=None,
         selected_active_manager_tid=None,
-        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence(
-            []
-        ),
+        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence([]),
         now_ns=5_000_000_000,
     )
     assert not plan.acquire_runtime_observation
@@ -636,8 +621,10 @@ def test_mapping_runtime_fields_override_event_runtime_fields(
     monkeypatch.setattr(
         system.task_evidence,
         "describe_runtime",
-        lambda handle: described.append(handle)
-        or {"runner": handle.runner, "id": handle.id, "state": "unknown"},
+        lambda handle: (
+            described.append(handle)
+            or {"runner": handle.runner, "id": handle.id, "state": "unknown"}
+        ),
     )
     monkeypatch.setattr(
         system.task_evidence,
@@ -664,9 +651,7 @@ def test_mapping_runtime_fields_override_event_runtime_fields(
             "runtime_handle": mapping_handle.to_dict(),
         },
         selected_active_manager_tid=None,
-        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence(
-            []
-        ),
+        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence([]),
         now_ns=5_000_000_000,
     )
     reduced = reduce_task_snapshot(plan, evidence, now_ns=5_000_000_000)
@@ -706,7 +691,9 @@ def test_reducer_has_no_io_or_runtime_probe_dependencies() -> None:
     assert not {
         name
         for name in imported
-        if any(name == item or name.startswith(f"{item}.") for item in forbidden_imports)
+        if any(
+            name == item or name.startswith(f"{item}.") for item in forbidden_imports
+        )
     }
     assert called.isdisjoint(forbidden_calls)
 
@@ -793,9 +780,7 @@ def test_collector_combines_tid_filters_terminal_filter_and_ordering(
                         taskspec=_taskspec(
                             status=status,
                             completed_at=(
-                                2_000_000_000
-                                if status == "completed"
-                                else None
+                                2_000_000_000 if status == "completed" else None
                             ),
                         ),
                     )

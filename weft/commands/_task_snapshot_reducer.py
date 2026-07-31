@@ -325,12 +325,8 @@ def plan_snapshot_probes(
         "internal_service_runtime_missing_after_stale_window",
     }:
         provisional_status = "failed"
-    acquire_claimed = (
-        draft.lifecycle_status not in TERMINAL_TASK_STATUSES
-        and (
-            draft.local_evidence is None
-            or draft.local_evidence.reconciliation is None
-        )
+    acquire_claimed = draft.lifecycle_status not in TERMINAL_TASK_STATUSES and (
+        draft.local_evidence is None or draft.local_evidence.reconciliation is None
     )
     return SnapshotProbePlan(
         draft=draft,

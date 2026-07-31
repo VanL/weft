@@ -437,9 +437,8 @@ def iter_task_realtime_events(
                     + WEFT_COMPLETED_RESULT_GRACE_SECONDS
                     - time.monotonic()
                 )
-                if (
-                    terminal_grace_remaining > 0
-                    and not task_ops._deadline_expired(deadline)
+                if terminal_grace_remaining > 0 and not task_ops._deadline_expired(
+                    deadline
                 ):
                     remaining = task_ops._remaining_timeout(deadline)
                     wait_timeout = (

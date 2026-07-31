@@ -41,8 +41,9 @@ def test_validate_spec_source_load_runner_reports_missing_plugin() -> None:
 
     assert schema_only.valid is True
     assert loaded.valid is False
-    assert "Requested runner 'missing-runner' is not available" in (
-        loaded.errors_by_stage["runner"]["runner"]
+    assert (
+        "Requested runner 'missing-runner' is not available"
+        in (loaded.errors_by_stage["runner"]["runner"])
     )
 
 
@@ -57,9 +58,7 @@ def test_validate_spec_source_rejects_task_options_for_pipeline(option: str) -> 
 
     assert result.valid is False
     assert result.errors_by_stage == {
-        "options": {
-            "options": "--load-runner and --preflight only apply to task specs"
-        }
+        "options": {"options": "--load-runner and --preflight only apply to task specs"}
     }
 
 
@@ -146,8 +145,9 @@ def test_validate_spec_source_reports_tool_profile_stage(tmp_path: Path) -> None
 
     assert result.valid is False
     assert list(result.errors_by_stage) == ["tool_profile"]
-    assert "does not support explicit MCP server descriptors" in (
-        result.errors_by_stage["tool_profile"]["tool_profile"]
+    assert (
+        "does not support explicit MCP server descriptors"
+        in (result.errors_by_stage["tool_profile"]["tool_profile"])
     )
 
 
