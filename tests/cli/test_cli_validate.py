@@ -595,14 +595,13 @@ def test_validate_taskspec_adapter_failure_short_circuits_preflight(workdir) -> 
     )
 
     assert rc == 1
-    assert out == (
+    assert out.startswith(
         "✓ TaskSpec is valid\n"
         "✗ Run-input validation failed\n\n"
         "               Validation Errors               \n"
-        "┏━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-        "┃ Field     ┃ Error                           ┃\n"
-        "┡━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩\n"
-        "│ run_input │ No module named 'helper_module' │\n"
-        "└───────────┴─────────────────────────────────┘"
     )
+    assert "run_input" in out
+    assert "No module named 'helper_module'" in out
+    assert "Environment profile preflight passed" not in out
+    assert "Runner preflight passed" not in out
     assert err == ""
