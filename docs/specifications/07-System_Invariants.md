@@ -67,7 +67,8 @@ _Implementation mapping_: `weft/core/task_lifecycle.py` transition table,
 
 _Implementation mapping_: `weft/core/state_machines.py`;
 runtime-specific reducer instances live in modules such as
-`weft/core/task_lifecycle.py` and `weft/commands/control_convergence.py`.
+`weft/core/task_lifecycle.py`, `weft/core/terminal_handoff.py`, and
+`weft/commands/control_convergence.py`.
 
 - **REDUCER.1**: generic state-machine helpers must be pure. They select
   decisions from caller-provided state and evidence only, and they must not
@@ -82,6 +83,16 @@ runtime-specific reducer instances live in modules such as
   by the current helper.
 - **REDUCER.4**: reducer tests should prove structural reachability separately
   from concrete test coverage. A state can be reachable but still untested.
+- **REDUCER.5**: the terminal handoff reducer has one explicit expected row
+  for every state/event Cartesian-product cell. Valid, no-op, and invalid
+  cells are all contract, and every cell has a firing table test.
+- **REDUCER.6**: producer lifecycle and terminal-channel lifecycle are
+  independent reducer evidence. Producer exit alone cannot classify a
+  missing terminal payload.
+- **REDUCER.7**: terminal handoff reaches exactly one terminal action. Events
+  reduced after `decided` are programming errors rather than a second verdict.
+- **REDUCER.8**: adapter clocks, process probes, channel reads, monitor checks,
+  and cleanup effects stay outside the terminal handoff reducer.
 
 ### Queue Invariants
 
@@ -167,7 +178,9 @@ _Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/resource_mon
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
-`weft/core/taskspec/model.py`, `weft/core/tasks/sessions.py`, `weft/ext.py`.
+`weft/core/taskspec/model.py`, `weft/core/tasks/sessions.py`,
+`weft/core/terminal_handoff.py`, `weft/core/terminal_handoff_transport.py`, and
+`weft/ext.py`.
 
 - **EXEC.1**: each work item is executed exactly once per successful reservation
   path
@@ -179,6 +192,30 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
   through the same `runtime_handle` shape so endpoint and control surfaces have
   current-state liveness proof without trusting legacy top-level PID fields.
 - **EXEC.4**: return-code publication belongs to terminal execution outcomes
+- **EXEC.5**: host function, one-shot agent, and persistent agent work-item
+  results use ordered private response delivery with receiver-visible seal or
+  an explicit bounded failure path.
+- **EXEC.6**: observing producer exit while no result is currently visible
+  enters terminal drain; it is not no-result proof.
+- **EXEC.7**: a terminal handoff drain is bounded independently of
+  `spec.timeout`, including when the producer has already exited.
+- **EXEC.8**: private terminal transport or serialization failures become a
+  bounded error outcome with runner diagnostics; they do not hang or disappear.
+  Receiver decode failure and wrong terminal payload type are transport
+  failures and cannot be reduced as outcomes.
+- **EXEC.9**: before a one-shot adapter returns any terminal handoff decision,
+  it stops a still-live producer when required, reaps it, stops its monitor,
+  and closes all private endpoints under existing bounded cleanup rules. A
+  persistent-session timeout, cancellation, limit, protocol failure, or
+  non-ok work-item result whose worker contract ends the session invalidates
+  and cleans up that session before returning. A second execute on an invalid
+  session rejects as closed. Normal successful work-item results keep the
+  session live.
+- **EXEC.10**: stop-intent observations and producer exit are edge-triggered
+  within one terminal handoff. After one is reduced, the adapter excludes it
+  from later selector input; an accepted stop excludes every later stop
+  intent. Persistent level signals cannot starve outcome, channel seal,
+  transport failure, or drain expiry.
 
 ### Observability Invariants
 
@@ -829,6 +866,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](../plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md)
 - [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
 - [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)

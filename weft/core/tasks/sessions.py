@@ -1,26 +1,30 @@
 """Session helpers for interactive commands and persistent agent runtimes.
 
 Spec references:
-- docs/specifications/01-Core_Components.md [CC-3.2]
-- docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1]
+- docs/specifications/01-Core_Components.md [CC-3.2], [CC-3.5]
+- docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1], [RM-5.2]
+- docs/specifications/07-System_Invariants.md [EXEC.5]-[EXEC.10]
 - docs/specifications/13-Agent_Runtime.md [AR-6], [AR-9]
 """
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
-from typing import Any
+from typing import Any, cast
 
 from weft._constants import (
     ACTIVE_CONTROL_POLL_INTERVAL,
     COMMAND_SESSION_POST_TERMINATION_WAIT,
     COMMAND_SESSION_TERMINATION_TIMEOUT,
+    TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS,
 )
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
@@ -36,6 +40,16 @@ from weft.core.tasks.agent_session_protocol import (
     response_type,
     startup_error_diagnostics,
     startup_error_message,
+)
+from weft.core.terminal_handoff import (
+    TerminalHandoffEvent,
+    TerminalHandoffProgress,
+    TerminalHandoffStep,
+    drive_terminal_handoff_turn,
+)
+from weft.core.terminal_handoff_transport import (
+    TerminalHandoffTransportError,
+    receive_terminal_payload,
 )
 from weft.ext import RunnerHandle
 from weft.helpers import safe_cancel, terminate_process_tree
@@ -184,7 +198,10 @@ class CommandSession:
 
     def stop_monitor(self) -> None:
         if self._monitor:
-            self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+            try:
+                self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+            except Exception:  # pragma: no cover - process may have exited
+                pass
             try:
                 self._monitor.stop()
             except Exception:  # pragma: no cover - defensive
@@ -204,6 +221,7 @@ class SessionExecutionResult:
     value: Any | None
     error: str | None
     metrics: ResourceMetrics | None = None
+    diagnostics: dict[str, Any] | None = None
 
 
 class AgentSession:
@@ -213,7 +231,7 @@ class AgentSession:
         self,
         process: BaseProcess,
         request_queue: MPQueue[Any],
-        response_queue: MPQueue[dict[str, Any]],
+        response_receiver: Connection,
         monitor: BaseResourceMonitor | None,
         limits: Any,
         *,
@@ -222,7 +240,7 @@ class AgentSession:
     ) -> None:
         self._process = process
         self._request_queue = request_queue
-        self._response_queue = response_queue
+        self._response_receiver = response_receiver
         self._monitor = monitor
         self._limits = limits
         self._timeout = timeout
@@ -241,14 +259,31 @@ class AgentSession:
     def wait_ready(self, *, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
         last_handshake: str | None = None
+        channel_sealed = False
         start = time.monotonic()
         while time.monotonic() < deadline:
             remaining = max(deadline - time.monotonic(), 0.01)
             try:
-                payload = self._response_queue.get(timeout=remaining)
-            except queue.Empty:
+                payload = self._read_response_payload(timeout=remaining)
+            except EOFError:
+                channel_sealed = True
+                break
+            except TerminalHandoffTransportError as exc:
+                raise RuntimeError(
+                    self._format_ready_failure(
+                        "Agent session result channel failed during startup",
+                        timeout=timeout,
+                        started_at=start,
+                        last_handshake=last_handshake,
+                        diagnostics={"transport_error": str(exc)},
+                    )
+                ) from None
+            if payload is None:
                 if not self.is_alive():
-                    late_payload = self._join_and_drain_ready_response()
+                    try:
+                        late_payload = self._join_and_drain_ready_response()
+                    except (EOFError, TerminalHandoffTransportError):
+                        late_payload = None
                     if late_payload is not None:
                         if is_ready_response(late_payload):
                             return
@@ -268,8 +303,6 @@ class AgentSession:
                             ) from None
                     break
                 continue
-            if not isinstance(payload, Mapping):
-                continue
             payload_type = response_type(payload)
             if payload_type is not None:
                 last_handshake = payload_type
@@ -288,7 +321,16 @@ class AgentSession:
                         diagnostics=startup_error_diagnostics(payload),
                     )
                 )
-        late_payload = self._drain_ready_response(timeout=0.2)
+        if channel_sealed:
+            try:
+                self._process.join(timeout=TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS)
+            except Exception:  # pragma: no cover - defensive process observation
+                pass
+
+        try:
+            late_payload = self._drain_ready_response(timeout=0.2)
+        except (EOFError, TerminalHandoffTransportError):
+            late_payload = None
         if late_payload is not None:
             if is_ready_response(late_payload):
                 return
@@ -329,14 +371,29 @@ class AgentSession:
     def _drain_ready_response(self, *, timeout: float) -> Mapping[str, Any] | None:
         """Drain one late startup response without assuming process liveness."""
 
+        return self._read_response_payload(timeout=timeout)
+
+    def _read_response_payload(
+        self,
+        *,
+        timeout: float,
+    ) -> Mapping[str, Any] | None:
+        """Read one private response frame, preserving EOF and decode failures."""
+
         try:
-            if timeout > 0:
-                payload = self._response_queue.get(timeout=timeout)
-            else:
-                payload = self._response_queue.get_nowait()
-        except queue.Empty:
+            ready = self._response_receiver.poll(timeout)
+        except (OSError, ValueError) as exc:
+            raise TerminalHandoffTransportError(
+                f"terminal payload poll failed: {exc}"
+            ) from exc
+        if not ready:
             return None
-        return payload if isinstance(payload, Mapping) else None
+        payload = receive_terminal_payload(self._response_receiver)
+        if not isinstance(payload, Mapping):
+            raise TerminalHandoffTransportError(
+                f"decoded session payload has invalid type {type(payload).__name__}"
+            )
+        return payload
 
     def _format_ready_failure(
         self,
@@ -376,68 +433,259 @@ class AgentSession:
 
         self._request_queue.put(make_execute_request(work_item))
         start_time = time.monotonic()
+        progress = TerminalHandoffProgress()
+        drain_deadline: float | None = None
+        pending_transport_failure: str | None = None
+        producer_exit_observed = False
+        observed_exitcode: int | None = None
+        limit_error: str | None = None
 
-        while self.is_alive():
-            if safe_cancel(cancel_requested):
-                self.terminate()
-                self.stop_monitor()
-                return SessionExecutionResult(
-                    status="cancelled",
-                    value=None,
-                    error="Target execution cancelled",
-                    metrics=self._last_metrics,
+        while True:
+            now = time.monotonic()
+            observations: dict[str, TerminalHandoffEvent] = {}
+
+            if (
+                progress.accepted_stop is None
+                and "cancel_requested" not in progress.consumed_edge_kinds
+                and safe_cancel(cancel_requested)
+            ):
+                observations["cancel_requested"] = TerminalHandoffEvent(
+                    kind="cancel_requested"
                 )
 
-            elapsed = time.monotonic() - start_time
-            if self._timeout is not None and elapsed >= self._timeout:
-                self.terminate()
-                self.stop_monitor()
-                return SessionExecutionResult(
-                    status="timeout",
-                    value=None,
-                    error="Target execution timed out",
-                    metrics=self._last_metrics,
+            elapsed = now - start_time
+            if (
+                progress.accepted_stop is None
+                and "timeout_requested" not in progress.consumed_edge_kinds
+                and self._timeout is not None
+                and elapsed >= self._timeout
+            ):
+                observations["timeout_requested"] = TerminalHandoffEvent(
+                    kind="timeout_requested"
                 )
 
-            remaining = ACTIVE_CONTROL_POLL_INTERVAL
-            if self._timeout is not None:
-                remaining = min(remaining, max(0.01, self._timeout - elapsed))
+            if pending_transport_failure is not None:
+                observations["transport_failed"] = TerminalHandoffEvent(
+                    kind="transport_failed",
+                    detail=pending_transport_failure,
+                )
+                pending_transport_failure = None
+            else:
+                try:
+                    payload = self._read_response_payload(timeout=0.0)
+                except EOFError:
+                    observations["channel_sealed"] = TerminalHandoffEvent(
+                        kind="channel_sealed"
+                    )
+                except TerminalHandoffTransportError as exc:
+                    observations["transport_failed"] = TerminalHandoffEvent(
+                        kind="transport_failed",
+                        detail=str(exc),
+                    )
+                else:
+                    if payload is not None:
+                        try:
+                            parsed = parse_result_response(payload)
+                        except (TypeError, ValueError) as exc:
+                            parsed = None
+                            observations["transport_failed"] = TerminalHandoffEvent(
+                                kind="transport_failed",
+                                detail=str(exc),
+                            )
+                        if parsed is None:
+                            observations.setdefault(
+                                "transport_failed",
+                                TerminalHandoffEvent(
+                                    kind="transport_failed",
+                                    detail="invalid session result payload",
+                                ),
+                            )
+                        else:
+                            status, result, error = parsed
+                            session_result = SessionExecutionResult(
+                                status=status,
+                                value=result,
+                                error=error,
+                            )
+                            observations["outcome_received"] = TerminalHandoffEvent(
+                                kind="outcome_received",
+                                outcome=session_result,
+                            )
 
-            try:
-                payload = self._response_queue.get(timeout=remaining)
-            except queue.Empty:
+            if progress.accepted_stop is None and self.is_alive():
                 ok, violation = self.poll_limits()
                 if not ok:
-                    self.terminate()
-                    self.stop_monitor()
-                    return SessionExecutionResult(
+                    limit_error = violation or "Resource limit exceeded"
+                    observations["limit_reached"] = TerminalHandoffEvent(
+                        kind="limit_reached",
+                        detail=limit_error,
+                    )
+
+            if "producer_exited" not in progress.consumed_edge_kinds:
+                if not self.is_alive():
+                    self._process.join(timeout=0.0)
+                    producer_exit_observed = True
+                    observed_exitcode = getattr(self._process, "exitcode", None)
+                    observations["producer_exited"] = TerminalHandoffEvent(
+                        kind="producer_exited",
+                        detail=(
+                            str(observed_exitcode)
+                            if observed_exitcode is not None
+                            else None
+                        ),
+                    )
+
+            if drain_deadline is not None and now >= drain_deadline:
+                observations["drain_expired"] = TerminalHandoffEvent(
+                    kind="drain_expired"
+                )
+
+            step = self._reduce_terminal_observations(
+                progress,
+                tuple(observations.values()),
+            )
+            if step is None:
+                wait_for = self._terminal_handoff_wait_seconds(
+                    now=now,
+                    start_time=start_time,
+                    drain_deadline=drain_deadline,
+                )
+                try:
+                    self._response_receiver.poll(wait_for)
+                except (OSError, ValueError) as exc:
+                    pending_transport_failure = str(exc)
+                continue
+
+            progress = step.progress
+            action = step.decision.action
+            if action in {
+                "stop_for_timeout",
+                "stop_for_cancel",
+                "stop_for_limit",
+            }:
+                if drain_deadline is None:
+                    drain_deadline = now + TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+                self.terminate()
+                continue
+            if action == "begin_drain":
+                if drain_deadline is None:
+                    drain_deadline = now + TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+                continue
+            if action == "wait":
+                continue
+            if action == "return_outcome":
+                session_outcome = cast(SessionExecutionResult, step.event.outcome)
+                session_outcome.metrics = session_outcome.metrics or self.last_metrics
+                if session_outcome.status != "ok":
+                    self.close()
+                return session_outcome
+            if action == "return_timeout":
+                return self._finish_invalid_result(
+                    SessionExecutionResult(
+                        status="timeout",
+                        value=None,
+                        error="Target execution timed out",
+                    )
+                )
+            if action == "return_cancelled":
+                return self._finish_invalid_result(
+                    SessionExecutionResult(
+                        status="cancelled",
+                        value=None,
+                        error="Target execution cancelled",
+                    )
+                )
+            if action == "return_limit":
+                return self._finish_invalid_result(
+                    SessionExecutionResult(
                         status="limit",
                         value=None,
-                        error=violation,
-                        metrics=self._last_metrics,
+                        error=limit_error or "Resource limit exceeded",
                     )
-                continue
+                )
+            if action == "return_protocol_failure":
+                if step.event.kind == "channel_sealed" and not producer_exit_observed:
+                    self._process.join(timeout=TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS)
+                    if not self.is_alive():
+                        producer_exit_observed = True
+                        observed_exitcode = getattr(self._process, "exitcode", None)
+                error = "Worker result channel failed before a result was received"
+                if (
+                    step.event.kind == "channel_sealed"
+                    and producer_exit_observed
+                    and observed_exitcode is not None
+                ):
+                    error = (
+                        "Worker exited before returning a result "
+                        f"(exit code {observed_exitcode})"
+                    )
+                return self._finish_invalid_result(
+                    SessionExecutionResult(
+                        status="error",
+                        value=None,
+                        error=error,
+                        diagnostics=runner_diagnostics(
+                            phase="result_handoff",
+                            runner="host",
+                            target_type="agent",
+                            pid=getattr(self._process, "pid", None),
+                            exitcode=observed_exitcode,
+                            alive=self.is_alive(),
+                            duration_seconds=time.monotonic() - start_time,
+                            message=step.event.detail or error,
+                            extra={
+                                "handoff_state": step.decision.source,
+                                "handoff_event": step.event.kind,
+                                "handoff_transition": step.decision.transition_id,
+                                "drain_timeout_seconds": (
+                                    TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+                                ),
+                            },
+                        ),
+                    )
+                )
+            raise AssertionError(f"Unhandled terminal handoff action: {action}")
 
-            parsed = parse_result_response(payload)
-            if parsed is None:
-                continue
-            status, result, error = parsed
+    @staticmethod
+    def _reduce_terminal_observations(
+        progress: TerminalHandoffProgress,
+        observations: Sequence[TerminalHandoffEvent],
+    ) -> TerminalHandoffStep | None:
+        """Route one observation batch through the persistent-session policy."""
 
-            self._last_metrics = self.last_metrics
-            return SessionExecutionResult(
-                status=status,
-                value=result,
-                error=error,
-                metrics=self._last_metrics,
-            )
-
-        self._last_metrics = self.last_metrics
-        return SessionExecutionResult(
-            status="error",
-            value=None,
-            error="Agent session exited unexpectedly",
-            metrics=self._last_metrics,
+        if not observations:
+            return None
+        return drive_terminal_handoff_turn(
+            progress,
+            observations,
+            policy="persistent_session",
         )
+
+    def _terminal_handoff_wait_seconds(
+        self,
+        *,
+        now: float,
+        start_time: float,
+        drain_deadline: float | None,
+    ) -> float:
+        """Return the bounded wait until the next session observation boundary."""
+
+        deadlines = [now + ACTIVE_CONTROL_POLL_INTERVAL]
+        if self._timeout is not None:
+            deadlines.append(start_time + self._timeout)
+        if drain_deadline is not None:
+            deadlines.append(drain_deadline)
+        return max(0.0, min(deadlines) - now)
+
+    def _finish_invalid_result(
+        self,
+        result: SessionExecutionResult,
+    ) -> SessionExecutionResult:
+        """Attach metrics and invalidate a session before returning a verdict."""
+
+        result.metrics = result.metrics or self.last_metrics
+        self.close()
+        return result
 
     def is_alive(self) -> bool:
         return self._process.is_alive()
@@ -466,6 +714,12 @@ class AgentSession:
                     self._process.kill()
                 except (OSError, ValueError):  # pragma: no cover - defensive
                     pass
+            try:
+                self._process.join(
+                    timeout=min(0.2, max(0.0, deadline - time.monotonic()))
+                )
+            except Exception:  # pragma: no cover - defensive
+                pass
             return
 
         if not self.is_alive():
@@ -495,23 +749,12 @@ class AgentSession:
     def _close_ipc_resources(self, *, deadline: float | None = None) -> None:
         """Release multiprocessing handles owned by this session wrapper."""
 
-        for mp_queue in (self._request_queue, self._response_queue):
-            if deadline is not None:
-                cancel_join = getattr(mp_queue, "cancel_join_thread", None)
-                if callable(cancel_join):
-                    try:
-                        cancel_join()
-                    except Exception:  # pragma: no cover - defensive cleanup
-                        pass
-            try:
-                mp_queue.close()
-            except Exception:  # pragma: no cover - defensive cleanup
-                pass
-            if deadline is None:
-                try:
-                    mp_queue.join_thread()
-                except Exception:  # pragma: no cover - defensive cleanup
-                    pass
+        with contextlib.suppress(Exception):
+            self._request_queue.cancel_join_thread()
+        with contextlib.suppress(Exception):
+            self._request_queue.close()
+        with contextlib.suppress(Exception):
+            self._response_receiver.close()
         try:
             self._process.close()
         except Exception:  # pragma: no cover - process may still be running
@@ -530,7 +773,10 @@ class AgentSession:
 
     def stop_monitor(self) -> None:
         if self._monitor:
-            self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+            try:
+                self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+            except Exception:  # pragma: no cover - process may have exited
+                pass
             try:
                 self._monitor.stop()
             except Exception:  # pragma: no cover - defensive
@@ -540,7 +786,10 @@ class AgentSession:
     @property
     def last_metrics(self) -> ResourceMetrics | None:
         if self._monitor:
-            self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+            try:
+                self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+            except Exception:  # pragma: no cover - process may have exited
+                pass
         return self._last_metrics
 
     def close(self, *, deadline: float | None = None) -> None:
@@ -548,21 +797,25 @@ class AgentSession:
             return
         self._closed = True
         try:
+            try:
+                if self.is_alive():
+                    self._request_queue.put(make_stop_request())
+                    join_timeout = 0.5
+                    if deadline is not None:
+                        join_timeout = min(
+                            join_timeout,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    self._process.join(timeout=join_timeout)
+            except Exception:  # pragma: no cover - defensive
+                pass
             if self.is_alive():
-                self._request_queue.put(make_stop_request())
-                join_timeout = 0.5
-                if deadline is not None:
-                    join_timeout = min(
-                        join_timeout,
-                        max(0.0, deadline - time.monotonic()),
-                    )
-                self._process.join(timeout=join_timeout)
-        except Exception:  # pragma: no cover - defensive
-            pass
-        if self.is_alive():
-            self.terminate(deadline=deadline)
-        self.stop_monitor()
-        self._close_ipc_resources(deadline=deadline)
+                self.terminate(deadline=deadline)
+        finally:
+            try:
+                self.stop_monitor()
+            finally:
+                self._close_ipc_resources(deadline=deadline)
 
 
 class InProcessCommandSession:

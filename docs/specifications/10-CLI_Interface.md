@@ -87,9 +87,9 @@ Removed or superseded surfaces:
 through the manager path rather than bypassing the runtime.
 
 _Implementation mapping_: `weft/commands/run.py` owns shared `weft run`
-execution helpers and the structured `execute_run()` result surface;
-`weft/cli/run.py` is the Typer adapter and owns rendering that structured
-result to stdout/stderr and exit codes; shared submission lives in
+execution helpers, the structured `execute_run()` result surface, terminal
+rendering, and exit-code selection; `weft/cli/run.py` is the Typer adapter that
+owns option parsing and delegates rendering; shared submission lives in
 `weft/commands/submission.py`; manager bootstrap lives in
 `weft/core/manager_runtime.py` and is surfaced through
 `weft/commands/manager.py`.
@@ -230,6 +230,33 @@ Current rules:
   `weft spec validate --load-runner` and `--preflight`
 - if runtime startup fails, the task fails on the normal execution path with
   the concrete runner or agent error
+
+Private worker-result protocol failures are rendered in user terms. Plain
+output and the `error` field of `weft run --json` use one of these bounded
+categories: `Worker exited before returning a result (exit code N)` only when
+producer exit and a numeric exit code are observed without a result; `Worker
+result channel failed before a result was received` when EOF occurs while the
+producer is live or exit is unproved, delivery or decoding fails, the payload
+type is invalid, or bounded drain expires; and `Task returned a value that Weft
+could not serialize: <bounded cause>` when result serialization fails before
+any frame is written. Reducer state, event, transition ID, channel seal, and
+drain-budget details are private diagnostics and do not appear in `weft run`
+output.
+
+Plain rendering retains the existing `Error executing task: ` prefix before
+the category. JSON stores the category itself in `error` without that prefix.
+
+Each category is an ordinary task `failed` result and `weft run` exits 1.
+Timeout remains status `timeout` with exit 124. Existing cancellation,
+resource-limit, target-exception, and success rendering is unchanged. Success
+JSON remains `{tid,status,result}` and failure JSON remains
+`{tid,status,error}`; terminal-handoff diagnostic fields do not expand this
+command result schema.
+
+_Terminal handoff implementation mapping_: `weft/core/runners/host.py` and
+`weft/core/tasks/sessions.py` place the public category in the existing error
+outcome; `weft/core/tasks/consumer.py` publishes it through normal failed-task
+state; `weft/commands/run.py` renders the unchanged plain and JSON shapes.
 
 Current stdin behavior:
 
@@ -859,6 +886,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-31-simplebroker-6-api-migration-plan.md`](../plans/2026-07-31-simplebroker-6-api-migration-plan.md)
 - [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
 - [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)

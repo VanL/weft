@@ -205,6 +205,19 @@ Timeout terminal state and reserved-queue error policy still use the normal
 task lifecycle: when work execution exceeds `spec.timeout`, the task reports a
 timeout and applies `reserved_policy_on_error`.
 
+Before emitting `timeout_requested` in a host-runner observation turn, the
+one-shot adapter consumes a terminal payload that is already ready on the
+private response channel. The persistent-session adapter preserves its current
+boundary by accepting a due timeout before a same-turn ready payload. Once the
+reducer accepts timeout, timeout remains the terminal outcome while the adapter
+stops, drains, and cleans up; a later payload does not replace it. In both
+policies cancellation is first, confirmed resource limit follows both timeout
+and payload, and the first accepted stop remains final.
+
+_Implementation mapping_: `weft/core/runners/host.py` owns the one-shot timeout
+observation boundary; `weft/core/tasks/sessions.py` owns the persistent-session
+boundary; both route observations through `weft/core/terminal_handoff.py`.
+
 ## Error Handling
 
 ### Unified Reservation Pattern
@@ -292,6 +305,7 @@ controls stay here only when they are already shipped and observable:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)

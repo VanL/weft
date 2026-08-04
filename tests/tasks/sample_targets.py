@@ -36,6 +36,31 @@ def abrupt_exit(code: int = 73) -> None:
     os._exit(code)
 
 
+def return_unpicklable() -> Any:
+    """Return a local callable that cannot cross a spawn transport."""
+
+    return lambda: None
+
+
+def _raise_during_unpickle() -> None:
+    """Reject a frame only when the receiving process decodes it."""
+
+    raise ValueError("intentional result decode failure")
+
+
+class _UnreadablePickledResult:
+    """Serialize successfully, then fail when reconstructed by the parent."""
+
+    def __reduce__(self) -> tuple[Any, tuple[()]]:
+        return _raise_during_unpickle, ()
+
+
+def return_unreadable_pickled_result() -> Any:
+    """Return a value that exercises receiver-side terminal decode failure."""
+
+    return _UnreadablePickledResult()
+
+
 def simulate_work(
     *,
     duration: float = 0.0,

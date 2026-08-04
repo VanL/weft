@@ -490,6 +490,18 @@ Public callers do not send or receive:
 
 Those are private runtime-session messages only.
 
+Persistent session work-item completion uses the same host terminal handoff
+reducer as one-shot host work. A session child may publish an error result and
+exit immediately; the parent must return that result rather than replace it
+with a generic unexpected-exit error. Session startup remains a distinct
+readiness protocol, but its response transport must preserve ordered delivery,
+terminal serialization failure, and receiver-visible seal when the child
+exits. For observations gathered in the deadline turn, cancellation is
+selected first and timeout is selected before a ready result, preserving the
+existing persistent-session deadline boundary. Accepted stop and producer-exit
+signals are consumed once so their persistent level state cannot starve bounded
+drain.
+
 _Implementation mapping:_ `weft/core/tasks/agent_session_protocol.py` --
 `make_execute_request`, `make_stop_request`, `make_booted_response`,
 `make_ready_response`, `make_startup_error_response`, `make_result_response`,
@@ -500,7 +512,10 @@ Versioned via
 `weft/core/tasks/sessions.py` (`AgentSession` class),
 `weft/core/tasks/consumer.py` (`_uses_agent_session`, `_ensure_agent_session`,
 `_shutdown_agent_session`), `weft/core/tasks/runner.py`
-(`start_agent_session`).
+(`start_agent_session`). Terminal work-item selection and private framing live
+in `weft/core/terminal_handoff.py` and
+`weft/core/terminal_handoff_transport.py`; the host child endpoint lives in
+`weft/core/runners/host.py`.
 
 ## Current Backends [AR-7]
 
@@ -858,6 +873,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)

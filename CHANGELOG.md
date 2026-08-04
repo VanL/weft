@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Fast function and stored-spec execution no longer loses a result or hangs
+  when worker exit races private result delivery. Host function, one-shot
+  agent, and persistent agent-session results now use a reducer-backed framed
+  handoff with bounded channel-failure reporting. Nested immutable TaskSpec
+  arguments are normalized before spawn so they cannot fail worker bootstrap.
+  No TaskSpec, `.weft`, queue, or data migration is required.
+
 ## [0.9.89] - 2026-07-10
 
 ### Changed

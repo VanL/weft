@@ -376,6 +376,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                     metrics=result.metrics,
                     worker_pid=session.pid,
                     runtime_handle=session.handle,
+                    diagnostics=result.diagnostics,
                 ),
                 False,
             )

@@ -185,6 +185,368 @@ TASK_LIFECYCLE_TRANSITION_SPECS: Final[tuple[tuple[str, str, str, str, str], ...
 )
 """TaskSpec lifecycle transition table as id/source/target/action/reason rows."""
 
+TERMINAL_HANDOFF_STATE_VALUES: Final[frozenset[str]] = frozenset(
+    (
+        "observing",
+        "draining",
+        "stopping_timeout",
+        "stopping_cancel",
+        "stopping_limit",
+        "decided",
+    )
+)
+"""Private terminal handoff reducer state values [CC-3.5]."""
+
+TERMINAL_HANDOFF_TERMINAL_STATE_VALUES: Final[frozenset[str]] = frozenset(("decided",))
+"""Terminal states for the private terminal handoff reducer."""
+
+TERMINAL_HANDOFF_EVENT_KIND_VALUES: Final[frozenset[str]] = frozenset(
+    (
+        "outcome_received",
+        "producer_exited",
+        "channel_sealed",
+        "timeout_requested",
+        "cancel_requested",
+        "limit_reached",
+        "drain_expired",
+        "transport_failed",
+    )
+)
+"""Observation kinds accepted by the private terminal handoff reducer."""
+
+TERMINAL_HANDOFF_STOP_EVENT_KIND_VALUES: Final[frozenset[str]] = frozenset(
+    ("timeout_requested", "cancel_requested", "limit_reached")
+)
+"""Stop intents consumed as one-shot edges by terminal handoff adapters."""
+
+TERMINAL_HANDOFF_EDGE_EVENT_KIND_VALUES: Final[frozenset[str]] = (
+    TERMINAL_HANDOFF_STOP_EVENT_KIND_VALUES | frozenset(("producer_exited",))
+)
+"""Level observations consumed as edges within one terminal handoff."""
+
+TERMINAL_HANDOFF_ACTION_VALUES: Final[frozenset[str]] = frozenset(
+    (
+        "return_outcome",
+        "begin_drain",
+        "stop_for_timeout",
+        "stop_for_cancel",
+        "stop_for_limit",
+        "return_timeout",
+        "return_cancelled",
+        "return_limit",
+        "return_protocol_failure",
+        "wait",
+    )
+)
+"""Actions selected by the private terminal handoff reducer."""
+
+TERMINAL_HANDOFF_TRANSITION_SPECS: Final[tuple[tuple[str, str, str, str, str], ...]] = (
+    (
+        "observing",
+        "outcome_received",
+        "decided",
+        "return_outcome",
+        "terminal outcome received",
+    ),
+    (
+        "observing",
+        "producer_exited",
+        "draining",
+        "begin_drain",
+        "producer exited before terminal channel evidence",
+    ),
+    (
+        "observing",
+        "channel_sealed",
+        "decided",
+        "return_protocol_failure",
+        "terminal channel sealed without an outcome",
+    ),
+    (
+        "observing",
+        "timeout_requested",
+        "stopping_timeout",
+        "stop_for_timeout",
+        "execution timeout accepted",
+    ),
+    (
+        "observing",
+        "cancel_requested",
+        "stopping_cancel",
+        "stop_for_cancel",
+        "execution cancellation accepted",
+    ),
+    (
+        "observing",
+        "limit_reached",
+        "stopping_limit",
+        "stop_for_limit",
+        "resource limit accepted",
+    ),
+    (
+        "observing",
+        "transport_failed",
+        "decided",
+        "return_protocol_failure",
+        "terminal transport failed",
+    ),
+    (
+        "draining",
+        "outcome_received",
+        "decided",
+        "return_outcome",
+        "terminal outcome received during drain",
+    ),
+    (
+        "draining",
+        "producer_exited",
+        "draining",
+        "wait",
+        "producer exit was already observed",
+    ),
+    (
+        "draining",
+        "channel_sealed",
+        "decided",
+        "return_protocol_failure",
+        "terminal channel sealed during drain without an outcome",
+    ),
+    (
+        "draining",
+        "timeout_requested",
+        "stopping_timeout",
+        "stop_for_timeout",
+        "execution timeout accepted during drain",
+    ),
+    (
+        "draining",
+        "cancel_requested",
+        "stopping_cancel",
+        "stop_for_cancel",
+        "execution cancellation accepted during drain",
+    ),
+    (
+        "draining",
+        "limit_reached",
+        "stopping_limit",
+        "stop_for_limit",
+        "resource limit accepted during drain",
+    ),
+    (
+        "draining",
+        "drain_expired",
+        "decided",
+        "return_protocol_failure",
+        "terminal drain deadline expired",
+    ),
+    (
+        "draining",
+        "transport_failed",
+        "decided",
+        "return_protocol_failure",
+        "terminal transport failed during drain",
+    ),
+    (
+        "stopping_timeout",
+        "outcome_received",
+        "decided",
+        "return_timeout",
+        "accepted timeout remains final after outcome delivery",
+    ),
+    (
+        "stopping_timeout",
+        "producer_exited",
+        "stopping_timeout",
+        "begin_drain",
+        "producer exited while stopping for timeout",
+    ),
+    (
+        "stopping_timeout",
+        "channel_sealed",
+        "decided",
+        "return_timeout",
+        "terminal channel sealed after accepted timeout",
+    ),
+    (
+        "stopping_timeout",
+        "timeout_requested",
+        "stopping_timeout",
+        "wait",
+        "timeout stop intent was already accepted",
+    ),
+    (
+        "stopping_timeout",
+        "cancel_requested",
+        "stopping_timeout",
+        "wait",
+        "first accepted timeout stop intent remains final",
+    ),
+    (
+        "stopping_timeout",
+        "limit_reached",
+        "stopping_timeout",
+        "wait",
+        "first accepted timeout stop intent remains final",
+    ),
+    (
+        "stopping_timeout",
+        "drain_expired",
+        "decided",
+        "return_timeout",
+        "terminal drain expired after accepted timeout",
+    ),
+    (
+        "stopping_timeout",
+        "transport_failed",
+        "decided",
+        "return_timeout",
+        "terminal transport failed after accepted timeout",
+    ),
+    (
+        "stopping_cancel",
+        "outcome_received",
+        "decided",
+        "return_cancelled",
+        "accepted cancellation remains final after outcome delivery",
+    ),
+    (
+        "stopping_cancel",
+        "producer_exited",
+        "stopping_cancel",
+        "begin_drain",
+        "producer exited while stopping for cancellation",
+    ),
+    (
+        "stopping_cancel",
+        "channel_sealed",
+        "decided",
+        "return_cancelled",
+        "terminal channel sealed after accepted cancellation",
+    ),
+    (
+        "stopping_cancel",
+        "timeout_requested",
+        "stopping_cancel",
+        "wait",
+        "first accepted cancellation stop intent remains final",
+    ),
+    (
+        "stopping_cancel",
+        "cancel_requested",
+        "stopping_cancel",
+        "wait",
+        "cancellation stop intent was already accepted",
+    ),
+    (
+        "stopping_cancel",
+        "limit_reached",
+        "stopping_cancel",
+        "wait",
+        "first accepted cancellation stop intent remains final",
+    ),
+    (
+        "stopping_cancel",
+        "drain_expired",
+        "decided",
+        "return_cancelled",
+        "terminal drain expired after accepted cancellation",
+    ),
+    (
+        "stopping_cancel",
+        "transport_failed",
+        "decided",
+        "return_cancelled",
+        "terminal transport failed after accepted cancellation",
+    ),
+    (
+        "stopping_limit",
+        "outcome_received",
+        "decided",
+        "return_limit",
+        "accepted resource limit remains final after outcome delivery",
+    ),
+    (
+        "stopping_limit",
+        "producer_exited",
+        "stopping_limit",
+        "begin_drain",
+        "producer exited while stopping for a resource limit",
+    ),
+    (
+        "stopping_limit",
+        "channel_sealed",
+        "decided",
+        "return_limit",
+        "terminal channel sealed after accepted resource limit",
+    ),
+    (
+        "stopping_limit",
+        "timeout_requested",
+        "stopping_limit",
+        "wait",
+        "first accepted resource-limit stop intent remains final",
+    ),
+    (
+        "stopping_limit",
+        "cancel_requested",
+        "stopping_limit",
+        "wait",
+        "first accepted resource-limit stop intent remains final",
+    ),
+    (
+        "stopping_limit",
+        "limit_reached",
+        "stopping_limit",
+        "wait",
+        "resource-limit stop intent was already accepted",
+    ),
+    (
+        "stopping_limit",
+        "drain_expired",
+        "decided",
+        "return_limit",
+        "terminal drain expired after accepted resource limit",
+    ),
+    (
+        "stopping_limit",
+        "transport_failed",
+        "decided",
+        "return_limit",
+        "terminal transport failed after accepted resource limit",
+    ),
+)
+"""Private terminal handoff transition rows as source/event/target/action/reason."""
+
+TERMINAL_HANDOFF_ONE_SHOT_EVENT_ORDER: Final[tuple[str, ...]] = (
+    "cancel_requested",
+    "outcome_received",
+    "timeout_requested",
+    "limit_reached",
+    "transport_failed",
+    "channel_sealed",
+    "producer_exited",
+    "drain_expired",
+)
+"""Same-turn event precedence for one-shot host execution."""
+
+TERMINAL_HANDOFF_PERSISTENT_SESSION_EVENT_ORDER: Final[tuple[str, ...]] = (
+    "cancel_requested",
+    "timeout_requested",
+    "outcome_received",
+    "limit_reached",
+    "transport_failed",
+    "channel_sealed",
+    "producer_exited",
+    "drain_expired",
+)
+"""Same-turn event precedence for persistent host sessions."""
+
+TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS: Final[float] = 0.25
+"""Bound for resolving a sealed, failed, or leaked private result channel."""
+
+TERMINAL_HANDOFF_ERROR_CAUSE_MAX_CHARS: Final[int] = 500
+"""Maximum public cause length for pre-write terminal serialization failures."""
+
 CONTROL_CONVERGENCE_STATE_VALUES: Final[frozenset[str]] = frozenset(
     (
         "command_sent",

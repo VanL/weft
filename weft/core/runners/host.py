@@ -1,9 +1,10 @@
 """Built-in host runner implementation.
 
 Spec references:
-- docs/specifications/01-Core_Components.md [CC-3], [CC-3.4]
+- docs/specifications/01-Core_Components.md [CC-3], [CC-3.4], [CC-3.5]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
-- docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1]
+- docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1], [RM-5.2]
+- docs/specifications/07-System_Invariants.md [EXEC.5]-[EXEC.10]
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import lru_cache
+from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any, TextIO, cast
@@ -27,6 +29,7 @@ from simplebroker import BrokerTarget
 from weft._constants import (
     ACTIVE_CONTROL_POLL_INTERVAL,
     AGENT_SESSION_READY_TIMEOUT_SECONDS,
+    TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS,
 )
 from weft.core.agents import register_builtin_agent_runtimes
 from weft.core.agents.runtime import (
@@ -51,6 +54,18 @@ from weft.core.tasks.agent_session_protocol import (
 )
 from weft.core.tasks.sessions import AgentSession, CommandSession
 from weft.core.taskspec import AgentSection
+from weft.core.terminal_handoff import (
+    TerminalHandoffEvent,
+    TerminalHandoffProgress,
+    TerminalHandoffStep,
+    drive_terminal_handoff_turn,
+)
+from weft.core.terminal_handoff_transport import (
+    TerminalHandoffTransportError,
+    TerminalPayloadSerializationFailure,
+    receive_terminal_payload,
+    send_terminal_payload,
+)
 from weft.ext import (
     RunnerCapabilities,
     RunnerHandle,
@@ -69,6 +84,16 @@ from weft.helpers import (
 )
 
 register_builtin_agent_runtimes()
+
+
+def _plain_spawn_value(value: Any) -> Any:
+    """Copy frozen TaskSpec containers into spawn-pickle-safe built-ins."""
+
+    if isinstance(value, Mapping):
+        return {key: _plain_spawn_value(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_plain_spawn_value(item) for item in value]
+    return value
 
 
 def _host_handle(pid: int | None) -> RunnerHandle | None:
@@ -105,7 +130,7 @@ def _current_container_runtime() -> ContainerRuntimeDetection | None:
 def _worker_entry(
     spec_data: Mapping[str, Any],
     work_item: Any,
-    result_queue: MPQueue[RunnerOutcome],
+    result_sender: Connection,
 ) -> None:
     """Execute a single work item in a spawned process."""
     start = time.monotonic()
@@ -175,19 +200,47 @@ def _worker_entry(
         diagnostics = None
 
     end = time.monotonic()
-    _put_terminal_mp_queue(
-        result_queue,
-        RunnerOutcome(
-            status=status,
-            value=value,
-            error=error,
+    outcome = RunnerOutcome(
+        status=status,
+        value=value,
+        error=error,
+        stdout=stdout,
+        stderr=stderr,
+        returncode=returncode,
+        duration=end - start,
+        diagnostics=diagnostics,
+    )
+
+    def _serialization_failure(
+        failure: TerminalPayloadSerializationFailure,
+    ) -> RunnerOutcome:
+        message = (
+            f"Task returned a value that Weft could not serialize: {failure.cause}"
+        )
+        return RunnerOutcome(
+            status="error",
+            value=None,
+            error=message,
             stdout=stdout,
             stderr=stderr,
-            returncode=returncode,
+            returncode=None,
             duration=end - start,
-            diagnostics=diagnostics,
-        ),
-    )
+            diagnostics=runner_diagnostics(
+                phase="result_serialization",
+                runner="host",
+                target_type=str(spec_data.get("type") or "unknown"),
+                message=message,
+            ),
+        )
+
+    try:
+        send_terminal_payload(
+            result_sender,
+            outcome,
+            serialization_failure_factory=_serialization_failure,
+        )
+    finally:
+        result_sender.close()
 
 
 @contextlib.contextmanager
@@ -223,12 +276,12 @@ def _worker_runtime_context(
 def _agent_session_worker_entry(
     spec_data: Mapping[str, Any],
     request_queue: MPQueue[dict[str, Any]],
-    response_queue: MPQueue[dict[str, Any]],
+    response_sender: Connection,
 ) -> None:
     """Run a long-lived agent session in a spawned subprocess."""
     session = None
     try:
-        response_queue.put(make_booted_response())
+        send_terminal_payload(response_sender, make_booted_response())
         with _worker_runtime_context(spec_data):
             agent = AgentSection.model_validate(spec_data["agent"])
             session = start_agent_runtime_session(
@@ -236,7 +289,7 @@ def _agent_session_worker_entry(
                 tid=spec_data.get("tid"),
                 bundle_root=cast(str | None, spec_data.get("bundle_root")),
             )
-            response_queue.put(make_ready_response())
+            send_terminal_payload(response_sender, make_ready_response())
 
             while True:
                 request = request_queue.get()
@@ -253,14 +306,30 @@ def _agent_session_worker_entry(
                     )
                     result = session.execute(normalized)
                 except Exception:  # pragma: no cover - propagated via parent
-                    response_queue.put(
+                    send_terminal_payload(
+                        response_sender,
                         make_result_response(
-                            status="error", error=traceback.format_exc()
-                        )
+                            status="error",
+                            error=traceback.format_exc(),
+                        ),
                     )
                     break
 
-                response_queue.put(make_result_response(status="ok", result=result))
+                original_sent = send_terminal_payload(
+                    response_sender,
+                    make_result_response(status="ok", result=result),
+                    serialization_failure_factory=lambda failure: make_result_response(
+                        status="error",
+                        error=(
+                            "Task returned a value that Weft could not "
+                            f"serialize: {failure.cause}"
+                        ),
+                    ),
+                )
+                if not original_sent:
+                    break
+    except TerminalHandoffTransportError:
+        return
     except Exception as exc:  # pragma: no cover - propagated via parent
         traceback_text = traceback.format_exc()
         diagnostics = runner_diagnostics(
@@ -271,33 +340,24 @@ def _agent_session_worker_entry(
             exception_type=type(exc).__name__,
             traceback_text=traceback_text,
         )
-        _put_terminal_mp_queue(
-            response_queue,
-            make_startup_error_response(
-                traceback_text,
-                diagnostics=diagnostics,
-            ),
-        )
+        with contextlib.suppress(TerminalHandoffTransportError):
+            send_terminal_payload(
+                response_sender,
+                make_startup_error_response(
+                    traceback_text,
+                    diagnostics=diagnostics,
+                ),
+            )
     finally:
         if session is not None:
             try:
                 session.close()
             except Exception:  # pragma: no cover - defensive
                 pass
-
-
-def _put_terminal_mp_queue(mp_queue: MPQueue[Any], payload: Any) -> None:
-    """Put a terminal child-process payload and flush the queue before exit."""
-
-    mp_queue.put(payload)
-    try:
-        mp_queue.close()
-    except Exception:  # pragma: no cover - defensive child cleanup
-        pass
-    try:
-        mp_queue.join_thread()
-    except Exception:  # pragma: no cover - defensive child cleanup
-        pass
+        with contextlib.suppress(Exception):
+            request_queue.close()
+        with contextlib.suppress(Exception):
+            response_sender.close()
 
 
 class HostTaskRunner:
@@ -328,10 +388,10 @@ class HostTaskRunner:
             "tid": tid,
             "function_target": function_target,
             "process_target": process_target,
-            "agent": dict(agent or {}) if agent is not None else None,
-            "args": list(args or []),
-            "kwargs": dict(kwargs or {}),
-            "env": dict(env or {}),
+            "agent": _plain_spawn_value(agent) if agent is not None else None,
+            "args": _plain_spawn_value(args or ()),
+            "kwargs": _plain_spawn_value(kwargs or {}),
+            "env": _plain_spawn_value(env or {}),
             "working_dir": working_dir,
             "command_timeout": timeout,
             "bundle_root": bundle_root,
@@ -373,14 +433,17 @@ class HostTaskRunner:
                 on_stderr_chunk=on_stderr_chunk,
             )
 
-        result_queue = self._ctx.Queue()
+        response_receiver, response_sender = self._ctx.Pipe(duplex=False)
         process = self._ctx.Process(
             target=_worker_entry,
-            args=(self._spec_data, work_item, result_queue),
+            args=(self._spec_data, work_item, response_sender),
             daemon=True,
         )
+        process_started = False
         try:
             process.start()
+            process_started = True
+            response_sender.close()
             worker_pid = process.pid
             runtime_handle = _host_handle(worker_pid)
             if on_worker_started is not None:
@@ -393,37 +456,231 @@ class HostTaskRunner:
                     on_runtime_handle_started(runtime_handle)
                 except Exception:  # pragma: no cover - defensive
                     pass
+            return self._run_one_shot_terminal_handoff(
+                process,
+                response_receiver,
+                worker_pid=worker_pid,
+                runtime_handle=runtime_handle,
+                cancel_requested=cancel_requested,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                response_sender.close()
+            with contextlib.suppress(Exception):
+                response_receiver.close()
+            if process_started:
+                with contextlib.suppress(Exception):
+                    if process.is_alive():
+                        self._stop_process(process)
+                    else:
+                        process.join(timeout=0.2)
+            self._close_process_handle(process)
 
-            monitor = None
-            last_metrics: ResourceMetrics | None = None
-            outcome: RunnerOutcome | None = None
-            if self._monitor_class:
-                monitor = load_resource_monitor(
-                    self._monitor_class,
-                    limits=self._limits,
-                    polling_interval=self._monitor_interval,
-                    db_path=self._db_path,
-                    config=self._config,
+    def _run_one_shot_terminal_handoff(
+        self,
+        process: BaseProcess,
+        response_receiver: Connection,
+        *,
+        worker_pid: int | None,
+        runtime_handle: RunnerHandle | None,
+        cancel_requested: Callable[[], bool] | None,
+    ) -> RunnerOutcome:
+        """Observe one worker and reduce its private terminal handoff.
+
+        Spec: [CC-3.5], [RM-5.2], [EXEC.5]-[EXEC.10].
+        """
+
+        monitor = None
+        last_metrics: ResourceMetrics | None = None
+        if self._monitor_class:
+            monitor = load_resource_monitor(
+                self._monitor_class,
+                limits=self._limits,
+                polling_interval=self._monitor_interval,
+                db_path=self._db_path,
+                config=self._config,
+            )
+            try:
+                if worker_pid is None:
+                    raise RuntimeError("Worker process has no PID")
+                monitor.start(worker_pid)
+            except Exception:  # pragma: no cover - optional monitor boundary
+                with contextlib.suppress(Exception):
+                    monitor.stop()
+                monitor = None
+
+        start_time = time.monotonic()
+        next_monitor_at = start_time + self._monitor_interval
+        drain_deadline: float | None = None
+        progress = TerminalHandoffProgress()
+        pending_transport_failure: str | None = None
+        producer_exit_observed = False
+        observed_exitcode: int | None = None
+        limit_error: str | None = None
+        outcome: RunnerOutcome | None = None
+
+        try:
+            while outcome is None:
+                now = time.monotonic()
+                observations: dict[str, TerminalHandoffEvent] = {}
+
+                if (
+                    progress.accepted_stop is None
+                    and "cancel_requested" not in progress.consumed_edge_kinds
+                    and safe_cancel(cancel_requested)
+                ):
+                    observations["cancel_requested"] = TerminalHandoffEvent(
+                        kind="cancel_requested"
+                    )
+
+                if pending_transport_failure is not None:
+                    observations["transport_failed"] = TerminalHandoffEvent(
+                        kind="transport_failed",
+                        detail=pending_transport_failure,
+                    )
+                    pending_transport_failure = None
+                else:
+                    try:
+                        channel_ready = response_receiver.poll(0.0)
+                    except (OSError, ValueError) as exc:
+                        channel_ready = False
+                        observations["transport_failed"] = TerminalHandoffEvent(
+                            kind="transport_failed",
+                            detail=str(exc),
+                        )
+                    if channel_ready:
+                        try:
+                            payload = receive_terminal_payload(response_receiver)
+                        except EOFError:
+                            observations["channel_sealed"] = TerminalHandoffEvent(
+                                kind="channel_sealed"
+                            )
+                        except TerminalHandoffTransportError as exc:
+                            observations["transport_failed"] = TerminalHandoffEvent(
+                                kind="transport_failed",
+                                detail=str(exc),
+                            )
+                        else:
+                            if isinstance(payload, RunnerOutcome):
+                                observations["outcome_received"] = TerminalHandoffEvent(
+                                    kind="outcome_received",
+                                    outcome=payload,
+                                )
+                            else:
+                                observations["transport_failed"] = TerminalHandoffEvent(
+                                    kind="transport_failed",
+                                    detail=(
+                                        "decoded terminal payload has invalid type "
+                                        f"{type(payload).__name__}"
+                                    ),
+                                )
+
+                elapsed = now - start_time
+                if (
+                    progress.accepted_stop is None
+                    and "timeout_requested" not in progress.consumed_edge_kinds
+                    and self._timeout is not None
+                    and elapsed >= self._timeout
+                ):
+                    observations["timeout_requested"] = TerminalHandoffEvent(
+                        kind="timeout_requested"
+                    )
+
+                if (
+                    monitor is not None
+                    and progress.accepted_stop is None
+                    and "limit_reached" not in progress.consumed_edge_kinds
+                    and now >= next_monitor_at
+                    and process.is_alive()
+                ):
+                    try:
+                        ok, violation = monitor.check_limits()
+                    except Exception:  # pragma: no cover - process may have exited
+                        ok, violation = True, None
+                    last_metrics = monitor.last_metrics() or last_metrics
+                    next_monitor_at = now + self._monitor_interval
+                    if not ok:
+                        limit_error = violation or "Resource limit exceeded"
+                        observations["limit_reached"] = TerminalHandoffEvent(
+                            kind="limit_reached",
+                            detail=limit_error,
+                        )
+
+                if "producer_exited" not in progress.consumed_edge_kinds:
+                    if not process.is_alive():
+                        process.join(timeout=0.0)
+                        producer_exit_observed = True
+                        observed_exitcode = process.exitcode
+                        observations["producer_exited"] = TerminalHandoffEvent(
+                            kind="producer_exited",
+                            detail=(
+                                str(observed_exitcode)
+                                if observed_exitcode is not None
+                                else None
+                            ),
+                        )
+
+                if drain_deadline is not None and now >= drain_deadline:
+                    observations["drain_expired"] = TerminalHandoffEvent(
+                        kind="drain_expired"
+                    )
+
+                step = self._reduce_terminal_observations(
+                    progress,
+                    tuple(observations.values()),
                 )
-                try:
-                    if worker_pid is None:
-                        raise RuntimeError("Worker process has no PID")
-                    monitor.start(worker_pid)
-                except Exception:  # pragma: no cover
-                    with contextlib.suppress(Exception):
-                        monitor.stop()
-                    monitor = None
 
-            start_time = time.monotonic()
-            next_monitor_at = start_time + self._monitor_interval
+                if step is None:
+                    wait_for = self._terminal_handoff_wait_seconds(
+                        now=now,
+                        start_time=start_time,
+                        next_monitor_at=next_monitor_at if monitor else None,
+                        drain_deadline=drain_deadline,
+                    )
+                    try:
+                        response_receiver.poll(wait_for)
+                    except (OSError, ValueError) as exc:
+                        pending_transport_failure = str(exc)
+                    continue
 
-            while process.is_alive():
-                if safe_cancel(cancel_requested):
+                progress = step.progress
+                action = step.decision.action
+
+                if action in {
+                    "stop_for_timeout",
+                    "stop_for_cancel",
+                    "stop_for_limit",
+                }:
+                    if drain_deadline is None:
+                        drain_deadline = now + TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
                     self._stop_process(process)
-                    if monitor:
-                        last_metrics = monitor.last_metrics()
-                        monitor.stop()
-                    return RunnerOutcome(
+                    continue
+                if action == "begin_drain":
+                    if drain_deadline is None:
+                        drain_deadline = now + TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+                    continue
+                if action == "wait":
+                    continue
+                if action == "return_outcome":
+                    outcome = cast(RunnerOutcome, step.event.outcome)
+                    continue
+                if action == "return_timeout":
+                    outcome = RunnerOutcome(
+                        status="timeout",
+                        value=None,
+                        error="Target execution timed out",
+                        stdout=None,
+                        stderr=None,
+                        returncode=None,
+                        duration=(
+                            self._timeout
+                            if self._timeout is not None
+                            else time.monotonic() - start_time
+                        ),
+                    )
+                    continue
+                if action == "return_cancelled":
+                    outcome = RunnerOutcome(
                         status="cancelled",
                         value=None,
                         error="Target execution cancelled",
@@ -431,147 +688,125 @@ class HostTaskRunner:
                         stderr=None,
                         returncode=None,
                         duration=time.monotonic() - start_time,
-                        metrics=last_metrics,
-                        worker_pid=worker_pid,
-                        runtime_handle=runtime_handle,
                     )
-
-                elapsed = time.monotonic() - start_time
-                if self._timeout is not None and elapsed >= self._timeout:
-                    # Honor a result the worker already published in the race
-                    # window before declaring a timeout (Spec: [MF-5], [RM-5.2];
-                    # mirrors the command runner's re-poll). Only a result already
-                    # visible on the queue at the deadline is caught.
-                    try:
-                        outcome = result_queue.get_nowait()
-                    except queue.Empty:
-                        outcome = None
-                    self._stop_process(process)
-                    if monitor:
-                        last_metrics = monitor.last_metrics()
-                        monitor.stop()
-                    if outcome is not None:
-                        outcome.metrics = outcome.metrics or last_metrics
-                        outcome.worker_pid = worker_pid
-                        outcome.runtime_handle = (
-                            outcome.runtime_handle or runtime_handle
-                        )
-                        return outcome
-                    return RunnerOutcome(
-                        status="timeout",
+                    continue
+                if action == "return_limit":
+                    outcome = RunnerOutcome(
+                        status="limit",
                         value=None,
-                        error="Target execution timed out",
+                        error=limit_error or "Resource limit exceeded",
                         stdout=None,
                         stderr=None,
                         returncode=None,
-                        duration=self._timeout,
-                        metrics=last_metrics,
-                        worker_pid=worker_pid,
-                        runtime_handle=runtime_handle,
+                        duration=time.monotonic() - start_time,
                     )
-
-                remaining: float | None = None
-                if self._timeout is not None:
-                    remaining = self._timeout - elapsed
-                    if remaining <= 0:
-                        continue
-                sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
-                if remaining is not None:
-                    sleep_for = min(sleep_for, max(0.01, remaining))
-
-                try:
-                    outcome = result_queue.get(timeout=sleep_for)
-                    break
-                except queue.Empty:
-                    pass
-
-                if monitor and time.monotonic() >= next_monitor_at:
-                    try:
-                        ok, violation = monitor.check_limits()
-                    except Exception:  # pragma: no cover - process may have exited
-                        ok, violation = True, None
-                    last_metrics = monitor.last_metrics()
-                    next_monitor_at = time.monotonic() + self._monitor_interval
-                    if not ok:
-                        self._stop_process(process)
-                        last_metrics = monitor.last_metrics()
-                        monitor.stop()
-                        return RunnerOutcome(
-                            status="limit",
-                            value=None,
-                            error=violation,
-                            stdout=None,
-                            stderr=None,
-                            returncode=None,
-                            duration=time.monotonic() - start_time,
-                            metrics=last_metrics,
-                            worker_pid=worker_pid,
-                            runtime_handle=runtime_handle,
+                    continue
+                if action == "return_protocol_failure":
+                    if (
+                        step.event.kind == "channel_sealed"
+                        and not producer_exit_observed
+                    ):
+                        process.join(timeout=TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS)
+                        if not process.is_alive():
+                            producer_exit_observed = True
+                            observed_exitcode = process.exitcode
+                    error = "Worker result channel failed before a result was received"
+                    if (
+                        step.event.kind == "channel_sealed"
+                        and producer_exit_observed
+                        and observed_exitcode is not None
+                    ):
+                        error = (
+                            "Worker exited before returning a result "
+                            f"(exit code {observed_exitcode})"
                         )
-
-            process.join()
-            exitcode = process.exitcode
-
-            if safe_cancel(cancel_requested):
-                if monitor:
-                    last_metrics = monitor.last_metrics()
-                    monitor.stop()
-                return RunnerOutcome(
-                    status="cancelled",
-                    value=None,
-                    error="Target execution cancelled",
-                    stdout=None,
-                    stderr=None,
-                    returncode=None,
-                    duration=time.monotonic() - start_time,
-                    metrics=last_metrics,
-                    worker_pid=worker_pid,
-                    runtime_handle=runtime_handle,
-                )
-
-            if monitor:
-                last_metrics = monitor.last_metrics()
-                if last_metrics is None:
-                    try:
-                        last_metrics = monitor.snapshot()
-                    except Exception:  # pragma: no cover
-                        last_metrics = None
-                monitor.stop()
-
-            if outcome is None:
-                try:
-                    outcome = result_queue.get_nowait()
-                except queue.Empty:
-                    return RunnerOutcome(
+                    outcome = RunnerOutcome(
                         status="error",
                         value=None,
-                        error="Worker produced no result",
+                        error=error,
                         stdout=None,
                         stderr=None,
-                        returncode=exitcode,
+                        returncode=observed_exitcode,
                         duration=time.monotonic() - start_time,
-                        metrics=last_metrics,
-                        worker_pid=worker_pid,
-                        runtime_handle=runtime_handle,
                         diagnostics=runner_diagnostics(
-                            phase="process_spawn",
+                            phase="result_handoff",
                             runner="host",
                             target_type=str(self._spec_data.get("type") or "unknown"),
                             pid=worker_pid,
-                            exitcode=exitcode,
+                            exitcode=observed_exitcode,
                             alive=process.is_alive(),
                             duration_seconds=time.monotonic() - start_time,
-                            message="Worker produced no result",
+                            message=step.event.detail or error,
+                            extra={
+                                "handoff_state": step.decision.source,
+                                "handoff_event": step.event.kind,
+                                "handoff_transition": step.decision.transition_id,
+                                "drain_timeout_seconds": (
+                                    TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+                                ),
+                            },
                         ),
                     )
+                    continue
+                raise AssertionError(f"Unhandled terminal handoff action: {action}")
+
+            if process.is_alive():
+                self._stop_process(process)
+            else:
+                process.join(timeout=0.2)
+
+            if monitor:
+                last_metrics = monitor.last_metrics() or last_metrics
+                if last_metrics is None:
+                    try:
+                        last_metrics = monitor.snapshot()
+                    except Exception:  # pragma: no cover - optional metrics
+                        last_metrics = None
 
             outcome.metrics = outcome.metrics or last_metrics
             outcome.worker_pid = worker_pid
             outcome.runtime_handle = outcome.runtime_handle or runtime_handle
             return outcome
         finally:
-            self._close_mp_queue(result_queue)
-            self._close_process_handle(process)
+            if monitor:
+                with contextlib.suppress(Exception):
+                    last_metrics = monitor.last_metrics() or last_metrics
+                with contextlib.suppress(Exception):
+                    monitor.stop()
+
+    def _terminal_handoff_wait_seconds(
+        self,
+        *,
+        now: float,
+        start_time: float,
+        next_monitor_at: float | None,
+        drain_deadline: float | None,
+    ) -> float:
+        """Return the bounded wait until the next owned observation boundary."""
+
+        deadlines = [now + ACTIVE_CONTROL_POLL_INTERVAL]
+        if self._timeout is not None:
+            deadlines.append(start_time + self._timeout)
+        if next_monitor_at is not None:
+            deadlines.append(next_monitor_at)
+        if drain_deadline is not None:
+            deadlines.append(drain_deadline)
+        return max(0.0, min(deadlines) - now)
+
+    @staticmethod
+    def _reduce_terminal_observations(
+        progress: TerminalHandoffProgress,
+        observations: Sequence[TerminalHandoffEvent],
+    ) -> TerminalHandoffStep | None:
+        """Route one observation batch through the one-shot policy."""
+
+        if not observations:
+            return None
+        return drive_terminal_handoff_turn(
+            progress,
+            observations,
+            policy="one_shot",
+        )
 
     def _run_command_with_hooks(
         self,
@@ -824,50 +1059,75 @@ class HostTaskRunner:
             raise TypeError("agent configuration is required for agent sessions")
 
         request_queue = self._ctx.Queue()
-        response_queue = self._ctx.Queue()
+        response_receiver, response_sender = self._ctx.Pipe(duplex=False)
         process = self._ctx.Process(
             target=_agent_session_worker_entry,
-            args=(self._spec_data, request_queue, response_queue),
+            args=(self._spec_data, request_queue, response_sender),
             daemon=True,
         )
-        process.start()
-
-        monitor = None
-        if self._monitor_class:
-            monitor = load_resource_monitor(
-                self._monitor_class,
-                limits=self._limits,
-                polling_interval=self._monitor_interval,
-                db_path=self._db_path,
-                config=self._config,
-            )
-            try:
-                pid = process.pid
-                if pid is None:
-                    raise RuntimeError("Agent session process has no PID")
-                monitor.start(pid)
-            except Exception:  # pragma: no cover
-                monitor = None
-
-        session = AgentSession(
-            process,
-            request_queue,
-            response_queue,
-            monitor,
-            self._limits,
-            timeout=self._timeout,
-            handle=_host_handle(process.pid),
-        )
-        ready_timeout = max(
-            AGENT_SESSION_READY_TIMEOUT_SECONDS,
-            self._timeout if self._timeout is not None else 0.0,
-        )
         try:
-            session.wait_ready(timeout=ready_timeout)
-        except Exception:  # pragma: no cover - session startup cleanup
-            session.close()
+            process.start()
+        except BaseException:
+            self._close_mp_queue(request_queue)
+            with contextlib.suppress(Exception):
+                response_receiver.close()
+            with contextlib.suppress(Exception):
+                response_sender.close()
+            self._close_process_handle(process)
             raise
-        return session
+        monitor = None
+        session = None
+        try:
+            response_sender.close()
+            if self._monitor_class:
+                monitor = load_resource_monitor(
+                    self._monitor_class,
+                    limits=self._limits,
+                    polling_interval=self._monitor_interval,
+                    db_path=self._db_path,
+                    config=self._config,
+                )
+                try:
+                    pid = process.pid
+                    if pid is None:
+                        raise RuntimeError("Agent session process has no PID")
+                    monitor.start(pid)
+                except Exception:  # pragma: no cover - optional monitor boundary
+                    with contextlib.suppress(Exception):
+                        monitor.stop()
+                    monitor = None
+            session = AgentSession(
+                process,
+                request_queue,
+                response_receiver,
+                monitor,
+                self._limits,
+                timeout=self._timeout,
+                handle=_host_handle(process.pid),
+            )
+            ready_timeout = max(
+                AGENT_SESSION_READY_TIMEOUT_SECONDS,
+                self._timeout if self._timeout is not None else 0.0,
+            )
+            session.wait_ready(timeout=ready_timeout)
+            return session
+        except BaseException:  # pragma: no cover - session startup cleanup
+            if session is not None:
+                session.close()
+            else:
+                if monitor is not None:
+                    with contextlib.suppress(Exception):
+                        monitor.stop()
+                with contextlib.suppress(Exception):
+                    if process.is_alive():
+                        self._stop_process(process)
+                    else:
+                        process.join(timeout=0.2)
+                self._close_mp_queue(request_queue)
+                with contextlib.suppress(Exception):
+                    response_receiver.close()
+                self._close_process_handle(process)
+            raise
 
 
 class HostRunnerPlugin:

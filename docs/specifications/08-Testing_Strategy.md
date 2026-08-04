@@ -60,6 +60,21 @@ Coverage policy:
   marked `# pragma: no cover - <reason>` so coverage does not confuse
   intentional process-boundary code with missing tests
 
+The terminal handoff reducer requires exhaustive table-driven tests. Its test
+table must equal the Cartesian product of all declared states and event kinds,
+contain no duplicate cells, and assert the exact next state, action, and
+transition ID for valid cells plus the exact rejection for invalid cells.
+Every selected reason must be non-empty. Structural reachability and aggregate
+coverage helpers do not replace this cell-by-cell proof.
+
+The terminal handoff same-turn selector has one strict order per declared
+adapter policy across all eight event kinds. Its table tests cover every
+non-empty observation subset under both policies, 510 cases, and each host
+adapter routes all 28 unordered event pairs through its declared policy.
+Expected priorities are independent test data, not values derived from the
+production priority table. Multi-turn cases prove already-reduced stop and
+producer-exit level signals cannot starve outcome, seal, or drain expiry.
+
 ## Current Coverage [TS-1]
 
 - `tests/cli/` covers subprocess CLI behavior and operator-visible output.
@@ -74,6 +89,18 @@ Coverage policy:
   transition-ID coverage, state coverage, and action coverage. Focused
   property tests also cover pure queue-name classification and read-only task
   evidence queue fallback helpers.
+  Terminal handoff coverage pairs the full pure state/event table with real
+  spawn/IPC examples. It includes both `outcome -> exit` and
+  `exit -> outcome`, channel seal without outcome, transport/serialization
+  failure, timeout/result orderings, every non-empty same-turn observation
+  subset, abrupt child exit, persistent session error-then-exit, and the public
+  CLI fast-function and stored-spec regressions. Installed-workflow coverage
+  invokes the environment's `weft` console script from a fresh initialized
+  external directory with no test-added `PYTHONPATH`; it covers a
+  standard-library function, a local module before and after manager reuse, a
+  stored spec, and no-wait/result collection. Preloaded queues, target sleeps,
+  retry-only assertions, and `python -m` test adapters are not substitutes for
+  those paths.
 - `tests/specs/` covers spec-level invariants and cross-surface contracts. This
   tree already includes focused subdirectories such as
   `manager_architecture/`, `message_flow/`, `quick_reference/`,
@@ -120,6 +147,7 @@ Coverage policy:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
 - [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)

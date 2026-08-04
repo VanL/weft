@@ -1320,12 +1320,19 @@ def test_agent_session_deadline_close_does_not_join_ipc_feeder_threads() -> None
         def join_thread(self) -> None:
             self.join_calls += 1
 
+    class DeadlineEndpoint:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
     request_queue = DeadlineQueue()
-    response_queue = DeadlineQueue()
+    response_endpoint = DeadlineEndpoint()
     session = AgentSession(
         FakeProcess(),  # type: ignore[arg-type]
         request_queue,  # type: ignore[arg-type]
-        response_queue,  # type: ignore[arg-type]
+        response_endpoint,  # type: ignore[arg-type]
         None,
         None,
         timeout=None,
@@ -1334,9 +1341,8 @@ def test_agent_session_deadline_close_does_not_join_ipc_feeder_threads() -> None
     session.close(deadline=time.monotonic())
 
     assert request_queue.cancel_calls == 1
-    assert response_queue.cancel_calls == 1
     assert request_queue.join_calls == 0
-    assert response_queue.join_calls == 0
+    assert response_endpoint.closed is True
 
 
 def test_agent_session_deadline_preserves_process_tree_kill_escalation(

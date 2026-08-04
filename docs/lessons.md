@@ -1058,3 +1058,22 @@ index is not a dated section and does not count toward the coalescing trigger.
 - Full doctrine, including the parallel-write-slice cost of hot god files:
   `docs/agent-context/engineering-principles.md` §11 ("Cohesion Over File
   Size (Floors, Not Line Counts)").
+
+## 2026-08-04 Producer And Channel Evidence Are Independent
+
+- Producer liveness and result-channel completion are independent evidence.
+  Observing process exit while a private result channel is empty now cannot
+  prove that no result exists; the adapter must observe a valid payload, a
+  receiver-visible seal, an explicit transport failure, or a bounded drain
+  deadline. Tests must fire both `outcome -> exit` and `exit -> outcome`.
+- Race policy belongs in a named reducer, not in branch order. Every state and
+  event cell, including invalid and no-op cells, needs a literal table-driven
+  expectation. Same-turn precedence needs its own exhaustive selector oracle,
+  and persistent level signals must be consumed as edges so they cannot starve
+  later payload, seal, or expiry evidence.
+- A no-result symptom can hide a pre-entry spawn failure as well as a handoff
+  race. Nested immutable TaskSpec containers failed while the spawn bootstrap
+  unpickled them, before the target ran. Process-boundary inputs must therefore
+  be normalized to spawn-safe built-ins, and acceptance tests must traverse the
+  real installed manager and child-process path rather than only call the
+  runner in-process.

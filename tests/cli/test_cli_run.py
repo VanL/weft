@@ -596,6 +596,145 @@ def test_cli_run_function_inline(workdir, weft_harness) -> None:
     assert err == ""
 
 
+def test_cli_run_fast_standard_library_function(workdir, weft_harness) -> None:
+    """A fast callable must report its result even when the worker exits quickly.
+
+    Regression for the clean external-project invocation
+    ``weft run --function json:dumps --arg '[1,2]'`` failing with
+    ``Worker produced no result``.
+
+    Spec: [CLI-1.1.1], [CC-3.5], [EXEC.5]-[EXEC.8]
+    """
+    rc, out, err = run_cli(
+        "run",
+        "--function",
+        "json:dumps",
+        "--arg",
+        "[1,2]",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0, (out, err)
+    assert out == "[1, 2]"
+    assert err == ""
+
+
+def _assert_no_terminal_handoff_details(text: str) -> None:
+    """Assert that private reducer diagnostics do not enter public CLI errors."""
+
+    for private_token in (
+        "handoff_state",
+        "handoff_event",
+        "handoff_transition",
+        "terminal-handoff-",
+        "drain_timeout_seconds",
+    ):
+        assert private_token not in text
+
+
+@pytest.mark.parametrize("json_output", (False, True))
+@pytest.mark.parametrize(
+    ("target", "arg", "expected"),
+    (
+        (
+            "tests.tasks.sample_targets:abrupt_exit",
+            "73",
+            "Worker exited before returning a result (exit code 73)",
+        ),
+        (
+            "tests.tasks.sample_targets:return_unpicklable",
+            None,
+            "Task returned a value that Weft could not serialize: ",
+        ),
+        (
+            "tests.tasks.sample_targets:return_unreadable_pickled_result",
+            None,
+            "Worker result channel failed before a result was received",
+        ),
+    ),
+)
+def test_cli_run_terminal_handoff_failure_categories(
+    workdir,
+    weft_harness,
+    target: str,
+    arg: str | None,
+    expected: str,
+    json_output: bool,
+) -> None:
+    """Public CLI surfaces preserve bounded handoff categories and key sets."""
+
+    cli_args = ["run", "--function", target]
+    if arg is not None:
+        cli_args.extend(("--arg", arg))
+    if json_output:
+        cli_args.append("--json")
+
+    rc, out, err = run_cli(
+        *cli_args,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 1
+    if json_output:
+        assert err == ""
+        payload = json.loads(out)
+        assert set(payload) == {"tid", "status", "error"}
+        assert payload["status"] == "failed"
+        if expected.endswith(": "):
+            assert payload["error"].startswith(expected)
+        else:
+            assert payload["error"] == expected
+        _assert_no_terminal_handoff_details(payload["error"])
+        return
+
+    assert out == ""
+    if expected.endswith(": "):
+        assert err.startswith(f"Error executing task: {expected}")
+    else:
+        assert err == f"Error executing task: {expected}"
+    _assert_no_terminal_handoff_details(err)
+
+
+@pytest.mark.parametrize("json_output", (False, True))
+def test_cli_run_target_failure_compatibility(
+    workdir,
+    weft_harness,
+    json_output: bool,
+) -> None:
+    """Target exceptions preserve their category and public failure schema."""
+
+    cli_args = [
+        "run",
+        "--function",
+        "tests.tasks.sample_targets:fail_payload",
+    ]
+    if json_output:
+        cli_args.append("--json")
+
+    rc, out, err = run_cli(
+        *cli_args,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 1
+    if json_output:
+        assert err == ""
+        payload = json.loads(out)
+        assert set(payload) == {"tid", "status", "error"}
+        assert payload["status"] == "failed"
+        assert "intentional failure for testing" in payload["error"]
+        _assert_no_terminal_handoff_details(payload["error"])
+        return
+
+    assert out == ""
+    assert err.startswith("Error executing task: ")
+    assert "intentional failure for testing" in err
+    _assert_no_terminal_handoff_details(err)
+
+
 def test_cli_run_command_inline(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
@@ -874,6 +1013,45 @@ def test_cli_run_spec_path(workdir, weft_harness) -> None:
 
     assert rc == 0
     assert out == "from-spec"
+    assert err == ""
+
+
+def test_cli_run_stored_spec_preserves_fast_function_result(
+    workdir, weft_harness
+) -> None:
+    """Stored specs must preserve results from fast function workers.
+
+    This is the stored-spec counterpart to
+    ``test_cli_run_fast_standard_library_function`` and covers the reported
+    ``weft run --spec .weft/tasks/fire-check.json`` failure surface.
+
+    Spec: [CLI-1.1.1], [CC-3.5], [EXEC.5]-[EXEC.8]
+    """
+    spec_path = workdir / ".weft" / "tasks" / "fire-check.json"
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        spec_path,
+        {
+            "name": "fire-check",
+            "spec": {
+                "type": "function",
+                "function_target": "json:dumps",
+                "args": [[1, 2]],
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0, (out, err)
+    assert out == "[1, 2]"
     assert err == ""
 
 
@@ -2356,7 +2534,12 @@ def test_harness_wait_for_completion_reports_cancelled_task(
     _wait_for_task_process_exit(weft_harness, tid=tid)
 
 
-def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
+@pytest.mark.parametrize("json_output", (False, True))
+def test_cli_run_wait_reports_cancelled_task(
+    workdir,
+    weft_harness,
+    json_output: bool,
+) -> None:
     weft_harness.ensure_foreground_manager()
     constrained_backend = active_test_backend(os.environ) == "postgres"
     constrained_runtime = sys.platform == "win32" or constrained_backend
@@ -2365,8 +2548,7 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
     release_file = workdir / "cancel-release"
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(
-            run_cli,
+        cli_args = [
             "run",
             "--function",
             "tests.tasks.sample_targets:wait_for_file",
@@ -2374,6 +2556,12 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
             str(release_file),
             "--kw",
             "timeout=60",
+        ]
+        if json_output:
+            cli_args.append("--json")
+        future = executor.submit(
+            run_cli,
+            *cli_args,
             cwd=workdir,
             harness=weft_harness,
             timeout=run_timeout,
@@ -2395,34 +2583,117 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
         rc, out, err = future.result(timeout=result_timeout)
 
     assert rc == 1
-    assert out == ""
-    assert "Task cancelled" in err
+    if json_output:
+        assert err == ""
+        payload = json.loads(out)
+        assert set(payload) == {"tid", "status", "error"}
+        assert payload == {
+            "tid": task_tid,
+            "status": "cancelled",
+            "error": "Task cancelled",
+        }
+    else:
+        assert out == ""
+        assert err == "Error executing task: Task cancelled"
+        _assert_no_terminal_handoff_details(err)
     _wait_for_task_process_exit(weft_harness, tid=task_tid)
 
 
-def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
+@pytest.mark.parametrize("json_output", (False, True))
+def test_cli_run_wait_reports_memory_limit(
+    workdir,
+    weft_harness,
+    json_output: bool,
+) -> None:
+    """A confirmed limit keeps the existing killed rendering and schema."""
+
+    cli_args = [
+        "run",
+        "--memory",
+        "1",
+    ]
+    if json_output:
+        cli_args.append("--json")
+    cli_args.extend(
+        [
+            "--",
+            sys.executable,
+            str(PROCESS_SCRIPT),
+            "--memory-mb",
+            "10",
+            "--duration",
+            "2",
+        ]
+    )
+
+    rc, out, err = run_cli(
+        *cli_args,
+        cwd=workdir,
+        harness=weft_harness,
+        timeout=30.0,
+    )
+
+    assert rc == 1
+    if json_output:
+        assert err == ""
+        payload = json.loads(out)
+        assert set(payload) == {"tid", "status", "error"}
+        assert payload["status"] == "killed"
+        assert payload["error"] == "Task killed"
+        return
+
+    assert out == ""
+    assert err == "Error executing task: Task killed"
+    _assert_no_terminal_handoff_details(err)
+
+
+@pytest.mark.parametrize("json_output", (False, True))
+def test_cli_run_wait_returns_timeout_exit_code(
+    workdir,
+    weft_harness,
+    json_output: bool,
+) -> None:
     weft_harness.ensure_foreground_manager()
     constrained_backend = active_test_backend(os.environ) == "postgres"
     constrained_runtime = sys.platform == "win32" or constrained_backend
     run_timeout = 120.0 if constrained_runtime else 20.0
     task_timeout = "0.5"
     sleep_seconds = "5"
-    rc, out, err = run_cli(
+    cli_args = [
         "run",
         "--timeout",
         task_timeout,
-        "--",
-        sys.executable,
-        "-c",
-        f"import time; time.sleep({sleep_seconds})",
+    ]
+    if json_output:
+        cli_args.append("--json")
+    cli_args.extend(
+        [
+            "--",
+            sys.executable,
+            "-c",
+            f"import time; time.sleep({sleep_seconds})",
+        ]
+    )
+    rc, out, err = run_cli(
+        *cli_args,
         cwd=workdir,
         harness=weft_harness,
         timeout=run_timeout,
     )
 
     assert rc == 124
+    if json_output:
+        assert err == ""
+        payload = json.loads(out)
+        assert set(payload) == {"tid", "status", "error"}
+        assert payload["status"] == "timeout"
+        assert "timed out" in payload["error"].lower()
+        _assert_no_terminal_handoff_details(payload["error"])
+        return
+
     assert out == ""
     assert "timed out" in err.lower()
+    _assert_no_terminal_handoff_details(err)
 
 
 def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:

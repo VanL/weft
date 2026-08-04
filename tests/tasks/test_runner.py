@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import multiprocessing
-import queue
+import os
 import subprocess
 import sys
 import threading
 import time
 from contextlib import contextmanager
+from itertools import combinations
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
@@ -21,13 +23,25 @@ from weft.core.runners import RunnerOutcome
 from weft.core.runners import host as host_module
 from weft.core.runners.host import HostTaskRunner
 from weft.core.runners.subprocess_runner import run_monitored_subprocess
+from weft.core.tasks import sessions as sessions_module
 from weft.core.tasks.agent_session_protocol import (
     make_booted_response,
+    make_ready_response,
+    make_result_response,
     make_startup_error_response,
 )
 from weft.core.tasks.runner import TaskRunner
 from weft.core.tasks.sessions import AgentSession
-from weft.core.taskspec import LimitsSection
+from weft.core.taskspec import FrozenList, LimitsSection
+from weft.core.terminal_handoff import (
+    TerminalHandoffEvent,
+    TerminalHandoffEventKind,
+    TerminalHandoffProgress,
+)
+from weft.core.terminal_handoff_transport import (
+    TerminalHandoffTransportError,
+    send_terminal_payload,
+)
 from weft.ext import RunnerCapabilities, RunnerHandle
 
 
@@ -160,8 +174,9 @@ def test_task_runner_reports_abrupt_worker_exit_diagnostics() -> None:
 
     assert outcome.status == "error"
     assert outcome.returncode == 73
+    assert outcome.error == "Worker exited before returning a result (exit code 73)"
     assert outcome.diagnostics is not None
-    assert outcome.diagnostics["phase"] == "process_spawn"
+    assert outcome.diagnostics["phase"] == "result_handoff"
     assert outcome.diagnostics["exitcode"] == 73
 
 
@@ -212,8 +227,12 @@ def test_agent_session_close_releases_multiprocessing_handles() -> None:
 
     class FakeQueue:
         def __init__(self) -> None:
+            self.cancelled = False
             self.closed = False
             self.joined = False
+
+        def cancel_join_thread(self) -> None:
+            self.cancelled = True
 
         def close(self) -> None:
             self.closed = True
@@ -225,12 +244,12 @@ def test_agent_session_close_releases_multiprocessing_handles() -> None:
             raise AssertionError("closed sessions must not enqueue stop requests")
 
     request_queue = FakeQueue()
-    response_queue = FakeQueue()
+    response_receiver = FakeQueue()
     process = FakeProcess()
     session = AgentSession(
         process,  # type: ignore[arg-type]
         request_queue,  # type: ignore[arg-type]
-        response_queue,  # type: ignore[arg-type]
+        response_receiver,  # type: ignore[arg-type]
         monitor=None,
         limits=None,
         timeout=None,
@@ -239,9 +258,10 @@ def test_agent_session_close_releases_multiprocessing_handles() -> None:
     session.close()
 
     assert request_queue.closed is True
-    assert request_queue.joined is True
-    assert response_queue.closed is True
-    assert response_queue.joined is True
+    assert request_queue.cancelled is True
+    assert request_queue.joined is False
+    assert response_receiver.closed is True
+    assert response_receiver.joined is False
     assert process.closed is True
 
 
@@ -294,7 +314,7 @@ PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")
 
 def _agent_session_startup_error_worker(
     _request_queue: Any,
-    response_queue: Any,
+    response_sender: Connection,
 ) -> None:
     diagnostics = runner_diagnostics(
         phase="runtime_startup",
@@ -303,20 +323,22 @@ def _agent_session_startup_error_worker(
         message="startup boom",
         last_handshake="booted",
     )
-    response_queue.put(make_booted_response())
-    response_queue.put(
-        make_startup_error_response(
-            "startup boom",
-            diagnostics=diagnostics,
+    try:
+        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(
+            response_sender,
+            make_startup_error_response(
+                "startup boom",
+                diagnostics=diagnostics,
+            ),
         )
-    )
-    response_queue.close()
-    response_queue.join_thread()
+    finally:
+        response_sender.close()
 
 
 def _agent_session_exit_without_handshake_worker(
     _request_queue: Any,
-    _response_queue: Any,
+    _response_sender: Connection,
 ) -> None:
     import os
 
@@ -325,27 +347,392 @@ def _agent_session_exit_without_handshake_worker(
 
 def _agent_session_boot_then_hang_worker(
     _request_queue: Any,
-    response_queue: Any,
+    response_sender: Connection,
 ) -> None:
-    response_queue.put(make_booted_response())
-    time.sleep(30.0)
+    try:
+        send_terminal_payload(response_sender, make_booted_response())
+        time.sleep(30.0)
+    finally:
+        response_sender.close()
 
 
-def _spawn_agent_session_for_target(target: Any) -> AgentSession:
+def _spawn_agent_session_for_target(
+    target: Any,
+    *,
+    timeout: float | None = None,
+    monitor: Any | None = None,
+    limits: Any | None = None,
+) -> AgentSession:
     ctx = multiprocessing.get_context("spawn")
     ctx.set_executable(sys.executable)
     request_queue = ctx.Queue()
-    response_queue = ctx.Queue()
-    process = ctx.Process(target=target, args=(request_queue, response_queue))
+    response_receiver, response_sender = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=target, args=(request_queue, response_sender))
     process.start()
+    response_sender.close()
     return AgentSession(
         process,
         request_queue,
-        response_queue,
-        monitor=None,
+        response_receiver,
+        monitor=monitor,
+        limits=limits,
+        timeout=timeout,
+    )
+
+
+def _agent_session_error_then_exit_worker(
+    request_queue: Any,
+    response_sender: Connection,
+) -> None:
+    try:
+        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_ready_response())
+        request_queue.get()
+        send_terminal_payload(
+            response_sender,
+            make_result_response(status="error", error="session boom"),
+        )
+    finally:
+        response_sender.close()
+
+
+def _agent_session_ready_then_hang_worker(
+    request_queue: Any,
+    response_sender: Connection,
+) -> None:
+    try:
+        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_ready_response())
+        request_queue.get()
+        time.sleep(30.0)
+    finally:
+        response_sender.close()
+
+
+def _agent_session_ready_then_exit_worker(
+    request_queue: Any,
+    response_sender: Connection,
+) -> None:
+    try:
+        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_ready_response())
+        request_queue.get()
+    finally:
+        response_sender.close()
+
+
+def _agent_session_ready_then_seal_and_hang_worker(
+    request_queue: Any,
+    response_sender: Connection,
+) -> None:
+    send_terminal_payload(response_sender, make_booted_response())
+    send_terminal_payload(response_sender, make_ready_response())
+    request_queue.get()
+    response_sender.close()
+    time.sleep(30.0)
+
+
+def _agent_session_wrong_payload_worker(
+    request_queue: Any,
+    response_sender: Connection,
+) -> None:
+    try:
+        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_ready_response())
+        request_queue.get()
+        send_terminal_payload(response_sender, 42)
+    finally:
+        response_sender.close()
+
+
+def _agent_session_malformed_nested_result_worker(
+    request_queue: Any,
+    response_sender: Connection,
+) -> None:
+    try:
+        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_ready_response())
+        request_queue.get()
+        payload = make_result_response(status="ok")
+        payload["result"] = {"outputs": "not-a-list", "metadata": {}}
+        send_terminal_payload(response_sender, payload)
+    finally:
+        response_sender.close()
+
+
+def test_agent_session_error_result_survives_immediate_child_exit() -> None:
+    """An error frame sent immediately before exit remains authoritative."""
+
+    session = _spawn_agent_session_for_target(_agent_session_error_then_exit_worker)
+    try:
+        session.wait_ready(timeout=5.0)
+        result = session.execute("hello")
+
+        assert result.status == "error"
+        assert result.error == "session boom"
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("verdict", ("timeout", "cancelled", "limit"))
+def test_agent_session_invalidating_verdict_closes_session(verdict: str) -> None:
+    """Every accepted stop verdict cleans up before a deterministic rejection."""
+
+    class LimitMonitor:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def check_limits(self, _limits: Any) -> tuple[bool, str]:
+            return False, "test limit"
+
+        def last_metrics(self) -> ResourceMetrics:
+            return ResourceMetrics(memory_mb=1.0)
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monitor = LimitMonitor() if verdict == "limit" else None
+    session = _spawn_agent_session_for_target(
+        _agent_session_ready_then_hang_worker,
+        timeout=0.05 if verdict == "timeout" else None,
+        monitor=monitor,
+    )
+    try:
+        session.wait_ready(timeout=5.0)
+        result = session.execute(
+            "hello",
+            cancel_requested=(lambda: True) if verdict == "cancelled" else None,
+        )
+
+        assert result.status == verdict
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+        if monitor is not None:
+            assert monitor.stopped is True
+    finally:
+        session.close()
+
+
+def test_agent_session_monitor_metrics_failure_cannot_block_invalid_cleanup() -> None:
+    """Best-effort metrics never outrank cancellation or endpoint cleanup."""
+
+    class ExplodingMetricsMonitor:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def check_limits(self, _limits: Any) -> tuple[bool, None]:
+            return True, None
+
+        def last_metrics(self) -> None:
+            raise RuntimeError("metrics unavailable after exit")
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monitor = ExplodingMetricsMonitor()
+    session = _spawn_agent_session_for_target(
+        _agent_session_ready_then_hang_worker,
+        monitor=monitor,
+    )
+    try:
+        session.wait_ready(timeout=5.0)
+        result = session.execute("hello", cancel_requested=lambda: True)
+
+        assert result.status == "cancelled"
+        assert monitor.stopped is True
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+    finally:
+        session.close()
+
+
+def test_agent_session_eof_without_result_closes_session() -> None:
+    """A sealed response channel is bounded and invalidates the session."""
+
+    session = _spawn_agent_session_for_target(_agent_session_ready_then_exit_worker)
+    try:
+        session.wait_ready(timeout=5.0)
+        result = session.execute("hello")
+
+        assert result.status == "error"
+        assert result.error is not None
+        assert result.error == "Worker exited before returning a result (exit code 0)"
+        assert result.diagnostics is not None
+        assert result.diagnostics["phase"] == "result_handoff"
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+    finally:
+        session.close()
+
+
+def test_agent_session_live_eof_is_channel_failure() -> None:
+    """EOF while the session process remains live cannot claim worker exit."""
+
+    session = _spawn_agent_session_for_target(
+        _agent_session_ready_then_seal_and_hang_worker
+    )
+    try:
+        session.wait_ready(timeout=5.0)
+        result = session.execute("hello")
+
+        assert result.status == "error"
+        assert (
+            result.error == "Worker result channel failed before a result was received"
+        )
+        assert result.diagnostics is not None
+        assert result.diagnostics["handoff_event"] == "channel_sealed"
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+    finally:
+        session.close()
+
+
+def test_agent_session_wrong_payload_type_is_transport_failure() -> None:
+    """A decoded non-protocol object cannot become an outcome event."""
+
+    session = _spawn_agent_session_for_target(_agent_session_wrong_payload_worker)
+    try:
+        session.wait_ready(timeout=5.0)
+        result = session.execute("hello")
+
+        assert result.status == "error"
+        assert (
+            result.error == "Worker result channel failed before a result was received"
+        )
+        assert result.diagnostics is not None
+        assert result.diagnostics["handoff_event"] == "transport_failed"
+    finally:
+        session.close()
+
+
+def test_agent_session_malformed_nested_result_is_transport_failure() -> None:
+    """Nested private result validation cannot escape or leave a live session."""
+
+    session = _spawn_agent_session_for_target(
+        _agent_session_malformed_nested_result_worker
+    )
+    try:
+        session.wait_ready(timeout=5.0)
+        result = session.execute("hello")
+
+        assert result.status == "error"
+        assert (
+            result.error == "Worker result channel failed before a result was received"
+        )
+        assert result.diagnostics is not None
+        assert result.diagnostics["handoff_event"] == "transport_failed"
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+    finally:
+        session.close()
+
+
+def test_agent_session_does_not_poll_limits_after_producer_exit() -> None:
+    """A stale monitor cannot replace dead-producer/channel evidence with limit."""
+
+    class DeadProcess:
+        pid = 321
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def close(self) -> None:
+            return
+
+    class RequestQueue:
+        def put(self, _payload: object) -> None:
+            return
+
+        def cancel_join_thread(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    class SealedReceiver:
+        def poll(self, _timeout: float = 0.0) -> bool:
+            return True
+
+        def recv_bytes(self) -> bytes:
+            raise EOFError
+
+        def close(self) -> None:
+            return
+
+    class LateLimitMonitor:
+        def __init__(self) -> None:
+            self.check_calls = 0
+
+        def check_limits(self, _limits: Any) -> tuple[bool, str]:
+            self.check_calls += 1
+            return False, "late limit after exit"
+
+        def last_metrics(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return
+
+    monitor = LateLimitMonitor()
+    session = AgentSession(
+        DeadProcess(),  # type: ignore[arg-type]
+        RequestQueue(),  # type: ignore[arg-type]
+        SealedReceiver(),  # type: ignore[arg-type]
+        monitor,  # type: ignore[arg-type]
         limits=None,
         timeout=None,
     )
+
+    result = session.execute("hello")
+
+    assert result.status == "error"
+    assert result.error == "Worker exited before returning a result (exit code 0)"
+    assert monitor.check_calls == 0
+
+
+PERSISTENT_SESSION_EVENT_ORDER: tuple[TerminalHandoffEventKind, ...] = (
+    "cancel_requested",
+    "timeout_requested",
+    "outcome_received",
+    "limit_reached",
+    "transport_failed",
+    "channel_sealed",
+    "producer_exited",
+    "drain_expired",
+)
+
+
+@pytest.mark.parametrize(
+    ("first_kind", "second_kind"),
+    tuple(combinations(PERSISTENT_SESSION_EVENT_ORDER, 2)),
+)
+def test_agent_session_routes_all_event_pairs_through_persistent_policy(
+    first_kind: TerminalHandoffEventKind,
+    second_kind: TerminalHandoffEventKind,
+) -> None:
+    """The session adapter uses its declared selector for all 28 event pairs."""
+
+    events = tuple(
+        TerminalHandoffEvent(
+            kind=kind,
+            outcome=object() if kind == "outcome_received" else None,
+        )
+        for kind in (second_kind, first_kind)
+    )
+
+    step = AgentSession._reduce_terminal_observations(
+        TerminalHandoffProgress(),
+        events,
+    )
+
+    assert step is not None
+    assert step.event.kind == first_kind
 
 
 def test_run_monitored_subprocess_uses_supplied_monitor(
@@ -685,6 +1072,93 @@ def test_task_runner_executes_command_successfully(tmp_path):
     assert outcome.ok
     assert outcome.value.strip() == "ok"
     assert outcome.returncode == 0
+
+
+def test_task_runner_collects_immediate_command_stdout_and_stderr_tail(
+    tmp_path: Path,
+) -> None:
+    """Command completion follows both stream EOF markers after immediate exit."""
+
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=[
+            "-c",
+            (
+                "import sys; "
+                "sys.stdout.write('final-out'); sys.stdout.flush(); "
+                "sys.stderr.write('final-err'); sys.stderr.flush()"
+            ),
+        ],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+
+    outcome = runner.run({})
+
+    assert outcome.status == "ok"
+    assert outcome.stdout == "final-out"
+    assert outcome.stderr == "final-err"
+    assert outcome.value == "final-out"
+
+
+def test_interactive_session_collects_immediate_exit_stream_tail(
+    tmp_path: Path,
+) -> None:
+    """Interactive readers publish both tails and EOF without target sleeps."""
+
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=[
+            "-c",
+            (
+                "import sys; "
+                "sys.stdout.write('interactive-out'); sys.stdout.flush(); "
+                "sys.stderr.write('interactive-err'); sys.stderr.flush()"
+            ),
+        ],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+    session = runner.start_session()
+    stdout: list[str] = []
+    stderr: list[str] = []
+    deadline = time.monotonic() + 5.0
+    try:
+        while time.monotonic() < deadline:
+            stdout.extend(session.poll_stdout())
+            stderr.extend(session.poll_stderr())
+            if (
+                not session.is_alive()
+                and session._stdout_closed
+                and session._stderr_closed
+            ):
+                break
+            threading.Event().wait(0.01)
+    finally:
+        session.stop_monitor()
+
+    assert "".join(stdout) == "interactive-out"
+    assert "".join(stderr) == "interactive-err"
+    assert session._stdout_closed is True
+    assert session._stderr_closed is True
 
 
 def test_task_runner_applies_environment_profile_defaults(tmp_path):
@@ -1341,14 +1815,19 @@ def test_task_runner_materializes_docker_container_profile_at_plugin_boundary(
     assert backend._env["SERVICE_URL"] == "https://explicit.example.test"
 
 
-def _build_function_host_runner(timeout: float) -> HostTaskRunner:
+def _build_function_host_runner(
+    timeout: float,
+    *,
+    function_target: str = "tests.tasks.sample_targets:echo_payload",
+    args: list[Any] | None = None,
+) -> HostTaskRunner:
     return HostTaskRunner(
         target_type="function",
         tid=None,
-        function_target="tests.tasks.sample_targets:echo_payload",
+        function_target=function_target,
         process_target=None,
         agent=None,
-        args=[],
+        args=args or [],
         kwargs={},
         env={},
         working_dir=None,
@@ -1359,87 +1838,157 @@ def _build_function_host_runner(timeout: float) -> HostTaskRunner:
     )
 
 
-class _DeadlineFakeProcess:
-    """Worker process stub that stays 'alive' and never touches a real PID."""
-
-    def __init__(self) -> None:
-        self.started = False
-        self.terminated = False
-        self.closed = False
-
-    @property
-    def pid(self) -> None:
-        return None
-
-    def start(self) -> None:
-        self.started = True
-
-    def is_alive(self) -> bool:
-        return True
-
-    def join(self, timeout: float | None = None) -> None:
-        return None
-
-    def terminate(self) -> None:
-        self.terminated = True
-
-    def kill(self) -> None:
-        self.terminated = True
-
-    def close(self) -> None:
-        self.closed = True
+ONE_SHOT_EVENT_ORDER: tuple[TerminalHandoffEventKind, ...] = (
+    "cancel_requested",
+    "outcome_received",
+    "timeout_requested",
+    "limit_reached",
+    "transport_failed",
+    "channel_sealed",
+    "producer_exited",
+    "drain_expired",
+)
 
 
-class _PreloadedResultQueue:
-    """Result-queue stub pre-loaded with zero or one worker outcome."""
-
-    def __init__(self, outcome: RunnerOutcome | None) -> None:
-        self._items: list[RunnerOutcome] = [outcome] if outcome is not None else []
-
-    def get(self, timeout: float | None = None) -> RunnerOutcome:
-        if self._items:
-            return self._items.pop(0)
-        raise queue.Empty
-
-    def get_nowait(self) -> RunnerOutcome:
-        if self._items:
-            return self._items.pop(0)
-        raise queue.Empty
-
-    def close(self) -> None:
-        return None
-
-    def join_thread(self) -> None:
-        return None
-
-
-class _DeadlineFakeContext:
-    def __init__(self, result_queue: _PreloadedResultQueue) -> None:
-        self._result_queue = result_queue
-        self.process = _DeadlineFakeProcess()
-
-    def Queue(self) -> _PreloadedResultQueue:  # noqa: N802 - mirror mp context API
-        return self._result_queue
-
-    def Process(self, **_kwargs: Any) -> _DeadlineFakeProcess:  # noqa: N802
-        return self.process
-
-
-def test_function_timeout_honors_result_already_on_queue(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("first_kind", "second_kind"),
+    tuple(combinations(ONE_SHOT_EVENT_ORDER, 2)),
+)
+def test_host_runner_routes_all_event_pairs_through_one_shot_policy(
+    first_kind: TerminalHandoffEventKind,
+    second_kind: TerminalHandoffEventKind,
 ) -> None:
-    """A function result visible at the deadline is reported, not dropped.
+    """The host adapter uses its declared selector for all 28 event pairs."""
 
-    Regression for the timeout race: the function runner must re-check the result
-    queue before declaring a timeout. With a zero deadline and a result already on
-    the queue, the runner returns the worker's successful (``ok``) outcome instead
-    of ``timeout``. A real function worker emits ``status="ok"`` (see
-    ``_worker_entry`` in ``host.py``); the Consumer maps ``ok`` to a completed task
-    (covered by ``tests/tasks/test_task_execution.py``), so returning the queued
-    ``ok`` outcome here is what yields the public completed-not-timeout behavior.
+    events = tuple(
+        TerminalHandoffEvent(
+            kind=kind,
+            outcome=object() if kind == "outcome_received" else None,
+        )
+        for kind in (second_kind, first_kind)
+    )
 
-    Spec: [RM-5.2]
-    """
+    step = HostTaskRunner._reduce_terminal_observations(
+        TerminalHandoffProgress(),
+        events,
+    )
+
+    assert step is not None
+    assert step.event.kind == first_kind
+
+
+@pytest.mark.parametrize(
+    "adapter_reduce",
+    (
+        HostTaskRunner._reduce_terminal_observations,
+        AgentSession._reduce_terminal_observations,
+    ),
+    ids=("one-shot", "persistent-session"),
+)
+@pytest.mark.parametrize(
+    ("stop_kind", "stop_action", "return_action"),
+    (
+        ("cancel_requested", "stop_for_cancel", "return_cancelled"),
+        ("timeout_requested", "stop_for_timeout", "return_timeout"),
+        ("limit_reached", "stop_for_limit", "return_limit"),
+    ),
+)
+def test_both_adapters_consume_stop_levels_before_later_seal(
+    adapter_reduce: Any,
+    stop_kind: TerminalHandoffEventKind,
+    stop_action: str,
+    return_action: str,
+) -> None:
+    """Repeated stop levels cannot starve terminal evidence in either adapter."""
+
+    first = adapter_reduce(
+        TerminalHandoffProgress(),
+        (TerminalHandoffEvent(kind=stop_kind),),
+    )
+    assert first is not None
+    assert first.decision.action == stop_action
+
+    second = adapter_reduce(
+        first.progress,
+        (
+            TerminalHandoffEvent(kind=stop_kind),
+            TerminalHandoffEvent(kind="channel_sealed"),
+        ),
+    )
+    assert second is not None
+    assert second.event.kind == "channel_sealed"
+    assert second.decision.action == return_action
+
+
+@pytest.mark.parametrize(
+    "adapter_reduce",
+    (
+        HostTaskRunner._reduce_terminal_observations,
+        AgentSession._reduce_terminal_observations,
+    ),
+    ids=("one-shot", "persistent-session"),
+)
+def test_both_adapters_consume_dead_producer_before_drain_expiry(
+    adapter_reduce: Any,
+) -> None:
+    """A repeated dead-producer level cannot starve either adapter's deadline."""
+
+    first = adapter_reduce(
+        TerminalHandoffProgress(),
+        (TerminalHandoffEvent(kind="producer_exited"),),
+    )
+    assert first is not None
+    assert first.decision.action == "begin_drain"
+
+    second = adapter_reduce(
+        first.progress,
+        (
+            TerminalHandoffEvent(kind="producer_exited"),
+            TerminalHandoffEvent(kind="drain_expired"),
+        ),
+    )
+    assert second is not None
+    assert second.event.kind == "drain_expired"
+    assert second.decision.action == "return_protocol_failure"
+
+
+def _terminal_outcome_sender(
+    sender: Connection,
+    outcome: RunnerOutcome,
+) -> None:
+    try:
+        send_terminal_payload(sender, outcome)
+    finally:
+        sender.close()
+
+
+def _terminal_exit_without_send(_sender: Connection) -> None:
+    os._exit(73)
+
+
+class _DeferredFirstPollConnection:
+    """Expose a real pipe only after one production adapter observation turn."""
+
+    def __init__(self, receiver: Connection) -> None:
+        self._receiver = receiver
+        self.poll_calls = 0
+
+    def poll(self, timeout: float = 0.0) -> bool:
+        self.poll_calls += 1
+        if self.poll_calls == 1:
+            return False
+        return self._receiver.poll(timeout)
+
+    def recv_bytes(self) -> bytes:
+        return self._receiver.recv_bytes()
+
+
+def test_real_pipe_exit_then_outcome_uses_production_handoff_driver() -> None:
+    """A withheld first read proves exit then outcome converges on the outcome."""
+
+    ctx = multiprocessing.get_context("spawn")
+    ctx.set_executable(sys.executable)
+    receiver, sender = ctx.Pipe(duplex=False)
     worker_outcome = RunnerOutcome(
         status="ok",
         value="hello",
@@ -1449,26 +1998,484 @@ def test_function_timeout_honors_result_already_on_queue(
         returncode=0,
         duration=0.0,
     )
-    runner = _build_function_host_runner(timeout=0.0)
-    monkeypatch.setattr(
-        runner, "_ctx", _DeadlineFakeContext(_PreloadedResultQueue(worker_outcome))
+    process = ctx.Process(
+        target=_terminal_outcome_sender,
+        args=(sender, worker_outcome),
+    )
+    process.start()
+    sender.close()
+    deferred_receiver = _DeferredFirstPollConnection(receiver)
+    try:
+        process.join(timeout=5.0)
+        assert process.exitcode == 0
+
+        outcome = _build_function_host_runner(
+            timeout=5.0
+        )._run_one_shot_terminal_handoff(
+            process,
+            deferred_receiver,  # type: ignore[arg-type]
+            worker_pid=process.pid,
+            runtime_handle=None,
+            cancel_requested=None,
+        )
+
+        assert deferred_receiver.poll_calls >= 2
+        assert outcome.status == "ok"
+        assert outcome.value == "hello"
+    finally:
+        receiver.close()
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1.0)
+        process.close()
+
+
+def _terminal_write_failure_sender(
+    sender: Connection,
+    status_sender: Connection,
+) -> None:
+    try:
+        send_terminal_payload(sender, {"result": "unreachable"})
+    except TerminalHandoffTransportError as exc:
+        status_sender.send(str(exc))
+    finally:
+        sender.close()
+        status_sender.close()
+
+
+def test_real_pipe_write_failure_reaches_bounded_parent_transport_verdict() -> None:
+    """A real broken pipe writes once and the adapter returns a generic failure."""
+
+    ctx = multiprocessing.get_context("spawn")
+    ctx.set_executable(sys.executable)
+    receiver, sender = ctx.Pipe(duplex=False)
+    status_receiver, status_sender = ctx.Pipe(duplex=False)
+    process = ctx.Process(
+        target=_terminal_write_failure_sender,
+        args=(sender, status_sender),
+    )
+    process.start()
+    sender.close()
+    status_sender.close()
+    receiver.close()
+    try:
+        assert status_receiver.poll(5.0)
+        assert "delivery failed" in status_receiver.recv()
+        process.join(timeout=5.0)
+        assert process.exitcode == 0
+
+        outcome = _build_function_host_runner(
+            timeout=5.0
+        )._run_one_shot_terminal_handoff(
+            process,
+            receiver,
+            worker_pid=process.pid,
+            runtime_handle=None,
+            cancel_requested=None,
+        )
+
+        assert outcome.status == "error"
+        assert (
+            outcome.error == "Worker result channel failed before a result was received"
+        )
+        assert outcome.diagnostics is not None
+        assert outcome.diagnostics["handoff_event"] == "transport_failed"
+    finally:
+        status_receiver.close()
+        if process.is_alive():
+            process.kill()
+        process.join(timeout=1.0)
+        process.close()
+
+
+def test_one_shot_leaked_sender_reaches_bounded_drain_expiry() -> None:
+    """A retained writer cannot turn producer exit into an indefinite wait."""
+
+    ctx = multiprocessing.get_context("spawn")
+    ctx.set_executable(sys.executable)
+    receiver, sender = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=_terminal_exit_without_send, args=(sender,))
+    runner = _build_function_host_runner(timeout=5.0)
+    process.start()
+    started = time.monotonic()
+    try:
+        outcome = runner._run_one_shot_terminal_handoff(
+            process,
+            receiver,
+            worker_pid=process.pid,
+            runtime_handle=None,
+            cancel_requested=None,
+        )
+
+        assert time.monotonic() - started < 2.0
+        assert outcome.status == "error"
+        assert (
+            outcome.error == "Worker result channel failed before a result was received"
+        )
+        assert outcome.diagnostics is not None
+        assert outcome.diagnostics["handoff_event"] == "drain_expired"
+    finally:
+        sender.close()
+        receiver.close()
+        if process.is_alive():
+            process.kill()
+        process.join(timeout=1.0)
+        process.close()
+
+
+def test_host_runner_normalizes_nested_frozen_args_before_spawn() -> None:
+    """Nested immutable TaskSpec containers cannot break worker bootstrap."""
+
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        function_target="json:dumps",
+        args=[FrozenList([1, 2])],
     )
 
     outcome = runner.run_with_hooks(None)
 
     assert outcome.status == "ok"
-    assert outcome.value == "hello"
+    assert outcome.value == "[1, 2]"
 
 
-def test_function_timeout_reports_timeout_when_no_result_present(
-    monkeypatch: pytest.MonkeyPatch,
+def test_host_runner_reports_prewrite_result_serialization_failure() -> None:
+    """An unpicklable return value produces one bounded public error outcome."""
+
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        function_target="tests.tasks.sample_targets:return_unpicklable",
+    )
+
+    outcome = runner.run_with_hooks(None)
+
+    assert outcome.status == "error"
+    assert outcome.error is not None
+    assert outcome.error.startswith(
+        "Task returned a value that Weft could not serialize: "
+    )
+    assert len(outcome.error) <= 550
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["phase"] == "result_serialization"
+
+
+def test_host_runner_large_result_exceeds_pipe_buffer_without_deadlock() -> None:
+    """The parent drains framed result bytes while a live producer writes them."""
+
+    size = 4_194_304
+    runner = _build_function_host_runner(
+        timeout=10.0,
+        function_target="tests.tasks.sample_targets:large_output",
+        args=[size],
+    )
+
+    outcome = runner.run_with_hooks(None)
+
+    assert outcome.status == "ok"
+    assert isinstance(outcome.value, str)
+    assert len(outcome.value) == size
+
+
+def test_function_timeout_reports_timeout_when_no_result_is_ready(
+    tmp_path: Path,
 ) -> None:
-    """With no result on the queue at the deadline, the runner still times out."""
-    runner = _build_function_host_runner(timeout=0.0)
-    monkeypatch.setattr(
-        runner, "_ctx", _DeadlineFakeContext(_PreloadedResultQueue(None))
+    """A live function with no ready result still reaches the timeout verdict."""
+
+    runner = _build_function_host_runner(
+        timeout=0.05,
+        function_target="tests.tasks.sample_targets:wait_for_file",
+        args=[str(tmp_path / "absent")],
     )
 
     outcome = runner.run_with_hooks(None)
 
     assert outcome.status == "timeout"
+
+
+def test_one_shot_stop_effect_cannot_reset_absolute_drain_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Time spent stopping is charged against the first accepted drain bound."""
+
+    clock = {"now": 0.0}
+
+    class Process:
+        pid = None
+        exitcode = 0
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    class EmptyReceiver:
+        def poll(self, timeout: float = 0.0) -> bool:
+            clock["now"] += timeout
+            return False
+
+    process = Process()
+    runner = _build_function_host_runner(timeout=5.0)
+    monkeypatch.setattr(host_module.time, "monotonic", lambda: clock["now"])
+
+    def delayed_stop(_process: Process) -> None:
+        clock["now"] += 1.0
+        process.alive = False
+
+    monkeypatch.setattr(runner, "_stop_process", delayed_stop)
+
+    outcome = runner._run_one_shot_terminal_handoff(
+        process,  # type: ignore[arg-type]
+        EmptyReceiver(),  # type: ignore[arg-type]
+        worker_pid=None,
+        runtime_handle=None,
+        cancel_requested=lambda: True,
+    )
+
+    assert outcome.status == "cancelled"
+    assert clock["now"] == 1.0
+
+
+def test_session_stop_effect_cannot_reset_absolute_drain_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent cleanup time cannot extend the accepted stop deadline."""
+
+    clock = {"now": 0.0}
+
+    class Process:
+        pid = None
+        exitcode = 0
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def close(self) -> None:
+            return
+
+    class RequestQueue:
+        def put(self, _payload: object) -> None:
+            return
+
+        def cancel_join_thread(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    class EmptyReceiver:
+        def poll(self, timeout: float = 0.0) -> bool:
+            clock["now"] += timeout
+            return False
+
+        def close(self) -> None:
+            return
+
+    process = Process()
+    session = AgentSession(
+        process,  # type: ignore[arg-type]
+        RequestQueue(),  # type: ignore[arg-type]
+        EmptyReceiver(),  # type: ignore[arg-type]
+        monitor=None,
+        limits=None,
+        timeout=None,
+    )
+    monkeypatch.setattr(sessions_module.time, "monotonic", lambda: clock["now"])
+
+    def delayed_terminate(*, deadline: float | None = None) -> None:
+        del deadline
+        clock["now"] += 1.0
+        process.alive = False
+
+    monkeypatch.setattr(session, "terminate", delayed_terminate)
+
+    result = session.execute("hello", cancel_requested=lambda: True)
+
+    assert result.status == "cancelled"
+    assert clock["now"] == 1.0
+
+
+class _StartFailureEndpoint:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StartFailureQueue:
+    def __init__(self) -> None:
+        self.closed = False
+        self.joined = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def join_thread(self) -> None:
+        self.joined = True
+
+
+class _StartFailureProcess:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def start(self) -> None:
+        raise RuntimeError("spawn failed")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StartFailureContext:
+    def __init__(self) -> None:
+        self.receiver = _StartFailureEndpoint()
+        self.sender = _StartFailureEndpoint()
+        self.queue = _StartFailureQueue()
+        self.process = _StartFailureProcess()
+
+    def Pipe(  # noqa: N802 - mirrors multiprocessing context
+        self,
+        *,
+        duplex: bool,
+    ) -> tuple[_StartFailureEndpoint, _StartFailureEndpoint]:
+        assert duplex is False
+        return self.receiver, self.sender
+
+    def Queue(self) -> _StartFailureQueue:  # noqa: N802
+        return self.queue
+
+    def Process(self, **_kwargs: Any) -> _StartFailureProcess:  # noqa: N802
+        return self.process
+
+
+class _StartedProcess(_StartFailureProcess):
+    pid = None
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.alive = False
+        self.joined = False
+
+    def start(self) -> None:
+        self.alive = True
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+        self.joined = True
+
+    def terminate(self) -> None:
+        self.alive = False
+
+    def kill(self) -> None:
+        self.alive = False
+
+
+class _StartedContext(_StartFailureContext):
+    def __init__(self) -> None:
+        super().__init__()
+        self.process = _StartedProcess()
+
+
+def test_one_shot_spawn_failure_closes_both_response_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed worker start releases every private process and pipe handle."""
+
+    context = _StartFailureContext()
+    runner = _build_function_host_runner(timeout=5.0)
+    monkeypatch.setattr(runner, "_ctx", context)
+
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        runner.run_with_hooks(None)
+
+    assert context.receiver.closed is True
+    assert context.sender.closed is True
+    assert context.process.closed is True
+
+
+def test_agent_session_spawn_failure_closes_queue_and_response_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed session startup releases its request queue and both pipe ends."""
+
+    context = _StartFailureContext()
+    runner = HostTaskRunner(
+        target_type="agent",
+        tid="1780000000000000000",
+        function_target=None,
+        process_target=None,
+        agent={"runtime": "llm"},
+        args=None,
+        kwargs=None,
+        env=None,
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.1,
+    )
+    monkeypatch.setattr(runner, "_ctx", context)
+
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        runner.start_agent_session()
+
+    assert context.queue.closed is True
+    assert context.queue.joined is True
+    assert context.receiver.closed is True
+    assert context.sender.closed is True
+    assert context.process.closed is True
+
+
+def test_agent_session_monitor_load_failure_cleans_started_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-spawn monitor construction failure cannot leak session resources."""
+
+    context = _StartedContext()
+    runner = HostTaskRunner(
+        target_type="agent",
+        tid="1780000000000000000",
+        function_target=None,
+        process_target=None,
+        agent={"runtime": "llm"},
+        args=None,
+        kwargs=None,
+        env=None,
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class="tests.fake:Monitor",
+        monitor_interval=0.1,
+    )
+    monkeypatch.setattr(runner, "_ctx", context)
+
+    def fail_monitor_load(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("monitor load failed")
+
+    monkeypatch.setattr(
+        host_module,
+        "load_resource_monitor",
+        fail_monitor_load,
+    )
+
+    with pytest.raises(RuntimeError, match="monitor load failed"):
+        runner.start_agent_session()
+
+    assert context.process.alive is False
+    assert context.process.joined is True
+    assert context.process.closed is True
+    assert context.queue.closed is True
+    assert context.queue.joined is True
+    assert context.receiver.closed is True
+    assert context.sender.closed is True

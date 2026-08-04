@@ -29,6 +29,7 @@ See also:
   - [3.2 Runtime Handles and Control [CC-3.2]](#32-runtime-handles-and-control-cc-32)
   - [3.3 Validation and Preflight [CC-3.3]](#33-validation-and-preflight-cc-33)
   - [3.4 Monitoring Ownership [CC-3.4]](#34-monitoring-ownership-cc-34)
+  - [3.5 Private Terminal Handoff Reducer [CC-3.5]](#35-private-terminal-handoff-reducer-cc-35)
 - [Related Plans](#related-plans-1)
 - [Related Documents](#related-documents)
 
@@ -778,8 +779,82 @@ Terminal summary readiness and control-cleanup readiness live in the Monitor
 store/SQL layer; physical task-local runtime queue cleanup remains at the
 TaskMonitor runtime boundary.
 
+### 3.5 Private Terminal Handoff Reducer [CC-3.5]
+
+Host-runner work completion is reduced from independent producer and private
+response-channel observations. Producer liveness is not result-channel state:
+observing a producer exit while the response channel is currently empty starts
+terminal drain and must not by itself produce a no-result failure.
+
+The terminal handoff reducer is pure. Its states are `observing`, `draining`,
+`stopping_timeout`, `stopping_cancel`, `stopping_limit`, and terminal
+`decided`. Its events are `outcome_received`, `producer_exited`,
+`channel_sealed`, `timeout_requested`, `cancel_requested`, `limit_reached`,
+`drain_expired`, and `transport_failed`. The host runner and session adapter
+own process, channel, clock, monitor, and cleanup I/O and apply only the
+reducer's selected action.
+
+A terminal classification requires one of: a valid terminal payload; a
+receiver-visible channel seal; an explicit transport failure; or expiration
+of the named internal drain deadline. The drain deadline is a bounded safety
+net for a leaked or failed private channel, not a delay used to guess whether
+a normal result will become visible. A receiver decode/unpickle failure or a
+decoded object of the wrong terminal payload type is `transport_failed`; it is
+never `outcome_received`.
+
+The transition and precedence contract is:
+
+| Current state | outcome | producer exited | channel sealed | timeout | cancel | limit | drain expired | transport failed |
+|---|---|---|---|---|---|---|---|---|
+| `observing` | `decided/outcome` | `draining/drain` | `decided/protocol_failure` | `stopping_timeout/stop` | `stopping_cancel/stop` | `stopping_limit/stop` | invalid | `decided/protocol_failure` |
+| `draining` | `decided/outcome` | `draining/wait` | `decided/protocol_failure` | `stopping_timeout/stop` | `stopping_cancel/stop` | `stopping_limit/stop` | `decided/protocol_failure` | `decided/protocol_failure` |
+| `stopping_timeout` | `decided/timeout` | `stopping_timeout/drain` | `decided/timeout` | `stopping_timeout/wait` | `stopping_timeout/wait` | `stopping_timeout/wait` | `decided/timeout` | `decided/timeout` |
+| `stopping_cancel` | `decided/cancelled` | `stopping_cancel/drain` | `decided/cancelled` | `stopping_cancel/wait` | `stopping_cancel/wait` | `stopping_cancel/wait` | `decided/cancelled` | `decided/cancelled` |
+| `stopping_limit` | `decided/limit` | `stopping_limit/drain` | `decided/limit` | `stopping_limit/wait` | `stopping_limit/wait` | `stopping_limit/wait` | `decided/limit` | `decided/limit` |
+| `decided` | invalid | invalid | invalid | invalid | invalid | invalid | invalid | invalid |
+
+Outcome and producer-exit observation order must converge on the outcome. The
+one-shot adapter's same-turn order is cancellation, a ready terminal payload,
+timeout, a confirmed resource limit, transport failure, channel seal, producer
+exit, then drain expiry. The persistent-session adapter preserves its existing
+deadline boundary with cancellation, timeout, a ready terminal payload,
+confirmed limit, transport failure, channel seal, producer exit, then drain
+expiry. Reading the channel to distinguish a payload from EOF may buffer an
+observation, but only the policy's highest-priority eligible event is reduced
+in that turn.
+
+After `channel_sealed` selects protocol failure, an adapter may spend at most
+the named internal drain bound joining the producer to refine the public cause.
+If that join proves exit and exposes a numeric code, the adapter reports the
+worker-exit category; otherwise it reports the generic channel-failure
+category. This bounded evidence step does not wait for another payload, change
+the reducer action, or treat liveness alone as channel evidence.
+
+Once timeout, cancellation, or a confirmed limit is accepted, that stop intent
+wins over a later payload. The first accepted stop intent remains in force.
+Stop intents and `producer_exited` are edge-triggered: after one is reduced it
+is excluded from later selector input, and an accepted stop makes every
+stop-intent observation ineligible. Exactly one transition may select a
+terminal action.
+
+The built-in host implementation uses a private response transport that can
+provide ordered payload delivery and receiver-visible seal/EOF. This is not a
+public queue or runner-plugin protocol.
+
+Before spawning that worker, the host adapter recursively copies immutable
+TaskSpec execution containers into ordinary built-in containers. A nested
+immutable list or mapping must not fail during spawn bootstrap before the
+worker entrypoint can publish a terminal outcome.
+
+_Implementation mapping_: `weft/core/terminal_handoff.py` owns the pure reducer,
+same-turn selectors, and edge-consumption driver;
+`weft/core/terminal_handoff_transport.py` owns synchronous private framing;
+`weft/core/runners/host.py` and `weft/core/tasks/sessions.py` acquire
+observations, apply effects, and own cleanup.
+
 ## Related Plans
 
+- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
 - [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)

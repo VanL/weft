@@ -56,7 +56,9 @@ from weft.commands.run import (
     _select_active_manager,
     _start_manager,
     _wait_for_task_completion,
+    render_run_execution_result,
 )
+from weft.commands.types import RunExecutionResult
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.control_probe import ControlProbeResult, MatchedPong
@@ -67,6 +69,74 @@ from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
+
+
+@pytest.mark.parametrize(
+    "category",
+    (
+        "Worker exited before returning a result (exit code 73)",
+        "Worker result channel failed before a result was received",
+        "Task returned a value that Weft could not serialize: local callable",
+    ),
+)
+def test_run_renderer_preserves_terminal_handoff_categories(category: str) -> None:
+    """Plain and JSON rendering expose categories without private diagnostics."""
+
+    execution = RunExecutionResult(
+        tid="1780000000000000000",
+        status="failed",
+        error_message=category,
+    )
+    plain: list[tuple[str, bool]] = []
+    json_lines: list[tuple[str, bool]] = []
+
+    plain_exit = render_run_execution_result(
+        execution,
+        wait=True,
+        json_output=False,
+        verbose=False,
+        emit=lambda message, err=False: plain.append((message, err)),
+    )
+    json_exit = render_run_execution_result(
+        execution,
+        wait=True,
+        json_output=True,
+        verbose=False,
+        emit=lambda message, err=False: json_lines.append((message, err)),
+    )
+
+    assert plain_exit == 1
+    assert plain == [(f"Error executing task: {category}", True)]
+    assert json_exit == 1
+    assert len(json_lines) == 1
+    payload = json.loads(json_lines[0][0])
+    assert set(payload) == {"tid", "status", "error"}
+    assert payload == {
+        "tid": "1780000000000000000",
+        "status": "failed",
+        "error": category,
+    }
+    assert json_lines[0][1] is False
+
+
+def test_run_renderer_keeps_timeout_exit_124() -> None:
+    """Terminal handoff rendering does not alter the timeout exit contract."""
+
+    emitted: list[tuple[str, bool]] = []
+    exit_code = render_run_execution_result(
+        RunExecutionResult(
+            tid="1780000000000000001",
+            status="timeout",
+            error_message="Target execution timed out",
+        ),
+        wait=True,
+        json_output=False,
+        verbose=False,
+        emit=lambda message, err=False: emitted.append((message, err)),
+    )
+
+    assert exit_code == 124
+    assert emitted == [("Error executing task: Target execution timed out", True)]
 
 
 def _host_runtime_handle(pid: int) -> dict[str, Any]:
