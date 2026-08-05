@@ -32,6 +32,8 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Final, Literal
 
 from simplebroker import resolve_config as resolve_broker_config
@@ -2839,197 +2841,291 @@ def _add_simplebroker_env_vars(config: dict[str, Any]) -> None:
     config.update(_resolve_weft_broker_config(config))
 
 
-def _normalize_weft_override_value(name: str, value: Any) -> Any:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-101] exception
+class _OverrideKind(Enum):
+    """Named input categories for explicit in-process overrides."""
+
+    BOOLISH = "boolish"
+    BOOL_OR_STRING = "bool_or_string"
+    OPTIONAL_STRING = "optional_string"
+    STRING = "string"
+    INTEGER_OR_STRING = "integer_or_string"
+    NUMBER_OR_STRING = "number_or_string"
+    REMOVED = "removed"
+
+
+def _normalize_boolish_override(value: Any, parser: Callable[[str], Any]) -> Any:
+    """Parse strings and otherwise apply the existing bool() contract."""
+
+    return parser(value) if isinstance(value, str) else bool(value)
+
+
+def _normalize_bool_or_string_override(
+    name: str,
+    value: Any,
+    parser: Callable[[str], Any],
+) -> Any:
+    """Accept only a bool or a string parsed by the environment parser."""
+
+    if isinstance(value, str):
+        return parser(value)
+    if isinstance(value, bool):
+        return value
+    raise TypeError(f"{name} override must be bool or str")
+
+
+def _normalize_optional_string_override(
+    name: str,
+    value: Any,
+    parser: Callable[[str], Any],
+) -> Any:
+    """Accept None or a string parsed by the environment parser."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return parser(value)
+    raise TypeError(f"{name} override must be str or None")
+
+
+def _normalize_string_override(
+    name: str,
+    value: Any,
+    parser: Callable[[str], Any] | None,
+) -> Any:
+    """Accept only a string, optionally applying an environment parser."""
+
+    if not isinstance(value, str):
+        raise TypeError(f"{name} override must be str")
+    return parser(value) if parser is not None else value
+
+
+def _normalize_integer_or_string_override(
+    name: str,
+    value: Any,
+    parser: Callable[[str], Any],
+) -> Any:
+    """Accept a string or integer and route both through one parser."""
+
+    if isinstance(value, str):
+        return parser(value)
+    if isinstance(value, int):
+        return parser(str(value))
+    raise TypeError(f"{name} override must be int or str")
+
+
+def _normalize_number_or_string_override(
+    name: str,
+    value: Any,
+    parser: Callable[[str], Any],
+) -> Any:
+    """Accept a string or number and route both through one parser."""
+
+    if isinstance(value, str):
+        return parser(value)
+    if isinstance(value, int | float):
+        return parser(str(float(value)))
+    raise TypeError(f"{name} override must be int, float, or str")
+
+
+@dataclass(frozen=True, slots=True)
+class _OverrideRule:
+    """One validated explicit in-process override contract."""
+
+    kind: _OverrideKind
+    parser: Callable[[str], Any] | None = None
+    removed_message: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject internally inconsistent rule declarations at import time."""
+
+        if self.kind is _OverrideKind.REMOVED:
+            if self.parser is not None or not self.removed_message:
+                raise ValueError("removed override rules require only a reason")
+            return
+        if self.removed_message is not None:
+            raise ValueError("live override rules cannot carry a removal reason")
+        if self.kind is not _OverrideKind.STRING and self.parser is None:
+            raise ValueError(f"{self.kind.value} override rules require a parser")
+
+    def normalize(self, name: str, value: Any) -> Any:
+        """Apply the named category while preserving parser precedence."""
+
+        if self.kind is _OverrideKind.BOOLISH:
+            return _normalize_boolish_override(value, self._required_parser(name))
+        if self.kind is _OverrideKind.BOOL_OR_STRING:
+            return _normalize_bool_or_string_override(
+                name, value, self._required_parser(name)
+            )
+        if self.kind is _OverrideKind.OPTIONAL_STRING:
+            return _normalize_optional_string_override(
+                name, value, self._required_parser(name)
+            )
+        if self.kind is _OverrideKind.STRING:
+            return _normalize_string_override(name, value, self.parser)
+        if self.kind is _OverrideKind.INTEGER_OR_STRING:
+            return _normalize_integer_or_string_override(
+                name, value, self._required_parser(name)
+            )
+        if self.kind is _OverrideKind.NUMBER_OR_STRING:
+            return _normalize_number_or_string_override(
+                name, value, self._required_parser(name)
+            )
+        if self.removed_message is None:  # pragma: no cover - validated invariant
+            raise AssertionError(f"{name} removed rule has no reason")
+        raise ValueError(self.removed_message)
+
+    def _required_parser(self, name: str) -> Callable[[str], Any]:
+        """Return the parser guaranteed by the validated rule declaration."""
+
+        if self.parser is None:  # pragma: no cover - validated invariant
+            raise AssertionError(f"{name} live rule has no parser")
+        return self.parser
+
+
+_WEFT_OVERRIDE_RULES: Final[dict[str, _OverrideRule]] = {
+    "WEFT_DEBUG": _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_LOGGING_ENABLED": _OverrideRule(
+        kind=_OverrideKind.BOOL_OR_STRING,
+        parser=_parse_logging_enabled,
+    ),
+    "WEFT_LOGS_DIR": _OverrideRule(
+        kind=_OverrideKind.OPTIONAL_STRING,
+        parser=_parse_weft_logs_dir,
+    ),
+    "WEFT_REDACT_TASKSPEC_FIELDS": _OverrideRule(
+        kind=_OverrideKind.STRING,
+    ),
+    "WEFT_LOG_TASKS_EXTERNAL_PATH": _OverrideRule(
+        kind=_OverrideKind.STRING,
+        parser=_parse_log_tasks_external_path,
+    ),
+    "WEFT_LOG_TASKS_EXTERNAL_ENABLED": _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_LOG_TASKS_EXTERNAL_MODE": _OverrideRule(
+        kind=_OverrideKind.STRING,
+        parser=_parse_log_tasks_external_mode,
+    ),
+    "WEFT_TASK_MONITOR_MODE": _OverrideRule(
+        kind=_OverrideKind.STRING,
+        parser=_parse_task_monitor_mode,
+    ),
+    "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_log_tasks_retention_period_seconds,
+    ),
+    "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_task_monitor_reserved_cleanup_min_age_seconds,
+    ),
+    "WEFT_DIRECTORY_NAME": _OverrideRule(
+        kind=_OverrideKind.STRING,
+        parser=_parse_weft_directory_name,
+    ),
+    "WEFT_MANAGER_LIFETIME_TIMEOUT": _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_manager_lifetime_timeout,
+    ),
+    "WEFT_MANAGER_REUSE_ENABLED": _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_AUTOSTART_TASKS": _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_TASK_MONITOR_ENABLED": _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_TASK_MONITOR_MAINTENANCE": _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_TASK_MONITOR_INTERVAL_SECONDS": _OverrideRule(
+        kind=_OverrideKind.INTEGER_OR_STRING,
+        parser=_parse_task_monitor_interval_seconds,
+    ),
+    "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_task_monitor_catchup_interval_seconds,
+    ),
+    "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_task_monitor_maintenance_interval_seconds,
+    ),
+    "WEFT_TASK_MONITOR_BATCH_SIZE": _OverrideRule(
+        kind=_OverrideKind.INTEGER_OR_STRING,
+        parser=_parse_task_monitor_batch_size,
+    ),
+    "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": _OverrideRule(
+        kind=_OverrideKind.INTEGER_OR_STRING,
+        parser=_parse_task_monitor_task_log_scan_limit,
+    ),
+    "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": _OverrideRule(
+        kind=_OverrideKind.INTEGER_OR_STRING,
+        parser=_parse_task_monitor_store_write_batch_size,
+    ),
+    "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_task_monitor_stale_open_family_seconds,
+    ),
+    "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": _OverrideRule(
+        kind=_OverrideKind.INTEGER_OR_STRING,
+        parser=_parse_task_monitor_control_queue_delete_limit,
+    ),
+    "WEFT_TASK_MONITOR_PROCESSOR": _OverrideRule(
+        kind=_OverrideKind.STRING,
+        parser=_parse_task_monitor_processor,
+    ),
+    "WEFT_TASK_MONITOR_LOG_SINK": _OverrideRule(
+        kind=_OverrideKind.STRING,
+        parser=_parse_task_monitor_log_sink,
+    ),
+    "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_task_monitor_restart_backoff_seconds,
+    ),
+    WEFT_MANAGER_SERVE_LOG_LEVEL: _OverrideRule(
+        kind=_OverrideKind.STRING,
+        parser=_parse_manager_serve_log_level,
+    ),
+    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS: _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_manager_serve_log_interval,
+    ),
+    MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": _OverrideRule(
+        kind=_OverrideKind.REMOVED,
+        removed_message="WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS was removed; use WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
+    ),
+    "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": _OverrideRule(
+        kind=_OverrideKind.REMOVED,
+        removed_message="WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED was removed; use WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup",
+    ),
+    "WEFT_TASK_MONITOR_CLEANUP_WORKERS": _OverrideRule(
+        kind=_OverrideKind.REMOVED,
+        removed_message="WEFT_TASK_MONITOR_CLEANUP_WORKERS was removed; TaskMonitor runtime cleanup uses bounded reactor-launched worker slices",
+    ),
+}
+
+
+def _normalize_weft_override_value(name: str, value: Any) -> Any:
     """Normalize one explicit in-process config override."""
 
-    if name == "WEFT_DEBUG":
-        return _parse_bool(value) if isinstance(value, str) else bool(value)
-    if name == "WEFT_LOGGING_ENABLED":
-        if isinstance(value, str):
-            return _parse_logging_enabled(value)
-        if isinstance(value, bool):
-            return value
-        raise TypeError("WEFT_LOGGING_ENABLED override must be bool or str")
-    if name == "WEFT_LOGS_DIR":
-        if value is None:
-            return None
-        if isinstance(value, str):
-            return _parse_weft_logs_dir(value)
-        raise TypeError("WEFT_LOGS_DIR override must be str or None")
-    if name == "WEFT_REDACT_TASKSPEC_FIELDS":
-        if isinstance(value, str):
-            return value
-        raise TypeError("WEFT_REDACT_TASKSPEC_FIELDS override must be str")
-    if name == "WEFT_LOG_TASKS_EXTERNAL_PATH":
-        if isinstance(value, str):
-            return _parse_log_tasks_external_path(value)
-        raise TypeError("WEFT_LOG_TASKS_EXTERNAL_PATH override must be str")
-    if name == "WEFT_LOG_TASKS_EXTERNAL_ENABLED":
-        return _parse_bool(value) if isinstance(value, str) else bool(value)
-    if name == "WEFT_LOG_TASKS_EXTERNAL_MODE":
-        if isinstance(value, str):
-            return _parse_log_tasks_external_mode(value)
-        raise TypeError("WEFT_LOG_TASKS_EXTERNAL_MODE override must be str")
-    if name == "WEFT_TASK_MONITOR_MODE":
-        if isinstance(value, str):
-            return _parse_task_monitor_mode(value)
-        raise TypeError("WEFT_TASK_MONITOR_MODE override must be str")
-    if name == "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS":
-        if isinstance(value, str):
-            return _parse_log_tasks_retention_period_seconds(value)
-        if isinstance(value, int | float):
-            return _parse_log_tasks_retention_period_seconds(str(float(value)))
-        raise TypeError(
-            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS override must be int, "
-            "float, or str"
-        )
-    if name == "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS":
-        if isinstance(value, str):
-            return _parse_task_monitor_reserved_cleanup_min_age_seconds(value)
-        if isinstance(value, int | float):
-            return _parse_task_monitor_reserved_cleanup_min_age_seconds(
-                str(float(value))
-            )
-        raise TypeError(
-            "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS override must be "
-            "int, float, or str"
-        )
-    if name == "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS":
-        raise ValueError(
-            "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS was removed; use "
-            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"
-        )
-    if name == "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED":
-        raise ValueError(
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED was removed; use "
-            "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
-        )
-    if name == "WEFT_TASK_MONITOR_CLEANUP_WORKERS":
-        raise ValueError(
-            "WEFT_TASK_MONITOR_CLEANUP_WORKERS was removed; TaskMonitor runtime "
-            "cleanup uses bounded reactor-launched worker slices"
-        )
-    if name == "WEFT_DIRECTORY_NAME":
-        if isinstance(value, str):
-            return _parse_weft_directory_name(value)
-        raise TypeError("WEFT_DIRECTORY_NAME override must be str")
-    if name == "WEFT_MANAGER_LIFETIME_TIMEOUT":
-        if isinstance(value, str):
-            return _parse_manager_lifetime_timeout(value)
-        if isinstance(value, int | float):
-            return _parse_non_negative_float(
-                str(float(value)),
-                name="WEFT_MANAGER_LIFETIME_TIMEOUT",
-            )
-        raise TypeError(
-            "WEFT_MANAGER_LIFETIME_TIMEOUT override must be int, float, or str"
-        )
-    if name in {
-        "WEFT_MANAGER_REUSE_ENABLED",
-        "WEFT_AUTOSTART_TASKS",
-        "WEFT_TASK_MONITOR_ENABLED",
-        "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
-        "WEFT_TASK_MONITOR_MAINTENANCE",
-    }:
-        return _parse_bool(value) if isinstance(value, str) else bool(value)
-    if name == "WEFT_TASK_MONITOR_INTERVAL_SECONDS":
-        if isinstance(value, str):
-            return _parse_task_monitor_interval_seconds(value)
-        if isinstance(value, int):
-            return _parse_task_monitor_interval_seconds(str(value))
-        raise TypeError(
-            "WEFT_TASK_MONITOR_INTERVAL_SECONDS override must be int or str"
-        )
-    if name == "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS":
-        if isinstance(value, str):
-            return _parse_task_monitor_catchup_interval_seconds(value)
-        if isinstance(value, int | float):
-            return _parse_task_monitor_catchup_interval_seconds(str(float(value)))
-        raise TypeError(
-            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS override must be int, "
-            "float, or str"
-        )
-    if name == "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS":
-        if isinstance(value, str):
-            return _parse_task_monitor_maintenance_interval_seconds(value)
-        if isinstance(value, int | float):
-            return _parse_task_monitor_maintenance_interval_seconds(str(float(value)))
-        raise TypeError(
-            "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS override must be int, "
-            "float, or str"
-        )
-    if name == "WEFT_TASK_MONITOR_BATCH_SIZE":
-        if isinstance(value, str):
-            return _parse_task_monitor_batch_size(value)
-        if isinstance(value, int):
-            return _parse_task_monitor_batch_size(str(value))
-        raise TypeError("WEFT_TASK_MONITOR_BATCH_SIZE override must be int or str")
-    if name == "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT":
-        if isinstance(value, str):
-            return _parse_task_monitor_task_log_scan_limit(value)
-        if isinstance(value, int):
-            return _parse_task_monitor_task_log_scan_limit(str(value))
-        raise TypeError(
-            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT override must be int or str"
-        )
-    if name == "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE":
-        if isinstance(value, str):
-            return _parse_task_monitor_store_write_batch_size(value)
-        if isinstance(value, int):
-            return _parse_task_monitor_store_write_batch_size(str(value))
-        raise TypeError(
-            "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE override must be int or str"
-        )
-    if name == "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS":
-        if isinstance(value, str):
-            return _parse_task_monitor_stale_open_family_seconds(value)
-        if isinstance(value, int | float):
-            return _parse_task_monitor_stale_open_family_seconds(str(float(value)))
-        raise TypeError(
-            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS override must be int, "
-            "float, or str"
-        )
-    if name == "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT":
-        if isinstance(value, str):
-            return _parse_task_monitor_control_queue_delete_limit(value)
-        if isinstance(value, int):
-            return _parse_task_monitor_control_queue_delete_limit(str(value))
-        raise TypeError(
-            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT override must be int or str"
-        )
-    if name == "WEFT_TASK_MONITOR_PROCESSOR":
-        if isinstance(value, str):
-            return _parse_task_monitor_processor(value)
-        raise TypeError("WEFT_TASK_MONITOR_PROCESSOR override must be str")
-    if name == "WEFT_TASK_MONITOR_LOG_SINK":
-        if isinstance(value, str):
-            return _parse_task_monitor_log_sink(value)
-        raise TypeError("WEFT_TASK_MONITOR_LOG_SINK override must be str")
-    if name == "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS":
-        if isinstance(value, str):
-            return _parse_task_monitor_restart_backoff_seconds(value)
-        if isinstance(value, int | float):
-            return _parse_task_monitor_restart_backoff_seconds(str(float(value)))
-        raise TypeError(
-            "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS override must be int, "
-            "float, or str"
-        )
-    if name == WEFT_MANAGER_SERVE_LOG_LEVEL:
-        if isinstance(value, str):
-            return _parse_manager_serve_log_level(value)
-        raise TypeError("WEFT_MANAGER_SERVE_LOG_LEVEL override must be str")
-    if name == WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS:
-        if isinstance(value, str):
-            return _parse_manager_serve_log_interval(value)
-        if isinstance(value, int | float):
-            return _parse_manager_serve_log_interval(str(float(value)))
-        raise TypeError(
-            "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS override must be int, "
-            "float, or str"
-        )
-    if name == MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY:
-        return _parse_bool(value) if isinstance(value, str) else bool(value)
-    return value
+    rule = _WEFT_OVERRIDE_RULES.get(name)
+    return rule.normalize(name, value) if rule is not None else value
 
 
 def _normalize_weft_overrides(overrides: Mapping[str, Any]) -> dict[str, Any]:

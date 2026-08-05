@@ -1,7 +1,6 @@
 """Tests for the _constants module."""
 
 import ast
-import inspect
 import os
 import re
 from pathlib import Path
@@ -100,78 +99,8 @@ from weft._constants import (
 )
 
 
-def _resolve_normalized_key(node: ast.expr) -> str:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.Name):
-        assert hasattr(constants, node.id), (
-            f"normalizer key name {node.id!r} is not defined in weft._constants"
-        )
-        value = getattr(constants, node.id)
-        assert isinstance(value, str), (
-            f"normalizer key name {node.id!r} must resolve to str, "
-            f"got {type(value).__name__}"
-        )
-        return value
-    raise AssertionError(f"unsupported normalizer key expression: {ast.dump(node)}")
-
-
 def _explicit_normalizer_keys() -> set[str]:
-    tree = ast.parse(inspect.getsource(constants._normalize_weft_override_value))
-    keys: set[str] = set()
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.If):
-            if isinstance(node, (ast.IfExp, ast.While)):
-                assert not any(
-                    isinstance(part, ast.Name) and part.id == "name"
-                    for part in ast.walk(node.test)
-                ), (
-                    "unsupported normalizer control-flow condition at "
-                    f"line {node.lineno}: {ast.dump(node.test)}"
-                )
-            if isinstance(node, ast.Match):
-                assert not (
-                    isinstance(node.subject, ast.Name) and node.subject.id == "name"
-                ), (
-                    "unsupported normalizer match statement at "
-                    f"line {node.lineno}: {ast.dump(node.subject)}"
-                )
-            continue
-
-        if not any(
-            isinstance(part, ast.Name) and part.id == "name"
-            for part in ast.walk(node.test)
-        ):
-            continue
-        comparison = node.test
-        assert isinstance(comparison, ast.Compare), (
-            "unsupported normalizer condition at "
-            f"line {node.lineno}: {ast.dump(comparison)}"
-        )
-        assert (
-            isinstance(comparison.left, ast.Name)
-            and comparison.left.id == "name"
-            and len(comparison.ops) == 1
-            and len(comparison.comparators) == 1
-        ), (
-            "normalizer comparisons must have the form name == KEY or "
-            f"name in {{KEYS}} at line {node.lineno}: {ast.dump(comparison)}"
-        )
-        operator = comparison.ops[0]
-        values = comparison.comparators[0]
-        if isinstance(operator, ast.Eq):
-            keys.add(_resolve_normalized_key(values))
-            continue
-        assert isinstance(operator, ast.In) and isinstance(
-            values, (ast.Set, ast.List, ast.Tuple)
-        ), (
-            "normalizer comparisons must use == or a literal membership "
-            f"collection at line {node.lineno}: {ast.dump(comparison)}"
-        )
-        keys.update(_resolve_normalized_key(item) for item in values.elts)
-
-    return keys
+    return set(constants._WEFT_OVERRIDE_RULES)
 
 
 def test_env_loader_and_explicit_override_normalizer_keys_stay_in_parity() -> None:
@@ -191,6 +120,63 @@ def test_env_loader_and_explicit_override_normalizer_keys_stay_in_parity() -> No
     assert loader_keys - normalizer_keys == loader_only
     assert normalizer_keys - loader_keys == normalizer_only
     assert loader_keys - loader_only == normalizer_keys - normalizer_only
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        ("WEFT_DEBUG", "yes", True),
+        ("WEFT_DEBUG", 0, False),
+        ("WEFT_LOGGING_ENABLED", "off", False),
+        ("WEFT_LOGGING_ENABLED", True, True),
+        ("WEFT_LOGS_DIR", "  /tmp/weft-logs  ", "/tmp/weft-logs"),
+        ("WEFT_LOGS_DIR", None, None),
+        ("WEFT_REDACT_TASKSPEC_FIELDS", "metadata.secret", "metadata.secret"),
+        ("WEFT_TASK_MONITOR_INTERVAL_SECONDS", 60, 60),
+        ("WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS", 0.5, 0.5),
+        ("WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS", 0.25, 0.25),
+        ("UNRECOGNIZED_EMBEDDER_VALUE", object(), None),
+    ],
+)
+def test_explicit_override_normalization_preserves_input_contract(
+    name: str,
+    value: object,
+    expected: object,
+) -> None:
+    """Representative override categories retain their exact coercion contract."""
+
+    result = constants._normalize_weft_override_value(name, value)
+
+    if name == "UNRECOGNIZED_EMBEDDER_VALUE":
+        assert result is value
+    else:
+        assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "error_type", "message"),
+    [
+        ("WEFT_LOGGING_ENABLED", 1, TypeError, "must be bool or str"),
+        ("WEFT_LOGS_DIR", Path("logs"), TypeError, "must be str or None"),
+        ("WEFT_TASK_MONITOR_INTERVAL_SECONDS", 1.5, TypeError, "must be int or str"),
+        (
+            "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
+            "1",
+            ValueError,
+            "was removed",
+        ),
+    ],
+)
+def test_explicit_override_normalization_preserves_error_contract(
+    name: str,
+    value: object,
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    """Override category and removed-setting failures keep their public shape."""
+
+    with pytest.raises(error_type, match=message):
+        constants._normalize_weft_override_value(name, value)
 
 
 _RUNTIME_OBJECT_ALLOWLIST = {
