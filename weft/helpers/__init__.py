@@ -145,7 +145,7 @@ def resolve_broker_max_message_size(config: Mapping[str, Any]) -> int:
     return max_bytes
 
 
-def read_limited_stdin(max_bytes: int, *, stream: Any | None = None) -> str:
+def read_limited_stdin(max_bytes: int, *, stream: Any | None = None) -> str:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-122] exception
     """Read stdin in chunks while enforcing a byte limit."""
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
@@ -243,7 +243,7 @@ def resolve_cli_command(command: str, *, search_path: str | None = None) -> str:
     return resolved
 
 
-def iter_queue_entries(
+def iter_queue_entries(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-123] exception
     queue: Queue,
     *,
     since_timestamp: int | None = None,
@@ -401,7 +401,7 @@ def canonical_owner_tid(claimant_tids: Iterable[str]) -> str | None:
     return lowest_tid
 
 
-def terminate_process_tree(
+def terminate_process_tree(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-124] exception
     root_pid: int,
     *,
     timeout: float = 0.5,
@@ -735,7 +735,7 @@ def is_debug_enabled() -> bool:
     return bool(_config["WEFT_DEBUG"])
 
 
-def write_file_atomically(
+def write_file_atomically(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-125] exception
     file_path: Path | str,
     content: str | None = None,
     data: bytes | None = None,
@@ -1024,7 +1024,7 @@ def _pluralize(value: int, unit: str) -> str:
     return f"{value} {unit}{suffix}"
 
 
-def _format_duration(seconds: float, *, max_units: int = 2) -> str:
+def _format_duration(seconds: float, *, max_units: int = 2) -> str:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-126] exception
     seconds = max(seconds, 0.0)
 
     if seconds < 0.001:

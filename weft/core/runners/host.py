@@ -476,7 +476,7 @@ class HostTaskRunner:
                         process.join(timeout=0.2)
             self._close_process_handle(process)
 
-    def _run_one_shot_terminal_handoff(
+    def _run_one_shot_terminal_handoff(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-034] exception
         self,
         process: BaseProcess,
         response_receiver: Connection,
@@ -951,7 +951,7 @@ class HostTaskRunner:
         except Exception:  # pragma: no cover - process may still be running
             pass
 
-    def start_session(self) -> CommandSession:
+    def start_session(self) -> CommandSession:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-035] exception
         """Start a line-oriented interactive command session for streaming IO."""
         if self._spec_data["type"] != "command":
             raise ValueError(
@@ -1049,7 +1049,7 @@ class HostTaskRunner:
             handle=_host_handle(process.pid),
         )
 
-    def start_agent_session(self) -> AgentSession:
+    def start_agent_session(self) -> AgentSession:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-035] exception
         """Start a long-lived agent session for persistent agent tasks."""
         if self._spec_data["type"] != "agent":
             raise ValueError("Agent sessions are only supported for agent targets")

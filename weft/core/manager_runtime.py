@@ -173,7 +173,7 @@ def normalize_manager_registry_record(
     return _normalize_manager_record(context, payload, timestamp=timestamp)
 
 
-def _snapshot_registry(
+def _snapshot_registry(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-015] exception
     context: WeftContext,
     *,
     prune_stale: bool = True,
@@ -333,7 +333,7 @@ def _namespace_ambiguous_incumbent_should_block_start(
     return grace_ns < 0 or time.time_ns() - timestamp <= grace_ns
 
 
-def _manager_record_diagnostic(
+def _manager_record_diagnostic(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-016] exception
     context: WeftContext,
     record: dict[str, Any],
     *,
@@ -829,7 +829,7 @@ def _send_stop(
         queue.close()
 
 
-def _mark_manager_stopped(
+def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     context: WeftContext,
     tid: str,
     *,
@@ -1281,7 +1281,7 @@ def _wait_for_process_exit(
     return True
 
 
-def _await_manager_stop_confirmation(
+def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     context: WeftContext,
     *,
     target_tid: str,
@@ -1529,7 +1529,7 @@ def _reconcile_competing_manager_start(
     return record, False, None
 
 
-def _start_manager(
+def _start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
     context: WeftContext, *, verbose: bool
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
     """Launch a new Manager process and wait for its registry entry (Spec: [MA-3])."""
@@ -1817,7 +1817,7 @@ def _foreground_serve_blocking_manager(context: WeftContext) -> dict[str, Any] |
             return existing
 
 
-def _stop_manager(
+def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     context: WeftContext,
     record: dict[str, Any] | None,
     process: subprocess.Popen[Any] | None = None,

@@ -1004,7 +1004,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._stop_event.set()
         raise exc
 
-    def _ensure_outcome_ok(
+    def _ensure_outcome_ok(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-042] exception
         self,
         outcome: RunnerOutcome,
         timestamp: int | None,

@@ -151,7 +151,11 @@ jobs:
 
     - name: Run linting with ruff
       run: |
-        ruff check weft tests integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
+        ruff check .
+
+    - name: Check generated Ruff suppression index
+      run: |
+        python bin/ruff_suppression_index.py --check
 
     - name: Check formatting with ruff
       run: |

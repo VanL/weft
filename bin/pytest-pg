@@ -507,7 +507,7 @@ def _run_pytest_command(
         return 130
 
 
-def main() -> int:
+def main() -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-225] exception
     parser = argparse.ArgumentParser(
         description="Run PG-backed Weft tests with automatic Docker setup."
     )

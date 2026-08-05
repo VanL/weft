@@ -159,7 +159,7 @@ def main(argv: list[str], *, provider_name: str) -> int:
     return 2
 
 
-def _run_claude(argv: list[str]) -> int:
+def _run_claude(argv: list[str]) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-232] exception
     options: dict[str, Any] = {}
     prompt: str | None = None
     model: str | None = None
@@ -220,7 +220,7 @@ def _run_claude(argv: list[str]) -> int:
     )
 
 
-def _run_codex(argv: list[str]) -> int:
+def _run_codex(argv: list[str]) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-232] exception
     if not argv or argv[0] != "exec":
         print("unsupported codex command", file=sys.stderr)
         return 2
@@ -337,7 +337,7 @@ def _run_codex(argv: list[str]) -> int:
     return 0
 
 
-def _run_gemini_or_qwen(argv: list[str], *, provider_name: str) -> int:
+def _run_gemini_or_qwen(argv: list[str], *, provider_name: str) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-232] exception
     model: str | None = None
     prompt: str | None = None
     options: dict[str, Any] = {}
@@ -431,7 +431,7 @@ def _run_gemini_or_qwen(argv: list[str], *, provider_name: str) -> int:
     )
 
 
-def _run_opencode(argv: list[str]) -> int:
+def _run_opencode(argv: list[str]) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-232] exception
     if argv[:2] == ["run", "--help"]:
         if os.environ.get("PROVIDER_CLI_FIXTURE_OPENCODE_NO_RUN") == "1":
             print("legacy opencode help")

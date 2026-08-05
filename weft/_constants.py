@@ -2839,7 +2839,7 @@ def _add_simplebroker_env_vars(config: dict[str, Any]) -> None:
     config.update(_resolve_weft_broker_config(config))
 
 
-def _normalize_weft_override_value(name: str, value: Any) -> Any:
+def _normalize_weft_override_value(name: str, value: Any) -> Any:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-101] exception
     """Normalize one explicit in-process config override."""
 
     if name == "WEFT_DEBUG":

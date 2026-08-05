@@ -405,7 +405,7 @@ def _taskspec_from_mapping(value: object) -> dict[str, Any] | None:
     return None
 
 
-def _taskspec_from_collation(record: MonitorTaskCollationRecord) -> dict[str, Any]:
+def _taskspec_from_collation(record: MonitorTaskCollationRecord) -> dict[str, Any]:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-020] exception
     """Return the TaskSpec-shaped payload that anchors a collated report."""
 
     taskspec = dict(record.taskspec_summary)

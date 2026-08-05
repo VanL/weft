@@ -194,7 +194,7 @@ def _resolve_import(
     return ".".join(base_parts)
 
 
-def _parse_import_edges(
+def _parse_import_edges(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-210] exception
     source: str,
     *,
     source_module: str,
@@ -309,7 +309,7 @@ def _iter_import_edges(root: Path) -> list[ImportEdge]:
     return edges
 
 
-def _strongly_connected_components(
+def _strongly_connected_components(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-227] exception
     edges: list[tuple[str, str]],
 ) -> list[tuple[str, ...]]:
     graph: dict[str, set[str]] = {}
@@ -414,7 +414,7 @@ def test_run_support_mirror_module_is_deleted() -> None:
     assert not (PACKAGE_ROOT / "commands" / "_run_support.py").exists()
 
 
-def test_internal_import_boundaries() -> None:
+def test_internal_import_boundaries() -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-228] exception
     violations: list[str] = []
     rich_imports_seen: list[str] = []
     rich_violations: list[str] = []
@@ -558,7 +558,7 @@ def test_no_private_simplebroker_reaches() -> None:
     assert offenders == []
 
 
-def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]:
+def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-229] exception
     surface_exports = {
         "simplebroker": set(simplebroker.__all__) | {"commands"},
         "simplebroker.commands": set(simplebroker_commands.__all__),

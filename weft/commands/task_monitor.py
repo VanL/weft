@@ -492,7 +492,7 @@ def _resolve_since(
     return None
 
 
-def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:
+def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-120] exception
     """Run one foreground task monitor pass.
 
     The first Release 4 implementation accepts `follow` for CLI shape but keeps

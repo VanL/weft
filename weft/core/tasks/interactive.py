@@ -387,7 +387,7 @@ class InteractiveTaskMixin(ABC):
             payload["return_code"] = return_code
         return payload
 
-    def _interactive_finalize_session(self, failure_reason: str | None = None) -> None:
+    def _interactive_finalize_session(self, failure_reason: str | None = None) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-044] exception
         if getattr(self, "_interactive_session", None) is None:
             return
         if getattr(self, "_interactive_completion_reported", False):

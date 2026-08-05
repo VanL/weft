@@ -177,7 +177,7 @@ def rewrite_tid_in_io(io_section: dict[str, Any], old_tid: str, new_tid: str) ->
                 section[name] = value.replace(old_prefix, new_prefix)
 
 
-def resolve_taskspec_payload(
+def resolve_taskspec_payload(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-050] exception
     payload: Mapping[str, Any],
     *,
     tid: str | None = None,
@@ -863,7 +863,7 @@ class AgentSection(BaseModel):
     runtime_config: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_runtime_constraints(self) -> AgentSection:
+    def validate_runtime_constraints(self) -> AgentSection:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-051] exception
         """Validate runtime-specific schema constraints (Spec: [AR-2.2])."""
         if self.output_schema is not None and self.output_mode != "json":
             raise ValueError("output_schema is only allowed when output_mode is 'json'")
@@ -1015,7 +1015,7 @@ class SpecSection(BaseModel):
     reserved_policy_on_error: ReservedPolicy = ReservedPolicy.KEEP
 
     @model_validator(mode="after")
-    def validate_target(self) -> SpecSection:
+    def validate_target(self) -> SpecSection:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-052] exception
         """Ensure either function_target or process_target is provided based on type.
 
         Spec: [TS-1] (Target semantics).
@@ -1263,7 +1263,7 @@ class StateSection(BaseModel):
     peak_net_connections: int | None = Field(None, ge=0)
 
     @model_validator(mode="after")
-    def validate_state_consistency(self) -> StateSection:
+    def validate_state_consistency(self) -> StateSection:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-053] exception
         """Ensure state fields are consistent and transitions are valid.
 
         Spec: [TS-1] (state section), [MF-5] (state transitions).
@@ -1533,7 +1533,7 @@ class TaskSpec(BaseModel):
             raise ValueError("cannot apply defaults to a template TaskSpec")
         self._validate_strict_requirements()
 
-    def _validate_strict_requirements(self) -> None:
+    def _validate_strict_requirements(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-054] exception
         """Validate that this TaskSpec meets all REQUIRED fields per the specification.
 
         Raises:

@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 162 plan files in this directory.
+There are currently 163 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 162 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-08-04-ruff-complexity-and-suppression-registry-plan.md`](./2026-08-04-ruff-complexity-and-suppression-registry-plan.md) | Ruff Complexity And Suppression Registry Plan | `draft` | none |
 | [`2026-08-01-terminal-handoff-reducer-plan.md`](./2026-08-01-terminal-handoff-reducer-plan.md) | Terminal Handoff Reducer Plan | `completed` | none |
 | [`2026-07-31-simplebroker-6-api-migration-plan.md`](./2026-07-31-simplebroker-6-api-migration-plan.md) | SimpleBroker 6.0 API Migration Plan | `completed` | none |
 | [`2026-07-29-deduplication-and-test-integrity-plan.md`](./2026-07-29-deduplication-and-test-integrity-plan.md) | Deduplication and Test Integrity Plan | `completed` | none |

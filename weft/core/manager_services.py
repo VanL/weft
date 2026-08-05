@@ -227,7 +227,7 @@ def summarize_service_candidates(
     )
 
 
-def reduce_managed_service_state(
+def reduce_managed_service_state(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-019] exception
     service: ManagedServiceSpec,
     state: ManagedServiceState,
     evidence: ManagedServiceEvidence,

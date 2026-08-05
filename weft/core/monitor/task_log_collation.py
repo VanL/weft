@@ -68,7 +68,7 @@ class CollationResult:
     skipped_tid: str | None = None
 
 
-def collate_next_task_log_group(
+def collate_next_task_log_group(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-023] exception
     rows: Sequence[DecodedQueueWindowRow],
     *,
     now_ns: int,

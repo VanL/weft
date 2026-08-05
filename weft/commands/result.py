@@ -164,7 +164,7 @@ def _result_surface_has_activity(
         ctrl_queue.close()
 
 
-def _await_result_materialization(
+def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108] exception
     context: WeftContext,
     tid: str,
     *,
@@ -476,7 +476,7 @@ def _collect_all_results(
     return 0, "\n".join(lines)
 
 
-def _await_single_result(
+def _await_single_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-109] exception
     context: WeftContext,
     tid: str,
     *,
@@ -860,7 +860,7 @@ def await_task_result(
     )
 
 
-def cmd_result(
+def cmd_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-110] exception
     *,
     tid: str | None,
     all_results: bool,

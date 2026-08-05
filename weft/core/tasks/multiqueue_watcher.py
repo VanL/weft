@@ -531,7 +531,7 @@ class MultiQueueWatcher(BaseWatcher):
         if force_discovery:
             self._pending_messages_precheck_confirmed = True
 
-    def _apply_topology_mutation_on_owner(self, request: _TopologyMutation) -> None:
+    def _apply_topology_mutation_on_owner(self, request: _TopologyMutation) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-045] exception
         """Build, replace, and publish one mutation on the drive owner.
 
         Spec: [CC-2.1], [SB-0.4], [QUEUE.8]
@@ -639,7 +639,7 @@ class MultiQueueWatcher(BaseWatcher):
                 if candidate_config is not None:
                     self._close_candidate_resource_once(candidate_config.queue)
 
-    def _apply_pending_topology_mutations(self) -> None:
+    def _apply_pending_topology_mutations(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-045] exception
         """Complete queued mutations in FIFO order on the drive owner."""
         if threading.current_thread() is not self._topology_owner_thread:
             return

@@ -724,7 +724,7 @@ def task_list(
 
 
 @task_app.command("status")
-def task_status(
+def task_status(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-102] exception
     tid: Annotated[str, typer.Argument(help="Task ID or short ID")],
     process: Annotated[
         bool,

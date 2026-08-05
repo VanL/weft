@@ -58,7 +58,7 @@ def normalize_run_input_value(kind: str, raw_value: str) -> str:
     raise ValueError(f"Unsupported spec.run_input argument type: {kind}")
 
 
-def parse_declared_option_args(
+def parse_declared_option_args(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-055] exception
     tokens: list[str],
     arguments: Mapping[str, Any],
     *,

@@ -58,7 +58,7 @@ def prepare_command_invocation(
     return command, stdin_data
 
 
-def run_monitored_subprocess(
+def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exception
     *,
     process: subprocess.Popen[str],
     stdin_data: str | None,
@@ -389,11 +389,11 @@ def _kill_process_runtime(
         process.wait(timeout=SUBPROCESS_TERMINATION_WAIT_TIMEOUT)
 
 
-def _start_stream_reader(
+def _start_stream_reader(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-037] exception
     stream: IO[str],
     target_queue: queue.Queue[str | None],
 ) -> None:
-    def _reader() -> None:
+    def _reader() -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-037] exception
         raw_stream = getattr(stream, "buffer", None)
         encoding = getattr(stream, "encoding", None) or "utf-8"
         errors = getattr(stream, "errors", None) or "replace"

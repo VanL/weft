@@ -302,7 +302,7 @@ class CliSurface:
 
     name = "cli"
 
-    def run_task(
+    def run_task(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-218] exception
         self,
         workdir: Path,
         harness: WeftTestHarness,
@@ -786,7 +786,7 @@ def _submit_no_wait_task(
     )
 
 
-def _run_long_session(
+def _run_long_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-218] exception
     surface: SessionSurface,
     workdir: Path,
     harness: WeftTestHarness,

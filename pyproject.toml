@@ -158,6 +158,14 @@ ignore_missing_imports = true
 [tool.ruff]
 target-version = "py312"
 line-length = 88
+extend-include = [
+    "bin/check-doc-paths",
+    "bin/check-dom15-fixtures",
+    "bin/coalesce-check",
+    "bin/pytest-live-providers",
+    "bin/pytest-pg",
+    "bin/pytest-worker-count",
+]
 
 [tool.ruff.lint]
 select = [
@@ -166,6 +174,7 @@ select = [
     "F",  # pyflakes
     "I",  # isort
     "B",  # flake8-bugbear
+    "C901", # mccabe complexity
     "C4", # flake8-comprehensions
     "UP", # pyupgrade
 ]
@@ -176,3 +185,6 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["weft", "weft_django", "weft_microsandbox", "simplebroker"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10

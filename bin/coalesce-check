@@ -91,7 +91,7 @@ def in_local_checkout(sha: str) -> str | None:
             return cand.name
     return None
 
-def main() -> int:
+def main() -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-224] exception
     if not STATE.is_file():
         print("coalesce-check: no docs/coalescing.md — nothing to check")
         return 0

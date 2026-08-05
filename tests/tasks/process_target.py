@@ -8,7 +8,7 @@ import socket
 import time
 
 
-def run_task(
+def run_task(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-219] exception
     *,
     duration: float = 0.0,
     memory_mb: int = 0,

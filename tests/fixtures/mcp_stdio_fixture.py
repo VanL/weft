@@ -121,7 +121,7 @@ def call_fixture_tool(
         _close_process(process)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-215] exception
     """Run the tiny stdio MCP fixture server."""
     del argv
     for raw_line in sys.stdin:

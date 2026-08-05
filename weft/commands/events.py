@@ -263,7 +263,7 @@ def follow_task_events(
     )
 
 
-def iter_task_realtime_events(
+def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] exception
     context: WeftContext,
     tid: str,
     *,

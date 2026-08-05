@@ -886,7 +886,7 @@ def stale_observer_evidence(
     )
 
 
-def known_tid_evidence(
+def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
     ctx: WeftContext,
     *,
     tid: str,

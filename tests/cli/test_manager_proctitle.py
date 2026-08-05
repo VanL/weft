@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> None:
+def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-212] exception
     """Verify that the manager's process title updates from 'init' to 'running'."""
     # The harness starts a manager implicitly via `run_cli` if one isn't running.
     # We just need to trigger an action and then find the manager process.

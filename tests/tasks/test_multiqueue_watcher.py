@@ -1419,7 +1419,7 @@ def test_synchronous_run_registers_and_clears_drive_thread_for_stop(
     assert not outer.is_alive()
 
 
-def test_owner_fatal_exit_signals_every_queued_mutator(
+def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-220] exception
     broker_env,
     monkeypatch,
 ) -> None:

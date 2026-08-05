@@ -298,7 +298,7 @@ def _raise_parallel_manager_reuse_failure(
     raise AssertionError(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-def _run_parallel_manager_reuse_cycle(
+def _run_parallel_manager_reuse_cycle(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-211] exception
     *,
     root: Path,
     env: dict[str, str],

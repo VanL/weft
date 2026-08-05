@@ -68,7 +68,7 @@ def generate_tid(context: WeftContext) -> str:
     return _generate_tid(context)
 
 
-def apply_submit_overrides(
+def apply_submit_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-115] exception
     taskspec: TaskSpec,
     *,
     name: str | None = None,
@@ -186,7 +186,7 @@ def _receipt(name: str, tid: str) -> SubmittedTaskReceipt:
     )
 
 
-def ensure_manager_after_submission(
+def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-116] exception
     context: WeftContext,
     *,
     submitted_tid: str | int,

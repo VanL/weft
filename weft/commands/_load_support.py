@@ -57,7 +57,7 @@ class ImportReport:
     validation_warnings: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def format_preview(self) -> str:
+    def format_preview(self) -> str:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-104] exception
         """Format a human-readable preview of the import."""
         lines = ["Import Preview:"]
 
@@ -189,7 +189,7 @@ def _build_import_plan(input_file: TextIO, context: WeftContext) -> ImportPlan:
     return plan
 
 
-def _parse_import_file(input_file: TextIO) -> ImportPlan:
+def _parse_import_file(input_file: TextIO) -> ImportPlan:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-105] exception
     """Parse the JSONL input into one reusable import plan."""
 
     plan = ImportPlan()

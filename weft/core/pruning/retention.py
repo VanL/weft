@@ -606,7 +606,7 @@ def _reduce_task_evidence(rows: Sequence[_LogRow]) -> dict[str, _TaskEvidence]:
     return reduced
 
 
-def _task_log_candidates(
+def _task_log_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-032] exception
     rows: Sequence[_LogRow],
     *,
     config: RetentionPruneConfig,

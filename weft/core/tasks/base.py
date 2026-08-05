@@ -437,7 +437,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         return set()
 
-    def _validate_reactor_topology(self) -> None:
+    def _validate_reactor_topology(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-040] exception
         """Reject empty or conflicting construction topology before broker I/O.
 
         Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
@@ -1096,7 +1096,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
         return self._queue(self._queue_names["reserved"])
 
-    def run_until_stopped(
+    def run_until_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-041] exception
         self,
         *,
         poll_interval: float = TASK_PROCESS_POLL_INTERVAL,

@@ -557,7 +557,7 @@ def _tid_mapping_candidates(
     return candidates, scanned
 
 
-def _manager_candidates(
+def _manager_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-033] exception
     ctx: WeftContext,
     config: RuntimePruneConfig,
     now_ns: int,
@@ -770,7 +770,7 @@ def _streaming_candidates(
     return candidates, scanned
 
 
-def _endpoint_candidates(
+def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] exception
     ctx: WeftContext,
     config: RuntimePruneConfig,
     now_ns: int,

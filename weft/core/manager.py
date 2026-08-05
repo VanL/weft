@@ -1561,7 +1561,7 @@ class Manager(ServiceTask):
             if not self._child_is_supervision_only(child)
         }
 
-    def _register_manager(self) -> None:
+    def _register_manager(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         """Publish active manager service ownership (Spec: [MA-1.4], [MF-7])."""
         registry_queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
         now_ns = time.time_ns()
@@ -1704,7 +1704,7 @@ class Manager(ServiceTask):
             return True
         return now_ns - timestamp > retention_ns
 
-    def _prune_expired_manager_registry_entries(
+    def _prune_expired_manager_registry_entries(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         self, queue: Queue, *, now_ns: int | None = None
     ) -> None:
         """Delete canonical manager service-owner rows outside the runtime window."""
@@ -1826,7 +1826,7 @@ class Manager(ServiceTask):
             return None
         return latest_status
 
-    def _self_registry_status_timestamp(
+    def _self_registry_status_timestamp(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         self,
         queue: Queue,
         *,
@@ -1875,7 +1875,7 @@ class Manager(ServiceTask):
             return None
         return latest_timestamp
 
-    def _prune_older_self_registry_entries(self, queue: Queue) -> None:
+    def _prune_older_self_registry_entries(self, queue: Queue) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         """Keep only this manager's latest registry row."""
 
         latest_ts: int | None = None
@@ -1935,7 +1935,7 @@ class Manager(ServiceTask):
             return
         self._register_manager()
 
-    def _unregister_manager(
+    def _unregister_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         self,
         *,
         status: Literal["draining", "stopped"] = "stopped",
@@ -2130,7 +2130,7 @@ class Manager(ServiceTask):
         return pid_is_live(pid)
 
     @staticmethod
-    def _manager_record_liveness(
+    def _manager_record_liveness(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-006] exception
         record: Mapping[str, Any],
     ) -> Literal["live", "stale", "unknown"]:
         payload = record.get("runtime_handle")
@@ -2738,7 +2738,7 @@ class Manager(ServiceTask):
             return False
         return True
 
-    def _active_dispatch_manager_records(self) -> dict[str, dict[str, Any]] | None:
+    def _active_dispatch_manager_records(self) -> dict[str, dict[str, Any]] | None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-007] exception
         now_ns = time.time_ns()
         if not self._update_manager_registry_snapshot():
             return None
@@ -2927,7 +2927,7 @@ class Manager(ServiceTask):
         self._leader_actionable_work_cache = (turn, result)
         return result
 
-    def _maybe_yield_leadership(self, *, force: bool = False) -> bool:
+    def _maybe_yield_leadership(self, *, force: bool = False) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-007] exception
         """Check whether this manager should yield leadership and act on it.
 
         Leadership algorithm
@@ -3121,7 +3121,7 @@ class Manager(ServiceTask):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _child_has_exited(self, child: ManagedChild) -> bool:
+    def _child_has_exited(self, child: ManagedChild) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-008] exception
         """Return True when the child process is no longer live.
 
         The multiprocessing Process view can lag behind the OS process table on
@@ -3179,7 +3179,7 @@ class Manager(ServiceTask):
         except (AssertionError, OSError, ValueError):  # pragma: no cover - defensive
             return True
 
-    def _child_terminal_proof_visible(self, tid: str, child: ManagedChild) -> bool:
+    def _child_terminal_proof_visible(self, tid: str, child: ManagedChild) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-008] exception
         ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
         # Use a short-lived direct handle for child-local queues so the manager
         # cache does not retain per-child control queues after reaping.
@@ -3308,7 +3308,7 @@ class Manager(ServiceTask):
                     exc_info=True,
                 )
 
-    def _cleanup_children(self, *, deadline: float | None = None) -> bool:
+    def _cleanup_children(self, *, deadline: float | None = None) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
         autostart_child_exited = False
         child_exited = False
         for tid, child in list(self._child_processes.items()):
@@ -3385,7 +3385,7 @@ class Manager(ServiceTask):
             self._invalidate_leadership_work_cache()
         return child_exited
 
-    def _terminate_children(self, deadline: float) -> None:
+    def _terminate_children(self, deadline: float) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
         """Stop tracked children under one absolute monotonic deadline.
 
         Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
@@ -4024,7 +4024,7 @@ class Manager(ServiceTask):
                 reason="manager_shutdown",
             )
 
-    def _cleanup_stale_internal_reserved_queues(self, *, force: bool = False) -> None:
+    def _cleanup_stale_internal_reserved_queues(self, *, force: bool = False) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-010] exception
         """Boundedly delete internal spawn reservations for non-live managers."""
 
         if not self._internal_spawn_queue_attached():
@@ -4100,7 +4100,7 @@ class Manager(ServiceTask):
                 protected_tids=sorted(protected_tids),
             )
 
-    def _apply_spawn_reserved_policy(
+    def _apply_spawn_reserved_policy(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-010] exception
         self,
         policy: ReservedPolicy,
         *,
@@ -4202,7 +4202,7 @@ class Manager(ServiceTask):
     # ------------------------------------------------------------------
     # Message handling
     # ------------------------------------------------------------------
-    def _handle_work_message(
+    def _handle_work_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-011] exception
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
         """Consume a reserved spawn request, build child spec, and launch.
@@ -4680,7 +4680,7 @@ class Manager(ServiceTask):
     def _child_matches_service(child: ManagedChild, service_key: str) -> bool:
         return Manager._service_key_for_child(child) == service_key
 
-    def _terminate_duplicate_service_candidates(
+    def _terminate_duplicate_service_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-012] exception
         self,
         service_key: str,
         *,
@@ -5056,7 +5056,7 @@ class Manager(ServiceTask):
             metadata=candidate_metadata,
         )
 
-    def _service_candidate_from_service_owner_record(
+    def _service_candidate_from_service_owner_record(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-012] exception
         self,
         record: ServiceOwnerRecord,
     ) -> ServiceCandidate:
@@ -5581,7 +5581,7 @@ class Manager(ServiceTask):
         else:
             state.next_allowed_ns = 0
 
-    def _reconcile_managed_services(
+    def _reconcile_managed_services(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-012] exception
         self,
         *,
         force: bool = False,
@@ -5830,7 +5830,7 @@ class Manager(ServiceTask):
             compiled.bootstrap_input_fallback
         )
 
-    def _build_autostart_spawn_payload(
+    def _build_autostart_spawn_payload(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-013] exception
         self, manifest: dict[str, Any], source: str
     ) -> tuple[dict[str, Any], Any] | None:
         target = manifest.get("target")
@@ -6202,7 +6202,7 @@ class Manager(ServiceTask):
             include_autostart=True,
         )
 
-    def _managed_service_convergence_active_reasons(
+    def _managed_service_convergence_active_reasons(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-012] exception
         self,
         *,
         include_autostart: bool,
@@ -6574,7 +6574,7 @@ class Manager(ServiceTask):
             )
         return min(timeouts) if timeouts else None
 
-    def _process_reactor_turn(self) -> None:
+    def _process_reactor_turn(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-014] exception
         """Run one Manager turn behind the owner-enforcing template.
 
         Spec:

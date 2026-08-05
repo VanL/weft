@@ -1200,7 +1200,7 @@ def _snapshot_from_terminal_ctrl_out(
     )
 
 
-def _await_control_surface(
+def _await_control_surface(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-121] exception
     ctx: WeftContext,
     tid: str,
     *,

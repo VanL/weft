@@ -936,7 +936,7 @@ def _short_commit(commit: str) -> str:
     return commit[:12]
 
 
-def plan_tag_action(
+def plan_tag_action(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-226] exception
     state: ReleaseState,
     *,
     head_commit: str,
@@ -1120,7 +1120,7 @@ def _push_tag_action(
     print(note if not dry_run else f"dry-run: {note}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-226] exception
     parser = _build_parser()
     args = parser.parse_args(argv)
 

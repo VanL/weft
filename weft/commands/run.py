@@ -498,7 +498,7 @@ def _wait_for_task_completion(
     )
 
 
-def _run_interactive_session(
+def _run_interactive_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-111] exception
     context: WeftContext,
     taskspec: TaskSpec,
     *,
@@ -859,7 +859,7 @@ def _initial_work_payload(
     return None
 
 
-def render_run_execution_result(
+def render_run_execution_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-112] exception
     execution: RunExecutionResult,
     *,
     wait: bool,
@@ -1036,7 +1036,7 @@ def _materialize_parameterized_spec(
     return materialized, remaining_tokens
 
 
-def _execute_inline(
+def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
     *,
     command: Sequence[str],
     function_target: str | None,
@@ -1479,7 +1479,7 @@ def _run_pipeline(
 # -----------------------------------------------------------------------------
 
 
-def execute_run(
+def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
     command: Sequence[str],
     *,
     spec_run_args: Sequence[str],

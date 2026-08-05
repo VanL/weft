@@ -400,7 +400,7 @@ class WeftTestHarness:
 
         return "\n".join(lines)
 
-    def wait_for_completion(
+    def wait_for_completion(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-217] exception
         self,
         tid: str,
         timeout: float = DEFAULT_TASK_COMPLETION_TIMEOUT,
@@ -933,7 +933,7 @@ class WeftTestHarness:
     def _send_task_stop(self, tid: str) -> None:
         task_cmd._send_control(self.context, tid, CONTROL_STOP)
 
-    def _stop_active_managers(
+    def _stop_active_managers(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-233] exception
         self,
         *,
         force: bool = True,
@@ -987,7 +987,7 @@ class WeftTestHarness:
         if drain_registry:
             self._drain_registry_queue()
 
-    def _cleanup_preserving_database(self) -> None:
+    def _cleanup_preserving_database(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-234] exception
         wait_budget = max(6.0, min(self._manager_timeout, 10.0))
         if _is_windows():
             # Windows can keep SQLite WAL/SHM handles around after the last
@@ -1281,7 +1281,7 @@ class WeftTestHarness:
 
         return [base, Path(f"{base}-wal"), Path(f"{base}-shm")]
 
-    def _database_files_releasable(self) -> bool:
+    def _database_files_releasable(self) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-235] exception
         candidates = self._database_candidate_paths()
         if not candidates:
             return True

@@ -426,7 +426,7 @@ class ServiceTask(BaseTask):
             return False
         return True
 
-    def _stop_service_worker(
+    def _stop_service_worker(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-046] exception
         self,
         name: str,
         *,

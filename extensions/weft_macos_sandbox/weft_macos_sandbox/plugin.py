@@ -201,7 +201,7 @@ class MacOSSandboxRunnerPlugin:
     def check_version(self) -> None:
         return None
 
-    def validate_taskspec(
+    def validate_taskspec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-207] exception
         self,
         taskspec_payload: Mapping[str, Any],
         *,

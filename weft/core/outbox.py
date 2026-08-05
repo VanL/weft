@@ -34,7 +34,7 @@ def decode_result_payload(raw: str) -> Any:
         return raw
 
 
-def process_outbox_message(
+def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] exception
     raw: str,
     stream_buffer: list[str],
     *,

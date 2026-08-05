@@ -206,7 +206,7 @@ def test_task_runner_reports_command_spawn_diagnostics() -> None:
     assert outcome.diagnostics["exception_type"] == "FileNotFoundError"
 
 
-def test_agent_session_close_releases_multiprocessing_handles() -> None:
+def test_agent_session_close_releases_multiprocessing_handles() -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-221] exception
     class FakeProcess:
         def __init__(self) -> None:
             self.closed = False
@@ -629,7 +629,7 @@ def test_agent_session_malformed_nested_result_is_transport_failure() -> None:
         session.close()
 
 
-def test_agent_session_does_not_poll_limits_after_producer_exit() -> None:
+def test_agent_session_does_not_poll_limits_after_producer_exit() -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-236] exception
     """A stale monitor cannot replace dead-producer/channel evidence with limit."""
 
     class DeadProcess:
@@ -2238,7 +2238,7 @@ def test_one_shot_stop_effect_cannot_reset_absolute_drain_deadline(
     assert clock["now"] == 1.0
 
 
-def test_session_stop_effect_cannot_reset_absolute_drain_deadline(
+def test_session_stop_effect_cannot_reset_absolute_drain_deadline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-237] exception
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Persistent cleanup time cannot extend the accepted stop deadline."""

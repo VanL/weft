@@ -100,7 +100,7 @@ class TaskMonitorRuntimeConfig:
     maintenance_interval_seconds: float = WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any]) -> TaskMonitorRuntimeConfig:
+    def from_config(cls, config: Mapping[str, Any]) -> TaskMonitorRuntimeConfig:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-021] exception
         """Build typed runtime config from a loaded Weft config mapping."""
 
         enabled = bool(

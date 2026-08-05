@@ -786,7 +786,7 @@ class TaskMonitor(ServiceTask):
         except (OSError, RuntimeError, ValueError):  # pragma: no cover - defensive
             logger.debug("Failed to close external task-log sink", exc_info=True)
 
-    def _worker_local_monitor_clone(self) -> TaskMonitor:
+    def _worker_local_monitor_clone(self) -> TaskMonitor:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-024] exception
         """Return a worker-local monitor copy for durable cleanup effects.
 
         The clone may open broker/store handles and mutate its own cached
@@ -989,7 +989,7 @@ class TaskMonitor(ServiceTask):
         )
         return worker
 
-    def _close_worker_local_resources(self) -> tuple[str, ...]:
+    def _close_worker_local_resources(self) -> tuple[str, ...]:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-024] exception
         """Close every worker-owned live resource and return ordered errors.
 
         This helper deliberately bypasses public task lifecycle methods. A
@@ -2516,7 +2516,7 @@ class TaskMonitor(ServiceTask):
         )
         self._last_monitor_store_families_retired += result.families_retired
 
-    def _ingest_retained_task_log_rows(
+    def _ingest_retained_task_log_rows(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-025] exception
         self,
         store: MonitorStore,
         *,
@@ -2689,7 +2689,7 @@ class TaskMonitor(ServiceTask):
             completed_fifo_high_water=completed_high_water,
         )
 
-    def _recover_pre_checkpoint_task_log_rows(
+    def _recover_pre_checkpoint_task_log_rows(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-025] exception
         self,
         store: MonitorStore,
         *,
@@ -2932,7 +2932,7 @@ class TaskMonitor(ServiceTask):
             errors=tuple(errors),
         )
 
-    def _emit_monitor_store_summaries(
+    def _emit_monitor_store_summaries(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-026] exception
         self,
         store: MonitorStore,
         *,
@@ -3752,7 +3752,7 @@ class TaskMonitor(ServiceTask):
             TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT,
         )
 
-    def _run_terminal_control_cleanup_slice(
+    def _run_terminal_control_cleanup_slice(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-027] exception
         self,
         store: MonitorStore,
         *,
@@ -3961,7 +3961,7 @@ class TaskMonitor(ServiceTask):
             next_slice_kind=next_slice_kind,
         )
 
-    def _run_reserved_cleanup_slice(
+    def _run_reserved_cleanup_slice(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-056] exception
         self,
         store: MonitorStore,
         *,
@@ -4378,7 +4378,7 @@ class TaskMonitor(ServiceTask):
             deadline_hit=deadline_hit,
         )
 
-    def _trim_manager_task_spawned_task_log_rows(
+    def _trim_manager_task_spawned_task_log_rows(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-028] exception
         self,
         store: MonitorStore,
         *,
@@ -4712,7 +4712,7 @@ class TaskMonitor(ServiceTask):
         )
         return retirement
 
-    def _recover_orphan_task_log_rows(
+    def _recover_orphan_task_log_rows(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-057] exception
         self,
         store: MonitorStore,
         *,
@@ -4842,7 +4842,7 @@ class TaskMonitor(ServiceTask):
         )
         return result
 
-    def _coalesce_and_delete_dead_task_log_rows_for_tids(
+    def _coalesce_and_delete_dead_task_log_rows_for_tids(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-058] exception
         self,
         store: MonitorStore,
         tids: tuple[str, ...],

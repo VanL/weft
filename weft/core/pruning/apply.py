@@ -37,7 +37,7 @@ class ExactPruneCandidate(Protocol):
         ...
 
 
-def apply_exact_prune_candidates[
+def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031] exception
     Candidate: ExactPruneCandidate,
     AppliedCandidate,
 ](

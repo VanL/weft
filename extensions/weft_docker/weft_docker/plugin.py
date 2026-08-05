@@ -300,7 +300,7 @@ class DockerCommandRunner:
     def start_agent_session(self) -> AgentSession:
         raise ValueError("Docker runner does not support agent sessions")
 
-    def _build_docker_command(
+    def _build_docker_command(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-204] exception
         self,
         work_item: Any,
         container_name: str,
@@ -395,7 +395,7 @@ class DockerRunnerPlugin:
     def check_version(self) -> None:
         _load_docker_sdk()
 
-    def validate_taskspec(
+    def validate_taskspec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-205] exception
         self,
         taskspec_payload: Mapping[str, Any],
         *,
@@ -566,7 +566,7 @@ class DockerRunnerPlugin:
                 "tasks only"
             )
 
-    def _validate_agent_taskspec(
+    def _validate_agent_taskspec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-205] exception
         self,
         spec: Mapping[str, Any],
         *,
@@ -934,7 +934,7 @@ def _runtime_handle_for_container(
     )
 
 
-def _describe_runtime(
+def _describe_runtime(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-206] exception
     client: Any,
     *,
     runtime_id: str,
@@ -1173,7 +1173,7 @@ def _block_io_bytes(payload: Mapping[str, Any]) -> dict[str, int] | None:
     return {"read": read_total, "write": write_total}
 
 
-def _lookup_container(
+def _lookup_container(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-206] exception
     client: Any,
     runtime_id: str,
     *,

@@ -629,7 +629,7 @@ def _service_observation_is_stale(*, updated_at: int | None, now_ns: int) -> boo
     return now_ns - updated_at > stale_after_ns
 
 
-def _stale_liveness_reason(
+def _stale_liveness_reason(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-117] exception
     status: str,
     *,
     tid: str,
@@ -1285,7 +1285,7 @@ def _service_diagnostics_from_mapping(
     return {"task_monitor": dict(task_monitor)}
 
 
-def _collect_internal_service_snapshots(
+def _collect_internal_service_snapshots(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-118] exception
     ctx: WeftContext,
     *,
     managers: Sequence[Mapping[str, Any]],
@@ -1515,7 +1515,7 @@ def _render_json_payload(
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _watch_task_events(
+def _watch_task_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-119] exception
     ctx: WeftContext,
     *,
     tid_filters: set[str] | None,

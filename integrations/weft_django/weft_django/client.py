@@ -220,7 +220,7 @@ def _validate_decorated_task_overrides(overrides: Mapping[str, Any] | None) -> N
         raise ValueError("Decorated Django tasks only support runner='host' in v1")
 
 
-def _apply_taskspec_payload_overrides(
+def _apply_taskspec_payload_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-209] exception
     payload: Mapping[str, Any],
     overrides: Mapping[str, Any] | None,
     *,

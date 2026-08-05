@@ -421,7 +421,7 @@ class CodexProvider(_BaseTextProvider):
     _LIST_OPTIONS = frozenset({"add_dirs", "config_overrides"})
     _ALLOWED_OPTIONS = _STRING_OPTIONS | _BOOL_OPTIONS | _LIST_OPTIONS
 
-    def validate_options(self, options: Mapping[str, Any]) -> None:
+    def validate_options(self, options: Mapping[str, Any]) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-002] exception
         extra_keys = sorted(set(options) - self._ALLOWED_OPTIONS)
         if extra_keys:
             raise ValueError(
@@ -475,7 +475,7 @@ class CodexProvider(_BaseTextProvider):
                 f"Unsupported codex local provider value: {local_provider}"
             )
 
-    def resolve_options(
+    def resolve_options(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-002] exception
         self,
         *,
         authority_class: str,
@@ -549,7 +549,7 @@ class CodexProvider(_BaseTextProvider):
             )
         return merged
 
-    def build_invocation(
+    def build_invocation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-003] exception
         self,
         *,
         executable: str,
@@ -624,7 +624,7 @@ class CodexProvider(_BaseTextProvider):
             env={},
         )
 
-    def build_session_invocation(
+    def build_session_invocation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-003] exception
         self,
         *,
         executable: str,

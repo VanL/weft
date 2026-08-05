@@ -110,7 +110,7 @@ def drain_ctrl_out_stream_messages(
     return terminal_candidates
 
 
-def await_one_shot_result(
+def await_one_shot_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-106] exception
     context: WeftContext,
     tid: str,
     *,

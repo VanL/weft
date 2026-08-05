@@ -108,7 +108,7 @@ def test_resolve_work_item_mounts_rejects_relative_paths() -> None:
         )
 
 
-def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(
+def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-201] exception
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created: dict[str, object] = {}
@@ -253,7 +253,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(
     assert labels["weft.agent.image.cache_key"] == "cached-key"
 
 
-def test_agent_runner_reports_cancel_requested_as_cancelled(
+def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-201] exception
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     killed: list[bool] = []

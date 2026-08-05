@@ -235,7 +235,7 @@ def load_pipeline_spec_payload(payload: Mapping[str, Any]) -> PipelineSpec:
     return PipelineSpec.model_validate(dict(payload))
 
 
-def _merge_stage_defaults(
+def _merge_stage_defaults(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-030] exception
     taskspec_payload: Mapping[str, Any],
     stage: PipelineStage,
 ) -> dict[str, Any]:

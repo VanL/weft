@@ -323,7 +323,7 @@ class HeartbeatTask(ServiceTask):
             self._ensure_reserved_empty()
             self._cleanup_reserved_if_needed()
 
-    def _emit_due_registrations(self) -> bool:
+    def _emit_due_registrations(self) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-043] exception
         now = time.monotonic()
         due_ids: list[str] = []
 

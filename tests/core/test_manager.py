@@ -5372,7 +5372,7 @@ def test_manager_terminate_children_kills_sigterm_trapping_managed_pid(
             trapping.wait(timeout=2.0)
 
 
-def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(
+def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-214] exception
     manager_setup,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -7027,7 +7027,7 @@ def test_manager_leadership_observes_superseded_services_row_without_spawn_probe
     assert manager.taskspec.state.status == "cancelled"
 
 
-def test_manager_active_heartbeat_race_preserves_superseded_record(
+def test_manager_active_heartbeat_race_preserves_superseded_record(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-231] exception
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

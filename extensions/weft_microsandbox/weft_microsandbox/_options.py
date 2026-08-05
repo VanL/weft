@@ -108,7 +108,7 @@ def parse_options_from_payload(
     )
 
 
-def parse_options(
+def parse_options(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-208] exception
     *,
     target_type: str,
     agent: Mapping[str, Any] | None,

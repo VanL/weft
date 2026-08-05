@@ -1660,7 +1660,7 @@ class MonitorStore:
             checkpoint_message_id=None,
         )
 
-    def record_task_log_updates(
+    def record_task_log_updates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-022] exception
         self,
         queue_name: str,
         updates: Sequence[MonitorTaskEventUpdate],

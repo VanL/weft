@@ -187,7 +187,7 @@ def _agent_runtime(payload: dict[str, Any]) -> str | None:
     return runtime if isinstance(runtime, str) else None
 
 
-def _display_taskspec_summary(data: dict[str, Any]) -> None:
+def _display_taskspec_summary(data: dict[str, Any]) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-103] exception
     """Display a summary of the validated TaskSpec."""
     table = Table(title="TaskSpec Summary", show_header=False)
     table.add_column("Field", style="cyan")

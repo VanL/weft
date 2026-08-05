@@ -213,7 +213,7 @@ def test_task_monitor_rejects_service_registry_alias_for_derived_reserved_role(
     assert db_path.exists() is False
 
 
-def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(
+def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-222] exception
     broker_env,
     tmp_path: Path,
 ) -> None:
@@ -8436,7 +8436,7 @@ def test_task_monitor_jsonl_lifecycle_with_interleaved_writer_load(
         task.stop()
 
 
-def test_retirement_backlog_identifies_binding_stage(
+def test_retirement_backlog_identifies_binding_stage(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-238] exception
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

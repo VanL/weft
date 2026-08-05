@@ -329,7 +329,7 @@ def endpoint_record_owner_is_live(
     )
 
 
-def list_resolved_endpoints(
+def list_resolved_endpoints(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-004] exception
     ctx: WeftContext,
     *,
     pattern: str | None = None,

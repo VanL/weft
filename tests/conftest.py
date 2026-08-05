@@ -363,7 +363,7 @@ def task_factory(broker_env: tuple[object, Callable[[str], Queue]]):
                 pass
 
 
-def run_cli(
+def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
     *args: object,
     cwd: Path,
     stdin: str | None = None,
@@ -496,7 +496,7 @@ def _extract_ids(harness: WeftTestHarness, text: str) -> None:
             continue
 
 
-def _register_from_json(
+def _register_from_json(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-230] exception
     harness: WeftTestHarness,
     payload: Any,
     *,

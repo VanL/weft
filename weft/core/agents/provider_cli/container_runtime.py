@@ -430,7 +430,7 @@ def require_provider_container_runtime_descriptor(
     return descriptor
 
 
-def resolve_provider_container_runtime(
+def resolve_provider_container_runtime(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-001] exception
     provider_name: str,
     *,
     task_env: Mapping[str, str] | None,

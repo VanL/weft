@@ -256,7 +256,7 @@ class AgentSession:
     def handle(self) -> RunnerHandle | None:
         return self._handle
 
-    def wait_ready(self, *, timeout: float = 5.0) -> None:
+    def wait_ready(self, *, timeout: float = 5.0) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-047] exception
         deadline = time.monotonic() + timeout
         last_handshake: str | None = None
         channel_sealed = False
@@ -422,7 +422,7 @@ class AgentSession:
             return message
         return f"{message} ({summary})"
 
-    def execute(
+    def execute(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-048] exception
         self,
         work_item: Any,
         *,
@@ -690,7 +690,7 @@ class AgentSession:
     def is_alive(self) -> bool:
         return self._process.is_alive()
 
-    def terminate(self, *, deadline: float | None = None) -> None:
+    def terminate(self, *, deadline: float | None = None) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-049] exception
         if deadline is not None:
             if not self.is_alive():
                 try:

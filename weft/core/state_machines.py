@@ -170,7 +170,7 @@ class StateMachine[StateT: str, InputT, ActionT: str]:
         if unknown:
             raise AssertionError(f"Unknown covered actions: {_format_values(unknown)}")
 
-    def _validate(self) -> None:
+    def _validate(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-038] exception
         if not self.states:
             raise ValueError("StateMachine requires at least one state")
         if not self.actions:

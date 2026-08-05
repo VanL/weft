@@ -280,7 +280,7 @@ def _taskspec_context_root(path: Path) -> Path | None:
     return _resolve_cli_path(value, path.parent)
 
 
-def cli_context_root(args: Sequence[object], cwd: Path) -> Path:
+def cli_context_root(args: Sequence[object], cwd: Path) -> Path:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-216] exception
     """Resolve the project root a CLI invocation will operate against in tests."""
 
     arg_list = [str(arg) for arg in args]

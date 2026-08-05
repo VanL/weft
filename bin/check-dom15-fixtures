@@ -91,7 +91,7 @@ def fixture_rows(section: str) -> list[tuple[str, str]]:
     return rows
 
 
-def check(section: str) -> list[str]:
+def check(section: str) -> list[str]:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-223] exception
     problems: list[str] = []
     rows = fixture_rows(section)
     if not rows:

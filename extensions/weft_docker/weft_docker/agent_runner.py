@@ -99,7 +99,7 @@ class DockerProviderCLIRunner:
     def run(self, work_item: Any) -> RunnerOutcome:
         return self.run_with_hooks(work_item)
 
-    def run_with_hooks(
+    def run_with_hooks(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-202] exception
         self,
         work_item: Any,
         *,
@@ -592,7 +592,7 @@ def _normalize_mounts(value: object, *, name: str) -> list[dict[str, Any]]:
     return mounts
 
 
-def _normalize_work_item_mounts(value: object, *, name: str) -> list[dict[str, Any]]:
+def _normalize_work_item_mounts(value: object, *, name: str) -> list[dict[str, Any]]:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-203] exception
     if value is None:
         return []
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
@@ -667,7 +667,7 @@ def _validate_mount_target_conflicts(
         )
 
 
-def _resolve_work_item_mounts(
+def _resolve_work_item_mounts(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-203] exception
     mount_specs: Sequence[Mapping[str, Any]],
     work_item: Any,
     *,
