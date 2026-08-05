@@ -187,55 +187,72 @@ def _agent_runtime(payload: dict[str, Any]) -> str | None:
     return runtime if isinstance(runtime, str) else None
 
 
-def _display_taskspec_summary(data: dict[str, Any]) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-103] exception
+def _display_taskspec_summary(data: dict[str, Any]) -> None:
     """Display a summary of the validated TaskSpec."""
     table = Table(title="TaskSpec Summary", show_header=False)
     table.add_column("Field", style="cyan")
     table.add_column("Value")
 
-    table.add_row("TID", data.get("tid", "N/A"))
-    table.add_row("Name", data.get("name", "N/A"))
-    if "description" in data:
-        table.add_row("Description", data["description"])
-
-    spec = data.get("spec")
-    if isinstance(spec, dict):
-        table.add_row("Type", spec.get("type", "N/A"))
-        runner = spec.get("runner") or {}
-        if isinstance(runner, dict):
-            table.add_row("Runner", str(runner.get("name", "host")))
-        if spec.get("type") == "function":
-            table.add_row("Function", spec.get("function_target", "N/A"))
-        elif spec.get("type") == "command":
-            target = spec.get("process_target")
-            args = spec.get("args") or []
-            if isinstance(target, str):
-                command = (
-                    " ".join([target, *[str(arg) for arg in args]]) if args else target
-                )
-                table.add_row("Command", command)
-            else:
-                table.add_row("Command", "N/A")
-        elif spec.get("type") == "agent":
-            agent = spec.get("agent") or {}
-            if isinstance(agent, dict):
-                table.add_row("Runtime", str(agent.get("runtime", "N/A")))
-                table.add_row("Model", str(agent.get("model", "N/A")))
-            else:
-                table.add_row("Runtime", "N/A")
-                table.add_row("Model", "N/A")
-        run_input = spec.get("run_input")
-        if isinstance(run_input, dict):
-            table.add_row("Run input", str(run_input.get("adapter_ref", "N/A")))
-        parameterization = spec.get("parameterization")
-        if isinstance(parameterization, dict):
-            table.add_row(
-                "Parameterization",
-                str(parameterization.get("adapter_ref", "N/A")),
-            )
+    for field, value in _taskspec_summary_rows(data):
+        table.add_row(field, value)
 
     console.print()
     console.print(table)
+
+
+def _taskspec_summary_rows(data: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Project a validated TaskSpec into ordered summary rows."""
+    rows: list[tuple[str, Any]] = [
+        ("TID", data.get("tid", "N/A")),
+        ("Name", data.get("name", "N/A")),
+    ]
+    if "description" in data:
+        rows.append(("Description", data["description"]))
+
+    spec = data.get("spec")
+    if not isinstance(spec, dict):
+        return rows
+
+    rows.append(("Type", spec.get("type", "N/A")))
+    runner = spec.get("runner") or {}
+    if isinstance(runner, dict):
+        rows.append(("Runner", str(runner.get("name", "host"))))
+
+    spec_type = spec.get("type")
+    if spec_type == "function":
+        rows.append(("Function", spec.get("function_target", "N/A")))
+    elif spec_type == "command":
+        rows.append(("Command", _command_summary_value(spec)))
+    elif spec_type == "agent":
+        agent = spec.get("agent") or {}
+        if isinstance(agent, dict):
+            rows.append(("Runtime", str(agent.get("runtime", "N/A"))))
+            rows.append(("Model", str(agent.get("model", "N/A"))))
+        else:
+            rows.append(("Runtime", "N/A"))
+            rows.append(("Model", "N/A"))
+
+    run_input = spec.get("run_input")
+    if isinstance(run_input, dict):
+        rows.append(("Run input", str(run_input.get("adapter_ref", "N/A"))))
+    parameterization = spec.get("parameterization")
+    if isinstance(parameterization, dict):
+        rows.append(
+            (
+                "Parameterization",
+                str(parameterization.get("adapter_ref", "N/A")),
+            )
+        )
+    return rows
+
+
+def _command_summary_value(spec: dict[str, Any]) -> str:
+    """Format the command target and arguments for one summary row."""
+    target = spec.get("process_target")
+    if not isinstance(target, str):
+        return "N/A"
+    args = spec.get("args") or []
+    return " ".join([target, *[str(arg) for arg in args]]) if args else target
 
 
 def _display_validation_errors(errors: dict[str, str]) -> None:

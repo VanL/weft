@@ -16,6 +16,7 @@ from tests.fixtures.provider_cli_fixture import (
 )
 from tests.taskspec.fixtures import (
     create_valid_agent_taskspec,
+    create_valid_command_taskspec,
     create_valid_function_taskspec,
     create_valid_provider_cli_agent_taskspec,
 )
@@ -121,6 +122,38 @@ def test_validate_taskspec_agent_summary(workdir):
     assert "agent" in out
     assert "llm" in out
     assert "weft-test-agent-model" in out
+    assert err == ""
+
+
+def test_validate_taskspec_command_summary_preserves_fields_and_order(workdir) -> None:
+    """The validation summary keeps its user-facing command field sequence."""
+    taskspec = create_valid_command_taskspec(name="ordered-command")
+    payload = taskspec.model_dump(mode="json")
+    payload["description"] = "summary ordering proof"
+    spec_path = workdir / "ordered_command_taskspec.json"
+    write_taskspec(spec_path, payload)
+
+    rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
+
+    assert rc == 0
+    expected_fragments = (
+        "TaskSpec Summary",
+        "TID",
+        taskspec.tid,
+        "Name",
+        "ordered-command",
+        "Description",
+        "summary ordering proof",
+        "Type",
+        "command",
+        "Runner",
+        "host",
+        "Command",
+        "echo hello",
+    )
+    cursor = 0
+    for fragment in expected_fragments:
+        cursor = out.index(fragment, cursor) + len(fragment)
     assert err == ""
 
 
