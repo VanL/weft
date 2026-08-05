@@ -1,6 +1,6 @@
 # Ruff Complexity And Suppression Registry Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/08-Testing_Strategy.md [TS-0], [TS-1], [TS-3], [TS-3.1]
 Superseded by: none
 
@@ -1344,7 +1344,7 @@ Stop rather than improvise when:
 | Task 6 all-markers run | Current corrected worktree | `./.venv/bin/python -m pytest -m ""` | 3252 passed, 14 skipped | Parent integration | Live-provider and unavailable-backend skips are explicit. |
 | Task 6 final static and governance gates | Full configured mypy; Ruff lint/format; suppression check; plan metadata/spec hygiene; DOM-15; raw audit; diff check | Commands from §13 | Mypy clean across 198 source files; Ruff clean; 404 files formatted; 8 metadata/hygiene tests passed; DOM-15 passed; raw inventory `C901=147`, `E402=22`, `F401=5`; registry and diff clean | Parent integration | Clean. |
 | Task 6 documentation and traceability gates | Doc-path advisory plus explicit-root Backstitch | Commands from §13 | Exact reviewed eight dangling claims; Backstitch debt exit 1 with 45 errors, 1025 warnings, 610 infos, and zero issue keyed to [TS-3], [TS-3.1], the tool, policy tests, or this plan | Parent integration | No new documentation or traceability debt. |
-| Task 6 independent completed-work review | Full `3ada6ccb..12ef53ba` diff plus corrected closure worktree and exact raw inventory | Read-only clean-context review; focused policy/tool, Ruff, suppression, mypy, import-boundary, metadata/hygiene, DOM-15, doc-path, Backstitch, and diff checks | Initial `BLOCKED` on stale fixture and missing promised probes; corrected-state re-review `PASS` with no implementation blocker | Independent completion reviewer | Closure evidence may be committed at owner direction; plan/index status remain draft until that commit exists. |
+| Task 6 independent completed-work review | Full `3ada6ccb..12ef53ba` diff plus corrected closure worktree and exact raw inventory | Read-only clean-context review; focused policy/tool, Ruff, suppression, mypy, import-boundary, metadata/hygiene, DOM-15, doc-path, Backstitch, and diff checks | Initial `BLOCKED` on stale fixture and missing promised probes; corrected-state re-review `PASS` with no implementation blocker | Independent completion reviewer | Closure evidence committed at owner direction as `9b32344958a54794213939b4144636e89b0fa59a`; plan and index may now be marked completed. |
 
 ## 19. Revision Log
 
