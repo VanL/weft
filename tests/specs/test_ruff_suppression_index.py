@@ -369,15 +369,16 @@ def test_write_preserves_crlf_and_non_ascii_bytes_outside_markers(
     assert b"\n" not in generated.replace(b"\r\n", b"")
 
 
-def test_fenced_heading_and_markers_are_inert(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_fenced_heading_and_markers_are_inert(tmp_path: Path, fence: str) -> None:
     spec = _write_fixture(tmp_path)
     text = spec.read_text(encoding="utf-8")
-    example = """\
-```markdown
+    example = f"""\
+{fence}markdown
 ### Approved Ruff Suppression Registry [TS-3.1]
 <!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->
 <!-- END GENERATED RUFF SUPPRESSION INDEX -->
-```
+{fence}
 
 """
     spec.write_text(
@@ -388,6 +389,40 @@ def test_fenced_heading_and_markers_are_inert(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert spec.read_text(encoding="utf-8").startswith(f"# Policy\n\n{example}")
+
+
+def test_symbol_attribution_covers_module_decorator_and_nested_function(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "symbols.py"
+    source.write_text(
+        """\
+# noqa: F401 approved [TS-3.1] [RUFF-SUP-001] exception
+def marker(function):
+    return function
+
+@marker  # noqa: F401 approved [TS-3.1] [RUFF-SUP-002] exception
+def decorated():
+    return None
+
+def outer():
+    def inner():
+        return None  # noqa: F401 approved [TS-3.1] [RUFF-SUP-003] exception
+    return inner
+""",
+        encoding="utf-8",
+    )
+
+    directives = ruff_suppression_index.scan_source_directives(
+        tmp_path,
+        [source],
+    )
+
+    assert [(item.group_id, item.symbol) for item in directives] == [
+        ("RUFF-SUP-001", "<module>"),
+        ("RUFF-SUP-002", "decorated"),
+        ("RUFF-SUP-003", "outer"),
+    ]
 
 
 def test_syntactically_invalid_source_is_an_unverifiable_exit_two(
@@ -746,5 +781,117 @@ def test_normal_ruff_valid_non_list_json_is_tool_failure_without_writing(
     captured = capsys.readouterr()
     assert returncode == 2
     assert "normal Ruff check returned malformed JSON" in captured.err
+    assert "Traceback" not in captured.err
+    assert spec.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("raw_result", "message"),
+    [
+        ((1, "not-json", ""), "Ruff raw audit returned invalid JSON"),
+        ((1, "null", ""), "Ruff raw audit returned a non-list JSON payload"),
+        ((1, "[null]", ""), "Ruff raw audit returned a malformed diagnostic"),
+        ((2, "[]", "raw failed"), "Ruff raw audit failed: raw failed"),
+    ],
+)
+def test_raw_ruff_failures_are_clean_exit_two_without_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raw_result: tuple[int, str, str],
+    message: str,
+) -> None:
+    spec = _write_fixture(tmp_path)
+    original = spec.read_bytes()
+
+    def fake_ruff(
+        repo_root: Path,
+        *args: str,
+    ) -> subprocess.CompletedProcess[str]:
+        if "--show-files" in args:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=f"{repo_root / 'probe.py'}\n",
+                stderr="",
+            )
+        if "--ignore-noqa" not in args:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="[]",
+                stderr="",
+            )
+        returncode, stdout, stderr = raw_result
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    monkeypatch.setattr(ruff_suppression_index, "_run_ruff", fake_ruff)
+
+    returncode = ruff_suppression_index.main(
+        ["--repo-root", str(tmp_path), "--spec", str(spec), "--write"]
+    )
+
+    captured = capsys.readouterr()
+    assert returncode == 2
+    assert message in captured.err
+    assert "Traceback" not in captured.err
+    assert spec.read_bytes() == original
+
+
+def test_ruff_discovery_failure_is_clean_exit_two_without_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spec = _write_fixture(tmp_path)
+    original = spec.read_bytes()
+
+    monkeypatch.setattr(
+        ruff_suppression_index,
+        "_run_ruff",
+        lambda _repo_root, *args: subprocess.CompletedProcess(
+            args=args,
+            returncode=2,
+            stdout="",
+            stderr="discovery failed",
+        ),
+    )
+
+    returncode = ruff_suppression_index.main(
+        ["--repo-root", str(tmp_path), "--spec", str(spec), "--write"]
+    )
+
+    captured = capsys.readouterr()
+    assert returncode == 2
+    assert "Ruff file discovery failed: discovery failed" in captured.err
+    assert "Traceback" not in captured.err
+    assert spec.read_bytes() == original
+
+
+def test_ruff_invocation_failure_is_clean_exit_two_without_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spec = _write_fixture(tmp_path)
+    original = spec.read_bytes()
+
+    def fail_to_run(*_args: object, **_kwargs: object) -> None:
+        raise OSError("ruff unavailable")
+
+    monkeypatch.setattr(ruff_suppression_index.subprocess, "run", fail_to_run)
+
+    returncode = ruff_suppression_index.main(
+        ["--repo-root", str(tmp_path), "--spec", str(spec), "--write"]
+    )
+
+    captured = capsys.readouterr()
+    assert returncode == 2
+    assert "could not run Ruff: ruff unavailable" in captured.err
     assert "Traceback" not in captured.err
     assert spec.read_bytes() == original

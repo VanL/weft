@@ -1077,3 +1077,14 @@ index is not a dated section and does not count toward the coalescing trigger.
   be normalized to spawn-safe built-ins, and acceptance tests must traverse the
   real installed manager and child-process path rather than only call the
   runner in-process.
+
+## 2026-08-05 Exact Policy Fixtures Are Part Of The Atomic Registry
+
+- A suppression registry can reconcile its live spec, source directives, raw
+  diagnostics, and generated index while a committed exact-ID test fixture is
+  still stale. Treat that fixture as reviewed registry state: removing an
+  approved directive must update the human row, global inventory, generated
+  index, and exact expected group/directive fixture in the same slice.
+- Run the focused policy suite after every accepted registry-count change.
+  The suppression tool proves live reconciliation, but it cannot prove that a
+  separate CI fixture no longer encodes the prior inventory.

@@ -35,12 +35,16 @@ EXTENSIONLESS_PYTHON = [
 ]
 MCCABE_MAX_COMPLEXITY = 10
 EXPECTED_GROUP_IDS = [
-    *(f"RUFF-SUP-{number:03d}" for number in range(1, 60)),
-    *(f"RUFF-SUP-{number:03d}" for number in range(101, 127)),
+    *(f"RUFF-SUP-{number:03d}" for number in range(1, 60) if number != 21),
+    *(
+        f"RUFF-SUP-{number:03d}"
+        for number in range(101, 127)
+        if number not in {101, 102, 103, 110}
+    ),
     *(f"RUFF-SUP-{number:03d}" for number in range(201, 239)),
 ]
-EXPECTED_GROUP_COUNT = 123
-EXPECTED_DIRECTIVE_COUNT = 152
+EXPECTED_GROUP_COUNT = 118
+EXPECTED_DIRECTIVE_COUNT = 147
 TAGGED_C901 = re.compile(
     r"#\s*noqa:\s*[^#\n]*\bC901\b[^#\n]*"
     r"approved\s+\[TS-3\.1\]\s+\[RUFF-SUP-(\d{3})\]\s+exception\b"
@@ -212,6 +216,13 @@ def test_ruff_discovers_every_tracked_python_file() -> None:
     assert expected <= discovered, sorted(
         str(path.relative_to(ROOT)) for path in expected - discovered
     )
+
+
+def test_ruff_discovery_excludes_tracked_extensionless_bash_tools() -> None:
+    discovered = _ruff_discovered_files()
+    bash_tools = {ROOT / "bin" / "mypy-check", ROOT / "bin" / "uv"}
+
+    assert not {path.resolve() for path in bash_tools} & discovered
 
 
 def test_configured_complexity_boundary_fires_at_eleven() -> None:
