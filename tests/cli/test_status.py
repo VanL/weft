@@ -322,6 +322,62 @@ def test_task_status_process_json_reports_dead_pid_stale_liveness(workdir) -> No
     assert payload["live_managed_pids"] == []
 
 
+def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
+    workdir,
+) -> None:
+    context = build_context(spec_context=workdir)
+    tid = "1844674407370955171"
+    started = time.time_ns()
+    taskspec = {
+        "name": "live-host-task",
+        "state": {"status": "running", "started_at": started},
+        "io": {
+            "inputs": {"inbox": f"T{tid}.inbox"},
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "metadata": {"owner": "tests"},
+    }
+    _write_log_event(
+        context,
+        {
+            "event": "work_started",
+            "status": "running",
+            "activity": "waiting",
+            "waiting_on": "upstream-result",
+            "tid": tid,
+            "tid_short": tid[-10:],
+            "timestamp": started,
+            "taskspec": taskspec,
+        },
+    )
+    mapping_queue = context.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "runner": "host",
+                "runtime_handle": _host_runtime_handle(os.getpid()),
+            }
+        )
+    )
+
+    rc, out, err = run_cli("task", "status", tid, "--process", cwd=workdir)
+
+    assert rc == 0
+    assert out.splitlines() == [
+        f"{tid} running host live-host-task (work_started)",
+        "activity: waiting",
+        "waiting_on: upstream-result",
+        f"host_pids: [{os.getpid()}] live_host_pids: [{os.getpid()}]",
+    ]
+    assert err == ""
+
+
 def test_task_status_not_found(workdir) -> None:
     rc, out, err = run_cli("task", "status", "nonexistent", cwd=workdir)
 

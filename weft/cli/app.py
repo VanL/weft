@@ -723,8 +723,69 @@ def task_list(
         )
 
 
+def _task_status_process_fields(
+    tid: str,
+    context_dir: Path | None,
+) -> dict[str, list[int]]:
+    """Return additive scoped and live host-PID fields for task status."""
+    ctx = task_cmd._resolve_context(context_dir)
+    mapping = task_cmd.mapping_for_tid(ctx, tid) or {}
+    runtime_handle = mapping.get("runtime_handle")
+    managed_pids: list[int] = []
+    if isinstance(runtime_handle, dict):
+        try:
+            handle = RunnerHandle.from_dict(runtime_handle)
+            managed_pids = list(handle.scoped_host_pids())
+        except (TypeError, ValueError):
+            managed_pids = []
+    live_managed_pids = [
+        managed_pid
+        for managed_pid in managed_pids
+        if isinstance(managed_pid, int) and status_cmd._pid_alive(managed_pid)
+    ]
+    return {
+        "host_pids": managed_pids,
+        "managed_pids": managed_pids,
+        "live_managed_pids": live_managed_pids,
+    }
+
+
+def _task_status_plain_lines(
+    status_payload: dict[str, Any],
+    *,
+    include_process: bool,
+) -> list[str]:
+    """Project the public task-status payload into ordered plain-text lines."""
+    lines = [
+        f"{status_payload['tid']} {status_payload['status']} "
+        f"{status_payload.get('runner') or '-'} {status_payload['name']} "
+        f"({status_payload['event']})"
+    ]
+    activity = status_payload.get("activity")
+    if activity:
+        lines.append(f"activity: {activity}")
+    waiting_on = status_payload.get("waiting_on")
+    if waiting_on:
+        lines.append(f"waiting_on: {waiting_on}")
+    raw_diagnostics = status_payload.get("runner_diagnostics")
+    diagnostics = format_runner_diagnostics(
+        raw_diagnostics if isinstance(raw_diagnostics, dict) else None
+    )
+    if diagnostics is not None and status_payload["status"] in {
+        "failed",
+        "timeout",
+        "killed",
+    }:
+        lines.append(f"runner_diagnostics: {diagnostics}")
+    if include_process:
+        managed = status_payload.get("managed_pids")
+        live_managed = status_payload.get("live_managed_pids")
+        lines.append(f"host_pids: {managed} live_host_pids: {live_managed}")
+    return lines
+
+
 @task_app.command("status")
-def task_status(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-102] exception
+def task_status(
     tid: Annotated[str, typer.Argument(help="Task ID or short ID")],
     process: Annotated[
         bool,
@@ -772,42 +833,15 @@ def task_status(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-102] exception
         raise typer.Exit(code=2)
     status_payload: dict[str, Any] = snapshot.to_dict()
     if process:
-        ctx = task_cmd._resolve_context(context_dir)
-        mapping = task_cmd.mapping_for_tid(ctx, snapshot.tid) or {}
-        runtime_handle = mapping.get("runtime_handle")
-        managed_pids: list[int] = []
-        if isinstance(runtime_handle, dict):
-            try:
-                handle = RunnerHandle.from_dict(runtime_handle)
-                managed_pids = list(handle.scoped_host_pids())
-            except (TypeError, ValueError):
-                managed_pids = []
-        live_managed_pids = [
-            managed_pid
-            for managed_pid in managed_pids
-            if isinstance(managed_pid, int) and status_cmd._pid_alive(managed_pid)
-        ]
-        status_payload["host_pids"] = managed_pids
-        status_payload["managed_pids"] = managed_pids
-        status_payload["live_managed_pids"] = live_managed_pids
+        status_payload.update(_task_status_process_fields(snapshot.tid, context_dir))
     if json_output:
         typer.echo(json.dumps(status_payload, ensure_ascii=False))
         return
-    typer.echo(
-        f"{snapshot.tid} {snapshot.status} {snapshot.runner or '-'} "
-        f"{snapshot.name} ({snapshot.event})"
-    )
-    if snapshot.activity:
-        typer.echo(f"activity: {snapshot.activity}")
-    if snapshot.waiting_on:
-        typer.echo(f"waiting_on: {snapshot.waiting_on}")
-    diagnostics = format_runner_diagnostics(snapshot.runner_diagnostics)
-    if diagnostics is not None and snapshot.status in {"failed", "timeout", "killed"}:
-        typer.echo(f"runner_diagnostics: {diagnostics}")
-    if process:
-        managed = status_payload.get("managed_pids")
-        live_managed = status_payload.get("live_managed_pids")
-        typer.echo(f"host_pids: {managed} live_host_pids: {live_managed}")
+    for line in _task_status_plain_lines(
+        status_payload,
+        include_process=process,
+    ):
+        typer.echo(line)
 
 
 @task_app.command("ping")
