@@ -20,7 +20,7 @@ import importlib
 import json
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 
@@ -63,6 +63,120 @@ from weft.helpers import iter_queue_entries
 TaskLogObserver = Callable[[str, str, int], None]
 
 
+def _positive_int_config(
+    config: Mapping[str, Any],
+    key: str,
+    default: int,
+) -> int:
+    """Read one positive integer monitor setting."""
+    value = int(config.get(key, default))
+    if value <= 0:
+        raise ValueError(f"{key} must be positive")
+    return value
+
+
+def _positive_float_config(
+    config: Mapping[str, Any],
+    key: str,
+    default: float,
+) -> float:
+    """Read one positive floating-point monitor setting."""
+    value = float(config.get(key, default))
+    if value <= 0:
+        raise ValueError(f"{key} must be positive")
+    return value
+
+
+def _choice_config(
+    config: Mapping[str, Any],
+    key: str,
+    default: str,
+    allowed_values: Collection[str],
+    *,
+    lowercase: bool = False,
+) -> str:
+    """Read one stripped monitor choice and validate its allowed values."""
+    value = str(config.get(key, default)).strip()
+    if lowercase:
+        value = value.lower()
+    if value not in allowed_values:
+        allowed = ", ".join(sorted(allowed_values))
+        raise ValueError(f"{key} must be one of: {allowed}")
+    return value
+
+
+def _monitor_processor_config(
+    config: Mapping[str, Any],
+    mode: str,
+) -> str | None:
+    """Resolve and validate the optional custom monitor processor."""
+    processor_value = str(
+        config.get(
+            "WEFT_TASK_MONITOR_PROCESSOR",
+            WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
+        )
+    ).strip()
+    if processor_value in WEFT_TASK_MONITOR_MODES:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_PROCESSOR no longer selects built-in modes; use "
+            f"WEFT_TASK_MONITOR_MODE={processor_value}"
+        )
+    if processor_value and ":" not in processor_value:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_PROCESSOR must be a module:function reference"
+        )
+    if processor_value:
+        module_name, function_name = processor_value.split(":", 1)
+        if not module_name.strip() or not function_name.strip():
+            raise ValueError(
+                "WEFT_TASK_MONITOR_PROCESSOR module:function reference is malformed"
+            )
+    processor = processor_value or None
+    if mode == "custom" and processor is None:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_MODE=custom requires WEFT_TASK_MONITOR_PROCESSOR"
+        )
+    if mode != "custom" and processor is not None:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_PROCESSOR is only valid with "
+            "WEFT_TASK_MONITOR_MODE=custom"
+        )
+    return processor
+
+
+def _validate_jsonl_then_delete_config(
+    *,
+    mode: str,
+    task_log_external_path: str,
+    task_log_external_enabled: bool,
+    task_log_external_mode: str,
+    collation_store_enabled: bool,
+) -> None:
+    """Validate the reporting prerequisites for destructive JSONL mode."""
+    if mode != "jsonl_then_delete":
+        return
+    if not task_log_external_path:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
+            "WEFT_LOG_TASKS_EXTERNAL_PATH"
+        )
+    if not task_log_external_enabled:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED=true"
+        )
+    if task_log_external_mode != "collated":
+        raise ValueError(
+            "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
+            "WEFT_LOG_TASKS_EXTERNAL_MODE=collated"
+        )
+    if not collation_store_enabled:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
+            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED=true"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class TaskMonitorRuntimeConfig:
     """Typed config used by one supervised task-monitor process.
@@ -100,7 +214,7 @@ class TaskMonitorRuntimeConfig:
     maintenance_interval_seconds: float = WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any]) -> TaskMonitorRuntimeConfig:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-021] exception
+    def from_config(cls, config: Mapping[str, Any]) -> TaskMonitorRuntimeConfig:
         """Build typed runtime config from a loaded Weft config mapping."""
 
         enabled = bool(
@@ -118,76 +232,41 @@ class TaskMonitorRuntimeConfig:
                 f"{HEARTBEAT_MIN_INTERVAL_SECONDS}"
             )
 
-        catchup_interval_seconds = float(
-            config.get(
-                "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
-                WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
-            )
+        catchup_interval_seconds = _positive_float_config(
+            config,
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
+            WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
         )
-        if catchup_interval_seconds <= 0:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS must be positive"
-            )
-
-        batch_size = int(
-            config.get(
-                "WEFT_TASK_MONITOR_BATCH_SIZE",
-                WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
-            )
+        batch_size = _positive_int_config(
+            config,
+            "WEFT_TASK_MONITOR_BATCH_SIZE",
+            WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
         )
-        if batch_size <= 0:
-            raise ValueError("WEFT_TASK_MONITOR_BATCH_SIZE must be positive")
-
-        task_log_scan_limit = int(
-            config.get(
-                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT",
-                WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
-            )
+        task_log_scan_limit = _positive_int_config(
+            config,
+            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT",
+            WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
         )
-        if task_log_scan_limit <= 0:
-            raise ValueError("WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT must be positive")
-
-        store_write_batch_size = int(
-            config.get(
-                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
-                WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
-            )
+        store_write_batch_size = _positive_int_config(
+            config,
+            "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
+            WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
         )
-        if store_write_batch_size <= 0:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE must be positive"
-            )
-
-        stale_open_family_seconds = float(
-            config.get(
-                "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
-                WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
-            )
+        stale_open_family_seconds = _positive_float_config(
+            config,
+            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
+            WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
         )
-        if stale_open_family_seconds <= 0:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS must be positive"
-            )
-
-        control_queue_delete_limit = int(
-            config.get(
-                "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
-                WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
-            )
+        control_queue_delete_limit = _positive_int_config(
+            config,
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
+            WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
         )
-        if control_queue_delete_limit <= 0:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT must be positive"
-            )
-
-        task_log_retention_period_seconds = float(
-            config.get(
-                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
-                WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
-            )
+        task_log_retention_period_seconds = _positive_float_config(
+            config,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
+            WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
         )
-        if task_log_retention_period_seconds <= 0:
-            raise ValueError("WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS must be positive")
 
         reserved_gate_value = config.get(
             "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"
@@ -207,19 +286,13 @@ class TaskMonitorRuntimeConfig:
                     "be negative"
                 )
 
-        mode = (
-            str(
-                config.get(
-                    "WEFT_TASK_MONITOR_MODE",
-                    WEFT_TASK_MONITOR_MODE_DEFAULT,
-                )
-            )
-            .strip()
-            .lower()
+        mode = _choice_config(
+            config,
+            "WEFT_TASK_MONITOR_MODE",
+            WEFT_TASK_MONITOR_MODE_DEFAULT,
+            WEFT_TASK_MONITOR_MODES,
+            lowercase=True,
         )
-        if mode not in WEFT_TASK_MONITOR_MODES:
-            allowed = ", ".join(sorted(WEFT_TASK_MONITOR_MODES))
-            raise ValueError(f"WEFT_TASK_MONITOR_MODE must be one of: {allowed}")
 
         task_log_external_path = str(
             config.get(
@@ -233,74 +306,33 @@ class TaskMonitorRuntimeConfig:
                 mode == "jsonl_then_delete",
             )
         )
-        task_log_external_mode = (
-            str(
-                config.get(
-                    "WEFT_LOG_TASKS_EXTERNAL_MODE",
-                    WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
-                )
-            )
-            .strip()
-            .lower()
+        task_log_external_mode = _choice_config(
+            config,
+            "WEFT_LOG_TASKS_EXTERNAL_MODE",
+            WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
+            WEFT_LOG_TASKS_EXTERNAL_MODES,
+            lowercase=True,
         )
-        if task_log_external_mode not in WEFT_LOG_TASKS_EXTERNAL_MODES:
-            allowed = ", ".join(sorted(WEFT_LOG_TASKS_EXTERNAL_MODES))
-            raise ValueError(f"WEFT_LOG_TASKS_EXTERNAL_MODE must be one of: {allowed}")
         if task_log_external_enabled and not task_log_external_path:
             raise ValueError(
                 "WEFT_LOG_TASKS_EXTERNAL_PATH must be set when "
                 "WEFT_LOG_TASKS_EXTERNAL_ENABLED is true"
             )
 
-        processor_value = str(
-            config.get(
-                "WEFT_TASK_MONITOR_PROCESSOR",
-                WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
-            )
-        ).strip()
-        if processor_value in WEFT_TASK_MONITOR_MODES:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_PROCESSOR no longer selects built-in modes; use "
-                f"WEFT_TASK_MONITOR_MODE={processor_value}"
-            )
-        if processor_value and ":" not in processor_value:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_PROCESSOR must be a module:function reference"
-            )
-        if processor_value:
-            module_name, function_name = processor_value.split(":", 1)
-            if not module_name.strip() or not function_name.strip():
-                raise ValueError(
-                    "WEFT_TASK_MONITOR_PROCESSOR module:function reference is malformed"
-                )
-        processor = processor_value or None
-        if mode == "custom" and processor is None:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_MODE=custom requires WEFT_TASK_MONITOR_PROCESSOR"
-            )
-        if mode != "custom" and processor is not None:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_PROCESSOR is only valid with "
-                "WEFT_TASK_MONITOR_MODE=custom"
-            )
+        processor = _monitor_processor_config(config, mode)
 
-        log_sink = str(
-            config.get("WEFT_TASK_MONITOR_LOG_SINK", WEFT_TASK_MONITOR_LOG_SINK_DEFAULT)
-        ).strip()
-        if log_sink not in WEFT_TASK_MONITOR_LOG_SINKS:
-            allowed = ", ".join(sorted(WEFT_TASK_MONITOR_LOG_SINKS))
-            raise ValueError(f"WEFT_TASK_MONITOR_LOG_SINK must be one of: {allowed}")
-
-        restart_backoff_seconds = float(
-            config.get(
-                "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
-                WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
-            )
+        log_sink = _choice_config(
+            config,
+            "WEFT_TASK_MONITOR_LOG_SINK",
+            WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
+            WEFT_TASK_MONITOR_LOG_SINKS,
         )
-        if restart_backoff_seconds <= 0:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS must be positive"
-            )
+
+        restart_backoff_seconds = _positive_float_config(
+            config,
+            "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
+            WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
+        )
 
         collation_store_enabled = bool(
             config.get(
@@ -315,37 +347,18 @@ class TaskMonitorRuntimeConfig:
                 WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT,
             )
         )
-        maintenance_interval_seconds = float(
-            config.get(
-                "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
-                WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS,
-            )
+        maintenance_interval_seconds = _positive_float_config(
+            config,
+            "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
+            WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS,
         )
-        if maintenance_interval_seconds <= 0:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS must be positive"
-            )
-        if mode == "jsonl_then_delete":
-            if not task_log_external_path:
-                raise ValueError(
-                    "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
-                    "WEFT_LOG_TASKS_EXTERNAL_PATH"
-                )
-            if not task_log_external_enabled:
-                raise ValueError(
-                    "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
-                    "WEFT_LOG_TASKS_EXTERNAL_ENABLED=true"
-                )
-            if task_log_external_mode != "collated":
-                raise ValueError(
-                    "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
-                    "WEFT_LOG_TASKS_EXTERNAL_MODE=collated"
-                )
-            if not collation_store_enabled:
-                raise ValueError(
-                    "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
-                    "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED=true"
-                )
+        _validate_jsonl_then_delete_config(
+            mode=mode,
+            task_log_external_path=task_log_external_path,
+            task_log_external_enabled=task_log_external_enabled,
+            task_log_external_mode=task_log_external_mode,
+            collation_store_enabled=collation_store_enabled,
+        )
 
         return cls(
             enabled=enabled,

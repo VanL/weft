@@ -276,6 +276,71 @@ def test_runtime_config_rejects_custom_mode_without_processor() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("config", "first_error"),
+    [
+        (
+            {
+                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": 0,
+                "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": 0,
+            },
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS",
+        ),
+        (
+            {
+                "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": 0,
+                "WEFT_TASK_MONITOR_BATCH_SIZE": 0,
+            },
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
+        ),
+        (
+            {
+                "WEFT_TASK_MONITOR_MODE": "invalid",
+                "WEFT_LOG_TASKS_EXTERNAL_MODE": "invalid",
+            },
+            "WEFT_TASK_MONITOR_MODE",
+        ),
+        (
+            {
+                "WEFT_LOG_TASKS_EXTERNAL_MODE": "invalid",
+                "WEFT_TASK_MONITOR_PROCESSOR": "invalid",
+            },
+            "WEFT_LOG_TASKS_EXTERNAL_MODE",
+        ),
+        (
+            {
+                "WEFT_TASK_MONITOR_PROCESSOR": "invalid",
+                "WEFT_TASK_MONITOR_LOG_SINK": "invalid",
+            },
+            "WEFT_TASK_MONITOR_PROCESSOR",
+        ),
+        (
+            {
+                "WEFT_TASK_MONITOR_LOG_SINK": "invalid",
+                "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": 0,
+            },
+            "WEFT_TASK_MONITOR_LOG_SINK",
+        ),
+        (
+            {
+                "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": 0,
+                "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+                "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": False,
+            },
+            "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
+        ),
+    ],
+)
+def test_runtime_config_reports_invalid_settings_in_resolution_order(
+    config: dict[str, object],
+    first_error: str,
+) -> None:
+    """Multiple invalid values report the first setting in resolution order."""
+
+    with pytest.raises(ValueError, match=first_error):
+        TaskMonitorRuntimeConfig.from_config(config)
+
+
 @pytest.mark.parametrize("mode_name", ["delete", "report_only", "jsonl_then_delete"])
 def test_load_config_rejects_builtin_mode_in_processor_config(mode_name: str) -> None:
     with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_MODE"):
