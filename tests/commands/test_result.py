@@ -1680,22 +1680,98 @@ def test_await_single_result_tolerates_late_polled_boundary_timestamp_skew(
     assert error is None
 
 
-def test_cmd_result_rejects_stream_json_combination(tmp_path) -> None:
+@pytest.mark.parametrize(
+    (
+        "tid",
+        "all_results",
+        "peek",
+        "timeout",
+        "stream",
+        "json_output",
+        "expected",
+    ),
+    [
+        (
+            "123",
+            True,
+            True,
+            1.0,
+            True,
+            True,
+            "weft result: task id not expected with --all",
+        ),
+        (
+            None,
+            True,
+            True,
+            1.0,
+            True,
+            True,
+            "weft result: --stream cannot be used with --all",
+        ),
+        (
+            None,
+            True,
+            True,
+            1.0,
+            False,
+            True,
+            "weft result: --timeout is not supported with --all",
+        ),
+        (
+            None,
+            False,
+            True,
+            1.0,
+            True,
+            True,
+            "weft result: --peek requires --all",
+        ),
+        (
+            None,
+            False,
+            False,
+            1.0,
+            True,
+            True,
+            "weft result: task id required",
+        ),
+        (
+            "123",
+            False,
+            False,
+            1.0,
+            True,
+            True,
+            "weft result: --stream cannot be used with --json",
+        ),
+    ],
+)
+def test_cmd_result_reports_conflicting_options_in_precedence_order(
+    tmp_path,
+    tid: str | None,
+    all_results: bool,
+    peek: bool,
+    timeout: float | None,
+    stream: bool,
+    json_output: bool,
+    expected: str,
+) -> None:
     root = prepare_project_root(tmp_path)
 
     exit_code, payload = cmd_result(
-        tid="123",
-        all_results=False,
-        peek=False,
-        timeout=RESULT_WAIT_TIMEOUT,
-        stream=True,
-        json_output=True,
+        tid=tid,
+        all_results=all_results,
+        peek=peek,
+        timeout=timeout,
+        stream=stream,
+        json_output=json_output,
         show_stderr=False,
         context_path=str(root),
     )
 
     assert exit_code == 2
-    assert payload == "weft result: --stream cannot be used with --json"
+    assert payload == expected
 
 
 def test_cmd_result_stream_preserves_error_payload_selection(

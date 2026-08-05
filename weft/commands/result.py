@@ -10,7 +10,7 @@ import json
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import weft.commands.task_evidence as task_evidence
 from simplebroker import Queue
@@ -860,7 +860,81 @@ def await_task_result(
     )
 
 
-def cmd_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-110] exception
+def _result_request_error(
+    *,
+    tid: str | None,
+    all_results: bool,
+    peek: bool,
+    timeout: float | None,
+    stream: bool,
+    json_output: bool,
+) -> str | None:
+    """Return the first static result-option validation error."""
+    if all_results:
+        if tid is not None:
+            return "weft result: task id not expected with --all"
+        if stream:
+            return "weft result: --stream cannot be used with --all"
+        if timeout:
+            return "weft result: --timeout is not supported with --all"
+        return None
+    if peek:
+        return "weft result: --peek requires --all"
+    if tid is None:
+        return "weft result: task id required"
+    if stream and json_output:
+        return "weft result: --stream cannot be used with --json"
+    return None
+
+
+def _claimed_result_response(
+    tid: str,
+    evidence: task_evidence.TaskEvidenceSnapshot,
+    *,
+    json_output: bool,
+) -> tuple[int, str]:
+    """Render claimed-result recovery evidence for the command interface."""
+    claimed_error = evidence.error or (
+        f"weft result: task {tid} result output is claimed and requires recovery"
+    )
+    if not json_output:
+        return 1, claimed_error
+    json_payload = {
+        "tid": tid,
+        "status": evidence.status,
+        "result": None,
+        "error": claimed_error,
+        "reconciliation": evidence.reconciliation,
+    }
+    return 1, json.dumps(json_payload, ensure_ascii=False)
+
+
+def _single_result_response(
+    tid: str,
+    status: str,
+    value: Any,
+    error_message: str | None,
+    *,
+    json_output: bool,
+) -> tuple[int, str]:
+    """Render one completed or terminal result for the command interface."""
+    if status == "completed":
+        if json_output:
+            json_payload = {"tid": tid, "status": status, "result": value}
+            return 0, json.dumps(json_payload, ensure_ascii=False)
+        if value is None:
+            return 0, ""
+        if isinstance(value, (dict, list)):
+            return 0, json.dumps(value, ensure_ascii=False)
+        return 0, str(value)
+    if status == "timeout":
+        return 124, error_message or f"weft result: timed out waiting for task {tid}"
+    if status in FAILURE_LIKE_TASK_STATUSES:
+        return 1, error_message or f"weft result: task {tid} failed"
+    return 2, f"weft result: task {tid} not found"
+
+
+def cmd_result(
     *,
     tid: str | None,
     all_results: bool,
@@ -876,13 +950,17 @@ def cmd_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-110] exception
     except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft: failed to resolve context: {exc}"
 
+    request_error = _result_request_error(
+        tid=tid,
+        all_results=all_results,
+        peek=peek,
+        timeout=timeout,
+        stream=stream,
+        json_output=json_output,
+    )
+    if request_error is not None:
+        return 2, request_error
     if all_results:
-        if tid is not None:
-            return 2, "weft result: task id not expected with --all"
-        if stream:
-            return 2, "weft result: --stream cannot be used with --all"
-        if timeout:
-            return 2, "weft result: --timeout is not supported with --all"
         exit_code, payload = _collect_all_results(
             context,
             json_output=json_output,
@@ -891,17 +969,8 @@ def cmd_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-110] exception
         )
         return exit_code, payload
 
-    if peek:
-        return 2, "weft result: --peek requires --all"
-
-    if tid is None:
-        return 2, "weft result: task id required"
-
-    if stream and json_output:
-        return 2, "weft result: --stream cannot be used with --json"
-
     try:
-        full_tid = _normalize_tid(tid)
+        full_tid = _normalize_tid(cast(str, tid))
     except ValueError as exc:
         return 2, f"weft result: {exc}"
 
@@ -918,19 +987,11 @@ def cmd_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-110] exception
 
     claimed_evidence = _claimed_result_blockage(context, full_tid, materialized)
     if claimed_evidence is not None:
-        claimed_error = claimed_evidence.error or (
-            f"weft result: task {full_tid} result output is claimed and requires recovery"
+        return _claimed_result_response(
+            full_tid,
+            claimed_evidence,
+            json_output=json_output,
         )
-        if json_output:
-            json_payload = {
-                "tid": full_tid,
-                "status": claimed_evidence.status,
-                "result": None,
-                "error": claimed_error,
-                "reconciliation": claimed_evidence.reconciliation,
-            }
-            return 1, json.dumps(json_payload, ensure_ascii=False)
-        return 1, claimed_error
 
     remaining_timeout = timeout
     if timeout is not None and timeout > 0:
@@ -953,26 +1014,13 @@ def cmd_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-110] exception
         initial_result_surface_had_activity=materialized.result_surface_had_activity,
     )
 
-    if status == "completed":
-        if json_output:
-            json_payload = {"tid": full_tid, "status": status, "result": value}
-            return 0, json.dumps(json_payload, ensure_ascii=False)
-        if value is None:
-            return 0, ""
-        if isinstance(value, (dict, list)):
-            return 0, json.dumps(value, ensure_ascii=False)
-        return 0, str(value)
-
-    if status == "timeout":
-        return 124, error_message or (
-            f"weft result: timed out waiting for task {full_tid}"
-        )
-
-    if status in FAILURE_LIKE_TASK_STATUSES:
-        message = error_message or f"weft result: task {full_tid} failed"
-        return 1, message
-
-    return 2, f"weft result: task {full_tid} not found"
+    return _single_result_response(
+        full_tid,
+        status,
+        value,
+        error_message,
+        json_output=json_output,
+    )
 
 
 __all__ = ["ResultMaterialization", "await_task_result", "cmd_result"]
