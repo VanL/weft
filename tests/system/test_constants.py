@@ -830,6 +830,13 @@ class TestLoadConfig:
         assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
         assert config["BROKER_PROJECT_CONFIG_PATH"] == ".engram"
 
+    def test_fractional_string_vacuum_threshold_reaches_broker_resolver(self) -> None:
+        """A WEFT percentage string keeps SimpleBroker's string semantics."""
+        with patch.dict(os.environ, {}, clear=True):
+            config = compile_config({"WEFT_VACUUM_THRESHOLD": "0.5"})
+
+        assert config["BROKER_VACUUM_THRESHOLD"] == 0.005
+
     def test_removed_simplebroker_vacuum_lock_timeout_env_is_ignored(self) -> None:
         with patch.dict(
             os.environ,
