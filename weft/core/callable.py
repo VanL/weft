@@ -112,6 +112,7 @@ def make_callable(
             cwd=str(working_dir) if working_dir is not None else None,
             env=_build_env(),
             timeout=timeout,
+            check=False,
         )
         end_time = time.monotonic()
 

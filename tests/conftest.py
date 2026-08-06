@@ -419,6 +419,7 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
             encoding="utf-8",
             errors="replace",
             env=env_vars,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         debug_lines = [

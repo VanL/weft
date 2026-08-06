@@ -186,6 +186,7 @@ def _ensure_docker_image_available(image: str) -> None:
             timeout=DOCKER_IMAGE_INSPECT_TIMEOUT,
             encoding="utf-8",
             errors="replace",
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         pytest.skip(f"docker image {image!r} unavailable for test setup: {exc}")
@@ -200,6 +201,7 @@ def _ensure_docker_image_available(image: str) -> None:
             timeout=DOCKER_IMAGE_PULL_TIMEOUT,
             encoding="utf-8",
             errors="replace",
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         detail = _format_docker_setup_detail(exc.stdout, exc.stderr)

@@ -68,6 +68,7 @@ class TestModuleExecution:
             [sys.executable, "-m", "weft", "--version"],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0
         assert f"{PROG_NAME} {__version__}" in result.stdout
@@ -78,6 +79,7 @@ class TestModuleExecution:
             [sys.executable, "-m", "weft", "--help"],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0
         assert "Weft: the durable task substrate for agent systems" in result.stdout
@@ -88,6 +90,7 @@ class TestModuleExecution:
             [sys.executable, "-m", "weft"],
             capture_output=True,
             text=True,
+            check=False,
         )
         # Exit code can be 0 or 2 depending on Python/Typer version
         assert result.returncode in (0, 2)

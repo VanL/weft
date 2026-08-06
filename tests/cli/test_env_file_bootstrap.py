@@ -44,6 +44,7 @@ def _run_module(
         errors="replace",
         env=_clean_subprocess_env(env_file) if env is None else env,
         timeout=30,
+        check=False,
     )
 
 
@@ -77,6 +78,7 @@ def _probe_default_export_path(
         errors="replace",
         env=_clean_subprocess_env(env_file),
         timeout=30,
+        check=False,
     )
 
 
