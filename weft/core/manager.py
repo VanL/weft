@@ -5330,9 +5330,12 @@ class Manager(ServiceTask):
     @classmethod
     def _service_candidate_pid(cls, payload: Mapping[str, Any]) -> int | None:
         child_pid = payload.get("child_pid")
-        if isinstance(child_pid, int) and not isinstance(child_pid, bool):
-            if child_pid > 0:
-                return child_pid
+        if (
+            isinstance(child_pid, int)
+            and not isinstance(child_pid, bool)
+            and child_pid > 0
+        ):
+            return child_pid
 
         taskspec_dump = cls._service_candidate_taskspec_dump(payload)
         if taskspec_dump is None:

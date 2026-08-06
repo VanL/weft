@@ -3111,6 +3111,27 @@ def test_managed_service_pong_probe_is_nonblocking(
     assert list(make_queue(probe.ctrl_out_name).peek_generator()) == []
 
 
+@pytest.mark.parametrize(
+    ("child_pid", "taskspec_pid", "expected"),
+    [
+        (42, 9, 42),
+        (True, 9, 9),
+        (0, 9, 9),
+        (-1, None, None),
+    ],
+)
+def test_service_candidate_pid_prefers_positive_non_boolean_child_pid(
+    child_pid: object,
+    taskspec_pid: int | None,
+    expected: int | None,
+) -> None:
+    payload: dict[str, object] = {"child_pid": child_pid}
+    if taskspec_pid is not None:
+        payload["taskspec"] = {"state": {"pid": taskspec_pid}}
+
+    assert Manager._service_candidate_pid(payload) == expected
+
+
 def test_managed_service_pong_probe_timeout_deletes_exact_ping(
     manager_setup,
 ) -> None:
