@@ -91,7 +91,7 @@ def fixture_rows(section: str) -> list[tuple[str, str]]:
     return rows
 
 
-def check(section: str) -> list[str]:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-223] exception
+def check(section: str) -> list[str]:
     problems: list[str] = []
     rows = fixture_rows(section)
     if not rows:
@@ -109,11 +109,14 @@ def check(section: str) -> list[str]:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
             seen_classes.add(cls.split()[-1][0])
         else:
             seen_classes.add(cls[0])
-        if cls[0] in ("1", "2") and not cls.startswith("Escalate"):
-            if not any(m in fact for m in NEGATIVE_FACT_MARKERS):
-                problems.append(
-                    f"class-{cls[0]} fixture missing negative-trigger facts: {fact[:60]}..."
-                )
+        if (
+            cls[0] in ("1", "2")
+            and not cls.startswith("Escalate")
+            and not any(m in fact for m in NEGATIVE_FACT_MARKERS)
+        ):
+            problems.append(
+                f"class-{cls[0]} fixture missing negative-trigger facts: {fact[:60]}..."
+            )
 
     for required in ("0", "1", "2", "3", "4", "5", "+P"):
         if required not in seen_classes:
