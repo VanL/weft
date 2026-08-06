@@ -2231,11 +2231,15 @@ def test_function_host_start_callback_failures_are_logged_without_replacing_outc
 
     assert outcome.status == "ok"
     assert outcome.value == "payload"
-    assert [record.message for record in caplog.records] == [
+    callback_messages = [
+        record.message for record in caplog.records if "callback" in record.message
+    ]
+    assert callback_messages == [
         "Host worker-start callback failed",
         "Host runtime-handle callback failed",
     ]
     assert all(record.exc_info is None for record in caplog.records)
+    assert "contains secret" not in caplog.text
 
 
 ONE_SHOT_EVENT_ORDER: tuple[TerminalHandoffEventKind, ...] = (

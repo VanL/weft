@@ -1645,12 +1645,17 @@ def test_agent_session_deadline_preserves_process_tree_kill_escalation(
 
         def __init__(self) -> None:
             self.alive = True
+            self.join_calls = 0
 
         def is_alive(self) -> bool:
             return self.alive
 
         def kill(self) -> None:
             self.alive = False
+
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout is not None
+            self.join_calls += 1
 
     class FakeQueue:
         pass
@@ -1685,6 +1690,7 @@ def test_agent_session_deadline_preserves_process_tree_kill_escalation(
     assert pid == 456
     _assert_timeout_with_boundary_tolerance(timeout, 0.1)
     assert kill_after is True
+    assert process.join_calls == 1
 
 
 def test_agent_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
@@ -1696,6 +1702,7 @@ def test_agent_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
         def __init__(self) -> None:
             self.alive = True
             self.kill_calls = 0
+            self.join_calls = 0
 
         def is_alive(self) -> bool:
             return self.alive
@@ -1703,6 +1710,10 @@ def test_agent_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
         def kill(self) -> None:
             self.kill_calls += 1
             self.alive = False
+
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout == 0.0
+            self.join_calls += 1
 
     class FakeQueue:
         pass
@@ -1733,6 +1744,7 @@ def test_agent_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
 
     assert calls == [(654, 0.0, True)]
     assert process.kill_calls == 1
+    assert process.join_calls == 1
 
 
 def test_command_session_expired_cleanup_deadline_does_not_start_fresh_wait() -> None:
