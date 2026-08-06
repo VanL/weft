@@ -71,7 +71,7 @@ def test_check_limits_exceeded_reports_each_configured_limit(
     limit_field: str,
     limit_value: int,
     state_field: str,
-    state_value: float | int,
+    state_value: float,
     reason: str,
 ) -> None:
     payload = fixtures.create_valid_function_taskspec().model_dump(mode="json")
