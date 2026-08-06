@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import gc
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -44,6 +45,8 @@ from weft.helpers import (
     process_create_time,
     terminate_process_tree,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TASK_COMPLETION_TIMEOUT = 60.0
 COMPLETION_WAIT_REORDER_WINDOW_NS: Final[int] = 10_000_000_000
@@ -1246,7 +1249,7 @@ class WeftTestHarness:
             try:
                 obj.close()
             except Exception:  # pragma: no cover - cleanup best effort
-                pass
+                logger.warning("Failed to close live harness database queue")
         gc.collect()
 
     @staticmethod

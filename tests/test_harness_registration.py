@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -398,6 +399,59 @@ def test_harness_cleanup_closes_live_queues_before_database_probe() -> None:
         os.chdir(repo_cwd)
         if queue is not None:
             queue.close()
+        harness.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_queue_cleanup_reports_failure_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    first: Queue | None = None
+    second: Queue | None = None
+    try:
+        harness.__enter__()
+        first = Queue(
+            "cleanup.live.first",
+            db_path=harness.context.broker_target,
+            persistent=True,
+            config=harness.context.broker_config,
+        )
+        second = Queue(
+            "cleanup.live.second",
+            db_path=harness.context.broker_target,
+            persistent=True,
+            config=harness.context.broker_config,
+        )
+        close_calls: list[Queue] = []
+
+        def close_queue(queue: Queue) -> None:
+            close_calls.append(queue)
+            if queue is first:
+                raise RuntimeError("sensitive queue close failure")
+
+        caplog.set_level(logging.WARNING, logger="tests.helpers.weft_harness")
+        with monkeypatch.context() as patch:
+            patch.setattr(harness_mod.gc, "get_objects", lambda: [first, second])
+            patch.setattr(harness, "_queue_targets_database", lambda *_args: True)
+            patch.setattr(Queue, "close", close_queue)
+
+            harness._close_live_database_queues()
+
+        assert close_calls == [first, second]
+        assert [record.getMessage() for record in caplog.records] == [
+            "Failed to close live harness database queue"
+        ]
+        assert caplog.records[0].exc_info is None
+        assert "sensitive queue close failure" not in caplog.text
+    finally:
+        os.chdir(repo_cwd)
+        if first is not None:
+            first.close()
+        if second is not None:
+            second.close()
         harness.cleanup()
 
 
