@@ -263,7 +263,7 @@ def test_declared_action_without_transition_fails() -> None:
 
 
 def test_plain_set_source_fails_with_clear_error() -> None:
-    with pytest.raises(ValueError, match="source must be a state string"):
+    with pytest.raises(ValueError) as exc_info:
         StateMachine(
             states=("idle", "running", "done"),
             actions=("start",),
@@ -287,6 +287,11 @@ def test_plain_set_source_fails_with_clear_error() -> None:
             ),
             terminal_states=("done",),
         )
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == (
+        "Transition 'bad-source-type' source must be a state string or frozenset "
+        "of state strings"
+    )
 
 
 def test_terminal_state_with_outgoing_transition_fails_by_default() -> None:
