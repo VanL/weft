@@ -683,20 +683,22 @@ def test_describe_runtime_falls_back_to_container_id_when_name_lookup_misses(
 
     class FakeContainer:
         id = "container-123"
-        attrs = {
-            "Name": "/weft-test",
-            "Config": {"Image": "busybox:latest"},
-            "State": {
-                "Status": "running",
-                "OOMKilled": False,
-                "ExitCode": 0,
-                "Pid": 42,
-                "StartedAt": "2026-04-08T00:00:00Z",
-                "FinishedAt": "",
-                "Error": "",
-            },
-            "HostConfig": {"NetworkMode": "default"},
-        }
+
+        def __init__(self) -> None:
+            self.attrs = {
+                "Name": "/weft-test",
+                "Config": {"Image": "busybox:latest"},
+                "State": {
+                    "Status": "running",
+                    "OOMKilled": False,
+                    "ExitCode": 0,
+                    "Pid": 42,
+                    "StartedAt": "2026-04-08T00:00:00Z",
+                    "FinishedAt": "",
+                    "Error": "",
+                },
+                "HostConfig": {"NetworkMode": "default"},
+            }
 
         def reload(self) -> None:
             return None
