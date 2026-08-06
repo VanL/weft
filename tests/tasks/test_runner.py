@@ -2491,6 +2491,33 @@ class _StartedContext(_StartFailureContext):
         self.process = _StartedProcess()
 
 
+def test_host_queue_cleanup_reports_each_failure_and_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[str] = []
+
+    class Queue:
+        def close(self) -> None:
+            calls.append("close")
+            raise RuntimeError("sensitive queue close failure")
+
+        def join_thread(self) -> None:
+            calls.append("join")
+            raise RuntimeError("sensitive queue join failure")
+
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.host")
+
+    HostTaskRunner._close_mp_queue(Queue())  # type: ignore[arg-type]
+
+    assert calls == ["close", "join"]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to close host runner multiprocessing queue",
+        "Failed to join host runner queue thread",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
 def test_one_shot_spawn_failure_closes_both_response_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

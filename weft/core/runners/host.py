@@ -943,11 +943,11 @@ class HostTaskRunner:
         try:
             mp_queue.close()
         except Exception:  # pragma: no cover - defensive cleanup
-            pass
+            logger.warning("Failed to close host runner multiprocessing queue")
         try:
             mp_queue.join_thread()
         except Exception:  # pragma: no cover - defensive cleanup
-            pass
+            logger.warning("Failed to join host runner queue thread")
 
     @staticmethod
     def _close_process_handle(process: BaseProcess) -> None:
