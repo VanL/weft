@@ -6229,9 +6229,7 @@ class Manager(ServiceTask):
             if state.uncertain_attempts > 0:
                 reasons.append("uncertain_attempts")
         if include_autostart and self._autostart_enabled and self._autostart_dir:
-            if self._autostart_last_scan_ns == 0:
-                reasons.append("autostart_scan_due")
-            elif (
+            if self._autostart_last_scan_ns == 0 or (
                 time.time_ns() - self._autostart_last_scan_ns
                 >= self._autostart_scan_interval_ns
             ):

@@ -2512,6 +2512,29 @@ def test_manager_autostart_due_bypasses_convergence_throttle(
         manager.cleanup()
 
 
+def test_manager_unscanned_autostart_is_due_without_reading_clock(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager, _make_queue = manager_setup
+    manager._autostart_enabled = True
+    manager._autostart_dir = tmp_path
+    manager._autostart_last_scan_ns = 0
+    monkeypatch.setattr(
+        manager_mod.time,
+        "time_ns",
+        lambda: pytest.fail("unscanned autostart must not read the clock"),
+    )
+
+    reasons = manager._managed_service_convergence_active_reasons(
+        include_autostart=True,
+        include_broker=False,
+    )
+
+    assert "autostart_scan_due" in reasons
+
+
 def test_manager_clears_dispatch_stall_timer_when_backlog_drains(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
