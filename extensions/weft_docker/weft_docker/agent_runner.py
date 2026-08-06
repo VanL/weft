@@ -291,12 +291,12 @@ class DockerProviderCLIRunner:
                         try:
                             on_stdout_chunk(stdout_text, True)
                         except Exception:  # pragma: no cover - callback safety
-                            pass
+                            logger.warning("Docker agent stdout callback failed")
                     if stderr_text and on_stderr_chunk is not None:
                         try:
                             on_stderr_chunk(stderr_text, True)
                         except Exception:  # pragma: no cover - callback safety
-                            pass
+                            logger.warning("Docker agent stderr callback failed")
 
                     if terminal_status is not None:
                         outcome = RunnerOutcome(

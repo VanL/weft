@@ -216,8 +216,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
             return None
 
         def logs(self, *, stdout: bool = False, stderr: bool = False) -> bytes:
-            del stdout, stderr
-            return b""
+            return b"stdout-data" if stdout and not stderr else b"stderr-data"
 
         def remove(self, force: bool = False) -> None:
             del force
@@ -334,10 +333,14 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
         {"task": "Explain this document"},
         on_worker_started=fail_callback,
         on_runtime_handle_started=fail_callback,
+        on_stdout_chunk=fail_callback,
+        on_stderr_chunk=fail_callback,
     )
 
     assert outcome.status == "ok"
     assert outcome.value == "provider-output"
+    assert outcome.stdout == "stdout-data"
+    assert outcome.stderr == "stderr-data"
     assert created["image"] == "weft-agent-codex:cached123"
     kwargs = cast(dict[str, object], created["kwargs"])
     labels = cast(dict[str, str], kwargs["labels"])
@@ -345,6 +348,8 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
     assert [record.getMessage() for record in caplog.records] == [
         "Docker agent worker-start callback failed",
         "Docker agent runtime-handle callback failed",
+        "Docker agent stdout callback failed",
+        "Docker agent stderr callback failed",
     ]
     assert all(record.exc_info is None for record in caplog.records)
     assert "sensitive callback failure" not in caplog.text
