@@ -197,6 +197,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
 ) -> None:
     created: dict[str, object] = {}
     fail_start = False
+    fail_result_stage: str | None = None
 
     class FakeContainer:
         def __init__(self) -> None:
@@ -287,7 +288,14 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
             invocation: ProviderCLIInvocation,
         ) -> ProviderCLIResult:
             del completed, invocation
+            if fail_result_stage == "parse":
+                raise RuntimeError("provider parse failure")
             return ProviderCLIResult(output_text="parsed")
+
+    def build_result(**_kwargs: object) -> str:
+        if fail_result_stage == "build":
+            raise RuntimeError("provider result build failure")
+        return "provider-output"
 
     monkeypatch.setattr(
         "weft_docker.agent_runner.prepare_provider_cli_execution",
@@ -303,7 +311,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
     )
     monkeypatch.setattr(
         "weft_docker.agent_runner.build_provider_cli_execution_result",
-        lambda **kwargs: "provider-output",
+        build_result,
     )
     monkeypatch.setattr(
         "weft_docker.agent_runner.load_docker_sdk",
@@ -369,6 +377,25 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
     ]
     assert caplog.records[0].exc_info is None
     assert "sensitive cleanup failure" not in caplog.text
+
+    fail_start = False
+    for stage, message in (
+        ("parse", "provider parse failure"),
+        ("build", "provider result build failure"),
+    ):
+        caplog.clear()
+        fail_result_stage = stage
+        error_outcome = runner.run({"task": "Explain this document"})
+        assert error_outcome.status == "error"
+        assert error_outcome.value is None
+        assert error_outcome.error == message
+        assert error_outcome.stdout == "stdout-data"
+        assert error_outcome.stderr == "stderr-data"
+        assert [record.getMessage() for record in caplog.records] == [
+            "Docker agent container cleanup failed"
+        ]
+        assert caplog.records[0].exc_info is None
+        assert "sensitive cleanup failure" not in caplog.text
 
 
 def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-201] exception
