@@ -972,10 +972,15 @@ def test_wait_for_container_runtime_start_fails_when_created_state_sticks(
     class FakeContainer:
         id = "container-789"
         name = "weft-stuck"
-        attrs: dict[str, Any] = {"State": {"Status": "created"}}
+
+        def __init__(self) -> None:
+            self.attrs: dict[str, Any] = {"State": {"Status": "created"}}
 
         def reload(self) -> None:
             return None
+
+    fake_container = FakeContainer()
+    assert fake_container.attrs is not FakeContainer().attrs
 
     def monotonic() -> float:
         return clock["now"]
@@ -988,7 +993,7 @@ def test_wait_for_container_runtime_start_fails_when_created_state_sticks(
 
     with pytest.raises(TimeoutError, match="weft-stuck"):
         docker_sdk.wait_for_container_runtime_start(
-            FakeContainer(),
+            fake_container,
             timeout=0.2,
             interval=0.05,
         )
