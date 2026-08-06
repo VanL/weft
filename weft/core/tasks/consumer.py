@@ -918,7 +918,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         metrics = outcome.metrics
         if metrics is not None:
             metrics_payload = asdict(metrics)
-            cpu_percent = int(round(metrics.cpu_percent))
+            cpu_percent = round(metrics.cpu_percent)
             self.taskspec.update_metrics(
                 memory=metrics.memory_mb,
                 cpu=cpu_percent,

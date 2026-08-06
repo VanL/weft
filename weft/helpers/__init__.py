@@ -1063,7 +1063,7 @@ def _format_duration(seconds: float, *, max_units: int = 2) -> str:  # noqa: C90
             parts.append(_pluralize(value, name))
 
     if not parts:
-        parts.append(_pluralize(int(round(seconds)), "second"))
+        parts.append(_pluralize(round(seconds), "second"))
 
     return ", ".join(parts)
 

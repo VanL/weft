@@ -302,7 +302,7 @@ class InteractiveTaskMixin(ABC):
 
         metrics = session.last_metrics
         if metrics is not None:
-            cpu_percent = int(round(metrics.cpu_percent))
+            cpu_percent = round(metrics.cpu_percent)
             self.taskspec.update_metrics(
                 memory=metrics.memory_mb,
                 cpu=cpu_percent,
