@@ -1565,10 +1565,12 @@ def stop_tasks(
             decision.action,
             {"accept_terminal", "escalate_runner", "report_unknown"},
         )
-        if decision.action in {"escalate_runner", "report_unknown"}:
-            if not handled_by_runner:
-                task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
-                _stop_via_fallback(task_entry)
+        if (
+            decision.action in {"escalate_runner", "report_unknown"}
+            and not handled_by_runner
+        ):
+            task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
+            _stop_via_fallback(task_entry)
         count += 1
     return count
 
