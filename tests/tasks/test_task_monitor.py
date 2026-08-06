@@ -468,6 +468,43 @@ def test_task_monitor_worker_snapshot_rejects_unclassified_stateful_field(
         task.stop()
 
 
+def test_task_monitor_worker_snapshot_rejects_misclassified_shared_fields(
+    broker_env,
+) -> None:
+    """Declared shared fields must retain their snapshot-safe runtime shapes."""
+
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999404"),
+        observer=lambda _queue, _message, _timestamp: None,
+    )
+    original_error_handler = task._default_error_handler
+    original_db_path = task._db_path
+    try:
+        task._default_error_handler = _StatefulObserver()
+        with pytest.raises(RuntimeError) as exc_info:
+            task._worker_local_monitor_clone()
+        assert type(exc_info.value) is RuntimeError
+        assert str(exc_info.value) == (
+            "TaskMonitor worker snapshot plain-callable field became stateful: "
+            "_default_error_handler"
+        )
+        task._default_error_handler = original_error_handler
+
+        task._db_path = lambda: None
+        with pytest.raises(RuntimeError) as exc_info:
+            task._worker_local_monitor_clone()
+        assert type(exc_info.value) is RuntimeError
+        assert str(exc_info.value) == (
+            "TaskMonitor worker snapshot shared field became callable: _db_path"
+        )
+    finally:
+        task._default_error_handler = original_error_handler
+        task._db_path = original_db_path
+        task.stop()
+
+
 def test_task_monitor_worker_close_attempts_all_resources_and_reports_failure(
     broker_env,
     tmp_path: Path,
