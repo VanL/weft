@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from weft.core.agents.provider_cli import container_runtime as container_runtime_module
 from weft.core.agents.provider_cli.container_runtime import (
     get_provider_container_runtime_descriptor,
     parse_provider_container_runtime_descriptor,
@@ -48,6 +49,39 @@ def test_get_provider_container_runtime_descriptor_loads_all_supported_providers
     assert loaded["gemini"].runtime_home is not None  # type: ignore[union-attr]
     assert loaded["gemini"].env[0].name == "GEMINI_API_KEY"  # type: ignore[index]
     assert loaded["opencode"].env[0].name == "OPENAI_API_KEY"  # type: ignore[index]
+
+
+def test_provider_container_descriptor_rejects_non_object_json_as_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResource:
+        def joinpath(self, _name: str) -> FakeResource:
+            return self
+
+        def is_file(self) -> bool:
+            return True
+
+        def read_text(self, *, encoding: str) -> str:
+            assert encoding == "utf-8"
+            return "[]"
+
+        def __str__(self) -> str:
+            return "<fake-descriptor>"
+
+    monkeypatch.setattr(
+        container_runtime_module.resources,
+        "files",
+        lambda _package: FakeResource(),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        get_provider_container_runtime_descriptor("test-non-object-descriptor")
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == (
+        "Invalid provider container runtime descriptor <fake-descriptor>: "
+        "root must be an object"
+    )
+    assert exc_info.value.__cause__ is None
 
 
 def test_resolve_provider_container_runtime_does_not_forward_host_env_by_default() -> (
