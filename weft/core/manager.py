@@ -2728,12 +2728,9 @@ class Manager(ServiceTask):
         if record is None or record.get("status") != SERVICE_STATUS_SUPERSEDED:
             return False
         timestamp = record.get("_timestamp")
-        if isinstance(timestamp, int) and self._registry_entry_is_expired(
-            timestamp,
-            now_ns=now_ns,
-        ):
-            return False
-        return True
+        if not isinstance(timestamp, int):
+            return True
+        return not self._registry_entry_is_expired(timestamp, now_ns=now_ns)
 
     def _active_dispatch_manager_records(self) -> dict[str, dict[str, Any]] | None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-007] exception
         now_ns = time.time_ns()
