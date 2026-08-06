@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from weft.builtins import agent_images as agent_images_module
 from weft.builtins.agent_images import prepare_agent_images_task
 
 pytestmark = [
@@ -17,6 +18,40 @@ pytestmark = [
         reason="Docker builtins are currently supported only on Linux and macOS",
     )
 ]
+
+
+@pytest.mark.parametrize(
+    ("work_item", "message"),
+    [
+        (1, "prepare-agent-images expects a JSON object input"),
+        ("[]", "prepare-agent-images input must be a JSON object"),
+        (
+            {"refresh": 1},
+            "prepare-agent-images input field 'refresh' must be a boolean",
+        ),
+        (
+            {"providers": 1},
+            "prepare-agent-images input field 'providers' must be a list of strings",
+        ),
+    ],
+)
+def test_prepare_agent_images_rejects_malformed_work_item_as_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+    work_item: object,
+    message: str,
+) -> None:
+    fake_module = types.ModuleType("weft_docker.agent_images")
+    fake_module.ensure_agent_image = lambda *_args, **_kwargs: None
+    fake_module.get_agent_image_recipe = lambda _provider: None
+    monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
+    monkeypatch.setattr(agent_images_module, "builtin_platform_supported", lambda _: True)
+    monkeypatch.setattr(agent_images_module, "require_runner_plugin", lambda _: object())
+
+    with pytest.raises(ValueError) as exc_info:
+        prepare_agent_images_task(work_item)
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
 
 
 def test_prepare_agent_images_task_requires_docker_extension(
