@@ -323,10 +323,9 @@ def test_enqueue_on_commit_defers_submission_until_commit() -> None:
 
 @pytest.mark.shared
 def test_enqueue_on_commit_rollbacks_do_not_bind() -> None:
-    with pytest.raises(RuntimeError, match="rollback"):
-        with transaction.atomic():
-            deferred = echo_task.enqueue_on_commit("rollback")
-            raise RuntimeError("rollback")
+    with pytest.raises(RuntimeError, match="rollback"), transaction.atomic():
+        deferred = echo_task.enqueue_on_commit("rollback")
+        raise RuntimeError("rollback")
 
     assert deferred.task is None
 
@@ -351,20 +350,21 @@ def test_deferred_submit_rejects_wait_true() -> None:
 
 @pytest.mark.shared
 def test_deferred_native_submission_validates_unknown_overrides_before_commit() -> None:
-    with pytest.raises(TypeError, match="Unknown submit override"):
-        with transaction.atomic():
-            EventRecord.objects.create(key="bad-override", value="committed?")
-            submit_taskspec_on_commit(_native_taskspec(), payload="x", bogus=True)
+    with (
+        pytest.raises(TypeError, match="Unknown submit override"),
+        transaction.atomic(),
+    ):
+        EventRecord.objects.create(key="bad-override", value="committed?")
+        submit_taskspec_on_commit(_native_taskspec(), payload="x", bogus=True)
 
     assert not EventRecord.objects.filter(key="bad-override").exists()
 
 
 @pytest.mark.shared
 def test_deferred_spec_reference_validates_missing_reference_before_commit() -> None:
-    with pytest.raises(SpecNotFound):
-        with transaction.atomic():
-            EventRecord.objects.create(key="bad-spec", value="committed?")
-            submit_spec_reference_on_commit("missing-spec-reference", payload="x")
+    with pytest.raises(SpecNotFound), transaction.atomic():
+        EventRecord.objects.create(key="bad-spec", value="committed?")
+        submit_spec_reference_on_commit("missing-spec-reference", payload="x")
 
     assert not EventRecord.objects.filter(key="bad-spec").exists()
 
@@ -589,18 +589,19 @@ def test_task_events_view_respects_transport_setting() -> None:
 @pytest.mark.shared
 def test_url_import_requires_authz_setting() -> None:
     sys.modules.pop("weft_django.urls", None)
-    with override_settings(WEFT_DJANGO=_fixture_weft_settings(AUTHZ=None)):
-        with pytest.raises(ImproperlyConfigured, match="WEFT_DJANGO\\['AUTHZ'\\]"):
-            importlib.import_module("weft_django.urls")
+    with (
+        override_settings(WEFT_DJANGO=_fixture_weft_settings(AUTHZ=None)),
+        pytest.raises(ImproperlyConfigured, match="WEFT_DJANGO\\['AUTHZ'\\]"),
+    ):
+        importlib.import_module("weft_django.urls")
 
 
 @pytest.mark.shared
 def test_transport_validation() -> None:
     with override_settings(
         WEFT_DJANGO=_fixture_weft_settings(REALTIME={"TRANSPORT": "bogus"})
-    ):
-        with pytest.raises(ImproperlyConfigured, match="TRANSPORT"):
-            get_realtime_transport()
+    ), pytest.raises(ImproperlyConfigured, match="TRANSPORT"):
+        get_realtime_transport()
 
 
 @pytest.mark.shared
