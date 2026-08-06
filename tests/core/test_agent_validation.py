@@ -16,6 +16,7 @@ from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
 from weft.core.agents.provider_cli import probes
 from weft.core.agents.provider_cli.registry import list_provider_cli_providers
 from weft.core.agents.validation import (
+    agent_runtime_name_from_taskspec,
     validate_taskspec_agent_runtime,
     validate_taskspec_agent_tool_profile,
 )
@@ -31,6 +32,27 @@ def test_provider_registry_matches_agent_mcp_provider_set() -> None:
         "opencode",
         "qwen",
     )
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"spec": []}, "spec must be an object"),
+        (
+            {"spec": {"type": "agent", "agent": []}},
+            "spec.agent must be an object",
+        ),
+    ],
+)
+def test_agent_runtime_name_rejects_non_object_taskspec_sections_as_value_error(
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        agent_runtime_name_from_taskspec(payload)
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
 
 
 def test_validate_agent_runtime_rejects_unknown_provider(tmp_path) -> None:
