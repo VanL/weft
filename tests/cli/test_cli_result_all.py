@@ -45,11 +45,12 @@ def _wait_for_result_all_text(
             cwd=harness.root,
             harness=harness,
         )
-        if rc == 0:
-            if all(item in out for item in (contains or [])) and all(
-                item not in out for item in (excludes or [])
-            ):
-                return out
+        if (
+            rc == 0
+            and all(item in out for item in (contains or []))
+            and all(item not in out for item in (excludes or []))
+        ):
+            return out
         last_out = out
         last_err = err
         time.sleep(0.05)
