@@ -955,8 +955,8 @@ class HostTaskRunner:
 
         try:
             process.close()
-        except Exception:  # pragma: no cover - process may still be running
-            pass
+        except (OSError, ValueError):  # pragma: no cover - platform cleanup
+            logger.warning("Failed to close host runner process handle")
 
     def start_session(self) -> CommandSession:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-035] exception
         """Start a line-oriented interactive command session for streaming IO."""

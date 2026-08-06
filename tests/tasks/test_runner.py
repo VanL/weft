@@ -2518,6 +2518,35 @@ def test_host_queue_cleanup_reports_each_failure_and_continues(
     assert "sensitive" not in caplog.text
 
 
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
+def test_host_process_handle_cleanup_reports_supported_failure(
+    caplog: pytest.LogCaptureFixture,
+    error_type: type[Exception],
+) -> None:
+    class Process:
+        def close(self) -> None:
+            raise error_type("sensitive process-handle close failure")
+
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.host")
+
+    HostTaskRunner._close_process_handle(Process())  # type: ignore[arg-type]
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to close host runner process handle"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_host_process_handle_cleanup_propagates_unexpected_failure() -> None:
+    class Process:
+        def close(self) -> None:
+            raise RuntimeError("unexpected process-handle defect")
+
+    with pytest.raises(RuntimeError, match="unexpected process-handle defect"):
+        HostTaskRunner._close_process_handle(Process())  # type: ignore[arg-type]
+
+
 def test_one_shot_spawn_failure_closes_both_response_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
