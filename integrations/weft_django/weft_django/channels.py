@@ -120,8 +120,6 @@ class TaskEventsConsumer(AsyncJsonWebsocketConsumer):  # pragma: no cover - opti
                     normal_end = True
                     break
                 await self.send_json(payload)
-        except asyncio.CancelledError:
-            raise
         finally:
             cancel_event.set()
             close = getattr(iterator, "close", None)

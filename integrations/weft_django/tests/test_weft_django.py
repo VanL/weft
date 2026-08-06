@@ -703,6 +703,47 @@ def test_channels_connect_returns_before_follow_stream_finishes(
 
 
 @pytest.mark.shared
+def test_channels_stream_cancellation_propagates_after_iterator_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sys.modules.pop("weft_django.channels", None)
+    try:
+        module = importlib.import_module("weft_django.channels")
+    except ImproperlyConfigured:
+        pytest.skip("Channels extra is not installed")
+
+    cancel_event = threading.Event()
+    closed = threading.Event()
+
+    class _Iterator:
+        def close(self) -> None:
+            closed.set()
+
+    iterator = _Iterator()
+    monkeypatch.setattr(
+        module,
+        "iter_task_event_payloads",
+        lambda *args, **kwargs: iterator,
+    )
+
+    async def cancelled_to_thread(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(module.asyncio, "to_thread", cancelled_to_thread)
+
+    async def _run() -> None:
+        consumer = module.TaskEventsConsumer()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer._stream_events(object(), cancel_event)
+
+    asyncio.run(_run())
+
+    assert cancel_event.is_set()
+    assert closed.is_set()
+
+
+@pytest.mark.shared
 def test_management_commands_wrap_the_same_client_surface() -> None:
     task = echo_task.enqueue("management")
     assert task.result(timeout=30.0).status == "completed"
