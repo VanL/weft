@@ -118,9 +118,11 @@ class TestCLIConstants:
         from weft.cli.app import version_callback
 
         # Mock the typer.echo and Exit
-        with patch("weft.cli.app.typer.echo") as mock_echo:
-            with patch("weft.cli.app.typer.Exit", side_effect=SystemExit) as mock_exit:
-                with pytest.raises(SystemExit):
-                    version_callback(True)
-                mock_echo.assert_called_with("test-prog 9.9.9")
-                mock_exit.assert_called_once()
+        with (
+            patch("weft.cli.app.typer.echo") as mock_echo,
+            patch("weft.cli.app.typer.Exit", side_effect=SystemExit) as mock_exit,
+            pytest.raises(SystemExit),
+        ):
+            version_callback(True)
+        mock_echo.assert_called_with("test-prog 9.9.9")
+        mock_exit.assert_called_once()
