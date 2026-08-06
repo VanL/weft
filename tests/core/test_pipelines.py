@@ -313,6 +313,23 @@ def test_pipeline_compiler_rejects_incompatible_stage_task(
         )
 
 
+def test_pipeline_compiler_rejects_stage_without_mapping_spec(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    pipeline = load_pipeline_spec_payload(
+        {"name": "pipe", "stages": [{"name": "bad", "task": "bad"}]}
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        compile_linear_pipeline(
+            pipeline,
+            context=ctx,
+            task_loader=lambda _name: {"name": "bad", "spec": []},
+        )
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == "stage 'bad' is missing a valid spec section"
+
+
 def test_pipeline_compiler_rejects_nested_pipeline_stage_task(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
