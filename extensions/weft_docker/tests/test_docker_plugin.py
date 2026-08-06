@@ -812,17 +812,20 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
 
     class FakeContainer:
         id = "container-789"
-        attrs: dict[str, Any] = {
-            "Name": "/weft-test",
-            "Config": {"Image": "busybox:latest"},
-            "State": {"Status": "created"},
-        }
+
+        def __init__(self) -> None:
+            self.attrs: dict[str, Any] = {
+                "Name": "/weft-test",
+                "Config": {"Image": "busybox:latest"},
+                "State": {"Status": "created"},
+            }
 
         def reload(self) -> None:
             current = states.pop(0) if len(states) > 1 else states[0]
             self.attrs["State"]["Status"] = current
 
     fake_container = FakeContainer()
+    assert fake_container.attrs is not FakeContainer().attrs
     callback_state: dict[str, str] = {}
 
     @contextmanager
