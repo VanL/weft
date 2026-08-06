@@ -23,6 +23,88 @@ from weft.core.agents.provider_cli.registry import (
 pytestmark = [pytest.mark.shared]
 
 
+@pytest.mark.parametrize(
+    ("runner_options", "message"),
+    [
+        (
+            {"mounts": 1},
+            "spec.runner.options.mounts must be a list of mount objects",
+        ),
+        (
+            {"mounts": [1]},
+            "spec.runner.options.mounts[0] must be an object",
+        ),
+        (
+            {"mounts": [{"source": 1, "target": "/workspace"}]},
+            "spec.runner.options.mounts[0].source must be a string",
+        ),
+        (
+            {"mounts": [{"source": ".", "target": 1}]},
+            "spec.runner.options.mounts[0].target must be a string",
+        ),
+        (
+            {"work_item_mounts": 1},
+            "spec.runner.options.work_item_mounts must be a list of mount objects",
+        ),
+        (
+            {"work_item_mounts": [1]},
+            "spec.runner.options.work_item_mounts[0] must be an object",
+        ),
+        (
+            {
+                "work_item_mounts": [
+                    {
+                        "source_path_ref": "metadata.path",
+                        "target": "/workspace",
+                        "read_only": 1,
+                    }
+                ]
+            },
+            "spec.runner.options.work_item_mounts[0].read_only must be a boolean",
+        ),
+        (
+            {
+                "work_item_mounts": [
+                    {
+                        "source_path_ref": "metadata.path",
+                        "target": "/workspace",
+                        "required": 1,
+                    }
+                ]
+            },
+            "spec.runner.options.work_item_mounts[0].required must be a boolean",
+        ),
+        (
+            {"network": 1},
+            "spec.runner.options.network must be a string",
+        ),
+    ],
+)
+def test_agent_runner_rejects_wrong_option_shapes_as_value_error(
+    runner_options: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        DockerProviderCLIRunner(
+            tid="123",
+            agent={
+                "runtime": "provider_cli",
+                "authority_class": "general",
+                "conversation_scope": "per_message",
+                "runtime_config": {"provider": "codex"},
+            },
+            env={},
+            working_dir=None,
+            timeout=5.0,
+            limits=None,
+            monitor_interval=0.05,
+            runner_options=runner_options,
+        )
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
+
+
 def test_agent_runner_mounts_default_to_read_only(tmp_path: Path) -> None:
     runner = DockerProviderCLIRunner(
         tid="123",
