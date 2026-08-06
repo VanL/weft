@@ -1145,6 +1145,7 @@ independent review and separate explicit owner approval.
 | Task 5 `RUF012` queue-close context | MR-077, second local `_FakeContext.config` | RED instance-isolation assertion; full owning test file; current/targeted Ruff; suppression/diff checks | 19 passed; config now matches real per-context ownership while queue and generator-close behavior remain unchanged. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
 | Task 5 `RUF012` manager terminal-queue registry | MR-089, first local `FakeTerminalQueue.instances` | Exact owner test; current/targeted Ruff; suppression/diff checks | Shared class registry intentionally captures both proof-read and write queue instances within one test-local class. | Fresh clean Python expert | `NET POSITIVE`; `ClassVar` accepted. |
 | Task 5 `RUF012` manager terminal-proof registry | MR-090, second local `FakeTerminalQueue.instances` | Exact owner test; current/targeted Ruff; suppression/diff checks | Shared class registry intentionally captures aggregate queue construction history and is recreated per test invocation. | Fresh clean Python expert | `NET POSITIVE`; `ClassVar` accepted. |
+| Task 5 `RUF012` realtime materialization context | MR-098, first shared-ops `_FakeContext.config` | RED instance-isolation assertion; exact owner test; current/targeted Ruff; suppression/diff checks | Context config now matches real per-instance ownership while terminal-materialization event behavior is unchanged. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
 
 ## 20. Independent Review Loop
 

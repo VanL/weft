@@ -313,7 +313,8 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
             return None
 
     class _FakeContext:
-        config: dict[str, object] = {}
+        def __init__(self) -> None:
+            self.config: dict[str, object] = {}
 
         def queue(self, name: str, *, persistent: bool = False) -> _FakeQueue:
             del persistent
@@ -329,6 +330,10 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
 
         def close(self) -> None:
             return None
+
+    first_context = _FakeContext()
+    second_context = _FakeContext()
+    assert first_context.config is not second_context.config
 
     materialized = result_mod.ResultMaterialization(
         taskspec_payload=None,
@@ -369,7 +374,7 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
 
     events = list(
         events_mod.iter_task_realtime_events(
-            _FakeContext(),
+            first_context,
             tid,
             timeout=1.0,
         )
