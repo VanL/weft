@@ -241,11 +241,7 @@ def _pg_cli_requires_active_env(args: tuple[object, ...]) -> bool:
         return False
 
     command = str(args[0])
-    if command == "run":
-        return True
-    if command == "manager":
-        return True
-    return False
+    return command in {"manager", "run"}
 
 
 def _normalize_test_python_environment() -> None:
