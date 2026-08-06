@@ -703,7 +703,7 @@ class TestRuntimeReporting:
     def test_to_log_dict_contains_expected_fields(self) -> None:
         taskspec = fixtures.create_minimal_taskspec()
         log_entry = taskspec.to_log_dict()
-        for key in {"tid", "name", "status", "runtime_seconds", "metadata"}:
+        for key in ("tid", "name", "status", "runtime_seconds", "metadata"):
             assert key in log_entry
 
 
