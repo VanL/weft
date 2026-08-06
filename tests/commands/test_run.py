@@ -6,12 +6,17 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+import prompt_toolkit
 import pytest
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 
 import weft.commands._result_wait as result_wait_cmd
 import weft.commands._spawn_submission as spawn_submission_cmd
@@ -310,6 +315,150 @@ def _make_taskspec(tid: str) -> TaskSpec:
         state=StateSection(),
         metadata={},
     )
+
+
+class _PromptCompletionSession:
+    def __init__(
+        self,
+        session: Any,
+        *,
+        completion_timing: str,
+        completion_observed: threading.Event,
+    ) -> None:
+        self._session = session
+        self._completion_timing = completion_timing
+        self._completion_observed = completion_observed
+        self.app = session.app
+
+    def prompt(self, message: str, **kwargs: Any) -> Any:
+        if self._completion_timing == "before_run":
+            assert self._completion_observed.wait(timeout=1.0)
+        return self._session.prompt(message, **kwargs)
+
+
+class _PromptCompletionClient:
+    def __init__(
+        self,
+        *,
+        completion_timing: str,
+        session_holder: dict[str, _PromptCompletionSession],
+        completion_observed: threading.Event,
+    ) -> None:
+        self._completion_timing = completion_timing
+        self._session_holder = session_holder
+        self._completion_observed = completion_observed
+        self.status = "completed"
+        self.error = None
+        self.stdout_history: list[str] = []
+        self.stop_count = 0
+        self.completed = False
+
+    def start(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> bool:
+        del timeout
+        if self.completed:
+            return True
+        if self._completion_timing == "while_running":
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                session = self._session_holder.get("session")
+                if session is not None and session.app.is_running:
+                    break
+                time.sleep(0.001)
+            else:
+                raise AssertionError("prompt application did not start")
+        self.completed = True
+        self._completion_observed.set()
+        return True
+
+    def send_input(self, _payload: str) -> None:
+        return None
+
+    def close_input(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        self.stop_count += 1
+
+
+class _PromptCompletionQueue:
+    def __init__(self) -> None:
+        self.close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
+class _PromptCompletionContext:
+    def __init__(self, log_queue: _PromptCompletionQueue) -> None:
+        self.broker_target = "unused"
+        self.broker_config: dict[str, Any] = {}
+        self.config: dict[str, Any] = {}
+        self._log_queue = log_queue
+
+    def queue(self, name: str, *, persistent: bool) -> _PromptCompletionQueue:
+        assert name == WEFT_GLOBAL_LOG_QUEUE
+        assert persistent is False
+        return self._log_queue
+
+
+@pytest.mark.parametrize("completion_timing", ("before_run", "while_running"))
+@pytest.mark.timeout(3)
+def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
+    completion_timing: str,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real_prompt_session = prompt_toolkit.PromptSession
+    session_holder: dict[str, _PromptCompletionSession] = {}
+    completion_observed = threading.Event()
+    client_holder: dict[str, _PromptCompletionClient] = {}
+    log_queue = _PromptCompletionQueue()
+
+    def make_client(**_kwargs: Any) -> _PromptCompletionClient:
+        client = _PromptCompletionClient(
+            completion_timing=completion_timing,
+            session_holder=session_holder,
+            completion_observed=completion_observed,
+        )
+        client_holder["client"] = client
+        return client
+
+    with create_pipe_input() as pipe_input:
+        def make_prompt_session(
+            *_args: Any, **_kwargs: Any
+        ) -> _PromptCompletionSession:
+            session = real_prompt_session(input=pipe_input, output=DummyOutput())
+            wrapper = _PromptCompletionSession(
+                session,
+                completion_timing=completion_timing,
+                completion_observed=completion_observed,
+            )
+            session_holder["session"] = wrapper
+            return wrapper
+
+        monkeypatch.setattr(run_cmd, "InteractiveStreamClient", make_client)
+        monkeypatch.setattr(prompt_toolkit, "PromptSession", make_prompt_session)
+        monkeypatch.setattr(
+            "prompt_toolkit.patch_stdout.patch_stdout",
+            lambda: nullcontext(),
+        )
+
+        result = run_cmd._run_interactive_session(
+            _PromptCompletionContext(log_queue),
+            _make_taskspec(str(time.time_ns())),
+            stdin_data=None,
+            use_prompt=True,
+        )
+
+    assert result == ("completed", None, None)
+    assert client_holder["client"].stop_count == 1
+    assert log_queue.close_count == 1
+    assert thread_exception_guard == []
+    assert capsys.readouterr() == ("", "")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

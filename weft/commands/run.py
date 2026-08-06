@@ -677,13 +677,24 @@ def _run_interactive_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-111] exc
             session: PromptSession[str] = PromptSession("weft> ")
             completion_event = threading.Event()
 
+            def _exit_prompt_if_completed() -> None:
+                if (
+                    completion_event.is_set()
+                    and session.app.is_running
+                    and not session.app.is_done
+                ):
+                    session.app.exit()
+
             def _await_completion() -> None:
                 _wait_for_interactive_completion()
                 completion_event.set()
+                loop = session.app.loop
+                if loop is None:
+                    return
                 try:
-                    session.app.exit()
-                except Exception:  # pragma: no cover - defensive
-                    pass
+                    loop.call_soon_threadsafe(_exit_prompt_if_completed)
+                except RuntimeError:  # pragma: no cover - closed event-loop race
+                    return
 
             waiter = threading.Thread(target=_await_completion, daemon=True)
             waiter.start()
@@ -694,7 +705,10 @@ def _run_interactive_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-111] exc
             with patch_stdout():
                 while not completion_event.is_set():
                     try:
-                        line = session.prompt("weft> ")
+                        line = session.prompt(
+                            "weft> ",
+                            pre_run=_exit_prompt_if_completed,
+                        )
                     except EOFError:
                         client.close_input()
                         break
