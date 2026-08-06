@@ -1148,6 +1148,7 @@ independent review and separate explicit owner approval.
 | Task 5 `RUF012` realtime materialization context | MR-098, first shared-ops `_FakeContext.config` | RED instance-isolation assertion; exact owner test; current/targeted Ruff; suppression/diff checks | Context config now matches real per-instance ownership while terminal-materialization event behavior is unchanged. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
 | Task 5 `RUF012` realtime snapshot context | MR-097, second shared-ops `_FakeContext.config` | RED instance-isolation assertion; full owning test file; current/targeted Ruff; suppression/diff checks | 10 passed; context config now matches real per-instance ownership while snapshot-derived terminal event order remains unchanged. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
 | Task 5 `RUF012` Docker ID-fallback container | MR-011, first local `FakeContainer.attrs` | Exact owner test; current/targeted Ruff; suppression/diff checks | Mutable Docker-model attributes are now instance-owned; fixed immutable container ID and fallback lookup behavior remain unchanged. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
+| Task 5 `RUF012` Docker list-fallback container | MR-012, second local `FakeContainer.attrs` | Exact owner test; current/targeted Ruff; suppression/diff checks | Mutable Docker-model attributes are now instance-owned; fixed immutable ID/name and list fallback behavior remain unchanged. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
 
 ## 20. Independent Review Loop
 
