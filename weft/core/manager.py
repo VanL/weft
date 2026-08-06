@@ -6203,7 +6203,7 @@ class Manager(ServiceTask):
             include_autostart=True,
         )
 
-    def _managed_service_convergence_active_reasons(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-012] exception
+    def _managed_service_convergence_active_reasons(
         self,
         *,
         include_autostart: bool,
@@ -6238,12 +6238,17 @@ class Manager(ServiceTask):
                 reasons.append("missing_active_tid")
             if state.uncertain_attempts > 0:
                 reasons.append("uncertain_attempts")
-        if include_autostart and self._autostart_enabled and self._autostart_dir:
-            if self._autostart_last_scan_ns == 0 or (
-                time.time_ns() - self._autostart_last_scan_ns
+        if (
+            include_autostart
+            and self._autostart_enabled
+            and self._autostart_dir
+            and (
+                self._autostart_last_scan_ns == 0
+                or time.time_ns() - self._autostart_last_scan_ns
                 >= self._autostart_scan_interval_ns
-            ):
-                reasons.append("autostart_scan_due")
+            )
+        ):
+            reasons.append("autostart_scan_due")
         return tuple(dict.fromkeys(reasons))
 
     def _managed_service_convergence_active(self, *, include_autostart: bool) -> bool:

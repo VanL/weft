@@ -63,7 +63,7 @@ EXPECTED_GROUP_IDS = [
     ),
 ]
 EXPECTED_GROUP_COUNT = 116
-EXPECTED_DIRECTIVE_COUNT = 145
+EXPECTED_DIRECTIVE_COUNT = 144
 TAGGED_C901 = re.compile(
     r"#\s*noqa:\s*[^#\n]*\bC901\b[^#\n]*"
     r"approved\s+\[TS-3\.1\]\s+\[RUFF-SUP-(\d{3})\]\s+exception\b"
