@@ -55,7 +55,7 @@ def test_validate_taskspec_failure(workdir):
     spec_path = workdir / "invalid_taskspec.json"
     write_taskspec(spec_path, payload)
 
-    rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
+    rc, out, _err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
 
     assert rc != 0
     assert "TaskSpec validation failed" in out

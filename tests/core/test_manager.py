@@ -7345,7 +7345,7 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
 
 
 def test_manager_idle_shutdown(broker_env, unique_tid) -> None:
-    db_path, make_queue = broker_env
+    db_path, _make_queue = broker_env
     inbox = f"manager.{unique_tid}.inbox"
     ctrl_in = f"manager.{unique_tid}.ctrl_in"
     ctrl_out = f"manager.{unique_tid}.ctrl_out"
@@ -7865,7 +7865,7 @@ def test_manager_autostart_ensure_restarts(
 def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
     tmp_path: Path, broker_env, unique_tid
 ) -> None:
-    db_path, make_queue = broker_env
+    db_path, _make_queue = broker_env
 
     autostart_dir, manifest_path = write_autostart_fixture(
         tmp_path,

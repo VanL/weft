@@ -133,7 +133,7 @@ def test_system_builtins_ignores_local_project_shadow(workdir) -> None:
         },
     )
 
-    rc, out, err = run_cli(
+    rc, _out, err = run_cli(
         "spec",
         "create",
         "probe-agents",
@@ -249,7 +249,7 @@ def test_system_prune_rejects_invalid_options(workdir) -> None:
     assert rc == 1
     assert "--keep-recent-per-key must be >= 1" in err
 
-    rc, out, err = run_cli(
+    rc, _out, err = run_cli(
         "system",
         "builtins",
         "--json",

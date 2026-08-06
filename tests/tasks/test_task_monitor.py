@@ -5042,7 +5042,7 @@ def test_task_monitor_skips_ambiguous_old_service_owner_collation(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db_path, make_queue = broker_env
+    db_path, _make_queue = broker_env
     monkeypatch.setattr(
         task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
     )

@@ -2713,7 +2713,7 @@ def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
             )
         )
 
-        rc, out, err = run_cli(
+        rc, _out, _err = run_cli(
             "run",
             "--function",
             "tests.tasks.sample_targets:echo_payload",

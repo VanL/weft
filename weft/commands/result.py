@@ -375,7 +375,7 @@ def _drain_outbox_until_timestamp(
             break
         if not isinstance(next_item, tuple):
             break
-        payload, timestamp = next_item
+        _payload, timestamp = next_item
         if timestamp > boundary_timestamp:
             break
         consumed = queue.read_one(exact_timestamp=timestamp)

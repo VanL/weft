@@ -88,7 +88,7 @@ def drive_task_until(task, predicate, *, timeout: float = 5.0) -> None:
 
 
 def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     drain_queue(mapping_queue)  # clear any previous messages
 
@@ -134,7 +134,7 @@ def test_tid_mapping_includes_metadata_role(
 
 
 def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) -> None:
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     drain_queue(mapping_queue)
 
@@ -165,7 +165,7 @@ def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) ->
 def test_tid_mapping_deduplicates_identical_payloads(
     broker_env, task_factory, unique_tid
 ) -> None:
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     drain_queue(mapping_queue)
 
@@ -274,7 +274,7 @@ def test_process_title_sanitizes_dynamic_segments(
 
 
 def test_state_logging_records_events(broker_env, task_factory, unique_tid) -> None:
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 
@@ -305,7 +305,7 @@ def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
     task_factory,
     unique_tid,
 ) -> None:
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 
@@ -340,7 +340,7 @@ def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
 
 
 def test_state_logging_records_failure(broker_env, task_factory, unique_tid) -> None:
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 
@@ -392,7 +392,7 @@ def test_control_response_broker_error_is_best_effort(
 def test_control_stop_logged_and_cancelled(
     broker_env, task_factory, unique_tid
 ) -> None:
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 
@@ -445,7 +445,7 @@ def test_poll_reporting_emits_periodic_events(
     task_factory,
     unique_tid,
 ) -> None:
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 
@@ -498,7 +498,7 @@ def test_state_logging_respects_redaction(
     )
     weft_helpers.reload_config()
 
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 
@@ -530,7 +530,7 @@ def test_state_logging_respects_redaction(
 
     monkeypatch.setenv("WEFT_REDACT_TASKSPEC_FIELDS", "")
     weft_helpers.reload_config()
-    db_path, make_queue = broker_env
+    _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 

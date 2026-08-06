@@ -143,12 +143,12 @@ def test_status_filters_stopped_managers_by_default(workdir) -> None:
     registry.write(json.dumps(stopped_record))
 
     try:
-        rc, out, err = run_cli("status", cwd=workdir)
+        rc, out, _err = run_cli("status", cwd=workdir)
 
         assert rc == 0
         assert stopped_record["tid"] not in out
 
-        rc, out, err = run_cli("status", "--all", cwd=workdir)
+        rc, out, _err = run_cli("status", "--all", cwd=workdir)
 
         assert rc == 0
         assert stopped_record["tid"] in out
