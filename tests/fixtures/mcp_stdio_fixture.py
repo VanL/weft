@@ -264,11 +264,11 @@ def _server_command(server_config: Mapping[str, Any]) -> list[str]:
         raise RuntimeError("fixture MCP server config is missing command")
     args = server_config.get("args") or ()
     if isinstance(args, str):
-        raise RuntimeError("fixture MCP server args must be a sequence of strings")
+        raise TypeError("fixture MCP server args must be a sequence of strings")
     command_parts = [command]
     for value in args:
         if not isinstance(value, str):
-            raise RuntimeError("fixture MCP server args must be strings")
+            raise TypeError("fixture MCP server args must be strings")
         command_parts.append(value)
     return command_parts
 
