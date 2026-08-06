@@ -1295,6 +1295,150 @@ def test_agent_session_close_caps_join_to_caller_deadline() -> None:
     assert process.alive is False
 
 
+@pytest.mark.parametrize(
+    (
+        "deadline_enabled",
+        "initially_alive",
+        "expected_join_calls",
+        "expected_kill_calls",
+        "expected_terminate_calls",
+        "expected_tree_calls",
+        "expected_warning",
+    ),
+    [
+        (
+            True,
+            False,
+            1,
+            0,
+            0,
+            0,
+            "Failed to join exited agent session process before deadline",
+        ),
+        (
+            True,
+            True,
+            1,
+            1,
+            0,
+            1,
+            "Failed to join agent session process before deadline",
+        ),
+        (
+            False,
+            False,
+            1,
+            0,
+            0,
+            0,
+            "Failed to join exited agent session process",
+        ),
+        (
+            False,
+            True,
+            2,
+            0,
+            1,
+            1,
+            "Failed to join agent session process before escalation",
+        ),
+    ],
+)
+def test_agent_session_terminate_reports_os_join_failure_by_branch(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    deadline_enabled: bool,
+    initially_alive: bool,
+    expected_join_calls: int,
+    expected_kill_calls: int,
+    expected_terminate_calls: int,
+    expected_tree_calls: int,
+    expected_warning: str,
+) -> None:
+    class Process:
+        pid = 123
+
+        def __init__(self) -> None:
+            self.alive = initially_alive
+            self.join_calls = 0
+            self.kill_calls = 0
+            self.terminate_calls = 0
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout is not None
+            self.join_calls += 1
+            if self.join_calls == 1:
+                raise OSError("sensitive agent process wait failure")
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.alive = False
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.alive = False
+
+    tree_calls = 0
+
+    def terminate_tree(*_args: Any, **_kwargs: Any) -> set[int]:
+        nonlocal tree_calls
+        tree_calls += 1
+        return set()
+
+    process = Process()
+    session = AgentSession(
+        process,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    deadline = time.monotonic() + 1.0 if deadline_enabled else None
+    session.terminate(deadline=deadline)
+
+    assert process.join_calls == expected_join_calls
+    assert process.kill_calls == expected_kill_calls
+    assert process.terminate_calls == expected_terminate_calls
+    assert tree_calls == expected_tree_calls
+    assert [record.getMessage() for record in caplog.records] == [expected_warning]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_agent_session_terminate_propagates_unexpected_join_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Process:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            raise RuntimeError("unexpected agent process wait defect")
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    with pytest.raises(RuntimeError, match="unexpected agent process wait defect"):
+        session.terminate()
+
+    assert caplog.records == []
+
+
 def test_agent_session_deadline_close_does_not_join_ipc_feeder_threads() -> None:
     class FakeProcess:
         pid = None

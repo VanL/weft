@@ -702,8 +702,10 @@ class AgentSession:
                     self._process.join(
                         timeout=min(0.2, max(0.0, deadline - time.monotonic()))
                     )
-                except Exception:  # pragma: no cover - defensive
-                    pass
+                except OSError:  # pragma: no cover - platform wait failure
+                    logger.warning(
+                        "Failed to join exited agent session process before deadline"
+                    )
                 return
 
             pid = self._process.pid
@@ -723,15 +725,15 @@ class AgentSession:
                 self._process.join(
                     timeout=min(0.2, max(0.0, deadline - time.monotonic()))
                 )
-            except Exception:  # pragma: no cover - defensive
-                pass
+            except OSError:  # pragma: no cover - platform wait failure
+                logger.warning("Failed to join agent session process before deadline")
             return
 
         if not self.is_alive():
             try:
                 self._process.join(timeout=0.2)
-            except Exception:  # pragma: no cover - defensive
-                pass
+            except OSError:  # pragma: no cover - platform wait failure
+                logger.warning("Failed to join exited agent session process")
             return
 
         pid = self._process.pid
@@ -740,8 +742,8 @@ class AgentSession:
 
         try:
             self._process.join(timeout=0.2)
-        except Exception:  # pragma: no cover - defensive
-            pass
+        except OSError:  # pragma: no cover - platform wait failure
+            logger.warning("Failed to join agent session process before escalation")
         if not self.is_alive():
             return
 
