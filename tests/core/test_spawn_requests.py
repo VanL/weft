@@ -12,7 +12,10 @@ from weft._constants import (
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
-from weft.core.spawn_requests import submit_spawn_request
+from weft.core.spawn_requests import (
+    _write_spawn_request_with_timestamp,
+    submit_spawn_request,
+)
 from weft.core.taskspec import TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -106,3 +109,18 @@ def test_explicit_spawn_keeps_supplied_exact_id(weft_harness) -> None:
     assert submitted_tid == explicit_tid
     assert message_id == explicit_tid
     assert json.loads(body)["taskspec"]["tid"] == str(explicit_tid)
+
+
+def test_exact_id_writer_reports_missing_broker_capability_as_runtime_error() -> None:
+    with pytest.raises(RuntimeError) as exc_info:
+        _write_spawn_request_with_timestamp(
+            object(),
+            queue_name=WEFT_SPAWN_REQUESTS_QUEUE,
+            message="{}",
+            timestamp=1777000000000000123,
+        )
+    assert type(exc_info.value) is RuntimeError
+    assert str(exc_info.value) == (
+        "exact-ID spawn request writes require a broker connection with "
+        "insert_messages support"
+    )

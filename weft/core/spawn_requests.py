@@ -119,7 +119,10 @@ def _write_spawn_request_with_timestamp(
     """
 
     if not callable(getattr(db, "insert_messages", None)):
-        raise RuntimeError("exact-ID spawn request writes require simplebroker>=4.3.0")
+        raise RuntimeError(
+            "exact-ID spawn request writes require a broker connection with "
+            "insert_messages support"
+        )
 
     message_id = int(timestamp)
     inserter = cast(_ExactSpawnInserter, db)
