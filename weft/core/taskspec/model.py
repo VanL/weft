@@ -276,9 +276,8 @@ def resolve_taskspec_payload(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-050] exc
         if limits is None:
             limits = {}
             spec_section["limits"] = limits
-        if isinstance(limits, dict):
-            if limits.get("memory_mb") is None:
-                limits["memory_mb"] = DEFAULT_MEMORY_MB
+        if isinstance(limits, dict) and limits.get("memory_mb") is None:
+            limits["memory_mb"] = DEFAULT_MEMORY_MB
 
     return candidate
 
