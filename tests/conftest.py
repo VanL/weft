@@ -467,7 +467,7 @@ def _register_cli_outputs(
         for line in blob.splitlines():
             try:
                 payload = json.loads(line)
-            except Exception:
+            except json.JSONDecodeError:
                 continue
             _register_from_json(harness, payload, manager_command=manager_command)
 

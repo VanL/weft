@@ -514,6 +514,28 @@ class TestResolveCliCommand:
 class TestCliOutputRegistration:
     """Tests for CLI test-helper output parsing."""
 
+    def test_register_cli_outputs_ignores_non_json_lines(self) -> None:
+        harness = WeftTestHarness()
+        try:
+            _register_cli_outputs(harness, ("status", "--json"), "not json", "")
+
+            assert harness.registered_tids() == set()
+        finally:
+            harness.cleanup()
+
+    def test_register_cli_outputs_does_not_hide_unexpected_parser_errors(
+        self,
+    ) -> None:
+        harness = WeftTestHarness()
+        try:
+            with (
+                patch("tests.conftest.json.loads", side_effect=RuntimeError("boom")),
+                pytest.raises(RuntimeError, match="boom"),
+            ):
+                _register_cli_outputs(harness, ("status", "--json"), "{}", "")
+        finally:
+            harness.cleanup()
+
     def test_register_cli_outputs_ignores_status_timestamps(self) -> None:
         harness = WeftTestHarness()
         try:
