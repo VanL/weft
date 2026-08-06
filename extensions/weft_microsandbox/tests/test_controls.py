@@ -12,8 +12,9 @@ pytestmark = [pytest.mark.shared]
 
 
 class ControlRuntime:
-    stopped: list[tuple[str, float]] = []
-    killed: list[tuple[str, float]] = []
+    def __init__(self) -> None:
+        self.stopped: list[tuple[str, float]] = []
+        self.killed: list[tuple[str, float]] = []
 
     def stop(self, sandbox_id: str, *, timeout: float = 2.0) -> bool:
         self.stopped.append((sandbox_id, timeout))
@@ -29,6 +30,14 @@ class ControlRuntime:
             state="running",
             metadata={"from_runtime": True},
         )
+
+
+def test_control_runtime_records_are_instance_local() -> None:
+    first = ControlRuntime()
+    second = ControlRuntime()
+
+    assert first.stopped is not second.stopped
+    assert first.killed is not second.killed
 
 
 def _handle() -> RunnerHandle:
