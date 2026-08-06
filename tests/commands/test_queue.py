@@ -377,20 +377,23 @@ def test_watch_queue_closes_generator_when_limit_stops_iteration(
     monitor_queue = _FakeWatchQueue("watch.queue", [])
 
     class _FakeContext:
-        config: dict[str, Any] = {}
-
         def __init__(self) -> None:
+            self.config: dict[str, Any] = {}
             self._queues = [data_queue, monitor_queue]
 
         def queue(self, _name: str, *, persistent: bool = True):
             del persistent
             return self._queues.pop(0)
 
+    first_context = _FakeContext()
+    second_context = _FakeContext()
+    assert first_context.config is not second_context.config
+
     monkeypatch.setattr(queue_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
 
     messages = list(
         queue_cmd.watch_queue(
-            _FakeContext(),
+            first_context,
             "watch.queue",
             interval=0.25,
             max_messages=1,
