@@ -2547,6 +2547,84 @@ def test_host_process_handle_cleanup_propagates_unexpected_failure() -> None:
         HostTaskRunner._close_process_handle(Process())  # type: ignore[arg-type]
 
 
+def test_host_process_stop_reports_join_failure_and_escalates(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Process:
+        pid = 123
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_attempts = 0
+
+        def is_alive(self) -> bool:
+            calls.append("is_alive")
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout == 0.2
+            calls.append("join")
+            self.join_attempts += 1
+            if self.join_attempts == 1:
+                raise OSError("sensitive process wait failure")
+
+        def terminate(self) -> None:
+            calls.append("terminate")
+            self.alive = False
+
+        def kill(self) -> None:
+            calls.append("kill")
+            self.alive = False
+
+    monkeypatch.setattr(
+        host_module,
+        "terminate_process_tree",
+        lambda pid, *, timeout: calls.append(f"terminate_tree:{pid}:{timeout}"),
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.host")
+
+    HostTaskRunner._stop_process(Process())  # type: ignore[arg-type]
+
+    assert calls == [
+        "is_alive",
+        "terminate_tree:123:0.2",
+        "join",
+        "is_alive",
+        "terminate",
+        "join",
+        "is_alive",
+    ]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to join host runner process before escalation"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_host_process_stop_propagates_unexpected_join_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        pid = 123
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            raise RuntimeError("unexpected process wait defect")
+
+    monkeypatch.setattr(
+        host_module, "terminate_process_tree", lambda *_args, **_kwargs: None
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected process wait defect"):
+        HostTaskRunner._stop_process(Process())  # type: ignore[arg-type]
+
+
 def test_one_shot_spawn_failure_closes_both_response_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

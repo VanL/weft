@@ -925,8 +925,8 @@ class HostTaskRunner:
 
         try:
             process.join(timeout=timeout)
-        except Exception:  # pragma: no cover - defensive
-            pass
+        except OSError:  # pragma: no cover - platform wait failure
+            logger.warning("Failed to join host runner process before escalation")
         if not process.is_alive():
             return
 
