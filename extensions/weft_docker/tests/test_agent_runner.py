@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -192,6 +193,7 @@ def test_resolve_work_item_mounts_rejects_relative_paths() -> None:
 
 def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-201] exception
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     created: dict[str, object] = {}
 
@@ -324,7 +326,15 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
         runner_options={"container_workdir": "/tmp", "mount_workdir": False},
     )
 
-    outcome = runner.run({"task": "Explain this document"})
+    def fail_callback(*_args: object) -> None:
+        raise RuntimeError("sensitive callback failure")
+
+    caplog.set_level(logging.WARNING, logger="weft_docker.agent_runner")
+    outcome = runner.run_with_hooks(
+        {"task": "Explain this document"},
+        on_worker_started=fail_callback,
+        on_runtime_handle_started=fail_callback,
+    )
 
     assert outcome.status == "ok"
     assert outcome.value == "provider-output"
@@ -332,6 +342,12 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
     kwargs = cast(dict[str, object], created["kwargs"])
     labels = cast(dict[str, str], kwargs["labels"])
     assert labels["weft.agent.image.cache_key"] == "cached-key"
+    assert [record.getMessage() for record in caplog.records] == [
+        "Docker agent worker-start callback failed",
+        "Docker agent runtime-handle callback failed",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive callback failure" not in caplog.text
 
 
 def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-201] exception

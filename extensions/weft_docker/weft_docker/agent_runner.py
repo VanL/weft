@@ -7,6 +7,7 @@ Spec references:
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import tempfile
@@ -41,6 +42,8 @@ from weft.ext import RunnerHandle
 
 from ._sdk import docker_client, load_docker_sdk, wait_for_container_runtime_start
 from .agent_images import ensure_agent_image
+
+logger = logging.getLogger(__name__)
 
 
 class DockerProviderCLIRunner:
@@ -239,12 +242,16 @@ class DockerProviderCLIRunner:
                         try:
                             on_worker_started(None)
                         except Exception:  # pragma: no cover - callback safety
-                            pass
+                            logger.warning(
+                                "Docker agent worker-start callback failed"
+                            )
                     if on_runtime_handle_started is not None:
                         try:
                             on_runtime_handle_started(runtime_handle)
                         except Exception:  # pragma: no cover - callback safety
-                            pass
+                            logger.warning(
+                                "Docker agent runtime-handle callback failed"
+                            )
 
                     terminal_status: str | None = None
                     terminal_error: str | None = None
