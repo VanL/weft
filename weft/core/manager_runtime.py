@@ -1832,11 +1832,14 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
         raise ValueError("manager tid is required")
 
     current = record or _manager_record(context, target_tid)
-    if isinstance(current, dict):
-        if current.get("status") == "stopped" and _manager_handle_is_stale(
+    if (
+        isinstance(current, dict)
+        and current.get("status") == "stopped"
+        and _manager_handle_is_stale(
             _manager_handle_from_record(current)
-        ):
-            return True, None
+        )
+    ):
+        return True, None
 
     try:
         _send_stop(context, target_tid, record=current)
