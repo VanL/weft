@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import platform
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -17,6 +18,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ._options import MicrosandboxMount, MicrosandboxNetwork, WorkspaceMode
+
+logger = logging.getLogger(__name__)
 
 
 class MicrosandboxRuntimeError(RuntimeError):
@@ -445,11 +448,11 @@ async def _cleanup_sandbox(sdk: Any, sandbox: Any, name: str) -> None:
     try:
         await sandbox.stop(timeout=2.0)
     except Exception:
-        pass
+        logger.warning("Failed to stop Microsandbox during cleanup")
     try:
         await sdk.Sandbox.remove(name)
     except Exception:
-        pass
+        logger.warning("Failed to remove Microsandbox during cleanup")
 
 
 def _is_timeout_error(exc: BaseException) -> bool:

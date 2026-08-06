@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -259,3 +260,37 @@ def test_exec_with_cancel_maps_post_kill_exec_output_to_cancelled() -> None:
 
     assert result is None
     assert killed is True
+
+
+def test_cleanup_sandbox_reports_each_failure_and_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[str] = []
+
+    class Sandbox:
+        async def stop(self, *, timeout: float) -> None:
+            assert timeout == 2.0
+            calls.append("stop")
+            raise RuntimeError("sensitive stop failure")
+
+    class SandboxAPI:
+        @staticmethod
+        async def remove(name: str) -> None:
+            assert name == "sensitive-sandbox-name"
+            calls.append("remove")
+            raise RuntimeError("sensitive remove failure")
+
+    class SDK:
+        Sandbox = SandboxAPI
+
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    asyncio.run(_runtime._cleanup_sandbox(SDK(), Sandbox(), "sensitive-sandbox-name"))
+
+    assert calls == ["stop", "remove"]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to stop Microsandbox during cleanup",
+        "Failed to remove Microsandbox during cleanup",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
