@@ -1139,13 +1139,7 @@ def test_cli_run_spec_bundle_resolves_bundle_local_function_target(
     bundle_dir = workdir / "bundle-task"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "def bundle_echo(payload: str) -> str:",
-                "    return f'bundle:{payload}'",
-                "",
-            ]
-        ),
+        ("def bundle_echo(payload: str) -> str:\n    return f'bundle:{payload}'\n"),
         encoding="utf-8",
     )
     spec_payload = {
@@ -1192,14 +1186,11 @@ def test_cli_run_spec_bundle_passes_plain_json_object_stdin_to_function_target(
     bundle_dir = workdir / "bundle-json-task"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "import json",
-                "",
-                "def echo_mapping(payload: dict[str, object]) -> str:",
-                "    return json.dumps(payload, sort_keys=True)",
-                "",
-            ]
+        (
+            "import json\n"
+            "\n"
+            "def echo_mapping(payload: dict[str, object]) -> str:\n"
+            "    return json.dumps(payload, sort_keys=True)\n"
         ),
         encoding="utf-8",
     )
@@ -1412,14 +1403,11 @@ def test_cli_run_spec_bundle_declared_path_arg_normalizes_to_absolute_path(
     bundle_dir = workdir / "run-input-path-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "from __future__ import annotations",
-                "",
-                "def build_work_item(request):",
-                "    return request.arguments['document']",
-                "",
-            ]
+        (
+            "from __future__ import annotations\n"
+            "\n"
+            "def build_work_item(request):\n"
+            "    return request.arguments['document']\n"
         ),
         encoding="utf-8",
     )
@@ -1471,14 +1459,11 @@ def test_cli_run_spec_bundle_declared_args_require_declared_option(
     bundle_dir = workdir / "run-input-required-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "from __future__ import annotations",
-                "",
-                "def build_work_item(request):",
-                "    return request.arguments['prompt']",
-                "",
-            ]
+        (
+            "from __future__ import annotations\n"
+            "\n"
+            "def build_work_item(request):\n"
+            "    return request.arguments['prompt']\n"
         ),
         encoding="utf-8",
     )
@@ -1526,14 +1511,11 @@ def test_cli_run_spec_bundle_declared_args_reject_undeclared_option(
     bundle_dir = workdir / "run-input-undeclared-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "from __future__ import annotations",
-                "",
-                "def build_work_item(request):",
-                "    return request.arguments.get('prompt', '')",
-                "",
-            ]
+        (
+            "from __future__ import annotations\n"
+            "\n"
+            "def build_work_item(request):\n"
+            "    return request.arguments.get('prompt', '')\n"
         ),
         encoding="utf-8",
     )

@@ -198,13 +198,7 @@ def test_pipeline_run_stage_can_be_bundle_backed_task_spec(
     bundle_dir = tasks_dir / "stage1"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "def bundle_stage(payload: str) -> str:",
-                "    return f'{payload}-bundle'",
-                "",
-            ]
-        ),
+        ("def bundle_stage(payload: str) -> str:\n    return f'{payload}-bundle'\n"),
         encoding="utf-8",
     )
     _write_json(

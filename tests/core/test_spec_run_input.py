@@ -50,14 +50,11 @@ def test_invoke_run_input_adapter_supports_bundle_local_module(
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir(parents=True, exist_ok=True)
     (bundle_root / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "from __future__ import annotations",
-                "",
-                "def build(request):",
-                "    return {'task': f\"{request.arguments['prompt']}::{request.stdin_text}\"}",
-                "",
-            ]
+        (
+            "from __future__ import annotations\n"
+            "\n"
+            "def build(request):\n"
+            "    return {'task': f\"{request.arguments['prompt']}::{request.stdin_text}\"}\n"
         ),
         encoding="utf-8",
     )
@@ -82,14 +79,11 @@ def test_invoke_run_input_adapter_rejects_non_json_serializable_payload(
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir(parents=True, exist_ok=True)
     (bundle_root / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "from __future__ import annotations",
-                "",
-                "def build(request):",
-                "    return object()",
-                "",
-            ]
+        (
+            "from __future__ import annotations\n"
+            "\n"
+            "def build(request):\n"
+            "    return object()\n"
         ),
         encoding="utf-8",
     )

@@ -55,7 +55,9 @@ def test_validate_taskspec_failure(workdir):
     spec_path = workdir / "invalid_taskspec.json"
     write_taskspec(spec_path, payload)
 
-    rc, out, _err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
+    rc, out, _err = run_cli(
+        "spec", "validate", "--type", "task", spec_path, cwd=workdir
+    )
 
     assert rc != 0
     assert "TaskSpec validation failed" in out
@@ -466,14 +468,11 @@ def test_validate_taskspec_run_input_bundle_adapter(workdir) -> None:
     bundle_dir = workdir / "run_input_bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
-            [
-                "from __future__ import annotations",
-                "",
-                "def build_work_item(request):",
-                "    return request.arguments.get('prompt', '')",
-                "",
-            ]
+        (
+            "from __future__ import annotations\n"
+            "\n"
+            "def build_work_item(request):\n"
+            "    return request.arguments.get('prompt', '')\n"
         ),
         encoding="utf-8",
     )

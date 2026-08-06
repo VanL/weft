@@ -55,13 +55,7 @@ def test_execute_function_target_kwargs_only_ignores_empty_work_item():
 def test_execute_function_target_prefers_bundle_module(tmp_path: Path) -> None:
     helper = tmp_path / "helper_module.py"
     helper.write_text(
-        "\n".join(
-            [
-                "def bundle_sum(a: int, b: int = 0) -> int:",
-                "    return a + b + 10",
-                "",
-            ]
-        ),
+        ("def bundle_sum(a: int, b: int = 0) -> int:\n    return a + b + 10\n"),
         encoding="utf-8",
     )
 
