@@ -296,6 +296,23 @@ def test_system_prune_retention_dry_run_json(workdir) -> None:
     }
 
 
+def test_system_prune_all_plain_output_labels_each_summary(workdir) -> None:
+    rc, out, err = run_cli(
+        "system",
+        "prune",
+        "--family",
+        "all",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    assert out.startswith("Runtime state:\n")
+    assert "\nRetention:\n" in out
+
+
 def test_system_prune_retention_apply_requires_archive_unless_force(workdir) -> None:
     context = build_context(spec_context=workdir)
     _write_queue_json(

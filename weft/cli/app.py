@@ -1236,14 +1236,7 @@ def prune(
                 sort_keys=True,
             )
         else:
-            stdout = "\n".join(
-                [
-                    "Runtime state:",
-                    runtime_out,
-                    "Retention:",
-                    retention_out,
-                ]
-            )
+            stdout = f"Runtime state:\n{runtime_out}\nRetention:\n{retention_out}"
         stderr = "\n".join(part for part in (runtime_err, retention_err) if part)
     else:
         exit_code = 1
