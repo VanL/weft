@@ -13,6 +13,7 @@ import pytest
 from weft_microsandbox import _runtime
 from weft_microsandbox._options import MicrosandboxMount
 from weft_microsandbox._runtime import (
+    FileCopyBack,
     FileCopyIntoGuest,
     MicrosandboxRunSpec,
     MicrosandboxRuntime,
@@ -185,6 +186,39 @@ def test_copy_into_guest_recursively_copies_directory_contents(tmp_path: Path) -
         (str(config), "/tmp/weft-provider/claude-mcp.json"),
         (str(nested_file), "/tmp/weft-provider/nested/tool.json"),
     ]
+
+
+def test_copy_back_reports_failure_and_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Fs:
+        async def copy_to_host(self, guest_path: str, host_path: str) -> None:
+            calls.append((guest_path, host_path))
+            if guest_path == "/sensitive/first":
+                raise RuntimeError("sensitive copy-back failure")
+
+    class Sandbox:
+        fs = Fs()
+
+    copy_back = (
+        FileCopyBack("/sensitive/first", "/host/sensitive-first"),
+        FileCopyBack("/sensitive/second", "/host/sensitive-second"),
+    )
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    asyncio.run(_runtime._copy_back_files(Sandbox(), copy_back))
+
+    assert calls == [
+        ("/sensitive/first", "/host/sensitive-first"),
+        ("/sensitive/second", "/host/sensitive-second"),
+    ]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to copy Microsandbox output to the host"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive" not in caplog.text
 
 
 def test_exec_with_cancel_maps_cancelled_sdk_exec_task() -> None:

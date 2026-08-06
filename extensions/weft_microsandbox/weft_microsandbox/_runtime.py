@@ -335,7 +335,7 @@ async def _copy_back_files(
         try:
             await sandbox.fs.copy_to_host(item.guest_path, item.host_path)
         except Exception:
-            pass
+            logger.warning("Failed to copy Microsandbox output to the host")
 
 
 async def _copy_into_guest(
