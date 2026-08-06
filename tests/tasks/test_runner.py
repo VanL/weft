@@ -129,6 +129,87 @@ def test_runner_handle_rejects_legacy_shape() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("control", "runner handle control must be a mapping"),
+        ("observations", "runner handle observations must be a mapping"),
+    ],
+)
+def test_runner_handle_constructor_rejects_non_mapping_fields_as_type_error(
+    field: str,
+    message: str,
+) -> None:
+    kwargs: dict[str, Any] = {
+        "runner": "host",
+        "kind": "process",
+        "id": "123",
+        "control": {"authority": "host-pid"},
+        "observations": {},
+    }
+    kwargs[field] = ["not-a-mapping"]
+
+    with pytest.raises(TypeError) as exc_info:
+        RunnerHandle(**kwargs)
+    assert type(exc_info.value) is TypeError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "runner": 1,
+                "kind": "process",
+                "id": "123",
+                "control": {"authority": "host-pid"},
+            },
+            "runner handle requires string runner, kind, and id",
+        ),
+        (
+            {
+                "runner": "host",
+                "kind": "process",
+                "id": "123",
+                "control": ["not-a-mapping"],
+            },
+            "runner handle control must be a mapping",
+        ),
+        (
+            {
+                "runner": "host",
+                "kind": "process",
+                "id": "123",
+                "control": {"authority": "host-pid"},
+                "observations": ["not-a-mapping"],
+            },
+            "runner handle observations must be a mapping",
+        ),
+        (
+            {
+                "runner": "host",
+                "kind": "process",
+                "id": "123",
+                "control": {"authority": "host-pid"},
+                "metadata": ["not-a-mapping"],
+            },
+            "runner handle metadata must be a mapping",
+        ),
+    ],
+)
+def test_runner_handle_from_dict_rejects_persisted_shape_as_value_error(
+    payload: dict[str, Any],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        RunnerHandle.from_dict(payload)
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
+
+
 @pytest.mark.timeout(30)
 def test_task_runner_executes_function_successfully():
     runner = TaskRunner(

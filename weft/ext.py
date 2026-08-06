@@ -56,14 +56,14 @@ class RunnerHandle:
         if not runtime_id:
             raise ValueError("id must be non-empty")
         if not isinstance(self.control, Mapping):
-            raise ValueError("runner handle control must be a mapping")
+            raise TypeError("runner handle control must be a mapping")
         control = dict(self.control)
         authority = control.get("authority")
         if not isinstance(authority, str) or not authority.strip():
             raise ValueError("runner handle control.authority must be non-empty")
         control["authority"] = authority.strip()
         if not isinstance(self.observations, Mapping):
-            raise ValueError("runner handle observations must be a mapping")
+            raise TypeError("runner handle observations must be a mapping")
         observations = dict(self.observations)
         host_pids = observations.get("host_pids")
         if host_pids is not None:
