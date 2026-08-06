@@ -248,9 +248,7 @@ def test_cli_long_session_produces_identical_transcript_across_backends(
         )
         bulk_tasks.append(command_task)
 
-        if round_index == 0:
-            sample_tasks.extend([function_task, work_task, command_task])
-        elif round_index == BULK_ROUNDS - 1:
+        if round_index in {0, BULK_ROUNDS - 1}:
             sample_tasks.extend([function_task, work_task, command_task])
 
         if round_index in {0, 31, 63, BULK_ROUNDS - 1}:
