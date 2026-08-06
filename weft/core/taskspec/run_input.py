@@ -67,7 +67,7 @@ def parse_declared_option_args(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-055] e
 ) -> ParsedDeclaredOptions:
     """Parse declared long options from raw trailing CLI tokens."""
     option_to_name = {
-        normalize_declared_option_name(name): name for name in arguments.keys()
+        normalize_declared_option_name(name): name for name in arguments
     }
     parsed: dict[str, str] = {}
     remaining_tokens: list[str] = []
