@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -11,6 +12,8 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from simplebroker.ext import get_backend_plugin
+
+logger = logging.getLogger(__name__)
 
 PROJECT_CONFIG_FILENAME = "broker.toml"
 POSTGRES_TEST_BACKEND = "postgres"
@@ -215,6 +218,10 @@ def cleanup_prepared_roots(
         try:
             plugin.cleanup_target(dsn, backend_options={"schema": schema})
         except Exception:
+            logger.warning(
+                "Failed to clean Postgres test schema",
+                extra={"config_path": str(config_path), "schema": schema},
+            )
             continue
         cleaned_schemas.add(schema)
 
