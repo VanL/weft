@@ -146,14 +146,20 @@ def test_copy_into_guest_recursively_copies_directory_contents(tmp_path: Path) -
     nested_file.write_text("{}", encoding="utf-8")
 
     class Fs:
-        mkdirs: list[str] = []
-        copied: list[tuple[str, str]] = []
+        def __init__(self) -> None:
+            self.mkdirs: list[str] = []
+            self.copied: list[tuple[str, str]] = []
 
         async def mkdir(self, path: str) -> None:
             self.mkdirs.append(path)
 
         async def copy_from_host(self, host_path: str, guest_path: str) -> None:
             self.copied.append((host_path, guest_path))
+
+    first_fs = Fs()
+    second_fs = Fs()
+    assert first_fs.mkdirs is not second_fs.mkdirs
+    assert first_fs.copied is not second_fs.copied
 
     class Sandbox:
         fs = Fs()
