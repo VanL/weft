@@ -34,7 +34,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from simplebroker import resolve_config as resolve_broker_config
 
@@ -830,7 +830,7 @@ MANAGER_LAUNCHER_SIGNAL_ABORT: Final[str] = "ABORT"
 MANAGER_LAUNCHER_POLL_INTERVAL: Final[float] = 0.05
 """Polling interval for the detached manager bootstrap launcher wrapper."""
 
-DEFAULT_REPORTING_INTERVAL: Final[Literal["transition"]] = "transition"
+DEFAULT_REPORTING_INTERVAL: Final = "transition"
 """Default reporting interval. Either 'poll' or 'transition'."""
 
 DEFAULT_ENABLE_PROCESS_TITLE: Final[bool] = True
@@ -1301,19 +1301,19 @@ SERVICE_TYPE_MANAGER: Final[str] = "manager"
 SERVICE_TYPE_MANAGED: Final[str] = "managed"
 """Service-owner type for manager-supervised internal/autostart services."""
 
-SERVICE_STATUS_ACTIVE: Final[Literal["active"]] = "active"
+SERVICE_STATUS_ACTIVE: Final = "active"
 """Service-owner status for a live active service owner."""
 
-SERVICE_STATUS_DRAINING: Final[Literal["draining"]] = "draining"
+SERVICE_STATUS_DRAINING: Final = "draining"
 """Service-owner status for an owner that is still visible while draining."""
 
-SERVICE_STATUS_STOPPED: Final[Literal["stopped"]] = "stopped"
+SERVICE_STATUS_STOPPED: Final = "stopped"
 """Service-owner status for a stopped manager/service owner."""
 
-SERVICE_STATUS_SUPERSEDED: Final[Literal["superseded"]] = "superseded"
+SERVICE_STATUS_SUPERSEDED: Final = "superseded"
 """Service-owner status for a replaced manager/service owner."""
 
-SERVICE_STATUS_TERMINAL: Final[Literal["terminal"]] = "terminal"
+SERVICE_STATUS_TERMINAL: Final = "terminal"
 """Service-owner status for terminal managed-service evidence."""
 
 LIVE_SERVICE_STATUSES: Final[frozenset[str]] = frozenset(
@@ -1687,22 +1687,22 @@ PIPELINE_OWNER_METADATA_KEY: Final[str] = "_weft_pipeline_owner"
 
 # State Section Defaults
 # ----------------------
-STATUS_CREATED: Final[Literal["created"]] = "created"
+STATUS_CREATED: Final = "created"
 """Initial status for newly created tasks."""
 
-STATUS_RUNNING: Final[Literal["running"]] = "running"
+STATUS_RUNNING: Final = "running"
 """Status when task is actively running."""
 
-STATUS_COMPLETED: Final[Literal["completed"]] = "completed"
+STATUS_COMPLETED: Final = "completed"
 """Status when task has finished successfully."""
 
-STATUS_FAILED: Final[Literal["failed"]] = "failed"
+STATUS_FAILED: Final = "failed"
 """Status when task has failed with an error."""
 
-STATUS_CANCELLED: Final[Literal["cancelled"]] = "cancelled"
+STATUS_CANCELLED: Final = "cancelled"
 """Status when task was cancelled by user."""
 
-DEFAULT_STATUS: Final[Literal["created"]] = STATUS_CREATED
+DEFAULT_STATUS: Final = STATUS_CREATED
 """Default initial status for tasks."""
 
 TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset(
@@ -1935,13 +1935,13 @@ SPEC_TYPE_TASK: Final[str] = "task"
 SPEC_TYPE_PIPELINE: Final[str] = "pipeline"
 """Canonical spec kind name for stored PipelineSpecs."""
 
-SPEC_SOURCE_FILE: Final[Literal["file"]] = "file"
+SPEC_SOURCE_FILE: Final = "file"
 """Resolved spec reference source for explicit file paths."""
 
-SPEC_SOURCE_STORED: Final[Literal["stored"]] = "stored"
+SPEC_SOURCE_STORED: Final = "stored"
 """Resolved spec reference source for project-local stored specs."""
 
-SPEC_SOURCE_BUILTIN: Final[Literal["builtin"]] = "builtin"
+SPEC_SOURCE_BUILTIN: Final = "builtin"
 """Resolved spec reference source for shipped builtin specs."""
 
 SPEC_ENTRY_FILES: Final[dict[str, str]] = {
