@@ -2165,10 +2165,7 @@ class Manager(ServiceTask):
 
     @staticmethod
     def _manager_record_is_live(record: Mapping[str, Any]) -> bool:
-        liveness = Manager._manager_record_liveness(record)
-        if liveness == "live":
-            return True
-        return False
+        return Manager._manager_record_liveness(record) == "live"
 
     @staticmethod
     def _manager_ctrl_queue_name(tid: str, record: Mapping[str, Any]) -> str:
