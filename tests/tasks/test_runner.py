@@ -348,6 +348,82 @@ def test_agent_session_close_releases_multiprocessing_handles() -> None:  # noqa
     assert process.closed is True
 
 
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
+def test_agent_session_ipc_cleanup_reports_supported_process_close_failure(
+    caplog: pytest.LogCaptureFixture,
+    error_type: type[Exception],
+) -> None:
+    calls: list[str] = []
+
+    class Process:
+        def close(self) -> None:
+            calls.append("process.close")
+            raise error_type("sensitive agent process close failure")
+
+    class RequestQueue:
+        def cancel_join_thread(self) -> None:
+            calls.append("request.cancel_join_thread")
+
+        def close(self) -> None:
+            calls.append("request.close")
+
+    class ResponseReceiver:
+        def close(self) -> None:
+            calls.append("response.close")
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        RequestQueue(),  # type: ignore[arg-type]
+        ResponseReceiver(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    session._close_ipc_resources()
+
+    assert len(calls) == 4
+    assert set(calls) == {
+        "request.cancel_join_thread",
+        "request.close",
+        "response.close",
+        "process.close",
+    }
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to close agent session process handle"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_agent_session_ipc_cleanup_propagates_unexpected_process_close_failure() -> (
+    None
+):
+    class Process:
+        def close(self) -> None:
+            raise RuntimeError("unexpected agent process close defect")
+
+    class Endpoint:
+        def cancel_join_thread(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        Endpoint(),  # type: ignore[arg-type]
+        Endpoint(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected agent process close defect"):
+        session._close_ipc_resources()
+
+
 def test_agent_session_startup_error_survives_immediate_child_exit() -> None:
     session = _spawn_agent_session_for_target(_agent_session_startup_error_worker)
     try:

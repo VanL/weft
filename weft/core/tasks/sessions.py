@@ -762,8 +762,8 @@ class AgentSession:
             self._response_receiver.close()
         try:
             self._process.close()
-        except Exception:  # pragma: no cover - process may still be running
-            pass
+        except (OSError, ValueError):  # pragma: no cover - platform cleanup
+            logger.warning("Failed to close agent session process handle")
 
     def poll_limits(self) -> tuple[bool, str | None]:
         if not self._monitor:
