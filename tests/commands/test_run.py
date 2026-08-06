@@ -1573,6 +1573,41 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
     assert calls == ["enqueue", "ensure"]
 
 
+@pytest.mark.parametrize("function_target", [None, "missing-separator"])
+def test_execute_inline_rejects_invalid_function_target_before_context(
+    function_target: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_cmd,
+        "build_context",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"unexpected context construction: {kwargs}")
+        ),
+    )
+
+    with pytest.raises(RunUsageError, match="module:callable"):
+        run_cmd._execute_inline(
+            command=(),
+            function_target=function_target,
+            args=(),
+            kwargs=(),
+            env=(),
+            name=None,
+            interactive=False,
+            stream_output=None,
+            timeout=None,
+            memory=None,
+            cpu=None,
+            tags=(),
+            context_dir=None,
+            wait=False,
+            json_output=False,
+            verbose=False,
+            autostart_enabled=True,
+        )
+
+
 def test_execute_run_inline_returns_structured_result_without_rendering(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

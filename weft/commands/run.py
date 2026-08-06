@@ -1059,11 +1059,12 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
     target_type = "command" if command else "function"
     if target_type == "command" and not command:
         raise RunUsageError("Provide a command to execute or use --function")
-    if target_type == "function":
-        if not function_target or ":" not in function_target:
-            raise RunUsageError(
-                "Use --function with module:callable to execute a Python function"
-            )
+    if target_type == "function" and (
+        not function_target or ":" not in function_target
+    ):
+        raise RunUsageError(
+            "Use --function with module:callable to execute a Python function"
+        )
 
     context = build_context(
         spec_context=str(context_dir) if context_dir is not None else None,
