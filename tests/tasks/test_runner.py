@@ -424,6 +424,43 @@ def test_agent_session_ipc_cleanup_propagates_unexpected_process_close_failure()
         session._close_ipc_resources()
 
 
+def test_agent_session_reports_monitor_cleanup_failures_and_clears_owner(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[str] = []
+
+    class Monitor:
+        def last_metrics(self) -> None:
+            calls.append("last_metrics")
+            raise RuntimeError("sensitive agent metrics failure")
+
+        def stop(self) -> None:
+            calls.append("stop")
+            raise RuntimeError("sensitive agent monitor stop failure")
+
+    session = AgentSession(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        Monitor(),  # type: ignore[arg-type]
+        None,
+        timeout=None,
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    session.stop_monitor()
+    session.stop_monitor()
+
+    assert calls == ["last_metrics", "stop"]
+    assert session._monitor is None
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to collect final agent session metrics",
+        "Failed to stop agent session resource monitor",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
 def test_agent_session_startup_error_survives_immediate_child_exit() -> None:
     session = _spawn_agent_session_for_target(_agent_session_startup_error_worker)
     try:
