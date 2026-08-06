@@ -793,8 +793,8 @@ class AgentSession:
         if self._monitor:
             try:
                 self._last_metrics = self._monitor.last_metrics() or self._last_metrics
-            except Exception:  # pragma: no cover - process may have exited
-                pass
+            except Exception:  # pragma: no cover - optional monitor observation
+                logger.warning("Failed to collect agent session metrics")
         return self._last_metrics
 
     def close(self, *, deadline: float | None = None) -> None:

@@ -461,6 +461,45 @@ def test_agent_session_reports_monitor_cleanup_failures_and_clears_owner(
     assert "sensitive" not in caplog.text
 
 
+def test_agent_session_metrics_failure_returns_cache_and_later_recovers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cached = ResourceMetrics(memory_mb=1.0)
+    refreshed = ResourceMetrics(memory_mb=2.0)
+
+    class Monitor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def last_metrics(self) -> ResourceMetrics:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("sensitive agent metrics failure")
+            return refreshed
+
+    monitor = Monitor()
+    session = AgentSession(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        monitor,  # type: ignore[arg-type]
+        None,
+        timeout=None,
+    )
+    session._last_metrics = cached
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    assert session.last_metrics is cached
+    assert session._monitor is monitor
+    assert session.last_metrics is refreshed
+    assert monitor.calls == 2
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to collect agent session metrics"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
 def test_agent_session_startup_error_survives_immediate_child_exit() -> None:
     session = _spawn_agent_session_for_target(_agent_session_startup_error_worker)
     try:
