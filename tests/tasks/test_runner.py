@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import multiprocessing
 import os
 import subprocess
@@ -1834,6 +1835,30 @@ def _build_function_host_runner(
         monitor_class=None,
         monitor_interval=0.1,
     )
+
+
+def test_function_host_start_callback_failures_are_logged_without_replacing_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runner = _build_function_host_runner(timeout=5.0)
+
+    def fail_callback(_value: object) -> None:
+        raise RuntimeError("contains secret")
+
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+        outcome = runner.run_with_hooks(
+            "payload",
+            on_worker_started=fail_callback,
+            on_runtime_handle_started=fail_callback,
+        )
+
+    assert outcome.status == "ok"
+    assert outcome.value == "payload"
+    assert [record.message for record in caplog.records] == [
+        "Host worker-start callback failed",
+        "Host runtime-handle callback failed",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 ONE_SHOT_EVENT_ORDER: tuple[TerminalHandoffEventKind, ...] = (

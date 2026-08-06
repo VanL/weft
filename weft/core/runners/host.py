@@ -10,6 +10,7 @@ Spec references:
 from __future__ import annotations
 
 import contextlib
+import logging
 import multiprocessing
 import os
 import queue
@@ -82,6 +83,8 @@ from weft.helpers import (
     safe_cancel,
     terminate_process_tree,
 )
+
+logger = logging.getLogger(__name__)
 
 register_builtin_agent_runtimes()
 
@@ -450,11 +453,13 @@ class HostTaskRunner:
                 try:
                     on_worker_started(worker_pid)
                 except Exception:  # pragma: no cover - defensive
+                    logger.warning("Host worker-start callback failed")
                     pass
             if on_runtime_handle_started is not None and runtime_handle is not None:
                 try:
                     on_runtime_handle_started(runtime_handle)
                 except Exception:  # pragma: no cover - defensive
+                    logger.warning("Host runtime-handle callback failed")
                     pass
             return self._run_one_shot_terminal_handoff(
                 process,
