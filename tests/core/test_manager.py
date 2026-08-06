@@ -2765,6 +2765,48 @@ def test_reconcile_reuses_tracked_service_candidates(
     ]
 
 
+def test_reconcile_clears_duplicate_scan_after_live_tracked_evidence(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._task_monitor_enabled = True
+    service_keys = {
+        INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    }
+    candidates = {
+        key: manager_mod.ServiceCandidate(
+            key=key,
+            tid=f"17770000000000000{index}",
+            state="live",
+            source="manager-child",
+        )
+        for index, key in enumerate(sorted(service_keys), start=1)
+    }
+    manager._managed_service_duplicate_scan_pending.update(service_keys)
+
+    monkeypatch.setattr(
+        manager, "_pending_service_keys", lambda _keys, **_kwargs: set()
+    )
+    monkeypatch.setattr(
+        manager,
+        "_tracked_service_candidate",
+        lambda service_key, **_kwargs: candidates[service_key],
+    )
+    monkeypatch.setattr(
+        manager,
+        "_observed_service_candidates_by_key",
+        lambda keys, **_kwargs: {key: [candidates[key]] for key in keys},
+    )
+    monkeypatch.setattr(manager, "_tick_managed_service", lambda *_args, **_kwargs: None)
+
+    manager._reconcile_managed_services(include_autostart=False)
+
+    assert manager._managed_service_duplicate_scan_pending.isdisjoint(service_keys)
+
+
 def test_managed_service_progress_reasons_are_coarse_and_stable() -> None:
     before = {
         INTERNAL_SERVICE_KEY_TASK_MONITOR: {

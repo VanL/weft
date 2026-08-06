@@ -5688,9 +5688,12 @@ class Manager(ServiceTask):
                 candidates=candidates,
                 scan_terminal_proof=scan_terminal_proof,
             )
-            if service.key in keys_needing_evidence:
-                if tracked is not None and tracked.state == "live":
-                    self._managed_service_duplicate_scan_pending.discard(service.key)
+            if (
+                service.key in keys_needing_evidence
+                and tracked is not None
+                and tracked.state == "live"
+            ):
+                self._managed_service_duplicate_scan_pending.discard(service.key)
 
     def _tick_internal_services(self, *, force: bool = False) -> None:
         """Drive one convergence pass over all built-in Manager-owned services.
