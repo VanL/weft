@@ -254,8 +254,8 @@ def _apply_taskspec_payload_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP
         spec_section["timeout"] = overrides["timeout"]
     if "stream_output" in overrides:
         spec_section["stream_output"] = overrides["stream_output"]
-    if "name" in overrides and overrides["name"]:
-        updated["name"] = overrides["name"]
+    if name := overrides.get("name"):
+        updated["name"] = name
     if "env" in overrides:
         env = spec_section.get("env")
         env = env if isinstance(env, dict) else {}
