@@ -6226,15 +6226,16 @@ class Manager(ServiceTask):
             INTERNAL_SERVICE_KEY_TASK_MONITOR,
         }
         for service_key, state in self._managed_service_state.items():
-            if state.spawn_pending or state.active_tid is None:
-                if state.spawn_pending:
-                    reasons.append("spawn_pending")
-                if (
-                    service_key in internal_keys
-                    and self._task_monitor_enabled
-                    and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
-                ):
-                    reasons.append("missing_active_tid")
+            service_unsettled = state.spawn_pending or state.active_tid is None
+            if state.spawn_pending:
+                reasons.append("spawn_pending")
+            if (
+                service_unsettled
+                and service_key in internal_keys
+                and self._task_monitor_enabled
+                and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
+            ):
+                reasons.append("missing_active_tid")
             if state.uncertain_attempts > 0:
                 reasons.append("uncertain_attempts")
         if include_autostart and self._autostart_enabled and self._autostart_dir:

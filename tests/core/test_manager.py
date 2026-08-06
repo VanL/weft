@@ -2198,6 +2198,23 @@ def test_managed_service_convergence_active_reasons_are_stable(
     )
 
 
+def test_spawn_pending_internal_service_with_active_tid_remains_unsettled(
+    manager_setup,
+) -> None:
+    manager, _make_queue = manager_setup
+    manager._managed_service_state.clear()
+    task_monitor = manager._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR)
+    task_monitor.spawn_pending = True
+    task_monitor.active_tid = "1777000000000000052"
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+
+    assert manager._managed_service_convergence_active_reasons(
+        include_autostart=False,
+        include_broker=False,
+    ) == ("spawn_pending", "missing_active_tid")
+
+
 def test_throttled_managed_service_convergence_skips_broker_work(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
