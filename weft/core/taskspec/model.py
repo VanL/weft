@@ -1667,9 +1667,7 @@ class TaskSpec(BaseModel):
         self.state.status = status
 
         # Set timestamps based on state
-        if status == "spawning" and not self.state.started_at:
-            self.state.started_at = time.time_ns()
-        elif status == "running" and not self.state.started_at:
+        if status in {"running", "spawning"} and not self.state.started_at:
             self.state.started_at = time.time_ns()
         elif status in terminal_states:
             if not self.state.completed_at:
