@@ -41,8 +41,7 @@ def normalize_tid(raw_tid: str) -> str:
     """Return the canonical numeric TID or raise `InvalidTID`."""
 
     candidate = raw_tid.strip()
-    if candidate.startswith("T"):
-        candidate = candidate[1:]
+    candidate = candidate.removeprefix("T")
     if not candidate or not candidate.isdigit() or len(candidate) != 19:
         raise InvalidTID(f"invalid task id '{raw_tid}'")
     if int(candidate) > 9_223_372_036_854_775_807:

@@ -788,8 +788,7 @@ def github_repo_slug_from_remote(remote_url: str) -> str | None:
     else:
         return None
 
-    if path.endswith(".git"):
-        path = path[:-4]
+    path = path.removesuffix(".git")
     if path.count("/") != 1:
         return None
     owner, repo = path.split("/", maxsplit=1)

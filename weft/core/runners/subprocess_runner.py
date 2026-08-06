@@ -406,8 +406,7 @@ def _start_stream_reader(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-037] excepti
                 return ""
             normalized = chunk
             if pending_cr:
-                if normalized.startswith("\n"):
-                    normalized = normalized[1:]
+                normalized = normalized.removeprefix("\n")
                 normalized = "\n" + normalized
                 pending_cr = False
             normalized = normalized.replace("\r\n", "\n")

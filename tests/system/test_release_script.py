@@ -46,6 +46,26 @@ def _release_state(
     )
 
 
+@pytest.mark.parametrize(
+    ("remote_url", "expected"),
+    [
+        ("git@github.com:owner/repo.git", "owner/repo"),
+        ("git@github.com:owner/repo", "owner/repo"),
+        ("ssh://git@github.com/owner/repo.git", "owner/repo"),
+        ("https://github.com/owner/repo.git", "owner/repo"),
+        ("git@github.com:owner/repo.git.git", "owner/repo.git"),
+        ("git@example.com:owner/repo.git", None),
+    ],
+)
+def test_github_repo_slug_from_remote_removes_one_git_suffix(
+    remote_url: str,
+    expected: str | None,
+) -> None:
+    release = _load_release_module()
+
+    assert release.github_repo_slug_from_remote(remote_url) == expected
+
+
 def test_write_version_files_updates_pyproject_and_constants(tmp_path: Path) -> None:
     """The helper should update both canonical root-package version sources."""
 

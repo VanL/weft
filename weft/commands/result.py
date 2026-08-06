@@ -93,8 +93,7 @@ def _normalize_tid(raw_tid: str) -> str:
     candidate = raw_tid.strip()
     if not candidate:
         raise ValueError("empty TID")
-    if candidate.startswith("T"):
-        candidate = candidate[1:]
+    candidate = candidate.removeprefix("T")
     if not candidate.isdigit():
         raise ValueError(f"invalid task id '{raw_tid}'")
     return candidate

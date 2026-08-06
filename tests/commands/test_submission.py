@@ -13,6 +13,14 @@ from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 pytestmark = [pytest.mark.shared]
 
 
+@pytest.mark.parametrize(
+    "raw_tid",
+    ["1777000000000000789", "T1777000000000000789", " T1777000000000000789 "],
+)
+def test_normalize_tid_removes_at_most_one_task_prefix(raw_tid: str) -> None:
+    assert submission_mod.normalize_tid(raw_tid) == "1777000000000000789"
+
+
 def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
     weft_harness,
     monkeypatch: pytest.MonkeyPatch,

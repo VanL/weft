@@ -36,6 +36,11 @@ RESULT_MATERIALIZATION_TEST_TIMEOUT = 15.0
 """Backend-tolerant timeout for tests that validate eventual queue discovery."""
 
 
+@pytest.mark.parametrize("raw_tid", ["123", "T123", " T123 "])
+def test_result_tid_normalization_removes_at_most_one_prefix(raw_tid: str) -> None:
+    assert result_cmd._normalize_tid(raw_tid) == "123"
+
+
 def _write_task_log_event(queue, tid: str, event: str, status: str) -> None:
     queue.write(
         json.dumps(

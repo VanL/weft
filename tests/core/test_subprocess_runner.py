@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import queue
 import subprocess
 import sys
 import time as real_time
@@ -36,6 +37,28 @@ def _runner_handle(process: subprocess.Popen[str]) -> RunnerHandle:
         control={"authority": "host-pid"},
         observations={"host_pids": [process.pid]},
     )
+
+
+def test_stream_reader_normalizes_crlf_split_across_chunks() -> None:
+    class ChunkedBuffer:
+        def __init__(self) -> None:
+            self._chunks = iter((b"\r", b"\nnext\r", b""))
+
+        def read1(self, _size: int) -> bytes:
+            return next(self._chunks)
+
+    class ChunkedStream:
+        buffer = ChunkedBuffer()
+        encoding = "utf-8"
+        errors = "strict"
+
+    target_queue: queue.Queue[str | None] = queue.Queue()
+
+    subprocess_runner._start_stream_reader(ChunkedStream(), target_queue)
+
+    assert target_queue.get(timeout=1.0) == "\nnext"
+    assert target_queue.get(timeout=1.0) == "\n"
+    assert target_queue.get(timeout=1.0) is None
 
 
 def test_completed_process_at_timeout_wake_boundary_returns_ok(
