@@ -237,6 +237,71 @@ def test_copy_into_guest_recursively_copies_directory_contents(tmp_path: Path) -
     ]
 
 
+def test_copy_into_guest_continues_after_guest_mkdir_failure(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source = tmp_path / "input.txt"
+    source.write_text("payload", encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    class Fs:
+        async def mkdir(self, path: str) -> None:
+            calls.append(("mkdir", path))
+            raise _runtime._load_sdk().FilesystemError("sensitive mkdir failure")
+
+        async def copy_from_host(self, host_path: str, guest_path: str) -> None:
+            calls.append(("copy", host_path, guest_path))
+
+    class Sandbox:
+        fs = Fs()
+
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    asyncio.run(
+        _runtime._copy_into_guest(
+            Sandbox(),
+            (FileCopyIntoGuest(str(source), "/existing/input.txt"),),
+        )
+    )
+
+    assert calls == [
+        ("mkdir", "/existing"),
+        ("copy", str(source), "/existing/input.txt"),
+    ]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Microsandbox guest directory creation failed"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive" not in caplog.text
+
+
+def test_copy_into_guest_does_not_hide_unexpected_mkdir_error(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.txt"
+    source.write_text("payload", encoding="utf-8")
+
+    class Fs:
+        async def mkdir(self, path: str) -> None:
+            del path
+            raise RuntimeError("unexpected adapter failure")
+
+        async def copy_from_host(self, host_path: str, guest_path: str) -> None:
+            pytest.fail(f"unexpected copy: {host_path} -> {guest_path}")
+
+    class Sandbox:
+        fs = Fs()
+
+    with pytest.raises(RuntimeError, match="^unexpected adapter failure$"):
+        asyncio.run(
+            _runtime._copy_into_guest(
+                Sandbox(),
+                (FileCopyIntoGuest(str(source), "/existing/input.txt"),),
+            )
+        )
+
+
 def test_copy_back_reports_failure_and_continues(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

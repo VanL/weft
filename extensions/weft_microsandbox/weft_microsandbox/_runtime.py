@@ -364,10 +364,11 @@ async def _copy_into_guest(
 async def _mkdir_guest(sandbox: Any, path: str) -> None:
     if path in {"", "."}:
         return
+    microsandbox_error = _load_sdk().MicrosandboxError
     try:
         await sandbox.fs.mkdir(path)
-    except Exception:
-        pass
+    except microsandbox_error:
+        logger.warning("Microsandbox guest directory creation failed")
 
 
 def _resource_create_kwargs(spec: MicrosandboxRunSpec) -> dict[str, Any]:
