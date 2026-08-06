@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import multiprocessing
 import os
 import signal
@@ -586,11 +587,14 @@ def test_manager_context_is_cached_by_base_task(
         manager.cleanup()
 
 
+@pytest.mark.parametrize("unregister_fails", (False, True))
 def test_manager_cleanup_unregisters_registered_atexit_callback(
+    unregister_fails: bool,
     tmp_path: Path,
     broker_env,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     db_path, _make_queue = broker_env
     registered: list[Callable[[], None]] = []
@@ -601,6 +605,8 @@ def test_manager_cleanup_unregisters_registered_atexit_callback(
 
     def fake_unregister(callback: Callable[[], None]) -> None:
         unregistered.append(callback)
+        if unregister_fails:
+            raise RuntimeError("sensitive atexit failure")
 
     monkeypatch.setattr(manager_mod.atexit, "register", fake_register)
     monkeypatch.setattr(manager_mod.atexit, "unregister", fake_unregister)
@@ -613,10 +619,19 @@ def test_manager_cleanup_unregisters_registered_atexit_callback(
 
     assert len(registered) == 1
 
+    caplog.set_level(logging.WARNING, logger="weft.core.manager")
     manager.cleanup()
     manager.cleanup()
 
     assert unregistered == registered
+    if unregister_fails:
+        assert [record.getMessage() for record in caplog.records] == [
+            "Failed to unregister manager atexit callback"
+        ]
+        assert caplog.records[0].exc_info is None
+        assert "sensitive atexit failure" not in caplog.text
+    else:
+        assert caplog.records == []
 
 
 def write_autostart_pipeline_fixture(

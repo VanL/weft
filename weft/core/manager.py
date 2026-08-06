@@ -6935,8 +6935,8 @@ class Manager(ServiceTask):
         self._atexit_callback = None
         try:
             atexit.unregister(callback)
-        except Exception:  # pragma: no cover - interpreter shutdown cleanup
-            pass
+        except Exception:  # pragma: no cover - best-effort normal cleanup
+            logger.warning("Failed to unregister manager atexit callback")
 
 
 __all__ = ["Manager"]
