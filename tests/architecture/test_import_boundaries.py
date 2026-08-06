@@ -473,11 +473,12 @@ def test_internal_import_boundaries() -> None:  # noqa: C901 approved [TS-3.1] [
                 )
             continue
 
-        if _is_module_or_child(source, "weft.client"):
-            if _is_module_or_child(target, "weft.core"):
-                violations.append(
-                    f"{edge.path}:{edge.lineno} {source} -> {target} is forbidden"
-                )
+        if _is_module_or_child(source, "weft.client") and _is_module_or_child(
+            target, "weft.core"
+        ):
+            violations.append(
+                f"{edge.path}:{edge.lineno} {source} -> {target} is forbidden"
+            )
 
     assert not violations, "\n".join(violations)
     assert rich_imports_seen, "Rich boundary guard has no positive import fixture"
