@@ -1113,9 +1113,7 @@ class MultiQueueWatcher(BaseWatcher):
             self._handler = original_handler
             self._error_handler = original_error_handler
 
-        if self._stop_event.is_set():
-            inactive_candidates.add(queue_name)
-        elif not self._queue_has_pending(config.queue):
+        if self._stop_event.is_set() or not self._queue_has_pending(config.queue):
             inactive_candidates.add(queue_name)
 
         return True

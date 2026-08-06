@@ -88,6 +88,41 @@ def test_multi_queue_watcher_uses_base_retry_loop() -> None:
     assert "_run_with_retries" not in MultiQueueWatcher.__dict__
 
 
+def test_processed_message_stops_without_probing_queue_again(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    queue_name = "stop-short-circuit"
+    make_queue(queue_name).write("ready")
+    watcher: MultiQueueWatcher
+
+    def handler(
+        _message: str,
+        _timestamp: int,
+        _context: QueueMessageContext,
+    ) -> None:
+        watcher._stop_event.set()
+
+    watcher = MultiQueueWatcher(
+        queue_configs={queue_name: {"handler": handler}},
+        db=db_path,
+    )
+    monkeypatch.setattr(
+        watcher,
+        "_queue_has_pending",
+        lambda _queue: pytest.fail("stopped watcher must not probe the queue again"),
+    )
+    inactive_candidates: set[str] = set()
+
+    try:
+        assert watcher._process_queue_message(queue_name, inactive_candidates) is True
+    finally:
+        watcher.stop(join=False)
+
+    assert inactive_candidates == {queue_name}
+
+
 def test_background_add_queue_rebinds_exact_set_on_drive_owner(
     broker_env,
     monkeypatch,
