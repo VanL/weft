@@ -5959,9 +5959,12 @@ class Manager(ServiceTask):
             if max_restarts is None:
                 return True
             restarts = state.get("restarts", 0)
-            if isinstance(restarts, int) and not isinstance(restarts, bool):
-                if restarts < max_restarts:
-                    return True
+            if (
+                isinstance(restarts, int)
+                and not isinstance(restarts, bool)
+                and restarts < max_restarts
+            ):
+                return True
         return False
 
     def _active_autostart_sources(self) -> set[str]:
