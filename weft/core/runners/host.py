@@ -356,7 +356,7 @@ def _agent_session_worker_entry(
             try:
                 session.close()
             except Exception:  # pragma: no cover - defensive
-                pass
+                logger.warning("Failed to close host agent runtime session")
         with contextlib.suppress(Exception):
             request_queue.close()
         with contextlib.suppress(Exception):

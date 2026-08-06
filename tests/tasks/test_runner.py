@@ -30,6 +30,7 @@ from weft.core.tasks.agent_session_protocol import (
     make_ready_response,
     make_result_response,
     make_startup_error_response,
+    make_stop_request,
 )
 from weft.core.tasks.runner import TaskRunner
 from weft.core.tasks.sessions import AgentSession
@@ -2623,6 +2624,56 @@ def test_host_process_stop_propagates_unexpected_join_failure(
 
     with pytest.raises(RuntimeError, match="unexpected process wait defect"):
         HostTaskRunner._stop_process(Process())  # type: ignore[arg-type]
+
+
+def test_agent_worker_reports_session_close_failure_and_closes_ipc(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Session:
+        def close(self) -> None:
+            calls.append("session.close")
+            raise RuntimeError("sensitive agent runtime cleanup failure")
+
+    class RequestQueue:
+        def get(self) -> dict[str, Any]:
+            return make_stop_request()
+
+        def close(self) -> None:
+            calls.append("request_queue.close")
+
+    class ResponseSender:
+        def close(self) -> None:
+            calls.append("response_sender.close")
+
+    monkeypatch.setattr(
+        host_module,
+        "start_agent_runtime_session",
+        lambda *_args, **_kwargs: Session(),
+    )
+    monkeypatch.setattr(
+        host_module,
+        "send_terminal_payload",
+        lambda *_args, **_kwargs: True,
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.host")
+
+    host_module._agent_session_worker_entry(
+        {"agent": {"runtime": "llm"}},
+        RequestQueue(),  # type: ignore[arg-type]
+        ResponseSender(),  # type: ignore[arg-type]
+    )
+
+    assert calls[0] == "session.close"
+    assert len(calls) == 3
+    assert set(calls[1:]) == {"request_queue.close", "response_sender.close"}
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to close host agent runtime session"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
 
 
 def test_one_shot_spawn_failure_closes_both_response_endpoints(
