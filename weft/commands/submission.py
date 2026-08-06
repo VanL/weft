@@ -16,7 +16,6 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import weft.commands.specs as specs
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
@@ -35,6 +34,7 @@ from weft.core.spawn_requests import delete_spawn_request, submit_spawn_request
 from weft.core.taskspec import TaskSpec, apply_bundle_root_to_taskspec_payload
 
 from ._spawn_submission import reconcile_submitted_spawn
+from .specs import resolve_named_spec, resolve_spec_reference
 
 
 def normalize_tid(raw_tid: str) -> str:
@@ -383,7 +383,7 @@ def prepare_spec(
 
     _validate_submit_overrides(overrides)
     try:
-        resolved = specs.resolve_spec_reference(
+        resolved = resolve_spec_reference(
             reference,
             spec_type=SPEC_TYPE_TASK,
             context_path=context.root,
@@ -425,7 +425,7 @@ def prepare_pipeline(
 
     _validate_submit_overrides(overrides)
     try:
-        resolved = specs.resolve_spec_reference(
+        resolved = resolve_spec_reference(
             reference,
             spec_type=SPEC_TYPE_PIPELINE,
             context_path=context.root,
@@ -435,7 +435,7 @@ def prepare_pipeline(
     pipeline_spec = load_pipeline_spec_payload(resolved.payload)
 
     def _load_pipeline_stage(task_name: str) -> dict[str, Any]:
-        stage_ref = specs.resolve_named_spec(
+        stage_ref = resolve_named_spec(
             task_name,
             spec_type=SPEC_TYPE_TASK,
             context_path=context.root,

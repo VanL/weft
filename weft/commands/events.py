@@ -13,7 +13,6 @@ from collections.abc import Iterator
 from dataclasses import asdict
 from typing import Any
 
-import weft.commands.task_evidence as task_evidence
 import weft.commands.tasks as task_ops
 from weft._constants import (
     TERMINAL_TASK_STATUSES,
@@ -36,6 +35,7 @@ from .result import (
     await_task_result,
 )
 from .submission import normalize_tid
+from .task_evidence import queue_names_for_tid
 
 
 def _task_event_type(payload: dict[str, object]) -> str:
@@ -291,7 +291,7 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
     taskspec_payload = (
         materialized.taskspec_payload if materialized is not None else None
     )
-    outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
+    outbox_name, ctrl_out_name = queue_names_for_tid(
         normalized_tid,
         taskspec_payload,
     )
