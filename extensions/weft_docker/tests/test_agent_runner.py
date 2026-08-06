@@ -196,6 +196,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     created: dict[str, object] = {}
+    fail_start = False
 
     class FakeContainer:
         def __init__(self) -> None:
@@ -210,6 +211,8 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
             }
 
         def start(self) -> None:
+            if fail_start:
+                raise RuntimeError("primary container start failure")
             return None
 
         def reload(self) -> None:
@@ -220,6 +223,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
 
         def remove(self, force: bool = False) -> None:
             del force
+            raise RuntimeError("sensitive cleanup failure")
 
     class FakeContainers:
         def create(
@@ -350,9 +354,21 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
         "Docker agent runtime-handle callback failed",
         "Docker agent stdout callback failed",
         "Docker agent stderr callback failed",
+        "Docker agent container cleanup failed",
     ]
     assert all(record.exc_info is None for record in caplog.records)
     assert "sensitive callback failure" not in caplog.text
+    assert "sensitive cleanup failure" not in caplog.text
+
+    caplog.clear()
+    fail_start = True
+    with pytest.raises(RuntimeError, match="^primary container start failure$"):
+        runner.run({"task": "Explain this document"})
+    assert [record.getMessage() for record in caplog.records] == [
+        "Docker agent container cleanup failed"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive cleanup failure" not in caplog.text
 
 
 def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-201] exception

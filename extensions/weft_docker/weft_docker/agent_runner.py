@@ -366,7 +366,7 @@ class DockerProviderCLIRunner:
                     try:
                         container.remove(force=True)
                     except Exception:  # pragma: no cover - best effort cleanup
-                        pass
+                        logger.warning("Docker agent container cleanup failed")
 
     def start_session(self) -> CommandSession:
         raise ValueError("Docker runner does not support interactive sessions")
