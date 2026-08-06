@@ -74,6 +74,55 @@ def test_sandbox_name_handles_legacy_async_method_shape() -> None:
     )
 
 
+def test_describe_reports_optional_configuration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Refreshed:
+        name = "sandbox-name"
+        status = "running"
+        created_at = "created"
+        updated_at = "updated"
+
+        @staticmethod
+        def config() -> object:
+            raise RuntimeError("sensitive configuration failure")
+
+    class Handle:
+        @staticmethod
+        async def refresh() -> Refreshed:
+            return Refreshed()
+
+    class SandboxAPI:
+        @staticmethod
+        async def get(sandbox_id: str) -> Handle:
+            assert sandbox_id == "sensitive-sandbox-id"
+            return Handle()
+
+    class SDK:
+        Sandbox = SandboxAPI
+
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SDK())
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    description = asyncio.run(
+        MicrosandboxRuntime()._describe_async("sensitive-sandbox-id")
+    )
+
+    assert description is not None
+    assert description.state == "running"
+    assert description.metadata == {
+        "sandbox_name": "sandbox-name",
+        "created_at": "created",
+        "updated_at": "updated",
+    }
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to read Microsandbox configuration metadata"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive" not in caplog.text
+
+
 def test_runtime_builds_network_volume_and_rlimit_from_real_sdk(tmp_path: Path) -> None:
     sdk = _sdk()
     source = tmp_path / "input"

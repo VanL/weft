@@ -262,7 +262,7 @@ class MicrosandboxRuntime:
             try:
                 metadata["config"] = config()
             except Exception:  # pragma: no cover - best-effort SDK metadata
-                pass
+                logger.warning("Failed to read Microsandbox configuration metadata")
         return MicrosandboxDescription(
             sandbox_id=sandbox_id,
             state=str(getattr(refreshed, "status", "")) or None,
