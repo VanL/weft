@@ -21,6 +21,33 @@ def test_normalize_tid_removes_at_most_one_task_prefix(raw_tid: str) -> None:
     assert submission_mod.normalize_tid(raw_tid) == "1777000000000000789"
 
 
+def test_apply_submit_overrides_rejects_invalid_model_dump_spec_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    taskspec = TaskSpec.model_validate(
+        {
+            "name": "invalid-dump-shape",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+        context={"template": True, "auto_expand": False},
+    )
+
+    def invalid_model_dump(_self: TaskSpec, *, mode: str) -> dict[str, object]:
+        assert mode == "json"
+        return {"spec": [], "metadata": {}}
+
+    monkeypatch.setattr(TaskSpec, "model_dump", invalid_model_dump)
+
+    with pytest.raises(TypeError) as exc_info:
+        submission_mod.apply_submit_overrides(taskspec)
+    assert type(exc_info.value) is TypeError
+    assert str(exc_info.value) == "TaskSpec spec section must be a mapping"
+    assert exc_info.value.__cause__ is None
+
+
 def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
     weft_harness,
     monkeypatch: pytest.MonkeyPatch,

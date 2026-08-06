@@ -90,7 +90,7 @@ def apply_submit_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-115] excep
     metadata_section = payload.setdefault("metadata", {})
 
     if not isinstance(spec_section, dict):
-        raise ValueError("TaskSpec spec section must be a mapping")
+        raise TypeError("TaskSpec spec section must be a mapping")
     if not isinstance(metadata_section, dict):
         metadata_section = {}
         payload["metadata"] = metadata_section
