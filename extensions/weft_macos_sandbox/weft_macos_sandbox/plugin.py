@@ -201,7 +201,7 @@ class MacOSSandboxRunnerPlugin:
     def check_version(self) -> None:
         return None
 
-    def validate_taskspec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-207] exception
+    def validate_taskspec(
         self,
         taskspec_payload: Mapping[str, Any],
         *,
@@ -224,14 +224,16 @@ class MacOSSandboxRunnerPlugin:
             )
 
         env_passthrough = options.get("env_passthrough")
-        if env_passthrough is not None:
-            if not isinstance(env_passthrough, list) or not all(
+        if env_passthrough is not None and (
+            not isinstance(env_passthrough, list)
+            or not all(
                 isinstance(item, str) and item.strip() for item in env_passthrough
-            ):
-                raise ValueError(
-                    "macOS sandbox runner option env_passthrough must be a "
-                    "list of non-empty environment variable names"
-                )
+            )
+        ):
+            raise ValueError(
+                "macOS sandbox runner option env_passthrough must be a "
+                "list of non-empty environment variable names"
+            )
 
         if preflight:
             if sys.platform != "darwin":
