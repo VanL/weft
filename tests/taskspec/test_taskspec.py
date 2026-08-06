@@ -52,6 +52,36 @@ def test_model_post_init_context_is_runtime_positional_only() -> None:
         ]
 
 
+@pytest.mark.parametrize(
+    ("limit_field", "limit_value", "state_field", "state_value", "reason"),
+    [
+        ("memory_mb", 10, "memory", 11.0, "Memory limit exceeded: 11.0MB > 10MB"),
+        ("cpu_percent", 5, "cpu", 6.0, "CPU limit exceeded: 6% > 5%"),
+        ("max_fds", 2, "fds", 3, "File descriptor limit exceeded: 3 > 2"),
+        (
+            "max_connections",
+            1,
+            "net_connections",
+            2,
+            "Network connection limit exceeded: 2 > 1",
+        ),
+    ],
+)
+def test_check_limits_exceeded_reports_each_configured_limit(
+    limit_field: str,
+    limit_value: int,
+    state_field: str,
+    state_value: float | int,
+    reason: str,
+) -> None:
+    payload = fixtures.create_valid_function_taskspec().model_dump(mode="json")
+    payload["spec"]["limits"] = {limit_field: limit_value}
+    payload["state"][state_field] = state_value
+    taskspec = TaskSpec.model_validate(payload)
+
+    assert taskspec.check_limits_exceeded() == (True, reason)
+
+
 class TestCreationDefaults:
     """Ensure defaults and automatic expansion follow the spec."""
 

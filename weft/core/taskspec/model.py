@@ -1809,36 +1809,48 @@ class TaskSpec(BaseModel):
             and reason describes which limit was exceeded.
         """
         # Check memory limit
-        if self.spec.limits.memory_mb and self.state.memory:
-            if self.state.memory > self.spec.limits.memory_mb:
-                return (
-                    True,
-                    f"Memory limit exceeded: {self.state.memory:.1f}MB > {self.spec.limits.memory_mb}MB",
-                )
+        if (
+            self.spec.limits.memory_mb
+            and self.state.memory
+            and self.state.memory > self.spec.limits.memory_mb
+        ):
+            return (
+                True,
+                f"Memory limit exceeded: {self.state.memory:.1f}MB > {self.spec.limits.memory_mb}MB",
+            )
 
         # Check CPU limit (sustained usage)
-        if self.spec.limits.cpu_percent and self.state.cpu:
-            if self.state.cpu > self.spec.limits.cpu_percent:
-                return (
-                    True,
-                    f"CPU limit exceeded: {self.state.cpu}% > {self.spec.limits.cpu_percent}%",
-                )
+        if (
+            self.spec.limits.cpu_percent
+            and self.state.cpu
+            and self.state.cpu > self.spec.limits.cpu_percent
+        ):
+            return (
+                True,
+                f"CPU limit exceeded: {self.state.cpu}% > {self.spec.limits.cpu_percent}%",
+            )
 
         # Check file descriptor limit
-        if self.spec.limits.max_fds and self.state.fds:
-            if self.state.fds > self.spec.limits.max_fds:
-                return (
-                    True,
-                    f"File descriptor limit exceeded: {self.state.fds} > {self.spec.limits.max_fds}",
-                )
+        if (
+            self.spec.limits.max_fds
+            and self.state.fds
+            and self.state.fds > self.spec.limits.max_fds
+        ):
+            return (
+                True,
+                f"File descriptor limit exceeded: {self.state.fds} > {self.spec.limits.max_fds}",
+            )
 
         # Check network connections limit
-        if self.spec.limits.max_connections and self.state.net_connections:
-            if self.state.net_connections > self.spec.limits.max_connections:
-                return (
-                    True,
-                    f"Network connection limit exceeded: {self.state.net_connections} > {self.spec.limits.max_connections}",
-                )
+        if (
+            self.spec.limits.max_connections
+            and self.state.net_connections
+            and self.state.net_connections > self.spec.limits.max_connections
+        ):
+            return (
+                True,
+                f"Network connection limit exceeded: {self.state.net_connections} > {self.spec.limits.max_connections}",
+            )
 
         return False, None
 
