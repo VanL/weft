@@ -126,9 +126,8 @@ def _monitor_table_count(
     query = f"SELECT count(*) FROM {table}"
     if where:
         query = f"{query} WHERE {where}"
-    with ctx.broker() as broker:
-        with broker.sidecar() as session:
-            rows = list(session.run(query, params, fetch=True))
+    with ctx.broker() as broker, broker.sidecar() as session:
+        rows = list(session.run(query, params, fetch=True))
     return int(rows[0][0])
 
 
@@ -138,14 +137,13 @@ def _monitor_message_ids(
     context_key: str,
     tid: str,
 ) -> tuple[int, ...]:
-    with ctx.broker() as broker:
-        with broker.sidecar() as session:
-            rows = session.run(
-                "SELECT message_id FROM weft_monitor_task_messages "
-                "WHERE context_key = ? AND tid = ? ORDER BY message_id",
-                (context_key, tid),
-                fetch=True,
-            )
+    with ctx.broker() as broker, broker.sidecar() as session:
+        rows = session.run(
+            "SELECT message_id FROM weft_monitor_task_messages "
+            "WHERE context_key = ? AND tid = ? ORDER BY message_id",
+            (context_key, tid),
+            fetch=True,
+        )
     return tuple(int(row[0]) for row in rows)
 
 
@@ -159,14 +157,13 @@ def test_store_sidecar_session_rolls_back_on_exception(tmp_path) -> None:
     class _Boom(Exception):
         pass
 
-    with pytest.raises(_Boom):
-        with store._sidecar_session(transaction=True) as session:
-            session.run(
-                "INSERT INTO weft_monitor_meta (key, value_json, updated_at_ns) "
-                "VALUES (?, ?, ?)",
-                ("rollback_probe", "{}", 1),
-            )
-            raise _Boom()
+    with pytest.raises(_Boom), store._sidecar_session(transaction=True) as session:
+        session.run(
+            "INSERT INTO weft_monitor_meta (key, value_json, updated_at_ns) "
+            "VALUES (?, ?, ?)",
+            ("rollback_probe", "{}", 1),
+        )
+        raise _Boom()
 
     assert (
         _monitor_table_count(
@@ -1242,19 +1239,18 @@ def test_monitor_store_lists_raw_deleted_child_refs_for_repair(tmp_path) -> None
         (terminal,),
         checkpoint_message_id=None,
     )
-    with ctx.broker() as broker:
-        with broker.sidecar(transaction=True) as session:
-            session.run(
-                "UPDATE weft_monitor_task_collations "
-                "SET raw_deleted_at_ns = ?, updated_at_ns = ? "
-                "WHERE context_key = ? AND tid = ?",
-                (
-                    terminal.message_id + 1,
-                    terminal.message_id + 1,
-                    store.context_key,
-                    tid,
-                ),
-            )
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_task_collations "
+            "SET raw_deleted_at_ns = ?, updated_at_ns = ? "
+            "WHERE context_key = ? AND tid = ?",
+            (
+                terminal.message_id + 1,
+                terminal.message_id + 1,
+                store.context_key,
+                tid,
+            ),
+        )
 
     refs = store.list_raw_deleted_task_message_refs(limit=10)
 
@@ -1309,13 +1305,12 @@ def test_monitor_store_prunes_legacy_message_tombstones(tmp_path) -> None:
         (start, terminal),
         checkpoint_message_id=None,
     )
-    with ctx.broker() as broker:
-        with broker.sidecar(transaction=True) as session:
-            session.run(
-                "UPDATE weft_monitor_task_messages "
-                "SET deleted_at_ns = ? WHERE context_key = ? AND tid = ?",
-                (terminal.message_id + 1, store.context_key, tid),
-            )
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_task_messages "
+            "SET deleted_at_ns = ? WHERE context_key = ? AND tid = ?",
+            (terminal.message_id + 1, store.context_key, tid),
+        )
 
     result = store.prune_deleted_task_message_tombstones(
         limit=10,
@@ -1483,12 +1478,11 @@ def test_monitor_store_rejects_newer_schema_version(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
-    with ctx.broker() as broker:
-        with broker.sidecar(transaction=True) as session:
-            session.run(
-                "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
-                ('{"version": 999}', "schema_version"),
-            )
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            ('{"version": 999}', "schema_version"),
+        )
 
     with pytest.raises(MonitorStoreUnavailable):
         store.ensure_schema()
