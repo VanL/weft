@@ -1103,6 +1103,7 @@ requires every row `accepted`.
 | Queue ID | Baseline/worktree | Rules/symbol | Attempt | Verdict | Improvement criteria | State | Accepted checkpoint |
 |---|---|---|---:|---|---|---|---|
 | RW-RUF100-001 | Current uncommitted Task 4 worktree; initial candidate recorded by clean review | `RUF100` prose-preserving sites | 1 | `NET NEGATIVE` | Put the third SLF001 rationale beside the exact `_agent` access; remove obsolete D401 lint-history prose that interrupts the import block. | accepted | Attempt 2 `NET POSITIVE` after 168 focused tests and clean Ruff/suppression/diff gates; owner checkpoint pending. |
+| RW-RUF012-002 | Baseline `29e9ae54`; `/tmp/weft-rw-ruf012-queue-monitor` | MR-078, `test_watch_queue_uses_queue_monitor::_FakeContext.config` | 1 | `NET NEGATIVE` | Model the real per-instance context contract; initialize a fresh config in `__init__` instead of declaring shared mutable `ClassVar` state. | accepted | Attempt 2 `NET POSITIVE`; named test and clean Ruff/suppression/diff gates pass. |
 
 States: `candidate`, `queued`, `reworking`, `awaiting-review`,
 `awaiting-owner-checkpoint`, `accepted`.
@@ -1140,6 +1141,7 @@ independent review and separate explicit owner approval.
 | Task 5 `PYI064` | MR-149, fifteen literal constants | 81 constants tests; full configured mypy; direct `assert_type` probes for all direct/alias forms; targeted/current Ruff; suppression/diff checks | Bare `Final` retains every exact inferred literal type, including aliased `DEFAULT_STATUS`, while removing redundant duplicated annotations. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
 | Task 5 `RUF012` Microsandbox controls | MR-040, `ControlRuntime` call-history lists | RED instance-isolation test; full owning test file; targeted/current Ruff; suppression/diff checks | 3 passed; stop/kill history is now owned by each injected fake runtime and cannot leak across instances/tests. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
 | Task 5 `RUF012` Microsandbox filesystem fake | MR-042, local `Fs` call-record lists | RED instance-isolation assertions; full owning test file; targeted/current Ruff; suppression/diff checks | 9 passed; mkdir/copy records are owned by each fake filesystem while the single sandbox path remains unchanged. | Fresh clean Python expert | `NET POSITIVE`; accepted. |
+| Task 5 `RUF012` queue-monitor context | MR-078, first local `_FakeContext.config` | Exact owner test; current/targeted Ruff; suppression/diff checks; two clean reviews | Attempt 1 `ClassVar` was `NET NEGATIVE` because sharing was incidental. Rework initializes per-instance config to match `WeftContext`. | Two different fresh clean Python experts | Attempt 2 `NET POSITIVE`; RW-RUF012-002 accepted. |
 
 ## 20. Independent Review Loop
 

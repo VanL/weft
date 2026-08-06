@@ -337,9 +337,8 @@ def test_watch_queue_uses_queue_monitor(
     created_monitors: list[_FakeQueueChangeMonitor] = []
 
     class _FakeContext:
-        config: dict[str, Any] = {}
-
         def __init__(self) -> None:
+            self.config: dict[str, Any] = {}
             self._queues = [data_queue, monitor_queue]
 
         def queue(self, _name: str, *, persistent: bool = True):
