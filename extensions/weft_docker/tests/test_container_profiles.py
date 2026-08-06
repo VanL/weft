@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,54 @@ from weft_docker import profiles
 from weft_docker.profiles import materialize_container_profile
 
 pytestmark = [pytest.mark.shared]
+
+
+@pytest.mark.parametrize(
+    ("call", "message"),
+    [
+        (
+            lambda: profiles._resolve_profile_mounts(
+                1,
+                name="profiles.ops.mounts",
+                root=Path.cwd(),
+            ),
+            "profiles.ops.mounts must be a list of mount objects",
+        ),
+        (
+            lambda: profiles._resolve_profile_mounts(
+                [{"source": ".", "target": "/workspace", "read_only": 1}],
+                name="profiles.ops.mounts",
+                root=Path.cwd(),
+            ),
+            "profiles.ops.mounts[0].read_only must be a boolean",
+        ),
+        (
+            lambda: profiles._mapping_of_strings({1: "value"}, name="test.value"),
+            "test.value must be a mapping of strings to strings",
+        ),
+        (
+            lambda: profiles._string_list(1, name="test.value"),
+            "test.value must be a list of strings",
+        ),
+        (
+            lambda: profiles._required_text(1, name="test.value"),
+            "test.value must be a string",
+        ),
+        (
+            lambda: profiles._require_mapping(1, name="test.value"),
+            "test.value must be an object",
+        ),
+    ],
+)
+def test_container_profile_normalizers_reject_wrong_shapes_as_value_error(
+    call: Callable[[], object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        call()
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
 
 
 def _write_profile(path: Path, content: str) -> Path:
@@ -43,6 +92,7 @@ def test_container_profile_materializes_defaults_paths_and_env_precedence(
         required_env_from_host = ["REQUIRED_TOKEN"]
 
         [profiles.ops.env]
+        OPTIONAL_TOKEN = "profile-optional"
         SERVICE_URL = "https://internal-service:8443"
         REQUIRED_TOKEN = "profile-default"
 
@@ -58,6 +108,7 @@ def test_container_profile_materializes_defaults_paths_and_env_precedence(
         """,
     )
     monkeypatch.setenv("OPTIONAL_TOKEN", "from-host")
+    monkeypatch.setenv("REQUIRED_TOKEN", "from-host-required")
 
     materialized = materialize_container_profile(
         runner_options={
