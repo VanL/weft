@@ -9,6 +9,7 @@ Spec references:
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import tempfile
 import time
@@ -45,6 +46,8 @@ from ._runtime import (
     MicrosandboxStarted,
     WorkspaceSpec,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MicrosandboxRunner:
@@ -266,7 +269,7 @@ class MicrosandboxRunner:
                 try:
                     on_runtime_handle_started(runtime_handle)
                 except Exception:  # pragma: no cover - callback safety
-                    pass
+                    logger.warning("Microsandbox runtime-handle callback failed")
 
         try:
             result = self._runtime.run(
@@ -304,8 +307,8 @@ class MicrosandboxRunner:
                 runtime_handle=runtime_handle,
             )
 
-        _emit_stream(result.stdout, on_stdout_chunk)
-        _emit_stream(result.stderr, on_stderr_chunk)
+        _emit_stream(result.stdout, on_stdout_chunk, stream_name="stdout")
+        _emit_stream(result.stderr, on_stderr_chunk, stream_name="stderr")
         if runtime_handle is None:
             runtime_handle = _runtime_handle(
                 options=self._options,
@@ -517,12 +520,14 @@ def _sandbox_name(tid: str | None, *, prefix: str | None) -> str:
 def _emit_stream(
     text: str,
     callback: Callable[[str, bool], None] | None,
+    *,
+    stream_name: str,
 ) -> None:
     if text and callback is not None:
         try:
             callback(text, True)
         except Exception:  # pragma: no cover - callback safety
-            pass
+            logger.warning("Microsandbox %s callback failed", stream_name)
 
 
 def _safe_callback(
@@ -534,7 +539,7 @@ def _safe_callback(
     try:
         callback(value)
     except Exception:  # pragma: no cover - callback safety
-        pass
+        logger.warning("Microsandbox worker-start callback failed")
 
 
 _PLUGIN = MicrosandboxRunnerPlugin()

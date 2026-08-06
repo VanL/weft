@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 import pytest
 
 from weft.ext import RunnerHandle
-from weft_microsandbox._runtime import MicrosandboxRunResult, MicrosandboxRunSpec
+from weft_microsandbox._runtime import (
+    MicrosandboxRunResult,
+    MicrosandboxRunSpec,
+    MicrosandboxStarted,
+)
 from weft_microsandbox.plugin import MicrosandboxRunner
 
 pytestmark = [pytest.mark.shared]
@@ -164,3 +169,75 @@ def test_command_runner_maps_cancelled_runtime_result() -> None:
 
     assert outcome.status == "cancelled"
     assert outcome.error == "Target execution cancelled"
+
+
+def test_command_runner_reports_callback_failures_without_losing_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class CallbackRuntime(RecordingRuntime):
+        def run(
+            self,
+            spec: MicrosandboxRunSpec,
+            *,
+            on_started: Callable[[object], None] | None = None,
+            cancel_requested: Callable[[], bool] | None = None,
+        ) -> MicrosandboxRunResult:
+            del spec, cancel_requested
+            if on_started is not None:
+                on_started(MicrosandboxStarted("sandbox-1", "sandbox-1", 4242))
+            return MicrosandboxRunResult(
+                sandbox_id="sandbox-1",
+                sandbox_name="sandbox-1",
+                exit_code=0,
+                stdout="visible stdout",
+                stderr="visible stderr",
+                timed_out=False,
+                duration=0.01,
+            )
+
+    def fail_worker_started(_pid: int | None) -> None:
+        raise RuntimeError("sensitive worker callback failure")
+
+    def fail_runtime_handle(_handle: RunnerHandle) -> None:
+        raise RuntimeError("sensitive handle callback failure")
+
+    def fail_stream(_text: str, _final: bool) -> None:
+        raise RuntimeError("sensitive stream callback failure")
+
+    runner = MicrosandboxRunner(
+        target_type="command",
+        tid="1234567890123456789",
+        process_target="python",
+        agent=None,
+        args=[],
+        env={},
+        working_dir=None,
+        timeout=None,
+        limits=None,
+        runner_options={"image": "python:3.12"},
+        runtime=CallbackRuntime(),
+    )
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox.plugin")
+
+    outcome = runner.run_with_hooks(
+        None,
+        on_worker_started=fail_worker_started,
+        on_runtime_handle_started=fail_runtime_handle,
+        on_stdout_chunk=fail_stream,
+        on_stderr_chunk=fail_stream,
+    )
+
+    assert outcome.status == "ok"
+    assert outcome.value == "visible stdout"
+    assert outcome.stdout == "visible stdout"
+    assert outcome.stderr == "visible stderr"
+    assert outcome.runtime_handle is not None
+    assert outcome.runtime_handle.id == "sandbox-1"
+    assert [record.getMessage() for record in caplog.records] == [
+        "Microsandbox worker-start callback failed",
+        "Microsandbox runtime-handle callback failed",
+        "Microsandbox stdout callback failed",
+        "Microsandbox stderr callback failed",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
