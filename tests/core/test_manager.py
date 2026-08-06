@@ -22,7 +22,7 @@ from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -4194,7 +4194,7 @@ def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
     child_ctrl_out = f"T{child_tid}.ctrl_out"
 
     class FakeTerminalQueue:
-        instances: list[FakeTerminalQueue] = []
+        instances: ClassVar[list[FakeTerminalQueue]] = []
 
         def __init__(self, name: str, *args: object, **kwargs: object) -> None:
             del args, kwargs
