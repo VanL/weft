@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,53 @@ from weft import runtime_liveness
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
+
+
+@pytest.mark.parametrize(
+    ("call", "message"),
+    [
+        (
+            lambda: plugin._normalize_mounts(1, name="spec.runner.options.mounts"),
+            "spec.runner.options.mounts must be a list of mount objects",
+        ),
+        (
+            lambda: plugin._normalize_mounts(
+                [{"source": ".", "target": "/workspace", "read_only": 1}],
+                name="spec.runner.options.mounts",
+            ),
+            "spec.runner.options.mounts[0].read_only must be a boolean",
+        ),
+        (
+            lambda: plugin._normalize_required_text(1, name="test.value"),
+            "test.value must be a string",
+        ),
+        (
+            lambda: plugin._require_mapping(1, name="test.value"),
+            "test.value must be an object",
+        ),
+        (
+            lambda: plugin._mapping_of_strings({1: "value"}, name="test.value"),
+            "test.value must be a mapping of strings to strings",
+        ),
+        (
+            lambda: plugin._optional_string(1),
+            "spec.working_dir must be a string",
+        ),
+        (
+            lambda: plugin._string_list(1, name="spec.runner.options.docker_args"),
+            "spec.runner.options.docker_args must be a list of strings",
+        ),
+    ],
+)
+def test_docker_plugin_normalizers_reject_wrong_shapes_as_value_error(
+    call: Callable[[], object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        call()
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
 
 
 def _write_profile(path: Path, content: str) -> Path:
