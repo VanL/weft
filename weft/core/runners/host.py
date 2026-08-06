@@ -606,19 +606,21 @@ class HostTaskRunner:
                             detail=limit_error,
                         )
 
-                if "producer_exited" not in progress.consumed_edge_kinds:
-                    if not process.is_alive():
-                        process.join(timeout=0.0)
-                        producer_exit_observed = True
-                        observed_exitcode = process.exitcode
-                        observations["producer_exited"] = TerminalHandoffEvent(
-                            kind="producer_exited",
-                            detail=(
-                                str(observed_exitcode)
-                                if observed_exitcode is not None
-                                else None
-                            ),
-                        )
+                if (
+                    "producer_exited" not in progress.consumed_edge_kinds
+                    and not process.is_alive()
+                ):
+                    process.join(timeout=0.0)
+                    producer_exit_observed = True
+                    observed_exitcode = process.exitcode
+                    observations["producer_exited"] = TerminalHandoffEvent(
+                        kind="producer_exited",
+                        detail=(
+                            str(observed_exitcode)
+                            if observed_exitcode is not None
+                            else None
+                        ),
+                    )
 
                 if drain_deadline is not None and now >= drain_deadline:
                     observations["drain_expired"] = TerminalHandoffEvent(
