@@ -4267,7 +4267,7 @@ def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
     )
 
     class FakeTerminalQueue:
-        instances: list[FakeTerminalQueue] = []
+        instances: ClassVar[list[FakeTerminalQueue]] = []
 
         def __init__(self, name: str, *args: object, **kwargs: object) -> None:
             del args, kwargs
