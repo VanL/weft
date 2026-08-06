@@ -146,6 +146,29 @@ def _native_taskspec() -> TaskSpec:
     )
 
 
+def test_payload_override_copy_rejects_invalid_json_round_trip_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(weft_django_client.json, "loads", lambda _value: [])
+
+    with pytest.raises(TypeError) as exc_info:
+        weft_django_client._apply_taskspec_payload_overrides({"spec": {}}, None)
+    assert type(exc_info.value) is TypeError
+    assert str(exc_info.value) == "TaskSpec payload must be a JSON object"
+    assert exc_info.value.__cause__ is None
+
+
+def test_payload_overrides_reject_invalid_private_spec_type() -> None:
+    with pytest.raises(TypeError) as exc_info:
+        weft_django_client._apply_taskspec_payload_overrides(
+            {"spec": []},
+            {"name": "renamed"},
+        )
+    assert type(exc_info.value) is TypeError
+    assert str(exc_info.value) == "TaskSpec spec section must be a mapping"
+    assert exc_info.value.__cause__ is None
+
+
 def test_status_uses_terminal_snapshot_not_diagnostic_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -229,7 +229,7 @@ def _apply_taskspec_payload_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP
     def _copy_payload(source: Mapping[str, Any]) -> dict[str, Any]:
         cloned = json.loads(json.dumps(dict(source)))
         if not isinstance(cloned, dict):
-            raise ValueError("TaskSpec payload must be a JSON object")
+            raise TypeError("TaskSpec payload must be a JSON object")
         return cloned
 
     if not overrides:
@@ -242,7 +242,7 @@ def _apply_taskspec_payload_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP
         metadata = {}
         updated["metadata"] = metadata
     if not isinstance(spec_section, dict):
-        raise ValueError("TaskSpec spec section must be a mapping")
+        raise TypeError("TaskSpec spec section must be a mapping")
 
     if "metadata" in overrides:
         metadata.update(dict(overrides["metadata"] or {}))
