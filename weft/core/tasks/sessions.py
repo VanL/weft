@@ -367,8 +367,8 @@ class AgentSession:
 
         try:
             self._process.join(timeout=0.2)
-        except Exception:  # pragma: no cover - defensive process observation
-            pass
+        except OSError:  # pragma: no cover - platform wait failure
+            logger.warning("Failed to join agent startup process before late drain")
         return self._drain_ready_response(timeout=0.0)
 
     def _drain_ready_response(self, *, timeout: float) -> Mapping[str, Any] | None:

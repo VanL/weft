@@ -392,6 +392,72 @@ def test_agent_session_reports_hang_after_boot_handshake() -> None:
     assert "last_handshake=booted" in message
 
 
+def test_agent_startup_late_drain_survives_process_join_os_error(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    join_attempts = 0
+    drain_timeouts: list[float] = []
+
+    class Process:
+        def join(self, timeout: float | None = None) -> None:
+            nonlocal join_attempts
+            assert timeout == 0.2
+            join_attempts += 1
+            raise OSError("sensitive startup process wait failure")
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+
+    def drain(*, timeout: float) -> dict[str, bool]:
+        drain_timeouts.append(timeout)
+        return {"late": True}
+
+    monkeypatch.setattr(session, "_drain_ready_response", drain)
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    assert session._join_and_drain_ready_response() == {"late": True}
+    assert join_attempts == 1
+    assert drain_timeouts == [0.0]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to join agent startup process before late drain"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_agent_startup_late_drain_propagates_unexpected_join_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            raise RuntimeError("unexpected startup process wait defect")
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    monkeypatch.setattr(
+        session,
+        "_drain_ready_response",
+        lambda *, timeout: pytest.fail(f"unexpected late drain: {timeout}"),
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected startup process wait defect"):
+        session._join_and_drain_ready_response()
+
+
 PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")
 
 
