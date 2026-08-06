@@ -650,6 +650,10 @@ class TestProviderCLIValidation:
 class TestStateTransitions:
     """mark_* helpers update state consistently."""
 
+    def test_state_rejects_completion_before_start(self) -> None:
+        with pytest.raises(ValidationError, match="completed_at must be after"):
+            StateSection(started_at=2, completed_at=1)
+
     def test_mark_running_updates_fields(self) -> None:
         taskspec = fixtures.create_minimal_taskspec()
         taskspec.mark_running(pid=123)

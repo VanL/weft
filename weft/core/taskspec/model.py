@@ -1273,9 +1273,12 @@ class StateSection(BaseModel):
         running_states = {"running", "spawning"}
 
         # Validate timestamp consistency
-        if self.started_at and self.completed_at:
-            if self.completed_at < self.started_at:
-                raise ValueError("completed_at must be after started_at")
+        if (
+            self.started_at
+            and self.completed_at
+            and self.completed_at < self.started_at
+        ):
+            raise ValueError("completed_at must be after started_at")
 
         # Validate state-specific requirements
         if self.status in terminal_states:
