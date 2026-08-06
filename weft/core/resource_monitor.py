@@ -175,7 +175,7 @@ class PsutilResourceMonitor(BaseResourceMonitor):
             db_path=db_path,
             config=config,
         )
-        self._process: PsutilProcess | None = None if psutil else None
+        self._process: PsutilProcess | None = None
         self.history: list[ResourceMetrics] = []
         self.max_history = 100
         self._last_metrics: ResourceMetrics | None = None
