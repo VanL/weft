@@ -14,6 +14,7 @@ from weft.core.agents.runtime import (
     get_agent_runtime,
     normalize_agent_work_item,
     register_agent_runtime,
+    start_agent_runtime_session,
 )
 from weft.core.taskspec import AgentSection
 
@@ -61,6 +62,16 @@ def test_runtime_registry_registers_and_rejects_duplicates() -> None:
 def test_runtime_registry_rejects_unknown_runtime() -> None:
     with pytest.raises(ValueError, match="Unknown agent runtime"):
         get_agent_runtime("missing")
+
+
+def test_start_session_rejects_runtime_without_persistent_capability() -> None:
+    register_agent_runtime("echo", EchoRuntime())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        start_agent_runtime_session(make_agent_section())
+    assert type(exc_info.value) is RuntimeError
+    assert str(exc_info.value) == "Runtime does not support persistent sessions: echo"
+    assert exc_info.value.__cause__ is None
 
 
 def test_normalize_work_item_from_string() -> None:
