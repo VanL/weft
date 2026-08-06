@@ -3284,6 +3284,90 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
     assert seen_pids.count(4321) >= 2
 
 
+def test_stop_manager_confirms_observed_absence_in_evidence_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "17756224000000000051"
+    initial_record = {
+        "tid": tid,
+        "status": "active",
+        "runtime_handle": _host_runtime_handle(4321),
+    }
+    evidence: list[str] = []
+
+    def absent_registry_view(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        evidence.append("registry-absent")
+        return _registry_view()
+
+    def recorded_pid(record: dict[str, Any] | None) -> int:
+        assert record == initial_record
+        evidence.append("recorded-pid")
+        return 4321
+
+    def dead_recorded_pid(pid: int | None) -> bool:
+        assert pid == 4321
+        evidence.append("recorded-pid-dead")
+        return False
+
+    def local_process_absent_or_exited(
+        process: subprocess.Popen[Any] | None,
+        *,
+        deadline: float,
+    ) -> bool:
+        del deadline
+        assert process is None
+        evidence.append("local-process-gate")
+        return True
+
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_registry_view",
+        absent_registry_view,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_record_pid",
+        recorded_pid,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_is_pid_alive",
+        dead_recorded_pid,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_wait_for_process_exit",
+        local_process_absent_or_exited,
+    )
+
+    stopped, record = core_manager_runtime._await_manager_stop_confirmation(
+        ctx,
+        target_tid=tid,
+        deadline=time.monotonic() + 1.0,
+        initial_record=initial_record,
+        process=None,
+        stop_if_absent=False,
+    )
+
+    assert stopped is True
+    assert record == initial_record
+    assert evidence == [
+        "registry-absent",
+        "recorded-pid",
+        "recorded-pid-dead",
+        "local-process-gate",
+    ]
+
+
 def test_stop_manager_accepts_foreground_serve_stopped_registry_before_pid_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
