@@ -1026,17 +1026,20 @@ def test_command_runner_cleans_up_container_when_runtime_start_fails(
 
     class FakeContainer:
         id = "container-789"
-        attrs: dict[str, Any] = {
-            "Name": "/weft-test",
-            "Config": {"Image": "busybox:latest"},
-            "State": {"Status": "created"},
-        }
+
+        def __init__(self) -> None:
+            self.attrs: dict[str, Any] = {
+                "Name": "/weft-test",
+                "Config": {"Image": "busybox:latest"},
+                "State": {"Status": "created"},
+            }
 
         def reload(self) -> None:
             return None
 
     fake_process = FakeProcess()
     fake_container = FakeContainer()
+    assert fake_container.attrs is not FakeContainer().attrs
     fake_client = object()
     removed: list[tuple[object, str]] = []
 
