@@ -120,3 +120,97 @@ def test_mounts_default_to_read_only(tmp_path: Path) -> None:
     assert options.mounts[0].source == str(source.resolve())
     assert options.mounts[0].target == "/input"
     assert options.mounts[0].read_only is True
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"mode": 1}, "spec.runner.options.mode must be 'tool' or 'agent'"),
+        ({"network": 1}, "spec.runner.options.network must be 'none' or 'allow'"),
+        (
+            {"workspace_mode": 1},
+            "spec.runner.options.workspace_mode must be a string",
+        ),
+        (
+            {"mounts": 1},
+            "spec.runner.options.mounts must be a list of mount objects",
+        ),
+        (
+            {"mounts": [1]},
+            "spec.runner.options.mounts[0] must be an object",
+        ),
+        (
+            {
+                "mounts": [
+                    {"source": ".", "target": "/workspace", "read_only": 1}
+                ]
+            },
+            "spec.runner.options.mounts[0].read_only must be a boolean",
+        ),
+    ],
+)
+def test_options_reject_wrong_value_shapes_as_value_error(
+    options: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        parse_options_from_payload(_command_payload(**options))
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"spec": []}, "spec must be an object"),
+        (
+            {"spec": {"type": "command", "runner": []}},
+            "spec.runner must be an object",
+        ),
+        (
+            {
+                "spec": {
+                    "type": "command",
+                    "runner": {"name": "microsandbox", "options": []},
+                }
+            },
+            "spec.runner.options must be an object",
+        ),
+        (
+            {
+                "spec": {
+                    "type": "agent",
+                    "runner": {
+                        "name": "microsandbox",
+                        "options": {"image": "agent:latest"},
+                    },
+                    "agent": [],
+                }
+            },
+            "spec.agent must be an object",
+        ),
+        (
+            {
+                "spec": {
+                    "type": "command",
+                    "runner": {
+                        "name": "microsandbox",
+                        "options": {"image": "python:3.12-alpine"},
+                    },
+                    "env": ["not-a-mapping"],
+                }
+            },
+            "spec.env must be an object",
+        ),
+    ],
+)
+def test_payload_parser_rejects_non_object_sections_as_value_error(
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        parse_options_from_payload(payload)
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
