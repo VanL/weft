@@ -14,6 +14,7 @@ from weft.commands.task_monitor import (
     DiskJsonlTaskMonitorSink,
     StdoutTaskMonitorSink,
     TaskMonitorConfig,
+    _load_checkpoint,
     run_task_monitor,
 )
 from weft.context import build_context
@@ -229,6 +230,19 @@ def test_corrupt_checkpoint_fails_clearly(workdir) -> None:
 
     assert result.exit_code == 1
     assert "Invalid task monitor checkpoint" in result.stderr
+
+
+def test_checkpoint_loader_rejects_non_object_json_as_value_error(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        _load_checkpoint(checkpoint, "task-monitor")
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == f"Invalid task monitor checkpoint: {checkpoint}"
+    assert exc_info.value.__cause__ is None
 
 
 def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
