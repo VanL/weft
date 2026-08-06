@@ -6,9 +6,11 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from simplebroker.ext import OperationalError
 from tests.conftest import run_cli
 
 pytestmark = [pytest.mark.shared]
@@ -36,13 +38,45 @@ def _wait_for_outbox(harness, tid: str, timeout: float = 5.0) -> None:
     while time.monotonic() < deadline:
         queue = harness.context.queue(queue_name, persistent=True)
         try:
-            if queue.peek_one() is not None:
-                return
-        except Exception:
-            pass
+            ready = queue.peek_one() is not None
+        except OperationalError:
+            ready = False
         finally:
             queue.close()
+        if ready:
+            return
         time.sleep(0.05)
+
+
+def test_wait_for_outbox_retries_transient_backend_failure() -> None:
+    attempts = 0
+    queues: list[FakeQueue] = []
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        def peek_one(self) -> object:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError("transient backend failure")
+            return "ready"
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    def make_queue(*_args: object, **_kwargs: object) -> FakeQueue:
+        queue = FakeQueue()
+        queues.append(queue)
+        return queue
+
+    harness = SimpleNamespace(context=SimpleNamespace(queue=make_queue))
+
+    _wait_for_outbox(harness, "123", timeout=1.0)
+
+    assert attempts == 2
+    assert [queue.close_count for queue in queues] == [1, 1]
 
 
 def _wait_for_path(path: Path, *, timeout: float = 20.0) -> bool:
