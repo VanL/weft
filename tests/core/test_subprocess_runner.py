@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import queue
 import subprocess
 import sys
@@ -106,3 +107,54 @@ def test_completed_process_at_timeout_wake_boundary_returns_ok(
     assert outcome.status == "ok"
     assert outcome.returncode == 0
     assert outcome.stdout == "done\n"
+
+
+def test_start_callback_failures_are_logged_without_replacing_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "print('done')"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    def fail_callback(_value: object) -> None:
+        raise RuntimeError("contains secret")
+
+    try:
+        with caplog.at_level(
+            logging.WARNING,
+            logger="weft.core.runners.subprocess_runner",
+        ):
+            outcome = run_monitored_subprocess(
+                process=process,
+                stdin_data=None,
+                timeout=5.0,
+                limits=None,
+                monitor_class=None,
+                monitor_interval=1.0,
+                monitor=None,
+                db_path=None,
+                config=None,
+                runtime_handle=_runner_handle(process),
+                cancel_requested=None,
+                on_worker_started=fail_callback,
+                on_runtime_handle_started=fail_callback,
+                stop_runtime=lambda: None,
+                kill_runtime=lambda: None,
+            )
+    finally:
+        if process.poll() is None:  # pragma: no cover - failure cleanup
+            process.kill()
+            process.wait(timeout=5.0)
+
+    assert outcome.status == "ok"
+    assert outcome.returncode == 0
+    assert outcome.stdout == "done\n"
+    assert [record.message for record in caplog.records] == [
+        "Subprocess worker-start callback failed",
+        "Subprocess runtime-handle callback failed",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)

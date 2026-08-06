@@ -8,6 +8,7 @@ Spec references:
 from __future__ import annotations
 
 import codecs
+import logging
 import queue
 import subprocess
 import threading
@@ -28,6 +29,8 @@ from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners.outcome import RunnerOutcome
 from weft.ext import RunnerHandle
 from weft.helpers import safe_cancel
+
+logger = logging.getLogger(__name__)
 
 
 def prepare_command_invocation(
@@ -89,11 +92,13 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
         try:
             on_worker_started(actual_worker_pid)
         except Exception:  # pragma: no cover - defensive
+            logger.warning("Subprocess worker-start callback failed")
             pass
     if on_runtime_handle_started is not None:
         try:
             on_runtime_handle_started(runtime_handle)
         except Exception:  # pragma: no cover - defensive
+            logger.warning("Subprocess runtime-handle callback failed")
             pass
 
     if monitor is None and monitor_class and actual_worker_pid is not None:
