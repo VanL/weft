@@ -582,9 +582,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             "encoding": "text",
             "data": event.chunk,
         }
-        if stream == "stdout":
-            if event.final:
-                envelope["result_transform"] = "strip"
+        if stream == "stdout" and event.final:
+            envelope["result_transform"] = "strip"
         self._queue(self._queue_names["outbox"]).write(json.dumps(envelope))
 
     def _uses_live_command_streaming(self) -> bool:
