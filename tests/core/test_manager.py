@@ -587,6 +587,26 @@ def test_manager_context_is_cached_by_base_task(
         manager.cleanup()
 
 
+def test_manager_atexit_callback_silences_shutdown_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="weft.core.manager")
+
+    def fail_unregister(_manager: Manager, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("sensitive interpreter shutdown failure")
+
+    monkeypatch.setattr(Manager, "_unregister_manager", fail_unregister)
+    manager = object.__new__(Manager)
+
+    manager._atexit_unregister()
+
+    assert caplog.records == []
+    assert capsys.readouterr() == ("", "")
+
+
 @pytest.mark.parametrize("unregister_fails", (False, True))
 def test_manager_cleanup_unregisters_registered_atexit_callback(
     unregister_fails: bool,
