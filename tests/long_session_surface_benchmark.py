@@ -523,32 +523,35 @@ class ApiSurface:
     ) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with _api_call_environment(workdir, env, stdin=stdin):
-            with redirect_stdout(stdout), redirect_stderr(stderr):
-                rc = cmd_run(
-                    tuple(command),
-                    spec=spec,
-                    pipeline=None,
-                    pipeline_input=None,
-                    function=function,
-                    args=tuple(args),
-                    kwargs=tuple(kwargs),
-                    env=tuple(env_vars),
-                    name=name,
-                    interactive=interactive,
-                    stream_output=None,
-                    timeout=timeout,
-                    memory=None,
-                    cpu=None,
-                    tags=tuple(tags),
-                    context_dir=workdir,
-                    wait=wait,
-                    json_output=False,
-                    verbose=False,
-                    monitor=False,
-                    persistent_override=None,
-                    autostart_enabled=True,
-                )
+        with (
+            _api_call_environment(workdir, env, stdin=stdin),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            rc = cmd_run(
+                tuple(command),
+                spec=spec,
+                pipeline=None,
+                pipeline_input=None,
+                function=function,
+                args=tuple(args),
+                kwargs=tuple(kwargs),
+                env=tuple(env_vars),
+                name=name,
+                interactive=interactive,
+                stream_output=None,
+                timeout=timeout,
+                memory=None,
+                cpu=None,
+                tags=tuple(tags),
+                context_dir=workdir,
+                wait=wait,
+                json_output=False,
+                verbose=False,
+                monitor=False,
+                persistent_override=None,
+                autostart_enabled=True,
+            )
         return rc, stdout.getvalue().strip(), stderr.getvalue().strip()
 
     def run_task(
