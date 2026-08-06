@@ -51,8 +51,10 @@ under xdist load. This timeout guards stuck tests; it must not be tighter than
 the platform's normal process startup and teardown cost.
 """
 _PRIORITY_TEST_NODEIDS = (
-    "tests/cli/test_cli_long_session.py::"
-    "test_cli_long_session_produces_identical_transcript_across_backends",
+    (
+        "tests/cli/test_cli_long_session.py::"
+        "test_cli_long_session_produces_identical_transcript_across_backends"
+    ),
 )
 _SHARED_MODULES = frozenset(
     {

@@ -1895,8 +1895,10 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
         if _external_supervisor_record_is_live(current):
             return (
                 False,
-                f"Manager {target_tid} is externally supervised and did not stop; "
-                "no host PID is available for --force",
+                (
+                    f"Manager {target_tid} is externally supervised and did not stop; "
+                    "no host PID is available for --force"
+                ),
             )
         return True, None
 

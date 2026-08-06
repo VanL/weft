@@ -353,9 +353,11 @@ def render_runtime_prune_human(result: RuntimePruneResult) -> str:
 
     mode = "dry-run" if result.dry_run else "apply"
     lines = [
-        f"Runtime state prune {mode}: scanned {result.records_scanned} records, "
-        f"found {len(result.candidates)} candidates, deleted {result.deleted}, "
-        f"failed {result.failed}."
+        (
+            f"Runtime state prune {mode}: scanned {result.records_scanned} records, "
+            f"found {len(result.candidates)} candidates, deleted {result.deleted}, "
+            f"failed {result.failed}."
+        )
     ]
     for candidate in result.candidates:
         applied = "report-only" if candidate.report_only else "kept"

@@ -1130,8 +1130,10 @@ def watch_command(
         return (
             1,
             "",
-            "--move drains ALL messages from source queue, "
-            "incompatible with --after filtering",
+            (
+                "--move drains ALL messages from source queue, "
+                "incompatible with --after filtering"
+            ),
         )
 
     if limit is None:

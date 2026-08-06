@@ -756,9 +756,11 @@ def _task_status_plain_lines(
 ) -> list[str]:
     """Project the public task-status payload into ordered plain-text lines."""
     lines = [
-        f"{status_payload['tid']} {status_payload['status']} "
-        f"{status_payload.get('runner') or '-'} {status_payload['name']} "
-        f"({status_payload['event']})"
+        (
+            f"{status_payload['tid']} {status_payload['status']} "
+            f"{status_payload.get('runner') or '-'} {status_payload['name']} "
+            f"({status_payload['event']})"
+        )
     ]
     activity = status_payload.get("activity")
     if activity:

@@ -656,8 +656,10 @@ def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]
             "reaches non-exported simplebroker.commands.MAX_MESSAGE_SIZE",
         ),
         (
-            "from simplebroker import commands\ngetattr(commands, "
-            '"MAX_MESSAGE_SIZE")\n',
+            (
+                "from simplebroker import commands\ngetattr(commands, "
+                '"MAX_MESSAGE_SIZE")\n'
+            ),
             "via getattr",
         ),
     ],

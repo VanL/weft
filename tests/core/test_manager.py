@@ -5327,10 +5327,12 @@ def _spawn_sigterm_trapping_process(ready_file: Path) -> subprocess.Popen[bytes]
         [
             sys.executable,
             "-c",
-            "import signal, sys, time; "
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-            "open(sys.argv[1], 'w').write('ready'); "
-            "time.sleep(60)",
+            (
+                "import signal, sys, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "open(sys.argv[1], 'w').write('ready'); "
+                "time.sleep(60)"
+            ),
             str(ready_file),
         ]
     )

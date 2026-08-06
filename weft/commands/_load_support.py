@@ -491,8 +491,10 @@ def _format_alias_conflicts(conflicts: set[str]) -> tuple[int, str]:
     conflict_list = ", ".join(sorted(conflicts))
     return (
         3,
-        "weft load: alias conflicts detected; resolve and rerun\n"
-        f"Conflicting aliases: {conflict_list}",
+        (
+            "weft load: alias conflicts detected; resolve and rerun\n"
+            f"Conflicting aliases: {conflict_list}"
+        ),
     )
 
 

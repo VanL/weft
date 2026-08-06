@@ -34,8 +34,10 @@ def build_pytest_command(provider_names: Sequence[str]) -> tuple[str, ...]:
     )
     mcp_nodes = (
         (
-            "tests/tasks/test_agent_execution.py::"
-            "test_consumer_live_provider_cli_mcp_smoke",
+            (
+                "tests/tasks/test_agent_execution.py::"
+                "test_consumer_live_provider_cli_mcp_smoke"
+            ),
         )
         if "claude_code" in provider_names
         else ()

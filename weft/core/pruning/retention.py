@@ -414,9 +414,11 @@ def render_retention_prune_human(result: RetentionPruneResult) -> str:
         else "apply"
     )
     lines = [
-        f"Retention prune {mode}: scanned {result.records_scanned} records, "
-        f"found {len(result.candidates)} candidates, archived {result.archived}, "
-        f"deleted {result.deleted}, failed {result.failed}."
+        (
+            f"Retention prune {mode}: scanned {result.records_scanned} records, "
+            f"found {len(result.candidates)} candidates, archived {result.archived}, "
+            f"deleted {result.deleted}, failed {result.failed}."
+        )
     ]
     for warning in result.warnings:
         lines.append(f"warning: {warning}")
