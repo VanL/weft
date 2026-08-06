@@ -47,12 +47,12 @@ from weft.core.task_evidence import (
 )
 
 __all__ = [
+    "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS",
+    "WRAPPER_LOST_ERROR",
     "QueueAckTarget",
     "QueueMessageCounts",
-    "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS",
     "TaskEvidenceSnapshot",
     "TaskTerminalSnapshot",
-    "WRAPPER_LOST_ERROR",
     "bounded_log_terminal_evidence",
     "claimed_outbox_result_evidence",
     "coerce_terminal_envelope",
@@ -72,8 +72,8 @@ __all__ = [
     "return_code_from_event",
     "runtime_evidence",
     "select_terminal_envelope",
-    "stale_observer_evidence",
     "split_stdio",
+    "stale_observer_evidence",
     "task_is_interactive_payload",
     "task_is_persistent_payload",
     "task_local_terminal_evidence",
