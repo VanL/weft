@@ -1558,7 +1558,6 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
         ) -> None:
             del taskspec_payload
             plugin_calls.append(preflight)
-            return None
 
         def create_runner(self, **kwargs):
             del kwargs
@@ -1658,7 +1657,6 @@ def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
         ) -> None:
             del taskspec_payload
             plugin_calls.append(preflight)
-            return None
 
         def create_runner(self, **kwargs):
             del kwargs

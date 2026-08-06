@@ -137,7 +137,6 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
 
         def remove(self, force: bool = False) -> None:
             del force
-            return None
 
     class FakeContainers:
         def create(
@@ -287,7 +286,6 @@ def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 appro
 
         def remove(self, force: bool = False) -> None:
             del force
-            return None
 
     class FakeContainers:
         def create(

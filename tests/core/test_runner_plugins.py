@@ -20,7 +20,6 @@ class _FakeRunnerPlugin:
 
     def validate_taskspec(self, taskspec_payload, *, preflight: bool = False) -> None:
         del taskspec_payload, preflight
-        return None
 
     def create_runner(self, **kwargs):
         del kwargs

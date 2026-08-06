@@ -237,7 +237,6 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
 
     def _fake_blocking_manager(context_arg):
         manager_selection_calls.append(context_arg)
-        return None
 
     monkeypatch.setattr(
         core_manager_runtime,

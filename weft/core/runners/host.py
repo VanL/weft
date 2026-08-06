@@ -1146,7 +1146,6 @@ class HostRunnerPlugin:
         preflight: bool = False,
     ) -> None:
         del taskspec_payload, preflight
-        return None
 
     def create_runner(
         self,
