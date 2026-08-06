@@ -419,7 +419,7 @@ async def _exec_with_cancel(
         try:
             await sandbox.kill()
         except Exception:
-            pass
+            logger.warning("Failed to kill Microsandbox during cancellation")
         try:
             await asyncio.wait_for(exec_task, timeout=2.0)
             return None

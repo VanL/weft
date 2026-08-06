@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any
 
@@ -408,6 +409,64 @@ def test_exec_with_cancel_maps_post_kill_exec_output_to_cancelled() -> None:
 
     assert result is None
     assert killed is True
+
+
+def test_exec_with_cancel_reports_kill_failure_and_drains_exec_task(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class KillFailureSandbox:
+        kill_attempted = False
+        exec_task: asyncio.Task[object] | None = None
+
+        async def exec(self, *_args: object, **_kwargs: object) -> object:
+            self.exec_task = asyncio.current_task()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def kill(self) -> None:
+            self.kill_attempted = True
+            raise RuntimeError("sensitive kill failure")
+
+    async def _run() -> tuple[object | None, KillFailureSandbox]:
+        sandbox = KillFailureSandbox()
+        result = await _runtime._exec_with_cancel(
+            object(),
+            sandbox,
+            MicrosandboxRunSpec(
+                name="weft-cancel-kill-failure",
+                image="python:3.12",
+                command=("python", "-c", "print(1)"),
+                env={},
+                cwd="/",
+                network="none",
+                workspace=WorkspaceSpec(),
+            ),
+            cancel_requested=lambda: True,
+        )
+        return result, sandbox
+
+    wait_for = asyncio.wait_for
+
+    async def fast_wait_for(awaitable: Awaitable[Any], timeout: float) -> Any:
+        assert timeout == 2.0
+        return await wait_for(awaitable, timeout=0.01)
+
+    monkeypatch.setattr(_runtime.asyncio, "wait_for", fast_wait_for)
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    result, sandbox = asyncio.run(_run())
+
+    assert result is None
+    assert sandbox.kill_attempted is True
+    assert sandbox.exec_task is not None
+    assert sandbox.exec_task.done() is True
+    assert sandbox.exec_task.cancelled() is True
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to kill Microsandbox during cancellation"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive" not in caplog.text
 
 
 def test_cleanup_sandbox_reports_each_failure_and_continues(
