@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from weft_docker import profiles
 from weft_docker.profiles import materialize_container_profile
 
 pytestmark = [pytest.mark.shared]
@@ -146,6 +147,22 @@ def test_container_profile_malformed_toml_reports_clear_error(tmp_path: Path) ->
             bundle_root=None,
             host_env={},
         )
+
+
+def test_container_profile_rejects_invalid_toml_decoder_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _write_profile(tmp_path / "docker-profiles.toml", "version = 1")
+    monkeypatch.setattr(profiles.tomllib, "load", lambda _handle: [])
+
+    with pytest.raises(RuntimeError) as exc_info:
+        profiles._load_profile_file(profile)
+    assert type(exc_info.value) is RuntimeError
+    assert str(exc_info.value) == (
+        f"Docker profile file must contain a TOML table: {profile}"
+    )
+    assert exc_info.value.__cause__ is None
 
 
 def test_container_profile_missing_profile_reports_clear_error(tmp_path: Path) -> None:

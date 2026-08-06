@@ -206,7 +206,7 @@ def _load_profile_file(profile_file: Path) -> Mapping[str, Any]:
             f"Docker profile file is not valid TOML: {profile_file}"
         ) from exc
     if not isinstance(payload, Mapping):
-        raise ValueError(
+        raise RuntimeError(
             f"Docker profile file must contain a TOML table: {profile_file}"
         )
     return payload
