@@ -1292,13 +1292,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return False
         if payload == WORK_ENVELOPE_START or payload == {}:
             return True
-        if (
+        return (
             isinstance(payload, dict)
             and payload.get("close") is True
             and len(payload) == 1
-        ):
-            return True
-        return False
+        )
 
     @staticmethod
     def _is_stream_final_marker(raw: str) -> bool:

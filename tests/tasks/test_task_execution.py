@@ -43,6 +43,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
+    WORK_ENVELOPE_START,
 )
 from weft.core import launcher as launcher_module
 from weft.core.launcher import _request_parent_loss_shutdown, _task_process_entry
@@ -2860,6 +2861,28 @@ def test_task_failure_leaves_message_in_reserved(broker_env, unique_tid: str) ->
     assert peeked is not None
     assert peeked[0] is not None
     assert task.taskspec.state.status == "failed"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, False),
+        ("", True),
+        ("   ", True),
+        ("{}", True),
+        (" { } ", True),
+        (json.dumps(WORK_ENVELOPE_START), True),
+        (json.dumps({"close": True}), True),
+        (json.dumps({"close": True, "extra": 1}), False),
+        (json.dumps({"close": False}), False),
+        (json.dumps({"close": 1}), False),
+        ("not-json", False),
+        ("[]", False),
+        ("null", False),
+    ],
+)
+def test_consumer_start_token_truth_table(raw: str | None, expected: bool) -> None:
+    assert Consumer._is_start_token(raw) is expected
 
 
 def test_start_token_cleared_on_failure(broker_env, unique_tid: str) -> None:
