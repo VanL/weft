@@ -102,12 +102,35 @@ class WeftTestHarness:
     # ------------------------------------------------------------------
     def __enter__(self) -> Self:
         self._orig_cwd = Path.cwd()
-        self._patch_environment()
-        prepare_project_root(self.root)
-        os.chdir(self.root)
-        # Ensure context and database are initialized early.
-        self._initialize_context_with_retry()
+        try:
+            self._patch_environment()
+            prepare_project_root(self.root)
+            os.chdir(self.root)
+            # Ensure context and database are initialized early.
+            self._initialize_context_with_retry()
+        except BaseException as exc:
+            self._rollback_failed_enter(exc)
+            raise
         return self
+
+    def _rollback_failed_enter(self, primary: BaseException) -> None:
+        failed_steps: list[str] = []
+        rollback_steps = (
+            ("restore cwd", self._restore_cwd),
+            ("clean prepared project root", lambda: cleanup_prepared_roots(self.root)),
+            ("restore environment", self._restore_environment),
+            ("clean temporary directory", self._tempdir.cleanup),
+        )
+        for name, rollback in rollback_steps:
+            try:
+                rollback()
+            except Exception:
+                failed_steps.append(name)
+        self._closed = True
+        if failed_steps:
+            primary.add_note(
+                "Harness setup rollback also failed for: " + ", ".join(failed_steps)
+            )
 
     def __exit__(
         self,
@@ -116,12 +139,6 @@ class WeftTestHarness:
         tb: TracebackType | None,
     ) -> None:
         self.cleanup()
-
-    def __del__(self) -> None:
-        try:
-            self.cleanup()
-        except Exception:
-            pass
 
     @property
     def context(self) -> WeftContext:

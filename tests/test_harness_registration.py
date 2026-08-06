@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -19,6 +20,62 @@ from weft._constants import (
 )
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
+
+
+@pytest.mark.shared
+def test_harness_cleanup_has_no_implicit_object_finalizer() -> None:
+    """Keep process, broker, and filesystem cleanup explicitly owned."""
+
+    assert not hasattr(WeftTestHarness, "__del__")
+
+
+@pytest.mark.sqlite_only
+def test_harness_enter_failure_rolls_back_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    original_cwd = os.getcwd()
+    original_env = dict(os.environ)
+    root = harness.root
+    primary = RuntimeError("primary harness setup failure")
+    rollback_calls: list[str] = []
+    cleanup_tempdir = harness._tempdir.cleanup
+
+    def fail_context_initialization() -> None:
+        raise primary
+
+    def fail_prepared_root_cleanup(path: Path) -> None:
+        assert path == root
+        assert os.getcwd() == original_cwd
+        assert os.environ["WEFT_TEST_MODE"] == "1"
+        rollback_calls.append("prepared root")
+        raise OSError("secondary prepared-root cleanup failure")
+
+    def record_tempdir_cleanup() -> None:
+        assert dict(os.environ) == original_env
+        rollback_calls.append("tempdir")
+        cleanup_tempdir()
+
+    monkeypatch.setattr(
+        harness, "_initialize_context_with_retry", fail_context_initialization
+    )
+    monkeypatch.setattr(
+        harness_mod, "cleanup_prepared_roots", fail_prepared_root_cleanup
+    )
+    monkeypatch.setattr(harness._tempdir, "cleanup", record_tempdir_cleanup)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        harness.__enter__()
+
+    assert exc_info.value is primary
+    assert primary.__notes__ == [
+        "Harness setup rollback also failed for: clean prepared project root"
+    ]
+    assert rollback_calls == ["prepared root", "tempdir"]
+    assert os.getcwd() == original_cwd
+    assert dict(os.environ) == original_env
+    assert not root.exists()
+    assert harness._closed is True
 
 
 def _host_runtime_handle(*pids: int) -> dict[str, Any]:
