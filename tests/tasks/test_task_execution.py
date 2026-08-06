@@ -1512,6 +1512,42 @@ def test_command_session_reports_cleanup_callback_failure_once(
     assert "sensitive" not in caplog.text
 
 
+def test_command_session_reports_monitor_cleanup_failures_and_clears_owner(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[str] = []
+
+    class Monitor:
+        def last_metrics(self) -> None:
+            calls.append("last_metrics")
+            raise RuntimeError("sensitive command metrics failure")
+
+        def stop(self) -> None:
+            calls.append("stop")
+            raise RuntimeError("sensitive command monitor stop failure")
+
+    session = CommandSession(
+        object(),  # type: ignore[arg-type]
+        queue.Queue(),
+        queue.Queue(),
+        Monitor(),  # type: ignore[arg-type]
+        None,
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    session.stop_monitor()
+    session.stop_monitor()
+
+    assert calls == ["last_metrics", "stop"]
+    assert session._monitor is None
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to collect final command session metrics",
+        "Failed to stop command session resource monitor",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
 def test_command_session_deadline_preserves_process_tree_kill_escalation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

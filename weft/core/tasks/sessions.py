@@ -204,11 +204,11 @@ class CommandSession:
             try:
                 self._last_metrics = self._monitor.last_metrics() or self._last_metrics
             except Exception:  # pragma: no cover - process may have exited
-                pass
+                logger.warning("Failed to collect final command session metrics")
             try:
                 self._monitor.stop()
             except Exception:  # pragma: no cover - defensive
-                pass
+                logger.warning("Failed to stop command session resource monitor")
             self._monitor = None
 
     @property
