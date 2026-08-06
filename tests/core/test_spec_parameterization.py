@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from weft.core.taskspec import ParameterizationArgumentSection, TaskSpec
+from weft.core.taskspec import parameterization as parameterization_module
 from weft.core.taskspec.parameterization import (
     SpecParameterizationRequest,
+    invoke_parameterization_adapter,
     materialize_taskspec_template,
     parse_declared_parameterization_args,
 )
@@ -209,3 +211,52 @@ def test_spec_parameterization_request_is_constructible() -> None:
     )
 
     assert request.arguments == {"provider": "codex"}
+
+
+def test_parameterization_adapter_rejects_non_mapping_result_as_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SpecParameterizationRequest(
+        arguments={},
+        context_root=None,
+        spec_name="example",
+        taskspec_payload={"name": "example"},
+    )
+    monkeypatch.setattr(
+        parameterization_module,
+        "import_callable_ref",
+        lambda _adapter_ref, *, bundle_root: lambda _request: [],
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        invoke_parameterization_adapter("fixture:adapter", request=request)
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == (
+        "spec.parameterization adapter must return a JSON-serializable object"
+    )
+
+
+def test_parameterization_adapter_rejects_non_mapping_spec_as_value_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    taskspec = _create_parameterized_taskspec(tmp_path)
+    monkeypatch.setattr(
+        parameterization_module,
+        "import_callable_ref",
+        lambda _adapter_ref, *, bundle_root: lambda _request: {
+            "name": "example",
+            "spec": [],
+        },
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        materialize_taskspec_template(
+            taskspec,
+            arguments={"provider": "codex"},
+            context_root=str(tmp_path),
+        )
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == (
+        "spec.parameterization adapter must return a TaskSpec payload"
+    )
