@@ -781,9 +781,7 @@ def github_repo_slug_from_remote(remote_url: str) -> str | None:
         path = stripped.removeprefix("git@github.com:")
     elif stripped.startswith("ssh://git@github.com/"):
         path = stripped.removeprefix("ssh://git@github.com/")
-    elif stripped.startswith("https://github.com/") or stripped.startswith(
-        "http://github.com/"
-    ):
+    elif stripped.startswith(("https://github.com/", "http://github.com/")):
         path = urllib_parse.urlparse(stripped).path.lstrip("/")
     else:
         return None

@@ -50,7 +50,7 @@ def strip_fenced_blocks(text: str) -> str:
     out, fenced = [], False
     for line in text.splitlines():
         stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
+        if stripped.startswith(("```", "~~~")):
             fenced = not fenced
             continue
         if not fenced:
