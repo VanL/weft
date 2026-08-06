@@ -3756,9 +3756,7 @@ class Manager(ServiceTask):
         timestamp = self._peeked_message_timestamp(pending)
         if timestamp is None:
             return True
-        if self._stalled_control_retry_active(timestamp):
-            return False
-        return True
+        return not self._stalled_control_retry_active(timestamp)
 
     def _queue_has_pending(self, queue: Queue) -> bool:
         ctrl_name = self._queue_names.get("ctrl_in")
