@@ -610,6 +610,83 @@ def test_agent_startup_late_drain_propagates_unexpected_join_failure(
         session._join_and_drain_ready_response()
 
 
+def test_agent_wait_ready_survives_join_os_error_after_channel_seal(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    join_attempts = 0
+    drain_timeouts: list[float] = []
+
+    class Process:
+        def join(self, timeout: float | None = None) -> None:
+            nonlocal join_attempts
+            assert timeout is not None
+            join_attempts += 1
+            raise OSError("sensitive sealed-channel wait failure")
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    monkeypatch.setattr(
+        session,
+        "_read_response_payload",
+        lambda *, timeout: (_ for _ in ()).throw(EOFError()),
+    )
+
+    def drain(*, timeout: float) -> dict[str, Any]:
+        drain_timeouts.append(timeout)
+        return make_ready_response()
+
+    monkeypatch.setattr(session, "_drain_ready_response", drain)
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    session.wait_ready(timeout=0.1)
+
+    assert join_attempts == 1
+    assert drain_timeouts == [0.2]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to join agent startup process after channel seal"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_agent_wait_ready_propagates_unexpected_sealed_channel_join_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            raise RuntimeError("unexpected sealed-channel wait defect")
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    monkeypatch.setattr(
+        session,
+        "_read_response_payload",
+        lambda *, timeout: (_ for _ in ()).throw(EOFError()),
+    )
+    monkeypatch.setattr(
+        session,
+        "_drain_ready_response",
+        lambda *, timeout: pytest.fail(f"unexpected late drain: {timeout}"),
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected sealed-channel wait defect"):
+        session.wait_ready(timeout=0.1)
+
+
 PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")
 
 

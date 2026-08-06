@@ -327,8 +327,10 @@ class AgentSession:
         if channel_sealed:
             try:
                 self._process.join(timeout=TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS)
-            except Exception:  # pragma: no cover - defensive process observation
-                pass
+            except OSError:  # pragma: no cover - platform wait failure
+                logger.warning(
+                    "Failed to join agent startup process after channel seal"
+                )
 
         try:
             late_payload = self._drain_ready_response(timeout=0.2)
