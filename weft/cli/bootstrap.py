@@ -11,8 +11,8 @@ from weft.bootstrap import (
 )
 
 __all__ = [
-    "EnvFileError",
     "WEFT_ENV_FILE_ENV",
+    "EnvFileError",
     "apply_env_file",
     "main",
     "parse_env_file",

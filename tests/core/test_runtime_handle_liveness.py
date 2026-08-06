@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-import weft.runtime_liveness as runtime_liveness
+from weft import runtime_liveness
 from weft.ext import RunnerHandle
 
 pytestmark = [pytest.mark.shared]

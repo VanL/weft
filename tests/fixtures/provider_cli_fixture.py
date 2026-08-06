@@ -31,7 +31,7 @@ _PROVIDER_BINARIES = {
 TOOL_PROFILE_CALLS: list[dict[str, Any]] = []
 
 
-def resolve_operator_question(*, agent, work_item, tid):  # noqa: ANN001
+def resolve_operator_question(*, agent, work_item, tid):
     del agent
     return AgentResolverResult(
         prompt=f"resolved:{content_to_prompt_text(work_item.content)}",
@@ -41,7 +41,7 @@ def resolve_operator_question(*, agent, work_item, tid):  # noqa: ANN001
     )
 
 
-def provider_tool_profile(*, agent, tid):  # noqa: ANN001
+def provider_tool_profile(*, agent, tid):
     provider_name = str(agent.runtime_config.get("provider", "")).strip()
     provider_options: dict[str, Any] = {}
     if provider_name == "claude_code":
@@ -67,7 +67,7 @@ def reset_counting_tool_profile_calls() -> None:
     TOOL_PROFILE_CALLS.clear()
 
 
-def counting_provider_tool_profile(*, agent, tid):  # noqa: ANN001
+def counting_provider_tool_profile(*, agent, tid):
     """Record profile resolution before returning the normal fixture profile."""
 
     TOOL_PROFILE_CALLS.append(
@@ -79,12 +79,12 @@ def counting_provider_tool_profile(*, agent, tid):  # noqa: ANN001
     return provider_tool_profile(agent=agent, tid=tid)
 
 
-def invalid_resolver(*, agent, work_item, tid):  # noqa: ANN001
+def invalid_resolver(*, agent, work_item, tid):
     del agent, work_item, tid
     return "nope"
 
 
-def invalid_tool_profile(*, agent, tid):  # noqa: ANN001
+def invalid_tool_profile(*, agent, tid):
     del agent, tid
     return "nope"
 

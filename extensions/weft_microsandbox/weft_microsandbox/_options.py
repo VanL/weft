@@ -347,10 +347,10 @@ def _cpu_count_from_percent(cpu_percent: int | None) -> float | None:
 
 
 __all__ = [
+    "MicrosandboxMode",
     "MicrosandboxMount",
     "MicrosandboxNetwork",
     "MicrosandboxOptions",
-    "MicrosandboxMode",
     "WorkspaceMode",
     "parse_options",
     "parse_options_from_payload",

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Iterable
+from copy import deepcopy
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -34,6 +35,20 @@ EXTENSIONLESS_PYTHON = [
     "bin/pytest-worker-count",
 ]
 MCCABE_MAX_COMPLEXITY = 10
+RUFF_CHECK = "ruff check ."
+SUPPRESSION_CHECK = "python bin/ruff_suppression_index.py --check"
+FORMATTER_CHECK = (
+    "ruff format --check weft tests integrations/weft_django "
+    "extensions/weft_docker extensions/weft_macos_sandbox "
+    "extensions/weft_microsandbox"
+)
+MYPY_CHECK = (
+    "mypy weft bin integrations/weft_django/weft_django "
+    "extensions/weft_docker/weft_docker "
+    "extensions/weft_macos_sandbox/weft_macos_sandbox "
+    "extensions/weft_microsandbox/weft_microsandbox "
+    "--config-file pyproject.toml"
+)
 EXPECTED_GROUP_IDS = [
     *(f"RUFF-SUP-{number:03d}" for number in range(1, 60) if number != 21),
     *(
@@ -82,8 +97,21 @@ def _ruff_config() -> tuple[dict[str, Any], dict[str, Any]]:
     return ruff, ruff["lint"]
 
 
-def _enabled_rules() -> set[str]:
-    result = _ruff("check", "--show-settings", "weft/__init__.py")
+def _activation_policy_config() -> tuple[dict[str, Any], dict[str, Any]]:
+    ruff, lint = deepcopy(_ruff_config())
+    if "select" in lint:
+        lint["extend-select"] = lint.pop("select")
+    return ruff, lint
+
+
+def _ruff_settings(*, config: Path = PYPROJECT) -> dict[str, Any]:
+    result = _ruff(
+        "check",
+        "--config",
+        str(config),
+        "--show-settings",
+        "weft/__init__.py",
+    )
     assert result.returncode == 0, result.stderr
     match = re.search(
         r"linter\.rules\.enabled = \[\n(?P<rules>.*?)\n\]",
@@ -91,7 +119,34 @@ def _enabled_rules() -> set[str]:
         re.DOTALL,
     )
     assert match is not None, result.stdout
-    return set(re.findall(r"\(([A-Z]+\d+)\)", match.group("rules")))
+    target = re.search(
+        r"^linter\.unresolved_target_version = (.+)$",
+        result.stdout,
+        flags=re.MULTILINE,
+    )
+    complexity = re.search(
+        r"^linter\.mccabe\.max_complexity = (\d+)$",
+        result.stdout,
+        flags=re.MULTILINE,
+    )
+    preview = re.search(
+        r"^linter\.preview = (\w+)$",
+        result.stdout,
+        flags=re.MULTILINE,
+    )
+    assert target is not None, result.stdout
+    assert complexity is not None, result.stdout
+    assert preview is not None, result.stdout
+    return {
+        "enabled": set(re.findall(r"\(([A-Z]+\d+)\)", match.group("rules"))),
+        "target": target.group(1),
+        "max-complexity": int(complexity.group(1)),
+        "preview": preview.group(1),
+    }
+
+
+def _enabled_rules() -> set[str]:
+    return _ruff_settings()["enabled"]
 
 
 def _tracked_files() -> list[Path]:
@@ -146,9 +201,91 @@ def _assert_extensionless_policy(configured: Iterable[str]) -> None:
     }
 
 
+def _assert_ruff_policy(ruff: dict[str, Any], lint: dict[str, Any]) -> None:
+    assert ruff["target-version"] == "py312"
+    _assert_extensionless_policy(ruff["extend-include"])
+    assert "select" not in lint
+    assert lint["extend-select"] == REVIEWED_FAMILIES
+    assert lint["ignore"] == GLOBAL_IGNORES
+    assert lint["mccabe"] == {"max-complexity": MCCABE_MAX_COMPLEXITY}
+    assert lint.get("preview", False) is False
+    assert lint.get("per-file-ignores", {}) == {}
+
+
+def _assert_enabled_rules(actual: set[str], expected: set[str]) -> None:
+    assert actual == expected, {
+        "missing": sorted(expected - actual),
+        "unexpected": sorted(actual - expected),
+    }
+
+
 def _lint_job() -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     return workflow.split("  lint:", 1)[1].split("  test-django-integration:", 1)[0]
+
+
+def _assert_lint_job(job: str) -> None:
+    compact = " ".join(job.split())
+
+    assert RUFF_CHECK in job
+    assert SUPPRESSION_CHECK in job
+    assert FORMATTER_CHECK in compact
+    assert MYPY_CHECK in compact
+    assert job.index(RUFF_CHECK) < job.index(SUPPRESSION_CHECK)
+    assert job.index(SUPPRESSION_CHECK) < job.index("ruff format --check")
+    assert job.index("ruff format --check") < job.index("mypy weft")
+    assert "ruff format --check ." not in job
+    assert "--preview" not in job
+
+
+def _write_ruff_config(
+    tmp_path: Path,
+    *,
+    name: str,
+    selection_key: str = "extend-select",
+    ignores: Iterable[str] = GLOBAL_IGNORES,
+    per_file_ignores: bool = False,
+) -> Path:
+    config_dir = tmp_path / name
+    config_dir.mkdir()
+    config = config_dir / "pyproject.toml"
+    text = PYPROJECT.read_text(encoding="utf-8")
+    text = re.sub(
+        r"\n(?:select|extend-select) = \[\n",
+        f"\n{selection_key} = [\n",
+        text,
+        count=1,
+    )
+    retained_ignores = set(ignores)
+    for code in GLOBAL_IGNORES:
+        if code not in retained_ignores:
+            text = re.sub(
+                rf'^\s*"{code}",.*\n',
+                "",
+                text,
+                count=1,
+                flags=re.MULTILINE,
+            )
+    if per_file_ignores:
+        text += '\n[tool.ruff.lint.per-file-ignores]\n"probe.py" = ["F401"]\n'
+    config.write_text(text, encoding="utf-8")
+    return config
+
+
+def _stdin_codes(config: Path, source: str, *, filename: str = "probe.py") -> set[str]:
+    result = _ruff(
+        "check",
+        "--config",
+        str(config),
+        "--stdin-filename",
+        filename,
+        "--output-format",
+        "json",
+        "-",
+        input_text=source,
+    )
+    assert result.returncode in {0, 1}, result.stderr
+    return {diagnostic["code"] for diagnostic in json.loads(result.stdout)}
 
 
 def _load_suppression_tool() -> ModuleType:
@@ -180,23 +317,100 @@ def _raw_c901_diagnostics() -> list[dict[str, Any]]:
     return diagnostics
 
 
-def test_ruff_complexity_policy_is_configured() -> None:
-    """C901 and its threshold must be explicit repository policy."""
+def test_ruff_extends_defaults_without_losing_legacy_families() -> None:
+    """Stable defaults and retained families must be explicit repository policy."""
 
     ruff, lint = _ruff_config()
+    _assert_ruff_policy(ruff, lint)
 
-    assert ruff["extend-include"] == EXTENSIONLESS_PYTHON
-    assert lint["select"] == REVIEWED_FAMILIES
-    assert lint["ignore"] == GLOBAL_IGNORES
-    assert lint["mccabe"] == {"max-complexity": MCCABE_MAX_COMPLEXITY}
-    assert lint.get("preview", False) is False
-    assert lint.get("per-file-ignores", {}) == {}
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "select",
+        "missing-family",
+        "extra-family",
+        "target-version",
+        "ignore-E501",
+        "ignore-B008",
+        "mccabe",
+        "preview",
+        "per-file-ignore",
+    ],
+)
+def test_ruff_policy_guard_rejects_each_setting_mutation(mutation: str) -> None:
+    ruff, lint = _activation_policy_config()
+    _assert_ruff_policy(ruff, lint)
+
+    if mutation == "select":
+        lint["select"] = lint.pop("extend-select")
+    elif mutation == "missing-family":
+        lint["extend-select"] = REVIEWED_FAMILIES[:-1]
+    elif mutation == "extra-family":
+        lint["extend-select"] = [*REVIEWED_FAMILIES, "N"]
+    elif mutation == "target-version":
+        ruff["target-version"] = "py313"
+    elif mutation == "ignore-E501":
+        lint["ignore"] = ["B008"]
+    elif mutation == "ignore-B008":
+        lint["ignore"] = ["E501"]
+    elif mutation == "mccabe":
+        lint["mccabe"] = {"max-complexity": MCCABE_MAX_COMPLEXITY + 1}
+    elif mutation == "preview":
+        lint["preview"] = True
+    elif mutation == "per-file-ignore":
+        lint["per-file-ignores"] = {"tests/*.py": ["F401"]}
+    else:  # pragma: no cover - parametrization is the closed mutation contract
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    with pytest.raises(AssertionError):
+        _assert_ruff_policy(ruff, lint)
+
+
+@pytest.mark.parametrize("omitted", EXTENSIONLESS_PYTHON)
+def test_ruff_policy_guard_rejects_each_omitted_extensionless_path(
+    omitted: str,
+) -> None:
+    ruff, lint = _activation_policy_config()
+    _assert_ruff_policy(ruff, lint)
+    ruff["extend-include"] = [path for path in EXTENSIONLESS_PYTHON if path != omitted]
+
+    with pytest.raises(AssertionError, match=re.escape(omitted)):
+        _assert_ruff_policy(ruff, lint)
+
+
+def test_ruff_policy_guard_rejects_extensionless_bash_inclusion() -> None:
+    ruff, lint = _activation_policy_config()
+    _assert_ruff_policy(ruff, lint)
+    ruff["extend-include"] = [*EXTENSIONLESS_PYTHON, "bin/mypy-check"]
+
+    with pytest.raises(AssertionError, match="bin/mypy-check"):
+        _assert_ruff_policy(ruff, lint)
 
 
 def test_effective_ruff_rules_match_reviewed_inventory() -> None:
     expected = set(RULE_FIXTURE.read_text(encoding="utf-8").splitlines())
     assert expected
-    assert _enabled_rules() == expected
+    _assert_enabled_rules(_enabled_rules(), expected)
+
+
+def test_enabled_rule_inventory_guard_rejects_changed_code() -> None:
+    expected = set(RULE_FIXTURE.read_text(encoding="utf-8").splitlines())
+    changed = expected - {min(expected)}
+    _assert_enabled_rules(expected, expected)
+
+    with pytest.raises(AssertionError, match="missing"):
+        _assert_enabled_rules(changed, expected)
+
+
+def test_real_ruff_settings_match_repository_policy() -> None:
+    expected = set(RULE_FIXTURE.read_text(encoding="utf-8").splitlines())
+    settings = _ruff_settings()
+
+    assert settings["target"] == "3.12"
+    assert settings["max-complexity"] == MCCABE_MAX_COMPLEXITY
+    assert settings["preview"] == "disabled"
+    _assert_enabled_rules(settings["enabled"], expected)
 
 
 def test_extensionless_python_inventory_is_exact() -> None:
@@ -255,6 +469,106 @@ def test_configured_complexity_boundary_fires_at_eleven() -> None:
     assert "`complexity_11` is too complex (11 > 10)" in diagnostics[0]["message"]
 
 
+def test_real_ruff_fires_default_and_retained_legacy_rules() -> None:
+    probe = """\
+def probe() -> None:
+    try:
+        raise ValueError
+    except Exception:
+        raise RuntimeError("probe")
+"""
+    result = _ruff(
+        "check",
+        "--config",
+        str(PYPROJECT),
+        "--stdin-filename",
+        "probe.py",
+        "--output-format",
+        "json",
+        "-",
+        input_text=probe,
+    )
+    assert result.returncode == 1, result.stderr
+    codes = {diagnostic["code"] for diagnostic in json.loads(result.stdout)}
+    assert {"BLE001", "B904"} <= codes
+
+
+def test_select_loses_default_sentinel_while_extend_select_keeps_both(
+    tmp_path: Path,
+) -> None:
+    probe = """\
+def probe() -> None:
+    try:
+        raise ValueError
+    except Exception:
+        raise RuntimeError("probe")
+"""
+    select_config = _write_ruff_config(
+        tmp_path,
+        name="select",
+        selection_key="select",
+    )
+    extend_config = _write_ruff_config(tmp_path, name="extend")
+
+    select_codes = _stdin_codes(select_config, probe)
+    extend_codes = _stdin_codes(extend_config, probe)
+
+    assert "BLE001" not in select_codes
+    assert "B904" in select_codes
+    assert {"BLE001", "B904"} <= extend_codes
+
+
+@pytest.mark.parametrize(
+    ("rule", "probe"),
+    [
+        ("E501", f'value = "{"x" * 100}"\n'),
+        (
+            "B008",
+            """import datetime
+
+def probe(
+    value: datetime.datetime = datetime.datetime.now(),
+) -> None:
+    pass
+""",
+        ),
+    ],
+)
+def test_global_ignore_semantics_fire_when_each_ignore_is_removed(
+    tmp_path: Path,
+    rule: str,
+    probe: str,
+) -> None:
+    configured = _write_ruff_config(tmp_path, name="configured")
+    removed = _write_ruff_config(
+        tmp_path,
+        name="removed",
+        ignores=[code for code in GLOBAL_IGNORES if code != rule],
+    )
+
+    assert rule not in _stdin_codes(configured, probe)
+    assert rule in _stdin_codes(removed, probe)
+
+
+def test_real_per_file_ignore_hides_f401_but_policy_rejects_it(tmp_path: Path) -> None:
+    configured = _write_ruff_config(tmp_path, name="configured")
+    ignored = _write_ruff_config(
+        tmp_path,
+        name="ignored",
+        per_file_ignores=True,
+    )
+    probe = "import os\n"
+
+    assert "F401" in _stdin_codes(configured, probe)
+    assert "F401" not in _stdin_codes(ignored, probe)
+
+    candidate_ruff, candidate_lint = _activation_policy_config()
+    _assert_ruff_policy(candidate_ruff, candidate_lint)
+    candidate_lint["per-file-ignores"] = {"probe.py": ["F401"]}
+    with pytest.raises(AssertionError):
+        _assert_ruff_policy(candidate_ruff, candidate_lint)
+
+
 def test_approved_suppressions_match_the_spec_registry() -> None:
     tool = _load_suppression_tool()
     snapshot = tool.build_snapshot(
@@ -289,32 +603,47 @@ def test_every_raw_c901_is_tagged_with_an_approved_group() -> None:
 
 
 def test_ci_orders_complete_lint_suppression_format_and_type_gates() -> None:
-    lint_job = _lint_job()
-    ruff_check = "ruff check ."
-    suppression_check = "python bin/ruff_suppression_index.py --check"
-    formatter = (
-        "ruff format --check weft tests integrations/weft_django "
-        "extensions/weft_docker extensions/weft_macos_sandbox "
-        "extensions/weft_microsandbox"
-    )
-    mypy = (
-        "mypy weft bin integrations/weft_django/weft_django "
-        "extensions/weft_docker/weft_docker "
-        "extensions/weft_macos_sandbox/weft_macos_sandbox "
-        "extensions/weft_microsandbox/weft_microsandbox "
-        "--config-file pyproject.toml"
-    )
-    compact = " ".join(lint_job.split())
+    _assert_lint_job(_lint_job())
 
-    assert ruff_check in lint_job
-    assert suppression_check in lint_job
-    assert formatter in compact
-    assert mypy in compact
-    assert lint_job.index(ruff_check) < lint_job.index(suppression_check)
-    assert lint_job.index(suppression_check) < lint_job.index("ruff format --check")
-    assert lint_job.index("ruff format --check") < lint_job.index("mypy weft")
-    assert "ruff format --check ." not in lint_job
-    assert "--preview" not in lint_job
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "ruff-after-suppression",
+        "suppression-after-format",
+        "format-after-mypy",
+        "formatter-dot",
+        "formatter-missing-root",
+        "preview",
+    ],
+)
+def test_lint_job_guard_rejects_each_workflow_mutation(mutation: str) -> None:
+    job = " ".join(_lint_job().split())
+    _assert_lint_job(job)
+
+    if mutation == "ruff-after-suppression":
+        job = job.replace(RUFF_CHECK, "RUFF_PLACEHOLDER", 1)
+        job = job.replace(SUPPRESSION_CHECK, RUFF_CHECK, 1)
+        job = job.replace("RUFF_PLACEHOLDER", SUPPRESSION_CHECK, 1)
+    elif mutation == "suppression-after-format":
+        job = job.replace(SUPPRESSION_CHECK, "SUPPRESSION_PLACEHOLDER", 1)
+        job = job.replace(FORMATTER_CHECK, SUPPRESSION_CHECK, 1)
+        job = job.replace("SUPPRESSION_PLACEHOLDER", FORMATTER_CHECK, 1)
+    elif mutation == "format-after-mypy":
+        job = job.replace(FORMATTER_CHECK, "FORMATTER_PLACEHOLDER", 1)
+        job = job.replace(MYPY_CHECK, FORMATTER_CHECK, 1)
+        job = job.replace("FORMATTER_PLACEHOLDER", MYPY_CHECK, 1)
+    elif mutation == "formatter-dot":
+        job = job.replace(FORMATTER_CHECK, "ruff format --check .", 1)
+    elif mutation == "formatter-missing-root":
+        job = job.replace(" extensions/weft_microsandbox", "", 1)
+    elif mutation == "preview":
+        job = job.replace(RUFF_CHECK, f"{RUFF_CHECK} --preview", 1)
+    else:  # pragma: no cover - parametrization is the closed mutation contract
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    with pytest.raises(AssertionError):
+        _assert_lint_job(job)
 
 
 def test_real_repository_ruff_is_clean() -> None:

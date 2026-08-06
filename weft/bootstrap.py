@@ -124,8 +124,8 @@ def _parse_env_value(raw_value: str, *, path: Path, line_number: int) -> str:
 
 
 __all__ = [
-    "EnvFileError",
     "WEFT_ENV_FILE_ENV",
+    "EnvFileError",
     "apply_env_file",
     "main",
     "parse_env_file",

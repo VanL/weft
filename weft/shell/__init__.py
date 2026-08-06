@@ -26,7 +26,7 @@ def prepare_command(
         return list(command)
 
     updated = list(command)
-    insertion_index = 1 if len(updated) > 1 else len(updated)
+    insertion_index = min(len(updated), 1)
     for arg in hit.extra_args:
         if arg not in updated[1:]:
             updated.insert(insertion_index, arg)

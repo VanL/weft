@@ -483,7 +483,6 @@ def main(
     Durable task execution on SimpleBroker queues: persistent managers,
     multiprocess isolation, and comprehensive observability.
     """
-    pass
 
 
 @spec_app.command("create")

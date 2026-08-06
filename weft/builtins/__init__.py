@@ -216,8 +216,8 @@ def _human_platform_list(platforms: Sequence[str]) -> str:
 
 
 __all__ = [
-    "BuiltinTaskInfo",
     "DOCKER_BUILTIN_SUPPORTED_PLATFORMS",
+    "BuiltinTaskInfo",
     "builtin_platform_supported",
     "builtin_task_catalog",
     "builtin_task_names",

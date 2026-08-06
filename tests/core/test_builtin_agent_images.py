@@ -50,7 +50,7 @@ def test_prepare_agent_images_task_uses_probe_results_without_persisting_setting
         object() if provider_name == "codex" else None
     )
     fake_module.ensure_agent_image = lambda provider_name, refresh=False: (
-        SimpleNamespace(  # noqa: E731
+        SimpleNamespace(
             action="reused",
             image=f"weft-agent-{provider_name}:cached",
             cache_key=f"{provider_name}-cache-key",
@@ -119,7 +119,7 @@ def test_prepare_agent_images_task_explicit_providers_skip_probe(
         object() if provider_name == "codex" else None
     )
     fake_module.ensure_agent_image = lambda provider_name, refresh=False: (
-        SimpleNamespace(  # noqa: E731
+        SimpleNamespace(
             action="built",
             image=f"weft-agent-{provider_name}:fresh",
             cache_key=f"{provider_name}-cache-key",

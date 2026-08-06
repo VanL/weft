@@ -333,8 +333,8 @@ def prepare_cli_root(
 
 
 __all__ = [
-    "PROJECT_CONFIG_FILENAME",
     "POSTGRES_TEST_BACKEND",
+    "PROJECT_CONFIG_FILENAME",
     "active_test_backend",
     "cleanup_postgres_schema_for_root",
     "cleanup_prepared_roots",

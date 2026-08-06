@@ -102,13 +102,13 @@ def test_provider_cli_session_close_cleans_up_tempdir_after_failure(
         ),
         tid="123",
     )
-    tempdir = Path(session._tempdir.name)  # noqa: SLF001 - lifecycle assertion
+    tempdir = Path(session._tempdir.name)  # Lifecycle assertion.
 
     try:
         with pytest.raises(RuntimeError, match="fixture exec failed"):
             session.execute(
                 normalize_agent_work_item(
-                    session._agent,  # noqa: SLF001 - fixture-backed lifecycle assertion
+                    session._agent,  # Fixture-backed lifecycle assertion.
                     {"task": "fail:fixture exec failed"},
                 )
             )
@@ -135,7 +135,10 @@ def test_provider_cli_session_execute_rejects_opencode_without_run_support(
     try:
         with pytest.raises(RuntimeError, match="does not support 'run'"):
             session.execute(
-                normalize_agent_work_item(session._agent, {"task": "hello"})
-            )  # noqa: SLF001 - fixture-backed error assertion
+                normalize_agent_work_item(
+                    session._agent,  # Fixture-backed error assertion.
+                    {"task": "hello"},
+                )
+            )
     finally:
         session.close()

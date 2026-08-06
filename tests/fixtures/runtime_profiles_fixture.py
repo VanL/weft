@@ -24,7 +24,7 @@ def host_environment_profile(
     env,
     working_dir,
     tid,
-):  # noqa: ANN001
+):
     del target_type, runner_options
     if runner_name != "host":
         raise ValueError("host_environment_profile requires runner_name='host'")
@@ -43,7 +43,7 @@ def docker_image_environment_profile(
     env,
     working_dir,
     tid,
-):  # noqa: ANN001
+):
     del target_type, runner_options, env
     if runner_name != "docker":
         raise ValueError(
@@ -68,7 +68,7 @@ def docker_build_environment_profile(
     env,
     working_dir,
     tid,
-):  # noqa: ANN001
+):
     del target_type, runner_options, env
     if runner_name != "docker":
         raise ValueError(
@@ -106,7 +106,7 @@ def macos_sandbox_environment_profile(
     env,
     working_dir,
     tid,
-):  # noqa: ANN001
+):
     del target_type, runner_options, env
     if runner_name != "macos-sandbox":
         raise ValueError(
@@ -131,12 +131,12 @@ def invalid_environment_profile(
     env,
     working_dir,
     tid,
-):  # noqa: ANN001
+):
     del target_type, runner_name, runner_options, env, working_dir, tid
     return "nope"
 
 
-def structured_tool_profile(*, agent, tid):  # noqa: ANN001
+def structured_tool_profile(*, agent, tid):
     provider_name = str(agent.runtime_config.get("provider", "")).strip()
     workspace_access = None
     if provider_name in {"claude_code", "codex", "gemini", "qwen"}:
@@ -148,7 +148,7 @@ def structured_tool_profile(*, agent, tid):  # noqa: ANN001
     )
 
 
-def claude_mcp_tool_profile(*, agent, tid):  # noqa: ANN001
+def claude_mcp_tool_profile(*, agent, tid):
     del agent
     server = AgentMCPServerDescriptor(
         name="fixture-server",
@@ -164,7 +164,7 @@ def claude_mcp_tool_profile(*, agent, tid):  # noqa: ANN001
     )
 
 
-def claude_stdio_mcp_tool_profile(*, agent, tid):  # noqa: ANN001
+def claude_stdio_mcp_tool_profile(*, agent, tid):
     script_path = str(fixture_server_script_path())
     runtime_script = agent.runtime_config.get("mcp_server_script")
     if isinstance(runtime_script, str) and runtime_script.strip():
@@ -186,7 +186,7 @@ def claude_stdio_mcp_tool_profile(*, agent, tid):  # noqa: ANN001
     )
 
 
-def unsupported_mcp_tool_profile(*, agent, tid):  # noqa: ANN001
+def unsupported_mcp_tool_profile(*, agent, tid):
     del agent
     server = AgentMCPServerDescriptor(
         name="fixture-server",

@@ -422,7 +422,7 @@ def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
 
 __all__ = [
     "DEFAULT_PROFILE_FILE",
-    "MaterializedContainerProfile",
     "PROFILE_CONTROL_KEYS",
+    "MaterializedContainerProfile",
     "materialize_container_profile",
 ]

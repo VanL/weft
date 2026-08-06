@@ -15,8 +15,8 @@ from .system import (
 
 __all__ = [
     "_pid_alive",
-    "collect_status",
     "cmd_status",
+    "collect_status",
     "dump_system",
     "list_builtins",
     "load_system",

@@ -72,13 +72,13 @@ class FrozenList(list):
     def _immutable(self, operation: str) -> NoReturn:
         raise TypeError(f"Cannot {operation} immutable FrozenList")
 
-    def append(self, object: Any) -> None:  # noqa: A003
+    def append(self, object: Any) -> None:
         self._immutable("append to")
 
     def extend(self, iterable: Iterable[Any]) -> None:
         self._immutable("extend")
 
-    def insert(self, index: SupportsIndex, object: Any) -> None:  # noqa: A003
+    def insert(self, index: SupportsIndex, object: Any) -> None:
         self._immutable("insert into")
 
     def pop(self, index: SupportsIndex = -1) -> Any:
@@ -335,8 +335,8 @@ class LimitsSection(BaseModel):
     max_fds: int | None = Field(None, ge=MIN_FDS_LIMIT)
     max_connections: int | None = Field(None, ge=MIN_CONNECTIONS_LIMIT)
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -403,8 +403,8 @@ class RunnerSection(BaseModel):
             )
         return normalized
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -455,8 +455,8 @@ class RunInputArgumentSection(BaseModel):
             return None
         return normalized
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -546,8 +546,8 @@ class RunInputStdinSection(BaseModel):
             return None
         return normalized
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -632,8 +632,8 @@ class RunInputSection(BaseModel):
         )
         return self
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -695,8 +695,8 @@ class ParameterizationSection(BaseModel):
         )
         return self
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -766,8 +766,8 @@ class AgentToolSection(BaseModel):
             )
         return v
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -812,8 +812,8 @@ class AgentTemplateSection(BaseModel):
     prompt: str = Field(..., min_length=1)
     instructions: str | None = None
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -920,8 +920,8 @@ class AgentSection(BaseModel):
             return "general"
         return "bounded"
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -1094,8 +1094,8 @@ class SpecSection(BaseModel):
             raise ValueError("process_target must be a non-empty string")
         return value
 
-    def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
         object.__setattr__(self, "_allow_mutation", False)
 
     @contextmanager
@@ -1428,7 +1428,7 @@ class TaskSpec(BaseModel):
             inherited_weft_context=context.get("inherited_weft_context"),
         )
 
-    def model_post_init(self, __context: Any) -> None:
+    def model_post_init(self, context: Any, /) -> None:
         """Called after the model is initialized.
 
         Enforces partial immutability after initialization.

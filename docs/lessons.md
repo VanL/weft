@@ -1088,3 +1088,29 @@ index is not a dated section and does not count toward the coalescing trigger.
 - Run the focused policy suite after every accepted registry-count change.
   The suppression tool proves live reconciliation, but it cannot prove that a
   separate CI fixture no longer encodes the prior inventory.
+
+## 2026-08-06 Ruff Selection Probes Must Preserve The Rest Of The Config
+
+- `ruff check --isolated` is suitable for inspecting Ruff's bare defaults, but
+  it is not a faithful activation probe for changing only `lint.select` to
+  `lint.extend-select`: it also discards project settings such as
+  `isort.known-first-party`, discovery, target, ignores, and plugin options.
+  In the stable-default expansion preflight, that produced 75 false `I001`
+  findings and overstated the cleanup from 599 to 674 diagnostics.
+- When reviewing a single configuration-key change, create a temporary copy of
+  the real project config and mutate only that key. Compare effective settings
+  and diagnostics from the mutated full config; keep tracked-file discovery as
+  a separate firing test. An isolated probe may remain supporting evidence for
+  what Ruff itself defaults, never the repository activation forecast.
+
+## 2026-08-06 RUF100 Must See The Full Candidate Rule Set
+
+- `ruff check --select RUF100 --fix` does not mean "fix the RUF100 findings
+  reported by the repository policy." It replaces the enabled rule set with
+  `RUF100`, so every directive for any other rule appears unused. In this repo,
+  that would remove approved C901/E402/F401 suppressions along with genuinely
+  stale directives.
+- Run RUF100 cleanup with the complete candidate configuration active, then
+  restrict only the fix operation to RUF100. Reconcile the suppression index
+  immediately. If the changed-directive count differs from the measured
+  candidate-policy inventory, reject the batch before review.

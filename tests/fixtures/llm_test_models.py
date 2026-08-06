@@ -116,7 +116,7 @@ class DeterministicAgentModel(Model):
 
 
 @llm.hookimpl
-def register_models(register) -> None:  # noqa: ANN001
+def register_models(register) -> None:
     """Register deterministic test models through llm's real hook surface."""
     register(DeterministicAgentModel())
 

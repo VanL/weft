@@ -141,8 +141,8 @@ def serialize_result(result: Any) -> str:
 
 __all__ = [
     "decode_work_message",
-    "prepare_call_arguments",
-    "execute_function_target",
     "execute_command_target",
+    "execute_function_target",
+    "prepare_call_arguments",
     "serialize_result",
 ]

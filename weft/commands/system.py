@@ -1851,9 +1851,9 @@ def list_builtins() -> list[dict[str, Any]]:
 __all__ = [
     "BrokerStatusSnapshot",
     "TaskSnapshot",
+    "cmd_status",
     "collect_broker_status",
     "collect_status",
-    "cmd_status",
     "dump_system",
     "list_builtins",
     "load_system",

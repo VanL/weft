@@ -104,12 +104,12 @@ def test_harness_cleanup_preserve_database_avoids_force_termination(
         monkeypatch.setattr(
             harness,
             "_cleanup_manager_records",
-            lambda: {},
+            dict,
         )
         monkeypatch.setattr(
             harness,
             "_live_task_tids_from_mappings",
-            lambda: [],
+            list,
         )
         monkeypatch.setattr(
             harness,
@@ -451,7 +451,7 @@ def test_locked_database_cleanup_uses_configured_artifacts_when_candidate_remove
         database_path = harness.context.database_path
         assert database_path is not None
         monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
-        monkeypatch.setattr(harness, "_database_candidate_paths", lambda: [])
+        monkeypatch.setattr(harness, "_database_candidate_paths", list)
 
         exc = PermissionError(errno.EACCES, "locked", os.fspath(database_path))
 
@@ -525,7 +525,7 @@ def test_harness_cleanup_manager_records_include_startup_log_tids(
     repo_cwd = os.getcwd()
     try:
         harness.__enter__()
-        monkeypatch.setattr(harness, "_list_active_manager_records", lambda: [])
+        monkeypatch.setattr(harness, "_list_active_manager_records", list)
         startup_dir = harness.context.logs_dir / MANAGER_STARTUP_LOG_DIRNAME
         startup_dir.mkdir(parents=True, exist_ok=True)
         (startup_dir / "manager-1775630560447778816.stderr.log").write_text(
@@ -554,7 +554,7 @@ def test_harness_stop_active_managers_skips_terminal_task_tids(
     repo_cwd = os.getcwd()
     try:
         harness.__enter__()
-        monkeypatch.setattr(harness, "_list_active_manager_records", lambda: [])
+        monkeypatch.setattr(harness, "_list_active_manager_records", list)
         harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
             {
                 "full": "1775630560739303424",
@@ -676,7 +676,7 @@ def test_harness_stop_active_managers_does_not_fan_out_in_process_task_tid(
     repo_cwd = os.getcwd()
     try:
         harness.__enter__()
-        monkeypatch.setattr(harness, "_list_active_manager_records", lambda: [])
+        monkeypatch.setattr(harness, "_list_active_manager_records", list)
         harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
             {
                 "full": "1775630561555555555",
@@ -767,8 +767,8 @@ def test_harness_cleanup_preserve_database_waits_for_database_release(
     try:
         harness.__enter__()
         monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
-        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", lambda: [])
-        monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
+        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", list)
+        monkeypatch.setattr(harness, "_live_registered_pids", list)
 
         checks: list[str] = []
         release_states = iter([False, False, True])
@@ -844,9 +844,9 @@ def test_harness_cleanup_preserve_database_extends_windows_release_budget(
     try:
         harness.__enter__()
         monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
-        monkeypatch.setattr(harness, "_cleanup_manager_records", lambda: {})
-        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", lambda: [])
-        monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
+        monkeypatch.setattr(harness, "_cleanup_manager_records", dict)
+        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", list)
+        monkeypatch.setattr(harness, "_live_registered_pids", list)
         monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
 
         release_checks: list[float] = []
@@ -887,9 +887,9 @@ def test_harness_cleanup_preserve_database_raises_if_database_stays_locked(
     try:
         harness.__enter__()
         monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
-        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", lambda: [])
-        monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
-        monkeypatch.setattr(harness, "_database_candidate_paths", lambda: [])
+        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", list)
+        monkeypatch.setattr(harness, "_live_registered_pids", list)
+        monkeypatch.setattr(harness, "_database_candidate_paths", list)
         monkeypatch.setattr(harness, "_database_files_releasable", lambda: False)
 
         clock = {"now": 0.0}
@@ -1163,9 +1163,9 @@ def test_cleanup_preserving_database_stops_workers_without_task_fanout(
         monkeypatch.setattr(
             harness,
             "_live_task_tids_from_mappings",
-            lambda: [],
+            list,
         )
-        monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
+        monkeypatch.setattr(harness, "_live_registered_pids", list)
 
         manager_calls: list[str] = []
         monkeypatch.setattr(

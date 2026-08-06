@@ -21,7 +21,7 @@ from weft.core.taskspec import AgentSection
 class EchoRuntime:
     """Small real runtime used to verify registry and execution plumbing."""
 
-    def execute(self, *, agent, work_item, tools, tid):  # noqa: ANN001
+    def execute(self, *, agent, work_item, tools, tid):
         del tid
         return AgentExecutionResult(
             runtime=agent.runtime,

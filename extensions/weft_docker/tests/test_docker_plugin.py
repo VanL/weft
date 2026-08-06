@@ -13,7 +13,7 @@ import pytest
 from weft_docker import _sdk as docker_sdk
 from weft_docker import get_runner_plugin, plugin
 
-import weft.runtime_liveness as runtime_liveness
+from weft import runtime_liveness
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]

@@ -4926,7 +4926,7 @@ def test_manager_leadership_drain_resumes_when_leader_proof_disappears(
     manager, _make_queue = manager_setup
     lower_tid = str(int(manager.tid) - 1)
     manager._begin_leadership_drain(leader_tid=lower_tid)
-    monkeypatch.setattr(manager, "_active_dispatch_manager_records", lambda: {})
+    monkeypatch.setattr(manager, "_active_dispatch_manager_records", dict)
 
     manager._continue_shutdown_drain()
 

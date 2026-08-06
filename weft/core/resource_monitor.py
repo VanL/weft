@@ -400,8 +400,6 @@ class PsutilResourceMonitor(BaseResourceMonitor):
 class ResourceMonitor(PsutilResourceMonitor):
     """Default monitor exported under the spec-required name (Spec: [RM-5.1])."""
 
-    pass
-
 
 def load_resource_monitor(
     class_path: str,
@@ -437,7 +435,7 @@ def load_resource_monitor(
 __all__ = [
     "BaseResourceMonitor",
     "PsutilResourceMonitor",
-    "ResourceMonitor",
     "ResourceMetrics",
+    "ResourceMonitor",
     "load_resource_monitor",
 ]

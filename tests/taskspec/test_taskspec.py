@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from inspect import Parameter, signature
 
 import pytest
 from pydantic import ValidationError
@@ -18,9 +19,37 @@ from weft.core.taskspec import (
     TaskSpec,
     validate_taskspec,
 )
+from weft.core.taskspec import model as taskspec_model
 from weft.ext import AgentMCPServerDescriptor, AgentToolProfileResult
 
 from . import fixtures
+
+
+def test_model_post_init_context_is_runtime_positional_only() -> None:
+    """All Pydantic initialization hooks must expose the same runtime contract."""
+
+    class_names = (
+        "LimitsSection",
+        "RunnerSection",
+        "RunInputArgumentSection",
+        "RunInputStdinSection",
+        "RunInputSection",
+        "ParameterizationSection",
+        "AgentToolSection",
+        "AgentTemplateSection",
+        "AgentSection",
+        "SpecSection",
+        "TaskSpec",
+    )
+
+    for class_name in class_names:
+        parameters = tuple(
+            signature(getattr(taskspec_model, class_name).model_post_init).parameters.values()
+        )
+        assert [parameter.kind for parameter in parameters] == [
+            Parameter.POSITIONAL_ONLY,
+            Parameter.POSITIONAL_ONLY,
+        ]
 
 
 class TestCreationDefaults:

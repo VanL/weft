@@ -117,7 +117,7 @@ class WeftTestHarness:
     ) -> None:
         self.cleanup()
 
-    def __del__(self) -> None:  # noqa: D401
+    def __del__(self) -> None:
         try:
             self.cleanup()
         except Exception:

@@ -461,7 +461,7 @@ def test_ping_includes_runtime_summary_from_runner_plugin(
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
-    task._runtime_handle = RunnerHandle(  # noqa: SLF001
+    task._runtime_handle = RunnerHandle(
         runner="fake-runtime",
         kind="container",
         id="runtime-1",

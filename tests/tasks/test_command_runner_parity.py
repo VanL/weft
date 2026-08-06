@@ -268,7 +268,7 @@ def test_docker_runner_preflight_rejects_missing_build_context(
     from contextlib import contextmanager
 
     @contextmanager
-    def fake_docker_client(*, timeout: int = 10):  # noqa: ANN202
+    def fake_docker_client(*, timeout: int = 10):
         del timeout
         yield FakeClient()
 

@@ -132,4 +132,4 @@ def rearrange_args(argv: list[str]) -> list[str]:
     return processor.process(argv)
 
 
-__all__ = ["rearrange_args", "ArgumentParserError"]
+__all__ = ["ArgumentParserError", "rearrange_args"]

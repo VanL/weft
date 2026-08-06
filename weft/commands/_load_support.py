@@ -551,4 +551,4 @@ def cmd_load(
     return 0, report.format_completion()
 
 
-__all__ = ["cmd_load", "ImportReport"]
+__all__ = ["ImportReport", "cmd_load"]

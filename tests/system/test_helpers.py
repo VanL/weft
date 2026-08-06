@@ -20,7 +20,7 @@ import pytest
 import weft.helpers as helpers_module
 from tests.conftest import _register_cli_outputs
 from tests.helpers.weft_harness import WeftTestHarness
-from weft.helpers import (  # noqa: D401 - module already documented
+from weft.helpers import (
     CommandNotFoundError,
     debug_print,
     ensure_owner_only_dir,

@@ -1534,7 +1534,7 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
         validation_calls.append(("tool_profile", preflight))
 
     class FakeBackend:
-        def run_with_hooks(self, work_item, **kwargs):  # noqa: ANN001, ANN003
+        def run_with_hooks(self, work_item, **kwargs):
             del work_item, kwargs
             return RunnerOutcome(
                 status="ok",
@@ -1560,15 +1560,15 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
             plugin_calls.append(preflight)
             return None
 
-        def create_runner(self, **kwargs):  # noqa: ANN003
+        def create_runner(self, **kwargs):
             del kwargs
             return FakeBackend()
 
-        def stop(self, handle, *, timeout: float = 2.0) -> bool:  # noqa: ANN001
+        def stop(self, handle, *, timeout: float = 2.0) -> bool:
             del handle, timeout
             return True
 
-        def kill(self, handle, *, timeout: float = 2.0) -> bool:  # noqa: ANN001
+        def kill(self, handle, *, timeout: float = 2.0) -> bool:
             del handle, timeout
             return True
 
@@ -1660,15 +1660,15 @@ def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
             plugin_calls.append(preflight)
             return None
 
-        def create_runner(self, **kwargs):  # noqa: ANN003
+        def create_runner(self, **kwargs):
             del kwargs
             return FakeBackend()
 
-        def stop(self, handle, *, timeout: float = 2.0) -> bool:  # noqa: ANN001
+        def stop(self, handle, *, timeout: float = 2.0) -> bool:
             del handle, timeout
             return True
 
-        def kill(self, handle, *, timeout: float = 2.0) -> bool:  # noqa: ANN001
+        def kill(self, handle, *, timeout: float = 2.0) -> bool:
             del handle, timeout
             return True
 
@@ -1778,7 +1778,7 @@ def test_task_runner_materializes_docker_container_profile_at_plugin_boundary(
             return None
 
     @contextmanager
-    def fake_docker_client(*, timeout: int = 10):  # noqa: ANN202
+    def fake_docker_client(*, timeout: int = 10):
         del timeout
         yield FakeDockerClient()
 
@@ -2341,7 +2341,7 @@ class _StartFailureContext:
         self.queue = _StartFailureQueue()
         self.process = _StartFailureProcess()
 
-    def Pipe(  # noqa: N802 - mirrors multiprocessing context
+    def Pipe(  # Mirrors the multiprocessing context API.
         self,
         *,
         duplex: bool,
@@ -2349,10 +2349,10 @@ class _StartFailureContext:
         assert duplex is False
         return self.receiver, self.sender
 
-    def Queue(self) -> _StartFailureQueue:  # noqa: N802
+    def Queue(self) -> _StartFailureQueue:
         return self.queue
 
-    def Process(self, **_kwargs: Any) -> _StartFailureProcess:  # noqa: N802
+    def Process(self, **_kwargs: Any) -> _StartFailureProcess:
         return self.process
 
 

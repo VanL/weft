@@ -589,4 +589,4 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     print(longrepr, file=sys.stderr, flush=True)
 
 
-__all__ = ["weft_harness", "workdir", "broker_env", "task_factory", "run_cli"]
+__all__ = ["broker_env", "run_cli", "task_factory", "weft_harness", "workdir"]
