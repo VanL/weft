@@ -402,7 +402,8 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
             return None
 
     class _FakeContext:
-        config: dict[str, object] = {}
+        def __init__(self) -> None:
+            self.config: dict[str, object] = {}
 
         def queue(self, name: str, *, persistent: bool = False) -> _FakeQueue:
             del persistent
@@ -418,6 +419,10 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
 
         def close(self) -> None:
             return None
+
+    first_context = _FakeContext()
+    second_context = _FakeContext()
+    assert first_context.config is not second_context.config
 
     materialized = result_mod.ResultMaterialization(
         taskspec_payload=None,
@@ -454,7 +459,7 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
 
     events = list(
         events_mod.iter_task_realtime_events(
-            _FakeContext(),
+            first_context,
             tid,
             timeout=1.0,
         )
