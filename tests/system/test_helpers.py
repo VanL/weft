@@ -13,12 +13,17 @@ import time
 from io import StringIO
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 import weft.helpers as helpers_module
-from tests.conftest import _register_cli_outputs
+from tests.conftest import (
+    _register_cli_outputs,
+    broker_env,
+    queue_factory,
+    task_factory,
+)
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.helpers import (
     CommandNotFoundError,
@@ -566,6 +571,95 @@ class TestCliOutputRegistration:
         finally:
             harness.cleanup()
 
+
+class TestFixtureCleanupDiagnostics:
+    """Tests for best-effort fixture cleanup diagnostics."""
+
+    @staticmethod
+    def _assert_one_safe_warning(
+        caplog: pytest.LogCaptureFixture,
+        message: str,
+    ) -> None:
+        assert len(caplog.records) == 1
+        assert caplog.records[0].message == message
+        assert caplog.records[0].exc_info is None
+
+    def test_queue_factory_logs_close_failure_and_continues(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        harness = Mock()
+        first_queue = Mock()
+        second_queue = Mock()
+        first_queue.close.side_effect = RuntimeError("contains secret")
+
+        with (
+            patch("tests.conftest.Queue", side_effect=[first_queue, second_queue]),
+            caplog.at_level(logging.WARNING, logger="tests.conftest"),
+        ):
+            fixture = queue_factory.__wrapped__(harness)
+            make_queue = next(fixture)
+            make_queue("first")
+            make_queue("second")
+            with pytest.raises(StopIteration):
+                next(fixture)
+
+        first_queue.close.assert_called_once_with()
+        second_queue.close.assert_called_once_with()
+        self._assert_one_safe_warning(caplog, "Failed to close test queue")
+
+    def test_broker_env_logs_close_failure_and_continues(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        harness = Mock()
+        first_queue = Mock()
+        second_queue = Mock()
+        first_queue.close.side_effect = RuntimeError("contains secret")
+
+        with (
+            patch("tests.conftest.Queue", side_effect=[first_queue, second_queue]),
+            caplog.at_level(logging.WARNING, logger="tests.conftest"),
+        ):
+            fixture = broker_env.__wrapped__(harness)
+            _, make_queue = next(fixture)
+            make_queue("first")
+            make_queue("second")
+            with pytest.raises(StopIteration):
+                next(fixture)
+
+        first_queue.close.assert_called_once_with()
+        second_queue.close.assert_called_once_with()
+        self._assert_one_safe_warning(
+            caplog,
+            "Failed to close broker fixture queue",
+        )
+
+    def test_task_factory_logs_stop_failure_and_continues(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        first_task = Mock()
+        second_task = Mock()
+        first_task.stop.side_effect = RuntimeError("contains secret")
+
+        with (
+            patch(
+                "weft.core.tasks.Consumer",
+                side_effect=[first_task, second_task],
+            ),
+            caplog.at_level(logging.WARNING, logger="tests.conftest"),
+        ):
+            fixture = task_factory.__wrapped__((object(), Mock()))
+            make_task = next(fixture)
+            make_task(Mock())
+            make_task(Mock())
+            with pytest.raises(StopIteration):
+                next(fixture)
+
+        first_task.stop.assert_called_once_with()
+        second_task.stop.assert_called_once_with()
+        self._assert_one_safe_warning(caplog, "Failed to stop test task")
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
 def test_ensure_owner_only_dir_creates_and_tightens(tmp_path: Path) -> None:

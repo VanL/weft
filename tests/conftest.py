@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import multiprocessing
 import os
 import subprocess
@@ -18,6 +19,8 @@ from simplebroker import Queue
 from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.ext import RunnerHandle
+
+logger = logging.getLogger(__name__)
 
 
 @pytest.fixture
@@ -306,6 +309,7 @@ def queue_factory(weft_harness: WeftTestHarness):
             try:
                 queue.close()
             except Exception:  # pragma: no cover - defensive
+                logger.warning("Failed to close test queue")
                 pass
 
 
@@ -335,6 +339,7 @@ def broker_env(
             try:
                 queue.close()
             except Exception:  # pragma: no cover - defensive
+                logger.warning("Failed to close broker fixture queue")
                 pass
 
 
@@ -358,6 +363,7 @@ def task_factory(broker_env: tuple[object, Callable[[str], Queue]]):
             try:
                 task.stop()
             except Exception:
+                logger.warning("Failed to stop test task")
                 pass
 
 
