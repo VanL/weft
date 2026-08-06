@@ -165,6 +165,36 @@ def test_macos_sandbox_runner_requires_profile() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"spec": []}, "spec must be an object"),
+        (
+            {"spec": {"type": "command", "runner": []}},
+            "spec.runner must be an object",
+        ),
+        (
+            {
+                "spec": {
+                    "type": "command",
+                    "runner": {"name": "macos-sandbox", "options": []},
+                }
+            },
+            "spec.runner.options must be an object",
+        ),
+    ],
+)
+def test_macos_sandbox_validation_rejects_non_object_sections_as_value_error(
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        get_runner_plugin().validate_taskspec(payload)
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
+
+
 def test_macos_sandbox_runner_preflight_checks_binary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
