@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -13,7 +13,7 @@ from weft.ext import RunnerCapabilities
 @dataclass(slots=True)
 class _FakeRunnerPlugin:
     name: str
-    capabilities: RunnerCapabilities = RunnerCapabilities()
+    capabilities: RunnerCapabilities = field(default_factory=RunnerCapabilities)
 
     def check_version(self) -> None:
         return None

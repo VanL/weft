@@ -11,7 +11,8 @@ Spec references:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Set
+from collections.abc import Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -180,7 +181,7 @@ def reduce_task_event(
     payload: Mapping[str, Any],
     timestamp: int,
     *,
-    tid_filters: Set[str] | None,
+    tid_filters: AbstractSet[str] | None,
 ) -> FoldedTaskRecord | None:
     """Apply one already-read event without I/O or shared mutation."""
 

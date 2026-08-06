@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Final
+from typing import Final, Self
 
 import psutil
 
@@ -100,7 +100,7 @@ class WeftTestHarness:
     # ------------------------------------------------------------------
     # Context management
     # ------------------------------------------------------------------
-    def __enter__(self) -> WeftTestHarness:
+    def __enter__(self) -> Self:
         self._orig_cwd = Path.cwd()
         self._patch_environment()
         prepare_project_root(self.root)
