@@ -10,6 +10,7 @@ Spec references:
 from __future__ import annotations
 
 import contextlib
+import logging
 import queue
 import subprocess
 import time
@@ -53,6 +54,8 @@ from weft.core.terminal_handoff_transport import (
 )
 from weft.ext import RunnerHandle
 from weft.helpers import safe_cancel, terminate_process_tree
+
+logger = logging.getLogger(__name__)
 
 
 class CommandSession:
@@ -183,7 +186,7 @@ class CommandSession:
         try:
             self._cleanup_callback()
         except Exception:  # pragma: no cover - defensive
-            pass
+            logger.warning("Failed to run command session cleanup callback")
 
     def poll_limits(self) -> tuple[bool, str | None]:
         if not self._monitor:

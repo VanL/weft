@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import logging
 import os
 import queue
 import signal
@@ -1478,6 +1479,37 @@ def test_command_session_expired_cleanup_deadline_does_not_start_fresh_wait() ->
 
     assert process.kill_calls == 1
     assert process.alive is False
+
+
+def test_command_session_reports_cleanup_callback_failure_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+
+    def cleanup() -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("sensitive command cleanup failure")
+
+    session = CommandSession(
+        object(),  # type: ignore[arg-type]
+        queue.Queue(),
+        queue.Queue(),
+        None,
+        None,
+        cleanup_callback=cleanup,
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    session.close()
+    session.close()
+
+    assert calls == 1
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to run command session cleanup callback"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
 
 
 def test_command_session_deadline_preserves_process_tree_kill_escalation(
