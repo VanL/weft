@@ -1295,6 +1295,152 @@ def test_agent_session_close_caps_join_to_caller_deadline() -> None:
     assert process.alive is False
 
 
+def test_agent_session_close_reports_stop_request_failure_and_cleans_up(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Process:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            raise AssertionError(f"join should be skipped after failed stop: {timeout}")
+
+    class RequestQueue:
+        def put(self, _payload: object) -> None:
+            calls.append("put")
+            raise RuntimeError("sensitive agent stop publication failure")
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        RequestQueue(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    monkeypatch.setattr(
+        session,
+        "terminate",
+        lambda *, deadline=None: calls.append("terminate"),
+    )
+    monkeypatch.setattr(session, "stop_monitor", lambda: calls.append("stop_monitor"))
+    monkeypatch.setattr(
+        session,
+        "_close_ipc_resources",
+        lambda *, deadline=None: calls.append("close_ipc"),
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    session.close()
+    session.close()
+
+    assert len(calls) == 4
+    assert set(calls) == {"put", "terminate", "stop_monitor", "close_ipc"}
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to send agent session stop request"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_agent_session_close_reports_join_os_error_and_cleans_up(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Process:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout == 0.5
+            calls.append("join")
+            raise OSError("sensitive agent close wait failure")
+
+    class RequestQueue:
+        def put(self, _payload: object) -> None:
+            calls.append("put")
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        RequestQueue(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    monkeypatch.setattr(
+        session,
+        "terminate",
+        lambda *, deadline=None: calls.append("terminate"),
+    )
+    monkeypatch.setattr(session, "stop_monitor", lambda: calls.append("stop_monitor"))
+    monkeypatch.setattr(
+        session,
+        "_close_ipc_resources",
+        lambda *, deadline=None: calls.append("close_ipc"),
+    )
+    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+
+    session.close()
+
+    assert len(calls) == 5
+    assert set(calls) == {"put", "join", "terminate", "stop_monitor", "close_ipc"}
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to join agent session after stop request"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_agent_session_close_propagates_unexpected_join_failure_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Process:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            raise RuntimeError("unexpected agent close wait defect")
+
+    class RequestQueue:
+        def put(self, _payload: object) -> None:
+            return None
+
+    session = AgentSession(
+        Process(),  # type: ignore[arg-type]
+        RequestQueue(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        None,
+        timeout=None,
+    )
+    monkeypatch.setattr(
+        session,
+        "terminate",
+        lambda *, deadline=None: calls.append("terminate"),
+    )
+    monkeypatch.setattr(session, "stop_monitor", lambda: calls.append("stop_monitor"))
+    monkeypatch.setattr(
+        session,
+        "_close_ipc_resources",
+        lambda *, deadline=None: calls.append("close_ipc"),
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected agent close wait defect"):
+        session.close()
+
+    assert len(calls) == 3
+    assert set(calls) == {"terminate", "stop_monitor", "close_ipc"}
+
+
 @pytest.mark.parametrize(
     (
         "deadline_enabled",

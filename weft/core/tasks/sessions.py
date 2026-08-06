@@ -808,18 +808,27 @@ class AgentSession:
         try:
             try:
                 if self.is_alive():
-                    self._request_queue.put(make_stop_request())
-                    join_timeout = 0.5
-                    if deadline is not None:
-                        join_timeout = min(
-                            join_timeout,
-                            max(0.0, deadline - time.monotonic()),
-                        )
-                    self._process.join(timeout=join_timeout)
-            except Exception:  # pragma: no cover - defensive
-                pass
-            if self.is_alive():
-                self.terminate(deadline=deadline)
+                    stop_request = make_stop_request()
+                    try:
+                        self._request_queue.put(stop_request)
+                    except Exception:  # pragma: no cover - queue cleanup boundary
+                        logger.warning("Failed to send agent session stop request")
+                    else:
+                        join_timeout = 0.5
+                        if deadline is not None:
+                            join_timeout = min(
+                                join_timeout,
+                                max(0.0, deadline - time.monotonic()),
+                            )
+                        try:
+                            self._process.join(timeout=join_timeout)
+                        except OSError:  # pragma: no cover - platform wait failure
+                            logger.warning(
+                                "Failed to join agent session after stop request"
+                            )
+            finally:
+                if self.is_alive():
+                    self.terminate(deadline=deadline)
         finally:
             try:
                 self.stop_monitor()
