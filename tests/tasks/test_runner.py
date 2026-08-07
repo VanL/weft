@@ -1102,7 +1102,7 @@ def test_agent_session_monitor_metrics_failure_cannot_block_invalid_cleanup() ->
 
 
 def test_agent_session_eof_without_result_closes_session() -> None:
-    """A sealed response channel is bounded and invalidates the session."""
+    """Same-turn worker exit or channel seal invalidates the session."""
 
     session = _spawn_agent_session_for_target(_agent_session_ready_then_exit_worker)
     try:
@@ -1111,9 +1111,13 @@ def test_agent_session_eof_without_result_closes_session() -> None:
 
         assert result.status == "error"
         assert result.error is not None
-        assert result.error == "Worker exited before returning a result (exit code 0)"
+        assert result.error in {
+            "Worker exited before returning a result (exit code 0)",
+            "Worker result channel failed before a result was received",
+        }
         assert result.diagnostics is not None
         assert result.diagnostics["phase"] == "result_handoff"
+        assert result.diagnostics["handoff_event"] == "channel_sealed"
         with pytest.raises(RuntimeError, match="Agent session is closed"):
             session.execute("again")
     finally:
