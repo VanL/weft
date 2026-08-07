@@ -706,7 +706,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         results = run_benchmarks(settings)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-361] exception
         print(f"Benchmark failed: {exc}", file=sys.stderr)
         return 1
 

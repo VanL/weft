@@ -1157,6 +1157,110 @@ def test_manager_reactor_answers_ping_while_child_launch_is_active(
     assert not manager._active_child_launches
 
 
+def test_manager_child_launch_admission_failure_is_returned_locally(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
+    assert child_spec is not None
+
+    failure = LookupError("child launch lane unavailable")
+    handled: list[manager_mod._ManagerChildLaunchResult] = []
+
+    def fail_start(*_args: object, **_kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(manager, "_start_service_worker", fail_start)
+    monkeypatch.setattr(manager, "_handle_child_launch_failure", handled.append)
+
+    assert manager._launch_child_task(child_spec, None) is False
+    assert len(handled) == 1
+    result = handled[0]
+    assert result.request.child_spec is child_spec
+    assert result.process is None
+    assert result.launched_ns == 0
+    assert result.error is failure
+    assert child_spec.tid not in manager._active_child_launches
+    assert child_spec.tid not in manager._child_launch_started_ns
+    assert child_spec.tid not in manager._child_launch_stale_retries
+
+
+def test_manager_stale_child_launch_retry_failure_is_returned_locally(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
+    assert child_spec is not None
+    assert child_spec.tid is not None
+
+    monkeypatch.setattr(
+        manager, "_start_service_worker", lambda *_args, **_kwargs: None
+    )
+    assert manager._launch_child_task(child_spec, None) is True
+    manager._child_launch_started_ns[child_spec.tid] = 0
+
+    failure = LookupError("child launch retry lane unavailable")
+    handled: list[manager_mod._ManagerChildLaunchResult] = []
+
+    def fail_retry(*_args: object, **_kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(manager, "_has_worker_activity", lambda: False)
+    monkeypatch.setattr(
+        manager, "_child_launch_runtime_evidence_seen", lambda _tid: False
+    )
+    monkeypatch.setattr(manager, "_start_service_worker", fail_retry)
+    monkeypatch.setattr(manager, "_handle_child_launch_failure", handled.append)
+
+    assert manager._retry_stale_child_launches() is True
+    assert len(handled) == 1
+    result = handled[0]
+    assert result.request.child_spec is child_spec
+    assert result.process is None
+    assert result.launched_ns == 0
+    assert result.error is failure
+    assert child_spec.tid not in manager._active_child_launches
+    assert child_spec.tid not in manager._child_launch_started_ns
+    assert child_spec.tid not in manager._child_launch_stale_retries
+
+
+def test_manager_child_launch_worker_transports_fatal_exit_identity(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
+    assert child_spec is not None
+
+    request = manager_mod._ManagerChildLaunchRequest(
+        child_spec=child_spec,
+        task_cls=Consumer,
+        internal_role=None,
+        service_key=None,
+        autostart_source=None,
+        detach_stdio=True,
+    )
+
+    class FatalLaunchExit(BaseException):
+        pass
+
+    fatal = FatalLaunchExit("fatal launch exit")
+
+    def fail_launch(*_args: object, **_kwargs: object) -> None:
+        raise fatal
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", fail_launch)
+
+    result = manager._run_child_launch_worker(request)
+
+    assert result.request is request
+    assert result.process is None
+    assert result.launched_ns == 0
+    assert result.error is fatal
+
+
 def test_manager_launch_worker_success_commits_once_on_main_thread(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -2875,7 +2979,9 @@ def test_reconcile_clears_duplicate_scan_after_live_tracked_evidence(
         "_observed_service_candidates_by_key",
         lambda keys, **_kwargs: {key: [candidates[key]] for key in keys},
     )
-    monkeypatch.setattr(manager, "_tick_managed_service", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        manager, "_tick_managed_service", lambda *_args, **_kwargs: None
+    )
 
     manager._reconcile_managed_services(include_autostart=False)
 
@@ -4237,10 +4343,29 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
     def run_cleanup() -> None:
         try:
             manager.cleanup()
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-338] exception
             cleanup_errors.append(exc)
         finally:
             cleanup_returned.set()
+
+    class CleanupSignal(BaseException):
+        pass
+
+    signal = CleanupSignal("cleanup interrupted")
+    real_cleanup = manager.cleanup
+
+    def fail_cleanup() -> None:
+        raise signal
+
+    monkeypatch.setattr(manager, "cleanup", fail_cleanup)
+    sentinel_thread = threading.Thread(target=run_cleanup)
+    sentinel_thread.start()
+    sentinel_thread.join(timeout=1.0)
+    assert not sentinel_thread.is_alive()
+    assert cleanup_errors == [signal]
+    cleanup_errors.clear()
+    cleanup_returned.clear()
+    monkeypatch.setattr(manager, "cleanup", real_cleanup)
 
     monkeypatch.setattr(manager_mod, "launch_task_process", blocked_launch)
     monkeypatch.setattr(manager, "_stop_worker_lanes", fast_stop_worker_lanes)
@@ -4308,8 +4433,27 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
     def run_stop() -> None:
         try:
             manager.stop(timeout=0.05)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-338] exception
             stop_errors.append(exc)
+
+    class StopSignal(BaseException):
+        pass
+
+    signal = StopSignal("stop interrupted")
+    real_stop = manager.stop
+
+    def fail_stop(*, timeout: float) -> None:
+        del timeout
+        raise signal
+
+    monkeypatch.setattr(manager, "stop", fail_stop)
+    sentinel_thread = threading.Thread(target=run_stop)
+    sentinel_thread.start()
+    sentinel_thread.join(timeout=1.0)
+    assert not sentinel_thread.is_alive()
+    assert stop_errors == [signal]
+    stop_errors.clear()
+    monkeypatch.setattr(manager, "stop", real_stop)
 
     monkeypatch.setattr(manager, "_terminate_children", block_termination)
     monkeypatch.setattr(

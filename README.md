@@ -1033,7 +1033,7 @@ uv sync --all-extras
 ./.venv/bin/python bin/pytest-pg --all
 
 # Static checks
-./.venv/bin/ruff check weft tests
+./.venv/bin/ruff check .
 ./.venv/bin/ruff format weft tests
 ./.venv/bin/mypy weft extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
 

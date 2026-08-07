@@ -576,82 +576,90 @@ class TestLoadConfig:
         assert config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] is None
 
     def test_reserved_cleanup_min_age_rejects_negative(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": "-1"},
-            clear=True,
-        ):
-            with pytest.raises(
+        with (
+            patch.dict(
+                os.environ,
+                {"WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": "-1"},
+                clear=True,
+            ),
+            pytest.raises(
                 ValueError,
                 match="WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
-            ):
-                load_config()
+            ),
+        ):
+            load_config()
 
     def test_task_monitor_interval_rejects_below_heartbeat_minimum(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": str(
-                    HEARTBEAT_MIN_INTERVAL_SECONDS - 1
-                )
-            },
-            clear=True,
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "WEFT_TASK_MONITOR_INTERVAL_SECONDS": str(
+                        HEARTBEAT_MIN_INTERVAL_SECONDS - 1
+                    )
+                },
+                clear=True,
+            ),
+            pytest.raises(ValueError, match="WEFT_TASK_MONITOR_INTERVAL_SECONDS"),
         ):
-            with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_INTERVAL_SECONDS"):
-                load_config()
+            load_config()
 
     def test_task_monitor_batch_size_rejects_zero(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"WEFT_TASK_MONITOR_BATCH_SIZE": "0"},
-            clear=True,
+        with (
+            patch.dict(
+                os.environ,
+                {"WEFT_TASK_MONITOR_BATCH_SIZE": "0"},
+                clear=True,
+            ),
+            pytest.raises(ValueError, match="WEFT_TASK_MONITOR_BATCH_SIZE"),
         ):
-            with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_BATCH_SIZE"):
-                load_config()
+            load_config()
 
     def test_task_monitor_task_log_scan_limit_rejects_zero(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": "0"},
-            clear=True,
+        with (
+            patch.dict(
+                os.environ,
+                {"WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": "0"},
+                clear=True,
+            ),
+            pytest.raises(ValueError, match="WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"),
         ):
-            with pytest.raises(
-                ValueError, match="WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"
-            ):
-                load_config()
+            load_config()
 
     def test_task_monitor_store_write_batch_size_rejects_zero(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": "0"},
-            clear=True,
+        with (
+            patch.dict(
+                os.environ,
+                {"WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": "0"},
+                clear=True,
+            ),
+            pytest.raises(ValueError, match="WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"),
         ):
-            with pytest.raises(
-                ValueError, match="WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"
-            ):
-                load_config()
+            load_config()
 
     def test_log_tasks_retention_period_rejects_zero(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0"},
-            clear=True,
+        with (
+            patch.dict(
+                os.environ,
+                {"WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0"},
+                clear=True,
+            ),
+            pytest.raises(ValueError, match="WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"),
         ):
-            with pytest.raises(
-                ValueError, match="WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"
-            ):
-                load_config()
+            load_config()
 
     def test_removed_task_monitor_task_log_cutoff_rejects(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": "172800"},
-            clear=True,
-        ):
-            with pytest.raises(
+        with (
+            patch.dict(
+                os.environ,
+                {"WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": "172800"},
+                clear=True,
+            ),
+            pytest.raises(
                 ValueError, match="WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS"
-            ):
-                load_config()
+            ),
+        ):
+            load_config()
 
     @pytest.mark.parametrize(
         ("name", "value"),
@@ -661,9 +669,11 @@ class TestLoadConfig:
         ],
     )
     def test_removed_task_monitor_env_rejects(self, name: str, value: str) -> None:
-        with patch.dict(os.environ, {name: value}, clear=True):
-            with pytest.raises(ValueError, match=name):
-                load_config()
+        with (
+            patch.dict(os.environ, {name: value}, clear=True),
+            pytest.raises(ValueError, match=name),
+        ):
+            load_config()
 
     @pytest.mark.parametrize("level", ["off", "info", "debug", "trace"])
     def test_manager_serve_log_level_env(self, level: str) -> None:

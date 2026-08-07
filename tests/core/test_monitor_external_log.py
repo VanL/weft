@@ -18,6 +18,10 @@ from weft.core.monitor.external_log import ExternalTaskLogError, ExternalTaskLog
 pytestmark = [pytest.mark.shared]
 
 
+class _CleanupSignal(BaseException):
+    """Non-Exception failure used to prove final writer cleanup semantics."""
+
+
 def test_external_task_log_sink_writes_raw_jsonl(tmp_path) -> None:
     path = tmp_path / "task-log.jsonl"
     sink = ExternalTaskLogSink(
@@ -271,6 +275,38 @@ def test_external_task_log_final_writer_close_failure_allows_fresh_acquire(
         json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
     ]
     assert {record["writer"] for record in records} == {"first", "replacement"}
+
+
+def test_external_task_log_writer_close_attempts_both_cleanup_steps_and_raises_first(
+    tmp_path,
+) -> None:
+    """Flush has priority, but its BaseException cannot skip handler close."""
+
+    calls: list[str] = []
+    flush_failure = _CleanupSignal("flush failed")
+    close_failure = _CleanupSignal("close failed")
+
+    class FailingHandler:
+        def flush(self) -> None:
+            calls.append("flush")
+            raise flush_failure
+
+        def close(self) -> None:
+            calls.append("close")
+            raise close_failure
+
+    writer = external_log_mod._PathWriter(tmp_path / "cleanup.jsonl")
+    handler = FailingHandler()
+    writer.handler = handler
+    writer.logger.addHandler(handler)
+
+    with pytest.raises(_CleanupSignal) as exc_info:
+        writer._close_handler_locked()
+
+    assert exc_info.value is flush_failure
+    assert calls == ["flush", "close"]
+    assert writer.handler is None
+    assert handler not in writer.logger.handlers
 
 
 def test_external_task_log_same_path_concurrent_facades_rotate_complete_rows(

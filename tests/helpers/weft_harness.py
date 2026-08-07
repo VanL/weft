@@ -15,6 +15,7 @@ from typing import Final, Self
 import psutil
 
 from simplebroker import Queue
+from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
 from weft._constants import (
     CONTROL_STOP,
@@ -127,7 +128,7 @@ class WeftTestHarness:
         for name, rollback in rollback_steps:
             try:
                 rollback()
-            except Exception:
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-286] exception
                 failed_steps.append(name)
         self._closed = True
         if failed_steps:
@@ -259,7 +260,7 @@ class WeftTestHarness:
         try:
             decoded = json.loads(payload) if isinstance(payload, str) else payload
             return json.dumps(decoded, ensure_ascii=False, sort_keys=True)
-        except Exception:
+        except (TypeError, ValueError):
             return str(payload)
 
     def _peek_queue_lines(
@@ -277,8 +278,10 @@ class WeftTestHarness:
         )
         try:
             entries = queue.peek_many(limit=limit, with_timestamps=True) or []
-        except Exception as exc:  # pragma: no cover - defensive logging
-            return [f"<error reading {name}: {exc}>"]
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-315] exception
+            # Timeout diagnostics must not replace the primary failure or expose
+            # queue names, payloads, or backend exception text.
+            return ["<queue read unavailable>"]
         finally:
             queue.close()
 
@@ -713,8 +716,7 @@ class WeftTestHarness:
         )
         try:
             records = queue.peek_many(limit=2048) or []
-        except Exception:  # pragma: no cover - defensive
-            queue.close()
+        except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
             return []
         finally:
             queue.close()
@@ -1047,7 +1049,7 @@ class WeftTestHarness:
             if not last_live_task_tids and not last_live_pids:
                 if quiescent_since is None:
                     quiescent_since = time.time()
-                elif time.time() - quiescent_since >= 0.1:
+                elif time.time() - quiescent_since >= 0.1:  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-240] exception
                     if self._database_files_releasable():
                         return
             else:
@@ -1152,7 +1154,8 @@ class WeftTestHarness:
             return
         try:
             terminated = terminate_process_tree(pid, timeout=self._manager_timeout)
-        except Exception:
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-316] exception
+            logger.warning("Failed to terminate registered harness process tree")
             return
         if pid in terminated or not self._pid_alive(pid):
             return
@@ -1248,7 +1251,7 @@ class WeftTestHarness:
                 continue
             try:
                 obj.close()
-            except Exception:  # pragma: no cover - cleanup best effort
+            except Exception:  # pragma: no cover - cleanup best effort  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-287] exception
                 logger.warning("Failed to close live harness database queue")
         gc.collect()
 

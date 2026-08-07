@@ -586,6 +586,8 @@ def _execute_fixture_request(
                 file=sys.stderr,
             )
             return 2
+        # MCP server mappings retain declaration order. Skip unusable entries and
+        # send the fixture request to the first dict-valued server in that order.
         first_server = next(
             (config for config in mcp_servers.values() if isinstance(config, dict)),
             None,
@@ -595,7 +597,7 @@ def _execute_fixture_request(
             return 2
         try:
             mcp_result = call_fixture_tool(first_server, token=token)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-358] exception
             print(f"fixture MCP call failed: {exc}", file=sys.stderr)
             return 1
 
@@ -648,10 +650,10 @@ def _load_claude_mcp_servers(raw_value: str) -> dict[str, Any]:
     else:
         payload = json.loads(raw_value)
     if not isinstance(payload, dict):
-        raise ValueError("Claude MCP config must be a JSON object")
+        raise ValueError("Claude MCP config must be a JSON object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-257] exception
     servers = payload.get("mcpServers") or {}
     if not isinstance(servers, dict):
-        raise ValueError("Claude MCP config must contain mcpServers")
+        raise ValueError("Claude MCP config must contain mcpServers")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-257] exception
     return servers
 
 

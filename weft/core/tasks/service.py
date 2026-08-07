@@ -559,7 +559,7 @@ class ServiceTask(BaseTask):
         try:
             context.publish_event("started")
             value = spec.target(context, *spec.args, **dict(spec.kwargs or {}))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-347] exception
             stop_event.set()
             result_kind = "error"
             result_error = exc

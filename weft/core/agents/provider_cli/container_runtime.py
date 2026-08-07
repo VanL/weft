@@ -401,7 +401,7 @@ def get_provider_container_runtime_descriptor(
             f"Invalid provider container runtime descriptor {resource}: {exc}"
         ) from exc
     if not isinstance(payload, Mapping):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-266] exception
             f"Invalid provider container runtime descriptor {resource}: root must be an object"
         )
     descriptor = parse_provider_container_runtime_descriptor(

@@ -52,18 +52,24 @@ def test_ensure_preserves_existing_executable(tmp_path: Path) -> None:
         ([], "Invalid agents.json: root value must be an object"),
         (
             {"provider_cli": []},
-            "Invalid delegated agent settings in the project-local settings file: "
-            "'provider_cli' must be an object",
+            (
+                "Invalid delegated agent settings in the project-local settings file: "
+                "'provider_cli' must be an object"
+            ),
         ),
         (
             {"provider_cli": {"providers": []}},
-            "Invalid delegated agent settings in the project-local settings file: "
-            "'provider_cli.providers' must be an object",
+            (
+                "Invalid delegated agent settings in the project-local settings file: "
+                "'provider_cli.providers' must be an object"
+            ),
         ),
         (
             {"provider_cli": {"providers": {"claude_code": []}}},
-            "Invalid delegated agent settings in the project-local settings file: "
-            "provider 'claude_code' must map to an object",
+            (
+                "Invalid delegated agent settings in the project-local settings file: "
+                "provider 'claude_code' must map to an object"
+            ),
         ),
     ],
 )

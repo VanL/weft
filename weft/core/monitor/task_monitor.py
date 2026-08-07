@@ -837,7 +837,7 @@ class TaskMonitor(ServiceTask):
         for name in _WORKER_SNAPSHOT_PLAIN_SHARE_FIELDS & snapshot_fields:
             value = vars(self)[name]
             if not isinstance(value, (BuiltinFunctionType, FunctionType, type)):
-                raise RuntimeError(
+                raise RuntimeError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-260] exception
                     "TaskMonitor worker snapshot plain-callable field became "
                     f"stateful: {name}"
                 )
@@ -846,7 +846,7 @@ class TaskMonitor(ServiceTask):
         for name in _WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS & snapshot_fields:
             value = vars(self)[name]
             if callable(value):
-                raise RuntimeError(
+                raise RuntimeError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-260] exception
                     f"TaskMonitor worker snapshot shared field became callable: {name}"
                 )
             setattr(worker, name, value)
@@ -1006,7 +1006,7 @@ class TaskMonitor(ServiceTask):
         if store is not None:
             try:
                 store.close()
-            except Exception as exc:  # pragma: no cover - defensive close boundary
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
                 errors.append(f"monitor_store: {exc}")
 
         sink = self._external_task_log_sink
@@ -1014,7 +1014,7 @@ class TaskMonitor(ServiceTask):
         if sink is not None:
             try:
                 sink.close()
-            except Exception as exc:  # pragma: no cover - defensive close boundary
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
                 errors.append(f"external_task_log_sink: {exc}")
 
         queues: list[Any] = []
@@ -1036,7 +1036,7 @@ class TaskMonitor(ServiceTask):
             seen_queue_ids.add(queue_id)
             try:
                 queue_obj.close()
-            except Exception as exc:  # pragma: no cover - defensive close boundary
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
                 errors.append(f"queue:{getattr(queue_obj, 'name', '?')}: {exc}")
 
         finalizer = getattr(self, "_finalizer", None)
@@ -1301,7 +1301,11 @@ class TaskMonitor(ServiceTask):
                 fields={"task_tid": self.tid, **fields},
             )
             emit_serve_log_record(record)
-        except Exception:  # pragma: no cover - diagnostics must not affect monitor
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-323] exception
+            try:
+                os.write(2, b"weft task monitor operational log emission failed\n")
+            except OSError:
+                pass
             return
 
     def _emit_external_task_log_health_transition(
@@ -2289,7 +2293,7 @@ class TaskMonitor(ServiceTask):
             if store is not None:
                 try:
                     store.close()
-                except Exception as close_exc:  # pragma: no cover - defensive close
+                except Exception as close_exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-324] exception
                     close_error = f"monitor store close failed: {close_exc}"
             self._monitor_store = None
             error = str(exc)
@@ -3647,7 +3651,7 @@ class TaskMonitor(ServiceTask):
         try:
             try:
                 worker_result = worker._run_terminal_control_cleanup_worker_local(work)
-            except Exception as exc:  # pragma: no cover - worker boundary
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-325] exception
                 worker_result = _TaskControlCleanupWorkerResult(
                     work=work,
                     cleanup=_TaskControlCleanupResult(
@@ -5211,7 +5215,7 @@ class TaskMonitor(ServiceTask):
                 result, runtime_cleanup_ready = worker._run_builtin_cycle_worker_local(
                     work
                 )
-            except Exception as exc:  # pragma: no cover - worker boundary
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-326] exception
                 result = TaskMonitorProcessorResult(
                     success=False,
                     errors=(str(exc),),
@@ -5480,7 +5484,7 @@ class TaskMonitor(ServiceTask):
                 )
             processor = resolve_task_monitor_processor(self._monitor_config.processor)
             return processor(request)
-        except Exception as exc:  # pragma: no cover - custom processor boundary
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-327] exception
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
 
     def _handle_service_worker_event(self, event: ServiceWorkerEvent) -> None:

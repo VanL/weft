@@ -148,13 +148,13 @@ class RunnerHandle:
             or not isinstance(kind, str)
             or not isinstance(runtime_id, str)
         ):
-            raise ValueError("runner handle requires string runner, kind, and id")
+            raise ValueError("runner handle requires string runner, kind, and id")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-269] exception
         if not isinstance(control, Mapping):
-            raise ValueError("runner handle control must be a mapping")
+            raise ValueError("runner handle control must be a mapping")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-269] exception
         if not isinstance(observations, Mapping):
-            raise ValueError("runner handle observations must be a mapping")
+            raise ValueError("runner handle observations must be a mapping")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-269] exception
         if not isinstance(metadata, Mapping):
-            raise ValueError("runner handle metadata must be a mapping")
+            raise ValueError("runner handle metadata must be a mapping")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-269] exception
         return cls(
             runner=runner,
             kind=kind,  # type: ignore[arg-type]

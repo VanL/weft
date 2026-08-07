@@ -82,7 +82,7 @@ def cmd_dump(
     """
     try:
         context = build_context(spec_context=context_path)
-    except Exception as exc:  # pragma: no cover - command error boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-330] exception
         return 1, f"weft dump: failed to resolve context: {exc}"
 
     # Determine output path
@@ -115,7 +115,7 @@ def cmd_dump(
                 ) = _write_dump(f, db)
             claimed_queues, claimed_messages = _claimed_summary(db)
 
-    except Exception as exc:  # pragma: no cover - command error boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-330] exception
         return 1, f"weft dump: export failed: {exc}"
 
     # Success message

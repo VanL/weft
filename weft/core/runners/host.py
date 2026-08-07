@@ -186,7 +186,7 @@ def _worker_entry(
                         f"Command exited with {completed.returncode}: "
                         f"{(completed.stderr or '').strip()}"
                     )
-    except Exception as exc:  # pragma: no cover - propagated via parent
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-342] exception
         traceback_text = traceback.format_exc()
         status = "error"
         error = traceback_text
@@ -283,6 +283,7 @@ def _agent_session_worker_entry(
 ) -> None:
     """Run a long-lived agent session in a spawned subprocess."""
     session = None
+    ready_sent = False
     try:
         send_terminal_payload(response_sender, make_booted_response())
         with _worker_runtime_context(spec_data):
@@ -293,6 +294,7 @@ def _agent_session_worker_entry(
                 bundle_root=cast(str | None, spec_data.get("bundle_root")),
             )
             send_terminal_payload(response_sender, make_ready_response())
+            ready_sent = True
 
             while True:
                 request = request_queue.get()
@@ -308,12 +310,21 @@ def _agent_session_worker_entry(
                         request.get("work_item"),
                     )
                     result = session.execute(normalized)
-                except Exception:  # pragma: no cover - propagated via parent
+                except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-356] exception
+                    traceback_text = traceback.format_exc()
                     send_terminal_payload(
                         response_sender,
                         make_result_response(
                             status="error",
-                            error=traceback.format_exc(),
+                            error=traceback_text,
+                            diagnostics=runner_diagnostics(
+                                phase="execute",
+                                runner="host",
+                                target_type="agent",
+                                message=str(exc),
+                                exception_type=type(exc).__name__,
+                                traceback_text=traceback_text,
+                            ),
                         ),
                     )
                     break
@@ -333,10 +344,10 @@ def _agent_session_worker_entry(
                     break
     except TerminalHandoffTransportError:
         return
-    except Exception as exc:  # pragma: no cover - propagated via parent
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-356] exception
         traceback_text = traceback.format_exc()
         diagnostics = runner_diagnostics(
-            phase="runtime_startup" if session is None else "execute",
+            phase="execute" if ready_sent else "runtime_startup",
             runner="host",
             target_type=str(spec_data.get("type") or "agent"),
             message=str(exc),
@@ -344,23 +355,56 @@ def _agent_session_worker_entry(
             traceback_text=traceback_text,
         )
         with contextlib.suppress(TerminalHandoffTransportError):
-            send_terminal_payload(
-                response_sender,
-                make_startup_error_response(
+            response = (
+                make_result_response(
+                    status="error",
+                    error=traceback_text,
+                    diagnostics=diagnostics,
+                )
+                if ready_sent
+                else make_startup_error_response(
                     traceback_text,
                     diagnostics=diagnostics,
-                ),
+                )
+            )
+            send_terminal_payload(
+                response_sender,
+                response,
             )
     finally:
         if session is not None:
             try:
                 session.close()
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # pragma: no cover - defensive  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-298] exception
                 logger.warning("Failed to close host agent runtime session")
         with contextlib.suppress(Exception):
             request_queue.close()
         with contextlib.suppress(Exception):
             response_sender.close()
+
+
+def _start_optional_monitor(monitor: Any, pid: int | None) -> Any | None:
+    if pid is None:
+        logger.warning(
+            "Host resource monitor disabled because worker PID is unavailable"
+        )
+        try:
+            monitor.stop()
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+            logger.warning("Failed to stop host resource monitor without a worker PID")
+        return None
+
+    try:
+        monitor.start(pid)
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+        logger.warning("Failed to start host resource monitor")
+        try:
+            monitor.stop()
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+            logger.warning("Failed to stop host resource monitor after startup failure")
+        return None
+
+    return monitor
 
 
 class HostTaskRunner:
@@ -452,15 +496,13 @@ class HostTaskRunner:
             if on_worker_started is not None:
                 try:
                     on_worker_started(worker_pid)
-                except Exception:  # pragma: no cover - defensive
+                except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-343] exception
                     logger.warning("Host worker-start callback failed")
-                    pass
             if on_runtime_handle_started is not None and runtime_handle is not None:
                 try:
                     on_runtime_handle_started(runtime_handle)
-                except Exception:  # pragma: no cover - defensive
+                except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-343] exception
                     logger.warning("Host runtime-handle callback failed")
-                    pass
             return self._run_one_shot_terminal_handoff(
                 process,
                 response_receiver,
@@ -505,14 +547,7 @@ class HostTaskRunner:
                 db_path=self._db_path,
                 config=self._config,
             )
-            try:
-                if worker_pid is None:
-                    raise RuntimeError("Worker process has no PID")
-                monitor.start(worker_pid)
-            except Exception:  # pragma: no cover - optional monitor boundary
-                with contextlib.suppress(Exception):
-                    monitor.stop()
-                monitor = None
+            monitor = _start_optional_monitor(monitor, worker_pid)
 
         start_time = time.monotonic()
         next_monitor_at = start_time + self._monitor_interval
@@ -598,11 +633,17 @@ class HostTaskRunner:
                     and now >= next_monitor_at
                     and process.is_alive()
                 ):
+                    ok, violation = True, None
                     try:
                         ok, violation = monitor.check_limits()
-                    except Exception:  # pragma: no cover - process may have exited
-                        ok, violation = True, None
-                    last_metrics = monitor.last_metrics() or last_metrics
+                    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+                        logger.warning("Failed to check host resource limits")
+                    try:
+                        observed_metrics = monitor.last_metrics()
+                    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+                        logger.warning("Failed to collect host resource metrics")
+                    else:
+                        last_metrics = observed_metrics or last_metrics
                     next_monitor_at = now + self._monitor_interval
                     if not ok:
                         limit_error = violation or "Resource limit exceeded"
@@ -762,24 +803,29 @@ class HostTaskRunner:
             else:
                 process.join(timeout=0.2)
 
-            if monitor:
-                last_metrics = monitor.last_metrics() or last_metrics
+            if monitor is not None:
+                try:
+                    observed_metrics = monitor.last_metrics()
+                except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+                    logger.warning("Failed to collect final host resource metrics")
+                else:
+                    last_metrics = observed_metrics or last_metrics
                 if last_metrics is None:
                     try:
                         last_metrics = monitor.snapshot()
-                    except Exception:  # pragma: no cover - optional metrics
-                        last_metrics = None
+                    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+                        logger.warning("Failed to snapshot final host resource metrics")
 
             outcome.metrics = outcome.metrics or last_metrics
             outcome.worker_pid = worker_pid
             outcome.runtime_handle = outcome.runtime_handle or runtime_handle
             return outcome
         finally:
-            if monitor:
-                with contextlib.suppress(Exception):
-                    last_metrics = monitor.last_metrics() or last_metrics
-                with contextlib.suppress(Exception):
+            if monitor is not None:
+                try:
                     monitor.stop()
+                except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+                    logger.warning("Failed to stop host resource monitor")
 
     def _terminal_handoff_wait_seconds(
         self,
@@ -942,11 +988,11 @@ class HostTaskRunner:
 
         try:
             mp_queue.close()
-        except Exception:  # pragma: no cover - defensive cleanup
+        except Exception:  # pragma: no cover - defensive cleanup  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-295] exception
             logger.warning("Failed to close host runner multiprocessing queue")
         try:
             mp_queue.join_thread()
-        except Exception:  # pragma: no cover - defensive cleanup
+        except Exception:  # pragma: no cover - defensive cleanup  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-295] exception
             logger.warning("Failed to join host runner queue thread")
 
     @staticmethod
@@ -1039,13 +1085,7 @@ class HostTaskRunner:
                 db_path=self._db_path,
                 config=self._config,
             )
-            try:
-                pid = process.pid
-                if pid is None:
-                    raise RuntimeError("Interactive process has no PID")
-                monitor.start(pid)
-            except Exception:  # pragma: no cover
-                monitor = None
+            monitor = _start_optional_monitor(monitor, process.pid)
 
         return CommandSession(
             process,
@@ -1056,7 +1096,7 @@ class HostTaskRunner:
             handle=_host_handle(process.pid),
         )
 
-    def start_agent_session(self) -> AgentSession:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-035] exception
+    def start_agent_session(self) -> AgentSession:
         """Start a long-lived agent session for persistent agent tasks."""
         if self._spec_data["type"] != "agent":
             raise ValueError("Agent sessions are only supported for agent targets")
@@ -1094,15 +1134,7 @@ class HostTaskRunner:
                     db_path=self._db_path,
                     config=self._config,
                 )
-                try:
-                    pid = process.pid
-                    if pid is None:
-                        raise RuntimeError("Agent session process has no PID")
-                    monitor.start(pid)
-                except Exception:  # pragma: no cover - optional monitor boundary
-                    with contextlib.suppress(Exception):
-                        monitor.stop()
-                    monitor = None
+                monitor = _start_optional_monitor(monitor, process.pid)
             session = AgentSession(
                 process,
                 request_queue,
@@ -1123,8 +1155,12 @@ class HostTaskRunner:
                 session.close()
             else:
                 if monitor is not None:
-                    with contextlib.suppress(Exception):
+                    try:
                         monitor.stop()
+                    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
+                        logger.warning(
+                            "Failed to stop host agent resource monitor during startup cleanup"
+                        )
                 with contextlib.suppress(Exception):
                     if process.is_alive():
                         self._stop_process(process)

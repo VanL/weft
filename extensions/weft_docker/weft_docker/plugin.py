@@ -742,6 +742,10 @@ def _docker_runtime_liveness(handle: RunnerHandle) -> RuntimeLiveness:
     if runtime_id is None:
         return "unknown"
     try:
+        docker = _load_docker_sdk()
+    except RuntimeError:  # pragma: no cover - optional extension availability
+        return "unknown"
+    try:
         with _docker_client(timeout=2) as client:
             container = _lookup_container(
                 client,
@@ -751,7 +755,7 @@ def _docker_runtime_liveness(handle: RunnerHandle) -> RuntimeLiveness:
             if container is None:
                 return "stale"
             return _docker_container_liveness(container)
-    except Exception:  # pragma: no cover - Docker availability is environmental
+    except docker.errors.DockerException:  # pragma: no cover - Docker availability
         return "unknown"
 
 
@@ -789,9 +793,10 @@ def _docker_liveness_identifiers(handle: RunnerHandle) -> tuple[str | None, str 
 
 
 def _docker_container_liveness(container: Any) -> RuntimeLiveness:
+    docker = _load_docker_sdk()
     try:
         container.reload()
-    except Exception:
+    except docker.errors.DockerException:
         return "unknown"
     attrs = getattr(container, "attrs", None)
     state = attrs.get("State") if isinstance(attrs, Mapping) else None
@@ -1201,7 +1206,7 @@ def _lookup_container(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-206] exception
         return None
     try:
         candidates = list_method(all=True, filters={"name": runtime_id})
-    except Exception:  # pragma: no cover - defensive Docker API fallback
+    except docker.errors.DockerException:  # pragma: no cover - Docker API fallback
         return None
     for candidate in candidates:
         attrs = getattr(candidate, "attrs", None)
@@ -1236,10 +1241,11 @@ def _docker_stop(client: Any, runtime_id: str, *, timeout: float | None) -> bool
     container = _lookup_container(client, runtime_id)
     if container is None:
         return False
+    docker = _load_docker_sdk()
     try:
         stop_timeout = max(int(timeout or 2.0), 1)
         container.stop(timeout=stop_timeout)
-    except Exception:  # pragma: no cover - Docker daemon edge conditions
+    except docker.errors.DockerException:  # pragma: no cover - Docker daemon edge
         return False
     return True
 
@@ -1248,9 +1254,10 @@ def _docker_kill(client: Any, runtime_id: str) -> bool:
     container = _lookup_container(client, runtime_id)
     if container is None:
         return False
+    docker = _load_docker_sdk()
     try:
         container.kill()
-    except Exception:  # pragma: no cover - Docker daemon edge conditions
+    except docker.errors.DockerException:  # pragma: no cover - Docker daemon edge
         return False
     return True
 
@@ -1259,9 +1266,10 @@ def _remove_container(client: Any, runtime_id: str) -> None:
     container = _lookup_container(client, runtime_id)
     if container is None:
         return
+    docker = _load_docker_sdk()
     try:
         container.remove(force=True)
-    except Exception:  # pragma: no cover - best-effort cleanup
+    except docker.errors.DockerException:  # pragma: no cover - best-effort cleanup
         return
 
 
@@ -1270,11 +1278,11 @@ def _cleanup_process(process: subprocess.Popen[str]) -> None:
         return
     try:
         process.kill()
-    except Exception:  # pragma: no cover - best-effort cleanup
+    except OSError:  # pragma: no cover - best-effort cleanup
         return
     try:
         process.wait(timeout=1.0)
-    except Exception:  # pragma: no cover - best-effort cleanup
+    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - cleanup
         return
 
 
@@ -1429,7 +1437,7 @@ def _normalize_mounts(
     if value is None:
         return []
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError(f"{name} must be a list of mount objects")
+        raise ValueError(f"{name} must be a list of mount objects")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-275] exception
     mounts: list[dict[str, Any]] = []
     for index, raw_mount in enumerate(value):
         mount_name = f"{name}[{index}]"
@@ -1444,7 +1452,7 @@ def _normalize_mounts(
         )
         read_only = mount.get("read_only", True)
         if not isinstance(read_only, bool):
-            raise ValueError(f"{mount_name}.read_only must be a boolean")
+            raise ValueError(f"{mount_name}.read_only must be a boolean")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-275] exception
         mounts.append(
             {
                 "source": source,
@@ -1470,7 +1478,7 @@ def _normalize_optional_text(value: object, *, name: str) -> str | None:
 
 def _normalize_required_text(value: object, *, name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
+        raise ValueError(f"{name} must be a string")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-275] exception
     cleaned = value.strip()
     if not cleaned:
         raise ValueError(f"{name} must be a non-empty string")
@@ -1479,7 +1487,7 @@ def _normalize_required_text(value: object, *, name: str) -> str:
 
 def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ValueError(f"{name} must be an object")
+        raise ValueError(f"{name} must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-275] exception
     return value
 
 
@@ -1488,7 +1496,7 @@ def _mapping_of_strings(value: object, *, name: str) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for key, item in mapping.items():
         if not isinstance(key, str) or not isinstance(item, str):
-            raise ValueError(f"{name} must be a mapping of strings to strings")
+            raise ValueError(f"{name} must be a mapping of strings to strings")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-275] exception
         normalized[key] = item
     return normalized
 
@@ -1497,7 +1505,7 @@ def _optional_string(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("spec.working_dir must be a string")
+        raise ValueError("spec.working_dir must be a string")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-275] exception
     cleaned = value.strip()
     return cleaned or None
 
@@ -1506,7 +1514,7 @@ def _string_list(value: object, *, name: str) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError(f"{name} must be a list of strings")
+        raise ValueError(f"{name} must be a list of strings")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-275] exception
     return [str(item) for item in value]
 
 

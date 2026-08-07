@@ -69,7 +69,7 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"Failed to read JSON from {path}: {exc}") from exc
     if not isinstance(payload, dict):
-        raise ValueError(f"Spec file {path} must contain a JSON object")
+        raise ValueError(f"Spec file {path} must contain a JSON object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-264] exception
     return payload
 
 

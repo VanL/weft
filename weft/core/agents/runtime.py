@@ -289,7 +289,7 @@ def start_agent_runtime_session(
     runtime = get_agent_runtime(agent.runtime)
     start_session = getattr(runtime, "start_session", None)
     if not callable(start_session):
-        raise RuntimeError(
+        raise RuntimeError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-268] exception
             f"Runtime does not support persistent sessions: {agent.runtime}"
         )
     if _callable_supports_bundle_root(start_session):

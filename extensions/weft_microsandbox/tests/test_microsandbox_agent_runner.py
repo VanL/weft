@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from weft.core.agents.runtime import AgentExecutionResult
+from weft_microsandbox import plugin as plugin_module
 from weft_microsandbox._runtime import (
     MicrosandboxRunResult,
     MicrosandboxRunSpec,
@@ -73,6 +76,24 @@ def _agent(provider: str) -> dict[str, object]:
     }
 
 
+def _capture_provider_tempdir(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    captured: list[Path] = []
+    original_prepare = plugin_module.prepare_provider_cli_execution
+
+    def capture_tempdir(**kwargs: object) -> object:
+        tempdir = kwargs["tempdir"]
+        assert isinstance(tempdir, Path)
+        captured.append(tempdir)
+        return original_prepare(**kwargs)
+
+    monkeypatch.setattr(
+        plugin_module,
+        "prepare_provider_cli_execution",
+        capture_tempdir,
+    )
+    return captured
+
+
 def test_agent_runner_uses_provider_cli_parser_from_guest_stdout() -> None:
     runner = MicrosandboxRunner(
         target_type="agent",
@@ -101,6 +122,151 @@ def test_agent_runner_uses_provider_cli_parser_from_guest_stdout() -> None:
     assert StdoutAgentRuntime.last_spec is not None
     assert StdoutAgentRuntime.last_spec.command[0] == "gemini"
     assert StdoutAgentRuntime.last_spec.cwd == "/workspace"
+
+
+def test_agent_runner_converts_result_builder_failure_to_error_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_tempdirs = _capture_provider_tempdir(monkeypatch)
+
+    def fail_result_builder(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("provider result contains sensitive detail")
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_provider_cli_execution_result",
+        fail_result_builder,
+    )
+    runner = MicrosandboxRunner(
+        target_type="agent",
+        tid="1234567890123456789",
+        process_target=None,
+        agent=_agent("gemini"),
+        args=[],
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        runner_options={
+            "image": "agent:latest",
+            "executable": "gemini",
+            "cwd": "/workspace",
+        },
+        runtime=StdoutAgentRuntime(),
+    )
+
+    outcome = runner.run("question")
+
+    assert outcome.status == "error"
+    assert outcome.value is None
+    assert outcome.error == "provider result contains sensitive detail"
+    assert outcome.stdout == "agent answer\n"
+    assert outcome.stderr is None
+    assert outcome.returncode == 0
+    assert outcome.runtime_handle is not None
+    assert outcome.runtime_handle.id == "agent-sandbox"
+    assert len(provider_tempdirs) == 1
+    assert not provider_tempdirs[0].exists()
+
+
+def test_agent_runner_converts_provider_parser_failure_to_error_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_tempdirs: list[Path] = []
+    original_prepare = plugin_module.prepare_provider_cli_execution
+
+    def prepare_with_failing_parser(**kwargs: object) -> object:
+        tempdir = kwargs["tempdir"]
+        assert isinstance(tempdir, Path)
+        provider_tempdirs.append(tempdir)
+        prepared = original_prepare(**kwargs)
+
+        def fail_parser(**_parser_kwargs: object) -> object:
+            raise ValueError("provider parser contains sensitive detail")
+
+        return replace(
+            prepared,
+            provider=SimpleNamespace(parse_result=fail_parser),
+        )
+
+    monkeypatch.setattr(
+        plugin_module,
+        "prepare_provider_cli_execution",
+        prepare_with_failing_parser,
+    )
+    runner = MicrosandboxRunner(
+        target_type="agent",
+        tid="1234567890123456789",
+        process_target=None,
+        agent=_agent("gemini"),
+        args=[],
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        runner_options={
+            "image": "agent:latest",
+            "executable": "gemini",
+            "cwd": "/workspace",
+        },
+        runtime=StdoutAgentRuntime(),
+    )
+
+    outcome = runner.run("question")
+
+    assert outcome.status == "error"
+    assert outcome.value is None
+    assert outcome.error == "provider parser contains sensitive detail"
+    assert outcome.stdout == "agent answer\n"
+    assert outcome.stderr is None
+    assert outcome.returncode == 0
+    assert outcome.runtime_handle is not None
+    assert outcome.runtime_handle.id == "agent-sandbox"
+    assert len(provider_tempdirs) == 1
+    assert not provider_tempdirs[0].exists()
+
+
+def test_agent_runner_does_not_contain_fatal_result_builder_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FatalResultBuilderSignal(BaseException):
+        pass
+
+    signal = FatalResultBuilderSignal("stop now")
+    provider_tempdirs = _capture_provider_tempdir(monkeypatch)
+
+    def fail_result_builder(*_args: object, **_kwargs: object) -> object:
+        raise signal
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_provider_cli_execution_result",
+        fail_result_builder,
+    )
+    runner = MicrosandboxRunner(
+        target_type="agent",
+        tid="1234567890123456789",
+        process_target=None,
+        agent=_agent("gemini"),
+        args=[],
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        runner_options={
+            "image": "agent:latest",
+            "executable": "gemini",
+            "cwd": "/workspace",
+        },
+        runtime=StdoutAgentRuntime(),
+    )
+
+    with pytest.raises(FatalResultBuilderSignal) as exc_info:
+        runner.run("question")
+
+    assert exc_info.value is signal
+    assert len(provider_tempdirs) == 1
+    assert not provider_tempdirs[0].exists()
 
 
 def test_agent_runner_copies_provider_output_file_before_parse() -> None:

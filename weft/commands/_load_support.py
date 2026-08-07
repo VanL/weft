@@ -396,7 +396,7 @@ def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
         if snapshot is not None:
             try:
                 snapshot.restore()
-            except Exception as restore_exc:  # pragma: no cover - rollback failure
+            except OSError as restore_exc:  # pragma: no cover - rollback failure
                 raise ImportError(
                     "import failed and file-backed rollback failed: "
                     f"{failure_detail}; restore failed: {restore_exc}"
@@ -518,7 +518,7 @@ def cmd_load(
 
     try:
         context = build_context(spec_context=context_path)
-    except Exception as exc:  # pragma: no cover - command error boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-331] exception
         return 1, f"weft load: failed to resolve context: {exc}"
 
     if input_file is None:
@@ -534,7 +534,7 @@ def cmd_load(
     try:
         with open(input_path, encoding="utf-8") as handle:
             plan = _build_import_plan(handle, context)
-    except Exception as exc:  # pragma: no cover - command error boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-331] exception
         return 1, f"weft load: import failed: {exc}"
 
     if plan.report.alias_conflicts:
@@ -547,7 +547,7 @@ def cmd_load(
         report = _execute_import(plan, context)
     except ImportError as exc:
         return 1, f"weft load: {exc}"
-    except Exception as exc:  # pragma: no cover - command error boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-331] exception
         return 1, f"weft load: import failed: {exc}"
 
     return 0, report.format_completion()

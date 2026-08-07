@@ -53,7 +53,7 @@ def load_provider_cli_project_settings(
     if provider_payload is None:
         return ProviderCLIProjectSettings()
     if not isinstance(provider_payload, Mapping):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-267] exception
             "Invalid delegated agent settings in the project-local settings file: "
             f"provider '{provider_name}' must map to an object"
         )
@@ -100,7 +100,7 @@ def ensure_provider_cli_project_executable(
             path=settings_path,
         )
     if not isinstance(existing_entry, dict):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-267] exception
             "Invalid delegated agent settings in the project-local settings file: "
             f"provider '{provider_name}' must map to an object"
         )
@@ -215,7 +215,7 @@ def _provider_settings_mapping(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     if provider_cli is None:
         return {}
     if not isinstance(provider_cli, Mapping):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-267] exception
             "Invalid delegated agent settings in the project-local settings file: "
             "'provider_cli' must be an object"
         )
@@ -223,7 +223,7 @@ def _provider_settings_mapping(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     if providers is None:
         return {}
     if not isinstance(providers, Mapping):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-267] exception
             "Invalid delegated agent settings in the project-local settings file: "
             "'provider_cli.providers' must be an object"
         )
@@ -250,7 +250,7 @@ def _load_json_mapping(path: Path, *, label: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Unable to parse {label}: {exc}") from exc
     if not isinstance(payload, dict):
-        raise ValueError(f"Invalid {label}: root value must be an object")
+        raise ValueError(f"Invalid {label}: root value must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-267] exception
     return payload
 
 

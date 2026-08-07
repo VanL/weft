@@ -44,7 +44,9 @@ def test_model_post_init_context_is_runtime_positional_only() -> None:
 
     for class_name in class_names:
         parameters = tuple(
-            signature(getattr(taskspec_model, class_name).model_post_init).parameters.values()
+            signature(
+                getattr(taskspec_model, class_name).model_post_init
+            ).parameters.values()
         )
         assert [parameter.kind for parameter in parameters] == [
             Parameter.POSITIONAL_ONLY,

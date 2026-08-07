@@ -94,7 +94,7 @@ def test_materialize_taskspec_template_supports_bundle_local_adapter(
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir(parents=True, exist_ok=True)
     (bundle_root / "helper_module.py").write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from __future__ import annotations",
                 "",
@@ -136,7 +136,7 @@ def test_materialize_taskspec_template_rejects_spec_type_change(
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir(parents=True, exist_ok=True)
     (bundle_root / "helper_module.py").write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from __future__ import annotations",
                 "",
@@ -168,7 +168,7 @@ def test_materialize_taskspec_template_request_payload_is_json_like_copy(
     bundle_root.mkdir(parents=True, exist_ok=True)
     output_path = bundle_root / "request.json"
     (bundle_root / "helper_module.py").write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from __future__ import annotations",
                 "",
@@ -244,10 +244,12 @@ def test_parameterization_adapter_rejects_non_mapping_spec_as_value_error(
     monkeypatch.setattr(
         parameterization_module,
         "import_callable_ref",
-        lambda _adapter_ref, *, bundle_root: lambda _request: {
-            "name": "example",
-            "spec": [],
-        },
+        lambda _adapter_ref, *, bundle_root: (
+            lambda _request: {
+                "name": "example",
+                "spec": [],
+            }
+        ),
     )
 
     with pytest.raises(ValueError) as exc_info:

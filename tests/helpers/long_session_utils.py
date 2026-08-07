@@ -105,7 +105,7 @@ def write_command_script(path: Path) -> None:
     """Create the command target used by the long-session scenario."""
 
     path.write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from __future__ import annotations",
                 "",

@@ -112,11 +112,11 @@ class _PathWriter:
         first_error: BaseException | None = None
         try:
             handler.flush()
-        except BaseException as exc:  # pragma: no cover - defensive close boundary
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-319] exception
             first_error = exc
         try:
             handler.close()
-        except BaseException as exc:  # pragma: no cover - defensive close boundary
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-319] exception
             if first_error is None:
                 first_error = exc
         if first_error is not None:

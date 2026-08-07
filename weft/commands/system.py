@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-import weft.commands.task_evidence as task_evidence
+import weft.commands.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
@@ -849,7 +849,7 @@ def _collect_task_snapshot_records(
             and selected_manager.get("status") == "active"
             else None
         )
-    except Exception:  # pragma: no cover - defensive status reconciliation
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-335] exception
         selected_active_manager_tid = None
     log_queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
     try:
@@ -1583,7 +1583,7 @@ def _watch_task_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-119] exception
             monitor.wait(max(STATUS_WATCH_MIN_INTERVAL, interval))
     except KeyboardInterrupt:
         return 0
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-336] exception
         print(f"weft: status watch failed: {exc}", file=sys.stderr)
         return 1
     finally:
@@ -1611,7 +1611,7 @@ def cmd_status(
         tid_filters = _resolve_tid_filters(context, tid)
         broker_snapshot = collect_broker_status(context)
         managers = _collect_manager_records(context, include_stopped=include_terminal)
-    except Exception as exc:  # pragma: no cover - defensive guard
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-337] exception
         return 1, f"weft: failed to retrieve status: {exc}"
 
     if watch:

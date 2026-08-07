@@ -552,6 +552,54 @@ def test_service_worker_exception_publishes_error_and_clears_active_state(
     assert snapshot["stopping"] is True
 
 
+def test_service_worker_fatal_exit_is_published_with_exact_identity(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+
+    class FatalServiceExit(BaseException):
+        pass
+
+    fatal = FatalServiceExit("fatal service exit")
+
+    def target(_context: ServiceWorkerContext) -> None:
+        raise fatal
+
+    task._register_service_worker(ServiceWorkerSpec(name="api.fatal", target=target))
+
+    try:
+        task._start_service_worker("api.fatal", request_id="fatal-request")
+        drain_worker_results_until(
+            task,
+            lambda: any(
+                event.name == "api.fatal" and event.kind == "stopped"
+                for event, _thread_id in task.service_worker_events
+            ),
+        )
+        snapshot = task._service_worker_snapshot("api.fatal")
+    finally:
+        task.stop()
+
+    fatal_events = [
+        event
+        for event, thread_id in task.service_worker_events
+        if event.name == "api.fatal"
+        and event.kind == "error"
+        and thread_id == threading.get_ident()
+    ]
+    assert len(fatal_events) == 1
+    fatal_event = fatal_events[0]
+    assert fatal_event.request_id == "fatal-request"
+    assert fatal_event.worker_index == 0
+    assert fatal_event.value is None
+    assert fatal_event.error is fatal
+    assert fatal_event.item_id is None
+    assert snapshot["active"] is False
+    assert snapshot["stopping"] is True
+
+
 def test_service_task_lanes_are_single_flight(
     broker_env,
     unique_tid: str,

@@ -168,7 +168,7 @@ extend-include = [
 ]
 
 [tool.ruff.lint]
-select = [
+extend-select = [
     "E",  # pycodestyle errors
     "W",  # pycodestyle warnings
     "F",  # pyflakes

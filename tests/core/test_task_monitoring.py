@@ -518,6 +518,66 @@ def test_task_monitor_operational_log_off_is_silent(
     assert serve_log_events(capsys) == []
 
 
+@pytest.mark.parametrize("warning_write_fails", [False, True])
+def test_task_monitor_operational_log_failure_warns_without_exposing_error(
+    weft_harness,
+    monkeypatch: pytest.MonkeyPatch,
+    warning_write_fails: bool,
+) -> None:
+    """Best-effort diagnostics stay non-fatal but are not silently discarded."""
+
+    config = dict(weft_harness.context.config)
+    config.update(
+        {
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
+            "WEFT_TASK_MONITOR_ENABLED": True,
+            "WEFT_TASK_MONITOR_MODE": "report_only",
+        }
+    )
+    monitor = TaskMonitor(
+        weft_harness.context.broker_target,
+        make_task_monitor_taskspec("1778089999999999012"),
+        config=config,
+    )
+
+    class DiagnosticFailure(Exception):
+        pass
+
+    def fail_record_build(**_kwargs: Any) -> None:
+        raise DiagnosticFailure("private diagnostic detail")
+
+    writes: list[tuple[int, bytes]] = []
+
+    def write_warning(fd: int, payload: bytes) -> int:
+        writes.append((fd, payload))
+        if warning_write_fails:
+            raise OSError("diagnostic fd unavailable")
+        return len(payload)
+
+    try:
+        with monkeypatch.context() as scoped_patch:
+            scoped_patch.setattr(
+                "weft.core.monitor.task_monitor.build_serve_log_record",
+                fail_record_build,
+            )
+            scoped_patch.setattr(
+                "weft.core.monitor.task_monitor.os.write",
+                write_warning,
+            )
+            monitor._emit_task_monitor_log(
+                "task_monitor_test",
+                required_level="info",
+            )
+        assert monitor.taskspec.state.status == "running"
+    finally:
+        monitor.cleanup()
+
+    expected = [(2, b"weft task monitor operational log emission failed\n")]
+    assert writes == expected
+    assert all(b"private diagnostic detail" not in payload for _fd, payload in writes)
+
+
 def test_runtime_config_accepts_jsonl_then_delete_when_reporting_is_configured() -> (
     None
 ):

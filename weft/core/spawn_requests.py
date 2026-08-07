@@ -119,7 +119,7 @@ def _write_spawn_request_with_timestamp(
     """
 
     if not callable(getattr(db, "insert_messages", None)):
-        raise RuntimeError(
+        raise RuntimeError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-263] exception
             "exact-ID spawn request writes require a broker connection with "
             "insert_messages support"
         )

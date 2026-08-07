@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from contextlib import contextmanager
 from itertools import combinations
 from multiprocessing.connection import Connection
@@ -27,6 +28,7 @@ from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.core.tasks import sessions as sessions_module
 from weft.core.tasks.agent_session_protocol import (
     make_booted_response,
+    make_execute_request,
     make_ready_response,
     make_result_response,
     make_startup_error_response,
@@ -500,6 +502,136 @@ def test_agent_session_metrics_failure_returns_cache_and_later_recovers(
     assert "sensitive" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "session_factory",
+    [
+        lambda monitor: sessions_module.CommandSession(
+            object(),
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            monitor,
+            None,
+        ),
+        lambda monitor: AgentSession(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            monitor,
+            None,
+            timeout=None,
+        ),
+    ],
+)
+def test_session_limit_verdict_survives_optional_metrics_read_failure(
+    session_factory: Any,
+) -> None:
+    class Monitor:
+        def check_limits(self, _limits: Any) -> tuple[bool, str]:
+            return False, "memory limit"
+
+        def last_metrics(self) -> ResourceMetrics:
+            raise RuntimeError("metrics unavailable")
+
+        def stop(self) -> None:
+            return None
+
+    monitor = Monitor()
+    session = session_factory(monitor)
+
+    assert session.poll_limits() == (False, "memory limit")
+
+
+@pytest.mark.parametrize(
+    "session_factory",
+    [
+        lambda monitor: sessions_module.CommandSession(
+            object(),
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            monitor,
+            None,
+        ),
+        lambda monitor: AgentSession(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            monitor,
+            None,
+            timeout=None,
+        ),
+    ],
+)
+def test_session_monitor_adapter_failure_fails_open_and_releases_monitor(
+    session_factory: Any,
+) -> None:
+    class AdapterFailure(Exception):
+        pass
+
+    cached = ResourceMetrics(memory_mb=3.0)
+
+    class Monitor:
+        stop_calls = 0
+
+        def check_limits(self, _limits: Any) -> tuple[bool, str | None]:
+            raise AdapterFailure("configured monitor failed")
+
+        def last_metrics(self) -> ResourceMetrics:
+            return cached
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    monitor = Monitor()
+    session = session_factory(monitor)
+
+    assert session.poll_limits() == (True, None)
+    assert session.last_metrics is cached
+    assert session._monitor is None
+    assert monitor.stop_calls == 1
+
+
+@pytest.mark.parametrize(
+    "session_factory",
+    [
+        lambda monitor: sessions_module.CommandSession(
+            object(),
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            monitor,
+            None,
+        ),
+        lambda monitor: AgentSession(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            monitor,
+            None,
+            timeout=None,
+        ),
+    ],
+)
+def test_session_monitor_poll_propagates_non_exception_failure_identity(
+    session_factory: Any,
+) -> None:
+    class FatalSignal(BaseException):
+        pass
+
+    fatal = FatalSignal("stop polling")
+
+    class Monitor:
+        def check_limits(self, _limits: Any) -> tuple[bool, str | None]:
+            raise fatal
+
+    monitor = Monitor()
+    session = session_factory(monitor)
+
+    with pytest.raises(FatalSignal) as caught:
+        session.poll_limits()
+
+    assert caught.value is fatal
+    assert session._monitor is monitor
+
+
 def test_agent_session_startup_error_survives_immediate_child_exit() -> None:
     session = _spawn_agent_session_for_target(_agent_session_startup_error_worker)
     try:
@@ -758,20 +890,20 @@ def _spawn_agent_session_for_target(
     )
 
 
-def _agent_session_error_then_exit_worker(
-    request_queue: Any,
-    response_sender: Connection,
-) -> None:
-    try:
-        send_terminal_payload(response_sender, make_booted_response())
-        send_terminal_payload(response_sender, make_ready_response())
-        request_queue.get()
-        send_terminal_payload(
-            response_sender,
-            make_result_response(status="error", error="session boom"),
-        )
-    finally:
-        response_sender.close()
+class _PostReadyFailingRequestQueue:
+    """Picklable request seam that fails inside the production worker loop."""
+
+    def put(self, _request: Any) -> None:
+        pass
+
+    def get(self) -> dict[str, Any]:
+        raise RuntimeError("session request transport failed")
+
+    def cancel_join_thread(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 def _agent_session_ready_then_hang_worker(
@@ -838,16 +970,59 @@ def _agent_session_malformed_nested_result_worker(
         response_sender.close()
 
 
-def test_agent_session_error_result_survives_immediate_child_exit() -> None:
-    """An error frame sent immediately before exit remains authoritative."""
+def test_production_agent_worker_post_ready_error_survives_immediate_exit() -> None:
+    """The production worker's post-ready result frame survives its exit."""
 
-    session = _spawn_agent_session_for_target(_agent_session_error_then_exit_worker)
+    ctx = multiprocessing.get_context("spawn")
+    ctx.set_executable(sys.executable)
+    request_queue = _PostReadyFailingRequestQueue()
+    response_receiver, response_sender = ctx.Pipe(duplex=False)
+    process = ctx.Process(
+        target=host_module._agent_session_worker_entry,
+        args=(
+            {
+                "type": "agent",
+                "agent": {
+                    "runtime": "llm",
+                    "model": TEST_MODEL_ID,
+                    "conversation_scope": "per_task",
+                    "runtime_config": {
+                        "plugin_modules": ["tests.fixtures.llm_test_models"],
+                    },
+                },
+            },
+            request_queue,
+            response_sender,
+        ),
+    )
+    process.start()
+    worker_pid = process.pid
+    assert worker_pid is not None
+    response_sender.close()
+    session = AgentSession(
+        process,
+        request_queue,  # type: ignore[arg-type]
+        response_receiver,
+        monitor=None,
+        limits=None,
+        timeout=5.0,
+    )
     try:
         session.wait_ready(timeout=5.0)
         result = session.execute("hello")
 
         assert result.status == "error"
-        assert result.error == "session boom"
+        assert result.error is not None
+        assert "Traceback (most recent call last)" in result.error
+        assert "RuntimeError: session request transport failed" in result.error
+        assert result.diagnostics is not None
+        assert result.diagnostics["phase"] == "execute"
+        assert result.diagnostics["exception_type"] == "RuntimeError"
+        assert (
+            "RuntimeError: session request transport failed"
+            in result.diagnostics["traceback_tail"]
+        )
+        assert _wait_for_pid_exit(worker_pid)
         with pytest.raises(RuntimeError, match="Agent session is closed"):
             session.execute("again")
     finally:
@@ -1842,7 +2017,7 @@ def test_task_runner_agent_session_startup_uses_dedicated_ready_timeout(
 ) -> None:
     plugin = tmp_path / "slow_llm_plugin.py"
     plugin.write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "import time",
                 "import llm",
@@ -2196,6 +2371,9 @@ def _build_function_host_runner(
     *,
     function_target: str = "tests.tasks.sample_targets:echo_payload",
     args: list[Any] | None = None,
+    kwargs: dict[str, Any] | None = None,
+    monitor_class: str | None = None,
+    monitor_interval: float = 0.1,
 ) -> HostTaskRunner:
     return HostTaskRunner(
         target_type="function",
@@ -2204,14 +2382,80 @@ def _build_function_host_runner(
         process_target=None,
         agent=None,
         args=args or [],
-        kwargs={},
+        kwargs=kwargs or {},
         env={},
         working_dir=None,
         timeout=timeout,
         limits=None,
-        monitor_class=None,
-        monitor_interval=0.1,
+        monitor_class=monitor_class,
+        monitor_interval=monitor_interval,
     )
+
+
+def test_function_worker_maps_arbitrary_execution_failure_to_terminal_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExtensionFailure(Exception):
+        pass
+
+    class Sender:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fail_execution(*_args: object, **_kwargs: object) -> None:
+        raise ExtensionFailure("extension detail")
+
+    sent: list[RunnerOutcome] = []
+    sender = Sender()
+    monkeypatch.setattr(host_module, "execute_function_target", fail_execution)
+    monkeypatch.setattr(
+        host_module,
+        "send_terminal_payload",
+        lambda _sender, payload, **_kwargs: sent.append(payload) or True,
+    )
+
+    host_module._worker_entry(
+        {"type": "function", "function_target": "fixture:target"},
+        "payload",
+        sender,  # type: ignore[arg-type]
+    )
+
+    assert sender.closed is True
+    assert len(sent) == 1
+    outcome = sent[0]
+    assert outcome.status == "error"
+    assert outcome.value is None
+    assert outcome.returncode is None
+    assert outcome.error is not None
+    assert "ExtensionFailure: extension detail" in outcome.error
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["phase"] == "execute"
+    assert outcome.diagnostics["exception_type"] == "ExtensionFailure"
+
+
+def test_function_worker_propagates_non_exception_failure_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FatalSignal(BaseException):
+        pass
+
+    fatal = FatalSignal("stop worker")
+
+    def fail_execution(*_args: object, **_kwargs: object) -> None:
+        raise fatal
+
+    monkeypatch.setattr(host_module, "execute_function_target", fail_execution)
+
+    with pytest.raises(FatalSignal) as caught:
+        host_module._worker_entry(
+            {"type": "function", "function_target": "fixture:target"},
+            "payload",
+            object(),  # type: ignore[arg-type]
+        )
+
+    assert caught.value is fatal
 
 
 def test_function_host_start_callback_failures_are_logged_without_replacing_outcome(
@@ -2240,6 +2484,331 @@ def test_function_host_start_callback_failures_are_logged_without_replacing_outc
     ]
     assert all(record.exc_info is None for record in caplog.records)
     assert "contains secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "callback_name",
+    ["on_worker_started", "on_runtime_handle_started"],
+)
+def test_function_host_start_callback_propagates_non_exception_failure_identity(
+    callback_name: str,
+) -> None:
+    class FatalSignal(BaseException):
+        pass
+
+    fatal = FatalSignal("stop callback")
+    runner = _build_function_host_runner(timeout=5.0)
+
+    def fail_callback(_value: object) -> None:
+        raise fatal
+
+    with pytest.raises(FatalSignal) as caught:
+        runner.run_with_hooks("payload", **{callback_name: fail_callback})
+
+    assert caught.value is fatal
+
+
+def test_host_monitor_start_failure_attempts_stop_without_replacing_outcome(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Monitor:
+        def start(self, _pid: int) -> None:
+            calls.append("start")
+            raise RuntimeError("sensitive monitor start failure")
+
+        def stop(self) -> None:
+            calls.append("stop")
+            raise RuntimeError("sensitive monitor cleanup failure")
+
+    monkeypatch.setattr(
+        host_module, "load_resource_monitor", lambda *_a, **_k: Monitor()
+    )
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        monitor_class="tests.fake:Monitor",
+        monitor_interval=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+        outcome = runner.run("payload")
+
+    assert outcome.status == "ok"
+    assert outcome.value == "payload"
+    assert calls == ["start", "stop"]
+    monitor_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "resource monitor" in record.getMessage()
+    ]
+    assert monitor_messages == [
+        "Failed to start host resource monitor",
+        "Failed to stop host resource monitor after startup failure",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_host_monitor_without_pid_attempts_stop_and_reports_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[str] = []
+
+    class Monitor:
+        def stop(self) -> None:
+            calls.append("stop")
+            raise RuntimeError("sensitive missing-pid cleanup failure")
+
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+        monitor = host_module._start_optional_monitor(Monitor(), None)
+
+    assert monitor is None
+    assert calls == ["stop"]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Host resource monitor disabled because worker PID is unavailable",
+        "Failed to stop host resource monitor without a worker PID",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_host_monitor_without_pid_reports_disable_after_successful_cleanup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[str] = []
+
+    class Monitor:
+        def stop(self) -> None:
+            calls.append("stop")
+
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+        monitor = host_module._start_optional_monitor(Monitor(), None)
+
+    assert monitor is None
+    assert calls == ["stop"]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Host resource monitor disabled because worker PID is unavailable"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_command_session_monitor_start_failure_clears_session_owner(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Monitor:
+        def start(self, _pid: int) -> None:
+            calls.append("start")
+            raise RuntimeError("sensitive session monitor start failure")
+
+        def stop(self) -> None:
+            calls.append("stop")
+            raise RuntimeError("sensitive session monitor cleanup failure")
+
+    monkeypatch.setattr(
+        host_module, "load_resource_monitor", lambda *_a, **_k: Monitor()
+    )
+    runner = HostTaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=["-c", "import time; time.sleep(30)"],
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class="tests.fake:Monitor",
+        monitor_interval=0.1,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+        session = runner.start_session()
+    try:
+        assert session._monitor is None
+        assert calls == ["start", "stop"]
+        assert [record.getMessage() for record in caplog.records] == [
+            "Failed to start host resource monitor",
+            "Failed to stop host resource monitor after startup failure",
+        ]
+        assert all(record.exc_info is None for record in caplog.records)
+        assert "sensitive" not in caplog.text
+    finally:
+        session.terminate()
+
+
+def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    metrics = ResourceMetrics(memory_mb=12.5)
+
+    class Monitor:
+        def __init__(self) -> None:
+            self.metrics_reads = 0
+
+        def start(self, _pid: int) -> None:
+            calls.append("start")
+
+        def check_limits(self) -> tuple[bool, str | None]:
+            calls.append("check_limits")
+            raise RuntimeError("sensitive resource check failure")
+
+        def last_metrics(self) -> ResourceMetrics | None:
+            calls.append("last_metrics")
+            self.metrics_reads += 1
+            if self.metrics_reads == 1:
+                return metrics
+            raise RuntimeError("sensitive metrics read failure")
+
+        def snapshot(self) -> ResourceMetrics:
+            raise AssertionError("cached metrics must prevent a snapshot")
+
+        def stop(self) -> None:
+            calls.append("stop")
+            raise RuntimeError("sensitive monitor stop failure")
+
+    monitor = Monitor()
+    monkeypatch.setattr(host_module, "load_resource_monitor", lambda *_a, **_k: monitor)
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        function_target="tests.tasks.sample_targets:simulate_work",
+        kwargs={"duration": 0.15},
+        monitor_class="tests.fake:Monitor",
+        monitor_interval=0.01,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+        outcome = runner.run(None)
+
+    assert outcome.status == "ok"
+    assert outcome.value == "done"
+    assert outcome.metrics is metrics
+    assert "check_limits" in calls
+    assert calls[-1] == "stop"
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "resource" in record.getMessage()
+    ]
+    assert "Failed to check host resource limits" in messages
+    assert "Failed to collect host resource metrics" in messages
+    assert messages[-2:] == [
+        "Failed to collect final host resource metrics",
+        "Failed to stop host resource monitor",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_host_monitor_final_metrics_failure_uses_snapshot_before_stop(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    metrics = ResourceMetrics(memory_mb=19.5)
+
+    class Monitor:
+        def start(self, _pid: int) -> None:
+            calls.append("start")
+
+        def last_metrics(self) -> None:
+            calls.append("last_metrics")
+            raise RuntimeError("sensitive final metrics failure")
+
+        def snapshot(self) -> ResourceMetrics:
+            calls.append("snapshot")
+            return metrics
+
+        def stop(self) -> None:
+            calls.append("stop")
+
+    monkeypatch.setattr(
+        host_module, "load_resource_monitor", lambda *_a, **_k: Monitor()
+    )
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        monitor_class="tests.fake:Monitor",
+        monitor_interval=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+        outcome = runner.run("payload")
+
+    assert outcome.status == "ok"
+    assert outcome.value == "payload"
+    assert outcome.metrics is metrics
+    assert calls == ["start", "last_metrics", "snapshot", "stop"]
+    monitor_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "resource" in record.getMessage()
+    ]
+    assert monitor_messages == ["Failed to collect final host resource metrics"]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_host_monitor_snapshot_and_stop_failures_do_not_replace_outcome(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Monitor:
+        def start(self, _pid: int) -> None:
+            calls.append("start")
+
+        def check_limits(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def last_metrics(self) -> None:
+            calls.append("last_metrics")
+
+        def snapshot(self) -> ResourceMetrics:
+            calls.append("snapshot")
+            raise RuntimeError("sensitive snapshot failure")
+
+        def stop(self) -> None:
+            calls.append("stop")
+            raise RuntimeError("sensitive stop failure")
+
+    monkeypatch.setattr(
+        host_module, "load_resource_monitor", lambda *_a, **_k: Monitor()
+    )
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        monitor_class="tests.fake:Monitor",
+        monitor_interval=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+        outcome = runner.run("payload")
+
+    assert outcome.status == "ok"
+    assert outcome.value == "payload"
+    assert outcome.metrics is None
+    assert calls[0] == "start"
+    assert "last_metrics" in calls
+    assert calls[-2:] == ["snapshot", "stop"]
+    monitor_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "resource" in record.getMessage()
+    ]
+    assert monitor_messages == [
+        "Failed to snapshot final host resource metrics",
+        "Failed to stop host resource monitor",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
 
 
 ONE_SHOT_EVENT_ORDER: tuple[TerminalHandoffEventKind, ...] = (
@@ -2975,6 +3544,267 @@ def test_agent_worker_reports_session_close_failure_and_closes_ipc(
     assert "sensitive" not in caplog.text
 
 
+def test_agent_worker_maps_work_item_failure_and_closes_session_and_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExtensionFailure(Exception):
+        pass
+
+    calls: list[str] = []
+
+    class Session:
+        def execute(self, _work_item: object) -> None:
+            calls.append("session.execute")
+            raise ExtensionFailure("work item detail")
+
+        def close(self) -> None:
+            calls.append("session.close")
+
+    class RequestQueue:
+        def __init__(self) -> None:
+            self._requests = iter([make_execute_request("hello")])
+
+        def get(self) -> dict[str, Any]:
+            return next(self._requests)
+
+        def close(self) -> None:
+            calls.append("request_queue.close")
+
+    class ResponseSender:
+        def close(self) -> None:
+            calls.append("response_sender.close")
+
+    responses: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        host_module,
+        "start_agent_runtime_session",
+        lambda *_args, **_kwargs: Session(),
+    )
+    monkeypatch.setattr(
+        host_module,
+        "send_terminal_payload",
+        lambda _sender, payload, **_kwargs: responses.append(payload) or True,
+    )
+
+    host_module._agent_session_worker_entry(
+        {"agent": {"runtime": "llm"}},
+        RequestQueue(),  # type: ignore[arg-type]
+        ResponseSender(),  # type: ignore[arg-type]
+    )
+
+    assert [response["type"] for response in responses] == [
+        "booted",
+        "ready",
+        "result",
+    ]
+    assert responses[-1]["status"] == "error"
+    assert "ExtensionFailure: work item detail" in responses[-1]["error"]
+    assert responses[-1]["diagnostics"]["phase"] == "execute"
+    assert responses[-1]["diagnostics"]["exception_type"] == "ExtensionFailure"
+    assert calls[:2] == ["session.execute", "session.close"]
+    assert len(calls[2:]) == 2
+    assert Counter(calls[2:]) == Counter(
+        {"request_queue.close": 1, "response_sender.close": 1}
+    )
+
+
+def test_agent_worker_maps_post_ready_boundary_failure_to_result_and_closes_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExtensionFailure(Exception):
+        pass
+
+    calls: list[str] = []
+
+    class Session:
+        def close(self) -> None:
+            calls.append("session.close")
+
+    class RequestQueue:
+        def get(self) -> dict[str, Any]:
+            raise ExtensionFailure("request transport detail")
+
+        def close(self) -> None:
+            calls.append("request_queue.close")
+
+    class ResponseSender:
+        def close(self) -> None:
+            calls.append("response_sender.close")
+
+    responses: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        host_module,
+        "start_agent_runtime_session",
+        lambda *_args, **_kwargs: Session(),
+    )
+    monkeypatch.setattr(
+        host_module,
+        "send_terminal_payload",
+        lambda _sender, payload, **_kwargs: responses.append(payload) or True,
+    )
+
+    host_module._agent_session_worker_entry(
+        {"agent": {"runtime": "llm"}},
+        RequestQueue(),  # type: ignore[arg-type]
+        ResponseSender(),  # type: ignore[arg-type]
+    )
+
+    assert [response["type"] for response in responses] == [
+        "booted",
+        "ready",
+        "result",
+    ]
+    assert responses[-1]["status"] == "error"
+    assert "ExtensionFailure: request transport detail" in responses[-1]["error"]
+    assert responses[-1]["diagnostics"]["phase"] == "execute"
+    assert responses[-1]["diagnostics"]["exception_type"] == "ExtensionFailure"
+    assert calls[0] == "session.close"
+    assert len(calls[1:]) == 2
+    assert Counter(calls[1:]) == Counter(
+        {"request_queue.close": 1, "response_sender.close": 1}
+    )
+
+
+def test_agent_worker_propagates_non_exception_work_item_failure_identity_and_closes_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FatalSignal(BaseException):
+        pass
+
+    fatal = FatalSignal("stop work item")
+    calls: list[str] = []
+
+    class Session:
+        def execute(self, _work_item: object) -> None:
+            calls.append("session.execute")
+            raise fatal
+
+        def close(self) -> None:
+            calls.append("session.close")
+
+    class RequestQueue:
+        def get(self) -> dict[str, Any]:
+            return make_execute_request("hello")
+
+        def close(self) -> None:
+            calls.append("request_queue.close")
+
+    class ResponseSender:
+        def close(self) -> None:
+            calls.append("response_sender.close")
+
+    responses: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        host_module,
+        "start_agent_runtime_session",
+        lambda *_args, **_kwargs: Session(),
+    )
+    monkeypatch.setattr(
+        host_module,
+        "send_terminal_payload",
+        lambda _sender, payload, **_kwargs: responses.append(payload) or True,
+    )
+
+    with pytest.raises(FatalSignal) as caught:
+        host_module._agent_session_worker_entry(
+            {"agent": {"runtime": "llm"}},
+            RequestQueue(),  # type: ignore[arg-type]
+            ResponseSender(),  # type: ignore[arg-type]
+        )
+
+    assert caught.value is fatal
+    assert [response["type"] for response in responses] == ["booted", "ready"]
+    assert calls[:2] == ["session.execute", "session.close"]
+    assert len(calls[2:]) == 2
+    assert Counter(calls[2:]) == Counter(
+        {"request_queue.close": 1, "response_sender.close": 1}
+    )
+
+
+def test_agent_worker_maps_startup_failure_and_closes_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExtensionFailure(Exception):
+        pass
+
+    calls: list[str] = []
+
+    class RequestQueue:
+        def close(self) -> None:
+            calls.append("request_queue.close")
+
+    class ResponseSender:
+        def close(self) -> None:
+            calls.append("response_sender.close")
+
+    responses: list[dict[str, Any]] = []
+
+    def fail_start(*_args: object, **_kwargs: object) -> None:
+        raise ExtensionFailure("startup detail")
+
+    monkeypatch.setattr(host_module, "start_agent_runtime_session", fail_start)
+    monkeypatch.setattr(
+        host_module,
+        "send_terminal_payload",
+        lambda _sender, payload, **_kwargs: responses.append(payload) or True,
+    )
+
+    host_module._agent_session_worker_entry(
+        {"agent": {"runtime": "llm"}},
+        RequestQueue(),  # type: ignore[arg-type]
+        ResponseSender(),  # type: ignore[arg-type]
+    )
+
+    assert [response["type"] for response in responses] == [
+        "booted",
+        "startup_error",
+    ]
+    assert "ExtensionFailure: startup detail" in responses[-1]["error"]
+    assert responses[-1]["diagnostics"]["phase"] == "runtime_startup"
+    assert responses[-1]["diagnostics"]["exception_type"] == "ExtensionFailure"
+    assert len(calls) == 2
+    assert Counter(calls) == Counter(
+        {"request_queue.close": 1, "response_sender.close": 1}
+    )
+
+
+def test_agent_worker_propagates_non_exception_startup_failure_identity_and_closes_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FatalSignal(BaseException):
+        pass
+
+    fatal = FatalSignal("stop worker")
+    calls: list[str] = []
+
+    class RequestQueue:
+        def close(self) -> None:
+            calls.append("request_queue.close")
+
+    class ResponseSender:
+        def close(self) -> None:
+            calls.append("response_sender.close")
+
+    def fail_start(*_args: object, **_kwargs: object) -> None:
+        raise fatal
+
+    monkeypatch.setattr(host_module, "start_agent_runtime_session", fail_start)
+    monkeypatch.setattr(host_module, "send_terminal_payload", lambda *_a, **_k: True)
+
+    with pytest.raises(FatalSignal) as caught:
+        host_module._agent_session_worker_entry(
+            {"agent": {"runtime": "llm"}},
+            RequestQueue(),  # type: ignore[arg-type]
+            ResponseSender(),  # type: ignore[arg-type]
+        )
+
+    assert caught.value is fatal
+    assert len(calls) == 2
+    assert Counter(calls) == Counter(
+        {"request_queue.close": 1, "response_sender.close": 1}
+    )
+
+
 def test_one_shot_spawn_failure_closes_both_response_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3060,6 +3890,78 @@ def test_agent_session_monitor_load_failure_cleans_started_resources(
     with pytest.raises(RuntimeError, match="monitor load failed"):
         runner.start_agent_session()
 
+    assert context.process.alive is False
+    assert context.process.joined is True
+    assert context.process.closed is True
+    assert context.queue.closed is True
+    assert context.queue.joined is True
+    assert context.receiver.closed is True
+    assert context.sender.closed is True
+
+
+def test_agent_session_construction_failure_reports_monitor_cleanup_failure(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Monitor cleanup remains visible when session construction fails."""
+
+    calls: list[str] = []
+    context = _StartedContext()
+    context.process.pid = 123
+    runner = HostTaskRunner(
+        target_type="agent",
+        tid="1780000000000000000",
+        function_target=None,
+        process_target=None,
+        agent={"runtime": "llm"},
+        args=None,
+        kwargs=None,
+        env=None,
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class="tests.fake:Monitor",
+        monitor_interval=0.1,
+    )
+    monkeypatch.setattr(runner, "_ctx", context)
+
+    class Monitor:
+        def start(self, pid: int) -> None:
+            assert pid == 123
+            calls.append("start")
+
+        def stop(self) -> None:
+            calls.append("stop")
+            raise RuntimeError("sensitive agent monitor cleanup failure")
+
+    def fail_session_construction(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("session construction failed")
+
+    def stop_process(process: _StartedProcess) -> None:
+        calls.append("stop_process")
+        process.terminate()
+        process.join()
+
+    monkeypatch.setattr(
+        host_module,
+        "load_resource_monitor",
+        lambda *_args, **_kwargs: Monitor(),
+    )
+    monkeypatch.setattr(host_module, "AgentSession", fail_session_construction)
+    monkeypatch.setattr(runner, "_stop_process", stop_process)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="weft.core.runners.host"),
+        pytest.raises(RuntimeError, match="session construction failed"),
+    ):
+        runner.start_agent_session()
+
+    assert calls == ["start", "stop", "stop_process"]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to stop host agent resource monitor during startup cleanup"
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
     assert context.process.alive is False
     assert context.process.joined is True
     assert context.process.closed is True

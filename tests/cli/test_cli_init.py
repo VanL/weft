@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import weft.commands.init as init_cmd
 from tests.conftest import run_cli
 from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
@@ -17,6 +18,14 @@ from weft.commands.init import cmd_init
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
+
+
+class InitBackendFailure(Exception):
+    """Ordinary backend/plugin failure at the init command boundary."""
+
+
+class InitBackendSignal(BaseException):
+    """Fatal signal that the init command boundary must not contain."""
 
 
 def _write_broker_project_config(
@@ -52,6 +61,69 @@ def _clear_backend_part_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for prefix in ("WEFT", "BROKER"):
         for suffix in ("HOST", "PORT", "USER", "PASSWORD", "DATABASE"):
             monkeypatch.delenv(f"{prefix}_BACKEND_{suffix}", raising=False)
+
+
+def test_cmd_init_reports_ordinary_backend_plugin_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An extension-defined backend failure becomes init's existing error result."""
+
+    def fail_resolution(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise InitBackendFailure("backend detail")
+
+    monkeypatch.setattr(init_cmd, "resolve_context_broker_target", fail_resolution)
+    monkeypatch.setattr(
+        init_cmd,
+        "build_context",
+        lambda *args, **kwargs: pytest.fail(
+            f"post-init context must not run: {args!r} {kwargs!r}"
+        ),
+    )
+
+    result = cmd_init(
+        tmp_path,
+        quiet=False,
+        overrides={"BROKER_BACKEND": "postgres"},
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert (
+        captured.err
+        == "weft: failed to initialize SimpleBroker database: backend detail\n"
+    )
+
+
+def test_cmd_init_propagates_fatal_backend_plugin_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Init contains ordinary backend failures, not BaseException signals."""
+
+    signal = InitBackendSignal()
+
+    def fail_resolution(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise signal
+
+    monkeypatch.setattr(init_cmd, "resolve_context_broker_target", fail_resolution)
+
+    with pytest.raises(InitBackendSignal) as exc_info:
+        cmd_init(
+            tmp_path,
+            quiet=False,
+            overrides={"BROKER_BACKEND": "postgres"},
+        )
+
+    captured = capsys.readouterr()
+    assert exc_info.value is signal
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_cli_init_creates_project(workdir: Path, weft_harness) -> None:

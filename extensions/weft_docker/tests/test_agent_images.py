@@ -7,6 +7,7 @@ import tarfile
 from typing import cast
 
 import pytest
+from docker.errors import APIError, ImageNotFound
 from weft_docker.agent_images import get_agent_image_recipe
 from weft_docker.images import (
     DockerBuildFile,
@@ -67,7 +68,7 @@ def test_ensure_docker_image_builds_in_memory_context() -> None:
 
     class FakeImages:
         def get(self, tag: str) -> object:
-            raise RuntimeError(f"missing image: {tag}")
+            raise ImageNotFound(f"missing image: {tag}")
 
         def build(self, **kwargs: object) -> None:
             build_calls.append(kwargs)
@@ -95,3 +96,26 @@ def test_ensure_docker_image_builds_in_memory_context() -> None:
         assert hello_member is not None
         assert dockerfile_member.read().decode("utf-8") == recipe.dockerfile
         assert hello_member.read() == b"hello\n"
+
+
+def test_ensure_docker_image_does_not_treat_api_failure_as_cache_miss() -> None:
+    recipe = DockerImageRecipe(
+        name="codex",
+        version="v1",
+        dockerfile="FROM busybox\n",
+    )
+    build_calls: list[dict[str, object]] = []
+
+    class FakeImages:
+        def get(self, tag: str) -> object:
+            raise APIError(f"registry unavailable for {tag}")
+
+        def build(self, **kwargs: object) -> None:
+            build_calls.append(kwargs)
+
+    client = type("FakeClient", (), {"images": FakeImages()})()
+
+    with pytest.raises(APIError, match="registry unavailable"):
+        ensure_docker_image(client, recipe)
+
+    assert build_calls == []

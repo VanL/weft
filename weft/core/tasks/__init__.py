@@ -17,7 +17,7 @@ from .multiqueue_watcher import MultiQueueWatcher
 from .observer import Observer, SamplingObserver
 from .pipeline import PipelineEdgeTask, PipelineTask
 
-__all__ = [
+__all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-248] exception
     "BaseTask",
     "InteractiveTaskMixin",
     "Consumer",

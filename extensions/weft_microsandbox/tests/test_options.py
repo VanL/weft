@@ -140,11 +140,7 @@ def test_mounts_default_to_read_only(tmp_path: Path) -> None:
             "spec.runner.options.mounts[0] must be an object",
         ),
         (
-            {
-                "mounts": [
-                    {"source": ".", "target": "/workspace", "read_only": 1}
-                ]
-            },
+            {"mounts": [{"source": ".", "target": "/workspace", "read_only": 1}]},
             "spec.runner.options.mounts[0].read_only must be a boolean",
         ),
     ],

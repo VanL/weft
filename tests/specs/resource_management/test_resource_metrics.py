@@ -83,3 +83,30 @@ def test_connection_count_keeps_legacy_connections_fallback() -> None:
             return [object()]
 
     assert PsutilResourceMonitor._connection_count(FakeProcess()) == 1
+
+
+def test_check_limits_fails_open_when_the_process_disappears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor = PsutilResourceMonitor(limits=LimitsSection(memory_mb=1))
+    monkeypatch.setattr(
+        monitor,
+        "get_current_metrics",
+        lambda: (_ for _ in ()).throw(RuntimeError("process exited")),
+    )
+
+    assert monitor.check_limits() == (True, None)
+
+
+def test_check_limits_propagates_unexpected_metric_collection_defects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor = PsutilResourceMonitor(limits=LimitsSection(memory_mb=1))
+    monkeypatch.setattr(
+        monitor,
+        "get_current_metrics",
+        lambda: (_ for _ in ()).throw(ValueError("unexpected metric defect")),
+    )
+
+    with pytest.raises(ValueError, match="unexpected metric defect"):
+        monitor.check_limits()

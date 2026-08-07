@@ -227,7 +227,7 @@ def _normalize_mode(value: object, *, target_type: str) -> MicrosandboxMode:
             "spec.type='agent'"
         )
     if not isinstance(value, str):
-        raise ValueError("spec.runner.options.mode must be 'tool' or 'agent'")
+        raise ValueError("spec.runner.options.mode must be 'tool' or 'agent'")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-273] exception
     normalized = value.strip()
     if normalized not in {"tool", "agent"}:
         raise ValueError("spec.runner.options.mode must be 'tool' or 'agent'")
@@ -238,7 +238,7 @@ def _normalize_network(value: object) -> MicrosandboxNetwork:
     if value is None:
         return "none"
     if not isinstance(value, str):
-        raise ValueError("spec.runner.options.network must be 'none' or 'allow'")
+        raise ValueError("spec.runner.options.network must be 'none' or 'allow'")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-273] exception
     normalized = value.strip()
     if normalized not in {"none", "allow"}:
         raise ValueError("spec.runner.options.network must be 'none' or 'allow'")
@@ -249,7 +249,7 @@ def _normalize_workspace_mode(value: object) -> WorkspaceMode:
     if value is None:
         return "none"
     if not isinstance(value, str):
-        raise ValueError("spec.runner.options.workspace_mode must be a string")
+        raise ValueError("spec.runner.options.workspace_mode must be a string")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-273] exception
     normalized = value.strip()
     if normalized not in {
         "none",
@@ -268,11 +268,11 @@ def _normalize_mounts(value: object) -> tuple[MicrosandboxMount, ...]:
     if value is None:
         return ()
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise ValueError("spec.runner.options.mounts must be a list of mount objects")
+        raise ValueError("spec.runner.options.mounts must be a list of mount objects")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-273] exception
     mounts: list[MicrosandboxMount] = []
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
-            raise ValueError(f"spec.runner.options.mounts[{index}] must be an object")
+            raise ValueError(f"spec.runner.options.mounts[{index}] must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-273] exception
         source = _required_text(
             item.get("source"),
             name=f"spec.runner.options.mounts[{index}].source",
@@ -283,7 +283,7 @@ def _normalize_mounts(value: object) -> tuple[MicrosandboxMount, ...]:
         )
         read_only = item.get("read_only", True)
         if not isinstance(read_only, bool):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-273] exception
                 f"spec.runner.options.mounts[{index}].read_only must be a boolean"
             )
         mounts.append(
@@ -298,13 +298,13 @@ def _normalize_mounts(value: object) -> tuple[MicrosandboxMount, ...]:
 
 def _mapping_of_strings(value: object, *, name: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
-        raise ValueError(f"{name} must be an object")
+        raise ValueError(f"{name} must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-273] exception
     return {str(key): str(item) for key, item in value.items()}
 
 
 def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ValueError(f"{name} must be an object")
+        raise ValueError(f"{name} must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-273] exception
     return value
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib.machinery
 import importlib.util
 import subprocess
@@ -75,6 +76,244 @@ class _FakeProcess:
 
 class _SyntheticKeyboardInterrupt(BaseException):
     """Synthetic interrupt used so pytest itself never observes Ctrl-C."""
+
+
+def test_send_pytest_interrupt_contains_os_failure_and_uses_terminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+    process = _FakeProcess([])
+    calls: list[str] = []
+    monkeypatch.setattr(pytest_pg.os, "name", "posix")
+    monkeypatch.setattr(
+        pytest_pg.os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(OSError("signal failed")),
+    )
+    monkeypatch.setattr(process, "terminate", lambda: calls.append("terminate"))
+
+    pytest_pg._send_pytest_interrupt(process)
+
+    assert calls == ["terminate"]
+
+
+def test_send_pytest_interrupt_propagates_unexpected_signal_defect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+    process = _FakeProcess([])
+    monkeypatch.setattr(pytest_pg.os, "name", "posix")
+    monkeypatch.setattr(
+        pytest_pg.os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("signal defect")),
+    )
+
+    with pytest.raises(RuntimeError, match="signal defect"):
+        pytest_pg._send_pytest_interrupt(process)
+
+
+def test_send_pytest_interrupt_contains_terminate_os_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+    process = _FakeProcess([])
+    monkeypatch.setattr(pytest_pg.os, "name", "posix")
+    monkeypatch.setattr(
+        pytest_pg.os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(OSError("signal failed")),
+    )
+    monkeypatch.setattr(
+        process,
+        "terminate",
+        lambda: (_ for _ in ()).throw(OSError("process already exited")),
+    )
+
+    pytest_pg._send_pytest_interrupt(process)
+
+
+def test_send_pytest_interrupt_propagates_unexpected_terminate_defect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+    process = _FakeProcess([])
+    monkeypatch.setattr(pytest_pg.os, "name", "posix")
+    monkeypatch.setattr(
+        pytest_pg.os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(OSError("signal failed")),
+    )
+    monkeypatch.setattr(
+        process,
+        "terminate",
+        lambda: (_ for _ in ()).throw(RuntimeError("terminate defect")),
+    )
+
+    with pytest.raises(RuntimeError, match="terminate defect"):
+        pytest_pg._send_pytest_interrupt(process)
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "process_method"),
+    [
+        ("_terminate_pytest_process_tree", "terminate"),
+        ("_kill_pytest_process_tree", "kill"),
+    ],
+)
+def test_pytest_process_tree_helpers_fallback_only_for_import_error(
+    helper_name: str,
+    process_method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+    process = _FakeProcess([])
+    calls: list[str] = []
+    real_import = builtins.__import__
+
+    def fail_helpers_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "weft.helpers":
+            raise ImportError("helper unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_helpers_import)
+    monkeypatch.setattr(
+        process,
+        process_method,
+        lambda: calls.append(process_method),
+    )
+
+    getattr(pytest_pg, helper_name)(process)
+
+    assert calls == [process_method]
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "process_method"),
+    [
+        ("_terminate_pytest_process_tree", "terminate"),
+        ("_kill_pytest_process_tree", "kill"),
+    ],
+)
+def test_pytest_process_tree_helpers_contain_fallback_os_failure(
+    helper_name: str,
+    process_method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+    process = _FakeProcess([])
+    real_import = builtins.__import__
+
+    def fail_helpers_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "weft.helpers":
+            raise ImportError("helper unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_helpers_import)
+    monkeypatch.setattr(
+        process,
+        process_method,
+        lambda: (_ for _ in ()).throw(OSError("process already exited")),
+    )
+
+    getattr(pytest_pg, helper_name)(process)
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    ["_terminate_pytest_process_tree", "_kill_pytest_process_tree"],
+)
+def test_pytest_process_tree_helpers_propagate_unexpected_import_defect(
+    helper_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+    process = _FakeProcess([])
+    real_import = builtins.__import__
+
+    def fail_helpers_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "weft.helpers":
+            raise RuntimeError("helper import defect")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_helpers_import)
+
+    with pytest.raises(RuntimeError, match="helper import defect"):
+        getattr(pytest_pg, helper_name)(process)
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "process_method"),
+    [
+        ("_terminate_pytest_process_tree", "terminate"),
+        ("_kill_pytest_process_tree", "kill"),
+    ],
+)
+def test_pytest_process_tree_helpers_propagate_unexpected_fallback_defect(
+    helper_name: str,
+    process_method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+    process = _FakeProcess([])
+    real_import = builtins.__import__
+
+    def fail_helpers_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "weft.helpers":
+            raise ImportError("helper unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_helpers_import)
+    monkeypatch.setattr(
+        process,
+        process_method,
+        lambda: (_ for _ in ()).throw(RuntimeError("fallback defect")),
+    )
+
+    with pytest.raises(RuntimeError, match="fallback defect"):
+        getattr(pytest_pg, helper_name)(process)
+
+
+def test_main_reports_unexpected_cli_boundary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pytest_pg = _load_pytest_pg_module()
+
+    class CliBoundaryFailure(Exception):
+        pass
+
+    def start_container() -> tuple[str, str]:
+        return "test-container", "postgresql://test"
+
+    def fail_schema(*, env: dict[str, str]) -> None:
+        assert env == {"TEST_DSN": "postgresql://test"}
+        raise CliBoundaryFailure("cli boundary detail")
+
+    cleanup_events: list[str] = []
+    monkeypatch.setattr(pytest_pg, "_start_postgres_container", start_container)
+    monkeypatch.setattr(
+        pytest_pg,
+        "_build_test_env",
+        lambda *, dsn: {"TEST_DSN": dsn},
+    )
+    monkeypatch.setattr(pytest_pg, "_initialize_broker_schema", fail_schema)
+    monkeypatch.setattr(
+        pytest_pg,
+        "_print_container_logs",
+        lambda name: cleanup_events.append(f"logs:{name}"),
+    )
+    monkeypatch.setattr(
+        pytest_pg,
+        "_cleanup_container",
+        lambda name: cleanup_events.append(f"cleanup:{name}"),
+    )
+    monkeypatch.setattr(pytest_pg.sys, "argv", ["pytest-pg"])
+
+    assert pytest_pg.main() == 1
+    captured = capsys.readouterr()
+    assert captured.err == "cli boundary detail\n"
+    assert cleanup_events == ["logs:test-container", "cleanup:test-container"]
 
 
 def test_launch_pytest_process_isolates_ctrl_c_on_current_platform(

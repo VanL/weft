@@ -420,6 +420,61 @@ def test_bad_pong_extension_provider_error_stays_nested(broker_env, unique_tid):
     assert ping_response["task_status"] == task.taskspec.state.status
 
 
+def test_pong_extension_provider_failure_is_local_but_fatal_exit_propagates(
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
+    task = Consumer(db_path, spec)
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ordinary = LookupError("verbatim extension failure")
+
+    def fail_ordinary() -> None:
+        raise ordinary
+
+    class FatalExtensionExit(BaseException):
+        pass
+
+    fatal = FatalExtensionExit("fatal extension exit")
+
+    def fail_fatal() -> None:
+        raise fatal
+
+    try:
+        task.register_pong_extension_provider(fail_ordinary)
+        ctrl_in.write(
+            json.dumps(
+                {
+                    "command": "PING",
+                    "request_id": "failing-extension-provider",
+                }
+            )
+        )
+        task.process_once()
+        responses = [json.loads(message) for message in _read_all(ctrl_out)]
+        assert len(responses) == 1
+        pong = responses[0]
+        assert pong["command"] == "PING"
+        assert pong["status"] == "ok"
+        assert pong["message"] == "PONG"
+        assert pong["tid"] == unique_tid
+        assert pong["task_status"] == task.taskspec.state.status
+        assert pong["paused"] is False
+        assert pong["should_stop"] is False
+        assert pong["runner"] == task.taskspec.spec.runner.name
+        assert pong["request_id"] == "failing-extension-provider"
+        assert pong[PONG_EXTENSION_KEY] == {"error": "verbatim extension failure"}
+
+        task.register_pong_extension_provider(fail_fatal)
+        with pytest.raises(FatalExtensionExit) as exc_info:
+            task._pong_extension_fields()
+        assert exc_info.value is fatal
+    finally:
+        task.cleanup()
+
+
 def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):
     db_path, make_queue = broker_env
     spec = _make_manager_taskspec(unique_tid)

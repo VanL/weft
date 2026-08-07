@@ -243,6 +243,47 @@ def test_monitor_store_schema_creation_is_idempotent(tmp_path) -> None:
     assert store.status().schema_version == WEFT_MONITOR_SCHEMA_VERSION
 
 
+def test_monitor_store_status_represents_backend_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    store = open_monitor_store(_context(tmp_path))
+
+    def fail_checkpoint(_queue_name: str) -> int | None:
+        raise RuntimeError("monitor backend contains sensitive detail")
+
+    monkeypatch.setattr(store, "get_checkpoint", fail_checkpoint)
+
+    status = store.status()
+
+    assert status.enabled is True
+    assert status.available is False
+    assert status.schema_version is None
+    assert status.checkpoint is None
+    assert status.error == "monitor backend contains sensitive detail"
+
+
+def test_monitor_store_status_does_not_contain_fatal_backend_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    class FatalBackendSignal(BaseException):
+        pass
+
+    signal = FatalBackendSignal("stop now")
+    store = open_monitor_store(_context(tmp_path))
+
+    def fail_checkpoint(_queue_name: str) -> int | None:
+        raise signal
+
+    monkeypatch.setattr(store, "get_checkpoint", fail_checkpoint)
+
+    with pytest.raises(FatalBackendSignal) as exc_info:
+        store.status()
+
+    assert exc_info.value is signal
+
+
 def test_monitor_store_deferred_writes_are_bounded_outbox_rows(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)

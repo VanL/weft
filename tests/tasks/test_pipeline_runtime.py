@@ -35,6 +35,7 @@ from weft.commands import specs as spec_cmd
 from weft.context import build_context
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
 from weft.core.tasks import Consumer
+from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.tasks.pipeline import PipelineEdgeTask, PipelineTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
@@ -50,6 +51,38 @@ def _drain(queue) -> list[str]:
 
 def _drain_json(queue) -> list[dict[str, Any]]:
     return [json.loads(item) for item in _drain(queue)]
+
+
+class _WriteFailingQueue:
+    """Transparent test queue that fails one selected write."""
+
+    def __init__(self, delegate: Any, *, message: str, failure: BaseException) -> None:
+        self._delegate = delegate
+        self._message = message
+        self._failure = failure
+
+    def write(self, message: str) -> None:
+        if message == self._message:
+            raise self._failure
+        self._delegate.write(message)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+
+class _DeleteThenFailingQueue:
+    """Transparent test queue that fails after a real delete."""
+
+    def __init__(self, delegate: Any, *, failure: BaseException) -> None:
+        self._delegate = delegate
+        self._failure = failure
+
+    def delete(self, *args: Any, **kwargs: Any) -> None:
+        self._delegate.delete(*args, **kwargs)
+        raise self._failure
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
 
 
 def _drive_consumer_once_until_idle(
@@ -677,6 +710,72 @@ def test_stage_output_edge_fails_when_source_has_extra_payload(
     assert "single handoff" in terminal["error"]
 
 
+def test_pipeline_edge_maps_unexpected_ordinary_handoff_failure_to_failure(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unclassified ordinary handoff failure remains an edge result."""
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    edge = PipelineEdgeTask(db_path, _entry_edge_spec(tid))
+    make_queue("P1775000000000000000.inbox").write("payload")
+
+    class UnexpectedHandoffFailure(Exception):
+        pass
+
+    monkeypatch.setattr(
+        edge,
+        "_handoff_payload",
+        lambda _timestamp: (_ for _ in ()).throw(
+            UnexpectedHandoffFailure("unexpected handoff failure")
+        ),
+    )
+
+    edge.process_once()
+
+    assert edge.taskspec.state.status == "failed"
+    assert edge.taskspec.state.error == "unexpected handoff failure"
+    events = _drain_json(make_queue("P1775000000000000000.events"))
+    terminal = next(event for event in events if event.get("type") == "edge_terminal")
+    assert terminal["status"] == "failed"
+    assert terminal["error"] == "unexpected handoff failure"
+    assert make_queue(edge._queue_names["reserved"]).read_one() == "payload"
+    assert make_queue(edge._queue_names["inbox"]).read_one() is None
+
+
+def test_pipeline_edge_does_not_map_fatal_handoff_exit_to_failure(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control-flow exits escape the ordinary edge-failure boundary unchanged."""
+    db_path, _make_queue = broker_env
+    tid = str(time.time_ns())
+    edge = PipelineEdgeTask(db_path, _entry_edge_spec(tid))
+
+    class FatalHandoffExit(BaseException):
+        pass
+
+    fatal = FatalHandoffExit()
+    monkeypatch.setattr(
+        edge,
+        "_handoff_payload",
+        lambda _timestamp: (_ for _ in ()).throw(fatal),
+    )
+    context = QueueMessageContext(
+        queue_name=edge._queue_names["inbox"],
+        queue=edge._queue(edge._queue_names["inbox"]),
+        mode=QueueMode.RESERVE,
+        timestamp=1,
+        reserved_queue_name=edge._queue_names["reserved"],
+    )
+
+    with pytest.raises(FatalHandoffExit) as exc_info:
+        edge._handle_work_message("payload", 1, context)
+
+    assert exc_info.value is fatal
+    assert edge.taskspec.state.status == "running"
+
+
 def test_edge_keeps_successful_handoff_when_checkpoint_emit_fails(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -753,6 +852,219 @@ def test_pipeline_task_bootstraps_all_children_before_any_stage_runs(
     ]
     assert _drain_json(ctx.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)) == []
     assert ctx.queue(compiled.runtime.queues.events, persistent=True).read_one() is None
+
+
+def test_pipeline_bootstrap_first_child_failure_does_not_stop_unsubmitted_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first-child failure has an explicit empty rollback set."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=1)
+    task = PipelineTask(
+        tmp_path / "bootstrap-first-child.sqlite3",
+        TaskSpec.model_validate(payload),
+    )
+    child_payloads = task._ordered_child_taskspec_payloads()
+    ctrl_queues = [str(child["io"]["control"]["ctrl_in"]) for child in child_payloads]
+
+    class UnexpectedSubmissionFailure(Exception):
+        pass
+
+    def fail_first_submission(*_args: Any, **_kwargs: Any) -> None:
+        raise UnexpectedSubmissionFailure("unexpected submission failure")
+
+    monkeypatch.setattr(pipeline_module, "submit_spawn_request", fail_first_submission)
+
+    task._bootstrap_children()
+
+    assert _drain_json(task._queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)) == []
+    assert [_drain(task._queue(queue_name)) for queue_name in ctrl_queues] == [
+        []
+    ] * len(ctrl_queues)
+    assert task._registry_message_id is not None
+    assert _drain_json(task._queue(WEFT_PIPELINES_STATE_QUEUE)) == []
+    assert task.taskspec.state.status == "failed"
+    assert task.taskspec.state.error == (
+        "Pipeline bootstrap failed: unexpected submission failure"
+    )
+    assert task._bootstrapped is False
+
+
+def test_pipeline_bootstrap_later_child_failure_stops_only_submitted_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary later failure rolls back only admitted children."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=1)
+    task = PipelineTask(
+        tmp_path / "bootstrap-later-child.sqlite3",
+        TaskSpec.model_validate(payload),
+    )
+    child_payloads = task._ordered_child_taskspec_payloads()
+    ctrl_queues = [str(child["io"]["control"]["ctrl_in"]) for child in child_payloads]
+    original_submit = pipeline_module.submit_spawn_request
+    attempt = 0
+
+    class UnexpectedSubmissionFailure(Exception):
+        pass
+
+    def fail_second_submission(*args: Any, **kwargs: Any) -> None:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 2:
+            raise UnexpectedSubmissionFailure("unexpected submission failure")
+        original_submit(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "submit_spawn_request", fail_second_submission)
+
+    task._bootstrap_children()
+
+    spawned = _drain_json(task._queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    assert [item["taskspec"]["tid"] for item in spawned] == [child_payloads[0]["tid"]]
+    assert [_drain(task._queue(queue_name)) for queue_name in ctrl_queues] == [
+        [CONTROL_STOP],
+        *([[]] * (len(ctrl_queues) - 1)),
+    ]
+    assert task._registry_message_id is not None
+    assert _drain_json(task._queue(WEFT_PIPELINES_STATE_QUEUE)) == []
+    assert task.taskspec.state.status == "failed"
+    assert task.taskspec.state.error == (
+        "Pipeline bootstrap failed: unexpected submission failure"
+    )
+    assert task._bootstrapped is False
+
+
+def test_pipeline_bootstrap_later_fatal_exit_rolls_back_then_propagates_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fatal later exit rolls back admitted children without remapping it."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=1)
+    task = PipelineTask(
+        tmp_path / "bootstrap-fatal.sqlite3",
+        TaskSpec.model_validate(payload),
+    )
+    child_payloads = task._ordered_child_taskspec_payloads()
+    ctrl_queues = [str(child["io"]["control"]["ctrl_in"]) for child in child_payloads]
+    original_submit = pipeline_module.submit_spawn_request
+    attempt = 0
+
+    class FatalSubmissionExit(BaseException):
+        pass
+
+    fatal = FatalSubmissionExit()
+
+    def fail_second_submission(*args: Any, **kwargs: Any) -> None:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 2:
+            raise fatal
+        original_submit(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "submit_spawn_request", fail_second_submission)
+
+    with pytest.raises(FatalSubmissionExit) as exc_info:
+        task._bootstrap_children()
+
+    assert exc_info.value is fatal
+    spawned = _drain_json(task._queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    assert [item["taskspec"]["tid"] for item in spawned] == [child_payloads[0]["tid"]]
+    assert [_drain(task._queue(queue_name)) for queue_name in ctrl_queues] == [
+        [CONTROL_STOP],
+        *([[]] * (len(ctrl_queues) - 1)),
+    ]
+    assert task._registry_message_id is not None
+    assert _drain_json(task._queue(WEFT_PIPELINES_STATE_QUEUE)) == []
+    assert task._bootstrapped is False
+    assert task.taskspec.state.status == "running"
+
+
+def test_pipeline_bootstrap_fatal_exit_keeps_primary_when_rollbacks_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every cleanup phase runs, but the bootstrap fatal exit stays primary."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=1)
+    task = PipelineTask(
+        tmp_path / "bootstrap-fatal-cleanup.sqlite3",
+        TaskSpec.model_validate(payload),
+    )
+    child_payloads = task._ordered_child_taskspec_payloads()
+    ctrl_queues = [str(child["io"]["control"]["ctrl_in"]) for child in child_payloads]
+    original_submit = pipeline_module.submit_spawn_request
+    original_queue = task._queue
+    attempt = 0
+
+    class FatalSubmissionExit(BaseException):
+        pass
+
+    class RollbackExit(BaseException):
+        pass
+
+    fatal = FatalSubmissionExit()
+    rollback_failures = {
+        ctrl_queues[0]: RollbackExit("private rollback detail 1"),
+        ctrl_queues[1]: RollbackExit("private rollback detail 2"),
+    }
+    registry_failure = RollbackExit("private registry detail")
+
+    def fail_third_submission(*args: Any, **kwargs: Any) -> None:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 3:
+            raise fatal
+        original_submit(*args, **kwargs)
+
+    def queue_with_stop_failure(name: str) -> Any:
+        queue = original_queue(name)
+        if name == WEFT_PIPELINES_STATE_QUEUE:
+            return _DeleteThenFailingQueue(queue, failure=registry_failure)
+        if name not in rollback_failures:
+            return queue
+        return _WriteFailingQueue(
+            queue,
+            message=CONTROL_STOP,
+            failure=rollback_failures[name],
+        )
+
+    monkeypatch.setattr(pipeline_module, "submit_spawn_request", fail_third_submission)
+    monkeypatch.setattr(task, "_queue", queue_with_stop_failure)
+
+    with pytest.raises(FatalSubmissionExit) as exc_info:
+        task._bootstrap_children()
+
+    assert exc_info.value is fatal
+    spawned = _drain_json(original_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    assert [item["taskspec"]["tid"] for item in spawned] == [
+        child_payloads[0]["tid"],
+        child_payloads[1]["tid"],
+    ]
+    assert [_drain(original_queue(queue_name)) for queue_name in ctrl_queues] == [
+        [],
+        [],
+        [],
+    ]
+    assert task._registry_message_id is not None
+    assert _drain_json(original_queue(WEFT_PIPELINES_STATE_QUEUE)) == []
+    cleanup_records = [
+        record
+        for record in caplog.records
+        if "bootstrap rollback failed for child control queue" in record.getMessage()
+    ]
+    assert len(cleanup_records) == 2
+    assert all(record.exc_info is None for record in cleanup_records)
+    registry_records = [
+        record
+        for record in caplog.records
+        if "bootstrap registry cleanup failed" in record.getMessage()
+    ]
+    assert len(registry_records) == 1
+    assert registry_records[0].exc_info is None
+    assert "private rollback detail" not in caplog.text
+    assert "private registry detail" not in caplog.text
+    assert task._bootstrapped is False
+    assert task.taskspec.state.status == "running"
 
 
 def test_pipeline_task_writes_active_registry_record_before_child_progress(

@@ -28,6 +28,57 @@ from weft.helpers import iter_queue_json_entries
 pytestmark = [pytest.mark.shared]
 
 
+class _CleanupProcess:
+    def __init__(self, *, failure_phase: str, error: BaseException) -> None:
+        self.failure_phase = failure_phase
+        self.error = error
+        self.calls: list[str] = []
+
+    def poll(self) -> None:
+        return None
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+        if self.failure_phase == "terminate":
+            raise self.error
+
+    def wait(self, *, timeout: float) -> None:
+        self.calls.append(f"wait:{timeout}")
+        raise subprocess.TimeoutExpired("manager", timeout)
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+        if self.failure_phase == "kill":
+            raise self.error
+
+
+@pytest.mark.parametrize("failure_phase", ["terminate", "kill"])
+def test_terminate_manager_process_contains_os_cleanup_failure(
+    failure_phase: str,
+) -> None:
+    process = _CleanupProcess(failure_phase=failure_phase, error=OSError("wait failed"))
+
+    core_manager_runtime._terminate_manager_process(process, timeout=0.25)  # type: ignore[arg-type]
+
+    if failure_phase == "terminate":
+        assert process.calls == ["terminate"]
+    else:
+        assert process.calls == ["terminate", "wait:0.25", "kill"]
+
+
+@pytest.mark.parametrize("failure_phase", ["terminate", "kill"])
+def test_terminate_manager_process_propagates_unexpected_cleanup_defect(
+    failure_phase: str,
+) -> None:
+    process = _CleanupProcess(
+        failure_phase=failure_phase,
+        error=RuntimeError("cleanup defect"),
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup defect"):
+        core_manager_runtime._terminate_manager_process(process, timeout=0.25)  # type: ignore[arg-type]
+
+
 def test_manager_snapshot_converts_every_public_field() -> None:
     runtime_handle = {
         "runner": "host",
@@ -1199,14 +1250,23 @@ def test_stop_command_force_replaces_active_registry_record(
         "weft.core.manager_runtime._lookup_manager_pid",
         lambda *args, **kwargs: kill_pid,
     )
-    monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
-        lambda pid: pid == kill_pid,
-    )
-    monkeypatch.setattr(
-        "weft.core.manager_runtime.terminate_process_tree",
-        lambda *args, **kwargs: {kill_pid},
-    )
+    termination_started = False
+    lifecycle_events: list[tuple[str, int]] = []
+
+    def is_pid_alive(pid: int | None) -> bool:
+        lifecycle_events.append(
+            ("alive_after_terminate" if termination_started else "alive", pid or 0)
+        )
+        return pid == kill_pid and not termination_started
+
+    def terminate(pid: int, **_kwargs: object) -> set[int]:
+        nonlocal termination_started
+        lifecycle_events.append(("terminate", pid))
+        termination_started = True
+        return {pid}
+
+    monkeypatch.setattr("weft.core.manager_runtime._is_pid_alive", is_pid_alive)
+    monkeypatch.setattr("weft.core.manager_runtime.terminate_process_tree", terminate)
 
     exit_code, message = manager_cmd.stop_command(
         tid=tid,
@@ -1217,6 +1277,11 @@ def test_stop_command_force_replaces_active_registry_record(
 
     assert exit_code == 0
     assert message is None
+    assert ("alive", kill_pid) in lifecycle_events
+    assert lifecycle_events[-2:] == [
+        ("terminate", kill_pid),
+        ("alive_after_terminate", kill_pid),
+    ]
 
     reader = Queue(
         WEFT_SERVICES_REGISTRY_QUEUE,
@@ -1232,6 +1297,153 @@ def test_stop_command_force_replaces_active_registry_record(
     assert len(records) == 1
     assert records[0]["tid"] == tid
     assert records[0]["status"] == "stopped"
+
+
+@pytest.mark.parametrize(
+    ("error", "alive_after_error", "expected_success", "message_fragment"),
+    [
+        (ProcessLookupError("gone"), False, True, None),
+        (ProcessLookupError("uncertain"), True, False, "Failed to terminate"),
+        (OSError("gone"), False, True, None),
+        (OSError("uncertain"), True, False, "Failed to terminate"),
+        (PermissionError("denied"), True, False, "Permission denied"),
+    ],
+)
+def test_stop_manager_force_requires_dead_pid_evidence_after_signal_failure(
+    tmp_path,
+    monkeypatch,
+    error: OSError,
+    alive_after_error: bool,
+    expected_success: bool,
+    message_fragment: str | None,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000010"
+    kill_pid = 8765
+    record = _manager_service_payload(
+        context,
+        tid,
+        runtime_handle=_host_runtime_handle(kill_pid),
+    )
+    signal_attempted = False
+    marked: list[str] = []
+
+    monkeypatch.setattr(
+        core_manager_runtime, "_send_stop", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_await_manager_stop_confirmation",
+        lambda *_args, **_kwargs: (False, record),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_lookup_manager_pid",
+        lambda *_args, **_kwargs: kill_pid,
+    )
+
+    def is_pid_alive(pid: int | None) -> bool:
+        assert pid == kill_pid
+        return alive_after_error if signal_attempted else True
+
+    def terminate(*_args: object, **_kwargs: object) -> set[int]:
+        nonlocal signal_attempted
+        signal_attempted = True
+        raise error
+
+    def mark_stopped(*_args: object, **_kwargs: object) -> bool:
+        marked.append(tid)
+        return True
+
+    monkeypatch.setattr(core_manager_runtime, "_is_pid_alive", is_pid_alive)
+    monkeypatch.setattr(core_manager_runtime, "terminate_process_tree", terminate)
+    monkeypatch.setattr(core_manager_runtime, "_mark_manager_stopped", mark_stopped)
+
+    success, message = core_manager_runtime._stop_manager(
+        context,
+        record,
+        timeout=0.0,
+        force=True,
+    )
+
+    assert success is expected_success
+    if message_fragment is None:
+        assert message is None
+    else:
+        assert message_fragment in (message or "")
+    assert marked == ([tid] if expected_success else [])
+
+
+@pytest.mark.parametrize(
+    ("error", "exited_after_error", "expected_success", "message_fragment"),
+    [
+        (ProcessLookupError("gone"), True, True, None),
+        (ProcessLookupError("uncertain"), False, False, "Failed to terminate"),
+        (OSError("gone"), True, True, None),
+        (OSError("uncertain"), False, False, "Failed to terminate"),
+        (PermissionError("denied"), False, False, "Permission denied"),
+    ],
+)
+def test_stop_manager_force_requires_process_exit_evidence_after_signal_failure(
+    tmp_path,
+    monkeypatch,
+    error: OSError,
+    exited_after_error: bool,
+    expected_success: bool,
+    message_fragment: str | None,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000010"
+    record = _manager_service_payload(context, tid)
+    marked: list[str] = []
+
+    class FailingProcess:
+        signal_attempted = False
+
+        def poll(self) -> int | None:
+            if self.signal_attempted and exited_after_error:
+                return 0
+            return None
+
+        def terminate(self) -> None:
+            self.signal_attempted = True
+            raise error
+
+    process = FailingProcess()
+    monkeypatch.setattr(
+        core_manager_runtime, "_send_stop", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_await_manager_stop_confirmation",
+        lambda *_args, **_kwargs: (False, record),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_lookup_manager_pid",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def mark_stopped(*_args: object, **_kwargs: object) -> bool:
+        marked.append(tid)
+        return True
+
+    monkeypatch.setattr(core_manager_runtime, "_mark_manager_stopped", mark_stopped)
+
+    success, message = core_manager_runtime._stop_manager(
+        context,
+        record,
+        process=process,  # type: ignore[arg-type]
+        timeout=0.0,
+        force=True,
+    )
+
+    assert success is expected_success
+    if message_fragment is None:
+        assert message is None
+    else:
+        assert message_fragment in (message or "")
+    assert marked == ([tid] if expected_success else [])
 
 
 def test_list_command_returns_table(tmp_path):

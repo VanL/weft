@@ -113,7 +113,7 @@ def _resolve_taskspec_source(file_path: Path) -> tuple[Path, Path | None] | None
             file_path,
             spec_type=spec_cmd.SPEC_TYPE_TASK,
         )
-    except Exception as exc:  # pragma: no cover - validation command boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-351] exception
         console.print(f"[red]Error reading file:[/red] {exc}")
         return None
     return resolved.path, resolved.bundle_root

@@ -1248,7 +1248,7 @@ def alias_remove_command(
     )
 
 
-__all__ = [
+__all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-246] exception
     "QueueMessage",
     "QueueInfo",
     "read_messages",

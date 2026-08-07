@@ -7,10 +7,19 @@ from typing import Any
 import pytest
 
 import weft.commands.submission as submission_mod
+from weft.commands._spawn_submission import SpawnSubmissionReconciliation
 from weft.commands.types import PreparedSubmissionRequest
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 
 pytestmark = [pytest.mark.shared]
+
+
+class ManagerStartupFailure(Exception):
+    """Ordinary manager-startup failure that requires queue reconciliation."""
+
+
+class ManagerStartupSignal(BaseException):
+    """Fatal manager-startup signal that reconciliation must not contain."""
 
 
 @pytest.mark.parametrize(
@@ -46,6 +55,107 @@ def test_apply_submit_overrides_rejects_invalid_model_dump_spec_type(
     assert type(exc_info.value) is TypeError
     assert str(exc_info.value) == "TaskSpec spec section must be a mapping"
     assert exc_info.value.__cause__ is None
+
+
+def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
+    weft_harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-enqueue startup failure yields to durable spawned evidence."""
+
+    context = weft_harness.context
+    tid = "1777000000000000789"
+    startup_error = ManagerStartupFailure("startup detail")
+    calls: list[tuple[str, bool]] = []
+
+    def fail_startup(_context: object, *, verbose: bool) -> object:
+        calls.append(("ensure", verbose))
+        raise startup_error
+
+    def reconcile(_context: object, submitted_tid: str, **kwargs: object) -> object:
+        assert kwargs == {}
+        calls.append((f"reconcile:{submitted_tid}", False))
+        return SpawnSubmissionReconciliation(outcome="spawned", tid=submitted_tid)
+
+    monkeypatch.setattr(submission_mod, "reconcile_submitted_spawn", reconcile)
+
+    result = submission_mod.ensure_manager_after_submission(
+        context,
+        submitted_tid=tid,
+        verbose=True,
+        ensure_manager_fn=fail_startup,
+        delete_spawn_request_fn=lambda *_args, **_kwargs: pytest.fail(
+            "spawned evidence must not delete the committed request"
+        ),
+    )
+
+    assert result == (None, False, None)
+    assert calls == [("ensure", True), (f"reconcile:{tid}", False)]
+
+
+def test_ensure_manager_rejected_result_preserves_startup_failure_as_cause(
+    weft_harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manager rejection stays primary while retaining the startup failure."""
+
+    context = weft_harness.context
+    tid = "1777000000000000790"
+    startup_error = ManagerStartupFailure("startup detail")
+
+    def fail_startup(_context: object, *, verbose: bool) -> object:
+        assert verbose is False
+        raise startup_error
+
+    monkeypatch.setattr(
+        submission_mod,
+        "reconcile_submitted_spawn",
+        lambda _context, submitted_tid: SpawnSubmissionReconciliation(
+            outcome="rejected",
+            tid=submitted_tid,
+            error="manager rejection detail",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="^manager rejection detail$") as exc_info:
+        submission_mod.ensure_manager_after_submission(
+            context,
+            submitted_tid=tid,
+            ensure_manager_fn=fail_startup,
+        )
+
+    assert exc_info.value.__cause__ is startup_error
+
+
+def test_ensure_manager_propagates_fatal_startup_signal_without_reconciliation(
+    weft_harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BaseException signals bypass the ordinary queue reconciliation policy."""
+
+    context = weft_harness.context
+    signal = ManagerStartupSignal()
+
+    def fail_startup(_context: object, *, verbose: bool) -> object:
+        assert verbose is False
+        raise signal
+
+    monkeypatch.setattr(
+        submission_mod,
+        "reconcile_submitted_spawn",
+        lambda *_args, **_kwargs: pytest.fail(
+            "fatal startup signals must not enter reconciliation"
+        ),
+    )
+
+    with pytest.raises(ManagerStartupSignal) as exc_info:
+        submission_mod.ensure_manager_after_submission(
+            context,
+            submitted_tid="1777000000000000791",
+            ensure_manager_fn=fail_startup,
+        )
+
+    assert exc_info.value is signal
 
 
 def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(

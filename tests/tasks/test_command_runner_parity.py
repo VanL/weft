@@ -148,6 +148,17 @@ def _skip_unavailable_runner(
         assert sandbox_profile is not None
         options["profile"] = str(sandbox_profile)
 
+    validation_errors: tuple[type[Exception], ...] = (RuntimeError, ValueError)
+    if runner_name == "docker":
+        try:
+            # Docker is an optional test dependency. Its SDK base exception is
+            # part of Docker preflight availability, not a programming failure.
+            from docker.errors import DockerException
+        except ImportError:
+            pass
+        else:
+            validation_errors = (*validation_errors, DockerException)
+
     try:
         plugin.validate_taskspec(
             {
@@ -162,7 +173,7 @@ def _skip_unavailable_runner(
             },
             preflight=True,
         )
-    except Exception as exc:
+    except validation_errors as exc:
         pytest.skip(f"{runner_name} runner unavailable: {exc}")
     if runner_name == "docker":
         _ensure_docker_image_available(str(options["image"]))
@@ -221,6 +232,74 @@ def _ensure_docker_image_available(image: str) -> None:
         if detail:
             message = f"{message}: {detail}"
         pytest.skip(message)
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("runtime"), ValueError("value")])
+def test_runner_validation_availability_failures_skip(
+    failure: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+    sandbox_profile: Path,
+) -> None:
+    class UnavailablePlugin:
+        def validate_taskspec(self, *_args: Any, **_kwargs: Any) -> None:
+            raise failure
+
+    monkeypatch.setattr(
+        "tests.tasks.test_command_runner_parity.require_runner_plugin",
+        lambda _runner_name: UnavailablePlugin(),
+    )
+
+    with pytest.raises(pytest.skip.Exception, match=f"unavailable: {failure}"):
+        _skip_unavailable_runner(
+            "macos-sandbox",
+            sandbox_profile=sandbox_profile,
+        )
+
+
+def test_docker_runner_validation_sdk_failure_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docker_errors = pytest.importorskip("docker.errors")
+    failure = docker_errors.DockerException("daemon unavailable")
+
+    class UnavailableDockerPlugin:
+        def validate_taskspec(self, *_args: Any, **_kwargs: Any) -> None:
+            raise failure
+
+    monkeypatch.setattr(
+        "tests.tasks.test_command_runner_parity.require_runner_plugin",
+        lambda _runner_name: UnavailableDockerPlugin(),
+    )
+
+    with pytest.raises(
+        pytest.skip.Exception,
+        match="docker runner unavailable: daemon unavailable",
+    ):
+        _skip_unavailable_runner("docker")
+
+
+def test_runner_validation_programming_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    sandbox_profile: Path,
+) -> None:
+    failure = AssertionError("validation bug")
+
+    class BrokenPlugin:
+        def validate_taskspec(self, *_args: Any, **_kwargs: Any) -> None:
+            raise failure
+
+    monkeypatch.setattr(
+        "tests.tasks.test_command_runner_parity.require_runner_plugin",
+        lambda _runner_name: BrokenPlugin(),
+    )
+
+    with pytest.raises(AssertionError) as exc_info:
+        _skip_unavailable_runner(
+            "macos-sandbox",
+            sandbox_profile=sandbox_profile,
+        )
+
+    assert exc_info.value is failure
 
 
 def test_docker_runner_is_skipped_on_windows(

@@ -217,7 +217,7 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
 
     try:
         return ensure_manager_impl(context, verbose=verbose)
-    except Exception as exc:  # pragma: no cover - manager startup reconciliation
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-354] exception
         startup_error = exc
 
     reconciliation = reconcile_submitted_spawn(context, submitted_tid_str)

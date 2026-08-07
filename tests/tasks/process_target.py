@@ -56,7 +56,7 @@ def run_task(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-219] exception
         tcp_clients.extend([client, conn])
 
     for _ in range(max(0, open_files)):
-        tmp = tempfile.NamedTemporaryFile(delete=False)
+        tmp = tempfile.NamedTemporaryFile(delete=False)  # noqa: SIM115 approved [TS-3.1] [RUFF-SUP-308] exception
         files.append(tmp)
         file_paths.append(tmp.name)
 

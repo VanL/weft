@@ -20,7 +20,7 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 import weft.commands.system as status_cmd
-import weft.commands.task_evidence as task_evidence
+import weft.commands.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -542,9 +542,7 @@ def _monitor_store_task_snapshot(
     try:
         store = open_monitor_store(ctx, config=ctx.config)
         record = store.get_task(tid)
-    except (
-        Exception
-    ) as exc:  # pragma: no cover - monitor fallback must not break status
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-355] exception
         if _monitor_store_schema_missing(exc):
             return None
         return status_cmd.TaskSnapshot(

@@ -633,7 +633,7 @@ class MultiQueueWatcher(BaseWatcher):
                 self._close_activity_waiter_once(waiter)
         finally:
             if not topology_published:
-                if candidate_waiter is not None and not candidate_installed:
+                if candidate_waiter is not None and not candidate_installed:  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-242] exception
                     if candidate_rollback_owned:
                         self._close_candidate_resource_once(candidate_waiter)
                 if candidate_config is not None:
@@ -659,9 +659,11 @@ class MultiQueueWatcher(BaseWatcher):
             except _TopologyDriveError as exc:
                 request.error = exc.cause
                 retry_error = exc.cause
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-339] exception
+                # One ordinary request failure stays local; later FIFO requests run.
                 request.error = exc
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-339] exception
+                # A fatal owner exit releases every caller before exact re-raise.
                 request.error = RuntimeError(
                     "watcher drive exited during topology mutation"
                 )
@@ -680,20 +682,31 @@ class MultiQueueWatcher(BaseWatcher):
                     if not self._topology_mutations:
                         self._topology_pending.clear()
                 request.done.set()
-            self._finish_topology_sigint_critical()
-            if fatal_error is not None:
-                raise fatal_error
+            self._finish_topology_sigint_critical(fatal_error=fatal_error)
             if retry_error is not None:
                 raise retry_error
 
-    def _finish_topology_sigint_critical(self) -> None:
-        """Deliver a SIGINT deferred across an atomic topology transaction."""
+    def _finish_topology_sigint_critical(
+        self,
+        *,
+        fatal_error: BaseException | None = None,
+    ) -> None:
+        """Finish one atomic topology transaction and deliver its fatal outcome.
+
+        A fatal mutation failure is the transaction's specific unwind cause,
+        so it has priority over the generic interrupt.  The deferred SIGINT
+        still stops the watcher and is consumed before the exact fatal object
+        is re-raised.
+        """
         self._topology_sigint_critical = False
-        if not self._topology_deferred_sigint:
-            return
-        self._topology_deferred_sigint = False
-        self.stop(join=False)
-        raise KeyboardInterrupt
+        deferred_sigint = self._topology_deferred_sigint
+        if deferred_sigint:
+            self._topology_deferred_sigint = False
+            self.stop(join=False)
+        if fatal_error is not None:
+            raise fatal_error
+        if deferred_sigint:
+            raise KeyboardInterrupt
 
     def _sigint_handler(self, signum: int, frame: Any) -> None:
         """Defer SIGINT only while waiter replacement is half-published."""

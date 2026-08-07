@@ -87,7 +87,7 @@ def test_tool_profile_ref_must_return_agent_tool_profile_result() -> None:
 def test_bundle_local_resolver_and_tool_profile(tmp_path: Path) -> None:
     helper = tmp_path / "helper_module.py"
     helper.write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from weft.ext import AgentResolverResult, AgentToolProfileResult",
                 "",

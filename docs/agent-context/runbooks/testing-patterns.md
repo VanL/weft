@@ -31,7 +31,7 @@ or `ruff` are installed globally.
 
 # Static checks
 ./.venv/bin/mypy weft bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml
-./.venv/bin/ruff check weft
+./.venv/bin/ruff check .
 ```
 
 ## Coverage Policy

@@ -633,7 +633,7 @@ def _run_interactive_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-111] exc
                 context,
                 config=context.config,
             ).get_task(tid)
-        except Exception:  # pragma: no cover - monitor-store fallback best effort
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-332] exception
             return False
         if record is None or not record.terminal_seen:
             return False
@@ -1188,7 +1188,7 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
             emit_verbose=False,
             wait_for_completion=_wait_for_inline_completion if wait else None,
         )
-    except Exception as exc:  # pragma: no cover - command error boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-333] exception
         return RunExecutionResult(
             tid="",
             submission_error=f"Error submitting task: {exc}",
@@ -1325,7 +1325,7 @@ def _execute_spec_via_manager(
             emit_verbose=False,
             wait_for_completion=_wait_for_spec_completion if wait else None,
         )
-    except Exception as exc:  # pragma: no cover - command error boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-333] exception
         return RunExecutionResult(
             tid="",
             submission_error=f"Error submitting TaskSpec: {exc}",

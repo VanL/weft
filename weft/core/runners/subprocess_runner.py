@@ -8,13 +8,14 @@ Spec references:
 from __future__ import annotations
 
 import codecs
+import contextlib
 import logging
 import queue
 import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 from simplebroker import BrokerTarget
 from weft._constants import (
@@ -31,6 +32,15 @@ from weft.ext import RunnerHandle
 from weft.helpers import safe_cancel
 
 logger = logging.getLogger(__name__)
+
+_MonitorPhase = Literal[
+    "startup cleanup",
+    "cancellation cleanup",
+    "timeout cleanup",
+    "limit check",
+    "limit cleanup",
+    "completion cleanup",
+]
 
 
 def prepare_command_invocation(
@@ -88,18 +98,28 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
     """
     last_metrics: ResourceMetrics | None = None
     actual_worker_pid = worker_pid if worker_pid is not None else process.pid
-    if on_worker_started is not None:
-        try:
-            on_worker_started(actual_worker_pid)
-        except Exception:  # pragma: no cover - defensive
-            logger.warning("Subprocess worker-start callback failed")
-            pass
-    if on_runtime_handle_started is not None:
-        try:
-            on_runtime_handle_started(runtime_handle)
-        except Exception:  # pragma: no cover - defensive
-            logger.warning("Subprocess runtime-handle callback failed")
-            pass
+    try:
+        if on_worker_started is not None:
+            try:
+                on_worker_started(actual_worker_pid)
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-350] exception
+                logger.warning("Subprocess worker-start callback failed")
+        if on_runtime_handle_started is not None:
+            try:
+                on_runtime_handle_started(runtime_handle)
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-350] exception
+                logger.warning("Subprocess runtime-handle callback failed")
+    except BaseException:
+        # A fatal callback signal remains fatal, but the managed child must not
+        # outlive the call that owned it. Cleanup failures cannot replace the
+        # original signal.
+        with contextlib.suppress(BaseException):
+            _cleanup_after_callback_failure(
+                process,
+                stop_runtime=stop_runtime,
+                kill_runtime=kill_runtime,
+            )
+        raise
 
     if monitor is None and monitor_class and actual_worker_pid is not None:
         monitor = load_resource_monitor(
@@ -112,7 +132,9 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
     if monitor is not None:
         try:
             monitor.start(actual_worker_pid if actual_worker_pid is not None else -1)
-        except Exception:  # pragma: no cover - external process may not be monitorable
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
+            logger.warning("Subprocess resource monitor failed during startup")
+            _stop_monitor(monitor, phase="startup cleanup")
             monitor = None
 
     if process.stdout is None or process.stderr is None:
@@ -160,7 +182,12 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 stdout_closed=stdout_closed,
                 stderr_closed=stderr_closed,
             )
-            last_metrics = _stop_monitor(monitor, last_metrics)
+            last_metrics = _last_monitor_metrics(
+                monitor,
+                last_metrics,
+                phase="cancellation cleanup",
+            )
+            _stop_monitor(monitor, phase="cancellation cleanup")
             return RunnerOutcome(
                 status="cancelled",
                 value=None,
@@ -195,7 +222,12 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 stdout_closed=stdout_closed,
                 stderr_closed=stderr_closed,
             )
-            last_metrics = _stop_monitor(monitor, last_metrics)
+            last_metrics = _last_monitor_metrics(
+                monitor,
+                last_metrics,
+                phase="timeout cleanup",
+            )
+            _stop_monitor(monitor, phase="timeout cleanup")
             return RunnerOutcome(
                 status="timeout",
                 value=None,
@@ -238,11 +270,16 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
             and process.poll() is None
             and time.monotonic() >= next_monitor_at
         ):
+            ok, violation = True, None
             try:
                 ok, violation = monitor.check_limits()
-            except Exception:  # pragma: no cover - process may have exited
-                ok, violation = True, None
-            last_metrics = monitor.last_metrics()
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
+                logger.warning("Subprocess resource monitor failed during limit check")
+            last_metrics = _last_monitor_metrics(
+                monitor,
+                last_metrics,
+                phase="limit check",
+            )
             next_monitor_at = time.monotonic() + interval
             if not ok:
                 _kill_process_runtime(process, kill_runtime=kill_runtime)
@@ -256,7 +293,12 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                     stdout_closed=stdout_closed,
                     stderr_closed=stderr_closed,
                 )
-                last_metrics = _stop_monitor(monitor, last_metrics)
+                last_metrics = _last_monitor_metrics(
+                    monitor,
+                    last_metrics,
+                    phase="limit cleanup",
+                )
+                _stop_monitor(monitor, phase="limit cleanup")
                 return RunnerOutcome(
                     status="limit",
                     value=None,
@@ -295,14 +337,17 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
     stdout = "".join(stdout_parts)
     stderr = "".join(stderr_parts)
 
-    if monitor is not None:
-        last_metrics = monitor.last_metrics()
-        if last_metrics is None:
-            try:
-                last_metrics = monitor.snapshot()
-            except Exception:  # pragma: no cover - defensive
-                last_metrics = None
-        monitor.stop()
+    last_metrics = _last_monitor_metrics(
+        monitor,
+        last_metrics,
+        phase="completion cleanup",
+    )
+    if monitor is not None and last_metrics is None:
+        try:
+            last_metrics = monitor.snapshot()
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
+            logger.warning("Subprocess resource monitor failed during final snapshot")
+    _stop_monitor(monitor, phase="completion cleanup")
 
     returncode = process.returncode
     if returncode is None:
@@ -366,6 +411,33 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
         worker_pid=actual_worker_pid,
         runtime_handle=runtime_handle,
     )
+
+
+def _cleanup_after_callback_failure(
+    process: subprocess.Popen[str],
+    *,
+    stop_runtime: Callable[[], None],
+    kill_runtime: Callable[[], None],
+) -> None:
+    """Best-effort reap a child without replacing a callback fatal signal."""
+
+    with contextlib.suppress(BaseException):
+        _stop_process_runtime(
+            process,
+            stop_runtime=stop_runtime,
+            kill_runtime=kill_runtime,
+        )
+
+    process_alive = True
+    with contextlib.suppress(BaseException):
+        process_alive = process.poll() is None
+    if not process_alive:
+        return
+
+    with contextlib.suppress(BaseException):
+        process.kill()
+    with contextlib.suppress(BaseException):
+        process.wait(timeout=SUBPROCESS_TERMINATION_WAIT_TIMEOUT)
 
 
 def _stop_process_runtime(
@@ -526,12 +598,35 @@ def _drain_streams_until_closed(
     return stdout_closed, stderr_closed
 
 
-def _stop_monitor(
+def _last_monitor_metrics(
     monitor: Any,
     last_metrics: ResourceMetrics | None,
+    *,
+    phase: _MonitorPhase,
 ) -> ResourceMetrics | None:
     if monitor is None:
         return last_metrics
-    metrics = monitor.last_metrics() or last_metrics
-    monitor.stop()
-    return metrics
+    try:
+        return monitor.last_metrics() or last_metrics
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
+        logger.warning(
+            "Subprocess resource monitor failed while reading metrics during %s",
+            phase,
+        )
+        return last_metrics
+
+
+def _stop_monitor(
+    monitor: Any,
+    *,
+    phase: _MonitorPhase,
+) -> None:
+    if monitor is None:
+        return
+    try:
+        monitor.stop()
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
+        logger.warning(
+            "Subprocess resource monitor failed while stopping during %s",
+            phase,
+        )

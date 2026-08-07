@@ -74,7 +74,7 @@ def stdin_is_tty(stream: Any | None = None) -> bool:
         return False
     try:
         return bool(candidate.isatty())
-    except Exception:  # pragma: no cover - defensive for mocked stdin
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-328] exception
         return False
 
 
@@ -84,7 +84,7 @@ def safe_cancel(callback: Callable[[], bool] | None) -> bool:
         return False
     try:
         return bool(callback())
-    except Exception:  # pragma: no cover - external cancel hook is best effort
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-329] exception
         return False
 
 
@@ -814,7 +814,7 @@ def write_file_atomically(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-125] except
                 pass  # Best effort cleanup
             raise
 
-    except Exception as e:  # pragma: no cover - atomic write fallback
+    except OSError as e:  # pragma: no cover - atomic write fallback
         # Fallback to simple write if atomic approach fails
         # This maintains compatibility but loses race condition protection
         log_warning(

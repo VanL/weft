@@ -151,6 +151,86 @@ def test_validate_spec_source_reports_tool_profile_stage(tmp_path: Path) -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("validator_name", "stage", "field", "agent_runtime"),
+    [
+        (
+            "_validate_taskspec_parameterization",
+            "parameterization",
+            "parameterization",
+            None,
+        ),
+        ("_validate_taskspec_run_input", "run_input", "run_input", None),
+        (
+            "validate_taskspec_runner_environment",
+            "environment_profile",
+            "environment_profile",
+            None,
+        ),
+        ("validate_taskspec_runner", "runner", "runner", None),
+        (
+            "validate_taskspec_agent_runtime",
+            "agent_runtime",
+            "agent_runtime",
+            "llm",
+        ),
+        (
+            "validate_taskspec_agent_tool_profile",
+            "tool_profile",
+            "tool_profile",
+            "provider_cli",
+        ),
+    ],
+)
+def test_validate_spec_source_contains_open_validation_probe_failures_by_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    validator_name: str,
+    stage: str,
+    field: str,
+    agent_runtime: str | None,
+) -> None:
+    """Each extensible validation stage converts arbitrary failures locally."""
+    payload = create_valid_function_taskspec().model_dump(mode="json")
+    if agent_runtime is not None:
+        payload["spec"] = {
+            "type": "agent",
+            "agent": {
+                "runtime": agent_runtime,
+                "runtime_config": (
+                    {"provider": "codex", "executable": "unused-provider"}
+                    if agent_runtime == "provider_cli"
+                    else {"plugin_modules": ["unused.runtime"]}
+                ),
+            },
+        }
+
+    validator_names = (
+        "_validate_taskspec_parameterization",
+        "_validate_taskspec_run_input",
+        "validate_taskspec_runner_environment",
+        "validate_taskspec_runner",
+        "validate_taskspec_agent_runtime",
+        "validate_taskspec_agent_tool_profile",
+    )
+    for name in validator_names:
+        monkeypatch.setattr(spec_cmd, name, lambda *_args, **_kwargs: None)
+
+    failure_message = f"{stage} extension failed"
+
+    def raise_extension_failure(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(failure_message)
+
+    monkeypatch.setattr(spec_cmd, validator_name, raise_extension_failure)
+
+    result = spec_cmd.validate_spec_source(payload, load_runner=True)
+
+    assert result.valid is False
+    assert result.payload == payload
+    assert result.errors == [failure_message]
+    assert result.errors_by_stage == {stage: {field: failure_message}}
+    assert "Traceback" not in repr(result)
+
+
 def test_validate_spec_source_uses_bundle_root_without_mutating_payload(
     tmp_path: Path,
 ) -> None:

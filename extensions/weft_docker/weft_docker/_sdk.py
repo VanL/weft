@@ -55,12 +55,13 @@ def wait_for_container_runtime_start(
     if container is None:
         return
 
+    docker = load_docker_sdk()
     deadline = time.monotonic() + timeout
     runtime_id = getattr(container, "name", None) or getattr(container, "id", "unknown")
     while True:
         try:
             container.reload()
-        except Exception:  # pragma: no cover - defensive Docker API guard
+        except docker.errors.DockerException:  # pragma: no cover - Docker API guard
             return
 
         status = _container_status(container)

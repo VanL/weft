@@ -44,8 +44,12 @@ def test_prepare_agent_images_rejects_malformed_work_item_as_value_error(
     fake_module.ensure_agent_image = lambda *_args, **_kwargs: None
     fake_module.get_agent_image_recipe = lambda _provider: None
     monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
-    monkeypatch.setattr(agent_images_module, "builtin_platform_supported", lambda _: True)
-    monkeypatch.setattr(agent_images_module, "require_runner_plugin", lambda _: object())
+    monkeypatch.setattr(
+        agent_images_module, "builtin_platform_supported", lambda _: True
+    )
+    monkeypatch.setattr(
+        agent_images_module, "require_runner_plugin", lambda _: object()
+    )
 
     with pytest.raises(ValueError) as exc_info:
         prepare_agent_images_task(work_item)
@@ -195,3 +199,97 @@ def test_prepare_agent_images_task_explicit_providers_skip_probe(
             "cache_key": "codex-cache-key",
         }
     ]
+
+
+def test_prepare_agent_images_contains_one_provider_failure_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    attempts: list[str] = []
+    fake_module = types.ModuleType("weft_docker.agent_images")
+    fake_module.get_agent_image_recipe = lambda _provider_name: object()
+
+    def ensure_agent_image(provider_name: str, *, refresh: bool = False) -> object:
+        assert refresh is True
+        attempts.append(provider_name)
+        if provider_name == "codex":
+            raise RuntimeError("provider build contains sensitive detail")
+        return SimpleNamespace(
+            action="built",
+            image=f"weft-agent-{provider_name}:fresh",
+            cache_key=f"{provider_name}-cache-key",
+        )
+
+    fake_module.ensure_agent_image = ensure_agent_image
+    monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
+    monkeypatch.setattr(
+        agent_images_module,
+        "require_runner_plugin",
+        lambda name: SimpleNamespace(name=name),
+    )
+    monkeypatch.setattr(
+        agent_images_module,
+        "build_context",
+        lambda create_database=False: SimpleNamespace(root=tmp_path),
+    )
+
+    payload = prepare_agent_images_task(
+        {"providers": ["codex", "gemini"], "refresh": True}
+    )
+
+    assert attempts == ["codex", "gemini"]
+    assert payload["summary"] == {
+        "requested": 2,
+        "built": 1,
+        "reused": 0,
+        "unsupported": 0,
+        "failed": 1,
+    }
+    assert payload["providers"] == [
+        {
+            "provider": "codex",
+            "recipe_status": "supported",
+            "action": "failed",
+            "error": "provider build contains sensitive detail",
+        },
+        {
+            "provider": "gemini",
+            "recipe_status": "supported",
+            "action": "built",
+            "image": "weft-agent-gemini:fresh",
+            "cache_key": "gemini-cache-key",
+        },
+    ]
+
+
+def test_prepare_agent_images_does_not_contain_fatal_provider_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    class FatalProviderSignal(BaseException):
+        pass
+
+    signal = FatalProviderSignal("stop now")
+    fake_module = types.ModuleType("weft_docker.agent_images")
+    fake_module.get_agent_image_recipe = lambda _provider_name: object()
+
+    def fail_build(*_args: object, **_kwargs: object) -> object:
+        raise signal
+
+    fake_module.ensure_agent_image = fail_build
+    monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
+    monkeypatch.setattr(
+        agent_images_module,
+        "require_runner_plugin",
+        lambda name: SimpleNamespace(name=name),
+    )
+    monkeypatch.setattr(
+        agent_images_module,
+        "build_context",
+        lambda create_database=False: SimpleNamespace(root=tmp_path),
+    )
+
+    with pytest.raises(FatalProviderSignal) as exc_info:
+        prepare_agent_images_task({"providers": ["codex"]})
+
+    assert exc_info.value is signal

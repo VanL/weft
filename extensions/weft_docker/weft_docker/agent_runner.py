@@ -241,14 +241,12 @@ class DockerProviderCLIRunner:
                     if on_worker_started is not None:
                         try:
                             on_worker_started(None)
-                        except Exception:  # pragma: no cover - callback safety
-                            logger.warning(
-                                "Docker agent worker-start callback failed"
-                            )
+                        except Exception:  # pragma: no cover - callback safety  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-278] exception
+                            logger.warning("Docker agent worker-start callback failed")
                     if on_runtime_handle_started is not None:
                         try:
                             on_runtime_handle_started(runtime_handle)
-                        except Exception:  # pragma: no cover - callback safety
+                        except Exception:  # pragma: no cover - callback safety  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-278] exception
                             logger.warning(
                                 "Docker agent runtime-handle callback failed"
                             )
@@ -290,12 +288,12 @@ class DockerProviderCLIRunner:
                     if stdout_text and on_stdout_chunk is not None:
                         try:
                             on_stdout_chunk(stdout_text, True)
-                        except Exception:  # pragma: no cover - callback safety
+                        except Exception:  # pragma: no cover - callback safety  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-279] exception
                             logger.warning("Docker agent stdout callback failed")
                     if stderr_text and on_stderr_chunk is not None:
                         try:
                             on_stderr_chunk(stderr_text, True)
-                        except Exception:  # pragma: no cover - callback safety
+                        except Exception:  # pragma: no cover - callback safety  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-279] exception
                             logger.warning("Docker agent stderr callback failed")
 
                     if terminal_status is not None:
@@ -337,7 +335,7 @@ class DockerProviderCLIRunner:
                                 duration=time.monotonic() - start,
                                 runtime_handle=runtime_handle,
                             )
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-280] exception
                             outcome = RunnerOutcome(
                                 status="error",
                                 value=None,
@@ -365,7 +363,7 @@ class DockerProviderCLIRunner:
                 if container is not None:
                     try:
                         container.remove(force=True)
-                    except Exception:  # pragma: no cover - best effort cleanup
+                    except Exception:  # pragma: no cover - best effort cleanup  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-281] exception
                         logger.warning("Docker agent container cleanup failed")
 
     def start_session(self) -> CommandSession:
@@ -575,11 +573,11 @@ def _normalize_mounts(value: object, *, name: str) -> list[dict[str, Any]]:
     if value is None:
         return []
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise ValueError(f"{name} must be a list of mount objects")
+        raise ValueError(f"{name} must be a list of mount objects")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-274] exception
     mounts: list[dict[str, Any]] = []
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
-            raise ValueError(f"{name}[{index}] must be an object")
+            raise ValueError(f"{name}[{index}] must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-274] exception
         source = _normalize_required_text(
             item.get("source"),
             name=f"{name}[{index}].source",
@@ -603,12 +601,12 @@ def _normalize_work_item_mounts(value: object, *, name: str) -> list[dict[str, A
     if value is None:
         return []
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise ValueError(f"{name} must be a list of mount objects")
+        raise ValueError(f"{name} must be a list of mount objects")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-274] exception
 
     mounts: list[dict[str, Any]] = []
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
-            raise ValueError(f"{name}[{index}] must be an object")
+            raise ValueError(f"{name}[{index}] must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-274] exception
 
         extra_keys = sorted(
             set(item) - {"source_path_ref", "target", "read_only", "required", "kind"}
@@ -629,10 +627,10 @@ def _normalize_work_item_mounts(value: object, *, name: str) -> list[dict[str, A
 
         read_only = item.get("read_only", True)
         if not isinstance(read_only, bool):
-            raise ValueError(f"{name}[{index}].read_only must be a boolean")
+            raise ValueError(f"{name}[{index}].read_only must be a boolean")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-274] exception
         required = item.get("required", True)
         if not isinstance(required, bool):
-            raise ValueError(f"{name}[{index}].required must be a boolean")
+            raise ValueError(f"{name}[{index}].required must be a boolean")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-274] exception
 
         kind = item.get("kind", "any")
         if kind not in {"any", "file", "dir"}:
@@ -765,7 +763,7 @@ def _normalize_optional_text(value: object, *, name: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
+        raise ValueError(f"{name} must be a string")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-274] exception
     cleaned = value.strip()
     if not cleaned:
         raise ValueError(f"{name} must be a non-empty string when provided")
@@ -774,7 +772,7 @@ def _normalize_optional_text(value: object, *, name: str) -> str | None:
 
 def _normalize_required_text(value: object, *, name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
+        raise ValueError(f"{name} must be a string")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-274] exception
     cleaned = value.strip()
     if not cleaned:
         raise ValueError(f"{name} must be a non-empty string")

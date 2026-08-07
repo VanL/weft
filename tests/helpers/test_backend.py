@@ -217,7 +217,7 @@ def cleanup_prepared_roots(
             continue
         try:
             plugin.cleanup_target(dsn, backend_options={"schema": schema})
-        except Exception:
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-314] exception
             logger.warning(
                 "Failed to clean Postgres test schema",
                 extra={"config_path": str(config_path), "schema": schema},
@@ -256,7 +256,11 @@ def cleanup_postgres_schema_for_root(
             dsn,
             backend_options={"schema": schema},
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-314] exception
+        logger.warning(
+            "Failed to clean Postgres test schema",
+            extra={"schema": schema},
+        )
         return
     _PREPARED_POSTGRES_ROOTS.discard((str(resolved_root), dsn, schema))
 

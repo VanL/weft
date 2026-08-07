@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -61,9 +62,15 @@ EXPECTED_GROUP_IDS = [
         for number in range(201, 239)
         if number not in {207, 223}
     ),
+    *(
+        f"RUFF-SUP-{number:03d}"
+        for number in range(239, 366)
+        if number not in {282, 285, 293, 296, 297, 301, 302, 305, 306}
+    ),
 ]
-EXPECTED_GROUP_COUNT = 116
-EXPECTED_DIRECTIVE_COUNT = 144
+EXPECTED_GROUP_COUNT = 234
+EXPECTED_DIRECTIVE_COUNT = 377
+EXPECTED_C901_DIRECTIVE_COUNT = 143
 TAGGED_C901 = re.compile(
     r"#\s*noqa:\s*[^#\n]*\bC901\b[^#\n]*"
     r"approved\s+\[TS-3\.1\]\s+\[RUFF-SUP-(\d{3})\]\s+exception\b"
@@ -428,6 +435,61 @@ def test_extensionless_policy_guard_fires_when_one_tool_is_omitted() -> None:
         _assert_extensionless_policy(incomplete)
 
 
+def test_dom15_checker_entry_point_converts_internal_failure_to_exit_two(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class CheckerFailure(Exception):
+        pass
+
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda _path, **_kwargs: (_ for _ in ()).throw(
+            CheckerFailure("checker failed")
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", [str(ROOT / "bin/check-dom15-fixtures")])
+
+    with pytest.raises(SystemExit) as exc_info:
+        runpy.run_path(
+            str(ROOT / "bin/check-dom15-fixtures"),
+            run_name="__main__",
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == "check-dom15-fixtures: internal error: checker failed\n"
+    assert captured.err == ""
+
+
+def test_dom15_checker_entry_point_does_not_translate_fatal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class CheckerFatal(BaseException):
+        pass
+
+    failure = CheckerFatal("fatal checker failure")
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda _path, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+    monkeypatch.setattr(sys, "argv", [str(ROOT / "bin/check-dom15-fixtures")])
+
+    with pytest.raises(CheckerFatal) as exc_info:
+        runpy.run_path(
+            str(ROOT / "bin/check-dom15-fixtures"),
+            run_name="__main__",
+        )
+
+    assert exc_info.value is failure
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_ruff_discovers_every_tracked_python_file() -> None:
     expected = _tracked_python_files()
     discovered = _ruff_discovered_files()
@@ -587,7 +649,7 @@ def test_approved_suppressions_match_the_spec_registry() -> None:
 
 def test_every_raw_c901_is_tagged_with_an_approved_group() -> None:
     diagnostics = _raw_c901_diagnostics()
-    assert len(diagnostics) == EXPECTED_DIRECTIVE_COUNT
+    assert len(diagnostics) == EXPECTED_C901_DIRECTIVE_COUNT
     approved = set(EXPECTED_GROUP_IDS)
     observed: list[str] = []
 
@@ -603,7 +665,7 @@ def test_every_raw_c901_is_tagged_with_an_approved_group() -> None:
         assert group_id in approved, f"unknown C901 group at {source_path}:{row}"
         observed.append(group_id)
 
-    assert len(observed) == EXPECTED_DIRECTIVE_COUNT
+    assert len(observed) == EXPECTED_C901_DIRECTIVE_COUNT
 
 
 def test_ci_orders_complete_lint_suppression_format_and_type_gates() -> None:

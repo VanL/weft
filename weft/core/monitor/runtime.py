@@ -24,7 +24,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 
-import weft.core.task_evidence as task_evidence
+import weft.core.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-252] exception
 from simplebroker.ext import BrokerError
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,

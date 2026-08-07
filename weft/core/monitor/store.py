@@ -2384,7 +2384,7 @@ class MonitorStore:
 
         try:
             checkpoint = self.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
-        except Exception as exc:  # pragma: no cover - status snapshot fallback
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-364] exception
             return MonitorStoreStatus(
                 enabled=True,
                 available=False,

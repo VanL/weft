@@ -56,13 +56,13 @@ def main(argv: list[str] | None = None) -> int:
         config_json = base64.b64decode(config_b64).decode("utf-8")
         config = json.loads(config_json)
         poll_interval = float(poll_interval_s)
-    except Exception as exc:  # pragma: no cover - defensive
+    except (OSError, ValueError) as exc:
         sys.stderr.write(f"Invalid manager arguments: {exc}\n")
         return 2
 
     try:
         spec = TaskSpec.model_validate_json(spec_json)
-    except Exception as exc:  # pragma: no cover - defensive
+    except ValueError as exc:
         sys.stderr.write(f"Invalid manager TaskSpec: {exc}\n")
         return 2
 

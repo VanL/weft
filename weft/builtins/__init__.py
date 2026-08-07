@@ -112,11 +112,11 @@ def builtin_task_catalog() -> tuple[BuiltinTaskInfo, ...]:
     for path in builtin_task_specs():
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):  # pragma: no cover - defensive
-            raise ValueError(f"Builtin TaskSpec {path} must contain a JSON object")
+            raise ValueError(f"Builtin TaskSpec {path} must contain a JSON object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-271] exception
         spec = payload.get("spec")
         metadata = payload.get("metadata")
         if not isinstance(spec, dict):  # pragma: no cover - defensive
-            raise ValueError(f"Builtin TaskSpec {path} is missing a spec object")
+            raise ValueError(f"Builtin TaskSpec {path} is missing a spec object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-271] exception
         if metadata is None:
             metadata_map: dict[str, Any] = {}
         elif isinstance(metadata, dict):
@@ -170,7 +170,7 @@ def _normalize_supported_platforms(
     if value is None:
         return None
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-271] exception
             f"Builtin TaskSpec {path} supported_platforms must be a list of strings"
         )
     normalized: list[str] = []

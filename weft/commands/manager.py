@@ -288,7 +288,7 @@ def status_command(
     return 0, "\n".join(parts)
 
 
-__all__ = [
+__all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-245] exception
     "list_managers",
     "manager_status",
     "serve_manager",

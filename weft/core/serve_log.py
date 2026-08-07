@@ -146,19 +146,29 @@ def emit_serve_log_record(record: Mapping[str, Any]) -> None:
 
     try:
         line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-    except Exception:  # pragma: no cover - best-effort diagnostic serialization
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-320] exception
         return
     fd = _stderr_fd()
     if fd is None:
         try:
             print(line, end="", file=sys.stderr, flush=True)
-        except Exception:  # pragma: no cover - best-effort diagnostic emission
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-321] exception
+            _warn_serve_log_output_failure()
             return
         return
     log_queue = _ensure_log_queue(fd)
     try:
         log_queue.put_nowait(line.encode("utf-8", errors="replace"))
     except queue.Full:
+        return
+
+
+def _warn_serve_log_output_failure() -> None:
+    """Write one fixed, privacy-safe warning without using ``sys.stderr``."""
+
+    try:
+        os.write(2, b"weft manager serve log output failed\n")
+    except OSError:
         return
 
 

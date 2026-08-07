@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 
-import weft.commands.task_evidence as task_evidence
+import weft.commands.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
@@ -434,7 +434,7 @@ def _collect_all_results(
     with context.broker() as db:
         try:
             queue_names = db.list_queues(pattern=f"T*.{QUEUE_OUTBOX_SUFFIX}")
-        except Exception as exc:  # pragma: no cover - command error boundary
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-309] exception
             return 1, f"weft: failed to enumerate queues: {exc}"
 
     outbox_names = [str(name) for name in queue_names]
@@ -946,7 +946,7 @@ def cmd_result(
 ) -> tuple[int, str | None]:
     try:
         context = build_context(spec_context=context_path)
-    except Exception as exc:  # pragma: no cover - command error boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-353] exception
         return 1, f"weft: failed to resolve context: {exc}"
 
     request_error = _result_request_error(

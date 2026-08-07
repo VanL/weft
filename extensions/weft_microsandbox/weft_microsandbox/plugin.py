@@ -268,7 +268,7 @@ class MicrosandboxRunner:
             if on_runtime_handle_started is not None:
                 try:
                     on_runtime_handle_started(runtime_handle)
-                except Exception:  # pragma: no cover - callback safety
+                except Exception:  # pragma: no cover - callback safety  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-288] exception
                     logger.warning("Microsandbox runtime-handle callback failed")
 
         try:
@@ -352,7 +352,7 @@ class MicrosandboxRunner:
             )
         try:
             value = value_builder(result)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-362] exception
             return RunnerOutcome(
                 status="error",
                 value=None,
@@ -526,7 +526,7 @@ def _emit_stream(
     if text and callback is not None:
         try:
             callback(text, True)
-        except Exception:  # pragma: no cover - callback safety
+        except Exception:  # pragma: no cover - callback safety  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-289] exception
             logger.warning("Microsandbox %s callback failed", stream_name)
 
 
@@ -538,7 +538,7 @@ def _safe_callback(
         return
     try:
         callback(value)
-    except Exception:  # pragma: no cover - callback safety
+    except Exception:  # pragma: no cover - callback safety  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-288] exception
         logger.warning("Microsandbox worker-start callback failed")
 
 

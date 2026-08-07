@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from tests.conftest import run_cli  # re-exported for clarity
 from tests.fixtures.provider_cli_fixture import (
@@ -20,9 +22,18 @@ from tests.taskspec.fixtures import (
     create_valid_function_taskspec,
     create_valid_provider_cli_agent_taskspec,
 )
+from weft.cli import validate_taskspec as validate_taskspec_cmd
 
 pytestmark = [pytest.mark.shared]
 _MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+
+
+class NamedSpecResolutionFailure(Exception):
+    """Ordinary failure from the named-spec resolution boundary."""
+
+
+class NamedSpecResolutionSignal(BaseException):
+    """Fatal signal that named-spec resolution must not contain."""
 
 
 def write_taskspec(path: Path, spec: Any) -> None:
@@ -84,6 +95,62 @@ def test_validate_taskspec_missing_explicit_file_preserves_exit_contract(
     assert rc == 1
     assert out == f"Error: File not found: {missing}"
     assert err == ""
+
+
+def test_validate_taskspec_reports_ordinary_named_spec_resolution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Named-spec resolver failures become the command's existing read error."""
+
+    output = StringIO()
+    monkeypatch.setattr(
+        validate_taskspec_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None),
+    )
+
+    def fail_resolution(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise NamedSpecResolutionFailure("resolver detail")
+
+    monkeypatch.setattr(
+        validate_taskspec_cmd.spec_cmd,
+        "resolve_spec_reference",
+        fail_resolution,
+    )
+
+    assert validate_taskspec_cmd._resolve_taskspec_source(Path("stored-task")) is None
+    assert output.getvalue() == "Error reading file: resolver detail\n"
+
+
+def test_validate_taskspec_propagates_fatal_named_spec_resolution_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command boundary contains ordinary failures, not BaseException signals."""
+
+    output = StringIO()
+    monkeypatch.setattr(
+        validate_taskspec_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None),
+    )
+    signal = NamedSpecResolutionSignal()
+
+    def fail_resolution(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise signal
+
+    monkeypatch.setattr(
+        validate_taskspec_cmd.spec_cmd,
+        "resolve_spec_reference",
+        fail_resolution,
+    )
+
+    with pytest.raises(NamedSpecResolutionSignal) as exc_info:
+        validate_taskspec_cmd._resolve_taskspec_source(Path("stored-task"))
+
+    assert exc_info.value is signal
+    assert output.getvalue() == ""
 
 
 @pytest.mark.parametrize("option", ["--load-runner", "--preflight"])
@@ -405,7 +472,7 @@ def test_validate_taskspec_bundle_directory_loads_bundle_local_environment_profi
     bundle_dir = workdir / "bundle-task"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from weft.ext import RunnerEnvironmentProfileResult",
                 "",

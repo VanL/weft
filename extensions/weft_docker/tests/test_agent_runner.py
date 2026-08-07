@@ -214,7 +214,6 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
         def start(self) -> None:
             if fail_start:
                 raise RuntimeError("primary container start failure")
-            return None
 
         def reload(self) -> None:
             return None

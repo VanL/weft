@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from ._sdk import load_docker_sdk
+
 
 @dataclass(frozen=True, slots=True)
 class DockerBuildFile:
@@ -118,9 +120,10 @@ def ensure_docker_image(
 
 
 def _image_exists(client: Any, tag: str) -> bool:
+    docker = load_docker_sdk()
     try:
         client.images.get(tag)
-    except Exception:
+    except docker.errors.ImageNotFound:
         return False
     return True
 

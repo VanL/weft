@@ -24,6 +24,111 @@ from weft.commands import tasks as task_cmd
 
 
 @pytest.mark.shared
+def test_debug_payload_format_falls_back_for_json_shape_failures() -> None:
+    assert WeftTestHarness._format_debug_payload("{") == "{"
+    assert WeftTestHarness._format_debug_payload(object()).startswith("<object object")
+
+
+@pytest.mark.shared
+def test_debug_payload_format_propagates_unexpected_decoder_defect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        harness_mod.json,
+        "loads",
+        lambda _payload: (_ for _ in ()).throw(RuntimeError("decoder defect")),
+    )
+
+    with pytest.raises(RuntimeError, match="decoder defect"):
+        WeftTestHarness._format_debug_payload("{}")
+
+
+@pytest.mark.shared
+def test_queue_debug_read_failure_uses_fixed_fallback_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_calls: list[str] = []
+
+    class FailingQueue:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def peek_many(self, **_kwargs: object) -> list[object]:
+            raise RuntimeError("sensitive broker read failure")
+
+        def close(self) -> None:
+            close_calls.append("close")
+
+    harness = WeftTestHarness()
+    try:
+        monkeypatch.setattr(harness_mod, "Queue", FailingQueue)
+
+        lines = harness._peek_queue_lines("sensitive.queue.name", persistent=False)
+
+        assert lines == ["<queue read unavailable>"]
+        assert "sensitive" not in "\n".join(lines)
+        assert close_calls == ["close"]
+    finally:
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.shared
+def test_mapping_read_failure_closes_queue_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_calls: list[str] = []
+
+    class FailingQueue:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def peek_many(self, **_kwargs: object) -> list[object]:
+            raise RuntimeError("mapping read failure")
+
+        def close(self) -> None:
+            close_calls.append("close")
+
+    harness = WeftTestHarness()
+    try:
+        monkeypatch.setattr(harness_mod, "Queue", FailingQueue)
+
+        assert harness._load_tid_mapping_payloads() == []
+        assert close_calls == ["close"]
+    finally:
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.shared
+def test_mapping_read_propagates_unexpected_programming_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_calls: list[str] = []
+
+    class DefectiveQueue:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def peek_many(self, **_kwargs: object) -> list[object]:
+            raise TypeError("unexpected mapping reader defect")
+
+        def close(self) -> None:
+            close_calls.append("close")
+
+    harness = WeftTestHarness()
+    try:
+        monkeypatch.setattr(harness_mod, "Queue", DefectiveQueue)
+
+        with pytest.raises(TypeError, match="unexpected mapping reader defect"):
+            harness._load_tid_mapping_payloads()
+        assert close_calls == ["close"]
+    finally:
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.shared
 def test_harness_cleanup_has_no_implicit_object_finalizer() -> None:
     """Keep process, broker, and filesystem cleanup explicitly owned."""
 
@@ -144,6 +249,53 @@ def test_harness_force_termination_targets_managed_pids_only(
         harness._terminate_registered_pids()
 
         assert terminated == [202, 303]
+    finally:
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_pid_termination_failure_warns_and_continues_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = WeftTestHarness()
+    termination_calls: list[int] = []
+    try:
+        harness.register_pid(101, kind="owner")
+        harness.register_pid(202, kind="managed")
+        harness.register_pid(303, kind="managed")
+        monkeypatch.setattr(harness, "_should_skip_pid", lambda _pid: False)
+        monkeypatch.setattr(harness, "_pid_alive", lambda _pid: True)
+        monkeypatch.setattr(
+            harness,
+            "_pid_matches_mapping_identity",
+            lambda _pid, _create_time: True,
+        )
+
+        def terminate(pid: int, *, timeout: float) -> list[int]:
+            del timeout
+            termination_calls.append(pid)
+            if len(termination_calls) == 1:
+                raise RuntimeError("sensitive process cleanup failure")
+            return [pid]
+
+        monkeypatch.setattr(harness_mod, "terminate_process_tree", terminate)
+        caplog.set_level(logging.WARNING, logger="tests.helpers.weft_harness")
+
+        harness._terminate_registered_pids()
+
+        assert len(termination_calls) == 2
+        assert set(termination_calls) == {202, 303}
+        assert [record.getMessage() for record in caplog.records] == [
+            "Failed to terminate registered harness process tree"
+        ]
+        assert caplog.records[0].exc_info is None
+        assert "sensitive process cleanup failure" not in caplog.text
+        assert harness._registered_owner_pids == set()
+        assert harness._registered_managed_pids == set()
+        assert harness._registered_pids == set()
+        assert harness._registered_pid_create_times == {}
     finally:
         harness._closed = True
         harness._tempdir.cleanup()

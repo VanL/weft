@@ -946,7 +946,7 @@ class Manager(ServiceTask):
                     request_id=child_tid,
                     initial_items=(request,),
                 )
-            except Exception as exc:  # pragma: no cover - child-launch worker startup
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-346] exception
                 self._clear_active_child_launch(child_tid)
                 self._handle_child_launch_failure(
                     _ManagerChildLaunchResult(request=request, error=exc)
@@ -1075,7 +1075,7 @@ class Manager(ServiceTask):
                 request_id=child_spec.tid,
                 initial_items=(request,),
             )
-        except Exception as exc:  # pragma: no cover - child-launch worker startup
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-346] exception
             self._clear_active_child_launch(child_spec.tid)
             self._handle_child_launch_failure(
                 _ManagerChildLaunchResult(request=request, error=exc)
@@ -1136,7 +1136,7 @@ class Manager(ServiceTask):
                 config=self._config,
                 detach_stdio=request.detach_stdio,
             )
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-347] exception
             return _ManagerChildLaunchResult(request=request, error=exc)
         return _ManagerChildLaunchResult(
             request=request,
@@ -6916,7 +6916,7 @@ class Manager(ServiceTask):
     def _atexit_unregister(self) -> None:
         try:
             self._unregister_manager()
-        except Exception:  # pragma: no cover - interpreter shutdown cleanup
+        except Exception:  # pragma: no cover - interpreter shutdown cleanup  # noqa: BLE001,S110 approved [TS-3.1] [RUFF-SUP-283] exception
             pass
 
     def _register_atexit_callback(self) -> None:
@@ -6935,7 +6935,7 @@ class Manager(ServiceTask):
         self._atexit_callback = None
         try:
             atexit.unregister(callback)
-        except Exception:  # pragma: no cover - best-effort normal cleanup
+        except Exception:  # pragma: no cover - best-effort normal cleanup  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-284] exception
             logger.warning("Failed to unregister manager atexit callback")
 
 

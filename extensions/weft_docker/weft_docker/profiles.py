@@ -206,7 +206,7 @@ def _load_profile_file(profile_file: Path) -> Mapping[str, Any]:
             f"Docker profile file is not valid TOML: {profile_file}"
         ) from exc
     if not isinstance(payload, Mapping):
-        raise RuntimeError(
+        raise RuntimeError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-276] exception
             f"Docker profile file must contain a TOML table: {profile_file}"
         )
     return payload
@@ -318,7 +318,7 @@ def _resolve_profile_mounts(
     root: Path,
 ) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError(f"{name} must be a list of mount objects")
+        raise ValueError(f"{name} must be a list of mount objects")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-277] exception
     mounts: list[dict[str, Any]] = []
     for index, raw_mount in enumerate(value):
         mount_name = f"{name}[{index}]"
@@ -327,7 +327,7 @@ def _resolve_profile_mounts(
         target = _required_text(mount.get("target"), name=f"{mount_name}.target")
         read_only = mount.get("read_only", True)
         if not isinstance(read_only, bool):
-            raise ValueError(f"{mount_name}.read_only must be a boolean")
+            raise ValueError(f"{mount_name}.read_only must be a boolean")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-277] exception
         mounts.append(
             {
                 "source": str(_resolve_path(source, base=root)),
@@ -389,7 +389,7 @@ def _mapping_of_strings(value: object, *, name: str) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for key, item in mapping.items():
         if not isinstance(key, str) or not isinstance(item, str):
-            raise ValueError(f"{name} must be a mapping of strings to strings")
+            raise ValueError(f"{name} must be a mapping of strings to strings")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-277] exception
         normalized[key] = item
     return normalized
 
@@ -398,7 +398,7 @@ def _string_list(value: object, *, name: str) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError(f"{name} must be a list of strings")
+        raise ValueError(f"{name} must be a list of strings")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-277] exception
     strings: list[str] = []
     for index, item in enumerate(value):
         strings.append(_required_text(item, name=f"{name}[{index}]"))
@@ -407,7 +407,7 @@ def _string_list(value: object, *, name: str) -> list[str]:
 
 def _required_text(value: object, *, name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
+        raise ValueError(f"{name} must be a string")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-277] exception
     cleaned = value.strip()
     if not cleaned:
         raise ValueError(f"{name} must be a non-empty string")
@@ -416,7 +416,7 @@ def _required_text(value: object, *, name: str) -> str:
 
 def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ValueError(f"{name} must be an object")
+        raise ValueError(f"{name} must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-277] exception
     return value
 
 

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
         send_log,
     )
 
-__all__ = [
+__all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-243] exception
     "__version__",
     "PROG_NAME",
     "Task",

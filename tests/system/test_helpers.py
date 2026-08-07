@@ -22,6 +22,7 @@ from tests.conftest import (
     _register_cli_outputs,
     broker_env,
     queue_factory,
+    run_cli,
     task_factory,
 )
 from tests.helpers.weft_harness import WeftTestHarness
@@ -69,6 +70,19 @@ def test_safe_cancel_handles_missing_truthy_and_raising_callbacks() -> None:
         raise RuntimeError("bad cancel hook")
 
     assert safe_cancel(_raise) is False
+
+
+def test_stdin_is_tty_contains_arbitrary_stream_hook_failure() -> None:
+    class StreamHookFailure(Exception):
+        pass
+
+    class BrokenStream:
+        closed = False
+
+        def isatty(self) -> bool:
+            raise StreamHookFailure("private stream failure")
+
+    assert helpers_module.stdin_is_tty(BrokenStream()) is False
 
 
 def test_iter_queue_entries_closes_underlying_generator_on_early_close() -> None:
@@ -386,6 +400,25 @@ class TestAtomicFileWriting:
             "Atomic write failed" in record.getMessage() for record in caplog.records
         )
 
+    def test_write_file_atomically_propagates_unexpected_replace_defect(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "unexpected.txt"
+
+        def replace_fail(self: Path, target_path: Path) -> Path:
+            del self, target_path
+            raise RuntimeError("replace defect")
+
+        monkeypatch.setattr(Path, "replace", replace_fail)
+
+        with pytest.raises(RuntimeError, match="replace defect"):
+            write_file_atomically(target, content="must not use fallback")
+
+        assert not target.exists()
+        assert not list(tmp_path.glob("*.tmp"))
+
     def test_write_file_atomically_invalid_args(self, tmp_path: Path) -> None:
         target = tmp_path / "invalid.txt"
         with pytest.raises(ValueError):
@@ -660,6 +693,36 @@ class TestFixtureCleanupDiagnostics:
         first_task.stop.assert_called_once_with()
         second_task.stop.assert_called_once_with()
         self._assert_one_safe_warning(caplog, "Failed to stop test task")
+
+    def test_run_cli_timeout_keeps_primary_failure_when_harness_dump_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        harness = Mock()
+        harness.dump_debug_state.side_effect = RuntimeError("contains secret")
+        timeout_error = subprocess.TimeoutExpired(
+            ["weft", "status"],
+            1.0,
+            stderr="partial stderr",
+        )
+
+        with (
+            patch("tests.conftest.subprocess.run", side_effect=timeout_error),
+            pytest.raises(subprocess.TimeoutExpired) as exc_info,
+        ):
+            run_cli(
+                "status",
+                cwd=tmp_path,
+                timeout=1.0,
+                harness=harness,
+                prepare_root=False,
+            )
+
+        assert exc_info.value is timeout_error
+        notes = getattr(exc_info.value, "__notes__", [])
+        assert any("WeftTestHarness dump failed." in note for note in notes)
+        assert all("contains secret" not in note for note in notes)
+
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
 def test_ensure_owner_only_dir_creates_and_tightens(tmp_path: Path) -> None:

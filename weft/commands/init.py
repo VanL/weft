@@ -88,7 +88,7 @@ def cmd_init(
         _tighten_existing_project_broker_config(project_broker_config_path)
         broker_target = resolve_context_broker_target(root, config=config)
         result = int(sb_cmd_init(broker_target, quiet=True))
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-352] exception
         friendly_exc = normalize_backend_resolution_error(exc)
         if not quiet:
             print(

@@ -185,7 +185,7 @@ class CommandSession:
             return
         try:
             self._cleanup_callback()
-        except Exception:  # pragma: no cover - defensive
+        except Exception:  # pragma: no cover - defensive  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-299] exception
             logger.warning("Failed to run command session cleanup callback")
 
     def poll_limits(self) -> tuple[bool, str | None]:
@@ -193,9 +193,11 @@ class CommandSession:
             return True, None
         try:
             ok, violation = self._monitor.check_limits(self._limits)
+            if not ok:
+                return ok, violation
             self._last_metrics = self._monitor.last_metrics() or self._last_metrics
             return ok, violation
-        except Exception:  # pragma: no cover - process may have exited
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-344] exception
             self.stop_monitor()
             return True, None
 
@@ -203,11 +205,11 @@ class CommandSession:
         if self._monitor:
             try:
                 self._last_metrics = self._monitor.last_metrics() or self._last_metrics
-            except Exception:  # pragma: no cover - process may have exited
+            except Exception:  # pragma: no cover - process may have exited  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-300] exception
                 logger.warning("Failed to collect final command session metrics")
             try:
                 self._monitor.stop()
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # pragma: no cover - defensive  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-300] exception
                 logger.warning("Failed to stop command session resource monitor")
             self._monitor = None
 
@@ -506,11 +508,12 @@ class AgentSession:
                                 ),
                             )
                         else:
-                            status, result, error = parsed
+                            status, result, error, diagnostics = parsed
                             session_result = SessionExecutionResult(
                                 status=status,
                                 value=result,
                                 error=error,
+                                diagnostics=diagnostics,
                             )
                             observations["outcome_received"] = TerminalHandoffEvent(
                                 kind="outcome_received",
@@ -774,9 +777,11 @@ class AgentSession:
             return True, None
         try:
             ok, violation = self._monitor.check_limits(self._limits)
+            if not ok:
+                return ok, violation
             self._last_metrics = self._monitor.last_metrics() or self._last_metrics
             return ok, violation
-        except Exception:  # pragma: no cover - process may have exited
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-344] exception
             self.stop_monitor()
             return True, None
 
@@ -784,11 +789,11 @@ class AgentSession:
         if self._monitor:
             try:
                 self._last_metrics = self._monitor.last_metrics() or self._last_metrics
-            except Exception:  # pragma: no cover - process may have exited
+            except Exception:  # pragma: no cover - process may have exited  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-303] exception
                 logger.warning("Failed to collect final agent session metrics")
             try:
                 self._monitor.stop()
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # pragma: no cover - defensive  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-303] exception
                 logger.warning("Failed to stop agent session resource monitor")
             self._monitor = None
 
@@ -797,7 +802,7 @@ class AgentSession:
         if self._monitor:
             try:
                 self._last_metrics = self._monitor.last_metrics() or self._last_metrics
-            except Exception:  # pragma: no cover - optional monitor observation
+            except Exception:  # pragma: no cover - optional monitor observation  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-304] exception
                 logger.warning("Failed to collect agent session metrics")
         return self._last_metrics
 
@@ -811,7 +816,7 @@ class AgentSession:
                     stop_request = make_stop_request()
                     try:
                         self._request_queue.put(stop_request)
-                    except Exception:  # pragma: no cover - queue cleanup boundary
+                    except Exception:  # pragma: no cover - queue cleanup boundary  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-307] exception
                         logger.warning("Failed to send agent session stop request")
                     else:
                         join_timeout = 0.5

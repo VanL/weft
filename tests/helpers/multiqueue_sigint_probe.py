@@ -100,7 +100,7 @@ def main() -> int:
             assert waiters[0].wait_entered.wait(timeout=2.0)
             try:
                 watcher.add_queue("sigint.c", lambda *_args: None)
-            except BaseException as exc:  # pragma: no cover - parent asserts JSON
+            except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-359] exception
                 mutation_errors.append(f"{type(exc).__name__}: {exc}")
             finally:
                 mutation_done.set()

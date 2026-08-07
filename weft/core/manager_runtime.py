@@ -1304,8 +1304,8 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
             )
             current = view.target_record
             if current is None:
-                if stop_if_absent or entry_observed:
-                    if not _is_pid_alive(_record_pid(last_record)):
+                if stop_if_absent or entry_observed:  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
+                    if not _is_pid_alive(_record_pid(last_record)):  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
                         if _wait_for_process_exit(process, deadline=deadline):
                             return True, last_record
             else:
@@ -1316,7 +1316,7 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
                     "status"
                 ) == "stopped" and _manager_record_is_foreground_serve(current):
                     return True, current
-                if current.get("status") == "stopped" and not _is_pid_alive(
+                if current.get("status") == "stopped" and not _is_pid_alive(  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
                     current_pid
                 ):
                     if _wait_for_process_exit(process, deadline=deadline):
@@ -1325,7 +1325,7 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
                     now = time.monotonic()
                     if now - pid_checked_at >= MANAGER_PID_LIVENESS_RECHECK_INTERVAL:
                         pid_checked_at = now
-                        if not _is_pid_alive(current_pid):
+                        if not _is_pid_alive(current_pid):  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
                             if _wait_for_process_exit(process, deadline=deadline):
                                 return True, current
 
@@ -1701,14 +1701,14 @@ def _terminate_manager_process(
         return
     try:
         process.terminate()
-    except Exception:  # pragma: no cover - defensive
+    except OSError:  # pragma: no cover - platform process cleanup
         return
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:  # pragma: no cover - defensive
         try:
             process.kill()
-        except Exception:  # pragma: no cover - process may have exited
+        except OSError:  # pragma: no cover - process may have exited
             return
         try:
             process.wait(timeout=timeout)
@@ -1835,9 +1835,7 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     if (
         isinstance(current, dict)
         and current.get("status") == "stopped"
-        and _manager_handle_is_stale(
-            _manager_handle_from_record(current)
-        )
+        and _manager_handle_is_stale(_manager_handle_from_record(current))
     ):
         return True, None
 
@@ -1871,12 +1869,19 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
         if isinstance(kill_pid, int) and _is_pid_alive(kill_pid):
             try:
                 terminate_process_tree(kill_pid, timeout=timeout)
-            except (ProcessLookupError, OSError):
-                if _mark_manager_stopped(context, target_tid, record=current):
-                    return True, None
-                return False, f"Manager {target_tid} stopped but registry update failed"
             except PermissionError:
                 return False, f"Permission denied sending SIGTERM to PID {kill_pid}"
+            except OSError:
+                if not _is_pid_alive(kill_pid):
+                    if _mark_manager_stopped(context, target_tid, record=current):
+                        return True, None
+                    return (
+                        False,
+                        f"Manager {target_tid} stopped but registry update failed",
+                    )
+                return False, f"Failed to terminate Manager PID {kill_pid}"
+            if _is_pid_alive(kill_pid):
+                return False, f"Failed to terminate Manager PID {kill_pid}"
             if _mark_manager_stopped(context, target_tid, record=current):
                 return True, None
             return False, f"Manager {target_tid} stopped but registry update failed"
@@ -1884,10 +1889,17 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
         if process is not None and process.poll() is None:
             try:
                 process.terminate()
-            except Exception:  # pragma: no cover - defensive
-                if _mark_manager_stopped(context, target_tid, record=current):
-                    return True, None
-                return False, f"Manager {target_tid} stopped but registry update failed"
+            except PermissionError:
+                return False, f"Permission denied terminating Manager {target_tid}"
+            except OSError:
+                if process.poll() is not None:
+                    if _mark_manager_stopped(context, target_tid, record=current):
+                        return True, None
+                    return (
+                        False,
+                        f"Manager {target_tid} stopped but registry update failed",
+                    )
+                return False, f"Failed to terminate Manager {target_tid}"
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:

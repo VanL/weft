@@ -161,7 +161,9 @@ class PipelineEdgeTask(BaseTask):
         self._set_activity("working")
         try:
             self._handoff_payload(timestamp)
-        except Exception as exc:  # pragma: no cover - edge failure surface
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-341] exception
+            # An ordinary handoff failure is the edge result; control-flow
+            # exceptions must still escape the task boundary.
             self._fail_edge(str(exc), timestamp)
             return
 
@@ -437,15 +439,38 @@ class PipelineTask(BaseTask):
         try:
             for taskspec_payload in self._ordered_child_taskspec_payloads():
                 submitted_ctrl_queues.append(self._submit_child_spawn(taskspec_payload))
-        except Exception as exc:  # pragma: no cover - bootstrap failure surface
-            self._broadcast_control(CONTROL_STOP, ctrl_queues=submitted_ctrl_queues)
-            self._fail_pipeline(
-                f"Pipeline bootstrap failed: {exc}",
-                child_kind="bootstrap",
-                child_name=None,
-                child_tid=None,
-            )
-            return
+        except BaseException as exc:
+            # Bootstrap owns every child admitted before submission aborts.
+            # Ordinary failures become pipeline failures. Control-flow exits
+            # retain their identity after the same rollback and registry cleanup.
+            if isinstance(exc, Exception):
+                self._fail_pipeline(
+                    f"Pipeline bootstrap failed: {exc}",
+                    child_kind="bootstrap",
+                    child_name=None,
+                    child_tid=None,
+                    ctrl_queues=submitted_ctrl_queues,
+                )
+                return
+            # Cleanup phases are independent and subordinate to the fatal exit.
+            # Fixed local warnings expose failed phases without exception payloads.
+            for ctrl_queue in submitted_ctrl_queues:
+                try:
+                    self._broadcast_control(CONTROL_STOP, ctrl_queues=[ctrl_queue])
+                except BaseException:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-340] exception
+                    logger.warning(
+                        "Pipeline %s bootstrap rollback failed for child control queue %s",
+                        self.tid,
+                        ctrl_queue,
+                    )
+            try:
+                self._delete_pipeline_registry_record()
+            except BaseException:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-340] exception
+                logger.warning(
+                    "Pipeline %s bootstrap registry cleanup failed",
+                    self.tid,
+                )
+            raise
 
         self._bootstrapped = True
         self._set_activity("waiting")
@@ -782,9 +807,15 @@ class PipelineTask(BaseTask):
         *,
         ctrl_queues: list[str] | None = None,
     ) -> None:
-        queue_names = ctrl_queues or [
-            stage.ctrl_in_queue for stage in self._runtime.stages
-        ] + [edge.taskspec["io"]["control"]["ctrl_in"] for edge in self._runtime.edges]
+        queue_names = (
+            [stage.ctrl_in_queue for stage in self._runtime.stages]
+            + [
+                edge.taskspec["io"]["control"]["ctrl_in"]
+                for edge in self._runtime.edges
+            ]
+            if ctrl_queues is None
+            else ctrl_queues
+        )
         for queue_name in queue_names:
             if not queue_name:
                 continue
@@ -806,12 +837,13 @@ class PipelineTask(BaseTask):
         child_kind: str,
         child_name: str | None,
         child_tid: str | None,
+        ctrl_queues: list[str] | None = None,
     ) -> None:
         if self.taskspec.state.status in FAILURE_LIKE_TASK_STATUSES.union(
             {"completed"}
         ):
             return
-        self._broadcast_control(CONTROL_STOP)
+        self._broadcast_control(CONTROL_STOP, ctrl_queues=ctrl_queues)
         self.taskspec.mark_failed(error=error)
         self._clear_activity()
         self._status_snapshot["failure"] = {

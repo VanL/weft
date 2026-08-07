@@ -12,6 +12,7 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE
+from weft.commands import _dump_support, _load_support
 from weft.commands.dump import cmd_dump
 from weft.commands.load import ImportReport, cmd_load
 from weft.context import WeftContext, build_context
@@ -19,6 +20,10 @@ from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import resolve_taskspec_payload
 
 pytestmark = [pytest.mark.shared]
+
+
+class UnexpectedLoadFailure(Exception):
+    """Failure outside the command's expected operational exception families."""
 
 
 def _snapshot_broker_state(
@@ -213,6 +218,94 @@ def test_cmd_load_actual_import(tmp_path: Path) -> None:
     assert queues["test.queue"] == ["test message"]
 
 
+def test_execute_import_propagates_unexpected_snapshot_restore_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback implementation defect must not be relabeled as import failure."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    snapshot = _load_support.SQLiteSnapshot(
+        database_path=tmp_path / "broker.db",
+        snapshot_dir=tmp_path / "snapshot",
+    )
+    plan = _load_support.ImportPlan(apply_lines=["header", "message"])
+
+    monkeypatch.setattr(
+        _load_support,
+        "_ensure_exact_message_id_import_supported",
+        lambda _plan, _context: None,
+    )
+    monkeypatch.setattr(
+        _load_support,
+        "_sqlite_snapshot_if_file_backed",
+        lambda _context: snapshot,
+    )
+
+    def fail_apply(_broker: object, _lines: list[str]) -> None:
+        raise ValueError("apply failed")
+
+    def fail_restore(_snapshot: _load_support.SQLiteSnapshot) -> None:
+        raise RuntimeError("restore defect")
+
+    monkeypatch.setattr(_load_support, "load_lines", fail_apply)
+    monkeypatch.setattr(_load_support.SQLiteSnapshot, "restore", fail_restore)
+
+    with pytest.raises(RuntimeError, match="restore defect") as exc_info:
+        _load_support._execute_import(plan, context)
+
+    assert isinstance(exc_info.value.__context__, ValueError)
+    assert str(exc_info.value.__context__) == "apply failed"
+
+
+def test_execute_import_reports_operational_snapshot_restore_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expected filesystem rollback failure retains both failure details."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    snapshot = _load_support.SQLiteSnapshot(
+        database_path=tmp_path / "broker.db",
+        snapshot_dir=tmp_path / "snapshot",
+    )
+    plan = _load_support.ImportPlan(apply_lines=["header", "message"])
+
+    monkeypatch.setattr(
+        _load_support,
+        "_ensure_exact_message_id_import_supported",
+        lambda _plan, _context: None,
+    )
+    monkeypatch.setattr(
+        _load_support,
+        "_sqlite_snapshot_if_file_backed",
+        lambda _context: snapshot,
+    )
+
+    def fail_apply(_broker: object, _lines: list[str]) -> None:
+        raise ValueError("apply failed")
+
+    def fail_restore(_snapshot: _load_support.SQLiteSnapshot) -> None:
+        raise OSError("restore failed")
+
+    monkeypatch.setattr(_load_support, "load_lines", fail_apply)
+    monkeypatch.setattr(_load_support.SQLiteSnapshot, "restore", fail_restore)
+
+    with pytest.raises(
+        ImportError,
+        match=(
+            "import failed and file-backed rollback failed: apply failed; "
+            "restore failed: restore failed"
+        ),
+    ) as exc_info:
+        _load_support._execute_import(plan, context)
+
+    assert isinstance(exc_info.value.__cause__, ValueError)
+    assert str(exc_info.value.__cause__) == "apply failed"
+
+
 @pytest.mark.parametrize("dry_run", [True, False])
 def test_cmd_load_rejects_reserved_zero_id_before_writes(
     tmp_path: Path,
@@ -277,6 +370,81 @@ def test_load_invalid_context(tmp_path: Path) -> None:
     assert "failed to resolve context" in message
 
 
+def test_cmd_load_reports_unexpected_context_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command boundary reports an extension-defined context failure."""
+
+    def fail_context(*, spec_context: str | None) -> WeftContext:
+        del spec_context
+        raise UnexpectedLoadFailure("private context detail")
+
+    monkeypatch.setattr(_load_support, "build_context", fail_context)
+
+    exit_code, message = cmd_load()
+
+    assert exit_code == 1
+    assert message == "weft load: failed to resolve context: private context detail"
+
+
+def test_cmd_load_reports_unexpected_plan_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command boundary reports an extension-defined import-plan failure."""
+
+    root = prepare_project_root(tmp_path)
+    export_path = tmp_path / "unexpected-plan.jsonl"
+    export_path.write_text("ignored", encoding="utf-8")
+
+    def fail_plan(_handle: object, _context: WeftContext) -> _load_support.ImportPlan:
+        raise UnexpectedLoadFailure("private plan detail")
+
+    monkeypatch.setattr(_load_support, "_build_import_plan", fail_plan)
+
+    exit_code, message = cmd_load(
+        input_file=str(export_path),
+        context_path=str(root),
+    )
+
+    assert exit_code == 1
+    assert message == "weft load: import failed: private plan detail"
+
+
+def test_cmd_load_reports_unexpected_apply_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command boundary reports an extension-defined import-apply failure."""
+
+    root = prepare_project_root(tmp_path)
+    export_path = tmp_path / "unexpected-apply.jsonl"
+    export_path.write_text("ignored", encoding="utf-8")
+    plan = _load_support.ImportPlan()
+
+    monkeypatch.setattr(
+        _load_support,
+        "_build_import_plan",
+        lambda _handle, _context: plan,
+    )
+
+    def fail_apply(
+        _plan: _load_support.ImportPlan,
+        _context: WeftContext,
+    ) -> _load_support.ImportReport:
+        raise RuntimeError("private apply detail")
+
+    monkeypatch.setattr(_load_support, "_execute_import", fail_apply)
+
+    exit_code, message = cmd_load(
+        input_file=str(export_path),
+        context_path=str(root),
+    )
+
+    assert exit_code == 1
+    assert message == "weft load: import failed: private apply detail"
+
+
 def test_cmd_load_rejects_legacy_weft_dump_format(tmp_path: Path) -> None:
     """Old Weft meta/timestamp dumps are intentionally not accepted."""
 
@@ -311,6 +479,49 @@ def test_dump_invalid_context(tmp_path: Path) -> None:
 
     assert exit_code == 1
     assert "failed to resolve context" in message
+
+
+def test_cmd_dump_reports_unexpected_context_resolution_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command boundary converts backend-defined context errors to a result."""
+
+    class ContextResolutionError(Exception):
+        pass
+
+    def fail_context_resolution(*_args: object, **_kwargs: object) -> None:
+        raise ContextResolutionError("context resolution sentinel")
+
+    monkeypatch.setattr(_dump_support, "build_context", fail_context_resolution)
+
+    exit_code, message = cmd_dump(context_path="unused")
+
+    assert exit_code == 1
+    assert message == (
+        "weft dump: failed to resolve context: context resolution sentinel"
+    )
+
+
+def test_cmd_dump_reports_unexpected_export_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command boundary converts backend-defined export errors to a result."""
+
+    class ExportAdapterError(Exception):
+        pass
+
+    root = prepare_project_root(tmp_path)
+
+    def fail_export(_output: object, _db: object) -> tuple[int, int, int]:
+        raise ExportAdapterError("export adapter sentinel")
+
+    monkeypatch.setattr(_dump_support, "_write_dump", fail_export)
+
+    exit_code, message = cmd_dump(context_path=str(root))
+
+    assert exit_code == 1
+    assert message == "weft dump: export failed: export adapter sentinel"
 
 
 def test_import_report_formatting() -> None:

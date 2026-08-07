@@ -129,13 +129,13 @@ def apply_materialized_environment_to_taskspec(
 
 def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ValueError(f"{name} must be an object")
+        raise ValueError(f"{name} must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-258] exception
     return value
 
 
 def _require_text(value: object, *, name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
+        raise ValueError(f"{name} must be a string")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-258] exception
     cleaned = value.strip()
     if not cleaned:
         raise ValueError(f"{name} must be a non-empty string")

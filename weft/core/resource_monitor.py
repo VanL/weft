@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _psutil_imported: Any | None
 try:  # pragma: no cover - psutil optional at import time
     import psutil as _psutil_imported
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     _psutil_imported = None
 
 psutil: Any | None = _psutil_imported
@@ -353,7 +353,7 @@ class PsutilResourceMonitor(BaseResourceMonitor):
 
         try:
             metrics = self.get_current_metrics()
-        except Exception:  # pragma: no cover - process may have exited
+        except RuntimeError:  # pragma: no cover - process may have exited
             return True, None
 
         violations: list[str] = []

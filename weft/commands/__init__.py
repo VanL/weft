@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .status import cmd_status
     from .tidy import cmd_tidy
 
-__all__ = [
+__all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-244] exception
     "cmd_init",
     "cmd_result",
     "serve_command",

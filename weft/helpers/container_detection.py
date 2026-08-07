@@ -198,10 +198,7 @@ def _cgroup_path_matches_pattern(cgroup_path: str, pattern: str) -> bool:
 
 def _cgroup_segment_matches_pattern(segment: str, pattern: str) -> bool:
     if pattern == "kubepods":
-        return (
-            segment == pattern
-            or segment.startswith((f"{pattern}.", f"{pattern}-"))
-        )
+        return segment == pattern or segment.startswith((f"{pattern}.", f"{pattern}-"))
     if pattern == "cri-":
         return segment.startswith(pattern) and segment.endswith(".scope")
     return segment == pattern or (

@@ -320,7 +320,7 @@ def _build_pytest_command(
 def _initialize_broker_schema(*, env: dict[str, str]) -> None:
     """Initialize the shared PG schema before pytest-xdist workers race on it."""
 
-    code = "\n".join(
+    code = "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
         (
             "import os",
             "from simplebroker import Queue",
@@ -413,10 +413,10 @@ def _send_pytest_interrupt(process: subprocess.Popen[Any]) -> None:
             process.send_signal(signal.SIGINT)
             return
         os.killpg(process.pid, signal.SIGINT)
-    except Exception:
+    except OSError:
         try:
             process.terminate()
-        except Exception:
+        except OSError:
             return
 
 
@@ -430,10 +430,10 @@ def _terminate_pytest_process_tree(process: subprocess.Popen[Any]) -> None:
         return
     try:
         from weft.helpers import terminate_process_tree
-    except Exception:
+    except ImportError:
         try:
             process.terminate()
-        except Exception:
+        except OSError:
             return
         return
     terminate_process_tree(pid, timeout=1.0)
@@ -449,10 +449,10 @@ def _kill_pytest_process_tree(process: subprocess.Popen[Any]) -> None:
         return
     try:
         from weft.helpers import kill_process_tree
-    except Exception:
+    except ImportError:
         try:
             process.kill()
-        except Exception:
+        except OSError:
             return
         return
     kill_process_tree(pid, timeout=0.5)
@@ -569,7 +569,7 @@ def main() -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-225] exception
         pytest_returncode = 130
         print("Interrupted", file=sys.stderr)
         return 130
-    except Exception as exc:  # pragma: no cover - defensive CLI wrapper
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-334] exception
         pytest_returncode = 1
         print(str(exc), file=sys.stderr)
         return 1

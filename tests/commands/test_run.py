@@ -428,6 +428,7 @@ def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
         return client
 
     with create_pipe_input() as pipe_input:
+
         def make_prompt_session(
             *_args: Any, **_kwargs: Any
         ) -> _PromptCompletionSession:
@@ -458,6 +459,59 @@ def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
     assert client_holder["client"].stop_count == 1
     assert log_queue.close_count == 1
     assert thread_exception_guard == []
+    assert capsys.readouterr() == ("", "")
+
+
+def test_interactive_completion_ignores_unexpected_monitor_store_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An optional Monitor read cannot break the primary interactive channels."""
+
+    class UnexpectedMonitorFailure(Exception):
+        pass
+
+    class CompletingClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.wait_count = 0
+            self.status = "completed"
+            self.error = None
+            self.stdout_history: list[str] = []
+
+        def start(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> bool:
+            del timeout
+            self.wait_count += 1
+            return self.wait_count > 1
+
+        def close_input(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    monkeypatch.setattr(run_cmd, "InteractiveStreamClient", CompletingClient)
+    monkeypatch.setattr(
+        run_cmd,
+        "open_monitor_store",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            UnexpectedMonitorFailure("private monitor detail")
+        ),
+    )
+
+    result = run_cmd._run_interactive_session(
+        context,
+        _make_taskspec(str(time.time_ns())),
+        stdin_data=None,
+        use_prompt=False,
+    )
+
+    assert result == ("completed", None, None)
     assert capsys.readouterr() == ("", "")
 
 
@@ -1819,6 +1873,53 @@ def test_execute_run_inline_returns_structured_result_without_rendering(
     assert execution.submission_error is None
 
 
+def test_execute_inline_contains_unexpected_command_boundary_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command boundary reports an ordinary adapter error without traceback."""
+
+    class UnexpectedSubmissionFailure(Exception):
+        pass
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    monkeypatch.setattr(run_cmd, "build_context", lambda **kwargs: context)
+    monkeypatch.setattr(run_cmd, "_read_piped_stdin", lambda context: None)
+    monkeypatch.setattr(run_cmd, "stdin_is_tty", lambda: False)
+    monkeypatch.setattr(
+        run_cmd,
+        "_run_with_managed_execution",
+        lambda **kwargs: (_ for _ in ()).throw(
+            UnexpectedSubmissionFailure("adapter detail")
+        ),
+    )
+
+    execution = run_cmd._execute_inline(
+        command=(),
+        function_target="tests.tasks.sample_targets:echo_payload",
+        args=(),
+        kwargs=(),
+        env=(),
+        name=None,
+        interactive=False,
+        stream_output=None,
+        timeout=None,
+        memory=None,
+        cpu=None,
+        tags=(),
+        context_dir=root,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        autostart_enabled=True,
+    )
+
+    assert execution.tid == ""
+    assert execution.submission_error == "Error submitting task: adapter detail"
+    assert "UnexpectedSubmissionFailure" not in execution.submission_error
+
+
 def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2466,6 +2567,54 @@ def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
     finally:
         queue.close()
     assert exit_code == 1
+
+
+def test_execute_spec_contains_unexpected_command_boundary_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The TaskSpec boundary preserves ordinary adapter detail without traceback."""
+
+    class UnexpectedSubmissionFailure(Exception):
+        pass
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    spec_path = root / "task.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "demo-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+            "metadata": {},
+        },
+    )
+    monkeypatch.setattr(run_cmd, "build_context", lambda *args, **kwargs: context)
+    monkeypatch.setattr(run_cmd, "_read_piped_stdin", lambda context: None)
+    monkeypatch.setattr(
+        run_cmd,
+        "_run_with_managed_execution",
+        lambda **kwargs: (_ for _ in ()).throw(
+            UnexpectedSubmissionFailure("adapter detail")
+        ),
+    )
+
+    execution = run_cmd._execute_spec_via_manager(
+        spec_path,
+        name=None,
+        verbose=False,
+        wait=False,
+        json_output=False,
+        autostart_enabled=True,
+        persistent_override=None,
+    )
+
+    assert execution.tid == ""
+    assert execution.submission_error == "Error submitting TaskSpec: adapter detail"
+    assert "UnexpectedSubmissionFailure" not in execution.submission_error
 
 
 def test_run_spec_via_manager_returns_timeout_exit_code(
@@ -3631,8 +3780,10 @@ def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(
         "weft.core.manager_runtime._lookup_manager_pid",
         lambda *args, **kwargs: 8765,
     )
+    liveness = iter((True, False))
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive", lambda pid: pid == 8765
+        "weft.core.manager_runtime._is_pid_alive",
+        lambda pid: pid == 8765 and next(liveness),
     )
 
     def fake_terminate_process_tree(
@@ -3657,3 +3808,126 @@ def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(
     assert stopped is True
     assert message is None
     assert killed == [(8765, 0.0)]
+
+
+def test_stop_manager_force_refuses_stopped_state_while_tree_root_is_live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000008"
+    marked: list[str] = []
+    liveness = iter((True, True))
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._send_stop", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._registry_view",
+        lambda *args, **kwargs: _registry_view(),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._lookup_manager_pid",
+        lambda *args, **kwargs: 8765,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._is_pid_alive",
+        lambda pid: pid == 8765 and next(liveness),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.terminate_process_tree",
+        lambda *args, **kwargs: set(),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._mark_manager_stopped",
+        lambda *args, **kwargs: marked.append(tid) or True,
+    )
+
+    stopped, message = core_manager_runtime.stop_manager(
+        ctx,
+        None,
+        tid=tid,
+        timeout=0.0,
+        force=True,
+    )
+
+    assert stopped is False
+    assert message == "Failed to terminate Manager PID 8765"
+    assert marked == []
+
+
+@pytest.mark.parametrize("control_path", ["process-tree", "popen"])
+def test_stop_manager_force_does_not_publish_stopped_after_permission_denial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control_path: str,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000007"
+    marked: list[str] = []
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._send_stop", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._registry_view",
+        lambda *args, **kwargs: _registry_view(),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._mark_manager_stopped",
+        lambda *args, **kwargs: marked.append(tid) or True,
+    )
+
+    class PermissionDeniedProcess:
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            raise PermissionError("operation not permitted")
+
+    process: Any | None = None
+    if control_path == "process-tree":
+        monkeypatch.setattr(
+            "weft.core.manager_runtime._lookup_manager_pid",
+            lambda *args, **kwargs: 8765,
+        )
+        monkeypatch.setattr(
+            "weft.core.manager_runtime._is_pid_alive",
+            lambda pid: pid == 8765,
+        )
+        monkeypatch.setattr(
+            "weft.core.manager_runtime.terminate_process_tree",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                PermissionError("operation not permitted")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            "weft.core.manager_runtime._lookup_manager_pid",
+            lambda *args, **kwargs: None,
+        )
+        process = PermissionDeniedProcess()
+
+    stopped, message = core_manager_runtime.stop_manager(
+        ctx,
+        None,
+        process=process,  # type: ignore[arg-type]
+        tid=tid,
+        timeout=0.0,
+        force=True,
+    )
+
+    assert stopped is False
+    assert message is not None
+    assert "Permission denied" in message
+    assert marked == []

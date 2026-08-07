@@ -670,7 +670,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             try:
                 try:
                     value = func()
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-347] exception
                     result = TaskWorkerResult(lane=lane, error=exc)
                 else:
                     result = TaskWorkerResult(lane=lane, value=value)
@@ -1709,7 +1709,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             return {}
         try:
             provided = provider()
-        except Exception as exc:  # pragma: no cover - defensive extension boundary
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-348] exception
             return {PONG_EXTENSION_KEY: {"error": str(exc)}}
         if provided is None:
             return {}
@@ -1767,7 +1767,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         try:
             plugin = require_runner_plugin(handle.runner)
             description = plugin.describe(handle)
-        except Exception as exc:  # pragma: no cover - defensive plugin boundary
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-348] exception
             metadata = dict(fallback_metadata)
             metadata["describe_error"] = str(exc)
             return {

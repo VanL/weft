@@ -1230,7 +1230,7 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _delete_runtime_reserved_queue _delete_terminal_control_queues
     _queue_name_snapshot _run_monitor_store_cycle _run_task_monitor_cleanup_cycle
     _worker_local_monitor_clone
-    """.split()
+    """.split()  # noqa: SIM905 approved [TS-3.1] [RUFF-SUP-250] exception
 )
 
 _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
@@ -1262,7 +1262,7 @@ _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     _turn_active _wait_active _worker_lane_snapshot_only _worker_lock
     _worker_result_event
     _worker_result_queue _worker_stopping _worker_threads should_stop
-    """.split()
+    """.split()  # noqa: SIM905 approved [TS-3.1] [RUFF-SUP-250] exception
 )
 
 _WORKER_SNAPSHOT_PLAIN_SHARE_FIELDS: Final[frozenset[str]] = frozenset(

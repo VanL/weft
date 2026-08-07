@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import Queue, serialize_broker_target
+from simplebroker.ext import BrokerError
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -78,7 +79,7 @@ def _wait_for_registry(
                 Sequence[tuple[str, int]] | None,
                 queue.peek_many(limit=1000, with_timestamps=True),
             )
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             raw_entries = None
 
         if raw_entries:

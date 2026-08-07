@@ -259,7 +259,7 @@ class StateMachine[StateT: str, InputT, ActionT: str]:
         if isinstance(transition.source, frozenset):
             return transition.source
         if not isinstance(transition.source, str):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-261] exception
                 f"Transition {transition.id!r} source must be a state string "
                 "or frozenset of state strings"
             )

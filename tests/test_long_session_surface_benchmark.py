@@ -71,3 +71,47 @@ def test_api_surface_invoke_run_scopes_environment_and_captured_io(
     assert sys.stdin is previous_stdin
     assert sys.stdout is previous_stdout
     assert sys.stderr is previous_stderr
+
+
+def test_main_converts_benchmark_failure_to_clean_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class BenchmarkFailure(Exception):
+        pass
+
+    monkeypatch.setattr(
+        benchmark,
+        "run_benchmarks",
+        lambda _settings: (_ for _ in ()).throw(
+            BenchmarkFailure("surface setup failed")
+        ),
+    )
+
+    assert benchmark.main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "Benchmark failed: surface setup failed\n"
+
+
+def test_main_does_not_translate_fatal_benchmark_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class BenchmarkFatal(BaseException):
+        pass
+
+    failure = BenchmarkFatal("fatal benchmark failure")
+    monkeypatch.setattr(
+        benchmark,
+        "run_benchmarks",
+        lambda _settings: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(BenchmarkFatal) as exc_info:
+        benchmark.main([])
+
+    assert exc_info.value is failure
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

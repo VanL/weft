@@ -285,7 +285,7 @@ def _validate_stage_template(stage: PipelineStage, payload: Mapping[str, Any]) -
     """
     spec_section = payload.get("spec")
     if not isinstance(spec_section, Mapping):
-        raise ValueError(f"stage '{stage.name}' is missing a valid spec section")
+        raise ValueError(f"stage '{stage.name}' is missing a valid spec section")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-262] exception
     metadata = payload.get("metadata")
     metadata = metadata if isinstance(metadata, Mapping) else {}
 

@@ -8,7 +8,12 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
+import tests.helpers.test_backend as test_backend_module
+from tests.helpers.test_backend import (
+    cleanup_postgres_schema_for_root,
+    cleanup_prepared_roots,
+    prepare_project_root,
+)
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
@@ -44,6 +49,7 @@ def test_cleanup_prepared_roots_logs_failure_and_continues(
     successful_config = _write_postgres_config(successful_root, "successful_schema")
 
     plugin = Mock()
+    private_error = "cleanup failed for private target"
 
     def cleanup_target(
         _dsn: str,
@@ -51,7 +57,7 @@ def test_cleanup_prepared_roots_logs_failure_and_continues(
         backend_options: dict[str, str],
     ) -> None:
         if backend_options["schema"] == "failed_schema":
-            raise RuntimeError("cleanup failed")
+            raise RuntimeError(private_error)
 
     plugin.cleanup_target.side_effect = cleanup_target
     env = {
@@ -84,6 +90,55 @@ def test_cleanup_prepared_roots_logs_failure_and_continues(
     assert record.schema == "failed_schema"
     assert record.config_path == str(failed_config)
     assert record.exc_info is None
+    assert private_error not in caplog.text
+    assert "postgresql://test.invalid/weft" not in caplog.text
+
+
+def test_cleanup_postgres_schema_for_root_logs_private_failure(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    plugin = Mock()
+    private_error = "cleanup failed for private target"
+    plugin.cleanup_target.side_effect = RuntimeError(private_error)
+    env = {
+        "BROKER_TEST_BACKEND": "postgres",
+        "SIMPLEBROKER_PG_TEST_DSN": "postgresql://private.invalid/weft",
+    }
+    resolved_root = project_root.resolve()
+    schema = test_backend_module.postgres_schema_for_root(resolved_root)
+    cache_key = (str(resolved_root), env["SIMPLEBROKER_PG_TEST_DSN"], schema)
+    prepared_roots = {cache_key}
+    monkeypatch.setattr(
+        test_backend_module,
+        "_PREPARED_POSTGRES_ROOTS",
+        prepared_roots,
+    )
+
+    with (
+        patch(
+            "tests.helpers.test_backend.get_backend_plugin",
+            return_value=plugin,
+        ),
+        caplog.at_level(logging.WARNING, logger="tests.helpers.test_backend"),
+    ):
+        cleanup_postgres_schema_for_root(project_root, env=env)
+
+    plugin.cleanup_target.assert_called_once()
+    assert [record.message for record in caplog.records] == [
+        "Failed to clean Postgres test schema"
+    ]
+    expected_schema = plugin.cleanup_target.call_args.kwargs["backend_options"][
+        "schema"
+    ]
+    assert caplog.records[0].schema == expected_schema
+    assert cache_key in prepared_roots
+    assert caplog.records[0].exc_info is None
+    assert str(project_root) not in caplog.text
+    assert private_error not in caplog.text
+    assert "postgresql://private.invalid/weft" not in caplog.text
 
 
 def test_prepare_project_root_supports_context_queue_roundtrip(tmp_path: Path) -> None:

@@ -621,9 +621,12 @@ def test_url_import_requires_authz_setting() -> None:
 
 @pytest.mark.shared
 def test_transport_validation() -> None:
-    with override_settings(
-        WEFT_DJANGO=_fixture_weft_settings(REALTIME={"TRANSPORT": "bogus"})
-    ), pytest.raises(ImproperlyConfigured, match="TRANSPORT"):
+    with (
+        override_settings(
+            WEFT_DJANGO=_fixture_weft_settings(REALTIME={"TRANSPORT": "bogus"})
+        ),
+        pytest.raises(ImproperlyConfigured, match="TRANSPORT"),
+    ):
         get_realtime_transport()
 
 

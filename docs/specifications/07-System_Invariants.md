@@ -148,10 +148,13 @@ _Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/tasks/base.p
   changing delivery semantics; a later topology generation may restore native
   waiting. Empty activity membership installs no waiter without calling the
   factory with an empty list. Main-thread SIGINT cannot expose or close a
-  half-published waiter; `KeyboardInterrupt` is delivered after request and
-  ownership cleanup. A direct/manual wait temporarily owns its waiter and
-  excludes drive start and mutation; stop signals that wait but does not close
-  its waiter from another thread.
+  half-published waiter. After request and ownership cleanup, deferred SIGINT
+  normally delivers `KeyboardInterrupt`. If the same atomic topology
+  transaction also raises another fatal `BaseException`, stop intent is
+  committed and the deferred SIGINT consumed, but the exact transaction failure
+  is re-raised because it is the more specific unwind cause. A direct/manual
+  wait temporarily owns its waiter and excludes drive start and mutation; stop
+  signals that wait but does not close its waiter from another thread.
 
 _Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` owns [QUEUE.8]
 through `MultiQueueWatcher._submit_topology_mutation()`,
@@ -866,6 +869,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md`](../plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md)
 - [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](../plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md)
 - [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)

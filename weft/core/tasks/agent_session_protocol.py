@@ -126,6 +126,7 @@ def make_result_response(
     status: str,
     result: AgentExecutionResult | None = None,
     error: str | None = None,
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a private execution response payload."""
     payload: dict[str, Any] = {
@@ -136,12 +137,22 @@ def make_result_response(
     }
     if result is not None:
         payload["result"] = result.to_private_payload()
+    if diagnostics is not None:
+        payload["diagnostics"] = dict(diagnostics)
     return payload
 
 
 def parse_result_response(
     payload: Mapping[str, Any],
-) -> tuple[str, AgentExecutionResult | None, str | None] | None:
+) -> (
+    tuple[
+        str,
+        AgentExecutionResult | None,
+        str | None,
+        dict[str, Any] | None,
+    ]
+    | None
+):
     """Parse a private execution response payload."""
     if (
         payload.get("version") != AGENT_SESSION_PROTOCOL_VERSION
@@ -157,15 +168,27 @@ def parse_result_response(
     if error is not None and not isinstance(error, str):
         return None
 
+    diagnostics = payload.get("diagnostics")
+    if diagnostics is not None and not isinstance(diagnostics, Mapping):
+        return None
+    normalized_diagnostics = (
+        dict(diagnostics) if isinstance(diagnostics, Mapping) else None
+    )
+
     result_payload = payload.get("result")
     if result_payload is None:
-        return status, None, error
+        return status, None, error, normalized_diagnostics
     if not isinstance(result_payload, Mapping):
         return None
-    return status, AgentExecutionResult.from_private_payload(result_payload), error
+    return (
+        status,
+        AgentExecutionResult.from_private_payload(result_payload),
+        error,
+        normalized_diagnostics,
+    )
 
 
-__all__ = [
+__all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-249] exception
     "make_execute_request",
     "make_booted_response",
     "make_ready_response",

@@ -340,7 +340,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
     ) -> _ConsumerWorkResult:
         try:
             outcome, live_command_streaming = self._run_task_for_reactor(work_item)
-        except Exception as exc:  # pragma: no cover - worker exception transport
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-349] exception
+            # Ordinary failures keep per-work metadata. Fatal exits cross the
+            # outer BaseTask worker-result channel unchanged.
             return _ConsumerWorkResult(
                 timestamp=timestamp,
                 initial_transition=initial_transition,

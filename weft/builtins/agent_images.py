@@ -77,7 +77,7 @@ def prepare_agent_images_task(work_item: Any = None) -> dict[str, Any]:
 
         try:
             result = ensure_agent_image(provider_name, refresh=refresh)
-        except Exception as exc:  # pragma: no cover - provider image build boundary
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-363] exception
             provider_reports.append(
                 {
                     "provider": provider_name,
@@ -131,10 +131,10 @@ def _parse_prepare_request(work_item: Any) -> dict[str, Any]:
     elif isinstance(work_item, dict):
         payload = work_item
     else:
-        raise ValueError("prepare-agent-images expects a JSON object input")
+        raise ValueError("prepare-agent-images expects a JSON object input")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-270] exception
 
     if not isinstance(payload, dict):
-        raise ValueError("prepare-agent-images input must be a JSON object")
+        raise ValueError("prepare-agent-images input must be a JSON object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-270] exception
     extra_keys = sorted(set(payload) - {"providers", "refresh"})
     if extra_keys:
         raise ValueError(
@@ -151,7 +151,7 @@ def _parse_prepare_request(work_item: Any) -> dict[str, Any]:
 
     refresh_obj = payload.get("refresh", False)
     if not isinstance(refresh_obj, bool):
-        raise ValueError("prepare-agent-images input field 'refresh' must be a boolean")
+        raise ValueError("prepare-agent-images input field 'refresh' must be a boolean")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-270] exception
 
     return {
         "providers": providers,
@@ -161,7 +161,7 @@ def _parse_prepare_request(work_item: Any) -> dict[str, Any]:
 
 def _normalize_provider_list(value: object) -> list[str]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-270] exception
             "prepare-agent-images input field 'providers' must be a list of strings"
         )
     providers: list[str] = []

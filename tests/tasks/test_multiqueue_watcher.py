@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,12 +16,14 @@ from simplebroker import (
     create_activity_waiter_for_queues as real_create_activity_waiter,
 )
 from simplebroker.ext import PollingStrategy
+from tests.helpers import multiqueue_sigint_probe
 from tests.helpers.test_backend import POSTGRES_TEST_BACKEND, active_test_backend
 from weft._constants import QUEUE_PRIORITY_INTERNAL, QUEUE_PRIORITY_NORMAL
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
     QueueMessageContext,
     QueueMode,
+    _TopologyMutation,
 )
 
 
@@ -156,12 +159,12 @@ def test_background_add_queue_rebinds_exact_set_on_drive_owner(
     old_waiter = created[0][1]
     assert old_waiter.wait_entered.wait(timeout=2.0)
 
-    mutation_errors: list[BaseException] = []
+    mutation_errors: list[Exception] = []
 
     def add_queue() -> None:
         try:
             watcher.add_queue("dynamic.c", lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except (AssertionError, RuntimeError) as exc:
             mutation_errors.append(exc)
 
     mutator = threading.Thread(target=add_queue)
@@ -220,12 +223,12 @@ def test_background_remove_queue_rebinds_exact_remaining_set(
     old_waiter = created[0][1]
     assert old_waiter.wait_entered.wait(timeout=2.0)
 
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def remove_queue() -> None:
         try:
             watcher.remove_queue("remove.b")
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except (AssertionError, RuntimeError) as exc:
             errors.append(exc)
 
     mutator = threading.Thread(target=remove_queue)
@@ -354,12 +357,12 @@ def test_background_mutation_after_drive_reservation_waits_for_owner_claim(
     constructor_creation_count = len(waiter_creations)
     drive = watcher.run_in_thread()
     assert entered.wait(timeout=2.0)
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def mutate() -> None:
         try:
             watcher.add_queue("claim.c", lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except (AssertionError, RuntimeError) as exc:
             errors.append(exc)
 
     mutator = threading.Thread(target=mutate)
@@ -418,12 +421,12 @@ def test_background_rebind_before_first_strategy_start_closes_unbound_cached_wai
     old_cached = created[0][1]
     drive = watcher.run_in_thread()
     assert gate_entered.wait(timeout=2.0)
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def mutate() -> None:
         try:
             watcher.add_queue("first.c", lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except (AssertionError, RuntimeError) as exc:
             errors.append(exc)
 
     mutator = threading.Thread(target=mutate)
@@ -600,7 +603,7 @@ def test_background_add_with_preexisting_message_forces_immediate_discovery(
     watcher._next_inactive_probe_at = time.monotonic() + 60.0
     drive = watcher.run_in_thread()
     assert created[0].wait_entered.wait(timeout=2.0)
-    mutation_errors: list[BaseException] = []
+    mutation_errors: list[Exception] = []
 
     def mutate() -> None:
         try:
@@ -610,7 +613,7 @@ def test_background_add_with_preexisting_message_forces_immediate_discovery(
                     handled.set() if message == "already-there" else None
                 ),
             )
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except (AssertionError, RuntimeError) as exc:
             mutation_errors.append(exc)
 
     mutator = threading.Thread(target=mutate)
@@ -736,7 +739,7 @@ def test_background_queue_open_failure_preserves_old_generation(
     def mutate() -> None:
         try:
             watcher.add_queue("open.c", lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except OSError as exc:  # pragma: no cover - asserted below
             caught.append(exc)
 
     mutator = threading.Thread(target=mutate)
@@ -817,7 +820,7 @@ def test_background_strategy_replacement_failure_fails_request_and_retries_drive
     def mutate() -> None:
         try:
             watcher.add_queue("replace.c", lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except RuntimeError as exc:  # pragma: no cover - asserted below
             caught.append(exc)
 
     mutator = threading.Thread(target=mutate)
@@ -895,7 +898,7 @@ def test_background_post_replace_publication_failure_restores_old_waiter(
     def mutate() -> None:
         try:
             watcher.add_queue("publish.c", lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except RuntimeError as exc:  # pragma: no cover - asserted below
             caught.append(exc)
 
     mutator = threading.Thread(target=mutate)
@@ -961,7 +964,7 @@ def test_background_mutation_racing_stop_never_binds_after_owner_close(
     def add(name: str) -> None:
         try:
             watcher.add_queue(name, lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except RuntimeError as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 
     first = threading.Thread(target=add, args=("stop-race.c",))
@@ -1087,12 +1090,12 @@ def test_background_mutation_committed_before_stop_returns_success(
     )
     drive = watcher.run_in_thread()
     assert waiters[0].wait_entered.wait(timeout=2.0)
-    mutation_errors: list[BaseException] = []
+    mutation_errors: list[Exception] = []
 
     def mutate() -> None:
         try:
             watcher.add_queue("commit.c", lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except (AssertionError, RuntimeError) as exc:
             mutation_errors.append(exc)
 
     mutator = threading.Thread(target=mutate)
@@ -1463,6 +1466,7 @@ def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [
     factory_entered = threading.Event()
     raise_fatal = threading.Event()
     fatal_caught = threading.Event()
+    fatal_seen: list[BaseException] = []
     old_waiter = BlockingWaiter()
     calls = 0
 
@@ -1473,8 +1477,11 @@ def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [
         def run_forever(self) -> None:
             try:
                 super().run_forever()
-            except FatalMutation:
+            except FatalMutation as exc:
+                fatal_seen.append(exc)
                 fatal_caught.set()
+
+    fatal = FatalMutation()
 
     def create_waiter(_queues, *, stop_event):
         nonlocal calls
@@ -1484,7 +1491,7 @@ def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [
             return old_waiter
         factory_entered.set()
         assert raise_fatal.wait(timeout=2.0)
-        raise FatalMutation
+        raise fatal
 
     monkeypatch.setattr(
         "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
@@ -1501,7 +1508,7 @@ def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [
     def add(name: str) -> None:
         try:
             watcher.add_queue(name, lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except RuntimeError as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 
     mutators = [
@@ -1528,6 +1535,7 @@ def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [
     drive.join(timeout=2.0)
 
     assert fatal_caught.is_set()
+    assert fatal_seen == [fatal]
     assert all(not mutator.is_alive() for mutator in mutators)
     assert len(errors) == 3
     assert all(isinstance(error, RuntimeError) for error in errors)
@@ -1537,6 +1545,141 @@ def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [
     assert watcher._thread is None
     assert old_waiter.close_calls == 1
     assert old_waiter.close_threads == [drive.ident]
+
+
+def test_unexpected_ordinary_topology_failure_is_local_and_fifo_continues(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unclassified ordinary request defect does not strand later requests."""
+    db_path, _make_queue = broker_env
+    watcher = MultiQueueWatcher(
+        queue_configs={"ordinary.a": {"handler": lambda *_args: None}},
+        db=db_path,
+    )
+    first = _TopologyMutation(kind="add", queue_name="ordinary.first")
+    second = _TopologyMutation(kind="add", queue_name="ordinary.second")
+    calls: list[str] = []
+
+    class UnexpectedMutationFailure(Exception):
+        pass
+
+    failure = UnexpectedMutationFailure("unexpected mutation failure")
+
+    def apply(request: _TopologyMutation) -> None:
+        calls.append(request.queue_name)
+        if request is first:
+            raise failure
+
+    monkeypatch.setattr(watcher, "_apply_topology_mutation_on_owner", apply)
+    with watcher._topology_lock:
+        watcher._topology_owner_thread = threading.current_thread()
+        watcher._topology_mutations.extend((first, second))
+        watcher._topology_pending.set()
+
+    try:
+        watcher._apply_pending_topology_mutations()
+    finally:
+        with watcher._topology_lock:
+            watcher._topology_owner_thread = None
+        watcher.stop(join=False)
+
+    assert calls == ["ordinary.first", "ordinary.second"]
+    assert first.error is failure
+    assert second.error is None
+    assert first.done.is_set()
+    assert second.done.is_set()
+    assert watcher._topology_inflight is None
+    assert not watcher._topology_mutations
+
+
+def test_fatal_topology_failure_precedes_deferred_sigint_after_cleanup(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fatal transaction outcome wins after deferred SIGINT requests stop."""
+    db_path, _make_queue = broker_env
+    fatal_caught = threading.Event()
+    fatal_seen: list[BaseException] = []
+    old_waiter = BlockingWaiter()
+    candidate_waiter = BlockingWaiter()
+    waiters = iter((old_waiter, candidate_waiter))
+
+    class FatalMutation(BaseException):
+        pass
+
+    fatal = FatalMutation()
+
+    class FatalPriorityWatcher(MultiQueueWatcher):
+        def _publish_topology_locked(self, **kwargs) -> None:
+            assert self._topology_sigint_critical is True
+            self._sigint_handler(2, None)
+            raise fatal
+
+        def run_forever(self) -> None:
+            try:
+                super().run_forever()
+            except FatalMutation as exc:
+                fatal_seen.append(exc)
+                fatal_caught.set()
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
+        lambda _queues, *, stop_event: next(waiters),
+    )
+    watcher = FatalPriorityWatcher(
+        queue_configs={"fatal-priority.a": {"handler": lambda *_args: None}},
+        db=db_path,
+    )
+    drive = watcher.run_in_thread()
+    assert old_waiter.wait_entered.wait(timeout=2.0)
+    request_errors: list[RuntimeError] = []
+
+    def add(name: str) -> None:
+        try:
+            watcher.add_queue(name, lambda *_args: None)
+        except RuntimeError as exc:  # pragma: no cover - asserted below
+            request_errors.append(exc)
+
+    first = threading.Thread(target=add, args=("fatal-priority.first",))
+    second = threading.Thread(target=add, args=("fatal-priority.second",))
+    first.start()
+    second.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        with watcher._topology_lock:
+            if len(watcher._topology_mutations) == 2:
+                break
+        time.sleep(0.001)
+    else:
+        raise AssertionError("fatal-priority mutations were not queued")
+
+    old_waiter.release.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+    drive.join(timeout=2.0)
+
+    assert fatal_caught.is_set()
+    assert len(fatal_seen) == 1
+    assert fatal_seen[0] is fatal
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert not drive.is_alive()
+    assert len(request_errors) == 2
+    assert all(isinstance(error, RuntimeError) for error in request_errors)
+    assert watcher._topology_inflight is None
+    assert not watcher._topology_mutations
+    assert not watcher._topology_pending.is_set()
+    assert watcher._topology_owner_thread is None
+    assert watcher._thread is None
+    assert watcher._topology_sigint_critical is False
+    assert watcher._topology_deferred_sigint is False
+    assert watcher._topology_stopping is True
+    assert watcher._stop_event.is_set()
+    assert old_waiter.close_calls == 1
+    assert candidate_waiter.close_calls == 1
+    assert old_waiter.close_threads == [drive.ident]
+    assert candidate_waiter.close_threads == [drive.ident]
 
 
 def test_same_waiter_replacement_publication_failure_preserves_installed_owner(
@@ -1573,7 +1716,7 @@ def test_same_waiter_replacement_publication_failure_preserves_installed_owner(
     def mutate() -> None:
         try:
             watcher.add_queue("same.c", lambda *_args: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except RuntimeError as exc:  # pragma: no cover - asserted below
             caught.append(exc)
 
     mutator = threading.Thread(target=mutate)
@@ -1628,6 +1771,47 @@ def test_main_thread_sigint_after_waiter_replace_finishes_consistent_commit(
         [result["main_thread"]],
         [result["main_thread"]],
     ]
+
+
+def test_sigint_probe_reports_fatal_mutation_failure_from_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class MutationFatal(BaseException):
+        pass
+
+    failure = MutationFatal("fatal mutation failure")
+
+    class FailingWatcher:
+        def __init__(self, **_kwargs: object) -> None:
+            self.mutation_called = threading.Event()
+            waiter = multiqueue_sigint_probe.watcher_module.create_activity_waiter_for_queues(
+                [SimpleNamespace(name="sigint.a"), SimpleNamespace(name="sigint.b")],
+                stop_event=threading.Event(),
+            )
+            waiter.wait_entered.set()
+
+        def add_queue(self, _name: str, _handler: object) -> None:
+            self.mutation_called.set()
+            raise failure
+
+        def run(self) -> None:
+            assert self.mutation_called.wait(timeout=2.0)
+
+        def list_queues(self) -> list[str]:
+            return ["sigint.a", "sigint.b"]
+
+    monkeypatch.setattr(
+        multiqueue_sigint_probe,
+        "MultiQueueWatcher",
+        FailingWatcher,
+    )
+
+    assert multiqueue_sigint_probe.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["mutation_done"] is True
+    assert result["mutation_errors"] == ["MutationFatal: fatal mutation failure"]
+    assert result["mutator_alive"] is False
 
 
 def test_stop_join_timeout_does_not_block_on_owner_finalization_lock(
@@ -1795,7 +1979,7 @@ def test_background_mutation_from_handler_is_rejected_before_effects(
     def handler(*_args) -> None:
         try:
             watcher.add_queue("dynamic.forbidden", lambda *_inner: None)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except RuntimeError as exc:  # pragma: no cover - asserted below
             handler_errors.append(exc)
         finally:
             handled.set()
@@ -1848,7 +2032,7 @@ def test_background_membership_errors_return_to_requesting_thread(
                 watcher.add_queue("errors.a", lambda *_args: None)
             else:
                 watcher.remove_queue("errors.missing")
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except ValueError as exc:  # pragma: no cover - asserted below
             caught.append(exc)
 
     mutator = threading.Thread(target=mutate)

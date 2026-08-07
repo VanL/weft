@@ -81,7 +81,7 @@ def invoke_parameterization_adapter(
         ) from exc
     ensure_json_serializable_work_payload(payload)
     if not isinstance(payload, Mapping):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-259] exception
             "spec.parameterization adapter must return a JSON-serializable object"
         )
     return payload
@@ -117,7 +117,7 @@ def materialize_taskspec_template(
         )
     spec_section = payload.get("spec")
     if not isinstance(spec_section, Mapping):
-        raise ValueError("spec.parameterization adapter must return a TaskSpec payload")
+        raise ValueError("spec.parameterization adapter must return a TaskSpec payload")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-259] exception
     if spec_section.get("type") != taskspec.spec.type:
         raise ValueError(
             "spec.parameterization adapter must preserve spec.type for the "

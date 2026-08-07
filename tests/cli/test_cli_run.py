@@ -1239,7 +1239,7 @@ def test_cli_run_spec_bundle_declared_args_shape_work_item(
     bundle_dir = workdir / "run-input-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from __future__ import annotations",
                 "",
@@ -1568,7 +1568,7 @@ def test_cli_run_spec_bundle_parameterization_materializes_before_run_input(
     bundle_dir = workdir / "parameterized-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from __future__ import annotations",
                 "",
@@ -1650,7 +1650,7 @@ def test_cli_run_spec_bundle_parameterization_requires_declared_parameter(
     bundle_dir = workdir / "parameterized-required-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from __future__ import annotations",
                 "",

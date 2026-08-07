@@ -35,7 +35,7 @@ if TYPE_CHECKING:
         validate_taskspec,
     )
 
-__all__ = [
+__all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-247] exception
     "Consumer",
     "Observer",
     "SelectiveConsumer",

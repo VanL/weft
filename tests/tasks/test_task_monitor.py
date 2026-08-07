@@ -445,6 +445,57 @@ def test_task_monitor_builtin_worker_closes_store_and_fails_report_only_cycle_wh
         task.stop()
 
 
+def test_task_monitor_store_setup_failure_reports_close_failure(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Store setup keeps its primary error while exposing close failure."""
+
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999411"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    real_open_monitor_store = task_monitor_mod.open_monitor_store
+    events: list[str] = []
+
+    def failing_open_monitor_store(*args: Any, **kwargs: Any) -> Any:
+        proxy = _MonitorStoreSetupFailureProxy(
+            real_open_monitor_store(*args, **kwargs),
+            events=events,
+            failure_stage="ensure_schema",
+        )
+        proxy._fail = True
+        return proxy
+
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "open_monitor_store",
+        failing_open_monitor_store,
+    )
+    try:
+        store = task._ensure_monitor_store()
+
+        assert store is None
+        assert events == ["store"]
+        assert task._monitor_store is None
+        assert task._monitor_store_status.available is False
+        assert task._monitor_store_status.error == (
+            "store setup boom; monitor store close failed: store close boom"
+        )
+    finally:
+        task.stop()
+
+
 @pytest.mark.parametrize("resource", [[], _StatefulObserver()])
 def test_task_monitor_worker_snapshot_rejects_unclassified_stateful_field(
     broker_env,
@@ -627,6 +678,78 @@ def test_task_monitor_builtin_worker_close_failure_replaces_success(
         task.stop()
 
 
+def test_task_monitor_builtin_worker_transports_unexpected_failure_and_closes_resources(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unexpected built-in failure becomes a result after worker cleanup."""
+
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "worker-failure.jsonl"),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999410"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    real_clone = task._worker_local_monitor_clone
+    events: list[str] = []
+
+    def recording_clone() -> TaskMonitor:
+        worker = real_clone()
+        assert worker._external_task_log_sink is not None
+        worker._external_task_log_sink = _CloseRecordingProxy(
+            worker._external_task_log_sink,
+            name="sink",
+            events=events,
+        )
+        worker._queue_cache["worker.failure"] = _CloseRecordingProxy(
+            make_queue("worker.failure"),
+            name="queue",
+            events=events,
+        )
+        return worker
+
+    class BuiltinFailure(Exception):
+        pass
+
+    def fail_builtin_cycle(
+        _worker: TaskMonitor,
+        _work: task_monitor_mod._TaskMonitorBuiltinCycleWork,
+    ) -> tuple[TaskMonitorProcessorResult, bool]:
+        raise BuiltinFailure("built-in worker boom")
+
+    monkeypatch.setattr(task, "_worker_local_monitor_clone", recording_clone)
+    monkeypatch.setattr(
+        TaskMonitor,
+        "_run_builtin_cycle_worker_local",
+        fail_builtin_cycle,
+    )
+    try:
+        result = task._run_builtin_cycle_worker(
+            task_monitor_mod._TaskMonitorBuiltinCycleWork(
+                request_id="unexpected-worker-failure",
+                now_ns=time.time_ns(),
+                task_log_owner="monitor_store",
+            )
+        )
+
+        assert events == ["sink", "queue"]
+        assert result.close_errors == ()
+        assert result.result.success is False
+        assert result.result.errors == ("built-in worker boom",)
+        assert result.runtime_cleanup_ready is False
+    finally:
+        task.stop()
+
+
 def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -634,7 +757,7 @@ def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
 ) -> None:
     """Runtime cleanup reports worker close failure as pending typed work."""
 
-    db_path, _make_queue = broker_env
+    db_path, make_queue = broker_env
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -649,6 +772,7 @@ def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
         config=config,
     )
     real_clone = task._worker_local_monitor_clone
+    events: list[str] = []
 
     def clone_with_failing_sink_close() -> TaskMonitor:
         worker = real_clone()
@@ -656,13 +780,32 @@ def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
         worker._external_task_log_sink = _CloseRecordingProxy(
             worker._external_task_log_sink,
             name="sink",
-            events=[],
+            events=events,
             fail=True,
+        )
+        worker._queue_cache["runtime-close.queue"] = _CloseRecordingProxy(
+            make_queue("runtime-close.queue"),
+            name="queue",
+            events=events,
         )
         return worker
 
+    class UnexpectedWorkerFailure(Exception):
+        pass
+
+    def fail_outside_known_worker_errors(
+        _worker: TaskMonitor,
+        _work: task_monitor_mod._TaskControlCleanupWork,
+    ) -> task_monitor_mod._TaskControlCleanupWorkerResult:
+        raise UnexpectedWorkerFailure("unexpected runtime worker boom")
+
     monkeypatch.setattr(
         task, "_worker_local_monitor_clone", clone_with_failing_sink_close
+    )
+    monkeypatch.setattr(
+        TaskMonitor,
+        "_run_terminal_control_cleanup_worker_local",
+        fail_outside_known_worker_errors,
     )
     try:
         result = task._run_terminal_control_cleanup_worker(
@@ -676,9 +819,13 @@ def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
         assert result.cleanup.pending is True
         assert result.cleanup.next_slice_kind is None
         assert len(result.close_errors) == 1
+        assert result.monitor_status.available is False
+        assert result.monitor_status.error == "unexpected runtime worker boom"
+        assert result.cleanup.errors[0] == "unexpected runtime worker boom"
         assert any(
             "worker resource close failed" in error for error in result.cleanup.errors
         )
+        assert events == ["sink", "queue"]
     finally:
         task.stop()
 
@@ -962,6 +1109,17 @@ def failing_processor(
         success=False,
         errors=("processor failed",),
     )
+
+
+class CustomProcessorFailure(Exception):
+    """Arbitrary extension failure used to prove the processor boundary."""
+
+
+def raising_processor(
+    request: TaskMonitorProcessorRequest,
+) -> TaskMonitorProcessorResult:
+    PROCESSOR_REQUESTS.append(request)
+    raise CustomProcessorFailure("custom processor boom")
 
 
 def blocking_processor(
@@ -7704,6 +7862,45 @@ def test_task_monitor_failed_processor_does_not_advance_checkpoint(
         assert task._last_checkpoint is None
         assert task._last_processor_success is False
         assert task._last_error == "processor failed"
+    finally:
+        task.stop()
+
+
+def test_task_monitor_custom_processor_exception_is_a_failed_cycle(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An open-taxonomy processor failure stays inside its worker cycle."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_MODE": "custom",
+            "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:raising_processor",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(json.dumps({"event": "work_failed", "tid": "1778084345905438720"}))
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999412"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+
+        assert len(PROCESSOR_REQUESTS) == 1
+        assert task._last_checkpoint is None
+        assert task._last_processor_success is False
+        assert task._last_error == "custom processor boom"
+        assert task.taskspec.state.status == "running"
     finally:
         task.stop()
 

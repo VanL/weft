@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Self
 
 import pytest
+from psycopg_pool import PoolTimeout
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
@@ -36,9 +38,96 @@ RESULT_MATERIALIZATION_TEST_TIMEOUT = 15.0
 """Backend-tolerant timeout for tests that validate eventual queue discovery."""
 
 
+class ResultContextFailure(Exception):
+    """Ordinary context/backend failure at the result command boundary."""
+
+
+class ResultContextSignal(BaseException):
+    """Fatal signal that the result command boundary must not contain."""
+
+
+def test_collect_all_results_reports_backend_queue_enumeration_failure() -> None:
+    error = PoolTimeout("connection pool unavailable")
+
+    class FailingBroker:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def list_queues(self, *, pattern: str) -> list[str]:
+            assert pattern == "T*.outbox"
+            raise error
+
+    class FakeContext:
+        def broker(self) -> FailingBroker:
+            return FailingBroker()
+
+    assert result_cmd._collect_all_results(  # type: ignore[arg-type]
+        FakeContext(),
+        json_output=False,
+        show_stderr=False,
+        peek_only=False,
+    ) == (1, f"weft: failed to enumerate queues: {error}")
+
+
 @pytest.mark.parametrize("raw_tid", ["123", "T123", " T123 "])
 def test_result_tid_normalization_removes_at_most_one_prefix(raw_tid: str) -> None:
     assert result_cmd._normalize_tid(raw_tid) == "123"
+
+
+def test_cmd_result_reports_ordinary_context_resolution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Extension-defined context failures retain the command's error shape."""
+
+    def fail_context(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise ResultContextFailure("context detail")
+
+    monkeypatch.setattr(result_cmd, "build_context", fail_context)
+
+    result = cmd_result(
+        tid="1777000000000000789",
+        all_results=False,
+        peek=False,
+        timeout=None,
+        stream=False,
+        json_output=False,
+        show_stderr=False,
+        context_path="ignored",
+    )
+
+    assert result == (1, "weft: failed to resolve context: context detail")
+
+
+def test_cmd_result_propagates_fatal_context_resolution_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Result contains ordinary context failures, not BaseException signals."""
+
+    signal = ResultContextSignal()
+
+    def fail_context(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise signal
+
+    monkeypatch.setattr(result_cmd, "build_context", fail_context)
+
+    with pytest.raises(ResultContextSignal) as exc_info:
+        cmd_result(
+            tid="1777000000000000789",
+            all_results=False,
+            peek=False,
+            timeout=None,
+            stream=False,
+            json_output=False,
+            show_stderr=False,
+            context_path="ignored",
+        )
+
+    assert exc_info.value is signal
 
 
 def _write_task_log_event(queue, tid: str, event: str, status: str) -> None:

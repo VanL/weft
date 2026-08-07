@@ -224,7 +224,8 @@ class MicrosandboxRuntime:
         try:
             handle = await sdk.Sandbox.get(sandbox_id)
             await handle.stop(timeout=timeout)
-        except Exception:
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-317] exception
+            logger.warning("Failed to stop Microsandbox")
             return False
         return True
 
@@ -234,7 +235,8 @@ class MicrosandboxRuntime:
         try:
             handle = await sdk.Sandbox.get(sandbox_id)
             await handle.kill()
-        except Exception:
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-317] exception
+            logger.warning("Failed to kill Microsandbox")
             return False
         return True
 
@@ -246,7 +248,8 @@ class MicrosandboxRuntime:
         try:
             handle = await sdk.Sandbox.get(sandbox_id)
             refreshed = await handle.refresh()
-        except Exception:
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-317] exception
+            logger.warning("Failed to describe Microsandbox; treating it as missing")
             return MicrosandboxDescription(
                 sandbox_id=sandbox_id,
                 state="missing",
@@ -261,7 +264,7 @@ class MicrosandboxRuntime:
         if callable(config):
             try:
                 metadata["config"] = config()
-            except Exception:  # pragma: no cover - best-effort SDK metadata
+            except Exception:  # pragma: no cover - best-effort SDK metadata  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-292] exception
                 logger.warning("Failed to read Microsandbox configuration metadata")
         return MicrosandboxDescription(
             sandbox_id=sandbox_id,
@@ -334,7 +337,7 @@ async def _copy_back_files(
     for item in copy_back:
         try:
             await sandbox.fs.copy_to_host(item.guest_path, item.host_path)
-        except Exception:
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-291] exception
             logger.warning("Failed to copy Microsandbox output to the host")
 
 
@@ -418,16 +421,21 @@ async def _exec_with_cancel(
             continue
         try:
             await sandbox.kill()
-        except Exception:
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-294] exception
             logger.warning("Failed to kill Microsandbox during cancellation")
         try:
             await asyncio.wait_for(exec_task, timeout=2.0)
-            return None
         except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-317] exception
+            logger.warning(
+                "Microsandbox execution did not complete cleanly after cancellation"
+            )
             exec_task.cancel()
-            return None
+        return None
 
 
 async def _sandbox_name(sandbox: Any | None, *, fallback: str) -> str:
@@ -439,7 +447,8 @@ async def _sandbox_name(sandbox: Any | None, *, fallback: str) -> str:
             value = value()
         if inspect.isawaitable(value):
             value = await value
-    except Exception:
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-317] exception
+        logger.warning("Failed to read Microsandbox name; using fallback")
         return fallback
     text = str(value).strip()
     return text or fallback
@@ -448,18 +457,18 @@ async def _sandbox_name(sandbox: Any | None, *, fallback: str) -> str:
 async def _cleanup_sandbox(sdk: Any, sandbox: Any, name: str) -> None:
     try:
         await sandbox.stop(timeout=2.0)
-    except Exception:
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-290] exception
         logger.warning("Failed to stop Microsandbox during cleanup")
     try:
         await sdk.Sandbox.remove(name)
-    except Exception:
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-290] exception
         logger.warning("Failed to remove Microsandbox during cleanup")
 
 
 def _is_timeout_error(exc: BaseException) -> bool:
     try:
         timeout_error = _load_sdk().ExecTimeoutError
-    except Exception:  # pragma: no cover - import already checked on real path
+    except (MicrosandboxRuntimeError, AttributeError):  # pragma: no cover
         return exc.__class__.__name__ == "ExecTimeoutError"
     return isinstance(exc, timeout_error)
 

@@ -81,14 +81,14 @@ def _terminate_runtime(process: subprocess.Popen[Any]) -> None:
         return
     try:
         process.terminate()
-    except Exception:  # pragma: no cover - process may have exited
+    except OSError:  # pragma: no cover - process may have exited
         return
     try:
         process.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
         try:
             process.kill()
-        except Exception:  # pragma: no cover - process may have exited
+        except OSError:  # pragma: no cover - process may have exited
             return
         try:
             process.wait(timeout=1.0)
@@ -107,7 +107,9 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(payload_json)
         command = payload["command"]
         stderr_path = Path(payload["stderr_path"])
-    except Exception as exc:  # pragma: no cover - defensive
+    # Keep arbitrary ordinary payload failures inside this process boundary so
+    # the parent receives the launcher's documented invalid-payload result.
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-345] exception
         sys.stderr.write(f"Invalid detached launcher payload: {exc}\n")
         return 2
 
@@ -119,7 +121,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         runtime = _launch_runtime(command, stderr_path)
-    except Exception as exc:  # pragma: no cover - launcher process boundary
+    # The detached protocol needs one structured failure event even when the
+    # owned launch helper fails outside a platform-specific OS error family.
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-345] exception
         _emit_event(
             {
                 "event": "spawn_failed",

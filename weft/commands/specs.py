@@ -520,7 +520,7 @@ def _validate_task_spec_payload(
 
     try:
         _validate_taskspec_parameterization(validation_payload)
-    except Exception as exc:  # pragma: no cover - validation probe boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
         return _validation_failure(
             spec_type=SPEC_TYPE_TASK,
             stage="parameterization",
@@ -531,7 +531,7 @@ def _validate_task_spec_payload(
 
     try:
         _validate_taskspec_run_input(validation_payload)
-    except Exception as exc:  # pragma: no cover - validation probe boundary
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
         return _validation_failure(
             spec_type=SPEC_TYPE_TASK,
             stage="run_input",
@@ -545,7 +545,7 @@ def _validate_task_spec_payload(
             materialized_environment = validate_taskspec_runner_environment(
                 validation_payload
             )
-        except Exception as exc:  # pragma: no cover - validation probe boundary
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
             return _validation_failure(
                 spec_type=SPEC_TYPE_TASK,
                 stage="environment_profile",
@@ -561,7 +561,7 @@ def _validate_task_spec_payload(
                 preflight=preflight,
                 materialized_environment=materialized_environment,
             )
-        except Exception as exc:  # pragma: no cover - validation probe boundary
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
             return _validation_failure(
                 spec_type=SPEC_TYPE_TASK,
                 stage="runner",
@@ -576,7 +576,7 @@ def _validate_task_spec_payload(
                 load_runtime=True,
                 preflight=preflight,
             )
-        except Exception as exc:  # pragma: no cover - validation probe boundary
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
             return _validation_failure(
                 spec_type=SPEC_TYPE_TASK,
                 stage="agent_runtime",
@@ -592,7 +592,7 @@ def _validate_task_spec_payload(
                     load_runtime=True,
                     preflight=preflight,
                 )
-            except Exception as exc:  # pragma: no cover - validation probe boundary
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
                 return _validation_failure(
                     spec_type=SPEC_TYPE_TASK,
                     stage="tool_profile",

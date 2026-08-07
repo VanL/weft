@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import weft.core.task_evidence as task_evidence
+import weft.core.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-253] exception
 from simplebroker.ext import BrokerError
 from weft._constants import (
     TASK_MONITOR_CHECKPOINT_PATH,
@@ -222,7 +222,7 @@ def _load_checkpoint(path: Path, monitor_name: str) -> TaskMonitorCheckpoint | N
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Invalid task monitor checkpoint: {path}") from exc
     if not isinstance(payload, dict):
-        raise ValueError(f"Invalid task monitor checkpoint: {path}")
+        raise ValueError(f"Invalid task monitor checkpoint: {path}")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-265] exception
     try:
         schema_version = int(payload["schema_version"])
         last_timestamp = int(payload["last_task_log_timestamp"])

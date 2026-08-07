@@ -116,6 +116,8 @@ _SHARED_MODULES = frozenset(
         "tests/core/test_queue_wait.py",
         "tests/core/test_runner_diagnostics.py",
         "tests/core/test_runner_plugins.py",
+        "tests/core/test_runner_validation.py",
+        "tests/core/test_serve_log.py",
         "tests/core/test_pruning_apply.py",
         "tests/core/test_runtime_handle_liveness.py",
         "tests/core/test_service_convergence.py",
@@ -308,9 +310,8 @@ def queue_factory(weft_harness: WeftTestHarness):
         for queue in created:
             try:
                 queue.close()
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-312] exception
                 logger.warning("Failed to close test queue")
-                pass
 
 
 @pytest.fixture
@@ -338,9 +339,8 @@ def broker_env(
         for queue in created:
             try:
                 queue.close()
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-312] exception
                 logger.warning("Failed to close broker fixture queue")
-                pass
 
 
 @pytest.fixture
@@ -362,9 +362,8 @@ def task_factory(broker_env: tuple[object, Callable[[str], Queue]]):
         for task in tasks:
             try:
                 task.stop()
-            except Exception:
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-312] exception
                 logger.warning("Failed to stop test task")
-                pass
 
 
 def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
@@ -439,8 +438,8 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
         if harness is not None:
             try:
                 debug_lines.append(harness.dump_debug_state())
-            except Exception as dump_exc:  # pragma: no cover - defensive
-                debug_lines.append(f"WeftTestHarness dump failed: {dump_exc!r}")
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-310] exception
+                debug_lines.append("WeftTestHarness dump failed.")
         else:
             debug_lines.append("No WeftTestHarness provided.")
         debug_text = "\n".join(debug_lines)

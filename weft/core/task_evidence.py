@@ -769,7 +769,7 @@ def describe_runtime(handle: RunnerHandle | None) -> dict[str, Any] | None:
     try:
         plugin = require_runner_plugin(handle.runner)
         runtime = plugin.describe(handle)
-    except Exception as exc:  # pragma: no cover - defensive integration guard
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-365] exception
         return {
             "runner": handle.runner,
             "id": handle.id,

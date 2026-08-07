@@ -41,6 +41,73 @@ from weft.helpers import (
 pytestmark = [pytest.mark.shared]
 
 
+class MonitorStoreReadFailure(Exception):
+    """Ordinary dynamic monitor-store failure at the status fallback boundary."""
+
+
+class MonitorStoreReadSignal(BaseException):
+    """Fatal monitor-store signal that the status fallback must not contain."""
+
+
+def test_monitor_store_snapshot_reports_ordinary_dynamic_store_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary store failure becomes the existing bounded unknown snapshot."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = "1777000000000000789"
+
+    def fail_open(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise MonitorStoreReadFailure("store detail")
+
+    monkeypatch.setattr(task_cmd, "open_monitor_store", fail_open)
+
+    snapshot = task_cmd._monitor_store_task_snapshot(
+        context,
+        tid,
+        include_terminal=True,
+    )
+
+    assert snapshot is not None
+    assert snapshot.tid == tid
+    assert snapshot.status == "unknown"
+    assert snapshot.event == "monitor_store_unavailable"
+    assert snapshot.reconciliation == {
+        "classification": "monitor_store_unavailable",
+        "reason": "store_read_failed",
+    }
+    assert snapshot.error == "monitor store unavailable: store detail"
+
+
+def test_monitor_store_snapshot_propagates_fatal_dynamic_store_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The store fallback contains ordinary failures, not BaseException signals."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    signal = MonitorStoreReadSignal()
+
+    def fail_open(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise signal
+
+    monkeypatch.setattr(task_cmd, "open_monitor_store", fail_open)
+
+    with pytest.raises(MonitorStoreReadSignal) as exc_info:
+        task_cmd._monitor_store_task_snapshot(
+            context,
+            "1777000000000000790",
+            include_terminal=True,
+        )
+
+    assert exc_info.value is signal
+
+
 @pytest.mark.parametrize(
     ("timeout", "expected"),
     [

@@ -122,6 +122,25 @@ def test_describe_runtime_converts_plugin_failure_to_diagnostic(
     }
 
 
+def test_describe_runtime_does_not_contain_fatal_plugin_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FatalPluginSignal(BaseException):
+        pass
+
+    signal = FatalPluginSignal("stop now")
+
+    def fail_lookup(_name: str) -> object:
+        raise signal
+
+    monkeypatch.setattr(task_evidence, "require_runner_plugin", fail_lookup)
+
+    with pytest.raises(FatalPluginSignal) as exc_info:
+        task_evidence.describe_runtime(_runner_handle())
+
+    assert exc_info.value is signal
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -224,7 +243,7 @@ def _probe_with_task(
                 taskspec_payload=taskspec,
                 timeout=LIVE_PONG_PROBE_TIMEOUT,
             )
-        except BaseException as exc:  # pragma: no cover - thread handoff
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-338] exception
             errors.append(exc)
 
     thread = threading.Thread(target=probe)
@@ -238,6 +257,32 @@ def _probe_with_task(
     if errors:
         raise errors[0]
     return result.get("evidence")
+
+
+def test_probe_with_task_reraises_base_exception_from_probe_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The thread handoff preserves fatal probe signals by identity."""
+
+    class ProbeSignal(BaseException):
+        pass
+
+    signal = ProbeSignal("probe interrupted")
+
+    def fail_probe(*_args: object, **_kwargs: object) -> None:
+        raise signal
+
+    class ProbeDriver:
+        def process_once(self) -> None:
+            pass
+
+    monkeypatch.setattr(task_evidence, "ping_pong_evidence", fail_probe)
+    task: Any = ProbeDriver()
+
+    with pytest.raises(ProbeSignal) as caught:
+        _probe_with_task(object(), task, tid="123", taskspec={})
+
+    assert caught.value is signal
 
 
 def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
@@ -659,7 +704,10 @@ def test_ping_pong_ignores_unmatched_and_preserves_terminal_ctrl_out(
         task.stop(join=False)
 
 
-def test_known_tid_ping_pong_updates_task_status(tmp_path) -> None:
+def test_known_tid_ping_pong_updates_task_status(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -692,8 +740,26 @@ def test_known_tid_ping_pong_updates_task_status(tmp_path) -> None:
                     ping=True,
                     probe_timeout=LIVE_PONG_PROBE_TIMEOUT,
                 )
-            except BaseException as exc:  # pragma: no cover - thread handoff
+            except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-338] exception
                 errors.append(exc)
+
+        class StatusProbeSignal(BaseException):
+            pass
+
+        signal = StatusProbeSignal("status probe interrupted")
+        real_task_status = task_cmd.task_status
+
+        def fail_task_status(*_args: object, **_kwargs: object) -> None:
+            raise signal
+
+        monkeypatch.setattr(task_cmd, "task_status", fail_task_status)
+        sentinel_thread = threading.Thread(target=probe_status)
+        sentinel_thread.start()
+        sentinel_thread.join(timeout=1.0)
+        assert not sentinel_thread.is_alive()
+        assert errors == [signal]
+        errors.clear()
+        monkeypatch.setattr(task_cmd, "task_status", real_task_status)
 
         thread = threading.Thread(target=probe_status)
         thread.start()

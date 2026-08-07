@@ -128,7 +128,7 @@ def test_materialize_runner_environment_loads_bundle_local_profile(
 ) -> None:
     helper = tmp_path / "helper_module.py"
     helper.write_text(
-        "\n".join(
+        "\n".join(  # noqa: FLY002 approved [TS-3.1] [RUFF-SUP-239] exception
             [
                 "from weft.ext import RunnerEnvironmentProfileResult",
                 "",

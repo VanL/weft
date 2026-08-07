@@ -28,6 +28,47 @@ def _sdk() -> Any:
     return pytest.importorskip("microsandbox")
 
 
+def test_timeout_classifier_uses_name_fallback_when_sdk_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExecTimeoutError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        _runtime,
+        "_load_sdk",
+        lambda: (_ for _ in ()).throw(
+            _runtime.MicrosandboxRuntimeError("SDK unavailable")
+        ),
+    )
+
+    assert _runtime._is_timeout_error(ExecTimeoutError()) is True
+
+
+def test_timeout_classifier_uses_name_fallback_when_sdk_type_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExecTimeoutError(Exception):
+        pass
+
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: object())
+
+    assert _runtime._is_timeout_error(ExecTimeoutError()) is True
+
+
+def test_timeout_classifier_propagates_unexpected_sdk_lookup_defect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _runtime,
+        "_load_sdk",
+        lambda: (_ for _ in ()).throw(RuntimeError("SDK lookup defect")),
+    )
+
+    with pytest.raises(RuntimeError, match="SDK lookup defect"):
+        _runtime._is_timeout_error(TimeoutError())
+
+
 def test_installed_sdk_exposes_adapter_api_surface() -> None:
     sdk = _sdk()
 
@@ -73,6 +114,126 @@ def test_sandbox_name_handles_legacy_async_method_shape() -> None:
         )
         == "sandbox-method"
     )
+
+
+def test_sandbox_name_reports_lookup_failure_and_uses_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingNameSandbox:
+        @staticmethod
+        def name() -> str:
+            raise RuntimeError("sensitive sandbox name failure")
+
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    name = asyncio.run(
+        _runtime._sandbox_name(FailingNameSandbox(), fallback="sensitive-fallback")
+    )
+
+    assert name == "sensitive-fallback"
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to read Microsandbox name; using fallback"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive" not in caplog.text
+
+
+def test_stop_reports_adapter_failure_and_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Handle:
+        @staticmethod
+        async def stop(*, timeout: float) -> None:
+            assert timeout == 1.25
+            raise RuntimeError("sensitive stop failure")
+
+    class SandboxAPI:
+        @staticmethod
+        async def get(sandbox_id: str) -> Handle:
+            assert sandbox_id == "sensitive-sandbox-id"
+            return Handle()
+
+    class SDK:
+        Sandbox = SandboxAPI
+
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SDK())
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    stopped = asyncio.run(
+        MicrosandboxRuntime()._stop_async("sensitive-sandbox-id", timeout=1.25)
+    )
+
+    assert stopped is False
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to stop Microsandbox"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive" not in caplog.text
+
+
+def test_kill_reports_adapter_lookup_failure_and_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class SandboxAPI:
+        @staticmethod
+        async def get(sandbox_id: str) -> object:
+            assert sandbox_id == "sensitive-sandbox-id"
+            raise ValueError("sensitive kill lookup failure")
+
+    class SDK:
+        Sandbox = SandboxAPI
+
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SDK())
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    killed = asyncio.run(
+        MicrosandboxRuntime()._kill_async("sensitive-sandbox-id", timeout=1.25)
+    )
+
+    assert killed is False
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to kill Microsandbox"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive" not in caplog.text
+
+
+def test_describe_reports_adapter_failure_and_returns_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Handle:
+        @staticmethod
+        async def refresh() -> object:
+            raise OSError("sensitive FFI refresh failure")
+
+    class SandboxAPI:
+        @staticmethod
+        async def get(sandbox_id: str) -> Handle:
+            assert sandbox_id == "sensitive-sandbox-id"
+            return Handle()
+
+    class SDK:
+        Sandbox = SandboxAPI
+
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SDK())
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    description = asyncio.run(
+        MicrosandboxRuntime()._describe_async("sensitive-sandbox-id")
+    )
+
+    assert description is not None
+    assert description.sandbox_id == "sensitive-sandbox-id"
+    assert description.state == "missing"
+    assert description.metadata == {}
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to describe Microsandbox; treating it as missing"
+    ]
+    assert caplog.records[0].exc_info is None
+    assert "sensitive" not in caplog.text
 
 
 def test_describe_reports_optional_configuration_failure(
@@ -411,7 +572,7 @@ def test_exec_with_cancel_maps_post_kill_exec_output_to_cancelled() -> None:
     assert killed is True
 
 
-def test_exec_with_cancel_reports_kill_failure_and_drains_exec_task(
+def test_exec_with_cancel_reports_kill_failure_and_cancels_exec_task(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -463,10 +624,93 @@ def test_exec_with_cancel_reports_kill_failure_and_drains_exec_task(
     assert sandbox.exec_task.done() is True
     assert sandbox.exec_task.cancelled() is True
     assert [record.getMessage() for record in caplog.records] == [
-        "Failed to kill Microsandbox during cancellation"
+        "Failed to kill Microsandbox during cancellation",
+        "Microsandbox execution did not complete cleanly after cancellation",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "sensitive" not in caplog.text
+
+
+def test_exec_with_cancel_reports_post_kill_provider_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class ProviderFailureAfterKillSandbox:
+        killed = False
+
+        async def exec(self, *_args: object, **_kwargs: object) -> object:
+            while not self.killed:
+                await asyncio.sleep(0.01)
+            raise RuntimeError("sensitive provider failure")
+
+        async def kill(self) -> None:
+            self.killed = True
+
+    async def _run() -> object | None:
+        return await _runtime._exec_with_cancel(
+            object(),
+            ProviderFailureAfterKillSandbox(),
+            MicrosandboxRunSpec(
+                name="weft-cancel-provider-failure",
+                image="python:3.12",
+                command=("python", "-c", "print(1)"),
+                env={},
+                cwd="/",
+                network="none",
+                workspace=WorkspaceSpec(),
+            ),
+            cancel_requested=lambda: True,
+        )
+
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    assert asyncio.run(_run()) is None
+    assert [record.getMessage() for record in caplog.records] == [
+        "Microsandbox execution did not complete cleanly after cancellation"
     ]
     assert caplog.records[0].exc_info is None
     assert "sensitive" not in caplog.text
+
+
+def test_exec_with_cancel_propagates_outer_cancellation() -> None:
+    class BlockingAfterKillSandbox:
+        killed = False
+        exec_task: asyncio.Task[object] | None = None
+
+        async def exec(self, *_args: object, **_kwargs: object) -> object:
+            self.exec_task = asyncio.current_task()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def kill(self) -> None:
+            self.killed = True
+
+    async def _run() -> bool:
+        sandbox = BlockingAfterKillSandbox()
+        outer_task = asyncio.create_task(
+            _runtime._exec_with_cancel(
+                object(),
+                sandbox,
+                MicrosandboxRunSpec(
+                    name="weft-outer-cancel",
+                    image="python:3.12",
+                    command=("python", "-c", "print(1)"),
+                    env={},
+                    cwd="/",
+                    network="none",
+                    workspace=WorkspaceSpec(),
+                ),
+                cancel_requested=lambda: True,
+            )
+        )
+        while not sandbox.killed:
+            await asyncio.sleep(0.01)
+        outer_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer_task
+        assert sandbox.exec_task is not None
+        return sandbox.exec_task.cancelled()
+
+    assert asyncio.run(_run()) is True
 
 
 def test_cleanup_sandbox_reports_each_failure_and_continues(

@@ -69,6 +69,7 @@ from weft.core.taskspec import (
     StateSection,
     TaskSpec,
 )
+from weft.ext import RunnerHandle
 
 PROCESS_SCRIPT = str((Path(__file__).resolve().parent / "process_target.py").resolve())
 _launcher_wait_calls: list[float | None] = []
@@ -202,7 +203,7 @@ def test_base_task_process_once_rejects_a_second_drive_thread_before_policy(
     def drive_from_foreign_thread() -> None:
         try:
             task.process_once()
-        except BaseException as exc:
+        except RuntimeError as exc:
             errors.append(exc)
 
     thread = threading.Thread(target=drive_from_foreign_thread)
@@ -424,7 +425,7 @@ def test_base_task_rejects_reentrant_same_owner_turn(
         def _process_reactor_turn(self) -> None:
             try:
                 self.process_once()
-            except BaseException as exc:
+            except RuntimeError as exc:
                 nested_errors.append(exc)
 
     db_path, _make_queue = broker_env
@@ -479,7 +480,7 @@ def test_base_task_foreign_wait_rejects_before_waiter_effects(
     def foreign_wait() -> None:
         try:
             task.wait_for_activity(timeout=0.01)
-        except BaseException as exc:
+        except RuntimeError as exc:
             errors.append(exc)
 
     thread = threading.Thread(target=foreign_wait)
@@ -1065,7 +1066,7 @@ def test_base_task_stop_waits_for_starting_interlock(
     start_entered = threading.Event()
     release_start = threading.Event()
     stop_returned = threading.Event()
-    start_errors: list[BaseException] = []
+    start_errors: list[Exception] = []
     original_thread_start = threading.Thread.start
 
     def blocked_thread_start(thread: threading.Thread) -> None:
@@ -1077,7 +1078,7 @@ def test_base_task_stop_waits_for_starting_interlock(
         monkeypatch.setattr(threading.Thread, "start", blocked_thread_start)
         try:
             task.start()
-        except BaseException as exc:
+        except (AssertionError, RuntimeError) as exc:
             start_errors.append(exc)
 
     def stop_task() -> None:
@@ -4079,6 +4080,154 @@ def test_base_task_worker_error_is_raised_on_main_thread(
         task.process_once()
 
     assert isinstance(exc.value.__cause__, ValueError)
+
+
+def test_base_task_worker_lane_transports_fatal_exit_identity(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ErrorRecordingReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+
+    class FatalWorkerExit(BaseException):
+        pass
+
+    fatal = FatalWorkerExit("fatal worker exit")
+
+    def worker_body() -> None:
+        raise fatal
+
+    try:
+        thread = task._submit_worker_call("fatal", worker_body)
+        thread.join(timeout=2.0)
+        assert thread.is_alive() is False
+        task._drain_worker_results()
+    finally:
+        task.cleanup()
+
+    assert len(task.worker_results) == 1
+    assert task.worker_results[0].lane == "fatal"
+    assert task.worker_results[0].value is None
+    assert task.worker_results[0].error is fatal
+
+
+def test_consumer_worker_result_preserves_ordinary_failure_and_fatal_identity(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    ordinary = LookupError("ordinary runner failure")
+
+    def fail_ordinary(_work_item: Any) -> tuple[RunnerOutcome, bool]:
+        raise ordinary
+
+    class FatalRunnerExit(BaseException):
+        pass
+
+    fatal = FatalRunnerExit("fatal runner exit")
+
+    def fail_fatal(_work_item: Any) -> tuple[RunnerOutcome, bool]:
+        raise fatal
+
+    try:
+        monkeypatch.setattr(task, "_run_task_for_reactor", fail_ordinary)
+        result = task._run_reactor_work_item(
+            {"payload": "ordinary"},
+            timestamp=123,
+            initial_transition=True,
+        )
+        assert result.timestamp == 123
+        assert result.initial_transition is True
+        assert result.live_command_streaming is False
+        assert result.outcome is None
+        assert result.exception is ordinary
+
+        monkeypatch.setattr(task, "_run_task_for_reactor", fail_fatal)
+        with pytest.raises(FatalRunnerExit) as exc_info:
+            task._run_reactor_work_item(
+                {"payload": "fatal"},
+                timestamp=456,
+                initial_transition=False,
+            )
+        assert exc_info.value is fatal
+    finally:
+        task.cleanup()
+
+
+def test_runtime_summary_contains_plugin_failure_but_propagates_fatal_exit(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    task._runtime_handle = RunnerHandle(
+        runner="test-runner",
+        kind="process",
+        id="runtime-id",
+        control={"authority": "runner"},
+        observations={"observed": True},
+        metadata={"declared": True},
+    )
+    ordinary = LookupError("verbatim plugin failure")
+
+    class FailingPlugin:
+        def describe(self, _handle: RunnerHandle) -> None:
+            raise ordinary
+
+    class FatalPluginExit(BaseException):
+        pass
+
+    fatal = FatalPluginExit("fatal plugin exit")
+
+    class FatalPlugin:
+        def describe(self, _handle: RunnerHandle) -> None:
+            raise fatal
+
+    try:
+        monkeypatch.setattr(
+            base_module, "require_runner_plugin", lambda _name: FailingPlugin()
+        )
+        summary = task._control_runtime_summary()
+        assert summary == {
+            "runner": "test-runner",
+            "id": "runtime-id",
+            "state": "unknown",
+            "metadata": {
+                "observed": True,
+                "declared": True,
+                "describe_error": "verbatim plugin failure",
+            },
+        }
+
+        monkeypatch.setattr(
+            base_module, "require_runner_plugin", lambda _name: FatalPlugin()
+        )
+        with pytest.raises(FatalPluginExit) as exc_info:
+            task._control_runtime_summary()
+        assert exc_info.value is fatal
+    finally:
+        task.cleanup()
 
 
 def test_task_process_entry_waits_through_activity_seam(

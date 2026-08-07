@@ -110,7 +110,7 @@ def call_fixture_tool(
         call_response = _read_response(process.stdout, expected_id=3)
         content = call_response.get("result", {}).get("content", [])
         if not isinstance(content, list):
-            raise RuntimeError("fixture MCP server returned invalid content")
+            raise RuntimeError("fixture MCP server returned invalid content")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-255] exception
         for item in content:
             if isinstance(item, dict) and item.get("type") == "text":
                 text = item.get("text")
@@ -303,7 +303,7 @@ def _read_response(stream: Any, *, expected_id: int) -> dict[str, Any]:
         error = payload.get("error")
         if isinstance(error, dict):
             message = error.get("message")
-            raise RuntimeError(
+            raise RuntimeError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-256] exception
                 str(message)
                 if isinstance(message, str)
                 else "fixture MCP request failed"

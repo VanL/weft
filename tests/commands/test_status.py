@@ -2331,6 +2331,46 @@ def test_cmd_status_discovers_parent_context_from_subdirectory(
     assert "total_messages: 1" in payload
 
 
+def test_task_snapshot_collection_tolerates_unexpected_manager_selection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class UnexpectedManagerSelectionFailure(Exception):
+        pass
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955191"
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="work_completed",
+        status="completed",
+        started_at=1_762_000_000_000_000_000,
+        completed_at=1_762_000_001_000_000_000,
+    )
+    selection_attempts: list[object] = []
+
+    def _fail_manager_selection(_ctx: Any) -> None:
+        selection_attempts.append(_ctx)
+        raise UnexpectedManagerSelectionFailure("runner probe failed")
+
+    monkeypatch.setattr(status_cmd, "_select_active_manager", _fail_manager_selection)
+
+    records = status_cmd._collect_task_snapshot_records(
+        ctx,
+        include_terminal=True,
+        tid_filters=None,
+    )
+
+    assert selection_attempts == [ctx]
+    assert [(record.snapshot.tid, record.snapshot.status) for record in records] == [
+        (tid, "completed")
+    ]
+    assert capsys.readouterr() == ("", "")
+
+
 def test_watch_task_events_uses_queue_monitor(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2392,3 +2432,53 @@ def test_watch_task_events_uses_queue_monitor(
     assert iter_queue_names == ["weft.log.tasks", "weft.log.tasks"]
     assert iter_since_timestamps == [0, 0]
     assert created_monitors[0].wait_calls == [0.25, 0.25]
+
+
+def test_watch_task_events_reports_unexpected_watch_loop_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    class UnexpectedWatchFailure(Exception):
+        pass
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+
+    def _fail_log_read(*_args: Any, **_kwargs: Any) -> None:
+        raise UnexpectedWatchFailure("watch source failed")
+
+    monkeypatch.setattr(status_cmd, "_iter_log_events", _fail_log_read)
+
+    exit_code = status_cmd._watch_task_events(
+        ctx,
+        tid_filters=None,
+        status_filter=None,
+        json_output=False,
+        interval=0.25,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == "weft: status watch failed: watch source failed\n"
+
+
+def test_cmd_status_reports_unexpected_status_source_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class UnexpectedStatusSourceFailure(Exception):
+        pass
+
+    root = prepare_project_root(tmp_path)
+
+    def _fail_broker_status(_ctx: Any) -> None:
+        raise UnexpectedStatusSourceFailure("status source failed")
+
+    monkeypatch.setattr(status_cmd, "collect_broker_status", _fail_broker_status)
+
+    exit_code, payload = cmd_status(spec_context=root)
+
+    assert exit_code == 1
+    assert payload == "weft: failed to retrieve status: status source failed"

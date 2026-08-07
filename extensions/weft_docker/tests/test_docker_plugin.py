@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from docker.errors import APIError, NotFound
 from weft_docker import _sdk as docker_sdk
 from weft_docker import get_runner_plugin, plugin
 
@@ -17,6 +19,82 @@ from weft import runtime_liveness
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("kill unavailable")],
+)
+def test_cleanup_process_contains_operational_kill_failure(
+    failure: BaseException,
+) -> None:
+    class Process:
+        wait_called = False
+
+        def poll(self) -> int | None:
+            return None
+
+        def kill(self) -> None:
+            raise failure
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.wait_called = True
+            return 0
+
+    process = Process()
+    plugin._cleanup_process(process)
+
+    assert process.wait_called is False
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("wait unavailable"),
+        subprocess.TimeoutExpired(cmd="docker", timeout=1.0),
+    ],
+)
+def test_cleanup_process_contains_operational_wait_failure(
+    failure: BaseException,
+) -> None:
+    class Process:
+        killed = False
+
+        def poll(self) -> int | None:
+            return None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert timeout == 1.0
+            raise failure
+
+    process = Process()
+    plugin._cleanup_process(process)
+
+    assert process.killed is True
+
+
+@pytest.mark.parametrize("phase", ["kill", "wait"])
+def test_cleanup_process_propagates_unexpected_defect(phase: str) -> None:
+    class Process:
+        def poll(self) -> int | None:
+            return None
+
+        def kill(self) -> None:
+            if phase == "kill":
+                raise RuntimeError("unexpected cleanup defect")
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert timeout == 1.0
+            if phase == "wait":
+                raise RuntimeError("unexpected cleanup defect")
+            return 0
+
+    with pytest.raises(RuntimeError, match="unexpected cleanup defect"):
+        plugin._cleanup_process(Process())
 
 
 @pytest.mark.parametrize(
@@ -195,15 +273,42 @@ def test_docker_runtime_liveness_reports_stopped_container(
 def test_docker_runtime_liveness_reports_unknown_when_docker_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        plugin,
+        "_load_docker_sdk",
+        lambda: (_ for _ in ()).throw(RuntimeError("docker unavailable")),
+    )
+
+    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "unknown"
+
+
+def test_docker_runtime_liveness_reports_unknown_on_docker_api_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     @contextmanager
     def failing_client(*, timeout: int = 10) -> Iterator[object]:
         del timeout
-        raise RuntimeError("docker unavailable")
+        raise APIError("docker unavailable")
         yield object()
 
     monkeypatch.setattr(plugin, "_docker_client", failing_client)
 
     assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "unknown"
+
+
+def test_docker_runtime_liveness_propagates_unexpected_client_defect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def failing_client(*, timeout: int = 10) -> Iterator[object]:
+        del timeout
+        raise RuntimeError("client defect")
+        yield object()
+
+    monkeypatch.setattr(plugin, "_docker_client", failing_client)
+
+    with pytest.raises(RuntimeError, match="client defect"):
+        plugin._docker_runtime_liveness(_docker_manager_handle())
 
 
 def test_docker_runtime_liveness_ignores_non_docker_handle() -> None:
@@ -857,6 +962,13 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
         def poll(self) -> int | None:
             return None
 
+        def kill(self) -> None:
+            return None
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == 1.0
+            return 0
+
     class FakeContainer:
         id = "container-789"
 
@@ -1046,6 +1158,149 @@ def test_wait_for_container_runtime_start_fails_when_created_state_sticks(
         )
 
     assert clock["now"] >= 0.2
+
+
+def test_wait_for_container_runtime_start_treats_docker_api_failure_as_terminal() -> (
+    None
+):
+    class FakeContainer:
+        id = "container-789"
+
+        def reload(self) -> None:
+            raise APIError("container disappeared")
+
+    docker_sdk.wait_for_container_runtime_start(
+        FakeContainer(),
+        timeout=0.2,
+        interval=0.05,
+    )
+
+
+def test_wait_for_container_runtime_start_propagates_unexpected_reload_defect() -> None:
+    class FakeContainer:
+        id = "container-789"
+
+        def reload(self) -> None:
+            raise RuntimeError("reload defect")
+
+    with pytest.raises(RuntimeError, match="reload defect"):
+        docker_sdk.wait_for_container_runtime_start(
+            FakeContainer(),
+            timeout=0.2,
+            interval=0.05,
+        )
+
+
+def test_lookup_container_treats_docker_list_failure_as_missing() -> None:
+    class FakeContainers:
+        def get(self, runtime_id: str) -> object:
+            del runtime_id
+            raise NotFound("missing")
+
+        def list(self, **kwargs: object) -> list[object]:
+            del kwargs
+            raise APIError("list unavailable")
+
+    client = type("FakeClient", (), {"containers": FakeContainers()})()
+
+    assert plugin._lookup_container(client, "container-789") is None
+
+
+def test_lookup_container_propagates_unexpected_list_defect() -> None:
+    class FakeContainers:
+        def get(self, runtime_id: str) -> object:
+            del runtime_id
+            raise NotFound("missing")
+
+        def list(self, **kwargs: object) -> list[object]:
+            del kwargs
+            raise RuntimeError("list defect")
+
+    client = type("FakeClient", (), {"containers": FakeContainers()})()
+
+    with pytest.raises(RuntimeError, match="list defect"):
+        plugin._lookup_container(client, "container-789")
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (lambda client: plugin._docker_stop(client, "container-789", timeout=2), False),
+        (lambda client: plugin._docker_kill(client, "container-789"), False),
+        (lambda client: plugin._remove_container(client, "container-789"), None),
+    ],
+)
+def test_docker_control_operations_preserve_sdk_failure_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: Callable[[object], object],
+    expected: object,
+) -> None:
+    class FailingContainer:
+        def stop(self, *, timeout: int) -> None:
+            del timeout
+            raise APIError("stop unavailable")
+
+        def kill(self) -> None:
+            raise APIError("kill unavailable")
+
+        def remove(self, *, force: bool) -> None:
+            del force
+            raise APIError("remove unavailable")
+
+    monkeypatch.setattr(
+        plugin, "_lookup_container", lambda client, runtime_id: FailingContainer()
+    )
+
+    assert operation(object()) is expected
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda client: plugin._docker_stop(client, "container-789", timeout=2),
+        lambda client: plugin._docker_kill(client, "container-789"),
+        lambda client: plugin._remove_container(client, "container-789"),
+    ],
+)
+def test_docker_control_operations_propagate_unexpected_defects(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: Callable[[object], object],
+) -> None:
+    class FailingContainer:
+        def stop(self, *, timeout: int) -> None:
+            del timeout
+            raise RuntimeError("control defect")
+
+        def kill(self) -> None:
+            raise RuntimeError("control defect")
+
+        def remove(self, *, force: bool) -> None:
+            del force
+            raise RuntimeError("control defect")
+
+    monkeypatch.setattr(
+        plugin, "_lookup_container", lambda client, runtime_id: FailingContainer()
+    )
+
+    with pytest.raises(RuntimeError, match="control defect"):
+        operation(object())
+
+
+def test_docker_container_liveness_preserves_sdk_failure_fallback() -> None:
+    class FakeContainer:
+        def reload(self) -> None:
+            raise APIError("reload unavailable")
+
+    assert plugin._docker_container_liveness(FakeContainer()) == "unknown"
+
+
+def test_docker_container_liveness_propagates_unexpected_reload_defect() -> None:
+    class FakeContainer:
+        def reload(self) -> None:
+            raise RuntimeError("reload defect")
+
+    with pytest.raises(RuntimeError, match="reload defect"):
+        plugin._docker_container_liveness(FakeContainer())
 
 
 def test_command_runner_cleans_up_container_when_runtime_start_fails(

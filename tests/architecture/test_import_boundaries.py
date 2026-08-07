@@ -938,7 +938,7 @@ def test_agent_backend_package_exports_keep_identity() -> None:
     assert backends.LLMBackend is LLMBackend
     assert backends.ProviderCLIBackend is ProviderCLIBackend
     namespace: dict[str, object] = {}
-    exec("from weft.core.agents.backends import *", namespace)
+    exec("from weft.core.agents.backends import *", namespace)  # noqa: S102 approved [TS-3.1] [RUFF-SUP-254] exception
     assert namespace["LLMBackend"] is LLMBackend
     assert namespace["ProviderCLIBackend"] is ProviderCLIBackend
 
@@ -975,11 +975,11 @@ def test_commands_manager_export_supports_attribute_from_and_star_imports() -> N
 
     assert commands.manager is manager_module
     namespace: dict[str, object] = {}
-    exec("from weft.commands import manager", namespace)
+    exec("from weft.commands import manager", namespace)  # noqa: S102 approved [TS-3.1] [RUFF-SUP-254] exception
     assert namespace["manager"] is manager_module
 
     namespace = {}
-    exec("from weft.commands import *", namespace)
+    exec("from weft.commands import *", namespace)  # noqa: S102 approved [TS-3.1] [RUFF-SUP-254] exception
     assert namespace["manager"] is manager_module
 
 

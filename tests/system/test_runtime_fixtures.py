@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from io import StringIO
 from types import SimpleNamespace
 
@@ -55,17 +56,15 @@ def test_mcp_tool_call_rejects_invalid_remote_content_as_runtime_error(
     responses = iter(
         (
             {},
-            {
-                "result": {
-                    "tools": [{"name": mcp_stdio_fixture.FIXTURE_TOOL_NAME}]
-                }
-            },
+            {"result": {"tools": [{"name": mcp_stdio_fixture.FIXTURE_TOOL_NAME}]}},
             {"result": {"content": {}}},
         )
     )
     monkeypatch.setattr(mcp_stdio_fixture, "_server_command", lambda _config: ["x"])
     monkeypatch.setattr(mcp_stdio_fixture, "_server_cwd", lambda _config: None)
-    monkeypatch.setattr(mcp_stdio_fixture.subprocess, "Popen", lambda *_a, **_k: process)
+    monkeypatch.setattr(
+        mcp_stdio_fixture.subprocess, "Popen", lambda *_a, **_k: process
+    )
     monkeypatch.setattr(
         mcp_stdio_fixture,
         "_read_response",
@@ -101,3 +100,94 @@ def test_claude_mcp_config_normalizes_missing_or_falsey_servers(
     raw_value: str,
 ) -> None:
     assert provider_cli_fixture._load_claude_mcp_servers(raw_value) == {}
+
+
+def test_provider_fixture_mcp_failure_returns_clean_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FixtureFailure(Exception):
+        pass
+
+    monkeypatch.setattr(
+        provider_cli_fixture,
+        "call_fixture_tool",
+        lambda _config, *, token: (_ for _ in ()).throw(
+            FixtureFailure(f"failed token {token}")
+        ),
+    )
+
+    result = provider_cli_fixture._execute_fixture_request(
+        provider_name="fixture",
+        prompt="use_mcp: secret-token",
+        model=None,
+        options={"mcp_servers": {"fixture": {}}},
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "fixture MCP call failed: failed token secret-token\n"
+
+
+def test_provider_fixture_uses_first_usable_mcp_server_in_declaration_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_usable = {"command": "first"}
+    second_usable = {"command": "second"}
+    calls: list[tuple[dict[str, str], str]] = []
+
+    def fake_call_fixture_tool(config: dict[str, str], *, token: str) -> str:
+        calls.append((config, token))
+        return "mcp-result"
+
+    monkeypatch.setattr(
+        provider_cli_fixture,
+        "call_fixture_tool",
+        fake_call_fixture_tool,
+    )
+
+    result = provider_cli_fixture._execute_fixture_request(
+        provider_name="fixture",
+        prompt="use_mcp: requested-token",
+        model=None,
+        options={
+            "mcp_servers": {
+                "unusable": ["not", "a", "mapping"],
+                "first": first_usable,
+                "second": second_usable,
+            }
+        },
+    )
+
+    assert calls == [(first_usable, "requested-token")]
+    assert isinstance(result, str)
+    assert json.loads(result)["mcp_result"] == "mcp-result"
+
+
+def test_provider_fixture_mcp_fatal_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FixtureFatal(BaseException):
+        pass
+
+    failure = FixtureFatal("fatal fixture failure")
+    monkeypatch.setattr(
+        provider_cli_fixture,
+        "call_fixture_tool",
+        lambda _config, *, token: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(FixtureFatal) as exc_info:
+        provider_cli_fixture._execute_fixture_request(
+            provider_name="fixture",
+            prompt="use_mcp: token",
+            model=None,
+            options={"mcp_servers": {"fixture": {}}},
+        )
+
+    assert exc_info.value is failure
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
