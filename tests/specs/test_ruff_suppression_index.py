@@ -89,7 +89,7 @@ def _run_tool(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
             str(ROOT / "bin" / "ruff_suppression_index.py"),
             "--repo-root",
             str(repo),
-            "--spec",
+            "--registry",
             "policy.md",
             *args,
         ],
@@ -132,6 +132,29 @@ def test_write_repairs_a_stale_index_and_check_then_passes(tmp_path: Path) -> No
     second_write = _run_tool(tmp_path, "--write")
     assert second_write.returncode == 0, second_write.stderr
     assert spec.read_bytes() == before_second_write
+
+
+def test_deprecated_spec_option_targets_the_registry(tmp_path: Path) -> None:
+    registry = _write_fixture(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "bin" / "ruff_suppression_index.py"),
+            "--repo-root",
+            str(tmp_path),
+            "--spec",
+            "policy.md",
+            "--write",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "`probe.py::contain_failure`" in registry.read_text(encoding="utf-8")
 
 
 def test_write_cannot_approve_growth_in_an_existing_group(tmp_path: Path) -> None:
@@ -512,7 +535,7 @@ def test_replacement_failure_leaves_the_spec_and_no_temp_file(
         [
             "--repo-root",
             str(tmp_path),
-            "--spec",
+            "--registry",
             "policy.md",
             "--write",
         ]
@@ -772,7 +795,7 @@ def test_normal_ruff_valid_non_list_json_is_tool_failure_without_writing(
         [
             "--repo-root",
             str(tmp_path),
-            "--spec",
+            "--registry",
             str(spec),
             "--write",
         ]
@@ -833,7 +856,7 @@ def test_raw_ruff_failures_are_clean_exit_two_without_writing(
     monkeypatch.setattr(ruff_suppression_index, "_run_ruff", fake_ruff)
 
     returncode = ruff_suppression_index.main(
-        ["--repo-root", str(tmp_path), "--spec", str(spec), "--write"]
+        ["--repo-root", str(tmp_path), "--registry", str(spec), "--write"]
     )
 
     captured = capsys.readouterr()
@@ -863,7 +886,7 @@ def test_ruff_discovery_failure_is_clean_exit_two_without_writing(
     )
 
     returncode = ruff_suppression_index.main(
-        ["--repo-root", str(tmp_path), "--spec", str(spec), "--write"]
+        ["--repo-root", str(tmp_path), "--registry", str(spec), "--write"]
     )
 
     captured = capsys.readouterr()
@@ -887,7 +910,7 @@ def test_ruff_invocation_failure_is_clean_exit_two_without_writing(
     monkeypatch.setattr(ruff_suppression_index.subprocess, "run", fail_to_run)
 
     returncode = ruff_suppression_index.main(
-        ["--repo-root", str(tmp_path), "--spec", str(spec), "--write"]
+        ["--repo-root", str(tmp_path), "--registry", str(spec), "--write"]
     )
 
     captured = capsys.readouterr()

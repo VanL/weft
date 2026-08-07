@@ -21,7 +21,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = ROOT / "pyproject.toml"
 RULE_FIXTURE = ROOT / "tests" / "fixtures" / "ruff-enabled-rules.txt"
-STATIC_ANALYSIS_SPEC = ROOT / "docs" / "specifications" / "08-Testing_Strategy.md"
+TESTING_STRATEGY_SPEC = ROOT / "docs" / "specifications" / "08-Testing_Strategy.md"
+SUPPRESSION_REGISTRY = ROOT / "docs" / "ruff-suppression-registry.md"
 SUPPRESSION_TOOL = ROOT / "bin" / "ruff_suppression_index.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "test.yml"
 
@@ -635,16 +636,55 @@ def test_real_per_file_ignore_hides_f401_but_policy_rejects_it(tmp_path: Path) -
         _assert_ruff_policy(candidate_ruff, candidate_lint)
 
 
-def test_approved_suppressions_match_the_spec_registry() -> None:
+def test_approved_suppressions_match_the_standalone_registry() -> None:
     tool = _load_suppression_tool()
     snapshot = tool.build_snapshot(
         ROOT,
-        STATIC_ANALYSIS_SPEC.read_text(encoding="utf-8"),
+        SUPPRESSION_REGISTRY.read_text(encoding="utf-8"),
     )
 
     assert EXPECTED_GROUP_COUNT == len(EXPECTED_GROUP_IDS)
     assert [group.group_id for group in snapshot.groups] == EXPECTED_GROUP_IDS
     assert len(snapshot.directives) == EXPECTED_DIRECTIVE_COUNT
+
+
+def test_suppression_registry_is_not_part_of_required_reading() -> None:
+    strategy_text = TESTING_STRATEGY_SPEC.read_text(encoding="utf-8")
+    registry_text = SUPPRESSION_REGISTRY.read_text(encoding="utf-8")
+    strategy_lines = strategy_text.splitlines()
+    registry_lines = registry_text.splitlines()
+
+    assert "../ruff-suppression-registry.md" in strategy_text
+    assert "| Group | Rules | Approved cardinality |" not in strategy_text
+    assert not any(
+        line.startswith("Global raw-`noqa` inventory:") for line in strategy_lines
+    )
+    assert "<!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->" not in strategy_text
+    assert "| Group | Rules | Approved cardinality |" in registry_text
+    assert any(
+        line.startswith("Global raw-`noqa` inventory:") for line in registry_lines
+    )
+    assert "<!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->" in registry_text
+
+    required_reading = [
+        ROOT / "AGENTS.md",
+        ROOT / "docs" / "agent-context" / "context.index.yaml",
+        *(ROOT / "docs" / "agent-context").rglob("*.md"),
+    ]
+    for path in required_reading:
+        assert "ruff-suppression-registry.md" not in path.read_text(encoding="utf-8")
+
+
+def test_suppression_checker_defaults_to_standalone_registry() -> None:
+    tool = _load_suppression_tool()
+
+    assert tool.DEFAULT_REGISTRY == "docs/ruff-suppression-registry.md"
+    assert tool._parser().parse_args([]).registry == Path(
+        "docs/ruff-suppression-registry.md"
+    )
+    assert tool._parser().parse_args(["--spec", "legacy.md"]).registry == Path(
+        "legacy.md"
+    )
 
 
 def test_every_raw_c901_is_tagged_with_an_approved_group() -> None:

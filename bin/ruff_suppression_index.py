@@ -5,6 +5,7 @@ Repository commands:
     ./.venv/bin/python bin/ruff_suppression_index.py --check
     ./.venv/bin/python bin/ruff_suppression_index.py --write
 
+Registry: docs/ruff-suppression-registry.md
 Spec: docs/specifications/08-Testing_Strategy.md [TS-3], [TS-3.1]
 """
 
@@ -29,7 +30,7 @@ from pathlib import Path, PurePath
 REGISTRY_HEADING = "### Approved Ruff Suppression Registry [TS-3.1]"
 BEGIN_MARKER = "<!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->"
 END_MARKER = "<!-- END GENERATED RUFF SUPPRESSION INDEX -->"
-DEFAULT_SPEC = "docs/specifications/08-Testing_Strategy.md"
+DEFAULT_REGISTRY = "docs/ruff-suppression-registry.md"
 GLOBAL_INVENTORY_PREFIX = "Global raw-`noqa` inventory:"
 
 _GROUP_PATTERN = r"RUFF-SUP-\d{3}"
@@ -164,7 +165,7 @@ def _outside_fence_lines(text: str) -> list[tuple[str, int, int]]:
                 fence_width = 0
         offset += len(raw_line)
     if fence_character is not None:
-        raise PolicyMismatch("unclosed Markdown fence in suppression registry spec")
+        raise PolicyMismatch("unclosed Markdown fence in suppression registry")
     return lines
 
 
@@ -286,12 +287,12 @@ def _parse_human_group(row: str) -> HumanGroup:
     )
 
 
-def parse_human_groups(spec_text: str) -> tuple[HumanGroup, ...]:
+def parse_human_groups(registry_text: str) -> tuple[HumanGroup, ...]:
     """Parse only the human-owned registry table before the generated marker."""
 
     groups: list[HumanGroup] = []
     seen: set[str] = set()
-    for row in _table_rows(_registry_layout(spec_text)):
+    for row in _table_rows(_registry_layout(registry_text)):
         group = _parse_human_group(row)
         if group.group_id in seen:
             raise PolicyMismatch(f"duplicate human suppression group: {group.group_id}")
@@ -300,10 +301,10 @@ def parse_human_groups(spec_text: str) -> tuple[HumanGroup, ...]:
     return tuple(groups)
 
 
-def parse_global_inventory(spec_text: str) -> Counter[str]:
+def parse_global_inventory(registry_text: str) -> Counter[str]:
     """Parse the human-owned inventory of every raw locally suppressed finding."""
 
-    layout = _registry_layout(spec_text)
+    layout = _registry_layout(registry_text)
     inventory_lines = [
         line for line in layout.human_lines if line.startswith(GLOBAL_INVENTORY_PREFIX)
     ]
@@ -705,11 +706,11 @@ def reconcile(
     return "\n".join(rows)
 
 
-def build_snapshot(repo_root: Path, spec_text: str) -> SuppressionSnapshot:
+def build_snapshot(repo_root: Path, registry_text: str) -> SuppressionSnapshot:
     """Collect and reconcile all evidence without mutating the repository."""
 
-    groups = parse_human_groups(spec_text)
-    global_inventory = parse_global_inventory(spec_text)
+    groups = parse_human_groups(registry_text)
+    global_inventory = parse_global_inventory(registry_text)
     paths = discover_python_files(repo_root)
     directives = scan_source_directives(repo_root, paths)
     _require_normal_ruff(repo_root)
@@ -725,14 +726,14 @@ def build_snapshot(repo_root: Path, spec_text: str) -> SuppressionSnapshot:
     return SuppressionSnapshot(groups, directives, raw_diagnostics, rendered_index)
 
 
-def render_spec(spec_text: str, rendered_index: str) -> str:
+def render_registry(registry_text: str, rendered_index: str) -> str:
     """Replace only the uniquely delimited generated index."""
 
-    layout = _registry_layout(spec_text)
+    layout = _registry_layout(registry_text)
     index = rendered_index.replace("\n", layout.newline)
     return (
-        f"{spec_text[: layout.begin_end]}{layout.newline}"
-        f"{index}{layout.newline}{spec_text[layout.end_start :]}"
+        f"{registry_text[: layout.begin_end]}{layout.newline}"
+        f"{index}{layout.newline}{registry_text[layout.end_start :]}"
     )
 
 
@@ -764,27 +765,27 @@ def _atomic_replace(path: Path, content: bytes) -> None:
                 pass
 
 
-def run(*, repo_root: Path, spec: Path, write: bool) -> SuppressionSnapshot:
+def run(*, repo_root: Path, registry: Path, write: bool) -> SuppressionSnapshot:
     """Check or regenerate one repository suppression index."""
 
     root = repo_root.resolve()
-    spec_path = spec if spec.is_absolute() else root / spec
+    registry_path = registry if registry.is_absolute() else root / registry
     try:
-        original = spec_path.read_bytes()
-        spec_text = original.decode("utf-8")
+        original = registry_path.read_bytes()
+        registry_text = original.decode("utf-8")
     except (OSError, UnicodeError) as exc:
-        raise ToolFailure(f"could not read {spec_path}: {exc}") from exc
+        raise ToolFailure(f"could not read {registry_path}: {exc}") from exc
 
-    snapshot = build_snapshot(root, spec_text)
-    updated = render_spec(spec_text, snapshot.rendered_index)
+    snapshot = build_snapshot(root, registry_text)
+    updated = render_registry(registry_text, snapshot.rendered_index)
     updated_bytes = updated.encode("utf-8")
     if updated_bytes == original:
         return snapshot
     if not write:
         raise PolicyMismatch(
-            f"{repository_path(spec_path)}: generated Ruff suppression index is stale"
+            f"{repository_path(registry_path)}: generated Ruff suppression index is stale"
         )
-    _atomic_replace(spec_path, updated_bytes)
+    _atomic_replace(registry_path, updated_bytes)
     return snapshot
 
 
@@ -796,14 +797,21 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--check", action="store_true", help="validate without writing")
     mode.add_argument("--write", action="store_true", help="regenerate the index")
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
-    parser.add_argument("--spec", type=Path, default=Path(DEFAULT_SPEC))
+    parser.add_argument(
+        "--registry",
+        "--spec",
+        type=Path,
+        default=Path(DEFAULT_REGISTRY),
+        dest="registry",
+        help="path to the standalone suppression registry (--spec is deprecated)",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        run(repo_root=args.repo_root, spec=args.spec, write=args.write)
+        run(repo_root=args.repo_root, registry=args.registry, write=args.write)
     except PolicyMismatch as exc:
         print(f"ruff-suppression-index: {exc}", file=sys.stderr)
         return 1
