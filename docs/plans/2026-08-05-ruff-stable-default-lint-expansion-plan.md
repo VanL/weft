@@ -1,6 +1,6 @@
 # Ruff Stable-Default Lint Expansion Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/08-Testing_Strategy.md [TS-3], [TS-3.1]
 Superseded by: none
 
@@ -76,11 +76,10 @@ configuration accident.
   [TS-3], [TS-3.1], Ruff 0.16.1, the current 171-code fixture, the
   118-group/147-directive C901 registry, and the `C901=147`, `E402=22`,
   `F401=5` raw-`noqa` inventory.
-- Atomic promotion was assembled against diff base
-  `f4a12c55d31a3bfe8b4cde7edf064200d539c4c2` in the current uncommitted
-  worktree. Replace this worktree marker with the activation commit SHA after
-  the owner-directed commit; commit identity is intentionally not normative in
-  the testing spec.
+- Atomic promotion commit:
+  `bb6e47769a3f6f3c8f279931c11f364a7e67a7f8`. Commit identity is recorded here
+  for execution traceability and intentionally remains outside the normative
+  testing spec.
 
 ## 5. Current Structure And Key Files
 
@@ -1280,10 +1279,9 @@ independent review and separate explicit owner approval.
 
 ## 19. Execution Evidence
 
-Promotion state: atomic activation is verified in the uncommitted worktree
-based on `f4a12c55d31a3bfe8b4cde7edf064200d539c4c2`. The activation commit SHA
-must replace this marker after the owner directs the commit. The normative
-testing spec records behavior and suppression invariants, not execution SHAs.
+Promotion state: atomic activation committed as
+`bb6e47769a3f6f3c8f279931c11f364a7e67a7f8`. The normative testing spec records
+behavior and suppression invariants, not execution SHAs.
 
 | Slice | Baseline | Command/proof | Result | Reviewer | Disposition |
 |---|---|---|---|---|---|
@@ -1479,24 +1477,26 @@ changes re-enter full review.
 | Task 3 clean policy-test review | 2026-08-06 | PASS | Initial review blocked mutation tests that lacked passing controls. After correction, each mutation proves its unmutated candidate first; candidate-policy Ruff passes and only the two intended pre-activation RED tests fail. |
 | Task 9 independent completion review | 2026-08-07 | PASS after documentation closure | Technical review `NET POSITIVE`: no code, suppression, layering, order, locality, or comprehensibility blocker. Initial documentation-only block found a stale normative execution SHA and contradictory pending/activated plan language. Removed the SHA from the normative spec; recorded the uncommitted activation against diff base `f4a12c55d31a3bfe8b4cde7edf064200d539c4c2`; marked the Task 2 ledger historical; reconciled rework and activation records. The known xdist-only agent-session wording race predates this work and passes serially. |
 
-The checklist below remains open until the activation commit exists. The
-status-closure ledger commit replaces the worktree marker with that activation
-SHA and checks the completed items, as required by Task 9.
+The activation commit exists and the checklist below records the completed
+technical closure. This status-closure ledger change is intentionally separate
+from the atomic implementation commit, as required by Task 9.
 
 ## 23. Fresh-Eyes Checklist
 
-- [ ] 453-code target exactly matches SimpleBroker and removes no Weft rule.
-- [ ] Discovery includes tracked Python/shebang tools and excludes Bash.
-- [ ] Every manual-risk finding has owner, invariant, disposition, proof, and
+- [x] 453-code target exactly matches SimpleBroker and removes no Weft rule.
+- [x] Discovery includes tracked Python/shebang tools and excludes Bash.
+- [x] Every manual-risk finding has owner, invariant, disposition, proof, and
   review state before edits.
-- [ ] Mechanical batches are narrow and independently reviewed.
-- [ ] Each behavior refactor gets fresh Python-expert locality review.
-- [ ] Negative candidates are preserved/reworked; none unresolved at activation.
-- [ ] Behavior, containment, resource/subprocess order, typing, and output stay
+- [x] Mechanical batches are narrow and independently reviewed.
+- [x] Each behavior refactor gets fresh Python-expert locality review.
+- [x] Negative candidates are preserved/reworked; none unresolved at activation.
+- [x] Behavior, containment, resource/subprocess order, typing, and output stay
   fixed unless directly proven and separately scoped.
-- [ ] No global/per-file ignore, blanket directive, threshold raise, or second
+- [x] No global/per-file ignore, blanket directive, threshold raise, or second
   suppression system.
-- [ ] New suppressions, if any, are separately reviewed and owner-approved.
-- [ ] Spec, config, fixture, tests, docs, and suppression state activate atomically.
-- [ ] Formatter ownership and CI ordering stay unchanged.
-- [ ] Full verification and independent completion review pass.
+- [x] New suppressions, if any, are separately reviewed and owner-approved.
+- [x] Spec, config, fixture, tests, docs, and suppression state activate atomically.
+- [x] Formatter ownership and CI ordering stay unchanged.
+- [x] Full verification and independent completion review pass, with the
+  pre-existing xdist-only agent-session wording race isolated for a separate
+  follow-up commit.
