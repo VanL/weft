@@ -295,6 +295,7 @@ bug evidence.
 
 ## Related Plans
 
+- [`docs/plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md`](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)
 - [`docs/plans/2026-08-07-ruff-suppression-registry-extraction-plan.md`](../plans/2026-08-07-ruff-suppression-registry-extraction-plan.md)
 - [`docs/plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md`](../plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md)
 - [`docs/plans/2026-08-04-ruff-complexity-and-suppression-registry-plan.md`](../plans/2026-08-04-ruff-complexity-and-suppression-registry-plan.md)

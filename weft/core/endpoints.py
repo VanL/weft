@@ -13,7 +13,7 @@ Spec references:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Any, cast
@@ -329,7 +329,33 @@ def endpoint_record_owner_is_live(
     )
 
 
-def list_resolved_endpoints(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-004] exception
+def _classify_latest_endpoint_records(
+    records: Iterable[EndpointRecord],
+    *,
+    task_statuses: Mapping[str, str],
+    tid_mappings: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, list[EndpointRecord]], list[int]]:
+    """Classify latest pattern-filtered owner rows as live or exactly stale."""
+
+    grouped: dict[str, list[EndpointRecord]] = {}
+    stale_message_ids: list[int] = []
+    for record in records:
+        if record.status != "active":
+            continue
+        if _record_owner_is_live(
+            record,
+            task_statuses=task_statuses,
+            tid_mappings=tid_mappings,
+        ):
+            grouped.setdefault(record.name, []).append(record)
+            continue
+        if record.message_id is not None:
+            stale_message_ids.append(record.message_id)
+
+    return grouped, stale_message_ids
+
+
+def list_resolved_endpoints(
     ctx: WeftContext,
     *,
     pattern: str | None = None,
@@ -351,21 +377,11 @@ def list_resolved_endpoints(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-004] exce
 
         task_statuses = _latest_task_statuses(ctx)
         tid_mappings = _latest_tid_mapping_entries(ctx)
-        grouped: dict[str, list[EndpointRecord]] = {}
-        stale_message_ids: list[int] = []
-
-        for record in latest_by_owner.values():
-            if record.status != "active":
-                continue
-            if _record_owner_is_live(
-                record,
-                task_statuses=task_statuses,
-                tid_mappings=tid_mappings,
-            ):
-                grouped.setdefault(record.name, []).append(record)
-                continue
-            if record.message_id is not None:
-                stale_message_ids.append(record.message_id)
+        grouped, stale_message_ids = _classify_latest_endpoint_records(
+            latest_by_owner.values(),
+            task_statuses=task_statuses,
+            tid_mappings=tid_mappings,
+        )
 
         for message_id in stale_message_ids:
             try:

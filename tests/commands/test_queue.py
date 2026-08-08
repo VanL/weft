@@ -486,7 +486,14 @@ def test_resolve_command_returns_registered_endpoint_details(tmp_path) -> None:
         task.cleanup()
 
 
-def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "registration_order",
+    [("low", "high"), ("high", "low")],
+)
+def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(
+    tmp_path,
+    registration_order: tuple[str, str],
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     low_tid = str(time.time_ns())
@@ -511,8 +518,9 @@ def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(tmp_path) -> N
     )
 
     try:
-        low_task.register_endpoint_name("mayor")
-        high_task.register_endpoint_name("mayor")
+        tasks = {"low": low_task, "high": high_task}
+        for owner in registration_order:
+            tasks[owner].register_endpoint_name("mayor")
 
         exit_code, stdout, stderr = queue_cmd.list_command(
             json_output=True,

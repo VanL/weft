@@ -130,6 +130,9 @@ class _ManagerDiagnostic:
     canonical_candidate: bool
 
 
+_ManagerRegistryDisposition = Literal["keep", "omit", "prune"]
+
+
 def _generate_tid(context: WeftContext) -> str:
     """Generate a unique TID via broker timestamp (Spec: [MA-2])."""
     return str(
@@ -173,7 +176,51 @@ def normalize_manager_registry_record(
     return _normalize_manager_record(context, payload, timestamp=timestamp)
 
 
-def _snapshot_registry(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-015] exception
+def _manager_registry_disposition(
+    context: WeftContext,
+    record: dict[str, Any],
+    *,
+    probe_stale: bool,
+    probe_cache: dict[str, int | None] | None,
+) -> _ManagerRegistryDisposition:
+    """Return whether one normalized active manager row stays, omits, or prunes."""
+
+    is_stale, definitive_stale = _manager_record_stale_status(record)
+    if not is_stale:
+        return "keep"
+    if (
+        not definitive_stale
+        and is_canonical_manager_record(record)
+        and _manager_record_has_matched_pong(
+            context,
+            record,
+            probe_cache=probe_cache,
+        )
+    ):
+        return "keep"
+    if definitive_stale:
+        return "prune"
+    if _host_pid_visibility_is_namespace_ambiguous(record):
+        return "keep"
+    return "prune" if probe_stale else "omit"
+
+
+def _retain_latest_included_manager_record(
+    snapshot: dict[str, dict[str, Any]],
+    *,
+    tid: str,
+    record: dict[str, Any],
+    timestamp: int,
+) -> None:
+    """Retain the included record with the newest queue timestamp for one TID."""
+
+    existing = snapshot.get(tid)
+    existing_timestamp = int(existing.get("timestamp", -1)) if existing else -1
+    if existing is None or existing_timestamp < timestamp:
+        snapshot[tid] = record
+
+
+def _snapshot_registry(
     context: WeftContext,
     *,
     prune_stale: bool = True,
@@ -194,33 +241,23 @@ def _snapshot_registry(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-015] exception
             if not tid:
                 continue
             if prune_stale and record.get("status") == "active":
-                is_stale, definitive_stale = _manager_record_stale_status(record)
-                if is_stale:
-                    rescued_by_pong = (
-                        not definitive_stale
-                        and (probe_stale or is_canonical_manager_record(record))
-                        and is_canonical_manager_record(record)
-                        and _manager_record_has_matched_pong(
-                            context,
-                            record,
-                            probe_cache=probe_cache,
-                        )
-                    )
-                    if not rescued_by_pong:
-                        namespace_ambiguous = (
-                            _host_pid_visibility_is_namespace_ambiguous(record)
-                        )
-                        if definitive_stale or (
-                            probe_stale and not namespace_ambiguous
-                        ):
-                            stale_timestamps.append(timestamp)
-                            continue
-                        if not namespace_ambiguous:
-                            continue
-            existing = snapshot.get(tid)
-            existing_ts = int(existing.get("timestamp", -1)) if existing else -1
-            if existing is None or existing_ts < timestamp:
-                snapshot[tid] = record
+                disposition = _manager_registry_disposition(
+                    context,
+                    record,
+                    probe_stale=probe_stale,
+                    probe_cache=probe_cache,
+                )
+                if disposition == "prune":
+                    stale_timestamps.append(timestamp)
+                    continue
+                if disposition == "omit":
+                    continue
+            _retain_latest_included_manager_record(
+                snapshot,
+                tid=tid,
+                record=record,
+                timestamp=timestamp,
+            )
 
         for ts in stale_timestamps:
             try:

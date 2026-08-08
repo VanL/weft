@@ -6,10 +6,14 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
 from simplebroker import Queue
+from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
@@ -22,6 +26,7 @@ from weft.commands import manager as manager_cmd
 from weft.commands.types import ManagerSnapshot
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
+from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.service_convergence import build_manager_service_payload
 from weft.helpers import iter_queue_json_entries
 
@@ -195,6 +200,7 @@ def _manager_service_payload(
     ctrl_in: str | None = None,
     ctrl_out: str | None = None,
     outbox: str = "weft.manager.outbox",
+    requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
 ) -> dict[str, object]:
     return build_manager_service_payload(
         context=context,
@@ -202,7 +208,7 @@ def _manager_service_payload(
         name=name,
         status=status,
         queues={
-            "requests": "weft.spawn.requests",
+            "requests": requests,
             "ctrl_in": ctrl_in or f"T{tid}.ctrl_in",
             "ctrl_out": ctrl_out or f"T{tid}.ctrl_out",
             "outbox": outbox,
@@ -223,6 +229,655 @@ def _latest_manager_record(context, tid: str) -> dict[str, object] | None:
         return None if latest is None else latest[0]
     finally:
         queue.close()
+
+
+def _manager_registry_rows(queue: Queue) -> list[tuple[dict[str, Any], int]]:
+    return list(iter_queue_json_entries(queue))
+
+
+def _write_manager_registry_row(
+    queue: Queue,
+    context: Any,
+    tid: str,
+    **overrides: Any,
+) -> int:
+    return queue.write(json.dumps(_manager_service_payload(context, tid, **overrides)))
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagerSnapshotCase:
+    name: str
+    status: str = "active"
+    canonical: bool = True
+    prune_stale: bool = True
+    probe_stale: bool = False
+    stale_result: tuple[bool, bool] | None = (True, False)
+    pong_result: bool | None = False
+    namespace_ambiguous: bool = False
+    expected_in_view: bool = False
+    expected_deleted: bool = False
+    expected_pong_calls: int = 1
+
+
+_MANAGER_SNAPSHOT_CASES = (
+    _ManagerSnapshotCase(
+        "non-active",
+        status="stopped",
+        probe_stale=True,
+        stale_result=None,
+        pong_result=None,
+        expected_in_view=True,
+        expected_pong_calls=0,
+    ),
+    _ManagerSnapshotCase(
+        "active-live",
+        probe_stale=True,
+        stale_result=(False, False),
+        pong_result=None,
+        expected_in_view=True,
+        expected_pong_calls=0,
+    ),
+    _ManagerSnapshotCase(
+        "definitive-stale-probe-disabled",
+        stale_result=(True, True),
+        pong_result=None,
+        expected_deleted=True,
+        expected_pong_calls=0,
+    ),
+    _ManagerSnapshotCase(
+        "definitive-stale-probe-enabled",
+        probe_stale=True,
+        stale_result=(True, True),
+        pong_result=None,
+        expected_deleted=True,
+        expected_pong_calls=0,
+    ),
+    _ManagerSnapshotCase(
+        "canonical-pong-rescue-probe-disabled",
+        pong_result=True,
+        expected_in_view=True,
+    ),
+    _ManagerSnapshotCase(
+        "canonical-pong-rescue-probe-enabled",
+        probe_stale=True,
+        pong_result=True,
+        expected_in_view=True,
+    ),
+    _ManagerSnapshotCase("canonical-unmatched-pong-omit-only"),
+    _ManagerSnapshotCase(
+        "canonical-unmatched-pong-prune",
+        probe_stale=True,
+        expected_deleted=True,
+    ),
+    _ManagerSnapshotCase(
+        "noncanonical-omit-only-without-pong",
+        canonical=False,
+        pong_result=None,
+        expected_pong_calls=0,
+    ),
+    _ManagerSnapshotCase(
+        "noncanonical-prune-without-pong",
+        canonical=False,
+        probe_stale=True,
+        pong_result=None,
+        expected_deleted=True,
+        expected_pong_calls=0,
+    ),
+    _ManagerSnapshotCase(
+        "canonical-ambiguous-keep-probe-disabled",
+        namespace_ambiguous=True,
+        expected_in_view=True,
+    ),
+    _ManagerSnapshotCase(
+        "canonical-ambiguous-keep-probe-enabled",
+        probe_stale=True,
+        namespace_ambiguous=True,
+        expected_in_view=True,
+    ),
+    _ManagerSnapshotCase(
+        "noncanonical-ambiguous-keep-probe-disabled",
+        canonical=False,
+        pong_result=None,
+        namespace_ambiguous=True,
+        expected_in_view=True,
+        expected_pong_calls=0,
+    ),
+    _ManagerSnapshotCase(
+        "noncanonical-ambiguous-keep-probe-enabled",
+        canonical=False,
+        probe_stale=True,
+        pong_result=None,
+        namespace_ambiguous=True,
+        expected_in_view=True,
+        expected_pong_calls=0,
+    ),
+    _ManagerSnapshotCase(
+        "pruning-disabled",
+        prune_stale=False,
+        probe_stale=True,
+        stale_result=None,
+        pong_result=None,
+        expected_in_view=True,
+        expected_pong_calls=0,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    _MANAGER_SNAPSHOT_CASES,
+    ids=lambda case: case.name,
+)
+def test_snapshot_registry_decision_table_uses_one_record_evidence_frame(
+    tmp_path,
+    monkeypatch,
+    case: _ManagerSnapshotCase,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000100"
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    stale_calls: list[str] = []
+    pong_calls: list[str] = []
+
+    def stale_status(record: dict[str, Any]) -> tuple[bool, bool]:
+        stale_calls.append(str(record["tid"]))
+        if case.stale_result is None:
+            pytest.fail("stale classification must be skipped for this row")
+        return case.stale_result
+
+    def matched_pong(
+        _context: Any,
+        record: dict[str, Any],
+        *,
+        probe_cache: dict[str, int | None] | None,
+    ) -> bool:
+        del probe_cache
+        pong_calls.append(str(record["tid"]))
+        if case.pong_result is None:
+            pytest.fail("PONG probing must be skipped for this row")
+        return case.pong_result
+
+    def namespace_ambiguous(record: dict[str, Any]) -> bool:
+        del record
+        return case.namespace_ambiguous
+
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_stale_status",
+        stale_status,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_has_matched_pong",
+        matched_pong,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_host_pid_visibility_is_namespace_ambiguous",
+        namespace_ambiguous,
+    )
+
+    try:
+        message_id = _write_manager_registry_row(
+            queue,
+            context,
+            tid,
+            status=case.status,
+            runtime_handle=_host_runtime_handle(987654321),
+            requests=(
+                WEFT_SPAWN_REQUESTS_QUEUE
+                if case.canonical
+                else "custom.manager.requests"
+            ),
+        )
+
+        snapshot = core_manager_runtime._snapshot_registry(
+            context,
+            prune_stale=case.prune_stale,
+            probe_stale=case.probe_stale,
+            probe_cache={},
+            queue=queue,
+        )
+        remaining_ids = [
+            timestamp for _payload, timestamp in _manager_registry_rows(queue)
+        ]
+    finally:
+        queue.close()
+
+    assert (tid in snapshot) is case.expected_in_view
+    if case.expected_in_view:
+        assert snapshot[tid]["timestamp"] == message_id
+    assert remaining_ids == ([] if case.expected_deleted else [message_id])
+    assert len(stale_calls) == (1 if case.stale_result is not None else 0)
+    assert pong_calls == [tid] * case.expected_pong_calls
+
+
+@pytest.mark.parametrize(
+    "reverse_input",
+    [False, True],
+    ids=["chronological-input", "reversed-input"],
+)
+def test_snapshot_registry_latest_included_timestamp_wins(
+    tmp_path,
+    monkeypatch,
+    *,
+    reverse_input: bool,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000101"
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_stale_status",
+        lambda _record: (False, False),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_has_matched_pong",
+        lambda *_args, **_kwargs: pytest.fail("live rows must not be PONG-probed"),
+    )
+
+    try:
+        first_id = _write_manager_registry_row(
+            queue,
+            context,
+            tid,
+            name="first",
+            runtime_handle=_host_runtime_handle(987654321),
+        )
+        second_id = _write_manager_registry_row(
+            queue,
+            context,
+            tid,
+            name="second",
+            runtime_handle=_host_runtime_handle(987654321),
+        )
+        rows = _manager_registry_rows(queue)
+
+        def ordered_rows(
+            registry_queue: Queue,
+        ) -> Iterator[tuple[dict[str, Any], int]]:
+            assert registry_queue is queue
+            return iter(reversed(rows) if reverse_input else rows)
+
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "iter_queue_json_entries",
+            ordered_rows,
+        )
+
+        snapshot = core_manager_runtime._snapshot_registry(context, queue=queue)
+        remaining_ids = [
+            timestamp for _payload, timestamp in _manager_registry_rows(queue)
+        ]
+    finally:
+        queue.close()
+
+    assert first_id < second_id
+    assert snapshot[tid]["name"] == "second"
+    assert snapshot[tid]["timestamp"] == second_id
+    assert remaining_ids == [first_id, second_id]
+
+
+@pytest.mark.parametrize(
+    ("probe_stale", "newer_deleted"),
+    [(False, False), (True, True)],
+    ids=["newer-omitted", "newer-pruned"],
+)
+def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
+    tmp_path,
+    monkeypatch,
+    probe_stale: bool,
+    newer_deleted: bool,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000102"
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    pong_calls: list[str] = []
+
+    def stale_status(record: dict[str, Any]) -> tuple[bool, bool]:
+        return record["name"] == "newer", False
+
+    def no_matched_pong(
+        _context: Any,
+        record: dict[str, Any],
+        *,
+        probe_cache: dict[str, int | None] | None,
+    ) -> bool:
+        del probe_cache
+        pong_calls.append(str(record["name"]))
+        return False
+
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_stale_status",
+        stale_status,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_has_matched_pong",
+        no_matched_pong,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_host_pid_visibility_is_namespace_ambiguous",
+        lambda _record: False,
+    )
+
+    try:
+        older_id = _write_manager_registry_row(
+            queue,
+            context,
+            tid,
+            name="older",
+            runtime_handle=_host_runtime_handle(987654321),
+        )
+        newer_id = _write_manager_registry_row(
+            queue,
+            context,
+            tid,
+            name="newer",
+            runtime_handle=_host_runtime_handle(987654321),
+        )
+
+        snapshot = core_manager_runtime._snapshot_registry(
+            context,
+            probe_stale=probe_stale,
+            probe_cache={},
+            queue=queue,
+        )
+        remaining_ids = [
+            timestamp for _payload, timestamp in _manager_registry_rows(queue)
+        ]
+    finally:
+        queue.close()
+
+    assert snapshot[tid]["name"] == "older"
+    assert snapshot[tid]["timestamp"] == older_id
+    assert remaining_ids == ([older_id] if newer_deleted else [older_id, newer_id])
+    assert pong_calls == ["newer"]
+
+
+def test_snapshot_registry_does_not_close_caller_owned_queue(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000103"
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    original_close: Callable[[], None] = queue.close
+    close_calls: list[None] = []
+
+    def track_close() -> None:
+        close_calls.append(None)
+
+    monkeypatch.setattr(queue, "close", track_close)
+    try:
+        first_id = _write_manager_registry_row(
+            queue,
+            context,
+            tid,
+            status="stopped",
+        )
+
+        snapshot = core_manager_runtime._snapshot_registry(
+            context,
+            prune_stale=False,
+            queue=queue,
+        )
+        second_id = _write_manager_registry_row(
+            queue,
+            context,
+            "1761000000000000104",
+            status="stopped",
+        )
+        remaining_ids = [
+            timestamp for _payload, timestamp in _manager_registry_rows(queue)
+        ]
+    finally:
+        original_close()
+
+    assert snapshot[tid]["timestamp"] == first_id
+    assert close_calls == []
+    assert remaining_ids == [first_id, second_id]
+
+
+def test_snapshot_registry_closes_locally_acquired_queue(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000105"
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    original_close: Callable[[], None] = queue.close
+    close_calls: list[None] = []
+
+    def track_close() -> None:
+        close_calls.append(None)
+        original_close()
+
+    _write_manager_registry_row(queue, context, tid, status="stopped")
+    monkeypatch.setattr(queue, "close", track_close)
+    monkeypatch.setattr(core_manager_runtime, "_registry_queue", lambda _context: queue)
+
+    snapshot = core_manager_runtime._snapshot_registry(
+        context,
+        prune_stale=False,
+    )
+
+    assert snapshot[tid]["status"] == "stopped"
+    assert close_calls == [None]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BrokerError("broker delete failed"),
+        OSError("OS delete failed"),
+        RuntimeError("delete failed"),
+    ],
+    ids=["broker-error", "os-error", "runtime-error"],
+)
+def test_snapshot_registry_operational_delete_failure_continues_later_deletes(
+    tmp_path,
+    monkeypatch,
+    error: Exception,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    original_delete: Callable[..., bool] = queue.delete
+    original_close: Callable[[], None] = queue.close
+    delete_attempts: list[int] = []
+
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_stale_status",
+        lambda _record: (True, True),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_host_pid_visibility_is_namespace_ambiguous",
+        lambda _record: False,
+    )
+
+    try:
+        first_id = _write_manager_registry_row(
+            queue,
+            context,
+            "1761000000000000106",
+            runtime_handle=_host_runtime_handle(987654321),
+        )
+        second_id = _write_manager_registry_row(
+            queue,
+            context,
+            "1761000000000000107",
+            runtime_handle=_host_runtime_handle(987654321),
+        )
+
+        def fail_first_delete(*, message_id: int | str | None = None) -> bool:
+            assert message_id is not None
+            timestamp = int(message_id)
+            delete_attempts.append(timestamp)
+            if timestamp == first_id:
+                raise error
+            return original_delete(message_id=message_id)
+
+        monkeypatch.setattr(queue, "delete", fail_first_delete)
+
+        snapshot = core_manager_runtime._snapshot_registry(context, queue=queue)
+        remaining_ids = [
+            timestamp for _payload, timestamp in _manager_registry_rows(queue)
+        ]
+    finally:
+        original_close()
+
+    assert snapshot == {}
+    assert delete_attempts == [first_id, second_id]
+    assert remaining_ids == [first_id]
+
+
+def test_snapshot_registry_propagates_unexpected_delete_defect(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000108"
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    original_close: Callable[[], None] = queue.close
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_stale_status",
+        lambda _record: (True, True),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_host_pid_visibility_is_namespace_ambiguous",
+        lambda _record: False,
+    )
+
+    try:
+        message_id = _write_manager_registry_row(
+            queue,
+            context,
+            tid,
+            runtime_handle=_host_runtime_handle(987654321),
+        )
+
+        def defective_delete(*, message_id: int | str | None = None) -> bool:
+            del message_id
+            raise ValueError("unexpected delete defect")
+
+        monkeypatch.setattr(queue, "delete", defective_delete)
+
+        with pytest.raises(ValueError, match="unexpected delete defect"):
+            core_manager_runtime._snapshot_registry(context, queue=queue)
+        remaining_ids = [
+            timestamp for _payload, timestamp in _manager_registry_rows(queue)
+        ]
+    finally:
+        original_close()
+
+    assert remaining_ids == [message_id]
+
+
+@pytest.mark.parametrize(
+    ("pong_kind", "expected_in_view"),
+    [
+        ("absent", False),
+        ("malformed-manager-fields", False),
+        ("mismatched-control", False),
+        ("matched", True),
+    ],
+)
+def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
+    tmp_path,
+    monkeypatch,
+    pong_kind: str,
+    expected_in_view: bool,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000109"
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    probe_calls: list[tuple[str, str, str]] = []
+    probe_cache: dict[str, int | None] = {}
+    observed_at = 1761000000000000199
+
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_stale_status",
+        lambda _record: (True, False),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_host_pid_visibility_is_namespace_ambiguous",
+        lambda _record: False,
+    )
+
+    def send_probe(
+        _context: Any,
+        *,
+        tid: str,
+        ctrl_in_name: str,
+        ctrl_out_name: str,
+        timeout: float,
+        request_id: str | None = None,
+    ) -> ControlProbeResult:
+        del timeout, request_id
+        probe_calls.append((tid, ctrl_in_name, ctrl_out_name))
+        if pong_kind == "absent":
+            return ControlProbeResult(request_id="probe", timed_out=True)
+        payload: dict[str, Any] = {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "request_id": "probe",
+            "tid": tid,
+            "task_status": "running",
+            "role": "manager",
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "ctrl_in": ctrl_in_name,
+            "ctrl_out": ctrl_out_name,
+            "outbox": "weft.manager.outbox",
+            "weft_context": str(context.root),
+        }
+        if pong_kind == "malformed-manager-fields":
+            payload["role"] = 1
+        elif pong_kind == "mismatched-control":
+            payload["ctrl_out"] = "Tother.ctrl_out"
+        return ControlProbeResult(
+            request_id="probe",
+            matched=MatchedPong(
+                payload=payload,
+                observed_at=observed_at,
+                request_id="probe",
+            ),
+        )
+
+    monkeypatch.setattr(core_manager_runtime, "send_keyed_ping_probe", send_probe)
+
+    try:
+        message_id = _write_manager_registry_row(
+            queue,
+            context,
+            tid,
+            runtime_handle=_host_runtime_handle(987654321),
+        )
+        snapshot = core_manager_runtime._snapshot_registry(
+            context,
+            probe_stale=False,
+            probe_cache=probe_cache,
+            queue=queue,
+        )
+        remaining_ids = [
+            timestamp for _payload, timestamp in _manager_registry_rows(queue)
+        ]
+    finally:
+        queue.close()
+
+    assert (tid in snapshot) is expected_in_view
+    assert probe_calls == [(tid, f"T{tid}.ctrl_in", f"T{tid}.ctrl_out")]
+    assert probe_cache == {tid: observed_at if expected_in_view else None}
+    assert remaining_ids == [message_id]
 
 
 def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):

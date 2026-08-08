@@ -544,11 +544,16 @@ Implementation plan backlinks:
 a stable project-local name.
 
 _Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
-`ResolvedEndpoint`, `list_resolved_endpoints()`, `resolve_endpoint()`;
+`ResolvedEndpoint`,
+`weft/core/endpoints.py::_classify_latest_endpoint_records()`,
+`list_resolved_endpoints()`, `resolve_endpoint()`;
 `weft/core/tasks/base.py` — `register_endpoint_name()`,
 `unregister_endpoint_name()`;
 `weft/helpers/__init__.py` — `canonical_owner_tid()`;
 `weft.state.endpoints` — runtime queue used for the registry records.
+
+Implementation plan backlink:
+[`2026-08-08-registry-selection-pruning-authority-refactor-plan.md`](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md).
 
 Current rules:
 
