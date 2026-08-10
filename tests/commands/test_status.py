@@ -937,7 +937,9 @@ def test_status_json_projects_only_owned_broker_identity_fields() -> None:
         ),
     ]
 
-    payload = json.loads(status_cmd._render_json_payload(broker, managers, services, tasks))
+    payload = json.loads(
+        status_cmd._render_json_payload(broker, managers, services, tasks)
+    )
 
     assert payload["broker"] == {
         "total_messages": 7,

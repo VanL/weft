@@ -284,9 +284,7 @@ def test_parse_import_accepts_zero_header_checkpoint(last_ts: int | str) -> None
 
     assert plan.report.metadata["last_ts"] == 0
     assert isinstance(plan.report.metadata["last_ts"], int)
-    assert json.loads(plan.header_line or "null")["last_ts"] == (
-        "0000000000000000000"
-    )
+    assert json.loads(plan.header_line or "null")["last_ts"] == ("0000000000000000000")
 
 
 def test_dump_load_round_trip_preserves_adjacent_unsafe_message_ids(

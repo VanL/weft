@@ -1712,16 +1712,16 @@ TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset(
 )
 """Statuses that represent terminal task lifecycle states."""
 
-BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS: Final[
-    frozenset[str]
-] = frozenset(
-    {
-        "live_pong",
-        "result_without_terminal",
-        "terminal_ctrl_out",
-        "terminal_monitor_store",
-        "wrapper_lost",
-    }
+BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS: Final[frozenset[str]] = (
+    frozenset(
+        {
+            "live_pong",
+            "result_without_terminal",
+            "terminal_ctrl_out",
+            "terminal_monitor_store",
+            "wrapper_lost",
+        }
+    )
 )
 """Reconciliation classes whose ``observed_at`` values are broker row IDs."""
 

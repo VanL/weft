@@ -2443,9 +2443,7 @@ def _record_from_row(row: tuple[Any, ...]) -> MonitorTaskCollationRecord:
         completed_at_ns=_int_or_none(values["completed_at_ns"]),
         taskspec_summary=_json_dict(values["taskspec_summary_json"]),
         state=_json_dict(values["state_json"]),
-        lifecycle=_restore_lifecycle_message_ids(
-            _json_dict(values["lifecycle_json"])
-        ),
+        lifecycle=_restore_lifecycle_message_ids(_json_dict(values["lifecycle_json"])),
         resources=_json_dict(values["resources_json"]),
         diagnostics=_json_dict(values["diagnostics_json"]),
         bookkeeping=_restore_bookkeeping_message_ids(

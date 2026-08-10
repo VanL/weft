@@ -401,8 +401,7 @@ def _external_reconciliation(
     classification = projected.get("classification")
     observed_at = projected.get("observed_at")
     if (
-        classification
-        in BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS
+        classification in BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS
         and isinstance(observed_at, int)
         and not isinstance(observed_at, bool)
     ):

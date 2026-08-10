@@ -424,7 +424,9 @@ def test_bounded_move_json_formats_broker_id(
             del persistent
             return _MoveQueue()
 
-    monkeypatch.setattr(queue_cmd, "_context", lambda _spec_context=None: _MoveContext())
+    monkeypatch.setattr(
+        queue_cmd, "_context", lambda _spec_context=None: _MoveContext()
+    )
 
     exit_code, stdout, stderr = queue_cmd.move_command(
         "source",

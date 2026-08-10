@@ -23,9 +23,7 @@ def normalize_exact_message_id(value: object) -> int:
 
     canonical = format_message_id(cast("int | str", value))
     if isinstance(value, str) and value != canonical:
-        raise ValueError(
-            "message_id string must be exactly 19 ASCII decimal digits"
-        )
+        raise ValueError("message_id string must be exactly 19 ASCII decimal digits")
     return int(canonical)
 
 

@@ -354,8 +354,9 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
     assert len(completed["checkpoint_timestamp"]) == 19
     assert completed["checkpoint_timestamp"].isascii()
     assert isinstance(result.checkpoint_timestamp, int)
-    assert result.summary_payload()["checkpoint_timestamp"] == (
-        completed["checkpoint_timestamp"]
+    assert (
+        result.summary_payload()["checkpoint_timestamp"]
+        == (completed["checkpoint_timestamp"])
     )
 
 

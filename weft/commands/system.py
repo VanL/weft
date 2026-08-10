@@ -1532,8 +1532,7 @@ def _task_snapshot_to_json_dict(snapshot: TaskSnapshot) -> dict[str, Any]:
         payload["last_timestamp"] = format_message_id(last_timestamp)
 
     if (
-        classification
-        in BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS
+        classification in BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS
         and isinstance(reconciliation, dict)
     ):
         projected_reconciliation = dict(reconciliation)

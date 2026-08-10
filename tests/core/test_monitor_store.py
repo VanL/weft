@@ -443,9 +443,7 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
     deferred = json.loads(str(deferred_row[0]))
     assert lifecycle["message_id"] == "1779000000000000201"
     assert lifecycle["checkpoint"]["message_id"] == "1779000000000000202"
-    assert lifecycle["checkpoint"]["opaque"]["message_id"] == (
-        1779000000000000210
-    )
+    assert lifecycle["checkpoint"]["opaque"]["message_id"] == (1779000000000000210)
     assert lifecycle["observed_at_ns"] == 1779000000000000203
     assert bookkeeping["last_message_id"] == "1779000000000000201"
     assert bookkeeping["opaque"]["message_id"] == 1779000000000000211
@@ -488,16 +486,10 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
     assert deferred_body["monitor"]["message_id"] == 1779000000000000216
     assert deferred_body["monitor"]["first_message_id"] == message_id
     assert deferred_body["monitor"]["last_message_id"] == 1779000000000000202
-    assert deferred_body["monitor"]["terminal_message_id"] == (
-        1779000000000000202
-    )
+    assert deferred_body["monitor"]["terminal_message_id"] == (1779000000000000202)
     assert deferred_body["observations"]["message_id"] == 1779000000000000206
-    assert deferred_body["observations"]["message_ids"] == [
-        1779000000000000207
-    ]
-    assert deferred_body["taskspec"]["opaque"]["message_id"] == (
-        1779000000000000217
-    )
+    assert deferred_body["observations"]["message_ids"] == [1779000000000000207]
+    assert deferred_body["taskspec"]["opaque"]["message_id"] == (1779000000000000217)
 
     legacy_lifecycle = {
         "message_id": message_id,
@@ -551,9 +543,7 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
     legacy_record = store.get_task(tid)
     assert legacy_record is not None
     assert legacy_record.lifecycle["message_id"] == message_id
-    assert legacy_record.lifecycle["checkpoint"]["message_id"] == (
-        1779000000000000202
-    )
+    assert legacy_record.lifecycle["checkpoint"]["message_id"] == (1779000000000000202)
     assert legacy_record.bookkeeping["last_message_id"] == message_id
     assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_id
     [legacy_deferred_record] = store.list_pending_deferred_writes(limit=10)

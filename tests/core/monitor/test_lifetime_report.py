@@ -199,9 +199,7 @@ def test_lifetime_external_projection_is_non_mutating_and_preserves_identity() -
         "1779000000000000006",
     ]
     assert projected["observations"]["observed_at_ns"] == 1779000000000000007
-    assert projected["observations"]["opaque"]["message_id"] == (
-        1779000000000000008
-    )
+    assert projected["observations"]["opaque"]["message_id"] == (1779000000000000008)
     assert projected["taskspec"]["opaque_message_id"] == 1779000000000000011
     assert projected["emitted_at_ns"] == 1779000000000000100
     assert restored["report_id"] == report["report_id"]

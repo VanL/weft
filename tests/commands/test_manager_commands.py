@@ -205,8 +205,12 @@ def test_manager_json_commands_use_external_id_projection(
         "timestamp": message_id,
     }
     monkeypatch.setattr(manager_cmd, "build_context", lambda _path=None: object())
-    monkeypatch.setattr(manager_cmd, "_list_manager_records", lambda *_args, **_kwargs: [record])
-    monkeypatch.setattr(manager_cmd, "_manager_record", lambda *_args, **_kwargs: record)
+    monkeypatch.setattr(
+        manager_cmd, "_list_manager_records", lambda *_args, **_kwargs: [record]
+    )
+    monkeypatch.setattr(
+        manager_cmd, "_manager_record", lambda *_args, **_kwargs: record
+    )
 
     list_exit, list_payload = manager_cmd.list_command(json_output=True)
     status_exit, status_payload = manager_cmd.status_command(
@@ -216,12 +220,8 @@ def test_manager_json_commands_use_external_id_projection(
 
     assert list_exit == 0
     assert status_exit == 0
-    assert json.loads(list_payload or "[]")[0]["timestamp"] == (
-        "1779300000000000003"
-    )
-    assert json.loads(status_payload or "{}")["timestamp"] == (
-        "1779300000000000003"
-    )
+    assert json.loads(list_payload or "[]")[0]["timestamp"] == ("1779300000000000003")
+    assert json.loads(status_payload or "{}")["timestamp"] == ("1779300000000000003")
     assert record["timestamp"] == message_id
 
 

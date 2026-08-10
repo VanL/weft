@@ -65,8 +65,8 @@ def _manager_record_to_json(record: dict[str, Any]) -> dict[str, Any]:
         if isinstance(supersession_timestamp, int) and not isinstance(
             supersession_timestamp, bool
         ):
-            projected_metadata["supersession_observed_timestamp"] = (
-                format_message_id(supersession_timestamp)
+            projected_metadata["supersession_observed_timestamp"] = format_message_id(
+                supersession_timestamp
             )
         payload["metadata"] = projected_metadata
     return payload
