@@ -2,7 +2,33 @@
 
 ## Unreleased
 
+### Changed
+
+- The internal agent-session wire protocol gained an optional `diagnostics`
+  mapping on final-result messages (the parsed result tuple grew from three
+  to four fields). Both protocol ends ship in this package and unknown or
+  malformed payloads are rejected as before, so no external surface changes;
+  a mixed-version window exists only for an in-place upgrade with live
+  respawns. (Retroactive disclosure: landed with the Ruff lint-coverage
+  expansion commit.)
+
 ### Fixed
+
+- Worker poll-limit violations can no longer be lost: a detected limit
+  violation is now reported before any subsequent metrics collection runs,
+  where previously a metrics failure raised after detection could discard
+  the violation outcome entirely. (Retroactive disclosure: landed with the
+  Ruff lint-coverage expansion commit.)
+- Pipeline bootstrap failures now roll back already-started stages and
+  re-raise the original failure, including on fatal signals, and the
+  stop broadcast targets only stages that actually started rather than the
+  full declared set. (Retroactive disclosure: landed with the Ruff
+  lint-coverage expansion commit.)
+- Worker startup-failure diagnostics now attribute the failing phase by
+  whether readiness was actually signalled (`ready_sent`) rather than by
+  session-object presence, correcting phase misattribution in
+  startup-failure reports. (Retroactive disclosure: landed with the Ruff
+  lint-coverage expansion commit.)
 
 - Fast function and stored-spec execution no longer loses a result or hangs
   when worker exit races private result delivery. Host function, one-shot

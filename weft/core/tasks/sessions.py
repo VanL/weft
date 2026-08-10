@@ -429,7 +429,7 @@ class AgentSession:
             return message
         return f"{message} ({summary})"
 
-    def execute(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-048] exception
+    def execute(
         self,
         work_item: Any,
         *,
@@ -449,85 +449,15 @@ class AgentSession:
 
         while True:
             now = time.monotonic()
-            observations: dict[str, TerminalHandoffEvent] = {}
-
-            if (
-                progress.accepted_stop is None
-                and "cancel_requested" not in progress.consumed_edge_kinds
-                and safe_cancel(cancel_requested)
-            ):
-                observations["cancel_requested"] = TerminalHandoffEvent(
-                    kind="cancel_requested"
-                )
-
-            elapsed = now - start_time
-            if (
-                progress.accepted_stop is None
-                and "timeout_requested" not in progress.consumed_edge_kinds
-                and self._timeout is not None
-                and elapsed >= self._timeout
-            ):
-                observations["timeout_requested"] = TerminalHandoffEvent(
-                    kind="timeout_requested"
-                )
-
-            if pending_transport_failure is not None:
-                observations["transport_failed"] = TerminalHandoffEvent(
-                    kind="transport_failed",
-                    detail=pending_transport_failure,
-                )
-                pending_transport_failure = None
-            else:
-                try:
-                    payload = self._read_response_payload(timeout=0.0)
-                except EOFError:
-                    observations["channel_sealed"] = TerminalHandoffEvent(
-                        kind="channel_sealed"
-                    )
-                except TerminalHandoffTransportError as exc:
-                    observations["transport_failed"] = TerminalHandoffEvent(
-                        kind="transport_failed",
-                        detail=str(exc),
-                    )
-                else:
-                    if payload is not None:
-                        try:
-                            parsed = parse_result_response(payload)
-                        except (TypeError, ValueError) as exc:
-                            parsed = None
-                            observations["transport_failed"] = TerminalHandoffEvent(
-                                kind="transport_failed",
-                                detail=str(exc),
-                            )
-                        if parsed is None:
-                            observations.setdefault(
-                                "transport_failed",
-                                TerminalHandoffEvent(
-                                    kind="transport_failed",
-                                    detail="invalid session result payload",
-                                ),
-                            )
-                        else:
-                            status, result, error, diagnostics = parsed
-                            session_result = SessionExecutionResult(
-                                status=status,
-                                value=result,
-                                error=error,
-                                diagnostics=diagnostics,
-                            )
-                            observations["outcome_received"] = TerminalHandoffEvent(
-                                kind="outcome_received",
-                                outcome=session_result,
-                            )
-
-            if progress.accepted_stop is None and self.is_alive():
-                ok, violation = self.poll_limits()
-                if not ok:
-                    limit_error = violation or "Resource limit exceeded"
-                    observations["limit_reached"] = TerminalHandoffEvent(
-                        kind="limit_reached",
-                        detail=limit_error,
-                    )
+            observations, limit_error = self._observe_terminal_handoff(
+                progress,
+                now=now,
+                start_time=start_time,
+                pending_transport_failure=pending_transport_failure,
+                limit_error=limit_error,
+                cancel_requested=cancel_requested,
+            )
+            pending_transport_failure = None
 
             if (
                 "producer_exited" not in progress.consumed_edge_kinds
@@ -536,23 +466,22 @@ class AgentSession:
                 self._process.join(timeout=0.0)
                 producer_exit_observed = True
                 observed_exitcode = getattr(self._process, "exitcode", None)
-                observations["producer_exited"] = TerminalHandoffEvent(
-                    kind="producer_exited",
-                    detail=(
-                        str(observed_exitcode)
-                        if observed_exitcode is not None
-                        else None
-                    ),
+                observations.append(
+                    TerminalHandoffEvent(
+                        kind="producer_exited",
+                        detail=(
+                            str(observed_exitcode)
+                            if observed_exitcode is not None
+                            else None
+                        ),
+                    )
                 )
-
             if drain_deadline is not None and now >= drain_deadline:
-                observations["drain_expired"] = TerminalHandoffEvent(
-                    kind="drain_expired"
-                )
+                observations.append(TerminalHandoffEvent(kind="drain_expired"))
 
             step = self._reduce_terminal_observations(
                 progress,
-                tuple(observations.values()),
+                tuple(observations),
             )
             if step is None:
                 wait_for = self._terminal_handoff_wait_seconds(
@@ -567,94 +496,231 @@ class AgentSession:
                 continue
 
             progress = step.progress
-            action = step.decision.action
-            if action in {
-                "stop_for_timeout",
-                "stop_for_cancel",
-                "stop_for_limit",
-            }:
-                if drain_deadline is None:
-                    drain_deadline = now + TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
-                self.terminate()
+            drain_deadline, continue_waiting = self._apply_terminal_handoff_effect(
+                step,
+                now=now,
+                drain_deadline=drain_deadline,
+            )
+            if continue_waiting:
                 continue
-            if action == "begin_drain":
-                if drain_deadline is None:
-                    drain_deadline = now + TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
-                continue
-            if action == "wait":
-                continue
-            if action == "return_outcome":
-                session_outcome = cast(SessionExecutionResult, step.event.outcome)
-                session_outcome.metrics = session_outcome.metrics or self.last_metrics
-                if session_outcome.status != "ok":
-                    self.close()
-                return session_outcome
-            if action == "return_timeout":
-                return self._finish_invalid_result(
-                    SessionExecutionResult(
-                        status="timeout",
-                        value=None,
-                        error="Target execution timed out",
-                    )
+            return self._terminal_handoff_result(
+                step,
+                start_time=start_time,
+                producer_exit_observed=producer_exit_observed,
+                observed_exitcode=observed_exitcode,
+                limit_error=limit_error,
+            )
+
+    def _observe_terminal_handoff(
+        self,
+        progress: TerminalHandoffProgress,
+        *,
+        now: float,
+        start_time: float,
+        pending_transport_failure: str | None,
+        limit_error: str | None,
+        cancel_requested: Callable[[], bool] | None,
+    ) -> tuple[list[TerminalHandoffEvent], str | None]:
+        """Collect one persistent-session observation batch."""
+
+        observations: dict[str, TerminalHandoffEvent] = {}
+        if (
+            progress.accepted_stop is None
+            and "cancel_requested" not in progress.consumed_edge_kinds
+            and safe_cancel(cancel_requested)
+        ):
+            observations["cancel_requested"] = TerminalHandoffEvent(
+                kind="cancel_requested"
+            )
+        if (
+            progress.accepted_stop is None
+            and "timeout_requested" not in progress.consumed_edge_kinds
+            and self._timeout is not None
+            and now - start_time >= self._timeout
+        ):
+            observations["timeout_requested"] = TerminalHandoffEvent(
+                kind="timeout_requested"
+            )
+
+        response_event = self._observe_terminal_response(pending_transport_failure)
+        if response_event is not None:
+            observations[response_event.kind] = response_event
+
+        if progress.accepted_stop is None and self.is_alive():
+            ok, violation = self.poll_limits()
+            if not ok:
+                limit_error = violation or "Resource limit exceeded"
+                observations["limit_reached"] = TerminalHandoffEvent(
+                    kind="limit_reached",
+                    detail=limit_error,
                 )
-            if action == "return_cancelled":
-                return self._finish_invalid_result(
-                    SessionExecutionResult(
-                        status="cancelled",
-                        value=None,
-                        error="Target execution cancelled",
-                    )
+        return list(observations.values()), limit_error
+
+    def _observe_terminal_response(
+        self,
+        pending_transport_failure: str | None,
+    ) -> TerminalHandoffEvent | None:
+        """Read and parse one session response observation."""
+
+        if pending_transport_failure is not None:
+            return TerminalHandoffEvent(
+                kind="transport_failed",
+                detail=pending_transport_failure,
+            )
+        try:
+            payload = self._read_response_payload(timeout=0.0)
+        except EOFError:
+            return TerminalHandoffEvent(kind="channel_sealed")
+        except TerminalHandoffTransportError as exc:
+            return TerminalHandoffEvent(kind="transport_failed", detail=str(exc))
+        if payload is None:
+            return None
+        try:
+            parsed = parse_result_response(payload)
+        except (TypeError, ValueError) as exc:
+            return TerminalHandoffEvent(kind="transport_failed", detail=str(exc))
+        if parsed is None:
+            return TerminalHandoffEvent(
+                kind="transport_failed",
+                detail="invalid session result payload",
+            )
+        status, result, error, diagnostics = parsed
+        return TerminalHandoffEvent(
+            kind="outcome_received",
+            outcome=SessionExecutionResult(
+                status=status,
+                value=result,
+                error=error,
+                diagnostics=diagnostics,
+            ),
+        )
+
+    def _apply_terminal_handoff_effect(
+        self,
+        step: TerminalHandoffStep,
+        *,
+        now: float,
+        drain_deadline: float | None,
+    ) -> tuple[float | None, bool]:
+        """Apply a selected stop or drain effect and report whether to wait."""
+
+        action = step.decision.action
+        if action in {
+            "stop_for_timeout",
+            "stop_for_cancel",
+            "stop_for_limit",
+        }:
+            if drain_deadline is None:
+                drain_deadline = now + TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+            self.terminate()
+            return drain_deadline, True
+        if action == "begin_drain":
+            if drain_deadline is None:
+                drain_deadline = now + TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+            return drain_deadline, True
+        return drain_deadline, action == "wait"
+
+    def _terminal_handoff_result(
+        self,
+        step: TerminalHandoffStep,
+        *,
+        start_time: float,
+        producer_exit_observed: bool,
+        observed_exitcode: int | None,
+        limit_error: str | None,
+    ) -> SessionExecutionResult:
+        """Build the selected persistent-session terminal result."""
+
+        action = step.decision.action
+        if action == "return_outcome":
+            session_outcome = cast(SessionExecutionResult, step.event.outcome)
+            session_outcome.metrics = session_outcome.metrics or self.last_metrics
+            if session_outcome.status != "ok":
+                self.close()
+            return session_outcome
+        if action == "return_timeout":
+            return self._finish_invalid_result(
+                SessionExecutionResult(
+                    status="timeout",
+                    value=None,
+                    error="Target execution timed out",
                 )
-            if action == "return_limit":
-                return self._finish_invalid_result(
-                    SessionExecutionResult(
-                        status="limit",
-                        value=None,
-                        error=limit_error or "Resource limit exceeded",
-                    )
+            )
+        if action == "return_cancelled":
+            return self._finish_invalid_result(
+                SessionExecutionResult(
+                    status="cancelled",
+                    value=None,
+                    error="Target execution cancelled",
                 )
-            if action == "return_protocol_failure":
-                if step.event.kind == "channel_sealed" and not producer_exit_observed:
-                    self._process.join(timeout=TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS)
-                    if not self.is_alive():
-                        producer_exit_observed = True
-                        observed_exitcode = getattr(self._process, "exitcode", None)
-                error = "Worker result channel failed before a result was received"
-                if (
-                    step.event.kind == "channel_sealed"
-                    and producer_exit_observed
-                    and observed_exitcode is not None
-                ):
-                    error = (
-                        "Worker exited before returning a result "
-                        f"(exit code {observed_exitcode})"
-                    )
-                return self._finish_invalid_result(
-                    SessionExecutionResult(
-                        status="error",
-                        value=None,
-                        error=error,
-                        diagnostics=runner_diagnostics(
-                            phase="result_handoff",
-                            runner="host",
-                            target_type="agent",
-                            pid=getattr(self._process, "pid", None),
-                            exitcode=observed_exitcode,
-                            alive=self.is_alive(),
-                            duration_seconds=time.monotonic() - start_time,
-                            message=step.event.detail or error,
-                            extra={
-                                "handoff_state": step.decision.source,
-                                "handoff_event": step.event.kind,
-                                "handoff_transition": step.decision.transition_id,
-                                "drain_timeout_seconds": (
-                                    TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
-                                ),
-                            },
+            )
+        if action == "return_limit":
+            return self._finish_invalid_result(
+                SessionExecutionResult(
+                    status="limit",
+                    value=None,
+                    error=limit_error or "Resource limit exceeded",
+                )
+            )
+        if action == "return_protocol_failure":
+            return self._terminal_protocol_failure_result(
+                step,
+                start_time=start_time,
+                producer_exit_observed=producer_exit_observed,
+                observed_exitcode=observed_exitcode,
+            )
+        raise AssertionError(f"Unhandled terminal handoff action: {action}")
+
+    def _terminal_protocol_failure_result(
+        self,
+        step: TerminalHandoffStep,
+        *,
+        start_time: float,
+        producer_exit_observed: bool,
+        observed_exitcode: int | None,
+    ) -> SessionExecutionResult:
+        """Build and invalidate a persistent-session protocol failure."""
+
+        if step.event.kind == "channel_sealed" and not producer_exit_observed:
+            self._process.join(timeout=TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS)
+            if not self.is_alive():
+                producer_exit_observed = True
+                observed_exitcode = getattr(self._process, "exitcode", None)
+        error = "Worker result channel failed before a result was received"
+        if (
+            step.event.kind == "channel_sealed"
+            and producer_exit_observed
+            and observed_exitcode is not None
+        ):
+            error = (
+                "Worker exited before returning a result "
+                f"(exit code {observed_exitcode})"
+            )
+        return self._finish_invalid_result(
+            SessionExecutionResult(
+                status="error",
+                value=None,
+                error=error,
+                diagnostics=runner_diagnostics(
+                    phase="result_handoff",
+                    runner="host",
+                    target_type="agent",
+                    pid=getattr(self._process, "pid", None),
+                    exitcode=observed_exitcode,
+                    alive=self.is_alive(),
+                    duration_seconds=time.monotonic() - start_time,
+                    message=step.event.detail or error,
+                    extra={
+                        "handoff_state": step.decision.source,
+                        "handoff_event": step.event.kind,
+                        "handoff_transition": step.decision.transition_id,
+                        "drain_timeout_seconds": (
+                            TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
                         ),
-                    )
-                )
-            raise AssertionError(f"Unhandled terminal handoff action: {action}")
+                    },
+                ),
+            )
+        )
 
     @staticmethod
     def _reduce_terminal_observations(

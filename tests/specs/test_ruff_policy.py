@@ -52,7 +52,11 @@ MYPY_CHECK = (
     "--config-file pyproject.toml"
 )
 EXPECTED_GROUP_IDS = [
-    *(f"RUFF-SUP-{number:03d}" for number in range(1, 60) if number not in {4, 15, 21}),
+    *(
+        f"RUFF-SUP-{number:03d}"
+        for number in range(1, 60)
+        if number not in {4, 15, 21, 48}
+    ),
     *(
         f"RUFF-SUP-{number:03d}"
         for number in range(101, 127)
@@ -69,9 +73,9 @@ EXPECTED_GROUP_IDS = [
         if number not in {282, 285, 293, 296, 297, 301, 302, 305, 306}
     ),
 ]
-EXPECTED_GROUP_COUNT = 230
-EXPECTED_DIRECTIVE_COUNT = 373
-EXPECTED_C901_DIRECTIVE_COUNT = 139
+EXPECTED_GROUP_COUNT = 229
+EXPECTED_DIRECTIVE_COUNT = 372
+EXPECTED_C901_DIRECTIVE_COUNT = 138
 TAGGED_C901 = re.compile(
     r"#\s*noqa:\s*[^#\n]*\bC901\b[^#\n]*"
     r"approved\s+\[TS-3\.1\]\s+\[RUFF-SUP-(\d{3})\]\s+exception\b"

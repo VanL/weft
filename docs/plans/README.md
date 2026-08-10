@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 168 plan files in this directory.
+There are currently 170 plan files in this directory.
 
 ## Curation Policy
 
@@ -25,6 +25,8 @@ There are currently 168 plan files in this directory.
 | --- | --- | --- | --- |
 | [`2026-08-10-interactive-session-lifecycle-refactor-plan.md`](./2026-08-10-interactive-session-lifecycle-refactor-plan.md) | Interactive Session Lifecycle Refactor Plan | `completed` | none |
 | [`2026-08-10-result-observation-and-control-transition-refactor-plan.md`](./2026-08-10-result-observation-and-control-transition-refactor-plan.md) | Result Observation And Control Transition Refactor Plan | `completed` | none |
+| [`2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](./2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md) | Subprocess And Docker Provider Lifecycle Refactor Feasibility Plan | `completed` | none |
+| [`2026-08-08-terminal-handoff-adapter-refactor-plan.md`](./2026-08-08-terminal-handoff-adapter-refactor-plan.md) | Terminal Handoff Adapter Refactor Plan | `completed` | none |
 | [`2026-08-08-registry-selection-pruning-authority-refactor-plan.md`](./2026-08-08-registry-selection-pruning-authority-refactor-plan.md) | Registry Selection And Pruning Authority Refactor Plan | `completed` | none |
 | [`2026-08-07-ruff-suppression-registry-extraction-plan.md`](./2026-08-07-ruff-suppression-registry-extraction-plan.md) | Ruff Suppression Registry Extraction Plan | `completed` | none |
 | [`2026-08-05-ruff-stable-default-lint-expansion-plan.md`](./2026-08-05-ruff-stable-default-lint-expansion-plan.md) | Ruff Stable-Default Lint Expansion Plan | `completed` | none |

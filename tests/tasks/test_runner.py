@@ -2960,6 +2960,464 @@ class _DeferredFirstPollConnection:
         return self._receiver.recv_bytes()
 
 
+class _FailingFirstBlockingPollConnection:
+    """Fail one blocking poll while delegating every other pipe operation."""
+
+    def __init__(self, receiver: Connection) -> None:
+        self._receiver = receiver
+        self.blocking_poll_failed = False
+
+    def poll(self, timeout: float = 0.0) -> bool:
+        if timeout > 0.0 and not self.blocking_poll_failed:
+            self.blocking_poll_failed = True
+            raise OSError("blocking terminal poll failed")
+        return self._receiver.poll(timeout)
+
+    def recv_bytes(self) -> bytes:
+        return self._receiver.recv_bytes()
+
+    def close(self) -> None:
+        self._receiver.close()
+
+
+class _FailingResponseReadConnection:
+    """Fail the production response-read poll at the owner boundary."""
+
+    def __init__(self, receiver: Connection) -> None:
+        self._receiver = receiver
+
+    def poll(self, timeout: float = 0.0) -> bool:
+        del timeout
+        raise OSError("session read failed")
+
+    def recv_bytes(self) -> bytes:
+        return self._receiver.recv_bytes()
+
+    def close(self) -> None:
+        self._receiver.close()
+
+
+def test_host_terminal_receive_failure_is_transport_failure() -> None:
+    """A ready channel whose receive fails produces bounded transport evidence."""
+
+    class DeadProcess:
+        pid = None
+        exitcode = 73
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    class FailingReceiver:
+        def poll(self, timeout: float = 0.0) -> bool:
+            del timeout
+            return True
+
+        def recv_bytes(self) -> bytes:
+            raise OSError("terminal receive failed")
+
+    outcome = _build_function_host_runner(timeout=5.0)._run_one_shot_terminal_handoff(
+        DeadProcess(),  # type: ignore[arg-type]
+        FailingReceiver(),  # type: ignore[arg-type]
+        worker_pid=None,
+        runtime_handle=None,
+        cancel_requested=None,
+    )
+
+    assert outcome.status == "error"
+    assert outcome.error == "Worker result channel failed before a result was received"
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["handoff_event"] == "transport_failed"
+    assert "terminal payload receive failed" in outcome.diagnostics["message"]
+
+
+def test_host_terminal_wrong_decoded_payload_type_is_transport_failure() -> None:
+    """A decoded non-RunnerOutcome payload cannot become terminal success."""
+
+    class DeadProcess:
+        pid = None
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    try:
+        send_terminal_payload(sender, 42)
+        sender.close()
+
+        outcome = _build_function_host_runner(
+            timeout=5.0
+        )._run_one_shot_terminal_handoff(
+            DeadProcess(),  # type: ignore[arg-type]
+            receiver,
+            worker_pid=None,
+            runtime_handle=None,
+            cancel_requested=None,
+        )
+
+        assert outcome.status == "error"
+        assert (
+            outcome.error == "Worker result channel failed before a result was received"
+        )
+        assert outcome.diagnostics is not None
+        assert outcome.diagnostics["handoff_event"] == "transport_failed"
+        assert (
+            outcome.diagnostics["message"]
+            == "decoded terminal payload has invalid type int"
+        )
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_host_blocking_poll_failure_is_consumed_as_next_turn_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking-poll failure is stored and reduced on the following turn."""
+
+    class LiveProcess:
+        pid = None
+        exitcode = None
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    wrapped_receiver = _FailingFirstBlockingPollConnection(receiver)
+    process = LiveProcess()
+    runner = _build_function_host_runner(timeout=5.0)
+    monkeypatch.setattr(
+        runner,
+        "_stop_process",
+        lambda _process: setattr(process, "alive", False),
+    )
+    try:
+        outcome = runner._run_one_shot_terminal_handoff(
+            process,  # type: ignore[arg-type]
+            wrapped_receiver,  # type: ignore[arg-type]
+            worker_pid=None,
+            runtime_handle=None,
+            cancel_requested=None,
+        )
+
+        assert wrapped_receiver.blocking_poll_failed is True
+        assert outcome.status == "error"
+        assert outcome.diagnostics is not None
+        assert outcome.diagnostics["handoff_event"] == "transport_failed"
+        assert outcome.diagnostics["message"] == "blocking terminal poll failed"
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_one_shot_stop_after_begin_drain_preserves_first_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later accepted stop cannot replace an ordinary drain deadline."""
+
+    clock = {"now": 0.0}
+    cancel_checks = 0
+
+    class DeadProcess:
+        pid = None
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    class EmptyReceiver:
+        def poll(self, timeout: float = 0.0) -> bool:
+            clock["now"] += timeout
+            return False
+
+    def cancel_after_drain() -> bool:
+        nonlocal cancel_checks
+        cancel_checks += 1
+        return cancel_checks > 2
+
+    runner = _build_function_host_runner(timeout=5.0)
+    monkeypatch.setattr(host_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        runner,
+        "_stop_process",
+        lambda _process: clock.__setitem__("now", clock["now"] + 0.01),
+    )
+
+    outcome = runner._run_one_shot_terminal_handoff(
+        DeadProcess(),  # type: ignore[arg-type]
+        EmptyReceiver(),  # type: ignore[arg-type]
+        worker_pid=None,
+        runtime_handle=None,
+        cancel_requested=cancel_after_drain,
+    )
+
+    assert outcome.status == "cancelled"
+    assert cancel_checks == 3
+    assert clock["now"] == pytest.approx(
+        host_module.TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+    )
+
+
+@pytest.mark.parametrize(
+    ("exit_after_join", "expected_error", "expected_returncode"),
+    (
+        (True, "Worker exited before returning a result (exit code 73)", 73),
+        (False, "Worker result channel failed before a result was received", None),
+    ),
+)
+def test_host_channel_seal_refines_exit_after_bounded_join(
+    exit_after_join: bool,
+    expected_error: str,
+    expected_returncode: int | None,
+) -> None:
+    """A seal gets one bounded join before the host reports a numeric exit."""
+
+    class JoiningProcess:
+        pid = None
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.exitcode: int | None = None
+            self.join_timeouts: list[float | None] = []
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeouts.append(timeout)
+            if exit_after_join:
+                self.alive = False
+                self.exitcode = 73
+
+        def terminate(self) -> None:
+            self.alive = False
+
+        def kill(self) -> None:
+            self.alive = False
+
+    class SealedReceiver:
+        def poll(self, timeout: float = 0.0) -> bool:
+            del timeout
+            return True
+
+        def recv_bytes(self) -> bytes:
+            raise EOFError
+
+    process = JoiningProcess()
+    outcome = _build_function_host_runner(timeout=5.0)._run_one_shot_terminal_handoff(
+        process,  # type: ignore[arg-type]
+        SealedReceiver(),  # type: ignore[arg-type]
+        worker_pid=None,
+        runtime_handle=None,
+        cancel_requested=None,
+    )
+
+    assert (
+        process.join_timeouts[0] == host_module.TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+    )
+    assert (
+        process.join_timeouts.count(host_module.TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS)
+        == 1
+    )
+    assert outcome.status == "error"
+    assert outcome.error == expected_error
+    assert outcome.returncode == expected_returncode
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["handoff_event"] == "channel_sealed"
+
+
+def test_agent_session_response_read_failure_is_transport_failure() -> None:
+    """A session response-read failure invalidates with transport evidence."""
+
+    session = _spawn_agent_session_for_target(_agent_session_ready_then_hang_worker)
+    try:
+        session.wait_ready(timeout=5.0)
+        session._response_receiver = _FailingResponseReadConnection(  # type: ignore[assignment]
+            session._response_receiver
+        )
+
+        result = session.execute("hello")
+
+        assert result.status == "error"
+        assert (
+            result.error == "Worker result channel failed before a result was received"
+        )
+        assert result.diagnostics is not None
+        assert result.diagnostics["handoff_event"] == "transport_failed"
+        assert "session read failed" in result.diagnostics["message"]
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+    finally:
+        session.close()
+
+
+def test_agent_session_blocking_poll_failure_is_consumed_as_next_turn_transport_failure() -> (
+    None
+):
+    """A session blocking-poll failure is reduced on the following turn."""
+
+    session = _spawn_agent_session_for_target(_agent_session_ready_then_hang_worker)
+    try:
+        session.wait_ready(timeout=5.0)
+        wrapped_receiver = _FailingFirstBlockingPollConnection(
+            session._response_receiver
+        )
+        session._response_receiver = wrapped_receiver  # type: ignore[assignment]
+
+        result = session.execute("hello")
+
+        assert wrapped_receiver.blocking_poll_failed is True
+        assert result.status == "error"
+        assert result.diagnostics is not None
+        assert result.diagnostics["handoff_event"] == "transport_failed"
+        assert result.diagnostics["message"] == "blocking terminal poll failed"
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+    finally:
+        session.close()
+
+
+def test_agent_session_producer_exit_starts_bounded_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary producer exit starts one drain whose deadline bounds the wait."""
+
+    clock = {"now": 0.0}
+
+    class DeadProcess:
+        pid = None
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def close(self) -> None:
+            return
+
+    class RequestQueue:
+        def put(self, _payload: object) -> None:
+            return
+
+        def cancel_join_thread(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    class EmptyReceiver:
+        def poll(self, timeout: float = 0.0) -> bool:
+            clock["now"] += timeout
+            return False
+
+        def close(self) -> None:
+            return
+
+    session = AgentSession(
+        DeadProcess(),  # type: ignore[arg-type]
+        RequestQueue(),  # type: ignore[arg-type]
+        EmptyReceiver(),  # type: ignore[arg-type]
+        monitor=None,
+        limits=None,
+        timeout=None,
+    )
+    monkeypatch.setattr(sessions_module.time, "monotonic", lambda: clock["now"])
+
+    result = session.execute("hello")
+
+    assert result.status == "error"
+    assert result.diagnostics is not None
+    assert result.diagnostics["handoff_event"] == "drain_expired"
+    assert clock["now"] == sessions_module.TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+
+
+def test_session_stop_after_begin_drain_preserves_first_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later session stop cannot replace an ordinary drain deadline."""
+
+    clock = {"now": 0.0}
+    cancel_checks = 0
+
+    class DeadProcess:
+        pid = None
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def close(self) -> None:
+            return
+
+    class RequestQueue:
+        def put(self, _payload: object) -> None:
+            return
+
+        def cancel_join_thread(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    class EmptyReceiver:
+        def poll(self, timeout: float = 0.0) -> bool:
+            clock["now"] += timeout
+            return False
+
+        def close(self) -> None:
+            return
+
+    def cancel_after_drain() -> bool:
+        nonlocal cancel_checks
+        cancel_checks += 1
+        return cancel_checks > 2
+
+    session = AgentSession(
+        DeadProcess(),  # type: ignore[arg-type]
+        RequestQueue(),  # type: ignore[arg-type]
+        EmptyReceiver(),  # type: ignore[arg-type]
+        monitor=None,
+        limits=None,
+        timeout=None,
+    )
+    monkeypatch.setattr(sessions_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        session,
+        "terminate",
+        lambda **_kwargs: clock.__setitem__("now", clock["now"] + 0.01),
+    )
+
+    result = session.execute("hello", cancel_requested=cancel_after_drain)
+
+    assert result.status == "cancelled"
+    assert cancel_checks == 3
+    assert clock["now"] == pytest.approx(
+        sessions_module.TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS
+    )
+
+
 def test_real_pipe_exit_then_outcome_uses_production_handoff_driver() -> None:
     """A withheld first read proves exit then outcome converges on the outcome."""
 
