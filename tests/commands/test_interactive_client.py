@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from weft._constants import load_config
 from weft.commands.interactive import InteractiveStreamClient
@@ -122,8 +125,10 @@ def test_interactive_client_observes_terminal_ctrl_out_envelope(broker_env) -> N
             json.dumps(
                 {
                     "type": "terminal",
+                    "source": "task",
                     "tid": tid,
                     "status": "completed",
+                    "timestamp": time.time_ns(),
                     "event": "work_completed",
                 }
             )
@@ -135,6 +140,83 @@ def test_interactive_client_observes_terminal_ctrl_out_envelope(broker_env) -> N
 
     assert "completed" in state_statuses
     assert client.status == "completed"
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    ("missing_source", "unknown_source", "wrong_tid", "nonterminal_status"),
+)
+def test_interactive_client_rejects_invalid_terminal_envelopes(
+    broker_env,
+    invalid_case: str,
+) -> None:
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    spec = _make_interactive_spec(tid)
+
+    make_queue(spec.io.outputs["outbox"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    handled = threading.Event()
+    state_events: list[dict[str, object]] = []
+
+    def observe_state(event: dict[str, object]) -> None:
+        state_events.append(event)
+        handled.set()
+
+    def observe_stderr(_chunk: str, _final: bool) -> None:
+        handled.set()
+
+    client = InteractiveStreamClient(
+        db_path=db_path,
+        config=load_config(),
+        tid=tid,
+        inbox=spec.io.inputs["inbox"],
+        outbox=spec.io.outputs["outbox"],
+        ctrl_out=spec.io.control["ctrl_out"],
+        on_stderr=observe_stderr,
+        on_state=observe_state,
+    )
+    invalid: dict[str, object] = {
+        "type": "terminal",
+        "source": "task",
+        "tid": tid,
+        "status": "completed",
+        "timestamp": time.time_ns(),
+    }
+    if invalid_case == "missing_source":
+        invalid.pop("source")
+    elif invalid_case == "unknown_source":
+        invalid["source"] = "observer"
+    elif invalid_case == "wrong_tid":
+        invalid["tid"] = str(int(tid) + 1)
+    else:
+        invalid["status"] = "running"
+
+    valid = {
+        "type": "terminal",
+        "source": "task",
+        "tid": tid,
+        "status": "completed",
+        "timestamp": time.time_ns(),
+    }
+
+    client.start()
+    try:
+        ctrl_out.write(json.dumps(invalid))
+        assert handled.wait(timeout=5.0), "client did not handle invalid envelope"
+        assert not client.wait(timeout=0)
+        assert client.status is None
+        assert state_events == []
+
+        handled.clear()
+        ctrl_out.write(json.dumps(valid))
+        assert client.wait(timeout=5.0), "client did not accept valid envelope"
+    finally:
+        client.stop()
+
+    assert client.status == "completed"
+    assert state_events == [valid]
 
 
 def test_interactive_client_failure_overrides_stdout_final(broker_env) -> None:
@@ -177,8 +259,10 @@ def test_interactive_client_failure_overrides_stdout_final(broker_env) -> None:
             json.dumps(
                 {
                     "type": "terminal",
+                    "source": "task",
                     "tid": tid,
                     "status": "failed",
+                    "timestamp": time.time_ns(),
                     "event": "work_failed",
                     "error": "boom",
                 }
@@ -316,8 +400,10 @@ def test_interactive_client_control_stop_is_terminal(broker_env) -> None:
             json.dumps(
                 {
                     "type": "terminal",
+                    "source": "task",
                     "tid": tid,
                     "status": "cancelled",
+                    "timestamp": time.time_ns(),
                     "event": "control_stop",
                     "error": "Task cancelled",
                 }

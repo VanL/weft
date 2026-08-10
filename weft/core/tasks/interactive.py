@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3], [CC-2.4]
-- docs/specifications/05-Message_Flow_and_State.md [MF-2]
+- docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3]
 """
 
 from __future__ import annotations
@@ -362,7 +362,7 @@ class InteractiveTaskMixin(ABC):
     def _interactive_terminal_envelope(self) -> dict[str, Any]:
         """Build the task-local terminal event emitted on ctrl_out.
 
-        Spec: [CC-2.3], [MF-2]
+        Spec: [CC-2.3], [MF-2], [MF-3]
         """
 
         status = str(self.taskspec.state.status)
@@ -375,8 +375,10 @@ class InteractiveTaskMixin(ABC):
         }.get(status, "work_completed")
         payload: dict[str, Any] = {
             "type": "terminal",
+            "source": "task",
             "tid": str(self.taskspec.tid),
             "status": status,
+            "timestamp": time.time_ns(),
             "event": event,
         }
         error = self.taskspec.state.error

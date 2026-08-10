@@ -15,6 +15,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
+from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
 from weft.core.taskspec import (
@@ -178,9 +179,17 @@ def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None
             and message.get("final") is True
             for message in ctrl_messages
         )
-        assert any(
-            message.get("type") == "terminal" and message.get("status") == "completed"
+        terminal = next(
+            message
             for message in ctrl_messages
+            if message.get("type") == "terminal"
+            and message.get("status") == "completed"
+        )
+        assert terminal["source"] == "task"
+        assert terminal["tid"] == unique_tid
+        assert isinstance(terminal["timestamp"], int)
+        assert (
+            coerce_terminal_envelope(json.dumps(terminal), tid=unique_tid) == terminal
         )
 
     events = [json.loads(e) for e in _drain(log_queue)]

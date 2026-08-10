@@ -498,48 +498,207 @@ def _wait_for_task_completion(
     )
 
 
-def _run_interactive_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-111] exception
-    context: WeftContext,
-    taskspec: TaskSpec,
-    *,
-    stdin_data: str | None,
-    auto_close: bool = True,
-    use_prompt: bool = False,
-) -> tuple[str, Any | None, str | None]:
-    assert taskspec.tid is not None
-    tid = taskspec.tid
-    db_path = context.broker_target
-    config = context.broker_config
-    outbox_name = taskspec.io.outputs.get("outbox") or f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"
-    ctrl_out_name = (
-        taskspec.io.control.get("ctrl_out") or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-    )
-    ctrl_in_name = (
-        taskspec.io.control.get("ctrl_in") or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
-    )
-    inbox_name = taskspec.io.inputs.get("inbox") or f"T{tid}.{QUEUE_INBOX_SUFFIX}"
+class _InteractiveRunLifecycle:
+    """Own one command-side interactive session and its live resources.
 
-    status_holder: dict[str, str | None] = {"status": None, "error": None}
-    stdout_chunks: list[str] = []
-    quit_requested = False
+    Spec: [CC-2.3], [SB-0.4], [MF-3], [MF-5], [CLI-1.1.1]
+    """
 
-    def _stdout_callback(chunk: str, final: bool) -> None:
-        if use_prompt:
+    def __init__(
+        self,
+        context: WeftContext,
+        taskspec: TaskSpec,
+        *,
+        use_prompt: bool,
+    ) -> None:
+        assert taskspec.tid is not None
+        self._context = context
+        self._tid = taskspec.tid
+        self._use_prompt = use_prompt
+        self._outbox_name = taskspec.io.outputs.get("outbox") or (
+            f"T{self._tid}.{QUEUE_OUTBOX_SUFFIX}"
+        )
+        ctrl_out_name = taskspec.io.control.get("ctrl_out") or (
+            f"T{self._tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+        )
+        self._ctrl_in_name = taskspec.io.control.get("ctrl_in") or (
+            f"T{self._tid}.{QUEUE_CTRL_IN_SUFFIX}"
+        )
+        inbox_name = taskspec.io.inputs.get("inbox") or (
+            f"T{self._tid}.{QUEUE_INBOX_SUFFIX}"
+        )
+        self._status: str | None = None
+        self._error: str | None = None
+        self._stdout_chunks: list[str] = []
+        self._result: Any | None = None
+        self._log_last_timestamp: int | None = None
+        self._client = InteractiveStreamClient(
+            db_path=context.broker_target,
+            config=context.broker_config,
+            tid=self._tid,
+            inbox=inbox_name,
+            outbox=self._outbox_name,
+            ctrl_out=ctrl_out_name,
+            on_stdout=self._on_stdout,
+            on_stderr=self._on_stderr,
+            on_state=self._on_state,
+        )
+        self._log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+
+    def start(self) -> None:
+        """Start the queue client inside the caller-owned cleanup region."""
+
+        self._client.start()
+
+    def close(self) -> None:
+        """Close resources in the existing client-then-log order."""
+
+        self._client.stop()
+        self._log_queue.close()
+        if self._use_prompt:
+            return
+        if self._stdout_chunks:
+            self._result = "".join(self._stdout_chunks)
+            return
+        history = self._client.stdout_history
+        if history:
+            self._result = "".join(history)
+            self._stdout_chunks.extend(history)
+
+    def send_input(self, payload: str) -> None:
+        """Write one queue-mediated interactive input payload."""
+
+        self._client.send_input(payload)
+
+    def close_input(self) -> None:
+        """Close the task's interactive input stream."""
+
+        self._client.close_input()
+
+    def wait_for_completion(self, timeout: float | None = None) -> bool:
+        """Observe terminal evidence in the existing priority order.
+
+        Spec: [MF-3], [MF-5]
+        """
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while True:
+            if self._client.wait(timeout=0):
+                return True
+            if self._poll_terminal_log() or self._poll_monitor_terminal():
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            wait_timeout = 0.05
+            if deadline is not None:
+                wait_timeout = min(wait_timeout, max(0.0, deadline - time.monotonic()))
+            if self._client.wait(timeout=wait_timeout):
+                return True
+
+    def request_exit(self) -> bool:
+        """Close input, then escalate STOP to KILL only as needed.
+
+        Spec: [CC-2.4], [MF-3]
+        """
+
+        self.close_input()
+        if self.wait_for_completion(timeout=1.0):
+            return True
+        self._send_control(CONTROL_STOP)
+        if (
+            self._client.wait_for_control_response(
+                "STOP",
+                status="ack",
+                timeout=1.0,
+            )
+            is not None
+        ):
+            return True
+        if self.wait_for_completion(timeout=0.1):
+            return True
+        self._send_control(CONTROL_KILL)
+        if (
+            self._client.wait_for_control_response(
+                "KILL",
+                status="ack",
+                timeout=1.0,
+            )
+            is not None
+        ):
+            return True
+        return self.wait_for_completion(timeout=0.1)
+
+    def exit_prompt_if_completed(
+        self,
+        session: Any,
+        completion_event: threading.Event,
+    ) -> None:
+        """Exit a running prompt after terminal completion is visible."""
+
+        if (
+            completion_event.is_set()
+            and session.app.is_running
+            and not session.app.is_done
+        ):
+            session.app.exit()
+
+    def await_prompt_completion(
+        self,
+        session: Any,
+        completion_event: threading.Event,
+    ) -> None:
+        """Wait for completion and safely wake the prompt event loop."""
+
+        self.wait_for_completion()
+        completion_event.set()
+        loop = session.app.loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(
+                lambda: self.exit_prompt_if_completed(session, completion_event)
+            )
+        except RuntimeError:  # pragma: no cover - closed event-loop race
+            return
+
+    def outcome(self, *, quit_requested: bool) -> tuple[str, str | None]:
+        """Return the current terminal outcome with quit normalization."""
+
+        status = self._status or self._client.status or "completed"
+        error = self._error or self._client.error
+        if quit_requested and status in {"cancelled", "killed"}:
+            return "completed", None
+        return status, error
+
+    def collect_piped_result(self) -> Any | None:
+        """Fill an empty captured result from the final outbox snapshot."""
+
+        outbox_queue = self._context.queue(self._outbox_name, persistent=True)
+        try:
+            collected = _collect_interactive_queue_output(outbox_queue)
+        finally:
+            outbox_queue.close()
+        if collected and not self._result:
+            self._result = "".join(collected)
+        return self._result
+
+    def _on_stdout(self, chunk: str, final: bool) -> None:
+        if self._use_prompt:
             if chunk:
                 _echo(chunk, nl=False)
             if final and (not chunk or not chunk.endswith("\n")):
                 _echo()
-        else:
-            if chunk:
-                stdout_chunks.append(chunk)
+        elif chunk:
+            self._stdout_chunks.append(chunk)
 
-    def _stderr_callback(chunk: str, final: bool) -> None:
+    @staticmethod
+    def _on_stderr(chunk: str, final: bool) -> None:
         if chunk:
             _echo(chunk, err=True, nl=False)
         if final and (not chunk or not chunk.endswith("\n")):
             _echo(err=True)
 
-    def _state_callback(event: dict[str, Any]) -> None:
+    def _on_state(self, event: dict[str, Any]) -> None:
         status = event.get("status")
         if isinstance(status, str) and status in {
             "completed",
@@ -548,91 +707,54 @@ def _run_interactive_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-111] exc
             "cancelled",
             "killed",
         }:
-            status_holder["status"] = status
+            self._status = status
             error = event.get("error")
-            status_holder["error"] = str(error) if isinstance(error, str) else None
+            self._error = str(error) if isinstance(error, str) else None
             return
+        event_name = event.get("event")
+        if event_name in {"work_failed", "work_timeout", "work_limit_violation"}:
+            self._status = "failed"
+            self._error = event.get("error") or str(event_name).replace("_", " ")
+        elif event_name == "work_completed":
+            self._status = "completed"
+        elif event_name in {"control_stop", "task_signal_stop"}:
+            self._status = "cancelled"
+            self._error = event.get("error") or "Task cancelled"
+        elif event_name in {"control_kill", "task_signal_kill"}:
+            self._status = "killed"
+            self._error = event.get("error") or "Task killed"
 
-        evt = event.get("event")
-        if evt in {"work_failed", "work_timeout", "work_limit_violation"}:
-            status_holder["status"] = "failed"
-            status_holder["error"] = event.get("error") or evt.replace("_", " ")
-        elif evt == "work_completed":
-            status_holder["status"] = "completed"
-        elif evt in {"control_stop", "task_signal_stop"}:
-            status_holder["status"] = "cancelled"
-            status_holder["error"] = event.get("error") or "Task cancelled"
-        elif evt in {"control_kill", "task_signal_kill"}:
-            status_holder["status"] = "killed"
-            status_holder["error"] = event.get("error") or "Task killed"
-
-    def _send_interactive_control(command: str) -> None:
-        ctrl_queue = context.queue(ctrl_in_name, persistent=True)
+    def _send_control(self, command: str) -> None:
+        ctrl_queue = self._context.queue(self._ctrl_in_name, persistent=True)
         try:
             ctrl_queue.write(command)
         finally:
             ctrl_queue.close()
 
-    def _request_interactive_exit() -> bool:
-        client.close_input()
-        if _wait_for_interactive_completion(timeout=1.0):
-            return True
-        _send_interactive_control(CONTROL_STOP)
-        if (
-            client.wait_for_control_response("STOP", status="ack", timeout=1.0)
-            is not None
-        ):
-            return True
-        if _wait_for_interactive_completion(timeout=0.1):
-            return True
-        _send_interactive_control(CONTROL_KILL)
-        if (
-            client.wait_for_control_response("KILL", status="ack", timeout=1.0)
-            is not None
-        ):
-            return True
-        return _wait_for_interactive_completion(timeout=0.1)
-
-    client = InteractiveStreamClient(
-        db_path=db_path,
-        config=config,
-        tid=tid,
-        inbox=inbox_name,
-        outbox=outbox_name,
-        ctrl_out=ctrl_out_name,
-        on_stdout=_stdout_callback,
-        on_stderr=_stderr_callback,
-        on_state=_state_callback,
-    )
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    log_last_timestamp: int | None = None
-
-    def _poll_interactive_terminal_log() -> bool:
-        nonlocal log_last_timestamp
-        events, log_last_timestamp = poll_log_events(
-            log_queue,
-            log_last_timestamp,
-            tid,
+    def _poll_terminal_log(self) -> bool:
+        events, self._log_last_timestamp = poll_log_events(
+            self._log_queue,
+            self._log_last_timestamp,
+            self._tid,
         )
         terminal_seen = False
         for event_payload, _timestamp in events:
             event_status = terminal_status_from_event(event_payload)
             if event_status is None:
                 continue
-            status_holder["status"] = event_status
-            status_holder["error"] = terminal_error_message(
-                event_payload,
-                event_status,
-            )
+            self._status = event_status
+            self._error = terminal_error_message(event_payload, event_status)
             terminal_seen = True
         return terminal_seen
 
-    def _poll_interactive_monitor_terminal() -> bool:
+    def _poll_monitor_terminal(self) -> bool:
+        """Return optional Monitor terminal evidence without changing priority."""
+
         try:
             record = open_monitor_store(
-                context,
-                config=context.config,
-            ).get_task(tid)
+                self._context,
+                config=self._context.config,
+            ).get_task(self._tid)
         except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-332] exception
             return False
         if record is None or not record.terminal_seen:
@@ -640,142 +762,116 @@ def _run_interactive_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-111] exc
         status = record.terminal_status or record.status
         if not isinstance(status, str) or not status:
             return False
-        status_holder["status"] = status
+        self._status = status
         error = record.state.get("error")
-        status_holder["error"] = str(error) if isinstance(error, str) else None
+        self._error = str(error) if isinstance(error, str) else None
         return True
 
-    def _wait_for_interactive_completion(timeout: float | None = None) -> bool:
-        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
-        while True:
-            if client.wait(timeout=0):
-                return True
-            terminal_seen = (
-                _poll_interactive_terminal_log() or _poll_interactive_monitor_terminal()
-            )
-            if terminal_seen:
-                return True
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            wait_timeout = 0.05
-            if deadline is not None:
-                wait_timeout = min(wait_timeout, max(0.0, deadline - time.monotonic()))
-            if client.wait(timeout=wait_timeout):
-                return True
 
-    client.start()
+def _run_interactive_prompt(lifecycle: _InteractiveRunLifecycle) -> bool:
+    """Run the PromptToolkit mode for one queue-mediated session.
+
+    Spec: [CC-2.3], [CLI-1.1.1]
+    """
+
     try:
-        if use_prompt:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.patch_stdout import patch_stdout
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise RunUsageError(
+            "prompt_toolkit is required for interactive mode when stdin is a TTY"
+        ) from exc
+
+    session: PromptSession[str] = PromptSession("weft> ")
+    completion_event = threading.Event()
+
+    def exit_if_completed() -> None:
+        lifecycle.exit_prompt_if_completed(session, completion_event)
+
+    waiter = threading.Thread(
+        target=lambda: lifecycle.await_prompt_completion(session, completion_event),
+        daemon=True,
+    )
+    waiter.start()
+    lifecycle.send_input("\n")
+    quit_requested = False
+
+    with patch_stdout():
+        while not completion_event.is_set():
             try:
-                from prompt_toolkit import PromptSession
-                from prompt_toolkit.patch_stdout import patch_stdout
-            except ImportError as exc:  # pragma: no cover - optional dependency guard
-                raise RunUsageError(
-                    "prompt_toolkit is required for interactive mode when stdin is a TTY"
-                ) from exc
+                line = session.prompt("weft> ", pre_run=exit_if_completed)
+            except EOFError:
+                lifecycle.close_input()
+                break
+            except KeyboardInterrupt:
+                _echo()
+                continue
+            if line is None:
+                break
+            stripped = line.strip()
+            if stripped in {":quit", ":exit"}:
+                quit_requested = True
+                if not lifecycle.request_exit():
+                    raise RuntimeError("Interactive session did not stop after :quit")
+                break
+            lifecycle.send_input(line if line.endswith("\n") else f"{line}\n")
 
-            session: PromptSession[str] = PromptSession("weft> ")
-            completion_event = threading.Event()
+    waiter.join(timeout=0.5)
+    if not lifecycle.wait_for_completion(timeout=INTERACTIVE_STOP_COMPLETION_TIMEOUT):
+        raise RuntimeError("Interactive session did not stop after :quit")
+    return quit_requested
 
-            def _exit_prompt_if_completed() -> None:
-                if (
-                    completion_event.is_set()
-                    and session.app.is_running
-                    and not session.app.is_done
-                ):
-                    session.app.exit()
 
-            def _await_completion() -> None:
-                _wait_for_interactive_completion()
-                completion_event.set()
-                loop = session.app.loop
-                if loop is None:
-                    return
-                try:
-                    loop.call_soon_threadsafe(_exit_prompt_if_completed)
-                except RuntimeError:  # pragma: no cover - closed event-loop race
-                    return
+def _run_interactive_piped(
+    lifecycle: _InteractiveRunLifecycle,
+    stdin_data: str | None,
+    *,
+    auto_close: bool,
+) -> None:
+    """Run the existing non-prompt input and auto-close branches.
 
-            waiter = threading.Thread(target=_await_completion, daemon=True)
-            waiter.start()
+    Spec: [CLI-1.1.1]
+    """
 
-            # Trigger the downstream prompt to render once before entering the loop.
-            client.send_input("\n")
-
-            with patch_stdout():
-                while not completion_event.is_set():
-                    try:
-                        line = session.prompt(
-                            "weft> ",
-                            pre_run=_exit_prompt_if_completed,
-                        )
-                    except EOFError:
-                        client.close_input()
-                        break
-                    except KeyboardInterrupt:
-                        _echo()
-                        continue
-
-                    if line is None:  # Completion triggered while waiting for input
-                        break
-
-                    stripped = line.strip()
-                    if stripped in {":quit", ":exit"}:
-                        quit_requested = True
-                        if not _request_interactive_exit():
-                            raise RuntimeError(
-                                "Interactive session did not stop after :quit"
-                            )
-                        break
-
-                    payload = line if line.endswith("\n") else f"{line}\n"
-                    client.send_input(payload)
-
-            waiter.join(timeout=0.5)
-            if not _wait_for_interactive_completion(
-                timeout=INTERACTIVE_STOP_COMPLETION_TIMEOUT
-            ):
-                raise RuntimeError("Interactive session did not stop after :quit")
+    if stdin_data:
+        lifecycle.send_input(stdin_data)
+        if auto_close and not lifecycle.wait_for_completion(timeout=0.2):
+            lifecycle.close_input()
+            lifecycle.wait_for_completion()
         else:
-            if stdin_data:
-                client.send_input(stdin_data)
-                if auto_close and not _wait_for_interactive_completion(timeout=0.2):
-                    client.close_input()
-                    _wait_for_interactive_completion()
-                else:
-                    _wait_for_interactive_completion()
-            else:
-                if auto_close:
-                    client.close_input()
-                _wait_for_interactive_completion()
-        status = status_holder["status"] or client.status or "completed"
-        error = status_holder["error"] or client.error
-        if quit_requested and status in {"cancelled", "killed"}:
-            status = "completed"
-            error = None
-        result: Any | None = None
+            lifecycle.wait_for_completion()
+        return
+    if auto_close:
+        lifecycle.close_input()
+    lifecycle.wait_for_completion()
+
+
+def _run_interactive_session(
+    context: WeftContext,
+    taskspec: TaskSpec,
+    *,
+    stdin_data: str | None,
+    auto_close: bool = True,
+    use_prompt: bool = False,
+) -> tuple[str, Any | None, str | None]:
+    """Run one command-side interactive session through its lifecycle owner.
+
+    Spec: [CC-2.3], [SB-0.4], [MF-3], [MF-5], [CLI-1.1.1]
+    """
+
+    lifecycle = _InteractiveRunLifecycle(context, taskspec, use_prompt=use_prompt)
+    quit_requested = False
+    try:
+        lifecycle.start()
+        if use_prompt:
+            quit_requested = _run_interactive_prompt(lifecycle)
+        else:
+            _run_interactive_piped(lifecycle, stdin_data, auto_close=auto_close)
+        status, error = lifecycle.outcome(quit_requested=quit_requested)
     finally:
-        client.stop()
-        log_queue.close()
-        if not use_prompt:
-            if stdout_chunks:
-                result = "".join(stdout_chunks)
-            else:
-                history = client.stdout_history
-                if history:
-                    result = "".join(history)
-                    stdout_chunks.extend(history)
+        lifecycle.close()
 
-    if not use_prompt:
-        outbox_queue = context.queue(outbox_name, persistent=True)
-        try:
-            collected = _collect_interactive_queue_output(outbox_queue)
-        finally:
-            outbox_queue.close()
-
-        if collected and not result:
-            result = "".join(collected)
-
+    result = None if use_prompt else lifecycle.collect_piped_result()
     return status, result, error
 
 

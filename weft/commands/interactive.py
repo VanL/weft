@@ -7,8 +7,9 @@ queue polling happens in a background thread, allowing the foreground thread
 to focus on user interaction (prompt handling, signal management, etc.).
 
 Spec references:
-- docs/specifications/01-Core_Components.md (queue patterns, interactive tasks)
-- docs/specifications/05-Message_Flow_and_State.md (message flow invariants)
+- docs/specifications/01-Core_Components.md [CC-2.3]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3]
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any
 
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
+from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
     QueueMode,
@@ -40,6 +42,8 @@ class InteractiveStreamClient:
     thread-safe.  The CLI supplies lightweight closures that forward messages
     to the foreground thread (for example via queues or prompt_toolkit
     patching helpers).
+
+    Spec: [CC-2.3], [SB-0.4], [MF-3]
     """
 
     def __init__(
@@ -252,15 +256,12 @@ class InteractiveStreamClient:
         self, message: str, _timestamp: int, _context: object
     ) -> None:
         payload = self._maybe_parse_json(message)
-        if (
-            isinstance(payload, dict)
-            and payload.get("type") == "terminal"
-            and "status" in payload
-        ):
-            self._state_cb(dict(payload))
-            error = payload.get("error")
+        terminal = coerce_terminal_envelope(message, tid=self._tid)
+        if terminal is not None:
+            self._state_cb(dict(terminal))
+            error = terminal.get("error")
             self._mark_completion(
-                status=str(payload["status"]),
+                status=str(terminal["status"]),
                 error=str(error) if isinstance(error, str) else None,
             )
             return

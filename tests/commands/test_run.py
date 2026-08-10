@@ -317,6 +317,40 @@ def _make_taskspec(tid: str) -> TaskSpec:
     )
 
 
+class _PromptCompletionApp:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        completion_timing: str,
+        loop_read_before_run: threading.Event,
+    ) -> None:
+        self._app = app
+        self._allow_loop = completion_timing != "before_run"
+        self._loop_read_before_run = loop_read_before_run
+
+    @property
+    def loop(self) -> Any:
+        if not self._allow_loop:
+            self._loop_read_before_run.set()
+            return None
+        return self._app.loop
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._app.is_running)
+
+    @property
+    def is_done(self) -> bool:
+        return bool(self._app.is_done)
+
+    def allow_loop(self) -> None:
+        self._allow_loop = True
+
+    def exit(self) -> None:
+        self._app.exit()
+
+
 class _PromptCompletionSession:
     def __init__(
         self,
@@ -324,15 +358,26 @@ class _PromptCompletionSession:
         *,
         completion_timing: str,
         completion_observed: threading.Event,
+        prompt_entered: threading.Event,
+        loop_read_before_run: threading.Event,
     ) -> None:
         self._session = session
         self._completion_timing = completion_timing
         self._completion_observed = completion_observed
-        self.app = session.app
+        self._prompt_entered = prompt_entered
+        self._loop_read_before_run = loop_read_before_run
+        self.app = _PromptCompletionApp(
+            session.app,
+            completion_timing=completion_timing,
+            loop_read_before_run=loop_read_before_run,
+        )
 
     def prompt(self, message: str, **kwargs: Any) -> Any:
         if self._completion_timing == "before_run":
+            self._prompt_entered.set()
             assert self._completion_observed.wait(timeout=1.0)
+            assert self._loop_read_before_run.wait(timeout=1.0)
+            self.app.allow_loop()
         return self._session.prompt(message, **kwargs)
 
 
@@ -343,10 +388,12 @@ class _PromptCompletionClient:
         completion_timing: str,
         session_holder: dict[str, _PromptCompletionSession],
         completion_observed: threading.Event,
+        prompt_entered: threading.Event,
     ) -> None:
         self._completion_timing = completion_timing
         self._session_holder = session_holder
         self._completion_observed = completion_observed
+        self._prompt_entered = prompt_entered
         self.status = "completed"
         self.error = None
         self.stdout_history: list[str] = []
@@ -360,6 +407,8 @@ class _PromptCompletionClient:
         del timeout
         if self.completed:
             return True
+        if self._completion_timing == "before_run":
+            assert self._prompt_entered.wait(timeout=1.0)
         if self._completion_timing == "while_running":
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
@@ -404,6 +453,125 @@ class _PromptCompletionContext:
         return self._log_queue
 
 
+class _InteractiveExitQueue:
+    def __init__(self, messages: list[str] | None = None) -> None:
+        self._messages = messages
+        self.close_count = 0
+
+    def write(self, message: str) -> None:
+        if self._messages is not None:
+            self._messages.append(message)
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
+class _InteractiveExitContext:
+    def __init__(self, tid: str, commands: list[str]) -> None:
+        self.broker_target = "unused"
+        self.broker_config: dict[str, Any] = {}
+        self.config: dict[str, Any] = {}
+        self._tid = tid
+        self.log_queue = _InteractiveExitQueue()
+        self.control_queues: list[_InteractiveExitQueue] = []
+        self._commands = commands
+
+    def queue(self, name: str, *, persistent: bool) -> _InteractiveExitQueue:
+        if name == WEFT_GLOBAL_LOG_QUEUE:
+            assert persistent is False
+            return self.log_queue
+        assert name == f"T{self._tid}.ctrl_in"
+        assert persistent is True
+        queue = _InteractiveExitQueue(self._commands)
+        self.control_queues.append(queue)
+        return queue
+
+
+class _InteractiveEscalationClient:
+    def __init__(self, *, stop_acknowledged: bool, **_kwargs: Any) -> None:
+        self._stop_acknowledged = stop_acknowledged
+        self.status: str | None = None
+        self.error: str | None = None
+        self.stdout_history: list[str] = []
+        self.terminal = False
+        self.stop_count = 0
+
+    def start(self) -> None:
+        return None
+
+    def send_input(self, _payload: str) -> None:
+        return None
+
+    def close_input(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> bool:
+        del timeout
+        return self.terminal
+
+    def wait_for_control_response(
+        self,
+        command: str,
+        *,
+        status: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any] | None:
+        del status, timeout
+        if command == "STOP" and self._stop_acknowledged:
+            self.status = "cancelled"
+            self.error = "Task cancelled"
+            self.terminal = True
+            return {"command": "STOP", "status": "ack"}
+        if command == "KILL":
+            self.status = "killed"
+            self.error = "Task killed"
+            self.terminal = True
+        return None
+
+    def stop(self) -> None:
+        self.stop_count += 1
+
+
+class _QuitPromptApp:
+    is_running = False
+    is_done = False
+    loop = None
+
+    def exit(self) -> None:
+        return None
+
+
+class _QuitPromptSession:
+    app = _QuitPromptApp()
+
+    def __init__(self, _message: str) -> None:
+        return None
+
+    def prompt(self, _message: str, **_kwargs: Any) -> str:
+        return ":quit"
+
+
+class _DormantInteractiveThread:
+    def __init__(self, *, target: Callable[[], None], daemon: bool) -> None:
+        del target, daemon
+
+    def start(self) -> None:
+        return None
+
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+
+
+class _InteractiveThreadingAdapter:
+    Event = threading.Event
+    Thread = _DormantInteractiveThread
+
+
+class _EmptyMonitorStore:
+    def get_task(self, _tid: str) -> None:
+        return None
+
+
 @pytest.mark.parametrize("completion_timing", ("before_run", "while_running"))
 @pytest.mark.timeout(3)
 def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
@@ -415,6 +583,8 @@ def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
     real_prompt_session = prompt_toolkit.PromptSession
     session_holder: dict[str, _PromptCompletionSession] = {}
     completion_observed = threading.Event()
+    prompt_entered = threading.Event()
+    loop_read_before_run = threading.Event()
     client_holder: dict[str, _PromptCompletionClient] = {}
     log_queue = _PromptCompletionQueue()
 
@@ -423,6 +593,7 @@ def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
             completion_timing=completion_timing,
             session_holder=session_holder,
             completion_observed=completion_observed,
+            prompt_entered=prompt_entered,
         )
         client_holder["client"] = client
         return client
@@ -437,6 +608,8 @@ def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
                 session,
                 completion_timing=completion_timing,
                 completion_observed=completion_observed,
+                prompt_entered=prompt_entered,
+                loop_read_before_run=loop_read_before_run,
             )
             session_holder["session"] = wrapper
             return wrapper
@@ -460,6 +633,165 @@ def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
     assert log_queue.close_count == 1
     assert thread_exception_guard == []
     assert capsys.readouterr() == ("", "")
+
+
+def test_interactive_start_failure_closes_owned_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A client start failure still closes both command-owned resources."""
+
+    class StartFailure(Exception):
+        pass
+
+    failure = StartFailure("interactive client start failed")
+    client_holder: dict[str, object] = {}
+    log_queue = _PromptCompletionQueue()
+
+    class FailingStartClient:
+        status = None
+        error = None
+
+        def __init__(self, **_kwargs: Any) -> None:
+            self.stop_count = 0
+            self.stdout_history: list[str] = []
+            client_holder["client"] = self
+
+        def start(self) -> None:
+            raise failure
+
+        def stop(self) -> None:
+            self.stop_count += 1
+
+    monkeypatch.setattr(run_cmd, "InteractiveStreamClient", FailingStartClient)
+
+    with pytest.raises(StartFailure) as exc_info:
+        run_cmd._run_interactive_session(
+            _PromptCompletionContext(log_queue),
+            _make_taskspec(str(time.time_ns())),
+            stdin_data=None,
+            use_prompt=False,
+        )
+
+    client = client_holder["client"]
+    assert exc_info.value is failure
+    assert isinstance(client, FailingStartClient)
+    assert client.stop_count == 1
+    assert log_queue.close_count == 1
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("stop_acknowledged", "expected_commands"),
+    ((True, ["STOP"]), (False, ["STOP", "KILL"])),
+)
+def test_interactive_quit_escalates_stop_before_kill(
+    stop_acknowledged: bool,
+    expected_commands: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Quit sends KILL only after STOP and its completion checks fail."""
+
+    tid = str(time.time_ns())
+    commands: list[str] = []
+    context = _InteractiveExitContext(tid, commands)
+    client = _InteractiveEscalationClient(stop_acknowledged=stop_acknowledged)
+    ticks = iter(range(100))
+    monkeypatch.setattr(run_cmd, "InteractiveStreamClient", lambda **_kwargs: client)
+    monkeypatch.setattr(run_cmd, "threading", _InteractiveThreadingAdapter)
+    monkeypatch.setattr(run_cmd.time, "monotonic", lambda: float(next(ticks)))
+    monkeypatch.setattr(run_cmd, "poll_log_events", lambda *_args: ([], None))
+    monkeypatch.setattr(
+        run_cmd,
+        "open_monitor_store",
+        lambda *_args, **_kwargs: _EmptyMonitorStore(),
+    )
+    monkeypatch.setattr(prompt_toolkit, "PromptSession", _QuitPromptSession)
+    monkeypatch.setattr(
+        "prompt_toolkit.patch_stdout.patch_stdout",
+        lambda: nullcontext(),
+    )
+
+    result = run_cmd._run_interactive_session(
+        context,  # type: ignore[arg-type]
+        _make_taskspec(tid),
+        stdin_data=None,
+        use_prompt=True,
+    )
+
+    assert commands == expected_commands
+    assert [queue.close_count for queue in context.control_queues] == [1] * len(
+        commands
+    )
+    assert result == ("completed", None, None)
+    assert client.stop_count == 1
+    assert context.log_queue.close_count == 1
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("result_source", "expected"),
+    (("callback", "callback"), ("history", "history"), ("outbox", "outbox")),
+)
+def test_interactive_piped_result_precedence(
+    result_source: str,
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Captured callback/history output wins; outbox fills only an empty result."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    taskspec = _make_taskspec(str(time.time_ns()))
+    outbox = context.queue(taskspec.io.outputs["outbox"], persistent=True)
+    try:
+        outbox.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "final": True,
+                    "encoding": "text",
+                    "data": "outbox",
+                }
+            )
+        )
+    finally:
+        outbox.close()
+
+    class CompletingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.status = "completed"
+            self.error = None
+            self.stdout_history = ["history"] if result_source == "history" else []
+            self._on_stdout = kwargs["on_stdout"]
+
+        def start(self) -> None:
+            if result_source == "callback":
+                self._on_stdout("callback", False)
+
+        def close_input(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> bool:
+            del timeout
+            return True
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(run_cmd, "InteractiveStreamClient", CompletingClient)
+
+    result = run_cmd._run_interactive_session(
+        context,
+        taskspec,
+        stdin_data=None,
+        use_prompt=False,
+    )
+
+    assert result == ("completed", expected, None)
 
 
 def test_interactive_completion_ignores_unexpected_monitor_store_failure(

@@ -423,6 +423,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-07-31-simplebroker-6-api-migration-plan.md`](../plans/2026-07-31-simplebroker-6-api-migration-plan.md)
 - [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)

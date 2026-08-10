@@ -295,6 +295,7 @@ bug evidence.
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md`](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)
 - [`docs/plans/2026-08-07-ruff-suppression-registry-extraction-plan.md`](../plans/2026-08-07-ruff-suppression-registry-extraction-plan.md)
