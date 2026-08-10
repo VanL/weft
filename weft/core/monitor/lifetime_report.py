@@ -13,8 +13,9 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from simplebroker import format_message_id
 from weft._constants import (
     TASK_LIFETIME_REPORT_RECORD_TYPE,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
@@ -22,9 +23,12 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
 )
-from weft.core.monitor.store import MonitorTaskCollationRecord
 from weft.core.pruning.models import CleanupCandidate
 from weft.core.queue_window import QueueWindowRow
+from weft.helpers.message_ids import normalize_exact_message_id
+
+if TYPE_CHECKING:
+    from weft.core.monitor.store import MonitorTaskCollationRecord
 
 
 def build_collation_lifetime_report(
@@ -226,6 +230,94 @@ def build_lifetime_report(
         "observations": dict(observations or {}),
     }
     return report
+
+
+def project_lifetime_report_for_external_json(
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a non-mutating external JSON projection of a lifetime report.
+
+    ``report_id`` is already present when this function runs, so formatting
+    exact broker identities cannot change the durable deduplication identity.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
+    """
+
+    projected = dict(report)
+    subject = _project_message_id_mapping(report.get("subject"), ("message_id",))
+    if subject is not None:
+        projected["subject"] = subject
+    monitor = _project_message_id_mapping(
+        report.get("monitor"),
+        (
+            "message_id",
+            "first_message_id",
+            "last_message_id",
+            "terminal_message_id",
+        ),
+    )
+    if monitor is not None:
+        projected["monitor"] = monitor
+    observations = _project_message_id_mapping(
+        report.get("observations"),
+        ("message_id",),
+    )
+    if observations is not None:
+        message_ids = observations.get("message_ids")
+        if isinstance(message_ids, Sequence) and not isinstance(
+            message_ids, (str, bytes, bytearray)
+        ):
+            observations["message_ids"] = [
+                format_message_id(message_id) if message_id is not None else None
+                for message_id in message_ids
+            ]
+        projected["observations"] = observations
+    return projected
+
+
+def restore_lifetime_report_from_external_json(
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return an integer-domain copy of a stored external lifetime report.
+
+    The raw deferred JSON text remains canonical for direct flush. Callers that
+    inspect its parsed body receive the ordinary Python integer contract.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
+    """
+
+    restored = dict(report)
+    subject = _restore_message_id_mapping(report.get("subject"), ("message_id",))
+    if subject is not None:
+        restored["subject"] = subject
+    monitor = _restore_message_id_mapping(
+        report.get("monitor"),
+        (
+            "message_id",
+            "first_message_id",
+            "last_message_id",
+            "terminal_message_id",
+        ),
+    )
+    if monitor is not None:
+        restored["monitor"] = monitor
+    observations = _restore_message_id_mapping(
+        report.get("observations"),
+        ("message_id",),
+    )
+    if observations is not None:
+        message_ids = observations.get("message_ids")
+        if isinstance(message_ids, Sequence) and not isinstance(
+            message_ids, (str, bytes, bytearray)
+        ):
+            observations["message_ids"] = [
+                normalize_exact_message_id(message_id)
+                if message_id is not None
+                else None
+                for message_id in message_ids
+            ]
+        restored["observations"] = observations
+    return restored
 
 
 def stable_report_id(
@@ -550,3 +642,31 @@ def _observation_identity(observations: Mapping[str, Any] | None) -> dict[str, A
         if key in observations:
             selected[key] = observations[key]
     return selected
+
+
+def _project_message_id_mapping(
+    value: object,
+    fields: Sequence[str],
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    projected = dict(value)
+    for field in fields:
+        message_id = projected.get(field)
+        if message_id is not None:
+            projected[field] = format_message_id(message_id)
+    return projected
+
+
+def _restore_message_id_mapping(
+    value: object,
+    fields: Sequence[str],
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    restored = dict(value)
+    for field in fields:
+        message_id = restored.get(field)
+        if message_id is not None:
+            restored[field] = normalize_exact_message_id(message_id)
+    return restored

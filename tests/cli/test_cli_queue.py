@@ -70,7 +70,10 @@ def test_queue_read_json(workdir):
     assert rc == 0
     lines = [json.loads(line) for line in out.splitlines() if line]
     assert lines[0]["message"] == "data"
-    assert isinstance(lines[0]["timestamp"], int)
+    assert isinstance(lines[0]["timestamp"], str)
+    assert len(lines[0]["timestamp"]) == 19
+    assert lines[0]["timestamp"].isascii()
+    assert lines[0]["timestamp"].isdigit()
     assert err == ""
 
 

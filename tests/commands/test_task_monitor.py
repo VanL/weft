@@ -12,12 +12,15 @@ import pytest
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands.task_monitor import (
     DiskJsonlTaskMonitorSink,
+    ReducedTaskLog,
     StdoutTaskMonitorSink,
     TaskMonitorConfig,
+    _build_summary_record,
     _load_checkpoint,
     run_task_monitor,
 )
 from weft.context import build_context
+from weft.core.task_evidence import TaskEvidenceSnapshot
 
 pytestmark = [pytest.mark.shared]
 
@@ -90,6 +93,54 @@ def test_stdout_sink_writes_jsonl() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("classification", "expected_observed_at"),
+    [
+        ("terminal_ctrl_out", "1779700000000000002"),
+        ("wrapper_lost", "1779700000000000002"),
+        ("result_without_terminal", "1779700000000000002"),
+        ("live_pong", "1779700000000000002"),
+        ("claimed_result_without_terminal", 1_779_700_000_000_000_002),
+        ("stale_created", 1_779_700_000_000_000_002),
+        ("stale_liveness", 1_779_700_000_000_000_002),
+    ],
+)
+def test_task_summary_projects_reconciliation_by_timestamp_domain(
+    classification: str,
+    expected_observed_at: int | str,
+) -> None:
+    message_id = 1_779_700_000_000_000_001
+    observed_at = 1_779_700_000_000_000_002
+    snapshot = TaskEvidenceSnapshot(
+        tid="1779700000000000100",
+        status="failed",
+        classification=classification,
+        source="ctrl_out",
+        terminal=True,
+        observed_at=observed_at,
+        reconciliation={
+            "classification": classification,
+            "observed_at": observed_at,
+        },
+    )
+    reduced = ReducedTaskLog(
+        tid=snapshot.tid,
+        latest_payload={},
+        latest_timestamp=message_id,
+    )
+
+    record = _build_summary_record(
+        snapshot,
+        reduced,
+        monitor_run_id="monitor-run",
+        emitted_at=1_779_700_000_000_000_003,
+    )
+
+    assert record["last_task_log_timestamp"] == "1779700000000000001"
+    assert record["reconciliation"]["observed_at"] == expected_observed_at
+    assert snapshot.reconciliation["observed_at"] == observed_at
+
+
 def test_monitor_checkpoint_advances_after_successful_sink_write(workdir) -> None:
     ctx = build_context(spec_context=workdir)
     tid = "1778084345905438720"
@@ -114,7 +165,7 @@ def test_monitor_checkpoint_advances_after_successful_sink_write(workdir) -> Non
             no_checkpoint=False,
             since_timestamp=0,
             limit=None,
-            json_output=False,
+            json_output=True,
         )
     )
 
@@ -122,6 +173,11 @@ def test_monitor_checkpoint_advances_after_successful_sink_write(workdir) -> Non
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert isinstance(payload["last_task_log_timestamp"], int)
     assert payload["last_task_log_timestamp"] > 0
+    command_summary = json.loads(result.stdout)
+    assert command_summary["checkpoint_timestamp"] == str(
+        payload["last_task_log_timestamp"]
+    )
+    assert isinstance(result.checkpoint_timestamp, int)
 
 
 def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir) -> None:
@@ -286,6 +342,21 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
     assert summaries[0]["classification"] == "terminal_log"
     assert summaries[0]["status"] == "completed"
     assert summaries[0]["failure_owner"] is None
+    assert isinstance(summaries[0]["last_task_log_timestamp"], str)
+    assert len(summaries[0]["last_task_log_timestamp"]) == 19
+    assert summaries[0]["last_task_log_timestamp"].isascii()
+    completed = next(
+        record
+        for record in _records(result.stdout)
+        if record["record_type"] == "monitor_run_completed"
+    )
+    assert isinstance(completed["checkpoint_timestamp"], str)
+    assert len(completed["checkpoint_timestamp"]) == 19
+    assert completed["checkpoint_timestamp"].isascii()
+    assert isinstance(result.checkpoint_timestamp, int)
+    assert result.summary_payload()["checkpoint_timestamp"] == (
+        completed["checkpoint_timestamp"]
+    )
 
 
 def test_task_failure_without_task_monitor_anomaly_is_domain_failure(workdir) -> None:

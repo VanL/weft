@@ -11,6 +11,34 @@ from weft.core import serve_log
 pytestmark = [pytest.mark.shared]
 
 
+def test_build_serve_log_record_formats_only_owned_broker_message_ids() -> None:
+    record = serve_log.build_serve_log_record(
+        config={"_serve_log_active": True, "level": "info"},
+        event="spawn_reserved",
+        component="manager",
+        manager_tid="1779300000000000001",
+        manager_tid_short="00000001",
+        required_level="info",
+        pid=42,
+        fields={
+            "message_timestamp": 1779300000000000002,
+            "observed_timestamp": 1779300000000000003,
+            "superseded_message_id": 1779300000000000004,
+            "count": 3,
+            "opaque": {"message_timestamp": 1779300000000000005},
+        },
+    )
+
+    assert record["message_timestamp"] == "1779300000000000002"
+    assert record["observed_timestamp"] == "1779300000000000003"
+    assert record["superseded_message_id"] == "1779300000000000004"
+    assert record["timestamp_ns"] > 0
+    assert isinstance(record["timestamp_ns"], int)
+    assert record["pid"] == 42
+    assert record["count"] == 3
+    assert record["opaque"]["message_timestamp"] == 1779300000000000005
+
+
 def test_emit_serve_log_record_suppresses_unserializable_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

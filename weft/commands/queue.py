@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from simplebroker import commands as sb_commands
+from simplebroker import format_message_id
 from simplebroker.ext import TimestampError, TimestampGenerator
 from weft._constants import WEFT_CONTEXT_ENV
 from weft.commands.types import (
@@ -49,6 +50,7 @@ from weft.helpers import (
     resolve_broker_max_message_size,
     resolve_cli_message_content,
 )
+from weft.helpers.message_ids import normalize_exact_message_id
 
 
 @dataclass
@@ -62,7 +64,10 @@ class QueueMessage:
         return self.body
 
     def as_dict(self) -> dict[str, object]:
-        return {"message": self.body, "timestamp": self.timestamp}
+        timestamp = (
+            format_message_id(self.timestamp) if self.timestamp is not None else None
+        )
+        return {"message": self.body, "timestamp": timestamp}
 
 
 @dataclass
@@ -279,17 +284,23 @@ def read_queue(
     queue_name: str,
     *,
     all_messages: bool = False,
-    message_id: int | None = None,
+    message_id: int | str | None = None,
     after: int | None = None,
     before: int | None = None,
 ) -> list[QueueEntry]:
     """Read queue messages as structured entries."""
 
+    normalized_message_id = (
+        normalize_exact_message_id(message_id) if message_id is not None else None
+    )
     queue = ctx.queue(queue_name, persistent=True)
     try:
         entries: list[QueueEntry] = []
-        if message_id is not None:
-            item = queue.read_one(exact_timestamp=message_id, with_timestamps=True)
+        if normalized_message_id is not None:
+            item = queue.read_one(
+                exact_timestamp=normalized_message_id,
+                with_timestamps=True,
+            )
             if item is None:
                 return []
             body, timestamp = cast(tuple[str, int], item)
@@ -391,17 +402,23 @@ def peek_queue(
     queue_name: str,
     *,
     all_messages: bool = False,
-    message_id: int | None = None,
+    message_id: int | str | None = None,
     after: int | None = None,
     before: int | None = None,
 ) -> list[QueueEntry]:
     """Peek queue messages as structured entries."""
 
+    normalized_message_id = (
+        normalize_exact_message_id(message_id) if message_id is not None else None
+    )
     queue = ctx.queue(queue_name, persistent=True)
     try:
         entries: list[QueueEntry] = []
-        if message_id is not None:
-            item = queue.peek_one(exact_timestamp=message_id, with_timestamps=True)
+        if normalized_message_id is not None:
+            item = queue.peek_one(
+                exact_timestamp=normalized_message_id,
+                with_timestamps=True,
+            )
             if item is None:
                 return []
             body, timestamp = cast(tuple[str, int], item)
@@ -462,19 +479,22 @@ def move_queue_messages(
     *,
     limit: int | None = None,
     all_messages: bool = False,
-    message_id: int | None = None,
+    message_id: int | str | None = None,
     after: int | None = None,
     before: int | None = None,
 ) -> QueueMoveReceipt:
     """Move queue messages and return a structured receipt."""
 
+    normalized_message_id = (
+        normalize_exact_message_id(message_id) if message_id is not None else None
+    )
     queue = ctx.queue(source, persistent=True)
     try:
-        if message_id is not None:
+        if normalized_message_id is not None:
             iterator = queue.move_generator(
                 destination,
                 with_timestamps=True,
-                exact_timestamp=message_id,
+                exact_timestamp=normalized_message_id,
             )
             with closing_queue_iterator(iterator) as rows:
                 moved = list(rows)
@@ -746,7 +766,7 @@ def delete_queue_messages(
     queue_name: str | None = None,
     *,
     all_queues: bool = False,
-    message_id: int | None = None,
+    message_id: int | str | None = None,
 ) -> QueueDeleteReceipt:
     """Delete a queue, all queues, or one exact message."""
 
@@ -759,9 +779,10 @@ def delete_queue_messages(
         if queue_name is None:
             raise ValueError("queue_name is required when message_id is used")
 
+        normalized_message_id = normalize_exact_message_id(message_id)
         queue = ctx.queue(queue_name, persistent=True)
         try:
-            deleted = queue.delete(message_id=message_id)
+            deleted = queue.delete(message_id=normalized_message_id)
             return QueueDeleteReceipt(
                 queue=queue_name,
                 deleted_count=1 if deleted else 0,
@@ -974,7 +995,10 @@ def move_command(
                 if json_output:
                     payload_lines.append(
                         json.dumps(
-                            {"message": body, "timestamp": timestamp},
+                            {
+                                "message": body,
+                                "timestamp": format_message_id(timestamp),
+                            },
                             ensure_ascii=False,
                         )
                     )

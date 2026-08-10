@@ -72,15 +72,28 @@ def test_typed_package_markers_are_included_in_builds() -> None:
     )
 
 
-def test_simplebroker_floor_includes_dynamic_waiter_rebind_api() -> None:
-    """The root floor must include PollingStrategy live waiter replacement."""
+def test_simplebroker_floor_is_7_0_0() -> None:
+    """The root floor must include the public JSON message-ID boundary API."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
     minimum = _minimum_dependency_version(
         root_pyproject["project"]["dependencies"],
         "simplebroker",
     )
 
-    assert _version_tuple(minimum) >= _version_tuple("5.3.0")
+    assert minimum == "7.0.0"
+
+
+@pytest.mark.parametrize("extra", ["pg", "all", "dev"])
+def test_simplebroker_pg_floor_is_3_5_2(extra: str) -> None:
+    """Every root extra carrying PostgreSQL must use the paired patch floor."""
+    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
+
+    minimum = _minimum_dependency_version(
+        root_pyproject["project"]["optional-dependencies"][extra],
+        "simplebroker-pg",
+    )
+
+    assert minimum == "3.5.2"
 
 
 def test_root_extras_do_not_undercut_local_extension_versions() -> None:

@@ -43,7 +43,7 @@ def test_external_task_log_sink_writes_raw_jsonl(tmp_path) -> None:
     [line] = path.read_text(encoding="utf-8").splitlines()
     record = json.loads(line)
     assert record["record_type"] == "task_log_raw"
-    assert record["message_id"] == 1779100000000000002
+    assert record["message_id"] == "1779100000000000002"
     assert record["payload"]["event"] == "work_completed"
     assert sink.status().healthy is True
     assert sink.status().last_emitted == 1
@@ -397,7 +397,14 @@ def test_external_task_log_sink_writes_collated_jsonl(tmp_path) -> None:
     )
 
     sink.emit_collated(
-        task_summary={"tid": "1779100000000000011", "status": "completed"},
+        task_summary={
+            "tid": "1779100000000000011",
+            "status": "completed",
+            "first_message_id": 1779100000000000016,
+            "last_message_id": 1779100000000000017,
+            "terminal_message_id": 1779100000000000017,
+            "completed_at_ns": 1779100000000000018,
+        },
         emitted_at_ns=1779100000000000012,
         close_reason="terminal",
     )
@@ -407,6 +414,48 @@ def test_external_task_log_sink_writes_collated_jsonl(tmp_path) -> None:
     assert record["record_type"] == "task_log_collated"
     assert record["close_reason"] == "terminal"
     assert record["task"]["tid"] == "1779100000000000011"
+    assert record["task"]["first_message_id"] == "1779100000000000016"
+    assert record["task"]["last_message_id"] == "1779100000000000017"
+    assert record["task"]["terminal_message_id"] == "1779100000000000017"
+    assert record["task"]["completed_at_ns"] == 1779100000000000018
+
+
+def test_external_task_log_sink_projects_lifetime_ids_after_report_identity(
+    tmp_path,
+) -> None:
+    path = tmp_path / "task-lifetime.jsonl"
+    sink = ExternalTaskLogSink(
+        path=path,
+        mode="collated",
+        monitor_tid="1779100000000000023",
+    )
+    report = {
+        "record_type": "task_lifetime_report",
+        "report_id": "task-lifetime:stable",
+        "emitted_at_ns": 1779100000000000024,
+        "subject": {"message_id": 1779100000000000025},
+        "monitor": {
+            "first_message_id": 1779100000000000026,
+            "last_message_id": 1779100000000000027,
+            "terminal_message_id": None,
+        },
+        "observations": {
+            "message_ids": [1779100000000000028],
+            "observed_at_ns": 1779100000000000029,
+        },
+    }
+
+    sink.emit_lifetime_report(report, emitted_at_ns=1779100000000000024)
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert report["subject"]["message_id"] == 1779100000000000025
+    assert record["report_id"] == "task-lifetime:stable"
+    assert record["subject"]["message_id"] == "1779100000000000025"
+    assert record["monitor"]["first_message_id"] == "1779100000000000026"
+    assert record["monitor"]["last_message_id"] == "1779100000000000027"
+    assert record["monitor"]["terminal_message_id"] is None
+    assert record["observations"]["message_ids"] == ["1779100000000000028"]
+    assert record["observations"]["observed_at_ns"] == 1779100000000000029
 
 
 def test_external_task_log_sink_surfaces_service_classification(tmp_path) -> None:

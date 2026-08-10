@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from simplebroker import format_message_id
 from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
 from weft._exceptions import ControlRejected, ManagerNotRunning
 from weft.commands.types import ManagerSnapshot
@@ -44,6 +45,31 @@ _select_active_manager = select_active_manager
 _serve_manager_foreground = serve_manager_foreground
 _start_manager = start_manager_runtime
 _stop_manager = stop_manager_runtime
+
+
+def _manager_record_to_json(record: dict[str, Any]) -> dict[str, Any]:
+    """Project manager-owned broker message IDs for external JSON."""
+
+    payload = dict(record)
+    for key in ("timestamp", "_pong_live_at"):
+        value = payload.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            payload[key] = format_message_id(value)
+
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        projected_metadata = dict(metadata)
+        supersession_timestamp = projected_metadata.get(
+            "supersession_observed_timestamp"
+        )
+        if isinstance(supersession_timestamp, int) and not isinstance(
+            supersession_timestamp, bool
+        ):
+            projected_metadata["supersession_observed_timestamp"] = (
+                format_message_id(supersession_timestamp)
+            )
+        payload["metadata"] = projected_metadata
+    return payload
 
 
 def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
@@ -233,7 +259,10 @@ def list_command(
         )
 
     if json_output:
-        payload = json.dumps(records, indent=2)
+        payload = json.dumps(
+            [_manager_record_to_json(record) for record in records],
+            indent=2,
+        )
         return 0, payload
 
     if not records:
@@ -275,7 +304,7 @@ def status_command(
         return 1, f"Manager {tid} not found"
 
     if json_output:
-        return 0, json.dumps(record, indent=2)
+        return 0, json.dumps(_manager_record_to_json(record), indent=2)
 
     parts = [
         f"Manager {tid}",

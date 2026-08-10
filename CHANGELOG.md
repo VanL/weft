@@ -4,6 +4,13 @@
 
 ### Changed
 
+- The SimpleBroker runtime floor is now 7.0.0, with the paired
+  `simplebroker-pg` floor at 3.5.2. Exact broker message IDs remain integers in
+  Python and relational storage but are emitted as 19-digit strings at
+  external JSON boundaries and in owned exact-ID fields stored inside Monitor
+  table JSON, avoiding silent precision loss in JavaScript consumers. Exact
+  input boundaries accept canonical strings or integer tokens and normalize
+  them immediately to integers.
 - The internal agent-session wire protocol gained an optional `diagnostics`
   mapping on final-result messages (the parsed result tuple grew from three
   to four fields). Both protocol ends ship in this package and unknown or

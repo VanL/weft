@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from simplebroker import load_lines
+from simplebroker import format_message_id, load_lines
 from simplebroker.ext import BrokerError, IntegrityError
 from weft._constants import (
     SIMPLEBROKER_DUMP_FORMAT,
@@ -23,6 +23,7 @@ from weft._constants import (
     WEFT_STATE_QUEUE_PREFIX,
 )
 from weft.context import WeftContext, build_context
+from weft.helpers.message_ids import normalize_exact_message_id
 
 
 @dataclass(frozen=True)
@@ -222,11 +223,23 @@ def _parse_import_file(input_file: TextIO) -> ImportPlan:  # noqa: C901 approved
                     f"unsupported dump version {record.get('version')!r} "
                     f"(supported: {SIMPLEBROKER_DUMP_VERSION})",
                 )
+            try:
+                last_ts = normalize_exact_message_id(record.get("last_ts"))
+            except (TypeError, ValueError) as exc:
+                raise _dump_error(
+                    line_num,
+                    "header record requires an integer or canonical "
+                    "19-digit string 'last_ts' field",
+                ) from exc
             header_seen = True
-            plan.report.metadata.update(
-                {key: value for key, value in record.items() if key != "type"}
-            )
-            plan.header_line = _dump_line(record)
+            normalized_metadata = {
+                key: value for key, value in record.items() if key != "type"
+            }
+            normalized_metadata["last_ts"] = last_ts
+            plan.report.metadata.update(normalized_metadata)
+            normalized_header = dict(record)
+            normalized_header["last_ts"] = format_message_id(last_ts)
+            plan.header_line = _dump_line(normalized_header)
             continue
 
         if record_type == "alias":
@@ -257,20 +270,25 @@ def _parse_import_file(input_file: TextIO) -> ImportPlan:  # noqa: C901 approved
         if record_type == "message":
             queue_name = record.get("queue")
             body = record.get("body")
-            message_id = record.get("id")
+            raw_message_id = record.get("id")
             if not isinstance(queue_name, str) or not isinstance(body, str):
                 raise _dump_error(
                     line_num,
                     "message record requires string 'queue' and 'body' fields",
                 )
-            if (
-                isinstance(message_id, bool)
-                or not isinstance(message_id, int)
-                or message_id <= 0
-            ):
+            try:
+                message_id = normalize_exact_message_id(raw_message_id)
+            except (TypeError, ValueError) as exc:
                 raise _dump_error(
                     line_num,
-                    "message record requires a positive integer 'id' field",
+                    "message record requires a positive integer or canonical "
+                    "19-digit string 'id' field",
+                ) from exc
+            if message_id == 0:
+                raise _dump_error(
+                    line_num,
+                    "message record requires a positive integer or canonical "
+                    "19-digit string 'id' field",
                 )
 
             if _is_runtime_name(queue_name):
@@ -329,7 +347,7 @@ def _build_apply_lines(plan: ImportPlan) -> list[str]:
                 "type": "message",
                 "queue": record.queue_name,
                 "body": record.body,
-                "id": record.message_id,
+                "id": format_message_id(record.message_id),
             }
         )
         for record in plan.message_records

@@ -1212,6 +1212,7 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _persistent_service _pong_extension_provider _queue_cache _queue_generation
     _queue_iterator _queue_name_map _queue_obj _queues _resource_monitor
     _run_thread _running_event _runtime_cleanup_queue_discovery_pending _runtime_handle
+    _signal_stop_requested
     _serve_log_config_emitted _serve_log_last_emit_ns _serve_log_last_state
     _service_lane_work_items _service_worker_lock _service_worker_registrations
     _setproctitle_module _spilled_output_dirs _start_pending _stop_event
@@ -1251,7 +1252,8 @@ _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     _pong_extension_provider _queue_cache
     _queue_iterator _queue_obj _queues _resource_monitor _run_thread _running_event
     _runtime_handle _service_lane_work_items _service_worker_lock
-    _service_worker_registrations _setproctitle_module _start_pending
+    _service_worker_registrations _setproctitle_module _signal_stop_requested
+    _start_pending
     _stop_event _stop_lock _strategy _strategy_started _streaming_session_info
     _streaming_session_message_id _task_context_cache _task_lifecycle
     _task_lifecycle_lock _task_observer _taskspec_value _thread _thread_local
@@ -1709,6 +1711,35 @@ TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset(
     {"completed", "failed", "timeout", "cancelled", "killed"}
 )
 """Statuses that represent terminal task lifecycle states."""
+
+BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS: Final[
+    frozenset[str]
+] = frozenset(
+    {
+        "live_pong",
+        "result_without_terminal",
+        "terminal_ctrl_out",
+        "terminal_monitor_store",
+        "wrapper_lost",
+    }
+)
+"""Reconciliation classes whose ``observed_at`` values are broker row IDs."""
+
+WALL_CLOCK_TASK_LAST_TIMESTAMP_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
+    {
+        "claimed_result_without_terminal",
+        "stale_created",
+    }
+)
+"""Task reconciliations that replace ``last_timestamp`` with a wall clock."""
+
+WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS: Final[frozenset[str]] = frozenset(
+    {
+        "ctrl_out_terminal",
+        "pipeline_status",
+    }
+)
+"""Task snapshot events whose ``last_timestamp`` comes from an internal body."""
 
 TERMINAL_TASK_EVENTS: Final[Mapping[str, str]] = {
     "control_stop": "cancelled",

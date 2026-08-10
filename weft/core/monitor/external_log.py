@@ -22,11 +22,15 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from simplebroker import format_message_id
 from weft._constants import (
     WEFT_LOG_TASKS_EXTERNAL_ROTATE_BACKUP_COUNT,
     WEFT_LOG_TASKS_EXTERNAL_ROTATE_MAX_BYTES,
     WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
     WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES,
+)
+from weft.core.monitor.lifetime_report import (
+    project_lifetime_report_for_external_json,
 )
 
 
@@ -324,7 +328,7 @@ class ExternalTaskLogSink:
             "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
             "record_type": "task_log_raw",
             "queue": queue,
-            "message_id": int(message_id),
+            "message_id": format_message_id(message_id),
             "monitor_tid": self._monitor_tid,
             "emitted_at_ns": int(emitted_at_ns),
         }
@@ -344,18 +348,19 @@ class ExternalTaskLogSink:
     ) -> None:
         """Emit one collated task lifecycle summary for a terminal family."""
 
+        projected_summary = project_task_summary_for_external_json(task_summary)
         record: dict[str, Any] = {
             "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
             "record_type": "task_log_collated",
             "monitor_tid": self._monitor_tid,
             "emitted_at_ns": int(emitted_at_ns),
             "close_reason": close_reason,
-            "task": task_summary,
+            "task": projected_summary,
         }
-        collation_kind = task_summary.get("collation_kind")
+        collation_kind = projected_summary.get("collation_kind")
         if isinstance(collation_kind, str):
             record["collation_kind"] = collation_kind
-        service_summary = task_summary.get("service")
+        service_summary = projected_summary.get("service")
         if isinstance(service_summary, Mapping):
             record["service"] = dict(service_summary)
         self._emit(record, emitted_at_ns=emitted_at_ns, level=logging.INFO)
@@ -368,7 +373,11 @@ class ExternalTaskLogSink:
     ) -> None:
         """Emit one task lifetime report JSONL record."""
 
-        self._emit(dict(report), emitted_at_ns=emitted_at_ns, level=logging.INFO)
+        self._emit(
+            project_lifetime_report_for_external_json(report),
+            emitted_at_ns=emitted_at_ns,
+            level=logging.INFO,
+        )
 
     def emit_json_text(
         self,
@@ -452,6 +461,23 @@ def disabled_external_task_log_status(
         path=path or None,
         healthy=None,
     )
+
+
+def project_task_summary_for_external_json(
+    task_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return an external copy with exact Monitor message IDs formatted."""
+
+    projected = dict(task_summary)
+    for field in (
+        "first_message_id",
+        "last_message_id",
+        "terminal_message_id",
+    ):
+        message_id = projected.get(field)
+        if message_id is not None:
+            projected[field] = format_message_id(message_id)
+    return projected
 
 
 def _bounded_preview(value: str) -> str:

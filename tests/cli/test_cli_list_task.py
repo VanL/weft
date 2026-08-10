@@ -36,6 +36,10 @@ def test_task_list_and_task_status(workdir, weft_harness) -> None:
     entry = next(item for item in data if item["tid"] == tid)
     assert entry["runner"] == "host"
     assert entry["runtime_handle"]["runner"] == "host"
+    assert isinstance(entry["last_timestamp"], str)
+    assert len(entry["last_timestamp"]) == 19
+    assert entry["last_timestamp"].isascii()
+    assert entry["last_timestamp"].isdigit()
     assert err == ""
 
     rc, out, err = run_cli("task", "status", tid, "--json", cwd=workdir)
@@ -45,6 +49,10 @@ def test_task_list_and_task_status(workdir, weft_harness) -> None:
     assert payload["status"] in {"completed", "running", "failed"}
     assert payload["runner"] == "host"
     assert payload["runtime_handle"]["runner"] == "host"
+    assert isinstance(payload["last_timestamp"], str)
+    assert len(payload["last_timestamp"]) == 19
+    assert payload["last_timestamp"].isascii()
+    assert payload["last_timestamp"].isdigit()
     assert err == ""
 
 
@@ -84,7 +92,10 @@ def test_task_ping_outputs_extended_pong_json(workdir, weft_harness) -> None:
     payload = json.loads(out)
     assert payload["timed_out"] is False
     assert payload["error"] is None
-    assert isinstance(payload["observed_at"], int)
+    assert isinstance(payload["observed_at"], str)
+    assert len(payload["observed_at"]) == 19
+    assert payload["observed_at"].isascii()
+    assert payload["observed_at"].isdigit()
     assert payload["pong"]["command"] == "PING"
     assert payload["pong"]["message"] == "PONG"
     assert payload["pong"]["tid"] == tid

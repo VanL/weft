@@ -168,6 +168,63 @@ def test_manager_snapshot_discards_malformed_optional_fields() -> None:
     )
 
 
+def test_manager_json_projection_formats_only_owned_broker_ids() -> None:
+    first_id = 1_779_300_000_000_000_001
+    second_id = 1_779_300_000_000_000_002
+    record = {
+        "tid": "1779300000000000100",
+        "timestamp": first_id,
+        "_pong_live_at": second_id,
+        "metadata": {
+            "supersession_observed_timestamp": first_id,
+            "opaque_timestamp": second_id,
+        },
+        "_service_owner_payload": {"timestamp": second_id},
+    }
+
+    projected = manager_cmd._manager_record_to_json(record)
+
+    assert projected["timestamp"] == "1779300000000000001"
+    assert projected["_pong_live_at"] == "1779300000000000002"
+    assert projected["metadata"] == {
+        "supersession_observed_timestamp": "1779300000000000001",
+        "opaque_timestamp": second_id,
+    }
+    assert projected["_service_owner_payload"] == {"timestamp": second_id}
+    assert record["timestamp"] == first_id
+    assert record["_pong_live_at"] == second_id
+
+
+def test_manager_json_commands_use_external_id_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message_id = 1_779_300_000_000_000_003
+    record = {
+        "tid": "1779300000000000101",
+        "status": "active",
+        "timestamp": message_id,
+    }
+    monkeypatch.setattr(manager_cmd, "build_context", lambda _path=None: object())
+    monkeypatch.setattr(manager_cmd, "_list_manager_records", lambda *_args, **_kwargs: [record])
+    monkeypatch.setattr(manager_cmd, "_manager_record", lambda *_args, **_kwargs: record)
+
+    list_exit, list_payload = manager_cmd.list_command(json_output=True)
+    status_exit, status_payload = manager_cmd.status_command(
+        tid=record["tid"],
+        json_output=True,
+    )
+
+    assert list_exit == 0
+    assert status_exit == 0
+    assert json.loads(list_payload or "[]")[0]["timestamp"] == (
+        "1779300000000000003"
+    )
+    assert json.loads(status_payload or "{}")["timestamp"] == (
+        "1779300000000000003"
+    )
+    assert record["timestamp"] == message_id
+
+
 def _host_runtime_handle(pid: int) -> dict[str, object]:
     return {
         "runner": "host",

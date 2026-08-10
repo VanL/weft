@@ -25,8 +25,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 import weft.core.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-253] exception
+from simplebroker import format_message_id
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS,
     TASK_MONITOR_CHECKPOINT_PATH,
     TASK_MONITOR_LOG_SUBDIR,
     TASK_MONITOR_SCHEMA_VERSION,
@@ -92,7 +94,11 @@ class TaskMonitorResult:
             "events_scanned": self.events_scanned,
             "tids_seen": self.tids_seen,
             "summaries_emitted": self.summaries_emitted,
-            "checkpoint_timestamp": self.checkpoint_timestamp,
+            "checkpoint_timestamp": (
+                format_message_id(self.checkpoint_timestamp)
+                if self.checkpoint_timestamp is not None
+                else None
+            ),
         }
         if self.log_path is not None:
             payload["log_path"] = str(self.log_path)
@@ -386,6 +392,24 @@ def _monitor_classification(snapshot: task_evidence.TaskEvidenceSnapshot) -> str
     return snapshot.classification
 
 
+def _external_reconciliation(
+    reconciliation: dict[str, Any],
+) -> dict[str, Any]:
+    """Project an owned broker-backed reconciliation for external JSON."""
+
+    projected = dict(reconciliation)
+    classification = projected.get("classification")
+    observed_at = projected.get("observed_at")
+    if (
+        classification
+        in BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS
+        and isinstance(observed_at, int)
+        and not isinstance(observed_at, bool)
+    ):
+        projected["observed_at"] = format_message_id(observed_at)
+    return projected
+
+
 def _task_name(taskspec_payload: dict[str, Any] | None) -> str | None:
     if not isinstance(taskspec_payload, dict):
         return None
@@ -416,15 +440,16 @@ def _build_summary_record(
             "classification": classification,
             "source": source,
             "event": event,
-            "last_task_log_timestamp": reduced.latest_timestamp,
+            "last_task_log_timestamp": format_message_id(reduced.latest_timestamp),
             "started_at": snapshot.started_at or reduced.started_at,
             "completed_at": snapshot.completed_at or reduced.completed_at,
             "return_code": snapshot.return_code,
             "error": snapshot.error,
             "failure_owner": _failure_owner(snapshot),
             "cleanup_candidate": False,
-            "reconciliation": snapshot.reconciliation
-            or {"classification": classification},
+            "reconciliation": _external_reconciliation(
+                snapshot.reconciliation or {"classification": classification}
+            ),
         }
     )
     return record
@@ -474,7 +499,11 @@ def _records_for_scan(
             "summaries_emitted": summaries,
             "active_tasks": active_tasks,
             "classification_counts": classification_counts,
-            "checkpoint_timestamp": checkpoint_timestamp,
+            "checkpoint_timestamp": (
+                format_message_id(checkpoint_timestamp)
+                if checkpoint_timestamp is not None
+                else None
+            ),
         }
     )
     records.append(completed)
@@ -580,7 +609,11 @@ def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:  # noqa: C
                     "events_scanned": scan.events_scanned,
                     "tids_seen": len(scan.reduced),
                     "summaries_emitted": summaries,
-                    "checkpoint_timestamp": checkpoint_timestamp,
+                    "checkpoint_timestamp": (
+                        format_message_id(checkpoint_timestamp)
+                        if checkpoint_timestamp is not None
+                        else None
+                    ),
                     "log_path": str(sink.log_path),
                 },
                 ensure_ascii=False,

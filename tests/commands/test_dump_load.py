@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -135,7 +136,10 @@ def test_dump_export_format(sample_data_context: WeftContext) -> None:
     assert header_record["type"] == "header"
     assert header_record["format"] == "simplebroker-dump"
     assert header_record["version"] == 1
-    assert "last_ts" in header_record
+    assert isinstance(header_record["last_ts"], str)
+    assert len(header_record["last_ts"]) == 19
+    assert header_record["last_ts"].isascii()
+    assert header_record["last_ts"].isdigit()
 
     alias_lines = [line for line in lines if json.loads(line).get("type") == "alias"]
     assert len(alias_lines) == 2
@@ -144,6 +148,11 @@ def test_dump_export_format(sample_data_context: WeftContext) -> None:
         line for line in lines if json.loads(line).get("type") == "message"
     ]
     assert len(message_lines) == 3
+    message_ids = [json.loads(line)["id"] for line in message_lines]
+    assert all(isinstance(message_id, str) for message_id in message_ids)
+    assert all(len(message_id) == 19 for message_id in message_ids)
+    assert all(message_id.isascii() for message_id in message_ids)
+    assert all(message_id.isdigit() for message_id in message_ids)
 
     record_types = [json.loads(line)["type"] for line in lines]
     assert record_types[0] == "header"
@@ -216,6 +225,192 @@ def test_cmd_load_actual_import(tmp_path: Path) -> None:
     aliases, queues = _snapshot_broker_state(ctx)
     assert aliases["test-alias"] == "test.queue"
     assert queues["test.queue"] == ["test message"]
+
+
+@pytest.mark.parametrize("as_string", [False, True])
+def test_parse_import_normalizes_exact_ids_and_builds_canonical_apply_lines(
+    as_string: bool,
+) -> None:
+    """Dump IDs normalize to integers before canonical apply-line projection."""
+
+    last_ts = 1_779_400_000_000_000_002
+    message_id = 1_779_400_000_000_000_001
+    records = [
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": str(last_ts) if as_string else last_ts,
+        },
+        {
+            "type": "message",
+            "queue": "exact.queue",
+            "id": str(message_id) if as_string else message_id,
+            "body": "exact",
+        },
+    ]
+    source = StringIO("".join(json.dumps(record) + "\n" for record in records))
+
+    plan = _load_support._parse_import_file(source)
+    apply_lines = _load_support._build_apply_lines(plan)
+
+    assert plan.report.metadata["last_ts"] == last_ts
+    assert isinstance(plan.report.metadata["last_ts"], int)
+    assert plan.message_records[0].message_id == message_id
+    assert isinstance(plan.message_records[0].message_id, int)
+    assert plan.report.message_id_range == (message_id, message_id)
+    assert all(isinstance(value, int) for value in plan.report.message_id_range)
+    assert json.loads(apply_lines[0])["last_ts"] == "1779400000000000002"
+    assert json.loads(apply_lines[1])["id"] == "1779400000000000001"
+
+
+@pytest.mark.parametrize("last_ts", [0, "0000000000000000000"])
+def test_parse_import_accepts_zero_header_checkpoint(last_ts: int | str) -> None:
+    """The dump checkpoint origin remains valid in either accepted input form."""
+
+    records = [
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": last_ts,
+        }
+    ]
+    source = StringIO("".join(json.dumps(record) + "\n" for record in records))
+
+    plan = _load_support._parse_import_file(source)
+
+    assert plan.report.metadata["last_ts"] == 0
+    assert isinstance(plan.report.metadata["last_ts"], int)
+    assert json.loads(plan.header_line or "null")["last_ts"] == (
+        "0000000000000000000"
+    )
+
+
+def test_dump_load_round_trip_preserves_adjacent_unsafe_message_ids(
+    tmp_path: Path,
+) -> None:
+    """Canonical JSON strings keep adjacent IDs above JavaScript's safe range."""
+
+    message_ids = (1_779_400_000_000_000_001, 1_779_400_000_000_000_002)
+    source_root = prepare_project_root(tmp_path / "source")
+    source_context = build_context(spec_context=source_root)
+    with source_context.broker() as broker:
+        broker.insert_messages(
+            [
+                ("unsafe.queue", "first", message_ids[0]),
+                ("unsafe.queue", "second", message_ids[1]),
+            ]
+        )
+    export_path = source_context.weft_dir / "unsafe-export.jsonl"
+
+    dump_code, dump_message = cmd_dump(
+        output=str(export_path),
+        context_path=str(source_context.root),
+    )
+
+    assert dump_code == 0, dump_message
+    records = [
+        json.loads(line)
+        for line in export_path.read_text(encoding="utf-8").splitlines()
+    ]
+    header = records[0]
+    messages = [record for record in records if record["type"] == "message"]
+    assert isinstance(header["last_ts"], str)
+    assert len(header["last_ts"]) == 19
+    assert header["last_ts"].isascii()
+    assert header["last_ts"].isdigit()
+    assert int(header["last_ts"]) >= message_ids[-1]
+    assert [record["id"] for record in messages] == [
+        "1779400000000000001",
+        "1779400000000000002",
+    ]
+
+    destination_root = prepare_project_root(tmp_path / "destination")
+    destination_context = build_context(spec_context=destination_root)
+    load_code, load_message = cmd_load(
+        input_file=str(export_path),
+        context_path=str(destination_context.root),
+    )
+
+    assert load_code == 0, load_message
+    assert _queue_rows_with_timestamps(destination_context, "unsafe.queue") == [
+        ("first", message_ids[0]),
+        ("second", message_ids[1]),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("last_ts", True),
+        ("last_ts", 1.0),
+        ("last_ts", 1e18),
+        ("last_ts", -1),
+        ("last_ts", 9_999_999_999_999_999_999),
+        ("last_ts", "9999999999999999999"),
+        ("last_ts", " 1779400000000000002 "),
+        ("last_ts", "１７７９４０００００００００００００２"),
+        ("last_ts", "177940000000000002"),
+        ("id", True),
+        ("id", 1.0),
+        ("id", 1e18),
+        ("id", -1),
+        ("id", 9_999_999_999_999_999_999),
+        ("id", "9999999999999999999"),
+        ("id", " 1779400000000000001 "),
+        ("id", "１７７９４０００００００００００００１"),
+        ("id", "177940000000000001"),
+    ],
+)
+def test_cmd_load_rejects_noncanonical_exact_ids_before_writes(
+    tmp_path: Path,
+    field: str,
+    invalid_value: object,
+) -> None:
+    """Invalid header or message IDs fail validation without broker mutation."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    before = _snapshot_broker_state(context)
+    header_last_ts: object = 1_779_400_000_000_000_002
+    message_id: object = 1_779_400_000_000_000_001
+    if field == "last_ts":
+        header_last_ts = invalid_value
+    else:
+        message_id = invalid_value
+    records = [
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": header_last_ts,
+        },
+        {"type": "alias", "alias": "invalid", "target": "invalid.queue"},
+        {
+            "type": "message",
+            "queue": "invalid.queue",
+            "id": message_id,
+            "body": "must not be written",
+        },
+    ]
+    export_path = tmp_path / "invalid-id.jsonl"
+    export_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    exit_code, message = cmd_load(
+        input_file=str(export_path),
+        context_path=str(context.root),
+    )
+
+    assert exit_code == 1
+    assert f"'{field}'" in (message or "")
+    assert _snapshot_broker_state(context) == before
 
 
 def test_execute_import_propagates_unexpected_snapshot_restore_error(
@@ -307,9 +502,11 @@ def test_execute_import_reports_operational_snapshot_restore_error(
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("reserved_id", [0, "0000000000000000000"])
 def test_cmd_load_rejects_reserved_zero_id_before_writes(
     tmp_path: Path,
     dry_run: bool,
+    reserved_id: int | str,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -327,7 +524,7 @@ def test_cmd_load_rejects_reserved_zero_id_before_writes(
         {
             "type": "message",
             "queue": "zero.queue",
-            "id": 0,
+            "id": reserved_id,
             "body": "must not be written",
         },
     ]
@@ -343,7 +540,7 @@ def test_cmd_load_rejects_reserved_zero_id_before_writes(
     )
 
     assert exit_code == 1
-    assert "positive integer 'id'" in (message or "")
+    assert "positive integer or canonical 19-digit string 'id'" in (message or "")
     assert _snapshot_broker_state(ctx) == before
 
 

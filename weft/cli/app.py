@@ -13,6 +13,7 @@ from typing import Annotated, Any, cast
 
 import typer
 
+from simplebroker import format_message_id
 from weft._constants import (
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     PROG_NAME,
@@ -709,7 +710,10 @@ def task_list(
 
     if json_output:
         typer.echo(
-            json.dumps([snap.to_dict() for snap in snapshots], ensure_ascii=False)
+            json.dumps(
+                [status_cmd._task_snapshot_to_json_dict(snap) for snap in snapshots],
+                ensure_ascii=False,
+            )
         )
         return
     if not snapshots:
@@ -832,7 +836,7 @@ def task_status(
     if snapshot is None:
         typer.echo(f"Task {tid} not found", err=True)
         raise typer.Exit(code=2)
-    status_payload: dict[str, Any] = snapshot.to_dict()
+    status_payload: dict[str, Any] = status_cmd._task_snapshot_to_json_dict(snapshot)
     if process:
         status_payload.update(_task_status_process_fields(snapshot.tid, context_dir))
     if json_output:
@@ -862,7 +866,11 @@ def task_ping(
         timeout=timeout,
         context_path=context_dir,
     )
-    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    json_payload = dict(payload)
+    observed_at = json_payload.get("observed_at")
+    if isinstance(observed_at, int) and not isinstance(observed_at, bool):
+        json_payload["observed_at"] = format_message_id(observed_at)
+    typer.echo(json.dumps(json_payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 @task_app.command("stop")

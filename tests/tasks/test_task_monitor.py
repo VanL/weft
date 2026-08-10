@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -253,13 +254,16 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
         "should_stop",
     )
     original_scalar_values = {name: getattr(task, name) for name in reset_scalar_fields}
+    original_signal_stop_requested = task._signal_stop_requested
     for name in reset_scalar_fields:
         setattr(task, name, True)
+    task._signal_stop_requested = signal.SIGTERM
     try:
         worker = task._worker_local_monitor_clone()
     finally:
         for name, value in original_scalar_values.items():
             setattr(task, name, value)
+        task._signal_stop_requested = original_signal_stop_requested
 
     try:
 
@@ -349,6 +353,8 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
         for name in reset_scalar_fields:
             assert name in _WORKER_SNAPSHOT_REPLACED_FIELDS
             assert getattr(worker, name) is False, name
+        assert "_signal_stop_requested" in _WORKER_SNAPSHOT_REPLACED_FIELDS
+        assert worker._signal_stop_requested is None
 
         owner_queue_ids = {
             id(queue_obj)

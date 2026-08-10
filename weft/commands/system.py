@@ -20,9 +20,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import weft.commands.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
-from simplebroker import Queue
+from simplebroker import Queue, format_message_id
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
@@ -38,6 +39,8 @@ from weft._constants import (
     STATUS_WATCH_MIN_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_TASK_STATUSES,
+    WALL_CLOCK_TASK_LAST_TIMESTAMP_CLASSIFICATIONS,
+    WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS,
     WEFT_CONTEXT_ENV,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
@@ -48,6 +51,7 @@ from weft._constants import (
 from weft.builtins import builtin_task_catalog
 from weft.commands.manager import (
     _list_manager_records,
+    _manager_record_to_json,
     _manager_snapshot,
     _select_active_manager,
 )
@@ -1491,12 +1495,52 @@ def _service_snapshot_to_dict(snapshot: ServiceSnapshot) -> dict[str, Any]:
         "manager_tid": snapshot.manager_tid,
         "queue": snapshot.queue,
         "pid": snapshot.pid,
-        "updated_at": snapshot.updated_at,
+        "updated_at": (
+            format_message_id(snapshot.updated_at)
+            if snapshot.updated_at is not None
+            else None
+        ),
     }
     if snapshot.reconciliation is not None:
         payload["reconciliation"] = snapshot.reconciliation
     if snapshot.diagnostics is not None:
         payload["diagnostics"] = snapshot.diagnostics
+    return payload
+
+
+def _task_snapshot_to_json_dict(snapshot: TaskSnapshot) -> dict[str, Any]:
+    """Project broker-backed task identity fields for external JSON."""
+
+    payload = snapshot.to_dict()
+    reconciliation = payload.get("reconciliation")
+    classification = (
+        reconciliation.get("classification")
+        if isinstance(reconciliation, dict)
+        else None
+    )
+    last_timestamp_is_broker_backed = (
+        classification not in WALL_CLOCK_TASK_LAST_TIMESTAMP_CLASSIFICATIONS
+        and snapshot.event not in WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS
+    )
+    last_timestamp = payload.get("last_timestamp")
+    if (
+        last_timestamp_is_broker_backed
+        and isinstance(last_timestamp, int)
+        and not isinstance(last_timestamp, bool)
+        and last_timestamp > 0
+    ):
+        payload["last_timestamp"] = format_message_id(last_timestamp)
+
+    if (
+        classification
+        in BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS
+        and isinstance(reconciliation, dict)
+    ):
+        projected_reconciliation = dict(reconciliation)
+        observed_at = projected_reconciliation.get("observed_at")
+        if isinstance(observed_at, int) and not isinstance(observed_at, bool):
+            projected_reconciliation["observed_at"] = format_message_id(observed_at)
+        payload["reconciliation"] = projected_reconciliation
     return payload
 
 
@@ -1506,11 +1550,14 @@ def _render_json_payload(
     services: Sequence[ServiceSnapshot],
     tasks: Sequence[TaskSnapshot],
 ) -> str:
+    broker_payload: dict[str, Any] = broker.to_dict()
+    if broker.last_timestamp is not None:
+        broker_payload["last_timestamp"] = format_message_id(broker.last_timestamp)
     payload = {
-        "broker": broker.to_dict(),
-        "managers": managers,
+        "broker": broker_payload,
+        "managers": [_manager_record_to_json(record) for record in managers],
         "services": [_service_snapshot_to_dict(snap) for snap in services],
-        "tasks": [snap.to_dict() for snap in tasks],
+        "tasks": [_task_snapshot_to_json_dict(snap) for snap in tasks],
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -1560,7 +1607,7 @@ def _watch_task_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-119] exception
                     continue
                 event = payload.get("event") or "event"
                 record = {
-                    "timestamp": timestamp,
+                    "timestamp": format_message_id(timestamp),
                     "tid": tid,
                     "tid_short": short_tid,
                     "status": status,

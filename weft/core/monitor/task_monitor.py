@@ -96,12 +96,14 @@ from weft.core.monitor.external_log import (
     ExternalTaskLogSink,
     ExternalTaskLogStatus,
     disabled_external_task_log_status,
+    project_task_summary_for_external_json,
 )
 from weft.core.monitor.lifetime_report import (
     build_candidate_lifetime_report,
     build_collation_lifetime_report,
     build_inferred_tid_lifetime_report,
     build_raw_row_lifetime_report,
+    project_lifetime_report_for_external_json,
 )
 from weft.core.monitor.policies.dead_task import (
     dead_task_queue_cleanup_plan as _dead_task_queue_cleanup_plan,
@@ -914,6 +916,7 @@ class TaskMonitor(ServiceTask):
         worker._topology_deferred_sigint = False
         worker._stop_event = threading.Event()
         worker._running_event = threading.Event()
+        worker._signal_stop_requested = None
         worker._thread = None
         if "_run_thread" in vars(worker):
             worker._run_thread = None
@@ -2121,6 +2124,7 @@ class TaskMonitor(ServiceTask):
     ) -> str:
         """Write a lifetime report externally or defer it durably."""
 
+        projected_report = project_lifetime_report_for_external_json(report)
         sink = self._external_task_log_sink
         if sink is None:
             external_error = "external task-log sink is not configured"
@@ -2128,7 +2132,7 @@ class TaskMonitor(ServiceTask):
             try:
                 self._begin_external_task_log_sink_observation()
                 sink.emit_lifetime_report(
-                    report,
+                    projected_report,
                     emitted_at_ns=emitted_at_ns,
                 )
             except ExternalTaskLogError as exc:
@@ -2139,7 +2143,7 @@ class TaskMonitor(ServiceTask):
 
         try:
             store.upsert_deferred_write(
-                report=report,
+                report=projected_report,
                 external_error=external_error,
                 now_ns=emitted_at_ns,
             )
@@ -3100,7 +3104,7 @@ class TaskMonitor(ServiceTask):
         """Emit one terminal task or service summary to the monitor sink."""
 
         record = ready.record
-        task_summary = record.to_summary()
+        task_summary = project_task_summary_for_external_json(record.to_summary())
         service_summary = task_summary.get("service")
         is_service_summary = isinstance(service_summary, dict)
         if self._jsonl_then_delete_enabled():

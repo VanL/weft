@@ -368,6 +368,13 @@ TaskMonitor heartbeat wake -> T{monitor_tid}.inbox -> bounded processor cycle
 manager serve operational events -> process stderr/stdout only
 ```
 
+_Implementation mapping_: status and foreground-monitor projection in
+`weft/commands/system.py` and `weft/commands/task_monitor.py`; durable and
+external Monitor projection/restoration in `weft/core/monitor/store.py`,
+`weft/core/monitor/external_log.py`, and
+`weft/core/monitor/lifetime_report.py`; manager operational projection in
+`weft/core/serve_log.py`.
+
 Current rules:
 
 - `weft.log.tasks` is runtime lifecycle evidence. Status, result, and debugging
@@ -386,6 +393,10 @@ Current rules:
   diagnostics only. They must not be written to `weft.log.tasks`, per-task
   queues, control queues, or runtime-state queues, and they must not be used as
   lifecycle truth, pruning evidence, or status/result reconstruction input.
+- external JSONL is an [SB-0.2] boundary only for the manager-owned
+  `message_timestamp`, `observed_timestamp`, and `superseded_message_id`
+  fields. Operational `timestamp_ns` is a Unix-clock measurement and remains
+  numeric; arbitrary diagnostic mappings are not traversed.
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
   `weft.state.tid_mappings` entries and live runtime liveness where needed; they
   do not depend on a separate state database
@@ -402,6 +413,13 @@ Current rules:
   operational cursors only; deleting or corrupting them may affect duplicate
   log output, but it must not change task lifecycle truth, public status,
   result materialization, or cleanup decisions
+- task-log row/checkpoint IDs remain integers during scanning, reduction,
+  foreground checkpoint-file persistence, and Python result construction.
+  Monitor-table checkpoint JSON follows the explicit string-at-rest rule
+  below. External task-monitor JSONL and command JSON project
+  `last_task_log_timestamp`/`checkpoint_timestamp` to [SB-0.2] strings.
+  Task-summary `reconciliation.observed_at` follows the same conditional
+  broker-ID versus wall-clock rule as [CLI-1.2.1].
 - the supervised `TaskMonitor` may maintain Monitor-owned durable collation
   tables: `weft_monitor_meta`, `weft_monitor_task_collations`, and
   `weft_monitor_task_messages`. It may also maintain
@@ -413,6 +431,18 @@ Current rules:
   authority. The Monitor creates/verifies only these Monitor tables, in an
   already initialized Weft broker database, and records a cached PONG error if
   the store is unavailable.
+  Relational message-ID columns remain integers. Monitor-owned exact broker IDs
+  embedded in table JSON text use [SB-0.2] strings at rest: checkpoint metadata
+  `value_json.message_id`, collation `lifecycle_json.message_id`, nested
+  pipeline `lifecycle_json.checkpoint.message_id`, collation
+  `bookkeeping_json.last_message_id`, and the owned fields of deferred external
+  `body_json.subject.message_id`, `body_json.monitor.message_id`,
+  `body_json.monitor.first_message_id`, `body_json.monitor.last_message_id`,
+  nullable `body_json.monitor.terminal_message_id`,
+  `body_json.observations.message_id`, and every
+  `body_json.observations.message_ids[]`. Store reads immediately restore these
+  fields to integers in Python. Other TaskSpec, state, resource, diagnostic,
+  and extension mappings are opaque and are not recursively rewritten.
 - task-monitor log records and processor summaries are operational output only
   in the current release. The monitor may mark broker messages as lifecycle or
   cleanup candidates. With the default `delete` mode it may delete exact
@@ -450,6 +480,17 @@ Current rules:
   failures update cached diagnostics and may emit foreground operational
   warnings, but they do not write lifetime records and do not replace the
   write-or-defer-before-delete handoff rule.
+  External Monitor raw records format `message_id`; collated summaries format
+  `first_message_id`, `last_message_id`, and nullable
+  `terminal_message_id`; lifetime reports format owned `subject`, `monitor`,
+  and observation message-ID fields according to [SB-0.2]. Builders, Monitor
+  relational message-ID columns, checkpoint/result objects, PONG/processor
+  summaries, and cleanup candidates remain integer-valued; the owned Monitor
+  JSON-at-rest fields named above are strings and normalize back to integers on
+  read. Lifetime `report_id` is computed from the internal integer report
+  before a non-mutating external projection, so representation alone does not
+  change durable dedup identity. A deferred external write stores that
+  projected record so later flush emits the same canonical JSON shape.
 - when enabled, the canonical manager supervises one internal
   `TaskMonitor`. The supervised monitor reads task-log lifecycle evidence by
   generator/high-water cursor for observation and custom processors. Custom
@@ -1311,6 +1352,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)

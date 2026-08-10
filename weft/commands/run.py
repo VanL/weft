@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import weft.commands.specs as spec_cmd
-from simplebroker import Queue
+from simplebroker import Queue, format_message_id
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -125,6 +125,7 @@ def _emit_manager_started(record: dict[str, Any]) -> None:
 
 
 def _manager_started_payload(record: dict[str, Any]) -> dict[str, Any]:
+    timestamp = record.get("timestamp")
     return {
         "event": "manager_started",
         "manager_tid": record.get("tid"),
@@ -134,7 +135,11 @@ def _manager_started_payload(record: dict[str, Any]) -> dict[str, Any]:
             for key in ("requests", "outbox", "ctrl_in", "ctrl_out")
             if record.get(key)
         },
-        "timestamp": record.get("timestamp"),
+        "timestamp": (
+            format_message_id(timestamp)
+            if isinstance(timestamp, int) and not isinstance(timestamp, bool)
+            else timestamp
+        ),
     }
 
 

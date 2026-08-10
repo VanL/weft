@@ -316,6 +316,73 @@ def test_delete_queue_messages_rejects_queue_name_with_all_queues_without_deleti
     ]
 
 
+def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> None:
+    message_id = 1_779_600_000_000_000_001
+    calls: list[tuple[str, object]] = []
+
+    class _ExactQueue:
+        def read_one(self, *, exact_timestamp: object, with_timestamps: bool):
+            assert with_timestamps is True
+            calls.append(("read", exact_timestamp))
+            return "read", message_id
+
+        def peek_one(self, *, exact_timestamp: object, with_timestamps: bool):
+            assert with_timestamps is True
+            calls.append(("peek", exact_timestamp))
+            return "peek", message_id
+
+        def move_generator(
+            self,
+            _destination: str,
+            *,
+            with_timestamps: bool,
+            exact_timestamp: object,
+        ):
+            assert with_timestamps is True
+            calls.append(("move", exact_timestamp))
+            return iter([("move", message_id)])
+
+        def delete(self, *, message_id: object) -> bool:
+            calls.append(("delete", message_id))
+            return True
+
+        def close(self) -> None:
+            return
+
+    class _ExactContext:
+        def queue(self, _name: str, *, persistent: bool = True) -> _ExactQueue:
+            del persistent
+            return _ExactQueue()
+
+    context = _ExactContext()
+    canonical = "1779600000000000001"
+
+    read_entry = queue_cmd.read_queue(context, "source", message_id=canonical)[0]
+    peek_entry = queue_cmd.peek_queue(context, "source", message_id=canonical)[0]
+    move_receipt = queue_cmd.move_queue_messages(
+        context,
+        "source",
+        "destination",
+        message_id=canonical,
+    )
+    delete_receipt = queue_cmd.delete_queue_messages(
+        context,
+        "source",
+        message_id=canonical,
+    )
+
+    assert calls == [
+        ("read", message_id),
+        ("peek", message_id),
+        ("move", message_id),
+        ("delete", message_id),
+    ]
+    assert read_entry.timestamp == message_id
+    assert peek_entry.timestamp == message_id
+    assert move_receipt.moved_count == 1
+    assert delete_receipt.deleted_count == 1
+
+
 def test_watch_queue(tmp_path):
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -327,6 +394,52 @@ def test_watch_queue(tmp_path):
     messages = list(iterator)
     assert len(messages) == 1
     assert messages[0].body == "payload"
+
+
+def test_queue_message_json_formats_broker_id_without_mutating_domain_value() -> None:
+    message_id = 1_779_100_000_000_000_002
+    message = queue_cmd.QueueMessage("payload", message_id)
+
+    assert message.as_dict() == {
+        "message": "payload",
+        "timestamp": "1779100000000000002",
+    }
+    assert message.timestamp == message_id
+
+
+def test_bounded_move_json_formats_broker_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message_id = 1_779_100_000_000_000_003
+
+    class _MoveQueue:
+        def move_many(self, *_args: object, **_kwargs: object):
+            return [("payload", message_id)]
+
+        def close(self) -> None:
+            return None
+
+    class _MoveContext:
+        def queue(self, _name: str, *, persistent: bool = True) -> _MoveQueue:
+            del persistent
+            return _MoveQueue()
+
+    monkeypatch.setattr(queue_cmd, "_context", lambda _spec_context=None: _MoveContext())
+
+    exit_code, stdout, stderr = queue_cmd.move_command(
+        "source",
+        "destination",
+        limit=1,
+        json_output=True,
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    _summary, raw_record = stdout.splitlines()
+    assert json.loads(raw_record) == {
+        "message": "payload",
+        "timestamp": "1779100000000000003",
+    }
 
 
 def test_watch_queue_uses_queue_monitor(

@@ -36,6 +36,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
+from simplebroker import format_message_id
 from simplebroker.ext import SidecarSession, SidecarUnavailableError
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
@@ -62,6 +63,11 @@ from weft._constants import (
 from weft.context import WeftContext, service_context_key
 from weft.core.monitor import sql as monitor_sql
 from weft.core.monitor.collation import MonitorTaskEventUpdate
+from weft.core.monitor.lifetime_report import (
+    project_lifetime_report_for_external_json,
+    restore_lifetime_report_from_external_json,
+)
+from weft.helpers.message_ids import normalize_exact_message_id
 
 ServiceCollationKind = Literal[
     "user_task",
@@ -405,13 +411,15 @@ class MonitorDeferredWriteRecord:
     flushed_at_ns: int | None = None
 
     def body(self) -> dict[str, Any]:
-        """Return the JSON body for this deferred write."""
+        """Return the deferred body with exact IDs restored to integers."""
 
         try:
             parsed = json.loads(self.body_json)
         except json.JSONDecodeError:
             return {}
-        return parsed if isinstance(parsed, dict) else {}
+        if not isinstance(parsed, dict):
+            return {}
+        return restore_lifetime_report_from_external_json(parsed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,7 +728,12 @@ class _MonitorTableAccess:
         if value is None:
             return None
         message_id = value.get("message_id")
-        return message_id if isinstance(message_id, int) else None
+        if message_id is None:
+            return None
+        try:
+            return normalize_exact_message_id(message_id)
+        except (TypeError, ValueError):
+            return None
 
     def upsert_deferred_write(
         self,
@@ -1648,7 +1661,7 @@ class MonitorStore:
             access = self._access(session)
             access.write_meta(
                 f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{queue_name}",
-                {"message_id": int(message_id)},
+                {"message_id": format_message_id(message_id)},
             )
 
     def upsert_task_event(self, update: MonitorTaskEventUpdate) -> None:
@@ -1713,7 +1726,7 @@ class MonitorStore:
             with self._sidecar_session(transaction=True) as session:
                 self._access(session).write_meta(
                     f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{queue_name}",
-                    {"message_id": int(checkpoint_message_id)},
+                    {"message_id": format_message_id(checkpoint_message_id)},
                 )
 
         return MonitorStoreIngestResult(
@@ -2318,7 +2331,7 @@ class MonitorStore:
         if not isinstance(record_type, str) or not record_type:
             raise ValueError("deferred write record_type must be a non-empty string")
         timestamp = time.time_ns() if now_ns is None else int(now_ns)
-        body_json = _json(report)
+        body_json = _json(project_lifetime_report_for_external_json(report))
         with self._sidecar_session(transaction=True) as session:
             access = self._access(session)
             access.upsert_deferred_write(
@@ -2430,10 +2443,14 @@ def _record_from_row(row: tuple[Any, ...]) -> MonitorTaskCollationRecord:
         completed_at_ns=_int_or_none(values["completed_at_ns"]),
         taskspec_summary=_json_dict(values["taskspec_summary_json"]),
         state=_json_dict(values["state_json"]),
-        lifecycle=_json_dict(values["lifecycle_json"]),
+        lifecycle=_restore_lifecycle_message_ids(
+            _json_dict(values["lifecycle_json"])
+        ),
         resources=_json_dict(values["resources_json"]),
         diagnostics=_json_dict(values["diagnostics_json"]),
-        bookkeeping=_json_dict(values["bookkeeping_json"]),
+        bookkeeping=_restore_bookkeeping_message_ids(
+            _json_dict(values["bookkeeping_json"])
+        ),
         reserved_probe_needed=bool(values["reserved_probe_needed"]),
         summary_emitted_at_ns=_int_or_none(values["summary_emitted_at_ns"]),
         raw_deleted_at_ns=_int_or_none(values["raw_deleted_at_ns"]),
@@ -2612,10 +2629,10 @@ def _record_values(record: MonitorTaskCollationRecord) -> tuple[Any, ...]:
         record.completed_at_ns,
         _json(record.taskspec_summary),
         _json(record.state),
-        _json(record.lifecycle),
+        _json(_project_lifecycle_message_ids(record.lifecycle)),
         _json(record.resources),
         _json(record.diagnostics),
-        _json(record.bookkeeping),
+        _json(_project_bookkeeping_message_ids(record.bookkeeping)),
         int(record.reserved_probe_needed),
         record.summary_emitted_at_ns,
         record.raw_deleted_at_ns,
@@ -2700,6 +2717,56 @@ def _json_dict(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _project_lifecycle_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
+    projected = dict(value)
+    message_id = projected.get("message_id")
+    if message_id is not None:
+        projected["message_id"] = format_message_id(message_id)
+    checkpoint = projected.get("checkpoint")
+    if isinstance(checkpoint, Mapping):
+        checkpoint_projected = dict(checkpoint)
+        checkpoint_message_id = checkpoint_projected.get("message_id")
+        if checkpoint_message_id is not None:
+            checkpoint_projected["message_id"] = format_message_id(
+                checkpoint_message_id
+            )
+        projected["checkpoint"] = checkpoint_projected
+    return projected
+
+
+def _restore_lifecycle_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
+    restored = dict(value)
+    message_id = restored.get("message_id")
+    if message_id is not None:
+        restored["message_id"] = normalize_exact_message_id(message_id)
+    checkpoint = restored.get("checkpoint")
+    if isinstance(checkpoint, Mapping):
+        checkpoint_restored = dict(checkpoint)
+        checkpoint_message_id = checkpoint_restored.get("message_id")
+        if checkpoint_message_id is not None:
+            checkpoint_restored["message_id"] = normalize_exact_message_id(
+                checkpoint_message_id
+            )
+        restored["checkpoint"] = checkpoint_restored
+    return restored
+
+
+def _project_bookkeeping_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
+    projected = dict(value)
+    message_id = projected.get("last_message_id")
+    if message_id is not None:
+        projected["last_message_id"] = format_message_id(message_id)
+    return projected
+
+
+def _restore_bookkeeping_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
+    restored = dict(value)
+    message_id = restored.get("last_message_id")
+    if message_id is not None:
+        restored["last_message_id"] = normalize_exact_message_id(message_id)
+    return restored
 
 
 def _str_or_none(value: Any) -> str | None:

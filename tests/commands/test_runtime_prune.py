@@ -35,6 +35,12 @@ from weft.commands.runtime_prune import (
 )
 from weft.context import build_context
 from weft.core.endpoints import build_endpoint_record_payload
+from weft.core.pruning.runtime import (
+    RuntimePruneCandidate,
+    RuntimePruneResult,
+    RuntimeQueueScanStats,
+    _candidate_record,
+)
 from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
@@ -43,6 +49,32 @@ from weft.ext import RunnerHandle
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_runtime_prune_candidate_json_formats_message_id_only() -> None:
+    candidate = RuntimePruneCandidate(
+        queue=WEFT_TID_MAPPINGS_QUEUE,
+        queue_group="tid-mappings",
+        message_id=1779400000000000001,
+        key="1779400000000000002",
+        classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
+        reason="superseded",
+        age_seconds=3.0,
+        payload_excerpt={"observed_at_ns": 1779400000000000003},
+    )
+    result = RuntimePruneResult(
+        config=RuntimePruneConfig(),
+        run_id="runtime-prune:test",
+        candidates=(candidate,),
+        applied_candidates=(),
+        scan_stats=(RuntimeQueueScanStats(queue=WEFT_TID_MAPPINGS_QUEUE),),
+    )
+
+    record = _candidate_record(result, candidate)
+
+    assert record["message_id"] == "1779400000000000001"
+    assert record["payload_excerpt"]["observed_at_ns"] == 1779400000000000003
+    assert isinstance(candidate.message_id, int)
 
 
 def _context(tmp_path):

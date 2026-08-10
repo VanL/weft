@@ -144,6 +144,20 @@ def test_run_renderer_keeps_timeout_exit_124() -> None:
     assert emitted == [("Error executing task: Target execution timed out", True)]
 
 
+def test_manager_started_payload_formats_registry_message_id() -> None:
+    message_id = 1_779_400_000_000_000_001
+    record = {
+        "tid": "1779400000000000100",
+        "timestamp": message_id,
+        "requests": "weft.spawn.requests",
+    }
+
+    payload = run_cmd._manager_started_payload(record)
+
+    assert payload["timestamp"] == "1779400000000000001"
+    assert record["timestamp"] == message_id
+
+
 def _host_runtime_handle(pid: int) -> dict[str, Any]:
     return {
         "runner": "host",

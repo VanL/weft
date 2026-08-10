@@ -23,10 +23,40 @@ from weft._constants import (
 )
 from weft.commands.retention_prune import RetentionPruneConfig, run_retention_prune
 from weft.context import WeftContext, build_context
-from weft.core.pruning.retention import RetentionPruneCandidate, _append_records
+from weft.core.pruning.retention import (
+    RetentionPruneCandidate,
+    _append_records,
+    _candidate_record,
+)
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_retention_prune_candidate_json_formats_message_id_only() -> None:
+    candidate = RetentionPruneCandidate(
+        queue=WEFT_GLOBAL_LOG_QUEUE,
+        family="task-log",
+        message_id=1779400000000000010,
+        tid="1779400000000000011",
+        candidate_class=RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED,
+        reason="superseded",
+        age_seconds=2.0,
+        payload_sha256="0" * 64,
+        payload_size_bytes=2,
+        payload={"observed_at_ns": 1779400000000000012},
+    )
+
+    record = _candidate_record(
+        "retention-prune:test",
+        RetentionPruneConfig(),
+        candidate,
+        False,
+    )
+
+    assert record["message_id"] == "1779400000000000010"
+    assert record["payload"]["observed_at_ns"] == 1779400000000000012
+    assert isinstance(candidate.message_id, int)
 
 
 def _context(tmp_path: Path) -> WeftContext:
@@ -167,7 +197,7 @@ def test_task_log_apply_requires_archive_and_deletes_exact_rows(
     assert old_id not in remaining
     assert keep_id in remaining
     archive_records = _read_json_records(archive)
-    assert archive_records[0]["message_id"] == old_id
+    assert archive_records[0]["message_id"] == str(old_id)
     assert archive_records[-1]["record_type"] == "retention_prune_completed"
 
 
@@ -234,8 +264,8 @@ def test_task_log_apply_appends_to_same_day_archive_across_runs(
         if record["record_type"] == "retention_prune_candidate"
     }
     # Both runs' pre-delete candidate rows must survive in the archive.
-    assert old_id_a in candidate_message_ids
-    assert old_id_b in candidate_message_ids
+    assert str(old_id_a) in candidate_message_ids
+    assert str(old_id_b) in candidate_message_ids
     assert run_id_a in candidate_run_ids
     assert run_id_b in candidate_run_ids
 
@@ -255,6 +285,9 @@ With the ~2KB per-record payload below, each worker writes well past the
 default text-IO buffer size, so an unserialized append would issue multiple
 interleavable write syscalls per batch.
 """
+
+_CONCURRENT_APPEND_MESSAGE_ID_BASE = 1779400000000000100
+"""First exact broker-domain ID used by concurrent archive fixtures."""
 
 _CONCURRENT_APPEND_JOIN_TIMEOUT = 60.0
 """Deadline for joining append workers; generous to avoid CI flakiness."""
@@ -279,7 +312,7 @@ def _concurrent_append_worker(
         RetentionPruneCandidate(
             queue=WEFT_GLOBAL_LOG_QUEUE,
             family="task-log",
-            message_id=index,
+            message_id=_CONCURRENT_APPEND_MESSAGE_ID_BASE + index,
             tid=run_id,
             candidate_class=RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED,
             reason="concurrent append test",
@@ -349,7 +382,9 @@ def test_concurrent_archive_appends_produce_complete_jsonl_lines(
             for record in run_records
             if record["record_type"] == "retention_prune_candidate"
         ]
-        assert candidate_ids == list(range(n))
+        assert candidate_ids == [
+            str(_CONCURRENT_APPEND_MESSAGE_ID_BASE + index) for index in range(n)
+        ]
         summaries = [
             record
             for record in run_records

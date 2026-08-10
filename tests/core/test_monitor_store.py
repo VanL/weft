@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -20,6 +22,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MONITOR_CHECKPOINT_META_PREFIX,
     WEFT_MONITOR_SCHEMA_VERSION,
 )
 from weft.context import build_context
@@ -332,6 +335,229 @@ def test_monitor_store_checkpoint_round_trips(tmp_path) -> None:
     store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, 1779000000000000001)
 
     assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == 1779000000000000001
+
+
+def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000200"
+    message_id = 1779000000000000201
+    update = replace(
+        _update(
+            tid,
+            message_id,
+            event="work_completed",
+            status="completed",
+            terminal=True,
+        ),
+        lifecycle={
+            "event": "work_completed",
+            "message_id": message_id,
+            "checkpoint": {
+                "message_id": 1779000000000000202,
+                "opaque": {"message_id": 1779000000000000210},
+            },
+            "observed_at_ns": 1779000000000000203,
+        },
+        bookkeeping={
+            "last_message_id": message_id,
+            "opaque": {"message_id": 1779000000000000211},
+            "updated_at_ns": 1779000000000000204,
+        },
+        taskspec_summary={"opaque": {"message_id": 1779000000000000212}},
+        state={"opaque": {"message_id": 1779000000000000213}},
+        resources={"opaque": {"message_id": 1779000000000000214}},
+        diagnostics={"opaque": {"message_id": 1779000000000000215}},
+    )
+
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (update,),
+        checkpoint_message_id=message_id,
+    )
+    store.upsert_deferred_write(
+        report={
+            "schema_version": 1,
+            "record_type": "task_lifetime_report",
+            "report_id": "task-lifetime:json-id-storage",
+            "emitted_at_ns": 1779000000000000205,
+            "subject": {"message_id": message_id},
+            "monitor": {
+                "message_id": 1779000000000000216,
+                "first_message_id": message_id,
+                "last_message_id": 1779000000000000202,
+                "terminal_message_id": 1779000000000000202,
+            },
+            "observations": {
+                "message_id": 1779000000000000206,
+                "message_ids": [1779000000000000207],
+                "observed_at_ns": 1779000000000000208,
+            },
+            "taskspec": {"opaque": {"message_id": 1779000000000000217}},
+            "metadata": {"opaque": {"message_id": 1779000000000000218}},
+        },
+        external_error="permission denied",
+        now_ns=1779000000000000209,
+    )
+
+    with ctx.broker() as broker, broker.sidecar() as session:
+        [collation_row] = list(
+            session.run(
+                "SELECT terminal_message_id, first_message_id, last_message_id, "
+                "lifecycle_json, bookkeeping_json, taskspec_summary_json, "
+                "state_json, resources_json, diagnostics_json "
+                "FROM weft_monitor_task_collations "
+                "WHERE context_key = ? AND tid = ?",
+                (store.context_key, tid),
+                fetch=True,
+            )
+        )
+        [checkpoint_row] = list(
+            session.run(
+                "SELECT value_json FROM weft_monitor_meta WHERE key = ?",
+                (f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{WEFT_GLOBAL_LOG_QUEUE}",),
+                fetch=True,
+            )
+        )
+        [deferred_row] = list(
+            session.run(
+                "SELECT body_json FROM weft_monitor_deferred_writes "
+                "WHERE context_key = ? AND report_id = ?",
+                (store.context_key, "task-lifetime:json-id-storage"),
+                fetch=True,
+            )
+        )
+
+    assert collation_row[:3] == (message_id, message_id, message_id)
+    assert all(isinstance(value, int) for value in collation_row[:3])
+    lifecycle = json.loads(str(collation_row[3]))
+    bookkeeping = json.loads(str(collation_row[4]))
+    taskspec_summary = json.loads(str(collation_row[5]))
+    state = json.loads(str(collation_row[6]))
+    resources = json.loads(str(collation_row[7]))
+    diagnostics = json.loads(str(collation_row[8]))
+    checkpoint = json.loads(str(checkpoint_row[0]))
+    deferred = json.loads(str(deferred_row[0]))
+    assert lifecycle["message_id"] == "1779000000000000201"
+    assert lifecycle["checkpoint"]["message_id"] == "1779000000000000202"
+    assert lifecycle["checkpoint"]["opaque"]["message_id"] == (
+        1779000000000000210
+    )
+    assert lifecycle["observed_at_ns"] == 1779000000000000203
+    assert bookkeeping["last_message_id"] == "1779000000000000201"
+    assert bookkeeping["opaque"]["message_id"] == 1779000000000000211
+    assert bookkeeping["updated_at_ns"] == 1779000000000000204
+    assert taskspec_summary["opaque"]["message_id"] == 1779000000000000212
+    assert state["opaque"]["message_id"] == 1779000000000000213
+    assert resources["opaque"]["message_id"] == 1779000000000000214
+    assert diagnostics["opaque"]["message_id"] == 1779000000000000215
+    assert checkpoint["message_id"] == "1779000000000000201"
+    assert deferred["subject"]["message_id"] == "1779000000000000201"
+    assert deferred["monitor"]["message_id"] == "1779000000000000216"
+    assert deferred["monitor"]["first_message_id"] == "1779000000000000201"
+    assert deferred["monitor"]["last_message_id"] == "1779000000000000202"
+    assert deferred["monitor"]["terminal_message_id"] == "1779000000000000202"
+    assert deferred["observations"]["message_id"] == "1779000000000000206"
+    assert deferred["observations"]["message_ids"] == ["1779000000000000207"]
+    assert deferred["observations"]["observed_at_ns"] == 1779000000000000208
+    assert deferred["taskspec"]["opaque"]["message_id"] == 1779000000000000217
+    assert deferred["metadata"]["opaque"]["message_id"] == 1779000000000000218
+
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.lifecycle["message_id"] == message_id
+    assert record.lifecycle["checkpoint"]["message_id"] == 1779000000000000202
+    assert record.lifecycle["checkpoint"]["opaque"]["message_id"] == (
+        1779000000000000210
+    )
+    assert record.bookkeeping["last_message_id"] == message_id
+    assert record.bookkeeping["opaque"]["message_id"] == 1779000000000000211
+    assert record.taskspec_summary["opaque"]["message_id"] == 1779000000000000212
+    assert record.state["opaque"]["message_id"] == 1779000000000000213
+    assert record.resources["opaque"]["message_id"] == 1779000000000000214
+    assert record.diagnostics["opaque"]["message_id"] == 1779000000000000215
+    assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_id
+
+    [deferred_record] = store.list_pending_deferred_writes(limit=10)
+    assert deferred_record.body_json == str(deferred_row[0])
+    deferred_body = deferred_record.body()
+    assert deferred_body["subject"]["message_id"] == message_id
+    assert deferred_body["monitor"]["message_id"] == 1779000000000000216
+    assert deferred_body["monitor"]["first_message_id"] == message_id
+    assert deferred_body["monitor"]["last_message_id"] == 1779000000000000202
+    assert deferred_body["monitor"]["terminal_message_id"] == (
+        1779000000000000202
+    )
+    assert deferred_body["observations"]["message_id"] == 1779000000000000206
+    assert deferred_body["observations"]["message_ids"] == [
+        1779000000000000207
+    ]
+    assert deferred_body["taskspec"]["opaque"]["message_id"] == (
+        1779000000000000217
+    )
+
+    legacy_lifecycle = {
+        "message_id": message_id,
+        "checkpoint": {"message_id": 1779000000000000202},
+    }
+    legacy_bookkeeping = {"last_message_id": message_id}
+    legacy_deferred = {
+        "record_type": "task_lifetime_report",
+        "report_id": "task-lifetime:json-id-storage",
+        "subject": {"message_id": message_id},
+        "monitor": {
+            "message_id": 1779000000000000216,
+            "first_message_id": message_id,
+            "last_message_id": 1779000000000000202,
+            "terminal_message_id": None,
+        },
+        "observations": {
+            "message_id": 1779000000000000206,
+            "message_ids": [1779000000000000207],
+        },
+    }
+    with ctx.broker() as broker, broker.sidecar() as session:
+        session.run(
+            "UPDATE weft_monitor_task_collations "
+            "SET lifecycle_json = ?, bookkeeping_json = ? "
+            "WHERE context_key = ? AND tid = ?",
+            (
+                json.dumps(legacy_lifecycle),
+                json.dumps(legacy_bookkeeping),
+                store.context_key,
+                tid,
+            ),
+        )
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            (
+                json.dumps({"message_id": message_id}),
+                f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{WEFT_GLOBAL_LOG_QUEUE}",
+            ),
+        )
+        session.run(
+            "UPDATE weft_monitor_deferred_writes SET body_json = ? "
+            "WHERE context_key = ? AND report_id = ?",
+            (
+                json.dumps(legacy_deferred),
+                store.context_key,
+                "task-lifetime:json-id-storage",
+            ),
+        )
+
+    legacy_record = store.get_task(tid)
+    assert legacy_record is not None
+    assert legacy_record.lifecycle["message_id"] == message_id
+    assert legacy_record.lifecycle["checkpoint"]["message_id"] == (
+        1779000000000000202
+    )
+    assert legacy_record.bookkeeping["last_message_id"] == message_id
+    assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_id
+    [legacy_deferred_record] = store.list_pending_deferred_writes(limit=10)
+    assert legacy_deferred_record.body() == legacy_deferred
 
 
 def test_monitor_store_upsert_is_replay_safe_and_preserves_terminal(tmp_path) -> None:

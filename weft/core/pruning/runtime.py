@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from simplebroker import format_message_id
 from simplebroker.ext import BrokerError
 from weft._constants import (
     EXIT_ERROR,
@@ -896,7 +897,7 @@ def _candidate_record(
         "run_id": result.run_id,
         "emitted_at": time.time_ns(),
         "queue": candidate.queue,
-        "message_id": candidate.message_id,
+        "message_id": format_message_id(candidate.message_id),
         "key": candidate.key,
         "classification": candidate.classification,
         "reason": candidate.reason,

@@ -203,7 +203,7 @@ class QueuesNamespace:
         name: str,
         *,
         all_messages: bool = False,
-        message_id: int | None = None,
+        message_id: int | str | None = None,
         after: int | None = None,
         before: int | None = None,
     ) -> list[QueueEntry]:
@@ -227,7 +227,7 @@ class QueuesNamespace:
         name: str,
         *,
         all_messages: bool = False,
-        message_id: int | None = None,
+        message_id: int | str | None = None,
         after: int | None = None,
         before: int | None = None,
     ) -> list[QueueEntry]:
@@ -247,7 +247,7 @@ class QueuesNamespace:
         *,
         limit: int | None = None,
         all_messages: bool = False,
-        message_id: int | None = None,
+        message_id: int | str | None = None,
         after: int | None = None,
         before: int | None = None,
     ) -> QueueMoveReceipt:
@@ -314,7 +314,7 @@ class QueuesNamespace:
         name: str | None = None,
         *,
         all_queues: bool = False,
-        message_id: int | None = None,
+        message_id: int | str | None = None,
     ) -> QueueDeleteReceipt:
         return queues.delete_queue_messages(
             self.client.context,

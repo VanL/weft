@@ -136,6 +136,8 @@ Current options:
 - `--context PATH`
 - `--json`
 - `--verbose` / `-v`
+- verbose manager-start JSON formats its registry-row `timestamp` under the
+  [SB-0.2] external string rule; the Python manager record remains integer
 - `--stream-output` / `--no-stream-output`
 - `--wait` / `--no-wait`
 - `--interactive`
@@ -319,6 +321,11 @@ This exists so operators can supervise Weft under tools like `systemd`,
 Operational-log records are written to the manager process log, are bounded
 diagnostics, and are not `weft.log.tasks` lifecycle records or status truth.
 
+Foreground manager operational JSONL formats only its owned broker-ID fields
+`message_timestamp`, `observed_timestamp`, and `superseded_message_id` as
+[SB-0.2] strings when present. Its event clock `timestamp_ns`, counts, PIDs,
+TIDs, and all other diagnostic fields retain their current types.
+
 Plan backlink:
 [`2026-05-13-manager-replace-start-serve-plan.md`](../plans/2026-05-13-manager-replace-start-serve-plan.md).
 
@@ -351,8 +358,11 @@ other commands operate within an existing root.
 
 ### `status` - Show project status [CLI-1.2.1]
 
-_Implementation mapping_: `weft/commands/status.py` `cmd_status()`, registered
-in `weft/cli/app.py` as `weft status`.
+_Implementation mapping_: `weft/commands/system.py` owns status collection and
+the explicit task/manager/service JSON projections;
+`weft/commands/status.py` re-exports `cmd_status()` and the shared task
+projection; `weft/cli/app.py` registers `weft status` and reuses that task
+projection for task list/status JSON.
 
 Current behavior:
 
@@ -360,6 +370,27 @@ Current behavior:
 - shows manager registry information and task snapshots
 - shows manager-owned service snapshots for heartbeat and TaskMonitor
 - can emit JSON
+- external status JSON uses [SB-0.2] strings for
+  `broker.last_timestamp`, manager `timestamp`/`_pong_live_at` and owned
+  `metadata.supersession_observed_timestamp`, service `updated_at`, status
+  watch `timestamp`, and broker-backed task `last_timestamp` or
+  `reconciliation.observed_at`
+- task reconciliation classifications `terminal_ctrl_out`, `wrapper_lost`,
+  `result_without_terminal`, and `live_pong` carry broker-backed
+  `observed_at` when present. `claimed_result_without_terminal`,
+  `stale_created`, and `stale_liveness` observations are Unix clocks and stay
+  JSON numbers
+- task `last_timestamp` is independently classified by its source. Ordinary
+  task-log replay, including `runtime_conflict`, `stale_status_payload`,
+  `stale_liveness`, superseded manager/internal-service, and runtime-missing
+  reconciliations, retains a task-log row ID and uses [SB-0.2].
+  `terminal_monitor_store` retains a Monitor relational message ID and also
+  uses [SB-0.2]. A timestamp sourced from
+  `claimed_result_without_terminal`, `stale_created`, a pipeline-status body,
+  or a terminal control-envelope body (`ctrl_out_terminal`) is a Unix clock
+  and stays a JSON number
+- the same task projection is used by project status, `task list --json`, and
+  `task status --json`; public Python snapshots retain integer values
 - uses task-log replay plus manager/task registry queues rather than a separate
   state database
 - JSON status output includes an additive top-level `services` list. Each
@@ -479,6 +510,10 @@ Current behavior:
   `timed_out`, `error`, `observed_at`, and the matched raw `pong` payload; any
   task-registered extension data remains nested inside the PONG's `extended`
   key
+- task-ping JSON formats the top-level matched-row `observed_at` as an
+  [SB-0.2] string; the nested PONG body, including its Unix-clock `timestamp`,
+  is opaque and unchanged, and the Python command result keeps `observed_at`
+  as `int | None`
 - `weft task tid` resolves short TIDs, PID lookups, or reverse lookups via the
   TID-mapping queue
 - `weft task stop` and `weft task kill` can act on one task, all active tasks,
@@ -532,6 +567,11 @@ without stale pruning, classifies each row as live/stale/unknown/non-live,
 reports the proof source (`host-pid`, `external-supervisor`, `pong`, or registry
 metadata), and marks the selected canonical live owner. It is a diagnostic view
 of `weft.state.services`, not a fallback process table.
+
+Manager list/status JSON uses the same explicit manager-record projection as
+project status: top-level registry `timestamp`, matched-row `_pong_live_at`,
+and owned `metadata.supersession_observed_timestamp` follow [SB-0.2]. Other
+metadata, including `_service_owner_payload`, is opaque and unchanged.
 
 Pattern-based task stop/kill reuse queue broadcast and control messages rather
 than inventing a second control channel.
@@ -660,6 +700,13 @@ Current raw queue filters and metadata helpers mirror current SimpleBroker:
   name and must reject `--all`
 - command-local JSON output follows SimpleBroker's newline-delimited JSON shape
   for raw queue commands
+
+Raw delegated queue JSON follows SimpleBroker 7 directly. Weft-owned bounded
+move/watch JSON formats only the broker-row `timestamp` with
+`simplebroker.format_message_id`. Exact Python/client `message_id` arguments
+accept `int | str`, normalize immediately through [SB-0.2], and pass only an
+integer to queue operations. Human queue output and Python `QueueEntry`
+timestamps remain unchanged.
 
 ### Named Endpoint Queue Ergonomics [CLI-4.1]
 
@@ -822,9 +869,11 @@ Current behavior:
   be treated like secret material.
 - `system load --dry-run -i FILE` validates a dump without writing. Plain
   `system load -i FILE` imports the dump.
-- dump message records must carry a positive integer `id`; `system load`
-  rejects reserved ID `0` during validation before any writes, including in
-  dry-run validation
+- dump header `last_ts` and message `id` use the [SB-0.2] canonical string
+  representation when written. `system load` accepts canonical strings or
+  exact JSON integer tokens and immediately normalizes them to integers;
+  message ID `0` is rejected before any write, including dry-run validation,
+  while header `last_ts=0` is valid
 - `system load` preserves included broker message IDs during import and
   returns exit code `3` on alias conflicts before writes begin. If exact
   message-ID import is unavailable for the active backend, load fails before
@@ -837,6 +886,16 @@ Current behavior:
 - `system task-monitor --sink disk --json` emits a final command summary
   on stdout; `--sink stdout --json` is rejected because stdout is reserved for
   task-monitor JSONL records in stdout-sink mode
+- foreground task-monitor external JSONL and its disk-mode JSON command
+  summary format task-log `last_task_log_timestamp` and
+  `checkpoint_timestamp` with [SB-0.2]. Task summaries also format
+  `reconciliation.observed_at` for `terminal_ctrl_out`, `wrapper_lost`,
+  `result_without_terminal`, and `live_pong`; wall-clock reconciliation stays
+  numeric. The checkpoint file and Python `TaskMonitorResult` remain
+  integer-valued
+- runtime/retention prune candidate JSONL and archives format candidate
+  `message_id` with [SB-0.2]; counts, ages, run clocks, and human output remain
+  numeric/current
 - task-monitor checkpoints under `.weft/state/task-monitor/` are
   operational cursors only and are not read by `status`, `task status`, or
   `result`
@@ -886,6 +945,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)

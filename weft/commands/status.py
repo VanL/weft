@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .system import (
     _pid_alive,
+    _task_snapshot_to_json_dict,
     cmd_status,
     collect_status,
     dump_system,
@@ -15,6 +16,7 @@ from .system import (
 
 __all__ = [
     "_pid_alive",
+    "_task_snapshot_to_json_dict",
     "cmd_status",
     "collect_status",
     "dump_system",

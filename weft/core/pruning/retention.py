@@ -34,6 +34,7 @@ try:
 except ImportError:  # pragma: no cover - POSIX platforms
     msvcrt = None  # type: ignore[assignment]
 
+from simplebroker import format_message_id
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
@@ -1444,7 +1445,7 @@ def _candidate_record(
         "run_id": run_id,
         "emitted_at": time.time_ns(),
         "queue": candidate.queue,
-        "message_id": candidate.message_id,
+        "message_id": format_message_id(candidate.message_id),
         "tid": candidate.tid,
         "candidate_class": candidate.candidate_class,
         "reason": candidate.reason,

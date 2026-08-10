@@ -66,6 +66,10 @@ uv add 'weft[all]'
 Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
 selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
+Weft requires SimpleBroker 7.0.0 or newer; the Postgres extra requires the
+paired `simplebroker-pg` 3.5.2 or newer. Broker message IDs stay integers in
+Python and relational storage, while external JSON and owned exact-ID fields
+inside Monitor table JSON render them as 19-digit strings.
 
 Runner extras work the same way: `weft[docker]` adds the Docker runner plugin
 plus the Docker SDK dependency, `weft[macos-sandbox]` adds the macOS sandbox

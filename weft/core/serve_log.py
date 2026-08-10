@@ -16,6 +16,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from simplebroker import format_message_id
 from weft._constants import (
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     MANAGER_SERVE_LOG_CANDIDATE_LIMIT,
@@ -129,7 +130,17 @@ def build_serve_log_record(
         "required_level": required_level,
     }
     if fields:
-        record.update(truncate_serve_log_value(dict(fields)))
+        projected_fields = truncate_serve_log_value(dict(fields))
+        if isinstance(projected_fields, dict):
+            for field in (
+                "message_timestamp",
+                "observed_timestamp",
+                "superseded_message_id",
+            ):
+                message_id = projected_fields.get(field)
+                if message_id is not None:
+                    projected_fields[field] = format_message_id(message_id)
+            record.update(projected_fields)
     return record
 
 

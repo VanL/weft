@@ -35,6 +35,11 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
+Weft requires SimpleBroker 7.0.0 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 3.5.2 or newer. These paired
+floors provide the supported public message-ID formatter and matching backend
+contract.
+
 _Implementation mapping_: `weft/commands/queue.py` delegates to
 `simplebroker.commands`; `weft/context.py` injects the resolved broker target;
 `weft/core/tasks/base.py` and `weft/core/tasks/multiqueue_watcher.py` build
@@ -58,8 +63,10 @@ Current consequences:
 SimpleBroker message IDs are durable and ordered. Weft relies on that instead
 of generating a second ID space.
 
-_Implementation mapping_: import validation in
-`weft/commands/_load_support.py`; runtime ID use in
+_Implementation mapping_: exact input normalization in
+`weft/helpers/message_ids.py`, `weft/commands/_load_support.py`, and
+`weft/commands/queue.py`; explicit external projections in the owning
+command/CLI, Monitor, pruning, and serve-log modules; runtime ID use in
 `weft/core/tasks/base.py` and `weft/core/manager.py`.
 
 Current use:
@@ -72,6 +79,23 @@ Current use:
 SimpleBroker reserves message ID `0` as its lower-bound/checkpoint origin.
 Weft may select legacy zero-ID rows for recovery where SimpleBroker permits it,
 but it must not create or import a message with ID `0`.
+
+SimpleBroker message IDs remain integers in Python, broker/backend columns,
+Monitor relational message-ID columns, and internal process, control, and work
+protocols. At an external JSON boundary, or in a Weft-owned exact-ID field
+embedded in JSON text stored in a Monitor table, every non-null exact
+SimpleBroker message ID is a 19-character ASCII decimal string produced by the
+public `simplebroker.format_message_id` helper; null remains null. Monitor
+readers immediately normalize those owned stored strings back to integers.
+Counts, PIDs, TIDs, Unix-clock measurements, and opaque or internal JSON retain
+their owned types. Formatting is explicit by field and semantic source; Weft
+does not install a generic encoder or traverse arbitrary mappings by key name.
+
+Weft-owned exact-ID input boundaries accept either an integer or the canonical
+19-character string. They validate with the supported formatter, require a
+string input to equal the formatter's canonical result, and immediately
+normalize the accepted value to `int`. Range cursors retain their existing
+contracts.
 
 ### Safe Patterns [SB-0.3]
 
@@ -86,6 +110,13 @@ _Implementation mapping_: reservation and recovery wiring in
 `weft/core/tasks/base.py`; watcher scheduling in
 `weft/core/tasks/multiqueue_watcher.py`; queue passthrough in
 `weft/commands/queue.py`.
+
+Structured JSON stored inside broker messages is internal data, not an
+external JSON formatting boundary. Task/control/PONG bodies, TaskSpecs,
+manager service-owner payloads, pipeline events, diagnostics, and extension
+payloads are not recursively rewritten. Only the explicitly owned external
+fields named by the CLI and state-observation specs, plus the exact Monitor
+table JSON-at-rest fields named in [SB-0.4a], use [SB-0.2] formatting.
 
 The reason this matters is failure visibility. Weft wants failed or interrupted
 work to remain inspectable rather than being silently discarded.
@@ -155,6 +186,23 @@ Most Weft runtime state is queue-shaped, but Weft may keep narrow
 non-queue operational tables beside SimpleBroker tables when the state is a
 derived read model rather than queue data. The current example is the
 TaskMonitor durable collation store:
+
+Monitor relational message-ID and checkpoint columns remain integers. Exact
+broker IDs embedded in Monitor-owned JSON text are canonical strings at rest:
+checkpoint metadata `value_json.message_id`, collation
+`lifecycle_json.message_id`, nested pipeline
+`lifecycle_json.checkpoint.message_id`, collation
+`bookkeeping_json.last_message_id`, deferred
+`body_json.subject.message_id`, `body_json.monitor.message_id`,
+`body_json.monitor.first_message_id`, `body_json.monitor.last_message_id`,
+nullable `body_json.monitor.terminal_message_id`,
+`body_json.observations.message_id`, and every
+`body_json.observations.message_ids[]`. Reads normalize those exact fields back
+to integers before they enter Python domain objects. Other task, state,
+resource, diagnostic, and extension mappings remain opaque and are not
+traversed. External Monitor JSONL is projected at the final write or
+durable-deferred handoff boundary, and deterministic lifetime-report identity
+is computed before that projection.
 
 - `weft_monitor_meta`
 - `weft_monitor_task_collations`
@@ -399,13 +447,17 @@ Current implications:
 - Weft's large-output handling is a task-runtime feature, not a generic queue
   passthrough feature.
 - Weft dump/load uses SimpleBroker `simplebroker-dump` v1 NDJSON and preserves
-  included broker message IDs through SimpleBroker's public import path. In
-  the dump file, message records carry that value as `id`. Those IDs are task
-  IDs for spawn requests, so an import path that cannot perform exact-ID
-  import must fail before writes begin rather than silently allocate new
-  message IDs.
-- Dump message records must carry positive integer IDs. Load rejects reserved
-  ID `0` during validation, before aliases or messages are written.
+  included broker message IDs through SimpleBroker's public import path. The
+  header `last_ts` and message `id` fields are canonical 19-character strings
+  when written. Those message IDs are task IDs for spawn requests, so an
+  import path that cannot perform exact-ID import must fail before writes
+  begin rather than silently allocate new message IDs.
+- Load accepts a canonical string or an exact JSON integer token for header
+  `last_ts` and message `id`, validates and immediately normalizes either form
+  to an internal integer, and rebuilds canonical string records for
+  SimpleBroker apply. Message ID `0` is rejected during validation before
+  aliases or messages are written; header `last_ts=0` remains valid. Dump
+  version 1 is unchanged and no compatibility-writer branch is added.
 - Spawn-request submission writes generated and caller-supplied TIDs through
   SimpleBroker's public `insert_messages()` API rather than rewriting the
   TaskSpec TID.
@@ -423,6 +475,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-07-31-simplebroker-6-api-migration-plan.md`](../plans/2026-07-31-simplebroker-6-api-migration-plan.md)

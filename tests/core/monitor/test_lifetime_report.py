@@ -19,6 +19,8 @@ from weft.core.monitor.lifetime_report import (
     build_collation_lifetime_report,
     build_inferred_tid_lifetime_report,
     build_raw_row_lifetime_report,
+    project_lifetime_report_for_external_json,
+    restore_lifetime_report_from_external_json,
 )
 from weft.core.monitor.store import MonitorTaskCollationRecord
 from weft.core.pruning.models import CleanupCandidate
@@ -151,6 +153,69 @@ def test_lifetime_report_id_is_stable_across_emit_times() -> None:
         first,
         source_policy=TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
     )
+
+
+def test_lifetime_external_projection_is_non_mutating_and_preserves_identity() -> None:
+    report = build_collation_lifetime_report(
+        _record(),
+        monitor_tid="1779000000000000999",
+        emitted_at_ns=1779000000000000100,
+        close_reason="terminal",
+        observations={
+            "message_id": 1779000000000000004,
+            "message_ids": [
+                1779000000000000005,
+                1779000000000000006,
+            ],
+            "observed_at_ns": 1779000000000000007,
+            "opaque": {"message_id": 1779000000000000008},
+        },
+    )
+    report["subject"]["message_id"] = 1779000000000000009
+    report["monitor"]["message_id"] = 1779000000000000010
+    report["taskspec"]["opaque_message_id"] = 1779000000000000011
+
+    projected = project_lifetime_report_for_external_json(report)
+    restored = restore_lifetime_report_from_external_json(projected)
+
+    assert projected is not report
+    assert projected["report_id"] == report["report_id"]
+    assert report["monitor"]["first_message_id"] == 1779000000000000001
+    assert report["monitor"]["last_message_id"] == 1779000000000000003
+    assert report["monitor"]["terminal_message_id"] == 1779000000000000003
+    assert report["observations"]["message_id"] == 1779000000000000004
+    assert report["observations"]["message_ids"] == [
+        1779000000000000005,
+        1779000000000000006,
+    ]
+    assert projected["subject"]["message_id"] == "1779000000000000009"
+    assert projected["monitor"]["message_id"] == "1779000000000000010"
+    assert projected["monitor"]["first_message_id"] == "1779000000000000001"
+    assert projected["monitor"]["last_message_id"] == "1779000000000000003"
+    assert projected["monitor"]["terminal_message_id"] == "1779000000000000003"
+    assert projected["observations"]["message_id"] == "1779000000000000004"
+    assert projected["observations"]["message_ids"] == [
+        "1779000000000000005",
+        "1779000000000000006",
+    ]
+    assert projected["observations"]["observed_at_ns"] == 1779000000000000007
+    assert projected["observations"]["opaque"]["message_id"] == (
+        1779000000000000008
+    )
+    assert projected["taskspec"]["opaque_message_id"] == 1779000000000000011
+    assert projected["emitted_at_ns"] == 1779000000000000100
+    assert restored["report_id"] == report["report_id"]
+    assert restored["subject"]["message_id"] == 1779000000000000009
+    assert restored["monitor"]["message_id"] == 1779000000000000010
+    assert restored["monitor"]["first_message_id"] == 1779000000000000001
+    assert restored["monitor"]["last_message_id"] == 1779000000000000003
+    assert restored["monitor"]["terminal_message_id"] == 1779000000000000003
+    assert restored["observations"]["message_id"] == 1779000000000000004
+    assert restored["observations"]["message_ids"] == [
+        1779000000000000005,
+        1779000000000000006,
+    ]
+    assert restored["taskspec"]["opaque_message_id"] == 1779000000000000011
 
 
 @pytest.mark.parametrize(
