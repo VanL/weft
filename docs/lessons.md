@@ -1114,3 +1114,16 @@ index is not a dated section and does not count toward the coalescing trigger.
   restrict only the fix operation to RUF100. Reconcile the suppression index
   immediately. If the changed-directive count differs from the measured
   candidate-policy inventory, reject the batch before review.
+
+## 2026-08-10 Postgres Test Isolation Does Not Eliminate Host Contention
+
+- A readiness probe inside the official Postgres container can accept the
+  entrypoint's temporary Unix-socket bootstrap server before database creation
+  and its planned restart finish. Test wrappers must prove the published host
+  TCP path is accepting connections and run a query against the target database
+  before launching clients.
+- Unique container names, random host ports, and separate database names prevent
+  cross-project schema interference. They do not isolate CPU, Docker daemon, or
+  scheduler load. When a concurrent suite changes only fixed-deadline outcomes,
+  distinguish shared-host contention from shared-database state with direct
+  container/port/database evidence before changing production behavior.

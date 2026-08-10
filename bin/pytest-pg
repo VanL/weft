@@ -11,6 +11,7 @@ import argparse
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -109,6 +110,16 @@ def _docker_port(container_name: str) -> str | None:
     return output.rsplit(":", 1)[1]
 
 
+def _host_port_accepts_connections(port: str) -> tuple[bool, str]:
+    """Return whether the published Postgres port accepts host TCP connections."""
+
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0):
+            return True, ""
+    except OSError as exc:
+        return False, str(exc)
+
+
 def _cleanup_container(container_name: str) -> None:
     """Remove the temporary Docker container if it still exists."""
 
@@ -160,16 +171,26 @@ def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) ->
             time.sleep(1.0)
             continue
 
+        host_ready, host_error = _host_port_accepts_connections(port)
+        if not host_ready:
+            last_error = (
+                f"waiting for host connection to 127.0.0.1:{port}: {host_error}"
+            )
+            time.sleep(1.0)
+            continue
+
         result = subprocess.run(
             [
                 "docker",
                 "exec",
                 container_name,
-                "pg_isready",
+                "psql",
                 "-U",
                 POSTGRES_USER,
                 "-d",
                 POSTGRES_DB,
+                "-tAc",
+                "SELECT 1",
             ],
             cwd=ROOT,
             check=False,
@@ -178,12 +199,10 @@ def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) ->
             encoding="utf-8",
             errors="replace",
         )
-        if result.returncode == 0:
+        if result.returncode == 0 and result.stdout.strip() == "1":
             return port
 
-        last_error = (
-            result.stderr.strip() or result.stdout.strip() or "pg_isready failed"
-        )
+        last_error = result.stderr.strip() or result.stdout.strip() or "psql failed"
         time.sleep(1.0)
 
     raise RuntimeError(f"Postgres did not become ready: {last_error}")

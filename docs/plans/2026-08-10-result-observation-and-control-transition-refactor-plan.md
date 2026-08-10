@@ -1,6 +1,6 @@
 # Result Observation And Control Transition Refactor Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]; docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]; docs/specifications/07-System_Invariants.md [OBS.3], [OBS.12a], [OBS.14]; docs/specifications/08-Testing_Strategy.md [TS-1], [TS-3], [TS-3.1]; docs/specifications/09-Implementation_Plan.md [IP-1.1]; docs/specifications/10-CLI_Interface.md [CLI-1.2], [CLI-1.3]
 Superseded by: none
 
@@ -1168,12 +1168,14 @@ Retention has no production rollback because it makes no production change.
 | 2026-08-10 | final review | Authenticated Claude read-only review of code, tests, registry, fixtures, and spec backlinks | `PASS`; three-mechanism budget and behavior/order preservation confirmed |
 | 2026-08-10 | final review | Clean repository review of the final source/test/suppression/spec/plan state | `READY`; no blocking findings and no temporary mutation remains |
 | 2026-08-10 | deterministic gates | Focused result/control, full default pytest, all-markers pytest, mypy, Ruff, RUF100, format, lock, plan/spec hygiene, DOM-15, suppression, doc paths, Backstitch, diff check | focused passed; default 3,659 passed/3 skipped; all-markers 3,660 passed/14 skipped; all remaining deterministic gates passed; doc paths retained the same 8 unrelated claims; Backstitch remained 45/1,025/610 with no keyed addition |
-| 2026-08-10 | PostgreSQL gate | `pytest-pg --all` with logical workers and four workers; exact failures rerun in fresh containers | full gate blocked by shared-schema interference: init test failed once and pipeline owner-event test failed twice; each exact test passed immediately in isolation; one-worker diagnostic was clean but impractically slow and stopped at 1% |
+| 2026-08-10 | PostgreSQL diagnosis | Weft and SimpleBroker wrappers inspected during overlapping runs | containers were independent by unique name, random host port, and database (`weft_test` versus `simplebroker_test`); concurrent suites still shared host CPU and scheduling |
+| 2026-08-10 | PostgreSQL readiness | Red/green wrapper proof plus actual container startup | in-container `pg_isready` could accept the official image's temporary Unix-socket bootstrap server before its planned restart; readiness now requires the published host TCP port and `SELECT 1` against `weft_test`; 27 wrapper tests passed |
+| 2026-08-10 | PostgreSQL control test | Full gate failure reproduced in the focused TaskMonitor proof, then the owning module rerun | the test assumed one waiter wake and one reactor turn exposed its exact PONG even though waiters are hints; bounded observation of the PONG passed, then all 136 TaskMonitor tests passed with four workers |
+| 2026-08-10 | PostgreSQL gate | `./.venv/bin/python bin/pytest-pg --all` at the wrapper's default logical parallelism | 3,600 passed, 12 skipped in 240.97s |
 
-Completion status remains `draft` solely because the exact full PostgreSQL gate
-did not pass. Implementation, review, suppression reconciliation, traceability,
-and every deterministic gate are complete. Do not change the plan or README to
-`completed` until `./.venv/bin/python bin/pytest-pg --all` passes as a full run.
+Completion status is `completed`. Implementation, review, suppression
+reconciliation, traceability, deterministic gates, and the exact full
+PostgreSQL gate are complete.
 
 ## 19. Mechanism Ledger
 

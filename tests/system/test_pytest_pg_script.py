@@ -503,6 +503,59 @@ def test_start_postgres_container_keeps_container_until_cleanup(
     assert "--rm" not in docker_run
 
 
+def test_wait_for_postgres_ignores_unpublished_entrypoint_bootstrap_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness requires the published server and target database."""
+
+    pytest_pg = _load_pytest_pg_module()
+    commands: list[list[str]] = []
+    host_checks: list[str] = []
+    host_results = iter(
+        (
+            (False, "connection refused"),
+            (True, ""),
+        )
+    )
+
+    def fake_run(
+        cmd: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        if "psql" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="1\n", stderr="")
+        raise AssertionError(f"unexpected readiness command: {cmd}")
+
+    def host_ready(port: str) -> tuple[bool, str]:
+        host_checks.append(port)
+        return next(host_results)
+
+    monkeypatch.setattr(pytest_pg, "_docker_port", lambda _name: "54321")
+    monkeypatch.setattr(pytest_pg, "_host_port_accepts_connections", host_ready)
+    monkeypatch.setattr(pytest_pg.subprocess, "run", fake_run)
+    monkeypatch.setattr(pytest_pg.time, "sleep", lambda _seconds: None)
+
+    port = pytest_pg._wait_for_postgres("weft-pg-test-example")
+
+    assert port == "54321"
+    assert host_checks == ["54321", "54321"]
+    assert commands == [
+        [
+            "docker",
+            "exec",
+            "weft-pg-test-example",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "weft_test",
+            "-tAc",
+            "SELECT 1",
+        ],
+    ]
+
+
 def test_print_container_logs_includes_stdout_and_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

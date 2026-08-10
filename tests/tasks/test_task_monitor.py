@@ -7719,7 +7719,7 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
 
     task = TaskMonitor(db_path, spec, config=config)
-    responses: list[dict[str, object]] = []
+    pong: dict[str, object] | None = None
     try:
         task.process_once()
         drive_task_monitor_until_idle(task)
@@ -7732,18 +7732,24 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
 
         monkeypatch.setattr(task_monitor_mod, "run_task_monitor_cleanup", fail_cleanup)
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "cached"}))
-        task.wait_for_activity(timeout=task.next_wait_timeout())
-        task.process_once()
-        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        deadline = time.monotonic() + 3.0
+        while pong is None and time.monotonic() < deadline:
+            task.wait_for_activity(timeout=min(0.1, task.next_wait_timeout()))
+            task.process_once()
+            responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+            pong = next(
+                (
+                    response
+                    for response in responses
+                    if response["command"] == CONTROL_PING
+                    and response.get("request_id") == "cached"
+                ),
+                None,
+            )
     finally:
         task.stop()
 
-    pong = next(
-        response
-        for response in responses
-        if response["command"] == CONTROL_PING
-        and response.get("request_id") == "cached"
-    )
+    assert pong is not None
     assert pong["last_cleanup_policy_stats"] == cached_policy_stats
     assert (
         pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"]["cleanup_policy_stats"]

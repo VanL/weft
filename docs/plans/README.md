@@ -23,7 +23,7 @@ There are currently 167 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-08-10-result-observation-and-control-transition-refactor-plan.md`](./2026-08-10-result-observation-and-control-transition-refactor-plan.md) | Result Observation And Control Transition Refactor Plan | `draft` | none |
+| [`2026-08-10-result-observation-and-control-transition-refactor-plan.md`](./2026-08-10-result-observation-and-control-transition-refactor-plan.md) | Result Observation And Control Transition Refactor Plan | `completed` | none |
 | [`2026-08-08-registry-selection-pruning-authority-refactor-plan.md`](./2026-08-08-registry-selection-pruning-authority-refactor-plan.md) | Registry Selection And Pruning Authority Refactor Plan | `completed` | none |
 | [`2026-08-07-ruff-suppression-registry-extraction-plan.md`](./2026-08-07-ruff-suppression-registry-extraction-plan.md) | Ruff Suppression Registry Extraction Plan | `completed` | none |
 | [`2026-08-05-ruff-stable-default-lint-expansion-plan.md`](./2026-08-05-ruff-stable-default-lint-expansion-plan.md) | Ruff Stable-Default Lint Expansion Plan | `completed` | none |
