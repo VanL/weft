@@ -344,16 +344,20 @@ def test_launch_pytest_process_isolates_ctrl_c_on_current_platform(
         assert recorded["kwargs"]["start_new_session"] is True
 
 
-def test_worker_count_helper_returns_logical_cpu_count_plus_extra(
+def test_worker_count_helper_caps_logical_cpu_count_plus_extra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The helper should intentionally oversubscribe visible logical CPUs."""
+    """The helper should oversubscribe small hosts without exceeding 12 workers."""
 
     worker_count = _load_worker_count_module()
-    monkeypatch.setattr(worker_count.os, "cpu_count", lambda: 16)
 
-    assert worker_count.worker_count(extra=1) == 17
-    assert worker_count.worker_count(extra=2) == 18
+    monkeypatch.setattr(worker_count.os, "cpu_count", lambda: 8)
+    assert worker_count.worker_count(extra=1) == 9
+    assert worker_count.worker_count(extra=2) == 10
+
+    monkeypatch.setattr(worker_count.os, "cpu_count", lambda: 16)
+    assert worker_count.worker_count(extra=1) == 12
+    assert worker_count.worker_count(extra=2) == 12
 
 
 def test_worker_count_helper_writes_github_env(

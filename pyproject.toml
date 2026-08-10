@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft"
-version = "0.9.94"
+version = "0.9.95"
 description = "The durable task substrate for agent systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -43,32 +43,32 @@ pg = [
     "simplebroker-pg>=3.5.2",
 ]
 docker = [
-    "weft-docker>=0.9.71",
+    "weft-docker>=0.9.72",
 ]
 django = [
-    "weft-django>=0.9.31",
+    "weft-django>=0.9.32",
 ]
 django-channels = [
-    "weft-django[channels]>=0.9.31",
+    "weft-django[channels]>=0.9.32",
 ]
 macos-sandbox = [
-    "weft-macos-sandbox>=0.6.0",
+    "weft-macos-sandbox>=0.6.1",
 ]
 microsandbox = [
-    "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
+    "weft-microsandbox>=0.5.2; platform_system != 'Windows'",
 ]
 all = [
     "simplebroker-pg>=3.5.2",
-    "weft-docker>=0.9.71",
-    "weft-django>=0.9.31",
-    "weft-macos-sandbox>=0.6.0",
-    "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
+    "weft-docker>=0.9.72",
+    "weft-django>=0.9.32",
+    "weft-macos-sandbox>=0.6.1",
+    "weft-microsandbox>=0.5.2; platform_system != 'Windows'",
 ]
 dev = [
     "simplebroker-pg>=3.5.2",
-    "weft-docker>=0.9.71",
-    "weft-macos-sandbox>=0.6.0",
-    "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
+    "weft-docker>=0.9.72",
+    "weft-macos-sandbox>=0.6.1",
+    "weft-microsandbox>=0.5.2; platform_system != 'Windows'",
     "hypothesis>=6",
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -113,7 +113,7 @@ exclude = [
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
-addopts = "-ra -q --strict-markers -m 'not slow' -n logical --dist load"
+addopts = "-ra -q --strict-markers -m 'not slow' -n logical --maxprocesses 12 --dist load"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "shared: backend-agnostic tests that should pass across supported backends",

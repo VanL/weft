@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.9.95] - 2026-08-10
 
 ### Changed
 
@@ -11,6 +11,10 @@
   table JSON, avoiding silent precision loss in JavaScript consumers. Exact
   input boundaries accept canonical strings or integer tokens and normalize
   them immediately to integers.
+- Default and release-gate pytest concurrency is capped at 12 workers. Smaller
+  hosts still use their visible logical CPU count plus the configured
+  oversubscription, while larger hosts avoid the Docker, Postgres, and scheduler
+  contention seen at higher worker counts.
 - The internal agent-session wire protocol gained an optional `diagnostics`
   mapping on final-result messages (the parsed result tuple grew from three
   to four fields). Both protocol ends ship in this package and unknown or

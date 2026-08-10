@@ -6,12 +6,15 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+from typing import Final
+
+MAX_PYTEST_XDIST_WORKERS: Final[int] = 12
 
 
 def worker_count(*, extra: int = 1) -> int:
-    """Return visible logical CPUs plus *extra*, with a minimum of one."""
+    """Return visible logical CPUs plus *extra*, capped for suite stability."""
 
-    return max(1, (os.cpu_count() or 1) + extra)
+    return min(MAX_PYTEST_XDIST_WORKERS, max(1, (os.cpu_count() or 1) + extra))
 
 
 def write_github_env(name: str, value: str) -> None:
@@ -32,7 +35,7 @@ def main() -> int:
         "--extra",
         type=int,
         default=1,
-        help="Workers to add above visible logical CPUs.",
+        help="Workers to add above visible logical CPUs before the 12-worker cap.",
     )
     parser.add_argument(
         "--github-env",
