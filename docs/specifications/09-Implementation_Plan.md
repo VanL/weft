@@ -201,6 +201,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
 - [`docs/plans/2026-07-29-task-snapshot-reducer-plan.md`](../plans/2026-07-29-task-snapshot-reducer-plan.md)
 - [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)

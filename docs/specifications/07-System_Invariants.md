@@ -869,6 +869,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md`](../plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md)
 - [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](../plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md)

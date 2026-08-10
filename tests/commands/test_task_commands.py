@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
@@ -148,18 +149,61 @@ def test_deadline_helpers_share_exact_expiry_boundary(
     assert task_cmd._deadline_expired(deadline) is expired
 
 
+@pytest.mark.parametrize(
+    ("overall_deadline", "public_deadline", "kill_deadline", "expected"),
+    [
+        (15.0, None, None, 2.0),
+        (15.0, 11.0, None, 2.0),
+        (15.0, 9.0, None, 2.0),
+        (9.0, 11.5, None, 1.5),
+        (9.0, 9.0, None, None),
+        (9.0, None, None, None),
+        (15.0, 11.0, 10.5, 0.5),
+        (15.0, None, 9.0, None),
+        (9.0, 11.5, 10.5, 1.5),
+        (9.0, 9.0, 10.5, None),
+        (9.0, 11.5, 9.0, 1.5),
+        (9.0, None, 9.0, None),
+    ],
+)
+def test_control_surface_wait_timeout_preserves_three_clock_precedence(
+    overall_deadline: float,
+    public_deadline: float | None,
+    kill_deadline: float | None,
+    expected: float | None,
+) -> None:
+    assert (
+        task_cmd._control_surface_wait_timeout(
+            overall_deadline=overall_deadline,
+            public_signal_deadline=public_deadline,
+            kill_ack_deadline=kill_deadline,
+            now=10.0,
+            interval=2.0,
+        )
+        == expected
+    )
+
+
 class _FakeQueueChangeMonitor:
     def __init__(self, queues, *, config=None) -> None:
         del config
         self.queue_names = [queue.name for queue in queues]
+        self.queue_persistence = [
+            (
+                queue.name,
+                getattr(queue, "persistent", getattr(queue, "_persistent", None)),
+            )
+            for queue in queues
+        ]
         self.wait_calls: list[float | None] = []
+        self.close_calls = 0
 
     def wait(self, timeout: float | None) -> bool:
         self.wait_calls.append(timeout)
         return False
 
     def close(self) -> None:
-        return
+        self.close_calls += 1
 
 
 def _runtime_handle(
@@ -709,12 +753,302 @@ def test_await_control_surface_uses_queue_monitor(
     assert snapshot is not None
     assert snapshot.status == "completed"
     assert len(created_monitors) == 1
-    assert created_monitors[0].queue_names == [
-        "weft.state.tid_mappings",
-        "weft.log.tasks",
-        f"T{tid}.ctrl_out",
-    ]
+    assert Counter(created_monitors[0].queue_names) == Counter(
+        [
+            "weft.state.tid_mappings",
+            "weft.log.tasks",
+            f"T{tid}.ctrl_out",
+        ]
+    )
     assert created_monitors[0].wait_calls
+
+
+def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Late TaskSpec endpoints replace the watched surface without leaking it."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    initial_ctrl_out = f"T{tid}.ctrl_out"
+    late_ctrl_out = f"custom.{tid}.ctrl_out"
+    late_pipeline_status = f"custom.{tid}.pipeline.status"
+    terminal_payload = {
+        "type": "terminal",
+        "source": "task",
+        "tid": tid,
+        "status": "cancelled",
+        "timestamp": time.time_ns(),
+    }
+    seed_queue = ctx.queue(late_ctrl_out, persistent=False)
+    try:
+        seed_queue.write("{malformed")
+        seed_queue.write(json.dumps(["not", "a", "mapping"]))
+        seed_queue.write(json.dumps(terminal_payload))
+        seed_queue.write(json.dumps({"command": "STATUS", "status": "late"}))
+    finally:
+        seed_queue.close()
+
+    class _TrackedQueue:
+        def __init__(self, queue: object, *, name: str, persistent: bool) -> None:
+            self._queue = queue
+            self.name = name
+            self.persistent = persistent
+            self.close_calls = 0
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._queue, name)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self._queue.close()  # type: ignore[attr-defined]
+
+    original_queue = type(ctx).queue
+    opened_queues: list[_TrackedQueue] = []
+
+    def _tracking_queue(
+        context: object,
+        name: str,
+        *,
+        persistent: bool = False,
+    ) -> _TrackedQueue:
+        queue = original_queue(context, name, persistent=persistent)  # type: ignore[arg-type]
+        tracked = _TrackedQueue(queue, name=name, persistent=persistent)
+        opened_queues.append(tracked)
+        return tracked
+
+    initial_taskspec: dict[str, Any] = {
+        "tid": tid,
+        "io": {"control": {"ctrl_out": initial_ctrl_out}},
+    }
+    late_taskspec = {
+        "tid": tid,
+        "name": "late-surface",
+        "spec": {"runner": {"name": "host"}},
+        "io": {
+            "control": {
+                "ctrl_in": f"custom.{tid}.ctrl_in",
+                "ctrl_out": late_ctrl_out,
+            }
+        },
+        "state": {"status": "running"},
+        "metadata": {
+            "role": "pipeline",
+            "_weft_pipeline_runtime": {"queues": {"status": late_pipeline_status}},
+        },
+    }
+    taskspecs = iter([initial_taskspec, late_taskspec])
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _FakeQueueChangeMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(type(ctx), "queue", _tracking_queue)
+    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        task_cmd,
+        "load_latest_taskspec_payload",
+        lambda *_args, **_kwargs: next(taskspecs),
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("replacement ctrl_out terminal should finish first")
+        ),
+    )
+
+    entry, snapshot = task_cmd._await_control_surface(ctx, tid)
+
+    assert entry is None
+    assert snapshot is not None
+    assert snapshot.status == "cancelled"
+    assert snapshot.name == "late-surface"
+    assert len(created_monitors) == 2
+    assert Counter(created_monitors[0].queue_names) == Counter(
+        [WEFT_TID_MAPPINGS_QUEUE, "weft.log.tasks", initial_ctrl_out]
+    )
+    assert Counter(created_monitors[1].queue_names) == Counter(
+        [
+            WEFT_TID_MAPPINGS_QUEUE,
+            "weft.log.tasks",
+            late_ctrl_out,
+            late_pipeline_status,
+        ]
+    )
+    assert Counter(created_monitors[0].queue_persistence) == Counter(
+        [
+            (WEFT_TID_MAPPINGS_QUEUE, False),
+            ("weft.log.tasks", False),
+            (initial_ctrl_out, False),
+        ]
+    )
+    assert Counter(created_monitors[1].queue_persistence) == Counter(
+        [
+            (WEFT_TID_MAPPINGS_QUEUE, False),
+            ("weft.log.tasks", False),
+            (late_ctrl_out, False),
+            (late_pipeline_status, True),
+        ]
+    )
+    assert [monitor.close_calls for monitor in created_monitors] == [1, 1]
+    assert len(opened_queues) == 7
+    assert all(queue.close_calls == 1 for queue in opened_queues)
+
+    remaining_queue = original_queue(ctx, late_ctrl_out, persistent=False)
+    try:
+        remaining = remaining_queue.peek_many(limit=10)
+    finally:
+        remaining_queue.close()
+    assert len(remaining) == 1
+    assert json.loads(str(remaining[0])) == {
+        "command": "STATUS",
+        "status": "late",
+    }
+
+
+def test_await_control_surface_public_grace_outlives_expired_kill_ack(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A later public signal keeps the expired-overall tail waiting."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    ctrl_out.write(json.dumps({"command": CONTROL_KILL, "status": "ack", "tid": tid}))
+
+    class _Clock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = _Clock()
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+
+    class _ScriptedMonitor(_FakeQueueChangeMonitor):
+        def wait(self, timeout: float | None) -> bool:
+            self.wait_calls.append(timeout)
+            if len(self.wait_calls) == 1:
+                clock.value = 1.1
+                ctrl_out.write(
+                    json.dumps({"command": "STATUS", "status": "ok", "tid": tid})
+                )
+            else:
+                clock.value = 2.2
+            return False
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _ScriptedMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(task_cmd.time, "monotonic", clock)
+    monkeypatch.setattr(task_cmd, "CONTROL_SURFACE_WAIT_INTERVAL", 1.0)
+    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        task_cmd, "load_latest_taskspec_payload", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(task_cmd, "task_status", lambda *_args, **_kwargs: None)
+
+    try:
+        entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.5)
+    finally:
+        ctrl_out.close()
+
+    assert entry is None
+    assert snapshot is None
+    assert len(created_monitors) == 1
+    assert created_monitors[0].wait_calls == [0.5, 1.0]
+
+
+def test_await_control_surface_closes_partial_replacement_on_open_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed surface replacement closes displaced and partial resources."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    initial_ctrl_out = f"T{tid}.ctrl_out"
+    late_ctrl_out = f"custom.{tid}.ctrl_out"
+    construction_error = RuntimeError("replacement queue construction failed")
+
+    class _TrackedQueue:
+        def __init__(self, queue: object, *, name: str) -> None:
+            self._queue = queue
+            self.name = name
+            self.close_calls = 0
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._queue, name)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                self._queue.close()  # type: ignore[attr-defined]
+
+    original_queue = type(ctx).queue
+    opened_queues: list[_TrackedQueue] = []
+    open_calls = 0
+
+    def _tracking_queue(
+        context: object,
+        name: str,
+        *,
+        persistent: bool = False,
+    ) -> _TrackedQueue:
+        nonlocal open_calls
+        open_calls += 1
+        if open_calls == 5:
+            raise construction_error
+        queue = original_queue(context, name, persistent=persistent)  # type: ignore[arg-type]
+        tracked = _TrackedQueue(queue, name=name)
+        opened_queues.append(tracked)
+        return tracked
+
+    initial_taskspec = {
+        "tid": tid,
+        "io": {"control": {"ctrl_out": initial_ctrl_out}},
+    }
+    late_taskspec = {
+        "tid": tid,
+        "io": {"control": {"ctrl_out": late_ctrl_out}},
+    }
+    taskspecs = iter([initial_taskspec, late_taskspec])
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _FakeQueueChangeMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(type(ctx), "queue", _tracking_queue)
+    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(
+        task_cmd,
+        "load_latest_taskspec_payload",
+        lambda *_args, **_kwargs: next(taskspecs),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        task_cmd._await_control_surface(ctx, tid)
+
+    assert exc_info.value is construction_error
+    assert open_calls == 5
+    assert len(created_monitors) == 1
+    assert created_monitors[0].close_calls == 1
+    assert len(opened_queues) == 4
+    assert all(queue.close_calls == 1 for queue in opened_queues)
 
 
 def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
@@ -760,6 +1094,41 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
     assert snapshot is not None
     assert snapshot.status == "running"
     assert snapshot.event == "task_started"
+
+
+def test_observe_control_envelopes_keeps_same_drain_observation_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public and KILL clocks retain their last per-envelope sample."""
+
+    tid = str(time.time_ns())
+    messages = iter(
+        [
+            json.dumps({"command": "STATUS", "status": "ok", "tid": tid}),
+            json.dumps({"command": CONTROL_KILL, "status": "ack", "tid": tid}),
+            json.dumps({"type": "stream", "stream": "stderr", "data": "x"}),
+            None,
+        ]
+    )
+
+    class _ScriptedQueue:
+        def read_one(self) -> str | None:
+            return next(messages)
+
+    ctrl_out: Any = _ScriptedQueue()
+    monotonic_samples = iter([10.0, 20.0, 30.0])
+    monkeypatch.setattr(task_cmd.time, "monotonic", lambda: next(monotonic_samples))
+
+    observation = task_cmd._observe_control_envelopes(
+        ctrl_out,
+        tid=tid,
+        taskspec_payload={},
+    )
+
+    assert next(messages, "exhausted") == "exhausted"
+    assert observation.terminal_snapshot is None
+    assert observation.public_signal_observed_at == 20.0
+    assert observation.kill_ack_observed_at == 30.0
 
 
 def test_await_control_surface_accepts_terminal_ctrl_out_without_log_replay(

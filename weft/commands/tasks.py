@@ -15,12 +15,13 @@ import os
 import signal
 import time
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from typing import Any
 
 import weft.commands.system as status_cmd
 import weft.commands.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
+from simplebroker import Queue
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -1198,12 +1199,160 @@ def _snapshot_from_terminal_ctrl_out(
     )
 
 
-def _await_control_surface(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-121] exception
+class _ControlSurfaceResources:
+    """Own the current control-observation queues and their change monitor."""
+
+    def __init__(
+        self,
+        ctx: WeftContext,
+        *,
+        ctrl_out_name: str,
+        pipeline_status_name: str | None,
+    ) -> None:
+        self.ctrl_out_name = ctrl_out_name
+        self.pipeline_status_name = pipeline_status_name
+        self._queues: list[Queue] = []
+        self._monitor: QueueChangeMonitor | None = None
+        try:
+            self._queues.append(ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False))
+            self._queues.append(ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False))
+            self.ctrl_out_queue = ctx.queue(ctrl_out_name, persistent=False)
+            self._queues.append(self.ctrl_out_queue)
+            if isinstance(pipeline_status_name, str) and pipeline_status_name:
+                self._queues.append(ctx.queue(pipeline_status_name, persistent=True))
+            self._monitor = QueueChangeMonitor(self._queues, config=ctx.config)
+        except BaseException:
+            self.close()
+            raise
+
+    def matches(
+        self,
+        *,
+        ctrl_out_name: str,
+        pipeline_status_name: str | None,
+    ) -> bool:
+        """Return whether names still describe this observed surface."""
+
+        return (
+            self.ctrl_out_name == ctrl_out_name
+            and self.pipeline_status_name == pipeline_status_name
+        )
+
+    def wait(self, timeout: float | None) -> bool:
+        """Wait for activity on any queue in the current surface."""
+
+        monitor = self._monitor
+        if monitor is None:
+            return False
+        return monitor.wait(timeout)
+
+    def close(self) -> None:
+        """Close the monitor before its queues, at most once per resource."""
+
+        monitor = self._monitor
+        self._monitor = None
+        if monitor is not None:
+            monitor.close()
+        queues = self._queues
+        self._queues = []
+        for queue in queues:
+            queue.close()
+
+
+@dataclass(frozen=True, slots=True)
+class _ControlSurfaceObservation:
+    """Facts observed while draining the current ctrl-out queue."""
+
+    terminal_snapshot: status_cmd.TaskSnapshot | None
+    public_signal_observed_at: float | None
+    kill_ack_observed_at: float | None
+
+
+def _observe_control_envelopes(
+    ctrl_queue: Queue,
+    *,
+    tid: str,
+    taskspec_payload: dict[str, Any],
+) -> _ControlSurfaceObservation:
+    """Drain current control facts, stopping at the first typed terminal."""
+
+    public_signal_observed_at: float | None = None
+    kill_ack_observed_at: float | None = None
+    while True:
+        ctrl_raw = ctrl_queue.read_one()
+        if ctrl_raw is None:
+            break
+        ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
+        try:
+            payload = json.loads(str(ctrl_payload))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        terminal_snapshot = _snapshot_from_terminal_ctrl_out(
+            tid=tid,
+            payload=payload,
+            taskspec_payload=taskspec_payload,
+        )
+        if terminal_snapshot is not None:
+            return _ControlSurfaceObservation(
+                terminal_snapshot,
+                public_signal_observed_at,
+                kill_ack_observed_at,
+            )
+        if ("command" in payload and "status" in payload) or (
+            payload.get("type") == "terminal" and isinstance(payload.get("status"), str)
+        ):
+            public_signal_observed_at = time.monotonic()
+        command = str(payload.get("command", "")).strip().upper()
+        status = str(payload.get("status", "")).strip().lower()
+        if command == CONTROL_KILL and status == "ack":
+            kill_ack_observed_at = time.monotonic()
+    return _ControlSurfaceObservation(
+        None,
+        public_signal_observed_at,
+        kill_ack_observed_at,
+    )
+
+
+def _control_surface_wait_timeout(
+    *,
+    overall_deadline: float,
+    public_signal_deadline: float | None,
+    kill_ack_deadline: float | None,
+    now: float,
+    interval: float,
+) -> float | None:
+    """Select the next existing control-observation wait budget."""
+
+    overall_remaining = overall_deadline - now
+    if overall_remaining <= 0:
+        if public_signal_deadline is None:
+            return None
+        public_signal_remaining = public_signal_deadline - now
+        if public_signal_remaining <= 0:
+            return None
+        return min(public_signal_remaining, interval)
+    wait_timeout = min(overall_remaining, interval)
+    if kill_ack_deadline is None:
+        return wait_timeout
+    kill_ack_remaining = kill_ack_deadline - now
+    if kill_ack_remaining <= 0:
+        return None
+    return min(wait_timeout, kill_ack_remaining)
+
+
+def _await_control_surface(
     ctx: WeftContext,
     tid: str,
     *,
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
 ) -> tuple[dict[str, Any] | None, status_cmd.TaskSnapshot | None]:
+    """Observe dynamic task-control endpoints within the bounded wait budget.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
+    """
+
     deadline = time.monotonic() + timeout
     latest_entry: dict[str, Any] | None = None
     latest_snapshot: status_cmd.TaskSnapshot | None = None
@@ -1220,14 +1369,11 @@ def _await_control_surface(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-121] excep
         else None,
     )
     public_signal_deadline: float | None = None
-    monitor_queues = [
-        ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
-        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
-        ctx.queue(watched_ctrl_out_queue, persistent=False),
-    ]
-    if isinstance(watched_pipeline_status_queue, str) and watched_pipeline_status_queue:
-        monitor_queues.append(ctx.queue(watched_pipeline_status_queue, persistent=True))
-    monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
+    resources = _ControlSurfaceResources(
+        ctx,
+        ctrl_out_name=watched_ctrl_out_queue,
+        pipeline_status_name=watched_pipeline_status_queue,
+    )
     try:
         kill_ack_deadline: float | None = None
         while True:
@@ -1240,69 +1386,37 @@ def _await_control_surface(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-121] excep
                 if isinstance(taskspec_payload, dict)
                 else None,
             )
-            if (
-                pipeline_status_queue != watched_pipeline_status_queue
-                or ctrl_out_queue != watched_ctrl_out_queue
+            if not resources.matches(
+                ctrl_out_name=ctrl_out_queue,
+                pipeline_status_name=pipeline_status_queue,
             ):
-                monitor.close()
-                for queue in monitor_queues:
-                    queue.close()
-                monitor_queues = [
-                    ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
-                    ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
-                    ctx.queue(ctrl_out_queue, persistent=False),
-                ]
-                if isinstance(pipeline_status_queue, str) and pipeline_status_queue:
-                    monitor_queues.append(
-                        ctx.queue(pipeline_status_queue, persistent=True)
-                    )
-                monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
-                watched_pipeline_status_queue = pipeline_status_queue
-                watched_ctrl_out_queue = ctrl_out_queue
-
-            ctrl_queue = next(
-                (
-                    queue
-                    for queue in monitor_queues
-                    if queue.name == watched_ctrl_out_queue
-                ),
-                None,
-            )
-            while ctrl_queue is not None:
-                ctrl_raw = ctrl_queue.read_one()
-                if ctrl_raw is None:
-                    break
-                ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
-                try:
-                    payload = json.loads(str(ctrl_payload))
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                terminal_snapshot = _snapshot_from_terminal_ctrl_out(
-                    tid=tid,
-                    payload=payload,
-                    taskspec_payload=taskspec_payload
-                    if isinstance(taskspec_payload, dict)
-                    else {},
+                resources.close()
+                resources = _ControlSurfaceResources(
+                    ctx,
+                    ctrl_out_name=ctrl_out_queue,
+                    pipeline_status_name=pipeline_status_queue,
                 )
-                if terminal_snapshot is not None:
-                    return latest_entry, terminal_snapshot
-                if ("command" in payload and "status" in payload) or (
-                    payload.get("type") == "terminal"
-                    and isinstance(payload.get("status"), str)
-                ):
-                    public_signal_deadline = (
-                        time.monotonic() + CONTROL_SURFACE_WAIT_INTERVAL
-                    )
-                command = str(payload.get("command", "")).strip().upper()
-                status = str(payload.get("status", "")).strip().lower()
-                if command == CONTROL_KILL and status == "ack":
-                    kill_ack_deadline = time.monotonic() + CONTROL_SURFACE_WAIT_INTERVAL
 
-            mapping_entry = mapping_for_tid(ctx, tid)
-            if mapping_entry is not None:
-                latest_entry = mapping_entry
+            observation = _observe_control_envelopes(
+                resources.ctrl_out_queue,
+                tid=tid,
+                taskspec_payload=taskspec_payload
+                if isinstance(taskspec_payload, dict)
+                else {},
+            )
+            if observation.terminal_snapshot is not None:
+                return latest_entry, observation.terminal_snapshot
+            if observation.public_signal_observed_at is not None:
+                public_signal_deadline = (
+                    observation.public_signal_observed_at
+                    + CONTROL_SURFACE_WAIT_INTERVAL
+                )
+            if observation.kill_ack_observed_at is not None:
+                kill_ack_deadline = (
+                    observation.kill_ack_observed_at + CONTROL_SURFACE_WAIT_INTERVAL
+                )
+
+            latest_entry = mapping_for_tid(ctx, tid) or latest_entry
             snapshot = task_status(tid, context_path=ctx.root)
             if snapshot is not None:
                 latest_snapshot = snapshot
@@ -1313,27 +1427,18 @@ def _await_control_surface(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-121] excep
                     and time.monotonic() >= kill_ack_deadline
                 ):
                     return latest_entry, latest_snapshot
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                if public_signal_deadline is not None:
-                    grace_remaining = public_signal_deadline - time.monotonic()
-                    if grace_remaining > 0:
-                        monitor.wait(
-                            min(grace_remaining, CONTROL_SURFACE_WAIT_INTERVAL)
-                        )
-                        continue
+            wait_timeout = _control_surface_wait_timeout(
+                overall_deadline=deadline,
+                public_signal_deadline=public_signal_deadline,
+                kill_ack_deadline=kill_ack_deadline,
+                now=time.monotonic(),
+                interval=CONTROL_SURFACE_WAIT_INTERVAL,
+            )
+            if wait_timeout is None:
                 return latest_entry, latest_snapshot
-            wait_interval = min(remaining, CONTROL_SURFACE_WAIT_INTERVAL)
-            if kill_ack_deadline is not None:
-                kill_ack_remaining = kill_ack_deadline - time.monotonic()
-                if kill_ack_remaining <= 0:
-                    return latest_entry, latest_snapshot
-                wait_interval = min(wait_interval, kill_ack_remaining)
-            monitor.wait(wait_interval)
+            resources.wait(wait_timeout)
     finally:
-        monitor.close()
-        for queue in monitor_queues:
-            queue.close()
+        resources.close()
 
 
 def _latest_task_entry(

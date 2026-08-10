@@ -886,6 +886,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
 - [`docs/plans/2026-07-31-simplebroker-6-api-migration-plan.md`](../plans/2026-07-31-simplebroker-6-api-migration-plan.md)
 - [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
