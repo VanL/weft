@@ -206,11 +206,12 @@ def test_build_context_discovers_existing_project(tmp_path: Path) -> None:
     """Project databases are discovered via Weft-scoped SimpleBroker config."""
     root = prepare_project_root(tmp_path)
     root_ctx = build_context(spec_context=root)
-    _write_broker_project_config(
-        root,
-        backend="sqlite",
-        target="broker.db",
-    )
+    if root_ctx.database_path is not None:
+        _write_broker_project_config(
+            root,
+            backend="sqlite",
+            target=root_ctx.database_path.name,
+        )
     nested_dir = tmp_path / "a" / "b" / "c"
     nested_dir.mkdir(parents=True)
 
@@ -420,12 +421,13 @@ def test_build_context_discovers_existing_project_with_custom_weft_directory_nam
 
     root = prepare_project_root(tmp_path)
     root_ctx = build_context(spec_context=root)
-    _write_broker_project_config(
-        root,
-        backend="sqlite",
-        target="broker.db",
-        config_dir=".engram",
-    )
+    if root_ctx.database_path is not None:
+        _write_broker_project_config(
+            root,
+            backend="sqlite",
+            target=root_ctx.database_path.name,
+            config_dir=".engram",
+        )
     nested_dir = tmp_path / "a" / "b" / "c"
     nested_dir.mkdir(parents=True)
 
@@ -653,6 +655,11 @@ def test_build_context_empty_config_ignores_root_simplebroker_config(
 ) -> None:
     root = (tmp_path / "root-simplebroker-config").resolve()
     root.mkdir(parents=True)
+    _clear_backend_part_env(monkeypatch)
+    monkeypatch.delenv("WEFT_BACKEND", raising=False)
+    monkeypatch.delenv("WEFT_BACKEND_TARGET", raising=False)
+    monkeypatch.delenv("BROKER_BACKEND", raising=False)
+    monkeypatch.delenv("BROKER_BACKEND_TARGET", raising=False)
     _write_broker_project_config(
         root,
         backend="sqlite",

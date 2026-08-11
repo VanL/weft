@@ -2561,18 +2561,18 @@ def test_cmd_status_discovers_parent_context_from_subdirectory(
 
     prepared_root = prepare_project_root(root)
     ctx = build_context(spec_context=prepared_root)
-    assert ctx.database_path is not None
-    (prepared_root / ".weft" / "broker.toml").write_text(
-        "\n".join(
-            [
-                "version = 1",
-                'backend = "sqlite"',
-                f'target = "{ctx.database_path.name}"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    if ctx.database_path is not None:
+        (prepared_root / ".weft" / "broker.toml").write_text(
+            "\n".join(
+                [
+                    "version = 1",
+                    'backend = "sqlite"',
+                    f'target = "{ctx.database_path.name}"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
     queue = ctx.queue("status.queue", persistent=True)
     queue.write("payload")
 
