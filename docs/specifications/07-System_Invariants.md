@@ -96,11 +96,31 @@ runtime-specific reducer instances live in modules such as
 
 ### Queue Invariants
 
-_Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/tasks/base.py`,
+_Implementation mapping_: `weft/core/taskspec/model.py`,
+`weft/core/control_messages.py`, `weft/core/tasks/base.py`,
 `weft/_constants.py`.
 
 - **QUEUE.1**: every task has one inbox, reserved queue, and outbox
 - **QUEUE.2**: every task has one `ctrl_in` and `ctrl_out`
+
+#### Strict control envelope [QUEUE.2a]
+
+Every `ctrl_in` request is the one strict control envelope: exactly `command`
+plus optional nonblank-string `request_id`, with `command` exactly one of
+`PING`, `STATUS`, `STOP`, `KILL`, `PAUSE`, or `RESUME`. Rejected rows are
+exact-acknowledged without dispatch or reply. Every reply to a valid keyed
+request echoes its `request_id`.
+
+_Implementation mapping_: `weft/core/control_messages.py::ControlRequest`,
+`weft/core/control_messages.py::encode_control_message`,
+`weft/core/control_messages.py::decode_control_object`, and
+`weft/core/control_messages.py::parse_control_request` own the wire shape;
+`weft/core/tasks/base.py::BaseTask._handle_control_message` owns exact
+acknowledgement and shared dispatch; direct codec coverage lives in
+`tests/core/test_control_messages.py`.
+
+#### Other queue invariants
+
 - **QUEUE.3**: default task-local queue names are `T{tid}.…`
 - **QUEUE.4**: delivery uses reserve/claim semantics rather than ad hoc
   destructive reads
@@ -223,7 +243,7 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
 ### Observability Invariants
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
-`weft/core/monitor/task_monitor.py`, `weft/commands/status.py`,
+`weft/core/monitor/task_monitor.py`, `weft/commands/system.py`,
 `weft/commands/task_monitor.py`, `weft/_constants.py`.
 
 - **OBS.1**: lifecycle changes are written to `weft.log.tasks`
@@ -275,9 +295,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   - **OBS.13.1**: Monitor-owned tables `weft_monitor_meta`,
     `weft_monitor_task_collations`, `weft_monitor_task_messages`, and
     `weft_monitor_deferred_writes` are derived operational state. The Monitor
-    may create, verify, and additively migrate only those tables inside an
-    already initialized Weft broker database; it must not create or initialize
-    the broker database. The store
+    may create, verify, and migrate only those tables through the supported
+    version edge inside an already initialized Weft broker database; it must
+    not create or initialize the broker database. The store
     may support command-layer derived status fallback after raw task-log
     retirement, but it must not become result authority, control authority, or
     lifecycle truth.
@@ -305,8 +325,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     retryable table state. Parents may be physically retired only after raw
     deletion, summary emission, disposition, task-local control cleanup, any
     required reserved cleanup proof, and zero remaining child refs are all
-    recorded. Parent rows already marked `raw_deleted_at_ns` while child refs
-    remain must be repaired before retirement. Orphan raw-log recovery records
+    recorded. Schema 5 parents already marked `raw_deleted_at_ns` while child
+    refs remain are normalized only by the version 5 to 6 migration; version 6
+    startup rejects that noncanonical state. Orphan raw-log recovery records
     `orphan_raw_recovery_checked_at_ns` only after proving no raw broker rows
     remain; probe/delete errors leave the family retryable, and new raw
     task-log evidence clears the marker through normal collation merge.
@@ -383,9 +404,14 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   - **OBS.13.8**: Task-log collation summaries are operational evidence about
     cleanup work performed, not durable lifecycle truth or archival records.
     User-task rows use `collation_kind=user_task`; manager, built-in service,
-    and manager-authored service rows use service classification and
-    `record_type=service_summary`; external collated JSONL keeps
-    `record_type=task_log_collated` for compatibility. In collated mode,
+    and manager-authored service rows use service classification. External
+    collated JSONL uses the same classification: task rows emit
+    `record_type=task_summary` and manager or managed-service rows emit
+    `record_type=service_summary`. The external writer does not rename both
+    classes to `task_log_collated` or add a redundant compatibility
+    discriminator. The shared external task-log schema version is 2 for
+    task-summary, service-summary, raw, and lifetime-report records after the
+    cutover. In collated mode,
     Monitor ingestion precedes raw deletion, and external summary failure
     blocks family disposition retry rather than resurrecting ingested rows. In
     raw external mode, external emit precedes raw deletion; external sink
@@ -398,9 +424,14 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     Terminal disposition may later remove residual standard `T{tid}.ctrl_in`,
     `T{tid}.ctrl_out`, and `T{tid}.inbox` queues, including visible and claimed
     rows, after required summary emission when those queues were left by forced
-    process death, cleanup failure, or older releases. Standard
+    process death or cleanup failure. Standard
     `T{tid}.outbox` is retained until task-log retention age, and standard
     `T{tid}.reserved` remains owned by the reserved cleanup policy.
+    Monitor repair handles only states reachable from the current writer and
+    current cleanup transactions, including interrupted exact deletion,
+    pre-checkpoint gaps, pending deferred writes, and forced-process residue.
+    Data written by an older Monitor schema is handled by its schema migration,
+    not by a permanent normal-cycle compatibility lane.
   - **OBS.13.10**: Built-in task-log cleanup and runtime cleanup are the only
     TaskMonitor worker lanes allowed to own broker/store cleanup effects. The
     reactor must continue servicing task-local control while either lane is in
@@ -564,7 +595,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 ### Manager Invariants
 
 _Implementation mapping_: `weft/core/manager.py`,
-`weft/core/manager_runtime.py`, `weft/core/control_probe.py`,
+`weft/core/manager_runtime.py`, `weft/core/service_convergence.py`,
+`weft/core/control_probe.py`, `weft/core/monitor/task_monitor.py`,
+`weft/commands/system.py`,
 `weft/commands/manager.py`,
 `weft/cli/run.py`, `weft/commands/serve.py`,
 `weft/core/spawn_requests.py`, `weft/helpers/__init__.py`,
@@ -574,7 +607,26 @@ _Implementation mapping_: `weft/core/manager.py`,
   loop
 - **MANAGER.2**: manager TIDs follow the same TID rules as other tasks
 - **MANAGER.3**: managers publish manager service-owner rows in
-  `weft.state.services`. A manager must treat its own active canonical service
+  `weft.state.services`. The queue stores one
+  `schema="weft.service_owner.v2"` service-owner object. Required keys are
+  `schema`, `service_key`, `service_type`, `owner_tid`, `name`, `status`,
+  `queues`, `runtime_handle`, and `metadata`. Manager rows also carry `role`
+  and `capabilities`. `queues` is the only persisted queue-name mapping. The
+  persisted object does not duplicate `owner_tid` as `tid`, copy queue names
+  to top-level fields, alias `requests` as `inbox`, or carry `legacy_role`.
+  Manager/status read models may project documented convenience fields from
+  this canonical object, but they are not alternate persisted schemas.
+  Before an existing `weft.state.services` queue is passed to manager, status,
+  or Monitor logic, the shared
+  `discard_v1_service_registry_rows(queue)` bootstrap helper scans it and
+  exact-deletes only rows whose schema discriminator is
+  `weft.service_owner.v1`. It does not parse or transform those bodies and
+  never republishes them with a fresh timestamp. A verification scan must find
+  no v1 row before bootstrap returns. Existing v2 rows and their message IDs
+  are untouched. An unknown future schema fails bootstrap. Normal service-owner
+  parsing accepts v2 only. Running managers and services rebuild discarded
+  state by publishing their own current v2 heartbeats. A manager must treat
+  its own active canonical service
   row as live while it has not unregistered and is not stopping; external
   liveness probes are for other manager records. Managers periodically refresh
   their own active row so other processes have current evidence even when no
@@ -745,13 +797,11 @@ Monitor-owned tables before exact deletion; exact raw deletion is reconciled
 by physically deleting the corresponding pending child refs from
 `weft_monitor_task_messages`; visible raw rows older than the forward Monitor
 checkpoint and missing from `weft_monitor_task_messages` are recovered by a
-bounded pre-checkpoint pass that does not move the checkpoint; legacy orphan
-raw rows for terminal/disposed families may be exact-deleted by a bounded
-recovery pass that records a completed no-row probe on the parent family;
-parent raw-deleted rows that still have child refs are repaired by a bounded
-child-ref cleanup pass; and family
-summaries/disposition can run only after the FIFO pass reaches a completed
-high-water mark
+bounded pre-checkpoint pass that does not move the checkpoint; raw rows left by
+an interrupted current cleanup transaction for terminal/disposed families may
+be exact-deleted by a bounded recovery pass that records a completed no-row
+probe on the parent family; and family summaries/disposition can run only after
+the FIFO pass reaches a completed high-water mark
 (`empty` or first too-young visible row). A batch-limited, scan-limited, or
 error-limited pass must not close a task family.
 Terminal family disposition records retryable compact table state while raw
@@ -803,8 +853,8 @@ policy. Ordinary user-task rows use `collation_kind=user_task` and
 `record_type=task_summary`. Manager, built-in service, and manager-authored
 managed-service rows use a service classification and
 `record_type=service_summary` on the task-monitor sink. External collated JSONL
-keeps its compatibility `task_log_collated` record type and carries
-`collation_kind`/`service` fields when present. Service classification must be
+uses those same `task_summary` and `service_summary` record types. It does not
+add a redundant compatibility discriminator. Service classification must be
 derived from Weft-owned role, reserved service/autostart metadata, or internal
 runtime class markers; domain-specific metadata alone must not remove failed
 work from the generic task bucket.
@@ -869,6 +919,7 @@ doc:
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)

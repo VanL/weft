@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 import sys
@@ -28,6 +29,14 @@ from weft.core.monitor.task_log_collation import CollatedMessageGroup
 from weft.core.queue_window import QueueWindowRow
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_cleanup_policy_run_is_owned_by_its_only_consumer() -> None:
+    from weft.core.monitor.policies import task_log
+
+    assert task_log.CleanupPolicyRun.__module__ == task_log.__name__
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("weft.core.monitor.policies.types")
 
 
 def _json_row(queue: str, message_id: int, payload: object) -> QueueWindowRow:

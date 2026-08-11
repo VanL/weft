@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from simplebroker import BrokerTarget
-from tests.fixtures import taskspecs as fixtures
+from tests.taskspec import fixtures
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 

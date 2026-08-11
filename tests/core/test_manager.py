@@ -75,11 +75,13 @@ from weft._constants import (
     WRAPPER_LOST_ERROR,
     load_config,
 )
+from weft.core.control_messages import encode_control_message
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
 from weft.core.monitor.task_monitor import TaskMonitor
 from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
+    project_manager_service_record,
 )
 from weft.core.spawn_requests import submit_spawn_request
 from weft.core.tasks import (
@@ -208,6 +210,16 @@ def _manager_service_payload(
         },
         runtime_handle=runtime_handle or {},
     )
+
+
+def _manager_service_record(
+    manager: Manager,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    payload = _manager_service_payload(manager, **kwargs)
+    record = project_manager_service_record(payload, timestamp=1)
+    assert record is not None
+    return record
 
 
 def _service_probe_for(
@@ -1136,7 +1148,7 @@ def test_manager_reactor_answers_ping_while_child_launch_is_active(
     assert launch_started.wait(timeout=2.0)
     assert manager._active_child_launches
 
-    ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
+    ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
     manager.process_once()
 
     responses = [json.loads(item) for item in drain(ctrl_out)]
@@ -1155,6 +1167,29 @@ def test_manager_reactor_answers_ping_while_child_launch_is_active(
 
     assert spawn_event["child_taskspec"]["name"] == "delayed-launch"
     assert not manager._active_child_launches
+
+
+def test_manager_reactor_answers_ping_while_draining(manager_setup) -> None:
+    manager, make_queue = manager_setup
+    child_tid = "1777000000000000104"
+    manager._child_processes[child_tid] = ManagedChild(
+        process=FakeLaunchProcess(pid=424244),
+        ctrl_queue=f"T{child_tid}.ctrl_in",
+        persistent=False,
+    )
+    manager._begin_graceful_shutdown(message_id=None)
+    ctrl_in = make_queue(manager._queue_names["ctrl_in"])
+    ctrl_out = make_queue(manager._queue_names["ctrl_out"])
+
+    ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during-drain"))
+    manager.process_once()
+
+    response = json.loads(str(ctrl_out.read_one()))
+    assert response["command"] == CONTROL_PING
+    assert response["request_id"] == "during-drain"
+    assert response["message"] == "PONG"
+    assert response["should_stop"] is True
+    assert response["task_status"] == "running"
 
 
 def test_manager_child_launch_admission_failure_is_returned_locally(
@@ -1554,7 +1589,6 @@ def test_manager_service_enqueue_forces_next_internal_queue_probe(
         manager._queues[
             WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
         ].handler = record_internal_spawn
-        manager._check_counter = 1
 
         assert manager._enqueue_managed_service_request(
             manager._task_monitor_service_spec()
@@ -3569,7 +3603,9 @@ def test_task_monitor_duplicate_live_candidates_get_kill_signal(
     manager._tick_internal_services(force=True)
 
     assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
-    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
+    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == encode_control_message(
+        CONTROL_KILL
+    )
     assert killed == []
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
 
@@ -3595,7 +3631,7 @@ def test_task_monitor_duplicate_manager_spawned_candidates_do_not_force_kill_raw
             tid=tid,
             runtime_handle=_host_runtime_handle(os.getpid()),
         )
-    monkeypatch.setattr(manager, "_pid_alive", lambda pid: pid is not None)
+    monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: pid is not None)
     monkeypatch.setattr(
         manager,
         "_evaluate_dispatch_ownership",
@@ -3618,7 +3654,9 @@ def test_task_monitor_duplicate_manager_spawned_candidates_do_not_force_kill_raw
     manager._tick_internal_services(force=True)
 
     assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
-    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
+    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == encode_control_message(
+        CONTROL_KILL
+    )
     assert killed == []
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
 
@@ -3681,7 +3719,9 @@ def test_task_monitor_duplicate_tracked_child_force_kills_owned_process(
         ],
     )
 
-    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
+    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == encode_control_message(
+        CONTROL_KILL
+    )
     assert killed == [(duplicate_pid, 0.2)]
 
 
@@ -3728,7 +3768,9 @@ def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
     manager._tick_internal_services(force=True)
 
     assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
-    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
+    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == encode_control_message(
+        CONTROL_KILL
+    )
     assert killed == [(duplicate_pid, 0.2)]
 
 
@@ -4619,14 +4661,55 @@ def test_manager_registry_entries(manager_setup) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     entries = [json.loads(item) for item in drain(registry_queue)]
-    relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
+    relevant = [entry for entry in entries if entry.get("owner_tid") == manager.tid]
     assert len(relevant) == 1
     assert relevant[0]["status"] == "active"
     manager.cleanup()
     entries = [json.loads(item) for item in drain(registry_queue)]
-    relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
+    relevant = [entry for entry in entries if entry.get("owner_tid") == manager.tid]
     assert len(relevant) == 1
     assert relevant[0]["status"] == "stopped"
+
+
+def test_manager_bootstrap_discards_v1_registry_rows(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    registry = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    registry.write(json.dumps({"schema": "weft.service_owner.v1"}))
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = False
+
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    try:
+        rows = [json.loads(body) for body in registry.peek_generator()]
+        assert all(row.get("schema") != "weft.service_owner.v1" for row in rows)
+        assert any(
+            row.get("schema") == SERVICE_OWNER_SCHEMA
+            and row.get("owner_tid") == manager.tid
+            for row in rows
+        )
+    finally:
+        manager.cleanup()
+
+
+def test_manager_bootstrap_rejects_future_schema_before_v1_discard(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    registry = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    v1_id = registry.write(json.dumps({"schema": "weft.service_owner.v1"}))
+    future_id = registry.write(json.dumps({"schema": "weft.service_owner.v3"}))
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = False
+
+    with pytest.raises(ValueError, match="future service-owner schema"):
+        Manager(db_path, make_manager_spec(unique_tid), config=config)
+
+    rows = list(registry.peek_generator(with_timestamps=True, include_claimed=True))
+    assert {message_id for _body, message_id in rows} == {v1_id, future_id}
 
 
 def test_manager_refreshes_active_registry_heartbeat(
@@ -4642,7 +4725,7 @@ def test_manager_refreshes_active_registry_heartbeat(
 
     after = pending_timestamps(registry_queue)
     entries = [json.loads(item) for item in drain(registry_queue)]
-    relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
+    relevant = [entry for entry in entries if entry.get("owner_tid") == manager.tid]
     assert len(before) == 1
     assert len(after) == 1
     assert after != before
@@ -4669,7 +4752,7 @@ def test_manager_supersedes_fresh_higher_tid_active_refresh(
     assert active is not None
     assert higher_tid not in active
     rows = _managed_service_owner_rows(make_queue)
-    higher_rows = [row for row in rows if row.get("tid") == higher_tid]
+    higher_rows = [row for row in rows if row.get("owner_tid") == higher_tid]
     assert [row["status"] for row in higher_rows] == [
         SERVICE_STATUS_ACTIVE,
         SERVICE_STATUS_SUPERSEDED,
@@ -4682,7 +4765,7 @@ def test_manager_supersedes_fresh_higher_tid_active_refresh(
     active = manager._active_dispatch_manager_records()
     assert active is not None
     rows = _managed_service_owner_rows(make_queue)
-    higher_rows = [row for row in rows if row.get("tid") == higher_tid]
+    higher_rows = [row for row in rows if row.get("owner_tid") == higher_tid]
     assert [row["status"] for row in higher_rows] == [
         SERVICE_STATUS_ACTIVE,
         SERVICE_STATUS_SUPERSEDED,
@@ -4701,7 +4784,7 @@ def test_manager_supersedes_fresh_higher_tid_active_refresh(
     assert active is not None
     assert higher_tid not in active
     rows = _managed_service_owner_rows(make_queue)
-    higher_rows = [row for row in rows if row.get("tid") == higher_tid]
+    higher_rows = [row for row in rows if row.get("owner_tid") == higher_tid]
     assert [row["status"] for row in higher_rows] == [
         SERVICE_STATUS_ACTIVE,
         SERVICE_STATUS_SUPERSEDED,
@@ -4769,9 +4852,9 @@ def test_manager_registry_prunes_expired_rows_on_refresh(
     assert all(entry.get("name") != "old-manager" for entry in entries)
     assert any(entry.get("name") == "task-monitor" for entry in entries)
     assert all(entry.get("owner_tid") != "not-a-tid" for entry in entries)
-    assert [entry["tid"] for entry in entries if entry.get("tid") == manager.tid] == [
-        manager.tid
-    ]
+    assert [
+        entry["owner_tid"] for entry in entries if entry.get("owner_tid") == manager.tid
+    ] == [manager.tid]
 
 
 def test_manager_publishes_inactive_when_recent_lower_canonical_manager_exists(
@@ -4796,7 +4879,7 @@ def test_manager_publishes_inactive_when_recent_lower_canonical_manager_exists(
     manager._refresh_manager_registration()
 
     entries = [json.loads(item) for item in drain(registry_queue)]
-    assert [entry["tid"] for entry in entries] == [lower_tid, manager.tid]
+    assert [entry["owner_tid"] for entry in entries] == [lower_tid, manager.tid]
     own_entry = entries[-1]
     assert own_entry["status"] == "draining"
 
@@ -4835,7 +4918,7 @@ def test_manager_registers_when_lower_canonical_manager_is_stale(
     manager._refresh_manager_registration()
 
     entries = [json.loads(item) for item in drain(registry_queue)]
-    tids = {entry["tid"] for entry in entries}
+    tids = {entry["owner_tid"] for entry in entries}
     assert lower_tid not in tids
     assert manager.tid in tids
 
@@ -4848,7 +4931,7 @@ def test_manager_leadership_ping_probe_is_nonblocking(
     lower_tid = str(int(manager.tid) - 1)
     ctrl_in_name = f"T{lower_tid}.ctrl_in"
     ctrl_out_name = f"T{lower_tid}.ctrl_out"
-    record = _manager_service_payload(
+    record = _manager_service_record(
         manager,
         tid=lower_tid,
         runtime_handle=_external_supervisor_runtime_handle(),
@@ -4890,7 +4973,7 @@ def test_manager_leadership_ping_probe_timeout_deletes_exact_ping(
     lower_tid = str(int(manager.tid) - 1)
     ctrl_in_name = f"T{lower_tid}.ctrl_in"
     ctrl_out_name = f"T{lower_tid}.ctrl_out"
-    record = _manager_service_payload(
+    record = _manager_service_record(
         manager,
         tid=lower_tid,
         runtime_handle=_external_supervisor_runtime_handle(),
@@ -4934,7 +5017,7 @@ def test_manager_leadership_probe_timeout_sweeps_own_keyed_reply(
     lower_tid = str(int(manager.tid) - 1)
     ctrl_in_name = f"T{lower_tid}.ctrl_in"
     ctrl_out_name = f"T{lower_tid}.ctrl_out"
-    record = _manager_service_payload(
+    record = _manager_service_record(
         manager,
         tid=lower_tid,
         runtime_handle=_external_supervisor_runtime_handle(),
@@ -5000,7 +5083,7 @@ def test_manager_leadership_probe_abandonment_sweeps_own_keyed_reply(
     lower_tid = str(int(manager.tid) - 1)
     ctrl_in_name = f"T{lower_tid}.ctrl_in"
     ctrl_out_name = f"T{lower_tid}.ctrl_out"
-    record = _manager_service_payload(
+    record = _manager_service_record(
         manager,
         tid=lower_tid,
         runtime_handle=_external_supervisor_runtime_handle(),
@@ -5043,7 +5126,7 @@ def test_manager_leadership_ping_probe_accepts_later_pong(
     lower_tid = str(int(manager.tid) - 1)
     ctrl_in_name = f"T{lower_tid}.ctrl_in"
     ctrl_out_name = f"T{lower_tid}.ctrl_out"
-    record = _manager_service_payload(
+    record = _manager_service_record(
         manager,
         tid=lower_tid,
         runtime_handle=_external_supervisor_runtime_handle(),
@@ -5069,7 +5152,9 @@ def test_manager_leadership_ping_probe_accepts_later_pong(
                 "requests": WEFT_SPAWN_REQUESTS_QUEUE,
                 "ctrl_in": ctrl_in_name,
                 "ctrl_out": ctrl_out_name,
+                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
                 "weft_context": str(manager._manager_context().root),
+                "should_stop": False,
             }
         )
     )
@@ -5128,7 +5213,7 @@ def test_manager_leadership_keeps_namespace_ambiguous_host_row_after_ping_timeou
     assert manager._maybe_yield_leadership(force=True) is False
     assert manager.should_stop is False
     rows = _managed_service_owner_rows(make_queue)
-    assert any(row.get("tid") == lower_tid for row in rows)
+    assert any(row.get("owner_tid") == lower_tid for row in rows)
 
 
 def test_manager_unknown_lower_owner_does_not_suppress_or_yield(
@@ -5200,7 +5285,7 @@ def test_manager_pong_from_draining_candidate_is_not_dispatch_eligible(
     manager_setup,
 ) -> None:
     manager, _make_queue = manager_setup
-    record = _manager_service_payload(
+    record = _manager_service_record(
         manager,
         tid=str(int(manager.tid) - 1),
         runtime_handle=_external_supervisor_runtime_handle(),
@@ -5533,7 +5618,9 @@ def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
             break
         messages.append(raw)
 
-    assert messages == [] or any(message == CONTROL_STOP for message in messages)
+    assert messages == [] or any(
+        message == encode_control_message(CONTROL_STOP) for message in messages
+    )
     assert not _process_running(child_info.process.pid)
 
 
@@ -5828,7 +5915,7 @@ def test_manager_cleanup_retains_live_managed_pid_after_wrapper_exit(
         "_managed_pids_for_child",
         lambda tid: {515151} if tid == "child" else set(),
     )
-    monkeypatch.setattr(manager, "_pid_alive", lambda pid: pid == 515151)
+    monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: pid == 515151)
     monkeypatch.setattr(
         manager_mod,
         "terminate_process_tree",
@@ -5867,7 +5954,7 @@ def test_manager_child_termination_uses_one_deadline_for_multiple_children(
             persistent=False,
         )
 
-    monkeypatch.setattr(manager, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(manager_mod, "pid_is_live", lambda _pid: True)
     monkeypatch.setattr(manager, "_managed_pids_for_child", lambda _tid: set())
     monkeypatch.setattr(manager_mod, "terminate_process_tree", lambda *a, **k: set())
 
@@ -5919,7 +6006,7 @@ def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> No
         timeout=30.0 if os.name == "nt" else 20.0,
     )
 
-    ctrl_in_queue.write(CONTROL_STOP)
+    ctrl_in_queue.write(encode_control_message(CONTROL_STOP))
 
     deadline = time.time() + 8.0
     while time.time() < deadline and not manager.should_stop:
@@ -5973,7 +6060,7 @@ def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
         timeout=30.0 if os.name == "nt" else 20.0,
     )
 
-    manager.handle_termination_signal(signal.SIGTERM)
+    manager.note_termination_signal(signal.SIGTERM)
 
     assert list(manager._pending_termination_sources) == [("signal", signal.SIGTERM)]
     assert manager._draining is False
@@ -6016,7 +6103,7 @@ def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
         manager._begin_shutdown_drain = fail_if_signal_handler_starts_drain  # type: ignore[method-assign]
         manager._terminate_children = fail_if_signal_handler_terminates_children  # type: ignore[method-assign]
 
-        manager.handle_termination_signal(signal.SIGTERM)
+        manager.note_termination_signal(signal.SIGTERM)
 
         assert drain_started is False
         assert list(manager._pending_termination_sources) == [
@@ -6074,7 +6161,7 @@ def test_manager_drain_timeout_force_finishes_stubborn_children(
     manager._begin_graceful_shutdown(message_id=None)
     manager.process_once()
 
-    assert ctrl_queue.read_one() == CONTROL_STOP
+    assert ctrl_queue.read_one() == encode_control_message(CONTROL_STOP)
     assert terminated is True
     assert manager.should_stop is True
     assert manager.taskspec.state.status == "cancelled"
@@ -6118,7 +6205,7 @@ def test_manager_sigusr1_keeps_kill_semantics(manager_setup) -> None:
     assert manager._child_processes, "child process should be running"
     _child_tid, child_info = next(iter(manager._child_processes.items()))
 
-    manager.handle_termination_signal(signal.SIGUSR1)
+    manager.note_termination_signal(signal.SIGUSR1)
     assert list(manager._pending_termination_sources) == [("signal", signal.SIGUSR1)]
 
     manager.process_once()
@@ -6220,7 +6307,7 @@ def test_manager_parent_loss_enters_graceful_drain_with_live_children(
         "killed",
     }
     stop_commands = drain(make_queue(child_ctrl_queue))
-    assert CONTROL_STOP in stop_commands, (
+    assert encode_control_message(CONTROL_STOP) in stop_commands, (
         f"child did not receive STOP during graceful drain: {stop_commands!r}"
     )
 
@@ -6297,7 +6384,7 @@ def test_manager_stop_command_does_not_launch_new_children_after_stop(
             manager.wait_for_activity(timeout=0.02)
     assert len(manager._child_processes) == 1
 
-    ctrl_in_queue.write(CONTROL_STOP)
+    ctrl_in_queue.write(encode_control_message(CONTROL_STOP))
 
     deadline = time.time() + (20.0 if os.name == "nt" else 10.0)
     max_children_seen = len(manager._child_processes)
@@ -6346,7 +6433,7 @@ def test_manager_drain_reissues_stop_for_child_added_after_stop(
 
     manager.process_once()
 
-    assert ctrl_queue.read_one() == CONTROL_STOP
+    assert ctrl_queue.read_one() == encode_control_message(CONTROL_STOP)
 
 
 def test_manager_stop_mid_handler_requeues_reserved_work_unlaunched(
@@ -6373,7 +6460,7 @@ def test_manager_stop_mid_handler_requeues_reserved_work_unlaunched(
 
     def inject_stop(payload: dict[str, object], timestamp: int) -> TaskSpec | None:
         child_spec = original_build_child_spec(payload, timestamp)
-        ctrl_in_queue.write(CONTROL_STOP)
+        ctrl_in_queue.write(encode_control_message(CONTROL_STOP))
         return child_spec
 
     monkeypatch.setattr(manager, "_build_child_spec", inject_stop)
@@ -6657,8 +6744,6 @@ def test_manager_does_not_probe_inactive_public_spawn_queue(
 
     manager._active_queues = []
     manager._queue_iterator = itertools.cycle([])
-    manager._check_interval = 10
-    manager._check_counter = 1
     manager._next_inactive_probe_at = time.monotonic() + 60
     manager._pending_messages_precheck_confirmed = False
     monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
@@ -6705,8 +6790,6 @@ def test_manager_pending_precheck_activates_public_spawn_queue(
 
     manager._active_queues = []
     manager._queue_iterator = itertools.cycle([])
-    manager._check_interval = 10
-    manager._check_counter = 1
     manager._next_inactive_probe_at = time.monotonic() + 60
     manager._pending_messages_precheck_confirmed = True
     monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
@@ -7137,7 +7220,7 @@ def test_manager_lower_leader_blocks_active_heartbeat_with_persistent_child(
         manager._child_processes.clear()
 
     rows = _managed_service_owner_rows(make_queue)
-    own_rows = [row for row in rows if row.get("tid") == manager.tid]
+    own_rows = [row for row in rows if row.get("owner_tid") == manager.tid]
     assert own_rows
     assert own_rows[-1]["status"] == "draining"
     assert not any(row.get("status") == "active" for row in own_rows)
@@ -7245,6 +7328,8 @@ def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
                 "requests": WEFT_SPAWN_REQUESTS_QUEUE,
                 "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
                 "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
+                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+                "weft_context": str(manager._manager_context().root),
                 "should_stop": False,
             }
         )
@@ -7276,7 +7361,7 @@ def test_manager_superseded_self_record_stops_without_republishing_active(
     assert manager.should_stop is True
     assert manager.taskspec.state.status == "cancelled"
     rows = _managed_service_owner_rows(make_queue)
-    own_rows = [row for row in rows if row.get("tid") == manager.tid]
+    own_rows = [row for row in rows if row.get("owner_tid") == manager.tid]
     assert own_rows
     assert own_rows[-1]["status"] == SERVICE_STATUS_SUPERSEDED
 
@@ -7366,7 +7451,7 @@ def test_manager_active_heartbeat_race_preserves_superseded_record(  # noqa: C90
                         continue
                     if (
                         isinstance(existing, dict)
-                        and existing.get("tid") == manager.tid
+                        and existing.get("owner_tid") == manager.tid
                     ):
                         registry_queue.delete(message_id=timestamp)
                 registry_queue.write(superseded_payload)
@@ -7390,7 +7475,7 @@ def test_manager_active_heartbeat_race_preserves_superseded_record(  # noqa: C90
     manager._refresh_manager_registration(force=True)
 
     rows = _managed_service_owner_rows(make_queue)
-    own_rows = [row for row in rows if row.get("tid") == manager.tid]
+    own_rows = [row for row in rows if row.get("owner_tid") == manager.tid]
     assert [row["status"] for row in own_rows] == [SERVICE_STATUS_SUPERSEDED]
     assert manager.should_stop is True
     assert manager.taskspec.state.status == "cancelled"
@@ -7421,7 +7506,7 @@ def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
         persistent=False,
     )
 
-    monkeypatch.setattr(manager, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: False)
 
     def _unexpected_mapping_scan(_tid: str) -> set[int]:
         raise AssertionError("normal dead-child cleanup should not scan tid mappings")
@@ -7504,7 +7589,7 @@ def test_child_has_exited_trusts_live_host_pid_before_process_view(
         def join(self, timeout: float | None = None) -> None:
             del timeout
 
-    monkeypatch.setattr(manager, "_pid_alive", lambda pid: pid == 424243)
+    monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: pid == 424243)
 
     assert manager._child_has_exited(ManagedChild(FakeProcess(), None)) is False
 
@@ -7525,7 +7610,7 @@ def test_child_has_exited_allows_startup_liveness_visibility_grace(
         def join(self, timeout: float | None = None) -> None:
             del timeout
 
-    monkeypatch.setattr(manager, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: False)
 
     child = ManagedChild(FakeProcess(), None, launched_ns=time.time_ns())
 
@@ -7588,9 +7673,7 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
             self.delete_calls = 0
 
         def peek_one(self, *, with_timestamps: bool = False):
-            payload = json.dumps(
-                {"command": CONTROL_PING, "request_id": "stuck-control"}
-            )
+            payload = encode_control_message(CONTROL_PING, request_id="stuck-control")
             if with_timestamps:
                 return payload, stuck_timestamp
             return payload
@@ -7658,15 +7741,13 @@ def test_build_child_spec_propagates_unexpected_resolution_error(
 ) -> None:
     manager, _make_queue = manager_setup
 
-    def _unexpected_resolution_error(
-        *args: object, **kwargs: object
-    ) -> dict[str, object]:
+    def _unexpected_validation_error(*args: object, **kwargs: object) -> TaskSpec:
         del args, kwargs
         raise RuntimeError("unexpected resolution bug")
 
     monkeypatch.setattr(
-        "weft.core.manager.resolve_taskspec_payload",
-        _unexpected_resolution_error,
+        "weft.core.manager.validate_taskspec_payload",
+        _unexpected_validation_error,
     )
 
     with pytest.raises(RuntimeError, match="unexpected resolution bug"):
@@ -8001,7 +8082,9 @@ def test_manager_autostart_skips_active_templates(
     try:
         manager.process_once()
         assert not manager._user_work_children()
-        assert not manager._autostart_launched
+        assert (
+            manager._service_state(str(template_path.resolve())).launched_once is False
+        )
     finally:
         manager.cleanup()
 
@@ -8071,17 +8154,16 @@ def test_manager_autostart_prunes_deleted_manifest_state(
     manager = Manager(db_path, spec, config=config)
     stale_source = str((autostart_dir / "deleted.json").resolve())
     try:
-        manager._autostart_state[stale_source] = {
-            "restarts": 2,
-            "next_allowed_ns": time.time_ns(),
-            "launched_once": True,
-        }
-        manager._autostart_launched.add(stale_source)
+        state = manager._service_state(stale_source)
+        state.restarts = 2
+        state.next_allowed_ns = time.time_ns()
+        state.launched_once = True
+        manager._autostart_sources.add(stale_source)
 
         manager._tick_autostart(force=True)
 
-        assert stale_source not in manager._autostart_state
-        assert stale_source not in manager._autostart_launched
+        assert stale_source not in manager._managed_service_state
+        assert stale_source not in manager._autostart_sources
     finally:
         manager.cleanup()
 
@@ -8214,15 +8296,10 @@ def test_manager_idle_shutdown_waits_for_autostart_ensure_restart_budget(
     manager = Manager(db_path, spec, config=config)
     source = str(manifest_path.resolve())
     try:
-        manager._autostart_state[source] = {
-            "restarts": 0,
-            "next_allowed_ns": time.time_ns() + 1_000_000_000,
-            "launched_once": True,
-        }
-        manager._service_state(source).launched_once = True
-        manager._service_state(source).next_allowed_ns = int(
-            manager._autostart_state[source]["next_allowed_ns"]
-        )
+        state = manager._service_state(source)
+        state.restarts = 0
+        state.next_allowed_ns = time.time_ns() + 1_000_000_000
+        state.launched_once = True
         manager._last_activity_ns = time.time_ns() - 1_000_000_000
         manager._autostart_last_scan_ns = time.time_ns()
         manager._last_managed_service_convergence_ns = time.time_ns()
@@ -8422,7 +8499,7 @@ def test_manager_autostart_pipeline_ensure_restarts(
         assert first_spawn["child_tid"] != second_spawn["child_tid"]
         assert first_result == "restart-me"
         assert second_result == "restart-me"
-        assert manager._autostart_state[source]["restarts"] == 1
+        assert manager._service_state(source).restarts == 1
     finally:
         manager.cleanup()
 
@@ -8461,9 +8538,10 @@ def test_manager_autostart_ensure_enqueue_failure_does_not_advance_state(
 
         manager._tick_autostart(force=True)
 
-        assert source not in manager._autostart_launched
-        assert manager._autostart_state[source]["restarts"] == 0
-        assert manager._autostart_state[source]["next_allowed_ns"] == 0
+        state = manager._service_state(source)
+        assert state.launched_once is False
+        assert state.restarts == 0
+        assert state.next_allowed_ns == 0
     finally:
         manager.cleanup()
 
@@ -8549,12 +8627,10 @@ def test_manager_autostart_active_launch_blocks_duplicate_restart(
     enqueued: list[Any] = []
     try:
         manager._autostart_enabled = True
-        manager._autostart_state[source] = {
-            "restarts": 0,
-            "next_allowed_ns": 0,
-            "launched_once": True,
-        }
-        manager._service_state(source).launched_once = True
+        state = manager._service_state(source)
+        state.restarts = 0
+        state.next_allowed_ns = 0
+        state.launched_once = True
         manager._active_child_launches["active-launch-child"] = (
             manager_mod._ManagerChildLaunchRequest(
                 child_spec=manager.taskspec,
@@ -8575,7 +8651,7 @@ def test_manager_autostart_active_launch_blocks_duplicate_restart(
 
         assert enqueued == []
         assert manager._service_state(source).spawn_pending is True
-        assert manager._autostart_state[source]["restarts"] == 0
+        assert manager._service_state(source).restarts == 0
     finally:
         manager.cleanup()
 
@@ -8707,7 +8783,7 @@ def test_manager_autostart_ensure_allows_one_restart_after_initial_launch(
             timeout=30.0 if os.name == "nt" else 20.0,
         )
         assert first_spawn["child_tid"] != second_spawn["child_tid"]
-        assert manager._autostart_state[source]["restarts"] == 1
+        assert manager._service_state(source).restarts == 1
 
         spawn_events = [first_spawn, second_spawn]
         extra_deadline = time.time() + 1.0
@@ -8764,7 +8840,7 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
         )
         first_child_tid = first_spawn.get("child_tid")
         assert isinstance(first_child_tid, str)
-        initial_restart_due_ns = manager._autostart_state[source]["next_allowed_ns"]
+        initial_restart_due_ns = manager._service_state(source).next_allowed_ns
         assert isinstance(initial_restart_due_ns, int)
         assert initial_restart_due_ns > 0
         completed_event = wait_for_log_event(
@@ -8846,7 +8922,7 @@ def test_manager_autostart_backoff_rescan_uses_due_time(
     try:
         manager._tick_autostart(force=True)
         assert len(enqueued) == 1
-        assert manager._autostart_state[source]["next_allowed_ns"] == 1_500_000_000
+        assert manager._service_state(source).next_allowed_ns == 1_500_000_000
         manager._autostart_last_scan_ns = 0
 
         now_ns = 1_250_000_000
@@ -8860,7 +8936,7 @@ def test_manager_autostart_backoff_rescan_uses_due_time(
         now_ns = 1_500_000_000
         manager._tick_autostart()
         assert len(enqueued) == 2
-        assert manager._autostart_state[source]["restarts"] == 1
+        assert manager._service_state(source).restarts == 1
     finally:
         manager.cleanup()
 

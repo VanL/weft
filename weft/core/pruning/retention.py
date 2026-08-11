@@ -22,7 +22,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, Literal, cast
+from typing import IO, Any, Literal
 
 try:
     import fcntl
@@ -41,8 +41,6 @@ from weft._constants import (
     CONTROL_PING,
     CONTROL_STATUS,
     CONTROL_STOP,
-    EXIT_ERROR,
-    EXIT_SUCCESS,
     QUEUE_INBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
     RETENTION_PRUNE_CLASS_CLAIMED_OUTBOX_RESIDUE_FORCE,
@@ -65,14 +63,16 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft.context import WeftContext, build_context
+from weft.context import WeftContext
 from weft.core.pruning.apply import apply_exact_prune_candidates
+from weft.core.queue_window import is_old_enough, message_age_seconds
 from weft.core.task_evidence import (
     coerce_terminal_envelope,
     control_queue_names_for_tid,
     peek_final_outbox_evidence,
     peek_terminal_ctrl_out_evidence,
     queue_names_for_tid,
+    status_from_log_payload,
     terminal_status_from_event,
 )
 from weft.helpers import iter_queue_entries, iter_queue_json_entries
@@ -94,9 +94,7 @@ class RetentionPruneConfig:
     min_age_seconds: float = RETENTION_PRUNE_DEFAULT_MIN_AGE_SECONDS
     keep_recent_per_task: int = RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK
     limit: int | None = None
-    json_output: bool = False
     archive_path: Path | None = None
-    report_path: Path | None = None
     require_archive: bool = True
 
 
@@ -170,6 +168,7 @@ class RetentionPruneResult:
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     archived: int = 0
+    halted_at: Literal["validation", "initial_scan"] | None = None
 
     @property
     def dry_run(self) -> bool:
@@ -186,10 +185,6 @@ class RetentionPruneResult:
     @property
     def failed(self) -> int:
         return sum(1 for candidate in self.applied_candidates if candidate.error)
-
-    @property
-    def exit_code(self) -> int:
-        return EXIT_ERROR if self.errors or self.failed else EXIT_SUCCESS
 
     @property
     def candidate_class_counts(self) -> dict[str, int]:
@@ -224,13 +219,6 @@ class _TaskEvidence:
         return self.latest_status in TERMINAL_TASK_STATUSES
 
 
-def run_retention_prune(config: RetentionPruneConfig) -> RetentionPruneResult:
-    """Scan and optionally prune retention candidates."""
-
-    ctx = build_context(spec_context=config.context_path)
-    return run_retention_prune_for_context(ctx, config)
-
-
 def run_retention_prune_for_context(
     ctx: WeftContext,
     config: RetentionPruneConfig,
@@ -238,7 +226,7 @@ def run_retention_prune_for_context(
     """Run retention pruning against an already-resolved context."""
 
     validation_error = _validate_config(config)
-    run_id = _new_run_id()
+    run_id = f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}.{time.time_ns() % 1_000_000_000:09d}Z:pid-{os.getpid()}"
     if validation_error is not None:
         return RetentionPruneResult(
             config=config,
@@ -247,20 +235,22 @@ def run_retention_prune_for_context(
             applied_candidates=(),
             scan_stats=(),
             errors=(validation_error,),
+            halted_at="validation",
         )
 
     candidates, stats, scan_errors = _build_candidates(ctx, config)
-    visible_candidates = _apply_limit(candidates, config.limit)
+    visible_candidates = list(
+        candidates if config.limit is None else candidates[: config.limit]
+    )
     if scan_errors:
-        return _write_optional_report(
-            RetentionPruneResult(
-                config=config,
-                run_id=run_id,
-                candidates=tuple(visible_candidates),
-                applied_candidates=(),
-                scan_stats=tuple(stats),
-                errors=tuple(scan_errors),
-            )
+        return RetentionPruneResult(
+            config=config,
+            run_id=run_id,
+            candidates=tuple(visible_candidates),
+            applied_candidates=(),
+            scan_stats=tuple(stats),
+            errors=tuple(scan_errors),
+            halted_at="initial_scan",
         )
 
     archived = 0
@@ -269,7 +259,11 @@ def run_retention_prune_for_context(
     apply_stats = stats
     if config.apply:
         fresh_candidates, apply_stats, apply_errors = _build_candidates(ctx, config)
-        visible_candidates = _apply_limit(fresh_candidates, config.limit)
+        visible_candidates = list(
+            fresh_candidates
+            if config.limit is None
+            else fresh_candidates[: config.limit]
+        )
         scan_errors.extend(apply_errors)
         archive_error: str | None = None
         if config.require_archive or config.archive_path is not None or config.force:
@@ -291,17 +285,15 @@ def run_retention_prune_for_context(
                 )
             else:
                 scan_errors.append(f"failed to write archive: {archive_error}")
-                return _write_optional_report(
-                    RetentionPruneResult(
-                        config=config,
-                        run_id=run_id,
-                        candidates=tuple(visible_candidates),
-                        applied_candidates=(),
-                        scan_stats=tuple(apply_stats),
-                        errors=tuple(scan_errors),
-                        warnings=tuple(warnings),
-                        archived=archived,
-                    )
+                return RetentionPruneResult(
+                    config=config,
+                    run_id=run_id,
+                    candidates=tuple(visible_candidates),
+                    applied_candidates=(),
+                    scan_stats=tuple(apply_stats),
+                    errors=tuple(scan_errors),
+                    warnings=tuple(warnings),
+                    archived=archived,
                 )
         applied = tuple(_apply_candidates(ctx, visible_candidates, force=config.force))
 
@@ -330,124 +322,7 @@ def run_retention_prune_for_context(
                 warnings=result.warnings,
                 archived=result.archived,
             )
-    return _write_optional_report(result)
-
-
-def cmd_retention_prune(
-    *,
-    context: Path | None = None,
-    family: str = "retention",
-    apply: bool = False,
-    force: bool = False,
-    tasks: Sequence[str] | None = None,
-    retention_classes: Sequence[str] | None = None,
-    min_age_seconds: float = RETENTION_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-    keep_recent_per_task: int = RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK,
-    limit: int | None = None,
-    json_output: bool = False,
-    archive_path: Path | None = None,
-    report_path: Path | None = None,
-) -> tuple[int, str, str]:
-    """Command adapter for retention pruning.
-
-    Under the default Monitor collation mode (``delete``), most
-    ``weft.log.tasks`` evidence is already deleted at ingest once a family
-    is collated, per [OBS.13.3] — this foreground command principally
-    matters for collation-off deployments and for task-local queues that
-    Monitor collation does not cover.
-    """
-
-    normalized_family = cast(RetentionFamily, family)
-    config = RetentionPruneConfig(
-        context_path=context,
-        family=normalized_family,
-        apply=apply,
-        force=force,
-        task_filters=tuple(tasks or ()),
-        class_filters=tuple(retention_classes or ()),
-        min_age_seconds=min_age_seconds,
-        keep_recent_per_task=keep_recent_per_task,
-        limit=limit,
-        json_output=json_output,
-        archive_path=archive_path,
-        report_path=report_path,
-    )
-    result = run_retention_prune(config)
-    stdout = (
-        json.dumps(retention_prune_summary(result), sort_keys=True)
-        if json_output
-        else render_retention_prune_human(result)
-    )
-    stderr = "\n".join([*result.errors, *result.warnings])
-    return result.exit_code, stdout, stderr
-
-
-def retention_prune_summary(result: RetentionPruneResult) -> dict[str, Any]:
-    """Return the JSON summary contract for a retention prune run."""
-
-    return {
-        "schema_version": RETENTION_PRUNE_SCHEMA_VERSION,
-        "record_type": "retention_prune_completed",
-        "run_id": result.run_id,
-        "family": result.config.family,
-        "dry_run": result.dry_run,
-        "force": result.config.force,
-        "queues_scanned": [stat.queue for stat in result.scan_stats],
-        "records_scanned": result.records_scanned,
-        "candidates": len(result.candidates),
-        "archived": result.archived,
-        "deleted": result.deleted,
-        "failed": result.failed,
-        "candidate_class_counts": result.candidate_class_counts,
-        "errors": list(result.errors),
-        "warnings": list(result.warnings),
-    }
-
-
-def render_retention_prune_human(result: RetentionPruneResult) -> str:
-    """Render concise human output for the CLI."""
-
-    mode = (
-        "dry-run"
-        if result.dry_run
-        else "force apply"
-        if result.config.force
-        else "apply"
-    )
-    lines = [
-        (
-            f"Retention prune {mode}: scanned {result.records_scanned} records, "
-            f"found {len(result.candidates)} candidates, archived {result.archived}, "
-            f"deleted {result.deleted}, failed {result.failed}."
-        )
-    ]
-    for warning in result.warnings:
-        lines.append(f"warning: {warning}")
-    applied_by_id = {
-        (candidate.queue, candidate.message_id): candidate
-        for candidate in result.applied_candidates
-    }
-    for candidate in result.candidates:
-        visible = applied_by_id.get((candidate.queue, candidate.message_id), candidate)
-        state = (
-            "report-only"
-            if candidate.report_only and not result.config.force
-            else "kept"
-        )
-        if visible.applied:
-            state = "deleted"
-        elif visible.error:
-            state = f"error: {visible.error}"
-        protections = (
-            f" overrides={','.join(candidate.overridden_protections)}"
-            if candidate.overridden_protections
-            else ""
-        )
-        lines.append(
-            f"{candidate.queue} {candidate.message_id} {candidate.candidate_class} "
-            f"{candidate.tid} {state}{protections}"
-        )
-    return "\n".join(lines)
+    return result
 
 
 def _validate_config(config: RetentionPruneConfig) -> str | None:
@@ -480,10 +355,6 @@ def _validate_config(config: RetentionPruneConfig) -> str | None:
     ):
         return "--archive is required for retention --apply unless --force is set"
     return None
-
-
-def _new_run_id() -> str:
-    return f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}.{time.time_ns() % 1_000_000_000:09d}Z:pid-{os.getpid()}"
 
 
 def _build_candidates(
@@ -553,7 +424,7 @@ def _read_task_log_rows(ctx: WeftContext) -> tuple[list[_LogRow], int]:
             tid = payload.get("tid")
             if not isinstance(tid, str) or not tid:
                 continue
-            status = _status_from_log_payload(payload)
+            status = status_from_log_payload(payload)
             taskspec = payload.get("taskspec")
             rows.append(
                 _LogRow(
@@ -568,16 +439,6 @@ def _read_task_log_rows(ctx: WeftContext) -> tuple[list[_LogRow], int]:
     finally:
         queue.close()
     return rows, scanned
-
-
-def _status_from_log_payload(payload: Mapping[str, Any]) -> str | None:
-    status = payload.get("status")
-    if isinstance(status, str) and status:
-        return status
-    taskspec = payload.get("taskspec")
-    state = taskspec.get("state") if isinstance(taskspec, Mapping) else None
-    state_status = state.get("status") if isinstance(state, Mapping) else None
-    return state_status if isinstance(state_status, str) and state_status else None
 
 
 def _reduce_task_evidence(rows: Sequence[_LogRow]) -> dict[str, _TaskEvidence]:
@@ -642,7 +503,7 @@ def _task_log_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-032] excepti
                 if not config.force:
                     continue
                 overridden.append("newest_terminal_log")
-            if not _is_old_enough(row.message_id, now_ns, config.min_age_seconds):
+            if not is_old_enough(row.message_id, now_ns, config.min_age_seconds):
                 if not config.force:
                     continue
                 overridden.append("min_age")
@@ -679,7 +540,7 @@ def _task_log_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-032] excepti
 
 def _is_active_manager_row(payload: Mapping[str, Any]) -> bool:
     name = payload.get("name")
-    status = _status_from_log_payload(payload)
+    status = status_from_log_payload(payload)
     runtime_class = payload.get("_weft_runtime_task_class")
     return bool(
         status == "running" and (name == "manager" or runtime_class == "manager")
@@ -1082,19 +943,9 @@ def _age_protected(
     now_ns: int,
     config: RetentionPruneConfig,
 ) -> bool:
-    return not config.force and not _is_old_enough(
+    return not config.force and not is_old_enough(
         message_id, now_ns, config.min_age_seconds
     )
-
-
-def _is_old_enough(message_id: int, now_ns: int, min_age_seconds: float) -> bool:
-    if min_age_seconds <= 0:
-        return True
-    return _age_seconds(message_id, now_ns) >= min_age_seconds
-
-
-def _age_seconds(message_id: int, now_ns: int) -> float:
-    return max(0.0, (now_ns - int(message_id)) / 1_000_000_000)
 
 
 def _candidate(
@@ -1120,7 +971,7 @@ def _candidate(
         tid=tid,
         candidate_class=candidate_class,
         reason=reason,
-        age_seconds=_age_seconds(message_id, now_ns),
+        age_seconds=message_age_seconds(message_id, now_ns),
         payload_sha256=hashlib.sha256(payload_bytes).hexdigest(),
         payload_size_bytes=len(payload_bytes),
         payload_excerpt=raw_payload[:200],
@@ -1142,15 +993,6 @@ def _filter_classes(
     return [
         candidate for candidate in candidates if candidate.candidate_class in allowed
     ]
-
-
-def _apply_limit(
-    candidates: Sequence[RetentionPruneCandidate],
-    limit: int | None,
-) -> list[RetentionPruneCandidate]:
-    if limit is None:
-        return list(candidates)
-    return list(candidates[:limit])
 
 
 def _apply_candidates(
@@ -1187,34 +1029,6 @@ def _apply_candidates(
         ),
         *blocked,
     ]
-
-
-def _write_optional_report(result: RetentionPruneResult) -> RetentionPruneResult:
-    if result.config.report_path is None:
-        return result
-    try:
-        _write_records(
-            result.config.report_path,
-            result.run_id,
-            result.config,
-            result.candidates,
-            applied_candidates=result.applied_candidates,
-            errors=result.errors,
-            warnings=result.warnings,
-            truncate_payload=True,
-        )
-    except OSError as exc:
-        return RetentionPruneResult(
-            config=result.config,
-            run_id=result.run_id,
-            candidates=result.candidates,
-            applied_candidates=result.applied_candidates,
-            scan_stats=result.scan_stats,
-            errors=(*result.errors, f"failed to write report: {exc}"),
-            warnings=result.warnings,
-            archived=result.archived,
-        )
-    return result
 
 
 def _write_archive(
@@ -1258,32 +1072,22 @@ def _resolve_archive_path(ctx: WeftContext, archive_path: Path | None) -> Path:
     return archive_path
 
 
-def _write_records(
+def write_retention_prune_report(
+    result: RetentionPruneResult,
     path: Path,
-    run_id: str,
-    config: RetentionPruneConfig,
-    candidates: Sequence[RetentionPruneCandidate],
-    *,
-    applied_candidates: Sequence[RetentionPruneCandidate],
-    errors: Sequence[str],
-    warnings: Sequence[str],
-    truncate_payload: bool,
 ) -> None:
-    """Write a one-shot report, truncating any existing file at *path*.
+    """Write a one-shot report through the archive's canonical record writer."""
 
-    Used only for ``config.report_path``, a single-run summary report (not
-    the recovery archive). Each record carries ``run_id`` for provenance.
-    """
     _write_record_lines(
         path,
         "w",
-        run_id,
-        config,
-        candidates,
-        applied_candidates=applied_candidates,
-        errors=errors,
-        warnings=warnings,
-        truncate_payload=truncate_payload,
+        result.run_id,
+        result.config,
+        result.candidates,
+        applied_candidates=result.applied_candidates,
+        errors=result.errors,
+        warnings=result.warnings,
+        truncate_payload=True,
     )
 
 

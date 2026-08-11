@@ -60,7 +60,7 @@ EXPECTED_GROUP_IDS = [
     *(
         f"RUFF-SUP-{number:03d}"
         for number in range(101, 127)
-        if number not in {101, 102, 103, 110, 111, 121}
+        if number not in {101, 102, 103, 110, 111, 121, 123, 125}
     ),
     *(
         f"RUFF-SUP-{number:03d}"
@@ -70,12 +70,13 @@ EXPECTED_GROUP_IDS = [
     *(
         f"RUFF-SUP-{number:03d}"
         for number in range(239, 366)
-        if number not in {282, 285, 293, 296, 297, 301, 302, 305, 306}
+        if number
+        not in {243, 244, 247, 254, 282, 285, 293, 296, 297, 301, 302, 305, 306}
     ),
 ]
-EXPECTED_GROUP_COUNT = 229
-EXPECTED_DIRECTIVE_COUNT = 372
-EXPECTED_C901_DIRECTIVE_COUNT = 138
+EXPECTED_GROUP_COUNT = 223
+EXPECTED_DIRECTIVE_COUNT = 363
+EXPECTED_C901_DIRECTIVE_COUNT = 136
 TAGGED_C901 = re.compile(
     r"#\s*noqa:\s*[^#\n]*\bC901\b[^#\n]*"
     r"approved\s+\[TS-3\.1\]\s+\[RUFF-SUP-(\d{3})\]\s+exception\b"
@@ -686,8 +687,8 @@ def test_suppression_checker_defaults_to_standalone_registry() -> None:
     assert tool._parser().parse_args([]).registry == Path(
         "docs/ruff-suppression-registry.md"
     )
-    assert tool._parser().parse_args(["--spec", "legacy.md"]).registry == Path(
-        "legacy.md"
+    assert tool._parser().parse_args(["--registry", "custom.md"]).registry == Path(
+        "custom.md"
     )
 
 

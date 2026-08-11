@@ -53,6 +53,7 @@ def make_agent_section(
         runtime_config["tool_profile_ref"] = tool_profile_ref
     payload = {
         "runtime": "provider_cli",
+        "authority_class": "general",
         "model": model,
         "instructions": "base instructions",
         "options": options or {},

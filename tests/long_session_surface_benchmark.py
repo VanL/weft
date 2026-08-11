@@ -4,7 +4,7 @@ This harness is intentionally dev-only. It replays the same mixed long-session
 scenario used by the shared CLI integration test, but lets callers choose the
 surface:
 
-- ``cli``: subprocess ``python -m weft.cli`` calls via ``tests.conftest.run_cli``
+- ``cli``: subprocess ``python -m weft`` calls via ``tests.conftest.run_cli``
 - ``api``: direct in-process calls to ``weft.commands`` functions
 
 Typical usage:
@@ -36,7 +36,7 @@ from weft.cli.run import cmd_run
 from weft.commands import queue as queue_cmd
 from weft.commands.manager import stop_command
 from weft.commands.result import cmd_result
-from weft.commands.status import cmd_status
+from weft.commands.system import cmd_status
 from weft.commands.tasks import stop_tasks
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -530,6 +530,7 @@ class ApiSurface:
         ):
             rc = cmd_run(
                 tuple(command),
+                spec_run_args=(),
                 spec=spec,
                 pipeline=None,
                 pipeline_input=None,
@@ -548,7 +549,6 @@ class ApiSurface:
                 wait=wait,
                 json_output=False,
                 verbose=False,
-                monitor=False,
                 persistent_override=None,
                 autostart_enabled=True,
             )

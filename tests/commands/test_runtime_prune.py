@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -29,17 +30,20 @@ from weft._constants import (
     WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft.commands.runtime_prune import (
-    RuntimePruneConfig,
+from weft.commands import prune as prune_commands
+from weft.commands.prune import (
+    cmd_prune,
     run_runtime_prune,
+    write_runtime_prune_report,
 )
 from weft.context import build_context
 from weft.core.endpoints import build_endpoint_record_payload
+from weft.core.pruning import runtime as runtime_pruning
 from weft.core.pruning.runtime import (
     RuntimePruneCandidate,
+    RuntimePruneConfig,
     RuntimePruneResult,
     RuntimeQueueScanStats,
-    _candidate_record,
 )
 from weft.core.service_convergence import (
     build_manager_service_payload,
@@ -51,7 +55,33 @@ from weft.helpers import iter_queue_json_entries
 pytestmark = [pytest.mark.shared]
 
 
-def test_runtime_prune_candidate_json_formats_message_id_only() -> None:
+def test_prune_command_does_not_reexport_core_config_types() -> None:
+    assert not hasattr(prune_commands, "RuntimePruneConfig")
+    assert not hasattr(prune_commands, "RetentionPruneConfig")
+
+
+def test_runtime_prune_preserves_exact_run_id_format(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    monkeypatch.setattr(
+        runtime_pruning.time,
+        "strftime",
+        lambda *_args: "2030-01-02T03:04:05",
+    )
+    monkeypatch.setattr(runtime_pruning.time, "time_ns", lambda: 9_876_543_210)
+    monkeypatch.setattr(runtime_pruning.os, "getpid", lambda: 4321)
+
+    result = runtime_pruning.run_runtime_prune_for_context(
+        ctx,
+        RuntimePruneConfig(context_path=ctx.root, queues=()),
+    )
+
+    assert result.run_id == "2030-01-02T03:04:05.876543210Z:pid-4321"
+
+
+def test_runtime_prune_candidate_json_formats_message_id_only(tmp_path: Path) -> None:
     candidate = RuntimePruneCandidate(
         queue=WEFT_TID_MAPPINGS_QUEUE,
         queue_group="tid-mappings",
@@ -70,7 +100,9 @@ def test_runtime_prune_candidate_json_formats_message_id_only() -> None:
         scan_stats=(RuntimeQueueScanStats(queue=WEFT_TID_MAPPINGS_QUEUE),),
     )
 
-    record = _candidate_record(result, candidate)
+    report_path = tmp_path / "report.jsonl"
+    write_runtime_prune_report(result, report_path)
+    record = json.loads(report_path.read_text(encoding="utf-8").splitlines()[0])
 
     assert record["message_id"] == "1779400000000000001"
     assert record["payload_excerpt"]["observed_at_ns"] == 1779400000000000003
@@ -187,12 +219,48 @@ def test_tid_mapping_dry_run_reports_older_duplicate_without_deleting(tmp_path) 
 
     result = _run(ctx)
 
-    assert result.exit_code == 0
+    assert result.errors == ()
+    assert result.failed == 0
     assert [(c.message_id, c.classification) for c in result.candidates] == [
         (old_id, RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING)
     ]
     rows = _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
     assert {message_id for _payload, message_id in rows} >= {old_id, new_id}
+
+
+def test_runtime_selector_includes_candidate_at_exact_minimum_age(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    old_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "111", "full": "1770000000000000090", "name": "old"},
+    )
+    _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "222", "full": "1770000000000000090", "name": "new"},
+    )
+    monkeypatch.setattr(
+        runtime_pruning.time,
+        "time_ns",
+        lambda: old_id + 5_000_000_000,
+    )
+
+    result = runtime_pruning.run_runtime_prune_for_context(
+        ctx,
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("tid-mappings",),
+            min_age_seconds=5.0,
+        ),
+    )
+
+    assert [
+        (candidate.message_id, candidate.age_seconds) for candidate in result.candidates
+    ] == [(old_id, 5.0)]
 
 
 def test_tid_mapping_apply_deletes_exact_candidate_only(tmp_path) -> None:
@@ -217,6 +285,188 @@ def test_tid_mapping_apply_deletes_exact_candidate_only(tmp_path) -> None:
     }
     assert old_id not in remaining_ids
     assert new_id in remaining_ids
+
+
+def test_runtime_limit_applies_to_dry_run_and_apply_rescan(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    full_tid = "1770000000000000091"
+    oldest_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "111", "full": full_tid, "name": "oldest"},
+    )
+    middle_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "222", "full": full_tid, "name": "middle"},
+    )
+    latest_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "333", "full": full_tid, "name": "latest"},
+    )
+    config = RuntimePruneConfig(
+        context_path=ctx.root,
+        queues=("tid-mappings",),
+        min_age_seconds=0,
+        limit=1,
+    )
+
+    dry_run = runtime_pruning.run_runtime_prune_for_context(ctx, config)
+
+    assert [candidate.message_id for candidate in dry_run.candidates] == [oldest_id]
+    assert {
+        message_id for _payload, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    } >= {
+        oldest_id,
+        middle_id,
+        latest_id,
+    }
+
+    applied = runtime_pruning.run_runtime_prune_for_context(
+        ctx,
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("tid-mappings",),
+            min_age_seconds=0,
+            limit=1,
+            apply=True,
+        ),
+    )
+
+    assert [candidate.message_id for candidate in applied.candidates] == [oldest_id]
+    assert [candidate.message_id for candidate in applied.applied_candidates] == [
+        oldest_id
+    ]
+    remaining_ids = {
+        message_id for _payload, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    }
+    assert oldest_id not in remaining_ids
+    assert remaining_ids >= {middle_id, latest_id}
+
+
+def test_runtime_apply_report_error_is_classified_after_delete(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    old_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "111", "full": "1770000000000000003", "name": "old"},
+    )
+    new_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "222", "full": "1770000000000000003", "name": "new"},
+    )
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("occupied", encoding="utf-8")
+
+    exit_code, stdout, stderr = cmd_prune(
+        family="runtime-state",
+        context=ctx.root,
+        apply=True,
+        queues=("tid-mappings",),
+        min_age_seconds=0,
+        json_output=True,
+        report_path=blocked_parent / "report.jsonl",
+    )
+
+    assert exit_code == 1
+    assert json.loads(stdout)["deleted"] == 1
+    assert stderr.startswith("failed to write report:")
+    remaining_ids = {
+        message_id for _payload, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    }
+    assert old_id not in remaining_ids
+    assert new_id in remaining_ids
+
+
+def test_runtime_validation_error_does_not_create_or_truncate_report(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    report_path = tmp_path / "runtime-report.jsonl"
+    report_path.write_text("sentinel\n", encoding="utf-8")
+
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            keep_recent_per_key=0,
+        ),
+        report_path=report_path,
+    )
+
+    assert result.errors == ("--keep-recent-per-key must be >= 1",)
+    assert report_path.read_text(encoding="utf-8") == "sentinel\n"
+
+    missing_report = tmp_path / "missing-runtime-report.jsonl"
+    run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            keep_recent_per_key=0,
+        ),
+        report_path=missing_report,
+    )
+    assert not missing_report.exists()
+
+
+def test_runtime_initial_scan_error_does_not_create_or_truncate_report(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+
+    def fail_scan(*_args, **_kwargs):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(runtime_pruning, "_read_runtime_queue", fail_scan)
+    config = RuntimePruneConfig(
+        context_path=ctx.root,
+        queues=("tid-mappings",),
+    )
+    report_path = tmp_path / "runtime-report.jsonl"
+    report_path.write_text("sentinel\n", encoding="utf-8")
+
+    result = run_runtime_prune(config, report_path=report_path)
+
+    assert result.errors == (f"failed to scan {WEFT_TID_MAPPINGS_QUEUE}: scan failed",)
+    assert report_path.read_text(encoding="utf-8") == "sentinel\n"
+
+    missing_report = tmp_path / "missing-runtime-report.jsonl"
+    run_runtime_prune(config, report_path=missing_report)
+    assert not missing_report.exists()
+
+
+def test_runtime_apply_rescan_error_writes_optional_report(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    calls = 0
+
+    def build_candidates(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return ([], [], [] if calls == 1 else ["rescan failed"])
+
+    monkeypatch.setattr(runtime_pruning, "_build_candidates", build_candidates)
+    report_path = tmp_path / "runtime-report.jsonl"
+
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("tid-mappings",),
+            apply=True,
+        ),
+        report_path=report_path,
+    )
+
+    assert calls == 2
+    assert result.errors == ("rescan failed",)
+    records = [
+        json.loads(line)
+        for line in report_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["errors"] == ["rescan failed"]
 
 
 def test_manager_prune_reports_superseded_and_stale_active_rows(tmp_path) -> None:
@@ -383,7 +633,8 @@ def test_services_prune_deletes_superseded_managed_service_history(tmp_path) -> 
         )
     )
 
-    assert result.exit_code == 0
+    assert result.errors == ()
+    assert result.failed == 0
     assert result.deleted == 2
     deleted_ids = {candidate.message_id for candidate in result.applied_candidates}
     assert deleted_ids == {first_active, first_terminal}

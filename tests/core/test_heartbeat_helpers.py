@@ -24,6 +24,7 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import build_context
+from weft.core import manager_runtime as core_manager_runtime
 from weft.core.endpoints import (
     EndpointRecord,
     ResolvedEndpoint,
@@ -108,8 +109,12 @@ def test_ensure_heartbeat_service_starts_service_on_first_use(
         lambda context_arg, name: next(responses),
     )
     monkeypatch.setattr(
-        "weft.core.heartbeat._ensure_manager_running",
-        lambda context_arg: calls.__setitem__("ensure", calls["ensure"] + 1),
+        core_manager_runtime,
+        "ensure_manager",
+        lambda context_arg: calls.__setitem__(
+            "ensure",
+            calls["ensure"] + 1,
+        ),
     )
     monkeypatch.setattr(
         "weft.core.heartbeat._heartbeat_endpoint_is_live",
@@ -136,7 +141,8 @@ def test_upsert_heartbeat_reuses_live_service_without_second_startup(
         lambda context_arg, name: resolved,
     )
     monkeypatch.setattr(
-        "weft.core.heartbeat._ensure_manager_running",
+        core_manager_runtime,
+        "ensure_manager",
         lambda context_arg: (_ for _ in ()).throw(AssertionError("unexpected ensure")),
     )
     monkeypatch.setattr(
@@ -179,7 +185,8 @@ def test_ensure_heartbeat_service_fails_on_startup_timeout(
         lambda context_arg, name: None,
     )
     monkeypatch.setattr(
-        "weft.core.heartbeat._ensure_manager_running",
+        core_manager_runtime,
+        "ensure_manager",
         lambda context_arg: None,
     )
 

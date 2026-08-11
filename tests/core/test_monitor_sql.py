@@ -85,16 +85,6 @@ def test_monitor_sql_builds_deferred_write_outbox_queries() -> None:
     assert "%s" not in ddl + upsert + pending + flushed
 
 
-def test_monitor_sql_selects_legacy_deleted_task_message_refs() -> None:
-    query = monitor_sql.select_deleted_task_message_refs("weft_monitor_task_messages")
-
-    assert "SELECT tid, message_id" in query
-    assert "deleted_at_ns IS NOT NULL" in query
-    assert "ORDER BY message_id" in query
-    assert "LIMIT ?" in query
-    assert "%s" not in query
-
-
 def test_monitor_sql_selects_missing_task_message_ids() -> None:
     query = monitor_sql.select_missing_task_message_ids(
         "weft_monitor_task_messages",
@@ -192,33 +182,6 @@ def test_monitor_sql_orphan_recovery_query_summary_gate() -> None:
     assert gated.count("summary_emitted_at_ns") > ungated.count("summary_emitted_at_ns")
 
 
-def test_monitor_sql_raw_deleted_child_ref_repair_query_selects_inconsistency() -> None:
-    query = monitor_sql.select_raw_deleted_task_message_refs(
-        "weft_monitor_task_messages",
-        "weft_monitor_task_collations",
-        require_summary=False,
-    )
-
-    assert "FROM weft_monitor_task_messages AS m" in query
-    assert "JOIN weft_monitor_task_collations AS c" in query
-    assert "m.deleted_at_ns IS NULL" in query
-    assert "c.raw_deleted_at_ns IS NOT NULL" in query
-    assert "ORDER BY m.message_id" in query
-    assert "LIMIT ?" in query
-    assert "%s" not in query
-
-
-def test_monitor_sql_raw_deleted_child_ref_repair_query_summary_gate() -> None:
-    """jsonl mode gates marked-with-refs repair on the summary export."""
-    gated = monitor_sql.select_raw_deleted_task_message_refs(
-        "weft_monitor_task_messages",
-        "weft_monitor_task_collations",
-        require_summary=True,
-    )
-
-    assert "c.summary_emitted_at_ns IS NOT NULL" in gated
-
-
 def test_monitor_sql_manager_task_spawned_retention_query_keeps_newest_refs() -> None:
     query = monitor_sql.select_manager_task_spawned_retention_refs(
         "weft_monitor_task_messages",
@@ -230,7 +193,7 @@ def test_monitor_sql_manager_task_spawned_retention_query_keeps_newest_refs() ->
     assert "ORDER BY m.message_id DESC" in query
     assert "m.queue_name = ?" in query
     assert "m.event = 'task_spawned'" in query
-    assert "m.deleted_at_ns IS NULL" in query
+    assert "m.deleted_at_ns" not in query
     assert "c.raw_deleted_at_ns IS NULL" in query
     assert "(c.role = 'manager' OR c.name = 'manager')" in query
     assert "WHERE newest_rank > ?" in query

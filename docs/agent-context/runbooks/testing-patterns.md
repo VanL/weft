@@ -93,7 +93,7 @@ queue-name classifiers, read-only evidence helpers, and small configuration
 parsers.
 
 Keep property tests inside the normal domain module or nearby test file, not in
-a separate `tests/property/` tree. Mark property modules or tests with
+a separate tests/property tree. Mark property modules or tests with
 `pytest.mark.property`, and still declare backend scope with `shared` or
 `sqlite_only`.
 

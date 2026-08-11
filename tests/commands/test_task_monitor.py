@@ -17,6 +17,7 @@ from weft.commands.task_monitor import (
     TaskMonitorConfig,
     _build_summary_record,
     _load_checkpoint,
+    _reduce_task_log,
     run_task_monitor,
 )
 from weft.context import build_context
@@ -68,6 +69,63 @@ def _write_log(ctx: Any, payload: dict[str, Any]) -> None:
 
 def _records(output: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in output.splitlines() if line.strip()]
+
+
+def test_foreground_reducer_counts_only_rows_with_valid_tids() -> None:
+    first_tid = "1778084345905438701"
+    second_tid = "1778084345905438702"
+
+    scan = _reduce_task_log(
+        (
+            ({}, 10),
+            ({"tid": ""}, 11),
+            ({"tid": first_tid}, 12),
+            ({"tid": second_tid}, 13),
+        ),
+        limit=1,
+    )
+
+    assert scan.events_scanned == 1
+    assert scan.last_task_log_timestamp == 12
+    assert list(scan.reduced) == [first_tid]
+
+
+def test_foreground_scan_filters_malformed_rows_before_counts_and_checkpoint(
+    workdir: Path,
+) -> None:
+    ctx = build_context(spec_context=workdir)
+    tid = "1778084345905438703"
+    valid_payload = {
+        "event": "work_completed",
+        "status": "completed",
+        "tid": tid,
+        "taskspec": _taskspec_payload(tid),
+    }
+    queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        queue.write("not-json")
+        queue.write("[]")
+        queue.write(json.dumps({"event": "work_started"}))
+        valid_message_id = queue.write(json.dumps(valid_payload))
+        queue.write(json.dumps({"tid": "1778084345905438704"}))
+    finally:
+        queue.close()
+    assert valid_message_id is not None
+
+    result = run_task_monitor(
+        TaskMonitorConfig(
+            context_path=workdir,
+            sink="stdout",
+            no_checkpoint=True,
+            since_timestamp=0,
+            limit=4,
+        )
+    )
+
+    assert result.events_scanned == 1
+    assert result.tids_seen == 1
+    assert result.summaries_emitted == 1
+    assert result.checkpoint_timestamp == int(valid_message_id)
 
 
 def test_disk_sink_appends_jsonl(tmp_path: Path) -> None:

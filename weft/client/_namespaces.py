@@ -16,10 +16,9 @@ from weft._constants import (
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     TASK_PING_TIMEOUT_SECONDS,
 )
+from weft.commands import builtins, dump, load, specs, system, tasks, tidy
 from weft.commands import manager as managers
 from weft.commands import queue as queues
-from weft.commands import specs, tasks
-from weft.commands import status as system
 from weft.commands.types import (
     EndpointResolution,
     ManagerSnapshot,
@@ -73,12 +72,9 @@ class TasksNamespace:
     def status(
         self,
         tid: str,
-        *,
-        include_process: bool = False,
     ) -> TaskSnapshot | None:
         return tasks.task_snapshot(
             tid,
-            include_process=include_process,
             context=self.client.context,
         )
 
@@ -109,12 +105,10 @@ class TasksNamespace:
         self,
         tid: str,
         *,
-        include_process: bool = False,
         timeout: float | None = None,
     ) -> Iterator[TaskSnapshot]:
         yield from tasks.watch_task_status(
             tid,
-            include_process=include_process,
             timeout=timeout,
             context=self.client.context,
         )
@@ -434,13 +428,13 @@ class SystemNamespace:
         return system.system_status(self.client.context)
 
     def tidy(self) -> SystemTidyResult:
-        return system.tidy_system(self.client.context)
+        return tidy.tidy_system(self.client.context)
 
     def dump(self, *, output: str | Path | None = None) -> Path:
-        return system.dump_system(self.client.context, output=output)
+        return dump.dump_system(self.client.context, output=output)
 
     def builtins(self) -> list[dict[str, Any]]:
-        return system.list_builtins()
+        return builtins.list_builtins()
 
     def load(
         self,
@@ -448,7 +442,7 @@ class SystemNamespace:
         input_file: str | Path | None = None,
         dry_run: bool = False,
     ) -> SystemLoadResult:
-        return system.load_system(
+        return load.load_system(
             self.client.context,
             input_file=input_file,
             dry_run=dry_run,

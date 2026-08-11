@@ -12,6 +12,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+import weft.core.manager_runtime as manager_runtime  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
 from weft._constants import (
     HEARTBEAT_ENDPOINT_PROBE_TIMEOUT,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
@@ -35,12 +36,6 @@ from weft.helpers import (
     handle_has_live_host_process,
     iter_queue_json_entries,
 )
-
-
-def _ensure_manager_running(context: WeftContext) -> None:
-    from weft.core.manager_runtime import _ensure_manager
-
-    _ensure_manager(context, verbose=False)
 
 
 def _write_heartbeat_request(
@@ -213,7 +208,7 @@ def ensure_heartbeat_service(
     if resolved is not None and _heartbeat_endpoint_is_live(context, resolved=resolved):
         return resolved
 
-    _ensure_manager_running(context)
+    manager_runtime.ensure_manager(context)
 
     deadline = time.monotonic() + startup_timeout
     while time.monotonic() < deadline:

@@ -9,7 +9,7 @@ rather than task-state truth.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3], [CC-3.4]
-- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4], [SB-0.4a]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.1], [OBS.17]
 """
@@ -31,13 +31,13 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from simplebroker import format_message_id
-from simplebroker.ext import SidecarSession, SidecarUnavailableError
+from simplebroker.ext import BrokerError, SidecarSession, SidecarUnavailableError
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
     INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
@@ -50,6 +50,7 @@ from weft._constants import (
     INTERNAL_SERVICE_ROLES,
     INTERNAL_SERVICE_RUNTIME_CLASSES,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
     WEFT_MONITOR_DEFERRED_WRITES_TABLE,
     WEFT_MONITOR_META_TABLE,
@@ -89,7 +90,6 @@ class MonitorStoreUnavailable(MonitorStoreError):
 class MonitorStoreConfig:
     """Runtime config for the Monitor-owned durable store."""
 
-    schema_version: int = WEFT_MONITOR_SCHEMA_VERSION
     write_batch_size: int = WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT
 
     def __post_init__(self) -> None:
@@ -379,7 +379,6 @@ class MonitorStoreRetirementResult:
     """Summary of physical Monitor-store row retirement work."""
 
     message_rows_deleted: int = 0
-    message_tombstones_pruned: int = 0
     families_retired: int = 0
     affected_tids: int = 0
 
@@ -388,7 +387,6 @@ class MonitorStoreRetirementResult:
 
         return {
             "message_rows_deleted": self.message_rows_deleted,
-            "message_tombstones_pruned": self.message_tombstones_pruned,
             "families_retired": self.families_retired,
             "affected_tids": self.affected_tids,
         }
@@ -415,11 +413,33 @@ class MonitorDeferredWriteRecord:
 
         try:
             parsed = json.loads(self.body_json)
-        except json.JSONDecodeError:
-            return {}
+        except json.JSONDecodeError as exc:
+            raise MonitorStoreUnavailable(
+                f"invalid JSON in monitor deferred write {self.report_id}"
+            ) from exc
         if not isinstance(parsed, dict):
-            return {}
-        return restore_lifetime_report_from_external_json(parsed)
+            raise MonitorStoreUnavailable(
+                f"non-object monitor deferred write {self.report_id}"
+            )
+        schema_version = parsed.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION
+        ):
+            raise MonitorStoreUnavailable(
+                f"invalid external schema version in monitor deferred write {self.report_id}"
+            )
+        if parsed.get("record_type") != self.record_type:
+            raise MonitorStoreUnavailable(
+                f"record type mismatch in monitor deferred write {self.report_id}"
+            )
+        try:
+            return restore_lifetime_report_from_external_json(parsed)
+        except (TypeError, ValueError) as exc:
+            raise MonitorStoreUnavailable(
+                f"invalid owned ID in monitor deferred write {self.report_id}"
+            ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,7 +483,20 @@ class _MonitorIndexSpec:
     columns: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _MonitorTableSpec:
+    name: str
+    columns: tuple[str, ...]
+    primary_key: tuple[str, ...]
+
+
 _monitor_tables = _MonitorTableNames()
+
+_meta_columns: tuple[str, ...] = (
+    "key",
+    "value_json",
+    "updated_at_ns",
+)
 
 _task_columns: tuple[str, ...] = (
     "context_key",
@@ -524,6 +557,43 @@ _deferred_write_columns: tuple[str, ...] = (
     "attempt_count",
     "last_attempt_at_ns",
     "flushed_at_ns",
+)
+
+_task_message_columns: tuple[str, ...] = (
+    "context_key",
+    "tid",
+    "queue_name",
+    "message_id",
+    "event",
+    "status",
+    "observed_at_ns",
+    # Schema 6 retains these v5 physical columns deliberately. The first is
+    # inert; the second is migration input and a strict-v6 rejection probe.
+    "selected_for_delete_at_ns",
+    "deleted_at_ns",
+)
+
+_monitor_table_specs: tuple[_MonitorTableSpec, ...] = (
+    _MonitorTableSpec(
+        name=_monitor_tables.meta,
+        columns=_meta_columns,
+        primary_key=("key",),
+    ),
+    _MonitorTableSpec(
+        name=_monitor_tables.task_collations,
+        columns=_task_columns,
+        primary_key=("context_key", "tid"),
+    ),
+    _MonitorTableSpec(
+        name=_monitor_tables.task_messages,
+        columns=_task_message_columns,
+        primary_key=("context_key", "tid", "message_id"),
+    ),
+    _MonitorTableSpec(
+        name=_monitor_tables.deferred_writes,
+        columns=_deferred_write_columns,
+        primary_key=("context_key", "report_id"),
+    ),
 )
 
 _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
@@ -600,11 +670,6 @@ _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
         columns=("context_key", "tid"),
     ),
     _MonitorIndexSpec(
-        name="idx_weft_monitor_messages_deleted",
-        table=_monitor_tables.task_messages,
-        columns=("context_key", "deleted_at_ns", "message_id"),
-    ),
-    _MonitorIndexSpec(
         name="idx_weft_monitor_deferred_pending",
         table=_monitor_tables.deferred_writes,
         columns=("context_key", "flushed_at_ns", "created_at_ns"),
@@ -674,22 +739,139 @@ class _MonitorTableAccess:
             )
 
     def _column_exists(self, table: str, column: str) -> bool:
+        return column in self._table_columns(table)
+
+    def table_exists(self, table: str) -> bool:
+        """Return whether one Monitor-owned table exists without mutation."""
+
+        query = (
+            monitor_sql.postgres_table_exists()
+            if self._backend_name == "postgres"
+            else monitor_sql.sqlite_table_exists()
+        )
+        rows = list(self._session.run(query, (table,), fetch=True))
+        return bool(rows and rows[0][0])
+
+    def _table_columns(self, table: str) -> tuple[str, ...]:
         if self._backend_name == "postgres":
-            rows = list(
+            rows = self._session.run(
+                monitor_sql.postgres_table_columns(),
+                (table,),
+                fetch=True,
+            )
+            return tuple(str(row[0]) for row in rows)
+        rows = self._session.run(
+            monitor_sql.sqlite_table_info(table),
+            fetch=True,
+        )
+        return tuple(str(row[1]) for row in sorted(rows, key=lambda row: int(row[0])))
+
+    def _primary_key_columns(self, table: str) -> tuple[str, ...]:
+        if self._backend_name == "postgres":
+            rows = self._session.run(
+                monitor_sql.postgres_primary_key_columns(),
+                (table,),
+                fetch=True,
+            )
+            return tuple(str(row[0]) for row in rows)
+        rows = self._session.run(
+            monitor_sql.sqlite_table_info(table),
+            fetch=True,
+        )
+        keyed = (row for row in rows if len(row) > 5 and int(row[5]) > 0)
+        return tuple(str(row[1]) for row in sorted(keyed, key=lambda row: int(row[5])))
+
+    def _index_shape(
+        self,
+        index_name: str,
+    ) -> tuple[str, bool, tuple[str, ...]] | None:
+        if self._backend_name == "postgres":
+            rows = tuple(
                 self._session.run(
-                    monitor_sql.postgres_column_exists(),
-                    (table, column),
+                    monitor_sql.postgres_index_shape(),
+                    (index_name,),
                     fetch=True,
                 )
             )
-            return bool(rows)
-        rows = list(
+            if not rows:
+                return None
+            return (
+                str(rows[0][0]),
+                bool(rows[0][1]),
+                tuple(str(row[2]) for row in rows),
+            )
+        owner_rows = list(
             self._session.run(
-                monitor_sql.sqlite_table_info(table),
+                monitor_sql.sqlite_index_table(),
+                (index_name,),
                 fetch=True,
             )
         )
-        return any(len(row) > 1 and str(row[1]) == column for row in rows)
+        if not owner_rows:
+            return None
+        table = str(owner_rows[0][0])
+        index_rows = self._session.run(
+            monitor_sql.sqlite_index_list(table),
+            fetch=True,
+        )
+        matching = [row for row in index_rows if str(row[1]) == index_name]
+        if not matching:
+            return None
+        column_rows = self._session.run(
+            monitor_sql.sqlite_index_info(index_name),
+            fetch=True,
+        )
+        columns = tuple(
+            str(row[2]) for row in sorted(column_rows, key=lambda row: int(row[0]))
+        )
+        return table, bool(matching[0][2]), columns
+
+    def verify_schema_structure(self) -> None:
+        """Fail unless the current Monitor tables and indexes are exact."""
+
+        for table_spec in _monitor_table_specs:
+            if not self.table_exists(table_spec.name):
+                raise MonitorStoreUnavailable(
+                    f"missing required Monitor table {table_spec.name}"
+                )
+            actual_columns = self._table_columns(table_spec.name)
+            if actual_columns != table_spec.columns:
+                raise MonitorStoreUnavailable(
+                    f"invalid Monitor table columns for {table_spec.name}"
+                )
+            if self._primary_key_columns(table_spec.name) != table_spec.primary_key:
+                raise MonitorStoreUnavailable(
+                    f"invalid Monitor primary key for {table_spec.name}"
+                )
+        for index_spec in _monitor_index_specs:
+            shape = self._index_shape(index_spec.name)
+            if shape is None:
+                raise MonitorStoreUnavailable(
+                    f"missing required Monitor index {index_spec.name}"
+                )
+            table, unique, columns = shape
+            if table != index_spec.table or unique or columns != index_spec.columns:
+                raise MonitorStoreUnavailable(
+                    f"invalid Monitor index {index_spec.name}"
+                )
+        query = (
+            monitor_sql.postgres_monitor_index_names()
+            if self._backend_name == "postgres"
+            else monitor_sql.sqlite_monitor_index_names()
+        )
+        actual_index_names = {
+            str(row[0])
+            for row in self._session.run(query, fetch=True)
+            if str(row[0]).startswith("idx_weft_monitor_")
+        }
+        required_index_names = {spec.name for spec in _monitor_index_specs}
+        if actual_index_names != required_index_names:
+            raise MonitorStoreUnavailable("invalid Monitor index inventory")
+
+    def drop_v5_obsolete_indexes(self) -> None:
+        """Drop the one v5-only child-tombstone index."""
+
+        self._session.run(monitor_sql.drop_index("idx_weft_monitor_messages_deleted"))
 
     def read_meta(self, key: str) -> dict[str, Any] | None:
         """Read one Monitor metadata value."""
@@ -719,6 +901,300 @@ class _MonitorTableAccess:
             (key, _json(value), time.time_ns()),
         )
 
+    def tables_are_empty(self) -> bool:
+        """Return whether every existing Monitor-owned table has no rows."""
+
+        for spec in _monitor_table_specs:
+            if not self.table_exists(spec.name):
+                continue
+            rows = list(
+                self._session.run(
+                    monitor_sql.select_row_count(spec.name),
+                    fetch=True,
+                )
+            )
+            if rows and int(rows[0][0]) != 0:
+                return False
+        return True
+
+    def migrate_v5_to_v6(
+        self,
+        *,
+        raw_message_is_absent: Callable[[str, int], bool],
+    ) -> None:
+        """Rewrite the exact v5-owned fields into the v6 stored contract."""
+
+        self._migrate_v5_checkpoint_ids()
+        self._migrate_v5_collation_ids()
+        self._migrate_v5_deferred_writes()
+        self._migrate_v5_delete_state(raw_message_is_absent=raw_message_is_absent)
+
+    def _migrate_v5_checkpoint_ids(self) -> None:
+        """Rewrite v5 checkpoint message IDs into canonical strings."""
+
+        rows = tuple(
+            self._session.run(
+                monitor_sql.select_meta_rows(self._tables.meta),
+                fetch=True,
+            )
+        )
+        for key, value_json in rows:
+            key_text = str(key)
+            if not key_text.startswith(WEFT_MONITOR_CHECKPOINT_META_PREFIX):
+                continue
+            value = _json_object(value_json, f"monitor meta {key_text}")
+            _project_owned_message_id(
+                value,
+                "message_id",
+                f"monitor meta {key_text}",
+                required=True,
+            )
+            self._session.run(
+                monitor_sql.update_meta_value(self._tables.meta),
+                (_json(value), key_text),
+            )
+
+    def _migrate_v5_collation_ids(self) -> None:
+        """Rewrite only the two collation JSON fields with owned IDs."""
+
+        rows = tuple(
+            self._session.run(
+                monitor_sql.select_collation_json_rows(self._tables.task_collations),
+                fetch=True,
+            )
+        )
+        for row in rows:
+            context_key, tid, *json_values = row
+            (
+                taskspec_summary,
+                state,
+                lifecycle,
+                resources,
+                diagnostics,
+                bookkeeping,
+            ) = (
+                _json_object(value, f"monitor collation {context_key}:{tid} {field}")
+                for field, value in zip(
+                    (
+                        "taskspec_summary_json",
+                        "state_json",
+                        "lifecycle_json",
+                        "resources_json",
+                        "diagnostics_json",
+                        "bookkeeping_json",
+                    ),
+                    json_values,
+                    strict=True,
+                )
+            )
+            del taskspec_summary, state, resources, diagnostics
+            lifecycle = _project_lifecycle_message_ids(lifecycle)
+            bookkeeping = _project_bookkeeping_message_ids(bookkeeping)
+            self._session.run(
+                monitor_sql.update_collation_owned_json(self._tables.task_collations),
+                (
+                    _json(lifecycle),
+                    _json(bookkeeping),
+                    str(context_key),
+                    str(tid),
+                ),
+            )
+
+    def _migrate_v5_deferred_writes(self) -> None:
+        """Upgrade and canonicalize deferred external envelopes."""
+
+        rows = tuple(
+            self._session.run(
+                monitor_sql.select_deferred_json_rows(self._tables.deferred_writes),
+                fetch=True,
+            )
+        )
+        for context_key, report_id, record_type, body_json in rows:
+            body = _json_object(
+                body_json,
+                f"monitor deferred write {context_key}:{report_id}",
+            )
+            version = body.get("schema_version")
+            if isinstance(version, bool) or not isinstance(version, int):
+                raise MonitorStoreUnavailable(
+                    "invalid external schema version in monitor deferred write "
+                    f"{context_key}:{report_id}"
+                )
+            if version == 1:
+                body["schema_version"] = WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION
+            elif version != WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION:
+                raise MonitorStoreUnavailable(
+                    "invalid external schema version in monitor deferred write "
+                    f"{context_key}:{report_id}"
+                )
+            if body.get("record_type") != record_type:
+                raise MonitorStoreUnavailable(
+                    "record type mismatch in monitor deferred write "
+                    f"{context_key}:{report_id}"
+                )
+            projected = project_lifetime_report_for_external_json(body)
+            self._session.run(
+                monitor_sql.update_deferred_body(self._tables.deferred_writes),
+                (_json(projected), str(context_key), str(report_id)),
+            )
+
+    def _migrate_v5_delete_state(
+        self,
+        *,
+        raw_message_is_absent: Callable[[str, int], bool],
+    ) -> None:
+        """Remove v5 tombstones and normalize old parent marker state."""
+
+        tombstone_times: dict[tuple[str, str], int] = {}
+        rows = tuple(
+            self._session.run(
+                monitor_sql.select_deleted_message_rows(self._tables.task_messages),
+                fetch=True,
+            )
+        )
+        for context_key, tid, queue_name, message_id, _deleted_at_ns in rows:
+            try:
+                absent = raw_message_is_absent(str(queue_name), int(message_id))
+            except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+                raise MonitorStoreUnavailable(
+                    "unable to verify raw-row absence for Monitor schema v5 "
+                    f"tombstone {context_key}:{tid}:{message_id}"
+                ) from exc
+            if not absent:
+                raise MonitorStoreUnavailable(
+                    "raw row remains for Monitor schema v5 tombstone "
+                    f"{context_key}:{tid}:{message_id}"
+                )
+        for context_key, tid, _queue_name, message_id, deleted_at_ns in rows:
+            parent = list(
+                self._session.run(
+                    monitor_sql.select_collation_exists(self._tables.task_collations),
+                    (str(context_key), str(tid)),
+                    fetch=True,
+                )
+            )
+            if not parent:
+                raise MonitorStoreUnavailable(
+                    "orphan child tombstone in Monitor schema v5: "
+                    f"{context_key}:{tid}:{message_id}"
+                )
+            identity = (str(context_key), str(tid))
+            tombstone_times[identity] = max(
+                tombstone_times.get(identity, 0),
+                int(deleted_at_ns),
+            )
+            self._session.run(
+                monitor_sql.delete_message_row(self._tables.task_messages),
+                (str(context_key), str(tid), int(message_id)),
+            )
+        for (context_key, tid), deleted_at_ns in tombstone_times.items():
+            self._session.run(
+                monitor_sql.mark_migrated_tombstone_parent_raw_deleted(
+                    self._tables.task_collations,
+                    self._tables.task_messages,
+                ),
+                (deleted_at_ns, context_key, tid),
+            )
+        self._session.run(
+            monitor_sql.reset_raw_deleted_parents_with_children(
+                self._tables.task_collations,
+                self._tables.task_messages,
+            )
+        )
+
+    def verify_v6(self) -> None:
+        """Fail unless all Monitor-owned stored data is canonical v6 data."""
+
+        for key, value_json in self._session.run(
+            monitor_sql.select_meta_rows(self._tables.meta),
+            fetch=True,
+        ):
+            key_text = str(key)
+            value = _json_object(value_json, f"monitor meta {key_text}")
+            if key_text.startswith(WEFT_MONITOR_CHECKPOINT_META_PREFIX):
+                _restore_owned_message_id(
+                    value,
+                    "message_id",
+                    f"monitor meta {key_text}",
+                    required=True,
+                )
+
+        for row in self._session.run(
+            monitor_sql.select_collation_json_rows(self._tables.task_collations),
+            fetch=True,
+        ):
+            context_key, tid, *json_values = row
+            objects = tuple(
+                _json_object(value, f"monitor collation {context_key}:{tid} {field}")
+                for field, value in zip(
+                    (
+                        "taskspec_summary_json",
+                        "state_json",
+                        "lifecycle_json",
+                        "resources_json",
+                        "diagnostics_json",
+                        "bookkeeping_json",
+                    ),
+                    json_values,
+                    strict=True,
+                )
+            )
+            _restore_lifecycle_message_ids(objects[2])
+            _restore_bookkeeping_message_ids(objects[5])
+
+        for context_key, report_id, record_type, body_json in self._session.run(
+            monitor_sql.select_deferred_json_rows(self._tables.deferred_writes),
+            fetch=True,
+        ):
+            body = _json_object(
+                body_json,
+                f"monitor deferred write {context_key}:{report_id}",
+            )
+            version = body.get("schema_version")
+            if (
+                isinstance(version, bool)
+                or not isinstance(version, int)
+                or version != WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION
+            ):
+                raise MonitorStoreUnavailable(
+                    "invalid external schema version in monitor deferred write "
+                    f"{context_key}:{report_id}"
+                )
+            if body.get("record_type") != record_type:
+                raise MonitorStoreUnavailable(
+                    "record type mismatch in monitor deferred write "
+                    f"{context_key}:{report_id}"
+                )
+            try:
+                restore_lifetime_report_from_external_json(body)
+            except (TypeError, ValueError) as exc:
+                raise MonitorStoreUnavailable(
+                    "invalid owned ID in monitor deferred write "
+                    f"{context_key}:{report_id}"
+                ) from exc
+
+        if list(
+            self._session.run(
+                monitor_sql.select_deleted_message_rows(self._tables.task_messages),
+                fetch=True,
+            )
+        ):
+            raise MonitorStoreUnavailable(
+                "Monitor schema v6 contains obsolete child tombstones"
+            )
+        if list(
+            self._session.run(
+                monitor_sql.select_raw_deleted_parents_with_children(
+                    self._tables.task_collations,
+                    self._tables.task_messages,
+                ),
+                fetch=True,
+            )
+        ):
+            raise MonitorStoreUnavailable(
+                "Monitor schema v6 contains a raw-deleted parent with child refs"
+            )
+
     def get_checkpoint(self, queue_name: str) -> int | None:
         """Return the durable ingest checkpoint message ID for a queue."""
 
@@ -727,13 +1203,17 @@ class _MonitorTableAccess:
         )
         if value is None:
             return None
-        message_id = value.get("message_id")
-        if message_id is None:
-            return None
-        try:
-            return normalize_exact_message_id(message_id)
-        except (TypeError, ValueError):
-            return None
+        if "message_id" not in value:
+            raise MonitorStoreUnavailable(
+                f"invalid monitor checkpoint metadata for {queue_name}"
+            )
+        restored = dict(value)
+        _restore_owned_message_id(
+            restored,
+            "message_id",
+            f"monitor checkpoint {queue_name}",
+        )
+        return cast(int, restored["message_id"])
 
     def upsert_deferred_write(
         self,
@@ -1303,34 +1783,6 @@ class _MonitorTableAccess:
             for row in rows
         )
 
-    def raw_deleted_task_message_refs(
-        self,
-        *,
-        limit: int,
-        require_summary: bool,
-    ) -> tuple[MonitorRawMessageRef, ...]:
-        """Return child refs left after parent raw deletion was recorded."""
-
-        if limit <= 0:
-            return ()
-        rows = self._session.run(
-            monitor_sql.select_raw_deleted_task_message_refs(
-                self._tables.task_messages,
-                self._tables.task_collations,
-                require_summary=require_summary,
-            ),
-            (self._context_key, int(limit)),
-            fetch=True,
-        )
-        return tuple(
-            MonitorRawMessageRef(
-                queue=str(row[0]),
-                message_id=int(row[1]),
-                tid=str(row[2]),
-            )
-            for row in rows
-        )
-
     def task_message_refs_for_message_ids(
         self,
         message_ids: Sequence[int],
@@ -1390,18 +1842,6 @@ class _MonitorTableAccess:
         )
         return tuple(str(row[0]) for row in rows)
 
-    def deleted_task_message_refs(self, *, limit: int) -> tuple[tuple[str, int], ...]:
-        """Return legacy child message tombstones for physical cleanup."""
-
-        if limit <= 0:
-            return ()
-        rows = self._session.run(
-            monitor_sql.select_deleted_task_message_refs(self._tables.task_messages),
-            (self._context_key, int(limit)),
-            fetch=True,
-        )
-        return tuple((str(row[0]), int(row[1])) for row in rows)
-
     def delete_task_messages(self, message_ids: Sequence[int]) -> None:
         """Physically delete exact child raw-message references."""
 
@@ -1440,14 +1880,6 @@ class _MonitorTableAccess:
             )
         )
         return bool(rows)
-
-    def mark_raw_deleted(self, tid: str, deleted_at_ns: int) -> None:
-        """Mark all known raw task-log rows for a task deleted."""
-
-        self._session.run(
-            monitor_sql.mark_raw_deleted(self._tables.task_collations),
-            (int(deleted_at_ns), int(deleted_at_ns), self._context_key, tid),
-        )
 
     def reconcile_raw_deleted(self, deleted_at_ns: int) -> None:
         """Mark parent rows whose known child rows are all deleted."""
@@ -1575,7 +2007,7 @@ class MonitorStore:
     def schema_version(self) -> int:
         """Supported Monitor store schema version."""
 
-        return self._config.schema_version
+        return WEFT_MONITOR_SCHEMA_VERSION
 
     def _access(self, session: SidecarSession) -> _MonitorTableAccess:
         return _MonitorTableAccess(
@@ -1624,23 +2056,54 @@ class MonitorStore:
 
         with self._sidecar_session(transaction=True) as session:
             access = self._access(session)
-            access.ensure_schema()
-            version = self._read_schema_version(access)
+            if access.table_exists(WEFT_MONITOR_META_TABLE):
+                meta_spec = _monitor_table_specs[0]
+                actual_meta_columns = access._table_columns(meta_spec.name)
+                if actual_meta_columns != meta_spec.columns:
+                    raise MonitorStoreUnavailable(
+                        f"invalid Monitor table columns for {meta_spec.name}"
+                    )
+                if access._primary_key_columns(meta_spec.name) != meta_spec.primary_key:
+                    raise MonitorStoreUnavailable(
+                        f"invalid Monitor primary key for {meta_spec.name}"
+                    )
+                version = self._read_schema_version(access)
+            else:
+                version = None
             if version is None:
+                if not access.tables_are_empty():
+                    raise MonitorStoreUnavailable(
+                        "Monitor store has non-empty unversioned tables"
+                    )
+                access.ensure_schema()
+                access.verify_schema_structure()
                 access.write_meta(
                     WEFT_MONITOR_SCHEMA_VERSION_KEY,
-                    {"version": self._config.schema_version},
+                    {"version": WEFT_MONITOR_SCHEMA_VERSION},
                 )
-            elif version > self._config.schema_version:
+            elif version == 5:
+                access.ensure_schema()
+                access.drop_v5_obsolete_indexes()
+                access.verify_schema_structure()
+                access.migrate_v5_to_v6(
+                    raw_message_is_absent=self._raw_message_is_absent,
+                )
+                access.verify_v6()
+                access.write_meta(
+                    WEFT_MONITOR_SCHEMA_VERSION_KEY,
+                    {"version": WEFT_MONITOR_SCHEMA_VERSION},
+                )
+            elif version == WEFT_MONITOR_SCHEMA_VERSION:
+                access.verify_schema_structure()
+                access.verify_v6()
+            elif version < 5:
                 raise MonitorStoreUnavailable(
-                    "Monitor store schema version "
-                    f"{version} is newer than supported "
-                    f"{self._config.schema_version}"
+                    f"Monitor store schema version {version} is unsupported"
                 )
-            elif version < self._config.schema_version:
-                access.write_meta(
-                    WEFT_MONITOR_SCHEMA_VERSION_KEY,
-                    {"version": self._config.schema_version},
+            else:
+                raise MonitorStoreUnavailable(
+                    f"Monitor store schema version {version} is newer than supported "
+                    f"{WEFT_MONITOR_SCHEMA_VERSION}"
                 )
 
     def get_checkpoint(self, queue_name: str) -> int | None:
@@ -1649,6 +2112,20 @@ class MonitorStore:
         with self._sidecar_session() as session:
             return self._access(session).get_checkpoint(
                 queue_name,
+            )
+
+    def _raw_message_is_absent(self, queue_name: str, message_id: int) -> bool:
+        """Prove exact raw-row absence through the public broker surface."""
+
+        with self._context.broker() as broker:
+            return (
+                broker.peek_one(
+                    queue_name,
+                    exact_timestamp=message_id,
+                    with_timestamps=True,
+                    include_claimed=True,
+                )
+                is None
             )
 
     def set_checkpoint(self, queue_name: str, message_id: int) -> None:
@@ -2139,31 +2616,6 @@ class MonitorStore:
                 require_summary=require_summary,
             )
 
-    def list_raw_deleted_task_message_refs(
-        self,
-        *,
-        limit: int,
-        require_summary: bool = False,
-    ) -> tuple[MonitorRawMessageRef, ...]:
-        """Return child refs left after parent raw deletion was recorded.
-
-        ``require_summary`` restricts the selection to refs of families
-        whose ``summary_emitted_at_ns`` is set. Callers operating in
-        ``jsonl_then_delete`` mode must pass ``True`` so the repair path
-        never deletes a family's raw rows before its summary/JSONL export
-        (the mode's audit invariant).
-
-        Spec: [MF-5], [OBS.13], [OBS.17]
-        """
-
-        if limit <= 0:
-            return ()
-        with self._sidecar_session() as session:
-            return self._access(session).raw_deleted_task_message_refs(
-                limit=limit,
-                require_summary=require_summary,
-            )
-
     def delete_task_messages_after_raw_delete(
         self,
         message_ids: Sequence[int],
@@ -2232,45 +2684,6 @@ class MonitorStore:
             affected_tids=len(affected_tids),
         )
 
-    def prune_deleted_task_message_tombstones(
-        self,
-        *,
-        limit: int,
-        pruned_at_ns: int | None = None,
-    ) -> MonitorStoreRetirementResult:
-        """Physically remove legacy child-message tombstones.
-
-        Spec: [MF-5], [OBS.13]
-        """
-
-        if limit <= 0:
-            return MonitorStoreRetirementResult()
-        timestamp = time.time_ns() if pruned_at_ns is None else int(pruned_at_ns)
-        pruned_rows = 0
-        affected_tids: set[str] = set()
-        remaining = int(limit)
-        while remaining > 0:
-            chunk_limit = min(remaining, self._config.write_batch_size)
-            with self._sidecar_session(transaction=True) as session:
-                access = self._access(session)
-                chunk = access.deleted_task_message_refs(limit=chunk_limit)
-                if not chunk:
-                    break
-                chunk_tids = {tid for tid, _message_id in chunk}
-                chunk_message_ids = tuple(message_id for _tid, message_id in chunk)
-                access.delete_task_messages(chunk_message_ids)
-                access.reconcile_raw_deleted_for_tids(
-                    sorted(chunk_tids),
-                    timestamp,
-                )
-            pruned_rows += len(chunk_message_ids)
-            affected_tids.update(chunk_tids)
-            remaining -= len(chunk_message_ids)
-        return MonitorStoreRetirementResult(
-            message_tombstones_pruned=pruned_rows,
-            affected_tids=len(affected_tids),
-        )
-
     def retire_completed_collation_families(
         self,
         *,
@@ -2326,6 +2739,15 @@ class MonitorStore:
 
         report_id = report.get("report_id")
         record_type = report.get("record_type")
+        schema_version = report.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "deferred write report must use the current external schema version"
+            )
         if not isinstance(report_id, str) or not report_id:
             raise ValueError("deferred write report_id must be a non-empty string")
         if not isinstance(record_type, str) or not record_type:
@@ -2408,7 +2830,7 @@ class MonitorStore:
         return MonitorStoreStatus(
             enabled=True,
             available=True,
-            schema_version=self._config.schema_version,
+            schema_version=WEFT_MONITOR_SCHEMA_VERSION,
             checkpoint=checkpoint,
         )
 
@@ -2417,7 +2839,9 @@ class MonitorStore:
         if value is None:
             return None
         version = value.get("version")
-        return version if isinstance(version, int) else None
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise MonitorStoreUnavailable("invalid Monitor store schema version")
+        return version
 
 
 def _record_from_row(row: tuple[Any, ...]) -> MonitorTaskCollationRecord:
@@ -2707,63 +3131,113 @@ def _json(value: Mapping[str, Any]) -> str:
     return json.dumps(dict(value), sort_keys=True, ensure_ascii=False, default=str)
 
 
-def _json_dict(value: Any) -> dict[str, Any]:
+def _json_object(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, str):
-        return {}
+        raise MonitorStoreUnavailable(f"{label} is not JSON text")
     try:
         parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError as exc:
+        raise MonitorStoreUnavailable(f"{label} is invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise MonitorStoreUnavailable(f"{label} is not a JSON object")
+    return cast(dict[str, Any], parsed)
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    return _json_object(value, "Monitor-owned JSON field")
+
+
+def _project_owned_message_id(
+    value: dict[str, Any],
+    field: str,
+    label: str,
+    *,
+    nullable: bool = False,
+    required: bool = False,
+) -> None:
+    if field not in value:
+        if required:
+            raise MonitorStoreUnavailable(f"missing {label}.{field}")
+        return
+    message_id = value[field]
+    if message_id is None and nullable:
+        return
+    try:
+        value[field] = format_message_id(message_id)
+    except (TypeError, ValueError) as exc:
+        raise MonitorStoreUnavailable(f"invalid {label}.{field}") from exc
+
+
+def _restore_owned_message_id(
+    value: dict[str, Any],
+    field: str,
+    label: str,
+    *,
+    nullable: bool = False,
+    required: bool = False,
+) -> None:
+    if field not in value:
+        if required:
+            raise MonitorStoreUnavailable(f"missing {label}.{field}")
+        return
+    message_id = value[field]
+    if message_id is None and nullable:
+        return
+    if not isinstance(message_id, str):
+        raise MonitorStoreUnavailable(f"noncanonical {label}.{field}")
+    try:
+        value[field] = normalize_exact_message_id(message_id)
+    except (TypeError, ValueError) as exc:
+        raise MonitorStoreUnavailable(f"invalid {label}.{field}") from exc
 
 
 def _project_lifecycle_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
     projected = dict(value)
-    message_id = projected.get("message_id")
-    if message_id is not None:
-        projected["message_id"] = format_message_id(message_id)
+    _project_owned_message_id(projected, "message_id", "lifecycle_json")
     checkpoint = projected.get("checkpoint")
     if isinstance(checkpoint, Mapping):
         checkpoint_projected = dict(checkpoint)
-        checkpoint_message_id = checkpoint_projected.get("message_id")
-        if checkpoint_message_id is not None:
-            checkpoint_projected["message_id"] = format_message_id(
-                checkpoint_message_id
-            )
+        _project_owned_message_id(
+            checkpoint_projected,
+            "message_id",
+            "lifecycle_json.checkpoint",
+        )
         projected["checkpoint"] = checkpoint_projected
     return projected
 
 
 def _restore_lifecycle_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
     restored = dict(value)
-    message_id = restored.get("message_id")
-    if message_id is not None:
-        restored["message_id"] = normalize_exact_message_id(message_id)
+    _restore_owned_message_id(restored, "message_id", "lifecycle_json")
     checkpoint = restored.get("checkpoint")
     if isinstance(checkpoint, Mapping):
         checkpoint_restored = dict(checkpoint)
-        checkpoint_message_id = checkpoint_restored.get("message_id")
-        if checkpoint_message_id is not None:
-            checkpoint_restored["message_id"] = normalize_exact_message_id(
-                checkpoint_message_id
-            )
+        _restore_owned_message_id(
+            checkpoint_restored,
+            "message_id",
+            "lifecycle_json.checkpoint",
+        )
         restored["checkpoint"] = checkpoint_restored
     return restored
 
 
 def _project_bookkeeping_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
     projected = dict(value)
-    message_id = projected.get("last_message_id")
-    if message_id is not None:
-        projected["last_message_id"] = format_message_id(message_id)
+    _project_owned_message_id(
+        projected,
+        "last_message_id",
+        "bookkeeping_json",
+    )
     return projected
 
 
 def _restore_bookkeeping_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
     restored = dict(value)
-    message_id = restored.get("last_message_id")
-    if message_id is not None:
-        restored["last_message_id"] = normalize_exact_message_id(message_id)
+    _restore_owned_message_id(
+        restored,
+        "last_message_id",
+        "bookkeeping_json",
+    )
     return restored
 
 

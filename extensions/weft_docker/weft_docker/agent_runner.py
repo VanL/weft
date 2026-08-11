@@ -1,6 +1,7 @@
 """Docker-backed one-shot provider_cli agent runner.
 
 Spec references:
+- docs/specifications/01-Core_Components.md [CC-3.2]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
 - docs/specifications/13-Agent_Runtime.md [AR-7]
 """

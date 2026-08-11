@@ -152,6 +152,7 @@ def _provider_agent_overrides(
 
     return {
         "runtime": "provider_cli",
+        "authority_class": "general",
         "model": _provider_model(provider_name),
         "instructions": "base instructions",
         "runtime_config": runtime_config,

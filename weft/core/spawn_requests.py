@@ -7,7 +7,6 @@ Spec references:
 
 from __future__ import annotations
 
-import copy
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -28,9 +27,9 @@ from weft._constants import (
 from weft.core.endpoints import is_reserved_internal_endpoint_name
 from weft.core.taskspec import (
     TaskSpec,
-    apply_bundle_root_to_taskspec_payload,
-    bundle_root_from_taskspec_payload,
-    resolve_taskspec_payload,
+    decode_taskspec_transport_payload,
+    encode_taskspec_transport_payload,
+    validate_taskspec_payload,
 )
 
 
@@ -54,18 +53,14 @@ def _taskspec_payload_for_spawn(
     tid: str | None,
     inherited_weft_context: str | None = None,
 ) -> dict[str, Any]:
-    payload = (
-        taskspec.model_dump(mode="json")
+    model = (
+        taskspec
         if isinstance(taskspec, TaskSpec)
-        else copy.deepcopy(dict(taskspec))
+        else decode_taskspec_transport_payload(taskspec, template=True)
     )
-    bundle_root = (
-        taskspec.get_bundle_root()
-        if isinstance(taskspec, TaskSpec)
-        else bundle_root_from_taskspec_payload(payload)
-    )
-    apply_bundle_root_to_taskspec_payload(payload, bundle_root)
+    bundle_root = model.get_bundle_root()
     if tid is None:
+        payload = model.model_dump(mode="json")
         spec_section = payload.get("spec")
         if (
             inherited_weft_context
@@ -73,12 +68,19 @@ def _taskspec_payload_for_spawn(
             and not spec_section.get("weft_context")
         ):
             spec_section["weft_context"] = inherited_weft_context
-        return payload
-    return resolve_taskspec_payload(
-        payload,
-        tid=tid,
+        model = validate_taskspec_payload(
+            payload,
+            bundle_root=bundle_root,
+            template=True,
+        )
+        return encode_taskspec_transport_payload(model)
+    model = validate_taskspec_payload(
+        model.model_dump(mode="json"),
+        bundle_root=bundle_root,
+        resolved_tid=tid,
         inherited_weft_context=inherited_weft_context,
     )
+    return encode_taskspec_transport_payload(model)
 
 
 def generate_spawn_request_timestamp(

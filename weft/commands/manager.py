@@ -16,35 +16,7 @@ from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
 from weft._exceptions import ControlRejected, ManagerNotRunning
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
-from weft.core.manager_runtime import (
-    build_manager_spec,
-    ensure_manager,
-    generate_tid,
-    list_manager_records,
-    manager_diagnostic_records,
-    manager_record,
-    replace_active_manager,
-    select_active_manager,
-    serve_manager_foreground,
-)
-from weft.core.manager_runtime import (
-    start_manager as start_manager_runtime,
-)
-from weft.core.manager_runtime import (
-    stop_manager as stop_manager_runtime,
-)
-
-_build_manager_spec = build_manager_spec
-_ensure_manager = ensure_manager
-_generate_tid = generate_tid
-_manager_diagnostic_records = manager_diagnostic_records
-_list_manager_records = list_manager_records
-_manager_record = manager_record
-_replace_active_manager = replace_active_manager
-_select_active_manager = select_active_manager
-_serve_manager_foreground = serve_manager_foreground
-_start_manager = start_manager_runtime
-_stop_manager = stop_manager_runtime
+from weft.core import manager_runtime
 
 
 def _manager_record_to_json(record: dict[str, Any]) -> dict[str, Any]:
@@ -115,14 +87,14 @@ def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
 def start_manager(context: WeftContext) -> ManagerSnapshot:
     """Ensure a canonical manager exists and return its registry snapshot."""
 
-    record, _started_here, _process_handle = _ensure_manager(context, verbose=False)
+    record, _started_here, _process_handle = manager_runtime.ensure_manager(context)
     return _manager_snapshot(record)
 
 
 def serve_manager(context: WeftContext) -> None:
     """Run the canonical manager in the foreground."""
 
-    exit_code, message = _serve_manager_foreground(context)
+    exit_code, message = manager_runtime.serve_manager_foreground(context)
     if exit_code != 0:
         raise ManagerNotRunning(message or "Manager serve failed")
 
@@ -138,14 +110,18 @@ def stop_manager(
 
     record: dict[str, Any] | None = None
     if tid is None:
-        record = _select_active_manager(context, probe_stale=True, probe_cache={})
+        record = manager_runtime.select_active_manager(
+            context,
+            probe_stale=True,
+            probe_cache={},
+        )
         if record is None:
             raise ManagerNotRunning("No active manager")
         tid_value = record.get("tid")
         if not isinstance(tid_value, str) or not tid_value:
             raise ManagerNotRunning("Active manager record is missing a TID")
         tid = tid_value
-    stopped, message = _stop_manager(
+    stopped, message = manager_runtime.stop_manager(
         context,
         record,
         tid=tid,
@@ -165,7 +141,7 @@ def list_managers(
 
     return [
         _manager_snapshot(record)
-        for record in _list_manager_records(
+        for record in manager_runtime.list_manager_records(
             context,
             include_stopped=include_stopped,
             canonical_only=False,
@@ -179,7 +155,7 @@ def manager_status(
 ) -> ManagerSnapshot | None:
     """Return one manager snapshot or `None` if absent."""
 
-    record = _manager_record(context, tid)
+    record = manager_runtime.manager_record(context, tid)
     if record is None:
         return None
     return _manager_snapshot(record)
@@ -192,12 +168,12 @@ def start_command(
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
     if replace:
-        replaced, message = _replace_active_manager(context)
+        replaced, message = manager_runtime.replace_active_manager(context)
         if not replaced:
             return 1, message or "Manager replacement failed"
-        record, started_here, _process_handle = _start_manager(context, verbose=False)
+        record, started_here, _process_handle = manager_runtime.start_manager(context)
     else:
-        record, started_here, _process_handle = _ensure_manager(context, verbose=False)
+        record, started_here, _process_handle = manager_runtime.ensure_manager(context)
     tid = cast(str, record.get("tid"))
 
     if started_here:
@@ -216,14 +192,18 @@ def stop_command(
     context = build_context(context_path)
     record: dict[str, Any] | None = None
     if tid is None:
-        record = _select_active_manager(context, probe_stale=True, probe_cache={})
+        record = manager_runtime.select_active_manager(
+            context,
+            probe_stale=True,
+            probe_cache={},
+        )
         if record is None:
             return 0, None
         tid_value = record.get("tid")
         if not isinstance(tid_value, str) or not tid_value:
             return 1, "Active manager record is missing a TID"
         tid = tid_value
-    stopped, message = _stop_manager(
+    stopped, message = manager_runtime.stop_manager(
         context,
         record,
         tid=tid,
@@ -247,12 +227,12 @@ def list_command(
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
     if diagnostic:
-        records = _manager_diagnostic_records(
+        records = manager_runtime.manager_diagnostic_records(
             context,
             include_stopped=include_stopped,
         )
     else:
-        records = _list_manager_records(
+        records = manager_runtime.list_manager_records(
             context,
             include_stopped=include_stopped,
             canonical_only=False,
@@ -298,7 +278,7 @@ def status_command(
     context_path: Path | None = None,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
-    record = _manager_record(context, tid)
+    record = manager_runtime.manager_record(context, tid)
 
     if not record:
         return 1, f"Manager {tid} not found"

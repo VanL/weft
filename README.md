@@ -531,13 +531,13 @@ substitution, variable interpolation, includes, or multiline parsing. Real
 process environment values win over values from the file. `weft run --env` and
 TaskSpec `spec.env` are task-process overlays, not Weft process bootstrap.
 
-When Weft auto-discovers a project from a child directory, an existing local
-broker target still wins over ambient env backend selection. That means
-`.weft/broker.toml` is authoritative, and legacy sqlite project discovery
-beats `WEFT_BACKEND=...` during upward discovery. Env-based backend selection
-is the fallback when no project-local broker target has already claimed the
-directory. A root `.broker.toml` belongs to standalone SimpleBroker and does
-not redirect Weft by default.
+When Weft auto-discovers a project from a child directory, it searches upward
+only for the configured Weft-scoped broker config (by default
+`.weft/broker.toml`). A discovered config is authoritative over ambient backend
+selection. If none exists, Weft resolves the current directory as an explicit
+root, so an ancestor SQLite file does not claim the child. A root
+`.broker.toml` belongs to standalone SimpleBroker and does not redirect Weft by
+default.
 
 If Postgres is selected without the plugin installed, Weft will fail with an
 install hint for `uv add 'weft[pg]'`.
@@ -741,8 +741,8 @@ weft system dump -o FILE
 weft system load --dry-run --input FILE  # preflight import; exits 3 on conflicts
 weft system load --input FILE            # import the dump
 
-# Prune stale broker rows (dry-run by default)
-weft system prune [--apply|--dry-run] [--family FAMILY] [--force] [--context PATH]
+# Prune stale broker rows (explicit family; dry-run by default)
+weft system prune --family FAMILY [--apply|--dry-run] [--force] [--context PATH]
 # Scope and safety controls:
 #   [--queue GROUP]... [--min-age SECONDS] [--keep-recent-per-key N] [--keep-recent-per-task N]
 # Retention-family controls and reporting:
@@ -886,7 +886,7 @@ weft queue stats NAME [--json]
 # Broadcast and aliases
 weft queue broadcast [MESSAGE] [--pattern GLOB]
 printf "payload" | weft queue write QUEUE
-printf "STOP" | weft queue broadcast --pattern 'T*.ctrl_in'
+printf '%s\n' '{"command":"STOP"}' | weft queue broadcast --pattern 'T*.ctrl_in'
 weft queue alias add ALIAS TARGET
 weft queue alias remove ALIAS
 weft queue alias list [--target QUEUE]

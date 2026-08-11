@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from collections import Counter
@@ -22,15 +23,11 @@ from weft.commands.control_convergence import (
     reduce_control_convergence,
 )
 from weft.context import build_context
-from weft.core import (
-    IOSection,
-    SpecSection,
-    StateSection,
-    TaskSpec,
-    launch_task_process,
-)
+from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
+from weft.core.launcher import launch_task_process
 from weft.core.tasks import Consumer
+from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
     iter_queue_json_entries,
@@ -40,6 +37,14 @@ from weft.helpers import (
 )
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_task_snapshot_interfaces_drop_inert_process_parameter() -> None:
+    assert "include_process" not in inspect.signature(task_cmd.task_snapshot).parameters
+    assert (
+        "include_process"
+        not in inspect.signature(task_cmd.watch_task_status).parameters
+    )
 
 
 class MonitorStoreReadFailure(Exception):
@@ -709,7 +714,7 @@ def test_await_control_surface_uses_queue_monitor(
     snapshots = iter(
         [
             None,
-            task_cmd.status_cmd.TaskSnapshot(
+            task_cmd.system_cmd.TaskSnapshot(
                 tid=tid,
                 tid_short=tid[-10:],
                 name="task-func",
@@ -1070,7 +1075,7 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
     monkeypatch.setattr(
         task_cmd,
         "task_status",
-        lambda *_args, **_kwargs: task_cmd.status_cmd.TaskSnapshot(
+        lambda *_args, **_kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid[-10:],
             name="task-func",
@@ -1254,7 +1259,7 @@ def test_stop_tasks_uses_runner_handle_when_available(
             0.2,
         )
     ]
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
 def test_stop_tasks_prefers_task_process_over_runner_handle(
@@ -1319,7 +1324,7 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
             0.2,
         )
     ]
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
 def test_kill_tasks_uses_runner_handle_when_available(
@@ -1414,7 +1419,7 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
 
     def _running_surface(_ctx, _tid, *, timeout=0.0):
         del timeout
-        return mapping_payload, task_cmd.status_cmd.TaskSnapshot(
+        return mapping_payload, task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid[-10:],
             name="task-func",
@@ -1475,7 +1480,7 @@ def test_task_stop_stops_pipeline_run(
     stopped = task_cmd.stop_tasks([tid], context_path=root)
 
     assert stopped == 1
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
 def test_task_kill_kills_pipeline_run(
@@ -1494,7 +1499,7 @@ def test_task_kill_kills_pipeline_run(
     killed = task_cmd.kill_tasks([tid], context_path=root)
 
     assert killed == 1
-    assert ctrl_queue.read_one() == "KILL"
+    assert ctrl_queue.read_one() == encode_control_message("KILL")
 
 
 def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
@@ -1528,7 +1533,7 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
     monkeypatch.setattr(
         task_cmd,
         "task_status",
-        lambda *args, **kwargs: task_cmd.status_cmd.TaskSnapshot(
+        lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid[-10:],
             name="docker-task",
@@ -1569,7 +1574,7 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
     stopped = task_cmd.stop_tasks([tid], context_path=root)
 
     assert stopped == 1
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
 def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
@@ -1596,7 +1601,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
     monkeypatch.setattr(
         task_cmd,
         "task_status",
-        lambda *args, **kwargs: task_cmd.status_cmd.TaskSnapshot(
+        lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid[-10:],
             name="host-task",
@@ -1625,7 +1630,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
     stopped = task_cmd.stop_tasks([tid], context_path=root)
 
     assert stopped == 1
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
 def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
@@ -1658,7 +1663,7 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
     monkeypatch.setattr(
         task_cmd,
         "task_status",
-        lambda *args, **kwargs: task_cmd.status_cmd.TaskSnapshot(
+        lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid[-10:],
             name="sandbox-task",

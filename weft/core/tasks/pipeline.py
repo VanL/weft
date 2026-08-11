@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-3.2], [PL-4.1], [PL-4.2], [PL-5.3]
-- docs/specifications/05-Message_Flow_and_State.md [MF-4], [MF-6]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-4], [MF-6]
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from weft._constants import (
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_PIPELINES_STATE_QUEUE,
 )
+from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.pipelines import (
     CompiledPipelineEdge,
     CompiledPipelineStage,
@@ -39,7 +40,7 @@ from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.helpers import closing_queue_iterator
 
-from .base import BaseTask, ControlRequest, TaskControlPolicy
+from .base import BaseTask, TaskControlPolicy
 from .multiqueue_watcher import QueueMessageContext
 
 logger = logging.getLogger(__name__)
@@ -820,7 +821,7 @@ class PipelineTask(BaseTask):
             if not queue_name:
                 continue
             try:
-                self._queue(queue_name).write(command)
+                self._queue(queue_name).write(encode_control_message(command))
             except (
                 BrokerError,
                 OSError,
@@ -903,7 +904,12 @@ class PipelineTask(BaseTask):
             )
             self._publish_pipeline_snapshot()
             self._delete_pipeline_registry_record()
-            self._send_control_response("STOP", "ack")
+            response_extra = (
+                {"request_id": request.request_id}
+                if request.request_id is not None
+                else {}
+            )
+            self._send_control_response("STOP", "ack", **response_extra)
             return True
         if command == CONTROL_KILL:
             self._broadcast_control(CONTROL_KILL)
@@ -915,6 +921,11 @@ class PipelineTask(BaseTask):
             )
             self._publish_pipeline_snapshot()
             self._delete_pipeline_registry_record()
-            self._send_control_response("KILL", "ack")
+            response_extra = (
+                {"request_id": request.request_id}
+                if request.request_id is not None
+                else {}
+            )
+            self._send_control_response("KILL", "ack", **response_extra)
             return True
         return super()._handle_control_command(request, context)

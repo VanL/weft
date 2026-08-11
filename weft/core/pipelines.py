@@ -30,8 +30,9 @@ from weft.context import WeftContext
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import (
     TaskSpec,
-    apply_bundle_root_to_taskspec_payload,
-    resolve_taskspec_payload,
+    decode_taskspec_transport_payload,
+    encode_taskspec_transport_payload,
+    validate_taskspec_payload,
 )
 
 
@@ -410,8 +411,13 @@ def compile_linear_pipeline(
     )
 
     for stage in pipeline.stages:
-        loaded_payload = task_loader(stage.task)
-        _validate_stage_template(stage, loaded_payload)
+        transport_payload = task_loader(stage.task)
+        _validate_stage_template(stage, transport_payload)
+        loaded_taskspec = decode_taskspec_transport_payload(
+            transport_payload,
+            template=True,
+        )
+        loaded_payload = loaded_taskspec.model_dump(mode="json")
         merged_payload = _merge_stage_defaults(loaded_payload, stage)
         stage_tid = str(
             generate_spawn_request_timestamp(
@@ -447,14 +453,11 @@ def compile_linear_pipeline(
                     stage_name=stage.name,
                 )
             )
-        resolved_stage_payload = resolve_taskspec_payload(
+        stage_taskspec = validate_taskspec_payload(
             stage_payload,
-            tid=stage_tid,
+            bundle_root=loaded_taskspec.get_bundle_root(),
+            resolved_tid=stage_tid,
             inherited_weft_context=inherited_weft_context,
-        )
-        stage_taskspec = TaskSpec.model_validate(
-            resolved_stage_payload,
-            context={"auto_expand": False},
         )
         stage_record = CompiledPipelineStage(
             name=stage.name,
@@ -464,10 +467,7 @@ def compile_linear_pipeline(
             outbox_queue=stage_taskspec.io.outputs["outbox"],
             ctrl_in_queue=stage_taskspec.io.control["ctrl_in"],
             ctrl_out_queue=stage_taskspec.io.control["ctrl_out"],
-            taskspec=apply_bundle_root_to_taskspec_payload(
-                stage_taskspec.model_dump(mode="json"),
-                stage_taskspec.get_bundle_root(),
-            ),
+            taskspec=encode_taskspec_transport_payload(stage_taskspec),
         )
         stage_records.append(stage_record)
         stage_specs_for_runtime.append(stage_record.taskspec)
@@ -524,13 +524,10 @@ def compile_linear_pipeline(
                 edge_name=edge_name,
             ),
         )
-        edge_taskspec = TaskSpec.model_validate(
-            resolve_taskspec_payload(
-                edge_payload,
-                tid=edge_tid,
-                inherited_weft_context=inherited_weft_context,
-            ),
-            context={"auto_expand": False},
+        edge_taskspec = validate_taskspec_payload(
+            edge_payload,
+            resolved_tid=edge_tid,
+            inherited_weft_context=inherited_weft_context,
         )
         edge_record = CompiledPipelineEdge(
             name=edge_name,
@@ -544,7 +541,7 @@ def compile_linear_pipeline(
             downstream_tid=stage_tid,
             override_input=edge_runtime_payload["override_input"],
             emits_pipeline_result=False,
-            taskspec=edge_taskspec.model_dump(mode="json"),
+            taskspec=encode_taskspec_transport_payload(edge_taskspec),
         )
         edge_records.append(edge_record)
         edge_specs_for_runtime.append(edge_record.taskspec)
@@ -592,13 +589,10 @@ def compile_linear_pipeline(
             edge_name=exit_edge_name,
         ),
     )
-    exit_edge_taskspec = TaskSpec.model_validate(
-        resolve_taskspec_payload(
-            exit_edge_payload,
-            tid=exit_edge_tid,
-            inherited_weft_context=inherited_weft_context,
-        ),
-        context={"auto_expand": False},
+    exit_edge_taskspec = validate_taskspec_payload(
+        exit_edge_payload,
+        resolved_tid=exit_edge_tid,
+        inherited_weft_context=inherited_weft_context,
     )
     exit_edge_record = CompiledPipelineEdge(
         name=exit_edge_name,
@@ -612,7 +606,7 @@ def compile_linear_pipeline(
         downstream_tid=None,
         override_input=None,
         emits_pipeline_result=True,
-        taskspec=exit_edge_taskspec.model_dump(mode="json"),
+        taskspec=encode_taskspec_transport_payload(exit_edge_taskspec),
     )
     edge_records.append(exit_edge_record)
     edge_specs_for_runtime.append(exit_edge_record.taskspec)
@@ -638,13 +632,10 @@ def compile_linear_pipeline(
         },
         internal_task_class=INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     )
-    pipeline_taskspec = TaskSpec.model_validate(
-        resolve_taskspec_payload(
-            pipeline_payload,
-            tid=pipeline_tid,
-            inherited_weft_context=inherited_weft_context,
-        ),
-        context={"auto_expand": False},
+    pipeline_taskspec = validate_taskspec_payload(
+        pipeline_payload,
+        resolved_tid=pipeline_tid,
+        inherited_weft_context=inherited_weft_context,
     )
     return CompiledPipelineRun(
         pipeline_tid=pipeline_tid,

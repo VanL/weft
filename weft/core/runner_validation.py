@@ -23,6 +23,7 @@ from weft.ext import RunnerPlugin
 def validate_taskspec_runner(
     taskspec_payload: Mapping[str, Any],
     *,
+    bundle_root: str | None = None,
     load_runner: bool = False,
     preflight: bool = False,
     materialized_environment: MaterializedRunnerEnvironment | None = None,
@@ -41,7 +42,8 @@ def validate_taskspec_runner(
         return
 
     materialized = materialized_environment or validate_taskspec_runner_environment(
-        taskspec_payload
+        taskspec_payload,
+        bundle_root=bundle_root,
     )
     runner_payload = apply_materialized_environment_to_taskspec(
         taskspec_payload,
@@ -50,16 +52,29 @@ def validate_taskspec_runner(
     plugin = require_runner_plugin(runner_name_from_taskspec(runner_payload))
     plugin.check_version()
     validate_runner_capabilities(plugin, runner_payload)
-    plugin.validate_taskspec(runner_payload, preflight=False)
+    plugin.validate_taskspec(
+        runner_payload,
+        bundle_root=bundle_root,
+        preflight=False,
+    )
     if preflight:
-        plugin.validate_taskspec(runner_payload, preflight=True)
+        plugin.validate_taskspec(
+            runner_payload,
+            bundle_root=bundle_root,
+            preflight=True,
+        )
 
 
 def validate_taskspec_runner_environment(
     taskspec_payload: Mapping[str, Any],
+    *,
+    bundle_root: str | None = None,
 ) -> MaterializedRunnerEnvironment:
     """Load and materialize the configured runner environment profile."""
-    return materialize_runner_environment_from_taskspec(taskspec_payload)
+    return materialize_runner_environment_from_taskspec(
+        taskspec_payload,
+        bundle_root=bundle_root,
+    )
 
 
 def validate_runner_capabilities(

@@ -17,9 +17,11 @@ from weft._constants import (
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.manager import Manager
 from weft.core.tasks import Consumer, Monitor, PipelineTask
 from weft.core.tasks.base import TaskControlPolicy
+from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
@@ -76,12 +78,17 @@ def test_pause_resume_control_flow(broker_env, unique_tid):
     inbox = make_queue(spec.io.inputs["inbox"])
     outbox = make_queue(spec.io.outputs["outbox"])
 
-    ctrl_in.write("PAUSE")
+    ctrl_in.write(encode_control_message("PAUSE", request_id="pause-1"))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
     all_responses = list(responses)
-    assert any(r.get("command") == "PAUSE" and r["status"] == "ack" for r in responses)
+    assert any(
+        r.get("command") == "PAUSE"
+        and r["status"] == "ack"
+        and r["request_id"] == "pause-1"
+        for r in responses
+    )
 
     inbox.write(json.dumps({"payload": "work"}))
     task.process_once()
@@ -90,7 +97,7 @@ def test_pause_resume_control_flow(broker_env, unique_tid):
     assert inbox.peek_one() is not None
     assert outbox.read_one() is None
 
-    ctrl_in.write("RESUME")
+    ctrl_in.write(encode_control_message("RESUME", request_id="resume-1"))
     task.wait_for_activity(timeout=0.02)
     task.process_once()
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -104,7 +111,10 @@ def test_pause_resume_control_flow(broker_env, unique_tid):
     all_responses.extend(json.loads(msg) for msg in _read_all(ctrl_out))
 
     assert any(
-        r.get("command") == "RESUME" and r["status"] == "ack" for r in all_responses
+        r.get("command") == "RESUME"
+        and r["status"] == "ack"
+        and r["request_id"] == "resume-1"
+        for r in all_responses
     ), all_responses
     assert outbox.read_one() == "work"
 
@@ -117,18 +127,28 @@ def test_status_command_reports_state(broker_env, unique_tid):
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
 
-    ctrl_in.write("STATUS")
+    ctrl_in.write(encode_control_message("STATUS", request_id="status-1"))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
     status_response = next(r for r in responses if r.get("command") == "STATUS")
     assert status_response["status"] == "ok"
     assert status_response["paused"] is False
+    assert status_response["request_id"] == "status-1"
     assert status_response["task_status"] == task.taskspec.state.status
     assert status_response["runner"]
 
 
-def test_stop_command_sends_ack(broker_env, unique_tid):
+@pytest.mark.parametrize(
+    ("command", "expected_status"),
+    [("STOP", "cancelled"), ("KILL", "killed")],
+)
+def test_stop_kill_command_sends_keyed_ack(
+    broker_env,
+    unique_tid,
+    command: str,
+    expected_status: str,
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
@@ -137,15 +157,20 @@ def test_stop_command_sends_ack(broker_env, unique_tid):
     ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
 
+    task.taskspec.mark_started(pid=0)
+    task.taskspec.mark_running(pid=0)
     reserved.write("work")
 
-    ctrl_in.write("STOP")
+    request_id = f"{command.lower()}-1"
+    ctrl_in.write(encode_control_message(command, request_id=request_id))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    stop_response = next(r for r in responses if r.get("command") == "STOP")
-    assert stop_response["status"] == "ack"
+    response = next(r for r in responses if r.get("command") == command)
+    assert response["status"] == "ack"
+    assert response["request_id"] == request_id
     assert task.should_stop is True
+    assert task.taskspec.state.status == expected_status
 
 
 def test_late_stop_after_terminal_state_acks_without_state_regression(
@@ -163,7 +188,7 @@ def test_late_stop_after_terminal_state_acks_without_state_regression(
     task.taskspec.mark_running()
     task.taskspec.mark_completed(return_code=0)
 
-    ctrl_in.write("STOP")
+    ctrl_in.write(encode_control_message("STOP"))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -199,7 +224,7 @@ def test_ping_control_command_returns_pong(broker_env, unique_tid):
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
 
-    ctrl_in.write("PiNg")
+    ctrl_in.write(encode_control_message("PING"))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -221,7 +246,7 @@ def test_structured_ping_echoes_request_id_and_snapshot(broker_env, unique_tid):
     ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
     request_id = "req-123"
 
-    ctrl_in.write(json.dumps({"command": "ping", "request_id": request_id}))
+    ctrl_in.write(encode_control_message("PING", request_id=request_id))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -237,9 +262,20 @@ def test_structured_ping_echoes_request_id_and_snapshot(broker_env, unique_tid):
 
 @pytest.mark.parametrize(
     "payload",
-    ["null", "[]", "42", "true", json.dumps("PING")],
+    [
+        "PING",
+        "null",
+        "[]",
+        "42",
+        "true",
+        json.dumps("PING"),
+        json.dumps({"command": "ping"}),
+        json.dumps({"command": "DANCE", "request_id": "unknown"}),
+        json.dumps({"command": "PING", "extra": True}),
+        json.dumps({"command": "PING", "request_id": "   "}),
+    ],
 )
-def test_json_non_object_control_payload_is_acked_and_does_not_block_later_ping(
+def test_invalid_control_payload_is_acked_without_reply_and_does_not_block(
     broker_env,
     unique_tid,
     payload: str,
@@ -255,15 +291,16 @@ def test_json_non_object_control_payload_is_acked_and_does_not_block_later_ping(
     ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
 
     try:
-        ctrl_in.write(payload)
+        invalid_id = int(ctrl_in.write(payload))
+        progress_body = encode_control_message("PING", request_id="progress")
+        progress_id = int(ctrl_in.write(progress_body))
         task.process_once()
 
-        invalid_responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-        assert len(invalid_responses) == 1
-        assert invalid_responses[0]["status"] == "unknown"
-        assert ctrl_in.peek_one() is None
+        assert _read_all(ctrl_out) == []
+        remaining = list(ctrl_in.peek_generator(with_timestamps=True))
+        assert remaining == [(progress_body, progress_id)]
+        assert invalid_id != progress_id
 
-        ctrl_in.write(json.dumps({"command": "PING", "request_id": "progress"}))
         _drive_task_until(task, lambda: ctrl_out.peek_one() is not None)
 
         progress_responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -273,48 +310,6 @@ def test_json_non_object_control_payload_is_acked_and_does_not_block_later_ping(
             for response in progress_responses
         )
         assert ctrl_in.peek_one() is None
-    finally:
-        task.cleanup()
-
-
-@pytest.mark.parametrize("command", ["", "DANCE"])
-def test_unknown_structured_control_echoes_request_id_and_allows_progress(
-    broker_env,
-    unique_tid,
-    command: str,
-) -> None:
-    """Empty and named unknown commands are exact-acked progress events [MF-3]."""
-    db_path, make_queue = broker_env
-    spec = make_function_taskspec(
-        unique_tid,
-        "tests.tasks.sample_targets:echo_payload",
-    )
-    task = Consumer(db_path, spec)
-    ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
-    request_id = f"unknown-{command or 'empty'}"
-
-    try:
-        ctrl_in.write(json.dumps({"command": command, "request_id": request_id}))
-        task.process_once()
-
-        responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-        assert len(responses) == 1
-        assert responses[0]["command"] == command
-        assert responses[0]["status"] == "unknown"
-        assert responses[0]["tid"] == unique_tid
-        assert responses[0]["error"] == "Unsupported command"
-        assert responses[0]["request_id"] == request_id
-        assert ctrl_in.peek_one() is None
-
-        ctrl_in.write(json.dumps({"command": "PING", "request_id": "progress"}))
-        _drive_task_until(task, lambda: ctrl_out.peek_one() is not None)
-        later = [json.loads(msg) for msg in _read_all(ctrl_out)]
-        assert any(
-            response.get("message") == "PONG"
-            and response.get("request_id") == "progress"
-            for response in later
-        )
     finally:
         task.cleanup()
 
@@ -348,11 +343,11 @@ def test_control_ack_survives_task_reconstruction_without_replay(
     ctrl_out = make_queue(ctrl_out_name)
     default_ctrl_in = make_queue(f"T{unique_tid}.ctrl_in")
     default_ctrl_out = make_queue(f"T{unique_tid}.ctrl_out")
-    default_trap = json.dumps({"command": "PING", "request_id": "default-trap"})
+    default_trap = encode_control_message("PING", request_id="default-trap")
     default_ctrl_in.write(default_trap)
     first = Consumer(db_path, make_spec())
     try:
-        ctrl_in.write(json.dumps({"command": "PING", "request_id": "first"}))
+        ctrl_in.write(encode_control_message("PING", request_id="first"))
         first.process_once()
         assert ctrl_in.peek_one() is None
         first_response = json.loads(ctrl_out.read_one())
@@ -364,7 +359,7 @@ def test_control_ack_survives_task_reconstruction_without_replay(
 
     replacement = Consumer(db_path, make_spec())
     try:
-        ctrl_in.write(json.dumps({"command": "PING", "request_id": "barrier"}))
+        ctrl_in.write(encode_control_message("PING", request_id="barrier"))
         replacement.process_once()
 
         responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -387,7 +382,7 @@ def test_task_can_register_pong_extension_provider(broker_env, unique_tid):
         lambda: {"queue_depth": 3, "notes": {"mode": "diagnostic"}}
     )
 
-    ctrl_in.write(json.dumps({"command": "PING", "request_id": "extended-ping"}))
+    ctrl_in.write(encode_control_message("PING", request_id="extended-ping"))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -410,7 +405,7 @@ def test_bad_pong_extension_provider_error_stays_nested(broker_env, unique_tid):
     ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
     task.register_pong_extension_provider(lambda: {"bad": {object()}})
 
-    ctrl_in.write("PING")
+    ctrl_in.write(encode_control_message("PING"))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -445,12 +440,7 @@ def test_pong_extension_provider_failure_is_local_but_fatal_exit_propagates(
     try:
         task.register_pong_extension_provider(fail_ordinary)
         ctrl_in.write(
-            json.dumps(
-                {
-                    "command": "PING",
-                    "request_id": "failing-extension-provider",
-                }
-            )
+            encode_control_message("PING", request_id="failing-extension-provider")
         )
         task.process_once()
         responses = [json.loads(message) for message in _read_all(ctrl_out)]
@@ -492,7 +482,7 @@ def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):
     request_id = "manager-probe-request"
 
     try:
-        ctrl_in.write(json.dumps({"command": "PING", "request_id": request_id}))
+        ctrl_in.write(encode_control_message("PING", request_id=request_id))
         task.process_once()
 
         responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
@@ -506,6 +496,26 @@ def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):
         assert ping_response["ctrl_out"] == f"T{unique_tid}.ctrl_out"
         assert ping_response["outbox"] == WEFT_MANAGER_OUTBOX_QUEUE
         assert ping_response["weft_context"] == "."
+
+        assert task._handle_control_command(
+            ControlRequest("STOP", "manager-stop"),
+            QueueMessageContext(
+                queue_name=spec.io.control["ctrl_in"],
+                queue=ctrl_in,
+                mode=QueueMode.PEEK,
+                timestamp=1,
+            ),
+        )
+        assert task._draining is True
+        assert task.should_stop is False
+        assert task._control_snapshot_fields()["should_stop"] is True
+
+        stop_responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        stop_response = next(
+            response for response in stop_responses if response.get("command") == "STOP"
+        )
+        assert stop_response["status"] == "ack"
+        assert stop_response["request_id"] == "manager-stop"
     finally:
         task.cleanup()
 
@@ -546,7 +556,7 @@ def test_ping_includes_runtime_summary_from_runner_plugin(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
 
-    ctrl_in.write("PING")
+    ctrl_in.write(encode_control_message("PING"))
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]

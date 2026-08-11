@@ -17,6 +17,7 @@ from weft._constants import (
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
 )
+from weft.core.control_messages import encode_control_message
 from weft.core.tasks import Monitor, Observer, SamplingObserver, SelectiveConsumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
@@ -169,7 +170,7 @@ def test_monitor_stop_command(broker_env) -> None:
     spec = make_observer_spec("1761013000000000300")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP, request_id="monitor-stop"))
 
     monitor = Monitor(db_path, spec, observer=lambda msg, ts: None)
     monitor._drain_queue()
@@ -181,6 +182,7 @@ def test_monitor_stop_command(broker_env) -> None:
     response = next(item for item in control_responses if item["command"] == "STOP")
     assert response["command"] == "STOP"
     assert response["status"] == "ack"
+    assert response["request_id"] == "monitor-stop"
     terminal = next(item for item in terminal_responses if item["tid"] == spec.tid)
     assert terminal["source"] == "task"
     assert terminal["status"] == "cancelled"
@@ -226,7 +228,7 @@ def test_observer_handles_stop(broker_env) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000002")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task = Observer(db_path, spec, observer=lambda msg, ts: None)
     task._drain_queue()

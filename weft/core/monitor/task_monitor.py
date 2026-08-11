@@ -9,7 +9,7 @@ it remains operational evidence only, per [OBS.13].
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.3]
-- docs/specifications/03-Manager_Architecture.md [MA-1], [MA-3]
+- docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.4], [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
 """
 
@@ -81,6 +81,7 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.control_messages import ControlRequest
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
 from weft.core.monitor.cleanup import (
     TaskMonitorCleanupConfig,
@@ -198,10 +199,11 @@ from weft.core.serve_log import (
 from weft.core.service_convergence import (
     ServiceOwnerRecord,
     collect_service_owner_records,
+    discard_v1_service_registry_rows,
     manager_service_key,
     reduce_latest_by_service_owner,
 )
-from weft.core.tasks.base import ControlRequest, TaskReactorLifecycle, TaskWorkerResult
+from weft.core.tasks.base import TaskReactorLifecycle, TaskWorkerResult
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
 from weft.core.tasks.service import (
     ServiceTask,
@@ -305,7 +307,6 @@ class _RetainedTaskLogIngestResult:
     exact_delete_chunks: int = 0
     monitor_store_delete_chunks: int = 0
     monitor_store_message_rows_deleted: int = 0
-    monitor_store_message_tombstones_pruned: int = 0
     monitor_store_families_retired: int = 0
     checkpoint_message_id: int | None = None
     checkpoint_written: bool = False
@@ -335,9 +336,6 @@ class _RetainedTaskLogIngestResult:
             "monitor_store_delete_chunks": self.monitor_store_delete_chunks,
             "monitor_store_message_rows_deleted": (
                 self.monitor_store_message_rows_deleted
-            ),
-            "monitor_store_message_tombstones_pruned": (
-                self.monitor_store_message_tombstones_pruned
             ),
             "monitor_store_families_retired": self.monitor_store_families_retired,
             "checkpoint_message_id": self.checkpoint_message_id,
@@ -447,7 +445,6 @@ class _TaskMonitorCachedDiagnostics:
     last_collation_terminal_tasks: int
     last_collation_summaries_emitted: int
     last_monitor_store_message_rows_deleted: int
-    last_monitor_store_message_tombstones_pruned: int
     last_monitor_store_families_retired: int
     last_terminal_families_disposed: int
     last_suspect_families_classified: int
@@ -702,7 +699,6 @@ class TaskMonitor(ServiceTask):
         self._last_collation_terminal_tasks = 0
         self._last_collation_summaries_emitted = 0
         self._last_monitor_store_message_rows_deleted = 0
-        self._last_monitor_store_message_tombstones_pruned = 0
         self._last_monitor_store_families_retired = 0
         self._last_terminal_families_disposed = 0
         self._last_suspect_families_classified = 0
@@ -1066,9 +1062,6 @@ class TaskMonitor(ServiceTask):
             last_monitor_store_message_rows_deleted=(
                 self._last_monitor_store_message_rows_deleted
             ),
-            last_monitor_store_message_tombstones_pruned=(
-                self._last_monitor_store_message_tombstones_pruned
-            ),
             last_monitor_store_families_retired=(
                 self._last_monitor_store_families_retired
             ),
@@ -1151,9 +1144,6 @@ class TaskMonitor(ServiceTask):
         )
         self._last_monitor_store_message_rows_deleted = (
             diagnostics.last_monitor_store_message_rows_deleted
-        )
-        self._last_monitor_store_message_tombstones_pruned = (
-            diagnostics.last_monitor_store_message_tombstones_pruned
         )
         self._last_monitor_store_families_retired = (
             diagnostics.last_monitor_store_families_retired
@@ -1688,9 +1678,6 @@ class TaskMonitor(ServiceTask):
                 "last_monitor_store_message_rows_deleted": (
                     self._last_monitor_store_message_rows_deleted
                 ),
-                "last_monitor_store_message_tombstones_pruned": (
-                    self._last_monitor_store_message_tombstones_pruned
-                ),
                 "last_monitor_store_families_retired": (
                     self._last_monitor_store_families_retired
                 ),
@@ -1848,9 +1835,6 @@ class TaskMonitor(ServiceTask):
                     ),
                     "monitor_store_message_rows_deleted": (
                         self._last_monitor_store_message_rows_deleted
-                    ),
-                    "monitor_store_message_tombstones_pruned": (
-                        self._last_monitor_store_message_tombstones_pruned
                     ),
                     "monitor_store_families_retired": (
                         self._last_monitor_store_families_retired
@@ -2343,7 +2327,6 @@ class TaskMonitor(ServiceTask):
         self._last_collation_terminal_tasks = 0
         self._last_collation_summaries_emitted = 0
         self._last_monitor_store_message_rows_deleted = 0
-        self._last_monitor_store_message_tombstones_pruned = 0
         self._last_monitor_store_families_retired = 0
         self._last_terminal_families_disposed = 0
         self._last_suspect_families_classified = 0
@@ -2425,36 +2408,6 @@ class TaskMonitor(ServiceTask):
                     self._apply_monitor_store_retirement_result(
                         self._delete_monitor_store_task_log_rows(store)
                     )
-                    self._apply_monitor_store_retirement_result(
-                        self._repair_raw_deleted_task_message_refs(store)
-                    )
-                    tombstone_prune = store.prune_deleted_task_message_tombstones(
-                        limit=self._monitor_config.batch_size,
-                        pruned_at_ns=now_ns,
-                    )
-                    self._apply_monitor_store_retirement_result(tombstone_prune)
-                    self._last_policy_progress = (
-                        *self._last_policy_progress,
-                        PolicyProgress(
-                            policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
-                            domain="weft_monitor_task_messages",
-                            selected=tombstone_prune.message_tombstones_pruned,
-                            applied=tombstone_prune.message_tombstones_pruned,
-                            waypoint_reached=(
-                                tombstone_prune.message_tombstones_pruned
-                                >= self._monitor_config.batch_size
-                            ),
-                            base_reached=(
-                                tombstone_prune.message_tombstones_pruned == 0
-                            ),
-                            reason_counts={
-                                "message_tombstones_pruned": (
-                                    tombstone_prune.message_tombstones_pruned
-                                ),
-                                "affected_tids": tombstone_prune.affected_tids,
-                            },
-                        ),
-                    )
                     family_retirement = store.retire_completed_collation_families(
                         limit=self._monitor_config.batch_size,
                         retired_at_ns=now_ns,
@@ -2519,9 +2472,6 @@ class TaskMonitor(ServiceTask):
         """Commit cached Monitor-store physical retirement counters."""
 
         self._last_monitor_store_message_rows_deleted += result.message_rows_deleted
-        self._last_monitor_store_message_tombstones_pruned += (
-            result.message_tombstones_pruned
-        )
         self._last_monitor_store_families_retired += result.families_retired
 
     def _ingest_retained_task_log_rows(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-025] exception
@@ -3357,6 +3307,7 @@ class TaskMonitor(ServiceTask):
         services = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
         service_entries: list[tuple[Mapping[str, Any], int]] = []
         try:
+            discard_v1_service_registry_rows(services)
             for body, timestamp in iter_queue_entries(services):
                 try:
                     payload = json.loads(body)
@@ -3824,8 +3775,7 @@ class TaskMonitor(ServiceTask):
         family_limit_hit = len(ready_records) > len(records)
         active_tids = self._active_runtime_tids() if records else set()
         # Delete-time evidence hierarchy [OBS.13.7]: families WITHOUT
-        # terminal task-log proof (disposed-as-suspect, e.g. legacy
-        # stale_open rows disposed before the disposal-time gate existed)
+        # terminal task-log proof (disposed-as-suspect stale_open rows)
         # get the full destruction-protection standard, including
         # undecidable-means-live for non-host runner handles. Families
         # WITH terminal proof keep the positive-evidence check only:
@@ -4648,78 +4598,6 @@ class TaskMonitor(ServiceTask):
         )
         return retirement
 
-    def _repair_raw_deleted_task_message_refs(
-        self,
-        store: MonitorStore,
-    ) -> MonitorStoreRetirementResult:
-        """Repair child refs left after parent raw deletion was recorded.
-
-        In ``jsonl_then_delete`` mode the selection is summary-gated
-        (``require_summary``): a marked family's raw rows are only
-        re-driven through exact deletion after its summary/JSONL export,
-        preserving the mode's audit invariant. Unsummarized marked
-        families are terminal, so the summary stage handles them first.
-
-        Spec: [MF-5], [OBS.13], [OBS.17]
-        """
-
-        refs = store.list_raw_deleted_task_message_refs(
-            limit=self._monitor_config.batch_size + 1,
-            require_summary=self._jsonl_then_delete_enabled(),
-        )
-        if not refs:
-            self._last_policy_progress = (
-                *self._last_policy_progress,
-                PolicyProgress(
-                    policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
-                    domain="weft_monitor_task_messages",
-                    scanned=0,
-                    selected=0,
-                    base_reached=True,
-                ),
-            )
-            return MonitorStoreRetirementResult()
-
-        selected_refs = refs[: self._monitor_config.batch_size]
-        more_refs = len(refs) > len(selected_refs)
-        applied = apply_exact_prune_candidates(
-            self._monitor_context(),
-            selected_refs,
-            apply_result=_applied_monitor_raw_message,
-            reconcile_missing=True,
-        )
-        reconciled_ids = tuple(
-            result.candidate.message_id
-            for result in applied
-            if result.deleted
-            or (result.error is None and not result.candidate.report_only)
-        )
-        if reconciled_ids:
-            retirement = store.delete_task_messages_after_raw_delete(reconciled_ids)
-        else:
-            retirement = MonitorStoreRetirementResult()
-        errors = tuple(result.error for result in applied if result.error is not None)
-        if errors:
-            self._last_collation_store_error = "; ".join(errors)
-        self._last_policy_progress = (
-            *self._last_policy_progress,
-            PolicyProgress(
-                policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
-                domain="weft_monitor_task_messages",
-                scanned=len(refs),
-                selected=len(selected_refs),
-                applied=retirement.message_rows_deleted,
-                waypoint_reached=more_refs,
-                base_reached=False,
-                blocked_reason=errors[0] if errors else None,
-                reason_counts={
-                    "message_rows_deleted": retirement.message_rows_deleted,
-                    "affected_tids": retirement.affected_tids,
-                },
-            ),
-        )
-        return retirement
-
     def _recover_orphan_task_log_rows(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-057] exception
         self,
         store: MonitorStore,
@@ -4728,11 +4606,11 @@ class TaskMonitor(ServiceTask):
     ) -> _DeadTaskLogDeleteResult:
         """Delete raw task-log rows stranded by inconsistent Monitor state.
 
-        This is a bounded recovery path for legacy/inconsistent store rows. It
+        This is a bounded recovery path for an interrupted current cleanup. It
         is not the ordinary FIFO cleanup authority. In ``jsonl_then_delete``
-        mode the selection is summary-gated (``require_summary``): orphaned
-        raw rows of an unsummarized marked family are never deleted before
-        the family's summary/JSONL export lands via the summary stage.
+        mode the selection is summary-gated (``require_summary``): orphaned raw
+        rows of an unsummarized marked family are never deleted before the
+        family's summary/JSONL export lands via the summary stage.
 
         Spec: [MF-5], [OBS.13], [OBS.17]
         """
@@ -5093,7 +4971,6 @@ class TaskMonitor(ServiceTask):
             self._last_collation_terminal_tasks = 0
             self._last_collation_summaries_emitted = 0
             self._last_monitor_store_message_rows_deleted = 0
-            self._last_monitor_store_message_tombstones_pruned = 0
             self._last_monitor_store_families_retired = 0
             self._last_terminal_families_disposed = 0
             self._last_suspect_families_classified = 0
@@ -5271,7 +5148,6 @@ class TaskMonitor(ServiceTask):
             self._last_collation_terminal_tasks = 0
             self._last_collation_summaries_emitted = 0
             self._last_monitor_store_message_rows_deleted = 0
-            self._last_monitor_store_message_tombstones_pruned = 0
             self._last_monitor_store_families_retired = 0
             self._last_terminal_families_disposed = 0
             self._last_suspect_families_classified = 0
@@ -5370,9 +5246,6 @@ class TaskMonitor(ServiceTask):
             "collation_summaries_emitted": (self._last_collation_summaries_emitted),
             "monitor_store_message_rows_deleted": (
                 self._last_monitor_store_message_rows_deleted
-            ),
-            "monitor_store_message_tombstones_pruned": (
-                self._last_monitor_store_message_tombstones_pruned
             ),
             "monitor_store_families_retired": (
                 self._last_monitor_store_families_retired

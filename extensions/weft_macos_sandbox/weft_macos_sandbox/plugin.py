@@ -52,8 +52,6 @@ class MacOSSandboxRunner:
         monitor_class: str | None,
         monitor_interval: float | None,
         runner_options: Mapping[str, Any] | None,
-        db_path: BrokerTarget | str | None = None,
-        config: dict[str, Any] | None = None,
     ) -> None:
         if not isinstance(process_target, str) or not process_target.strip():
             raise ValueError("macOS sandbox runner requires spec.process_target")
@@ -88,8 +86,6 @@ class MacOSSandboxRunner:
         self._monitor_interval = monitor_interval or 1.0
         self._profile = str(Path(profile).expanduser())
         self._sandbox_binary = str(options.get("sandbox_binary") or "sandbox-exec")
-        self._db_path = db_path
-        self._config = config
 
     def run(self, work_item: Any) -> RunnerOutcome:
         return self.run_with_hooks(work_item)
@@ -167,8 +163,6 @@ class MacOSSandboxRunner:
             monitor_class=self._monitor_class,
             monitor_interval=self._monitor_interval,
             monitor=None,
-            db_path=self._db_path,
-            config=self._config,
             runtime_handle=runtime_handle,
             cancel_requested=cancel_requested,
             on_worker_started=on_worker_started,
@@ -205,8 +199,10 @@ class MacOSSandboxRunnerPlugin:
         self,
         taskspec_payload: Mapping[str, Any],
         *,
+        bundle_root: str | None = None,
         preflight: bool = False,
     ) -> None:
+        del bundle_root
         spec = _require_mapping(taskspec_payload.get("spec"), name="spec")
         if spec.get("type") != "command":
             raise ValueError("macOS sandbox runner supports only spec.type='command'")
@@ -279,6 +275,8 @@ class MacOSSandboxRunnerPlugin:
             bundle_root,
             persistent,
             interactive,
+            db_path,
+            config,
         )
         return MacOSSandboxRunner(
             process_target=process_target,
@@ -290,8 +288,6 @@ class MacOSSandboxRunnerPlugin:
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
             runner_options=runner_options,
-            db_path=db_path,
-            config=config,
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:

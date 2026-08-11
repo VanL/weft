@@ -201,33 +201,15 @@ def test_django_release_target_uses_namespaced_tag_and_package_dir() -> None:
     assert release.DJANGO_RELEASE_TARGET.package_dir == release.DJANGO_INTEGRATION_DIR
 
 
-def test_main_dry_run_publish_flag_defers_to_release_gate(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The helper should no longer create GitHub releases directly."""
+def test_main_rejects_removed_publish_flag() -> None:
+    """The obsolete direct-publish spelling is not part of the CLI contract."""
 
     release = _load_release_module()
-    monkeypatch.setattr(release, "read_current_version", lambda: "0.1.0")
-    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
-    monkeypatch.setattr(
-        release,
-        "inspect_release_state",
-        lambda version, *, target=release.ROOT_RELEASE_TARGET: _release_state(
-            release,
-            version=version,
-            tag_name=target.tag_name(version),
-            target=target,
-        ),
-    )
-    monkeypatch.setattr(release, "current_head_commit", lambda: "a" * 40)
 
-    exit_code = release.main(["--version", "0.1.1", "--publish", "--dry-run"])
-    captured = capsys.readouterr()
+    with pytest.raises(SystemExit) as exc_info:
+        release.main(["--publish"])
 
-    assert exit_code == 0
-    assert release.ROOT_RELEASE_GATE_WORKFLOW in captured.out
-    assert "gh release create" not in captured.out
+    assert exc_info.value.code == 2
 
 
 def test_resolve_target_version_reuses_current_when_unpublished(

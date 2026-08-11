@@ -33,6 +33,7 @@ from weft._constants import (
 )
 from weft.commands import specs as spec_cmd
 from weft.context import build_context
+from weft.core.control_messages import encode_control_message
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
 from weft.core.tasks import Consumer
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
@@ -922,7 +923,7 @@ def test_pipeline_bootstrap_later_child_failure_stops_only_submitted_children(
     spawned = _drain_json(task._queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
     assert [item["taskspec"]["tid"] for item in spawned] == [child_payloads[0]["tid"]]
     assert [_drain(task._queue(queue_name)) for queue_name in ctrl_queues] == [
-        [CONTROL_STOP],
+        [encode_control_message(CONTROL_STOP)],
         *([[]] * (len(ctrl_queues) - 1)),
     ]
     assert task._registry_message_id is not None
@@ -970,7 +971,7 @@ def test_pipeline_bootstrap_later_fatal_exit_rolls_back_then_propagates_identity
     spawned = _drain_json(task._queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
     assert [item["taskspec"]["tid"] for item in spawned] == [child_payloads[0]["tid"]]
     assert [_drain(task._queue(queue_name)) for queue_name in ctrl_queues] == [
-        [CONTROL_STOP],
+        [encode_control_message(CONTROL_STOP)],
         *([[]] * (len(ctrl_queues) - 1)),
     ]
     assert task._registry_message_id is not None
@@ -1022,11 +1023,11 @@ def test_pipeline_bootstrap_fatal_exit_keeps_primary_when_rollbacks_fail(
             return _DeleteThenFailingQueue(queue, failure=registry_failure)
         if name not in rollback_failures:
             return queue
-        return _WriteFailingQueue(
-            queue,
-            message=CONTROL_STOP,
-            failure=rollback_failures[name],
-        )
+            return _WriteFailingQueue(
+                queue,
+                message=encode_control_message(CONTROL_STOP),
+                failure=rollback_failures[name],
+            )
 
     monkeypatch.setattr(pipeline_module, "submit_spawn_request", fail_third_submission)
     monkeypatch.setattr(task, "_queue", queue_with_stop_failure)
@@ -1314,7 +1315,7 @@ def test_pipeline_task_fails_fast_when_child_stage_fails(tmp_path: Path) -> None
 
     assert task.taskspec.state.status == "failed"
     ctrl_queue = ctx.queue(compiled.runtime.stages[0].ctrl_in_queue, persistent=True)
-    assert ctrl_queue.read_one() == CONTROL_STOP
+    assert ctrl_queue.read_one() == encode_control_message(CONTROL_STOP)
     snapshots = _drain_json(ctx.queue(compiled.runtime.queues.status, persistent=True))
     latest = snapshots[-1]
     assert latest["status"] == "failed"
@@ -1378,15 +1379,25 @@ def test_pipeline_task_stop_propagates_to_waiting_children(tmp_path: Path) -> No
     )
     task.process_once()
 
-    ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(CONTROL_STOP)
+    ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(
+        encode_control_message(CONTROL_STOP, request_id="pipeline-stop")
+    )
     task.wait_for_activity(timeout=0.05)
     task.process_once()
 
     assert task.taskspec.state.status == "cancelled"
-    assert (
-        ctx.queue(compiled.runtime.stages[0].ctrl_in_queue, persistent=True).read_one()
-        == CONTROL_STOP
+    responses = _drain_json(
+        ctx.queue(compiled.runtime.queues.ctrl_out, persistent=True)
     )
+    assert any(
+        response.get("command") == CONTROL_STOP
+        and response.get("status") == "ack"
+        and response.get("request_id") == "pipeline-stop"
+        for response in responses
+    )
+    assert ctx.queue(
+        compiled.runtime.stages[0].ctrl_in_queue, persistent=True
+    ).read_one() == encode_control_message(CONTROL_STOP)
 
 
 def test_pipeline_task_kill_propagates_to_waiting_children(tmp_path: Path) -> None:
@@ -1405,15 +1416,25 @@ def test_pipeline_task_kill_propagates_to_waiting_children(tmp_path: Path) -> No
     )
     task.process_once()
 
-    ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(CONTROL_KILL)
+    ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(
+        encode_control_message(CONTROL_KILL, request_id="pipeline-kill")
+    )
     task.wait_for_activity(timeout=0.05)
     task.process_once()
 
     assert task.taskspec.state.status == "killed"
-    assert (
-        ctx.queue(compiled.runtime.stages[0].ctrl_in_queue, persistent=True).read_one()
-        == CONTROL_KILL
+    responses = _drain_json(
+        ctx.queue(compiled.runtime.queues.ctrl_out, persistent=True)
     )
+    assert any(
+        response.get("command") == CONTROL_KILL
+        and response.get("status") == "ack"
+        and response.get("request_id") == "pipeline-kill"
+        for response in responses
+    )
+    assert ctx.queue(
+        compiled.runtime.stages[0].ctrl_in_queue, persistent=True
+    ).read_one() == encode_control_message(CONTROL_KILL)
 
 
 def test_pipeline_task_pending_termination_signal_skips_bootstrap(

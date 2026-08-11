@@ -4,6 +4,36 @@
 
 ### Changed
 
+- **Breaking (embedders and direct queue writers):** public objects now come
+  from their owning modules rather than the `weft`, `weft.core`,
+  `weft.commands`, `weft.cli`, or first-party extension package roots. The
+  deprecated CLI argv bootstrap, shell-interpreter helpers, command support
+  facades, resource-monitor aliases, and other compatibility-only paths were
+  removed. Runner plugins now receive bundle ownership explicitly through
+  `validate_taskspec(..., bundle_root=...)`.
+- **Breaking:** TaskSpec, control, manager-authority, and service-owner data now
+  have one strict current representation. Unknown TaskSpec and nested model
+  fields are rejected; `provider_cli` agents require an explicit
+  `authority_class`; the inert `approval_required` tool field is rejected;
+  control queues accept JSON command objects only; manager PONGs must carry the
+  complete authority proof; and persisted service owners use the versioned v2
+  schema. The reserved `_weft_bundle_root` value is transport metadata and is
+  removed before TaskSpec validation.
+- **Breaking:** `weft system prune` now requires an explicit `--family`, the
+  hidden rejecting-only `weft run --monitor` option is gone, and automatic
+  project discovery searches only for Weft-scoped broker configuration. If no
+  such configuration is found, the current directory is the root; legacy
+  ancestor SQLite files no longer claim nested projects.
+- Monitor persistence now has one current v6 schema and one bounded v5-to-v6
+  startup migration. Normal readers reject old JSON-ID and child-tombstone
+  representations, external observation records use the v2 envelope and
+  `task_summary`/`service_summary` classifications, and obsolete repair and
+  raw-delete lanes were removed.
+- Runtime integrations now target the current dependency contracts directly:
+  SimpleBroker v7 iterator APIs, psutil 7 `net_connections()`, and the current
+  Microsandbox `.name` attribute. Internal command, pruning, status, dump/load,
+  control-envelope, service-record, and TaskSpec transport ownership was
+  consolidated so each behavior has one implementation path.
 - The SimpleBroker runtime floor is now 7.0.0, with the paired
   `simplebroker-pg` floor at 3.5.2. Exact broker message IDs remain integers in
   Python and relational storage but are emitted as 19-digit strings at
@@ -25,6 +55,10 @@
 
 ### Fixed
 
+- Absolute broker-config paths no longer relocate `WeftContext.root`, atomic
+  file replacement preserves its primary error when temporary-file cleanup
+  also fails, and service schema suffixes reject noncanonical numeric
+  lookalikes.
 - Worker poll-limit violations can no longer be lost: a detected limit
   violation is now reported before any subsequent metrics collection runs,
   where previously a metrics failure raised after detection could discard

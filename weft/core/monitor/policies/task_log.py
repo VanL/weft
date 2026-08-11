@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from simplebroker.ext import BrokerError
@@ -23,7 +24,6 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.monitor.policies.reserved import terminal_reserved_candidates
-from weft.core.monitor.policies.types import CleanupPolicyRun
 from weft.core.monitor.progress import PolicyProgress
 from weft.core.monitor.task_log_collation import (
     CollatedMessageGroup,
@@ -37,6 +37,8 @@ from weft.core.monitor.task_log_scanner import (
 from weft.core.pruning.models import (
     AppliedCleanupCandidate,
     CleanupCandidate,
+    CleanupPolicyStats,
+    CleanupQueueStats,
     cleanup_candidate_from_row,
     cleanup_policy_stats,
     cleanup_queue_stats,
@@ -54,6 +56,18 @@ ApplyCandidates = Callable[
     [Sequence[CleanupCandidate]],
     tuple[AppliedCleanupCandidate, ...],
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupPolicyRun:
+    """Internal result for one ordered cleanup-policy run."""
+
+    candidates: tuple[CleanupCandidate, ...] = ()
+    applied_candidates: tuple[AppliedCleanupCandidate, ...] = ()
+    queue_stats: tuple[CleanupQueueStats, ...] = ()
+    policy_stats: tuple[CleanupPolicyStats, ...] = ()
+    policy_progress: tuple[PolicyProgress, ...] = ()
+    errors: tuple[str, ...] = ()
 
 
 class PeekRowsIncludingClaimed(Protocol):

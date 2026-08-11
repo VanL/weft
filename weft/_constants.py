@@ -918,7 +918,7 @@ WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 TASK_MONITOR_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for task monitor operational records."""
 
-WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 5
+WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 6
 """Schema version for Monitor-owned durable collation tables."""
 
 WEFT_MONITOR_META_TABLE: Final[str] = "weft_monitor_meta"
@@ -1058,7 +1058,7 @@ WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT: Final[str] = "collated"
 WEFT_LOG_TASKS_EXTERNAL_MODES: Final[frozenset[str]] = frozenset({"collated", "raw"})
 """Supported external task-log logging modes."""
 
-WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION: Final[int] = 1
+WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION: Final[int] = 2
 """JSONL schema version for external task-log operational records."""
 
 WEFT_LOG_TASKS_EXTERNAL_ROTATE_MAX_BYTES: Final[int] = 10 * 1024 * 1024
@@ -1163,7 +1163,7 @@ _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS: Final[frozenset[str]] = frozenset(
 
 _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     """
-    _active_queues _activity _caller_pid _check_counter _check_interval
+    _active_queues _activity _caller_pid
     _cleanup_errors _closed_activity_waiter_ids _config _ctrl_out_queue_obj
     _db_path _default_error_handler
     _deferred_task_log_last_error _deferred_task_log_last_flush_at
@@ -1192,7 +1192,7 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _last_maintenance_runtime_prune_deleted
     _last_maintenance_runtime_prune_partial_batches _last_maintenance_vacuum_ok
     _last_monitor_store_families_retired _last_monitor_store_message_rows_deleted
-    _last_monitor_store_message_tombstones_pruned _last_orphan_task_log_recovery
+    _last_orphan_task_log_recovery
     _last_policy_progress _last_poll_report_at
     _last_pre_checkpoint_task_log_recovery _last_processed
     _last_processor_success _last_prune_records_scanned _last_reported
@@ -1294,7 +1294,7 @@ MANAGER_SERVE_LOG_CANDIDATE_LIMIT: Final[int] = 8
 MANAGER_SERVE_LOG_CHILD_LIMIT: Final[int] = 8
 """Maximum tracked child summaries included in one manager operational-log event."""
 
-SERVICE_OWNER_SCHEMA: Final[str] = "weft.service_owner.v1"
+SERVICE_OWNER_SCHEMA: Final[str] = "weft.service_owner.v2"
 """Runtime service-owner registry row schema."""
 
 SERVICE_TYPE_MANAGER: Final[str] = "manager"
@@ -1813,6 +1813,18 @@ CONTROL_PAUSE: Final[str] = "PAUSE"
 CONTROL_RESUME: Final[str] = "RESUME"
 """Control command to resume a paused task that supports live pausing."""
 
+CONTROL_COMMANDS: Final[frozenset[str]] = frozenset(
+    {
+        CONTROL_PING,
+        CONTROL_STATUS,
+        CONTROL_STOP,
+        CONTROL_KILL,
+        CONTROL_PAUSE,
+        CONTROL_RESUME,
+    }
+)
+"""Exact commands accepted by the canonical task control envelope."""
+
 # Resource Limits
 # ---------------
 MIN_MEMORY_LIMIT: Final[int] = 1
@@ -1900,9 +1912,6 @@ WEFT_AGENT_SETTINGS_FILENAME: Final[str] = "agents.json"
 
 WEFT_AGENT_HEALTH_FILENAME: Final[str] = "agent-health.json"
 """Best-effort delegated-agent health observations stored under the Weft metadata directory."""
-
-BROKER_PROJECT_CONFIG_FILENAME: Final[str] = ".broker.toml"
-"""Project-scoped broker configuration filename."""
 
 WEFT_BROKER_PROJECT_CONFIG_FILENAME: Final[str] = "broker.toml"
 """Default broker project configuration filename under the Weft metadata directory."""
@@ -2036,7 +2045,7 @@ SUBMIT_OVERRIDE_NAMES: Final[frozenset[str]] = frozenset(
 """Public TaskSpec fields that the shared submission surface accepts as overrides."""
 
 TASKSPEC_BUNDLE_ROOT_FIELD: Final[str] = "_weft_bundle_root"
-"""Private extra-field key storing a resolved TaskSpec bundle root path."""
+"""Transport-only key carrying a resolved TaskSpec bundle root path."""
 
 AGENT_SESSION_PROTOCOL_VERSION: Final[int] = 1
 """Private multiprocessing protocol version for agent-session subprocesses."""
@@ -2055,21 +2064,6 @@ PROVIDER_CONTAINER_DEFAULT_RUNTIME_HOME_ENV: Final[tuple[str, ...]] = (
     "USERPROFILE",
 )
 """Environment variable names updated when a generated runtime home is mounted."""
-
-KNOWN_INTERPRETER_DEFINITIONS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
-    "python": ("python", ("-u", "-i")),
-    "python3": ("python", ("-u", "-i")),
-    "python3.10": ("python", ("-u", "-i")),
-    "python3.11": ("python", ("-u", "-i")),
-    "python3.12": ("python", ("-u", "-i")),
-    "python3.13": ("python", ("-u", "-i")),
-    "python3.14": ("python", ("-u", "-i")),
-    "pypy": ("python", ("-u", "-i")),
-    "pypy3": ("python", ("-u", "-i")),
-    "node": ("node", ("--interactive",)),
-    "bash": ("bash", ("-i",)),
-}
-"""Known interactive interpreter launch adjustments keyed by executable name."""
 
 DOCKER_CONTAINER_LOOKUP_TIMEOUT: Final[float] = 2.0
 """Time budget for Docker runner state reconciliation against the daemon."""
@@ -2265,7 +2259,7 @@ def _translate_weft_config_vars(config: Mapping[str, Any]) -> dict[str, Any]:
     return translated
 
 
-def _apply_weft_simplebroker_defaults(
+def apply_weft_simplebroker_defaults(
     config: dict[str, Any], *, weft_directory_name: str
 ) -> None:
     """Apply weft-specific defaults for SimpleBroker integration.
@@ -2295,7 +2289,7 @@ def _resolve_weft_broker_config(
     broker_overrides.update(_translate_weft_config_vars(config))
     if explicit_broker_overrides is not None:
         broker_overrides.update(explicit_broker_overrides)
-    _apply_weft_simplebroker_defaults(
+    apply_weft_simplebroker_defaults(
         broker_overrides,
         weft_directory_name=get_weft_directory_name(config),
     )
@@ -2322,12 +2316,6 @@ def _parse_bool(value: str | None) -> bool:
     # Values that should be considered False
     false_values = {"0", "F", "NONE", "NULL", "FALSE"}
     return value.upper() not in false_values
-
-
-def _parse_logging_enabled(value: str) -> bool:
-    """Parse logging enablement with the existing strict compatibility rule."""
-
-    return value == "1"
 
 
 def _parse_non_negative_float(value: str, *, name: str) -> float:
@@ -2710,7 +2698,7 @@ def _load_weft_env_vars() -> dict[str, Any]:
         "WEFT_LOGGING_ENABLED": _load_weft_env_value(
             "WEFT_LOGGING_ENABLED",
             default=False,
-            parser=_parse_logging_enabled,
+            parser=_parse_bool,
         ),
         "WEFT_LOGS_DIR": _load_weft_env_value(
             "WEFT_LOGS_DIR",
@@ -3020,7 +3008,7 @@ _WEFT_OVERRIDE_RULES: Final[dict[str, _OverrideRule]] = {
     ),
     "WEFT_LOGGING_ENABLED": _OverrideRule(
         kind=_OverrideKind.BOOL_OR_STRING,
-        parser=_parse_logging_enabled,
+        parser=_parse_bool,
     ),
     "WEFT_LOGS_DIR": _OverrideRule(
         kind=_OverrideKind.OPTIONAL_STRING,
@@ -3183,12 +3171,15 @@ def load_environment() -> dict[str, Any]:
             WEFT_DEBUG (bool): Enable debug output.
                 Default: False
                 Shows additional diagnostic information.
-                False for: empty, "0", "f", "F", "false", "False", "FALSE"
+                False for: empty, "0", "f", "false", "none", or "null"
+                (case-insensitive)
                 True for: any other non-empty value (e.g., "1", "true", "yes")
 
             WEFT_LOGGING_ENABLED (bool): Enable logging output.
                 Default: False (disabled)
-                Set to "1" to enable logging throughout Weft.
+                False for: empty, "0", "f", "false", "none", or "null"
+                (case-insensitive)
+                True for: any other non-empty value (e.g., "1", "true", "yes")
                 When enabled, logs will be written using Python's logging module.
                 Configure logging levels and handlers in your application as needed.
 

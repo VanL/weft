@@ -55,9 +55,11 @@ packages.
   result surface and the shared waiting/streaming behavior behind it.
   Result, task, and system commands consume runtime descriptions and
   structured stdout/stderr extraction from `weft/core/task_evidence.py`.
-- `weft/commands/status.py`, `weft/commands/tasks.py`, and
-  `weft/commands/_task_history.py` own task inspection, short/full TID
-  handling, and pipeline-aware status reconstruction.
+- `weft/commands/system.py` owns system status and task-snapshot
+  reconstruction; `weft/commands/tasks.py` owns task inspection, short/full
+  TID handling, control, and runner-diagnostic presentation over
+  `weft/core/runner_diagnostics.py`; `weft/commands/_task_history.py` owns
+  pipeline-aware history lookup.
 - `weft/commands/manager.py` and `weft/commands/serve.py` own the manager
   lifecycle commands over the shared runtime helper.
 - `weft/commands/queue.py` owns direct queue operations, endpoint resolution,
@@ -76,6 +78,8 @@ packages.
   `weft/core/tasks/consumer.py`, `weft/core/tasks/interactive.py`,
   `weft/core/tasks/pipeline.py`, `weft/core/tasks/runner.py`, and
   `weft/core/manager.py`.
+- `weft/core/agents/backends/__init__.py` owns built-in backend registration
+  only; backend classes remain owned by their leaf modules.
 
 ## Boundary Inventory [IP-1.0]
 
@@ -90,15 +94,16 @@ The current implementation is intentionally layered. The important rule is not
 | `weft/core/` | Runtime primitives, task execution, manager coordination, evidence reducers | CLI/client modules, presentation decisions | Preserves the runtime as the source used by every surface. |
 | `weft/core/monitor/` | Operational collation, bounded cleanup, monitor diagnostics | Public lifecycle/result authority | Real process cleanup needs durable retryable read models, but lifecycle truth remains task-owned evidence. |
 | `weft/core/taskspec/` | TaskSpec schema, validation, materialization helpers | Queue execution, manager lifecycle, CLI rendering | Keeps execution contracts explicit before work reaches queues. |
-| `weft/shell/` and runner plugins | Process/session launch details and runner handles | Task status reconstruction policy | Lets status/result use one evidence reducer instead of runner-specific state paths. |
+| `weft/core/runners/` and runner plugins | Process/session launch details and runtime handles | Task status reconstruction policy | There is no separate shell command-rewrite layer; status/result use one evidence reducer instead of runner-specific state paths. |
 
 When a change crosses a boundary, update the governing spec and the module
 docstrings together. A new abstraction is justified only when it removes real
 duplication or protects one of these ownership lines.
 
-The public `weft`, `weft.commands`, and `weft.core` package facades preserve
-their documented exports lazily. Implementation leaves import sibling modules
-directly instead of reaching back through those compatibility facades.
+The public `weft.client` package is the Python adapter. The `weft` package root
+contains package metadata, while `weft.commands` and `weft.core` are package
+namespaces rather than compatibility export surfaces. Production code imports
+the leaf module that owns the behavior.
 
 ## Public Python Client Surface [IP-1.1]
 
@@ -201,6 +206,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
 - [`docs/plans/2026-07-29-task-snapshot-reducer-plan.md`](../plans/2026-07-29-task-snapshot-reducer-plan.md)

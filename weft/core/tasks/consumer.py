@@ -1,7 +1,7 @@
 """Concrete task consumer runtime.
 
 Spec references:
-- docs/specifications/01-Core_Components.md [CC-2.3], [CC-2.5]
+- docs/specifications/01-Core_Components.md [CC-2.3], [CC-2.5], [CC-3.2]
 - docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3], [MF-5]
 - docs/specifications/06-Resource_Management.md [RM-5], [RM-5.2]
 - docs/specifications/13-Agent_Runtime.md [AR-1], [AR-4.1], [AR-6]
@@ -33,6 +33,7 @@ from weft._constants import (
     WORK_ENVELOPE_START,
 )
 from weft.core.agents.runtime import AgentExecutionResult
+from weft.core.control_messages import parse_control_request
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
@@ -298,7 +299,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         return outcome.value
 
     def _register_outcome_runtime(self, outcome: RunnerOutcome) -> None:
-        self._register_running_worker(outcome.worker_pid)
         self.register_runtime_handle(outcome.runtime_handle)
 
     def run_work_item(self, work_item: Any) -> Any:
@@ -376,7 +376,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                     returncode=None,
                     duration=time.monotonic() - start_time,
                     metrics=result.metrics,
-                    worker_pid=session.pid,
                     runtime_handle=session.handle,
                     diagnostics=result.diagnostics,
                 ),
@@ -633,7 +632,10 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
 
         timestamp_int = int(timestamp)
-        request = self._parse_control_request(raw_message)
+        request = parse_control_request(raw_message)
+        if request is None:
+            self._ack_control_message(queue_name, timestamp_int)
+            return
         command = request.command
         if command in {CONTROL_STOP, CONTROL_KILL}:
             self._defer_active_control(

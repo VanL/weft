@@ -1030,14 +1030,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--publish",
-        action="store_true",
-        help=(
-            "Deprecated compatibility flag. GitHub Releases are now created by "
-            "the tag-push workflow after the release gate passes."
-        ),
-    )
-    parser.add_argument(
         "--skip-checks",
         action="store_true",
         help="Skip preflight test/lint/type-check commands",
@@ -1161,12 +1153,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
     if args.dry_run:
         if dirty:
             print("dry-run: working tree is dirty; a real release would fail")
-        if args.publish:
-            print(
-                "--publish is ignored: "
-                f"{ROOT_RELEASE_GATE_WORKFLOW} publishes the root distributions and "
-                "creates the GitHub Release after the pushed tag passes"
-            )
         if not args.skip_checks:
             precheck_env = build_precheck_env_overrides()
             for command in build_precheck_commands():
@@ -1218,12 +1204,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
         return 0
 
     _require_command("uv")
-    if args.publish:
-        print(
-            "--publish is ignored: "
-            f"{ROOT_RELEASE_GATE_WORKFLOW} publishes the root distributions and "
-            "creates the GitHub Release after the pushed tag passes"
-        )
 
     if not args.skip_checks:
         precheck_env = build_precheck_env_overrides()

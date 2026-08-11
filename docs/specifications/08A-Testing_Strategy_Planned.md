@@ -10,7 +10,7 @@ this planned companion rather than treating this file as the live testing map.
 
 ## 1. Dedicated Integration Splits [TS-A1]
 
-There is still no separate `tests/integration/` tree. If the suite ever needs a
+There is still no separate tests/integration tree. If the suite ever needs a
 dedicated integration layer, it would hold cross-surface flows that are already
 covered elsewhere today:
 

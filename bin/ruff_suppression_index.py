@@ -799,11 +799,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument(
         "--registry",
-        "--spec",
         type=Path,
         default=Path(DEFAULT_REGISTRY),
         dest="registry",
-        help="path to the standalone suppression registry (--spec is deprecated)",
+        help="path to the standalone suppression registry",
     )
     return parser
 

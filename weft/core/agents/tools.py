@@ -31,7 +31,6 @@ class ResolvedAgentTool:
     description: str | None
     input_schema: dict[str, Any]
     implementation: Callable[..., Any]
-    approval_required: bool = False
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -81,7 +80,6 @@ def resolve_agent_tool(
         description=description,
         input_schema=input_schema,
         implementation=implementation,
-        approval_required=tool.approval_required,
         config=dict(tool.config),
     )
 

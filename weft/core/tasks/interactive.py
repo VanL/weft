@@ -26,6 +26,7 @@ from weft._constants import (
     INTERACTIVE_STOP_POLL_INTERVAL,
     TERMINAL_TASK_STATUSES,
 )
+from weft.core.control_messages import ControlRequest
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message
 from weft.core.taskspec import ReservedPolicy, TaskSpec
@@ -525,10 +526,14 @@ class InteractiveTaskMixin(ABC):
         if getattr(self, "_interactive_mode", False):
             self._interactive_shutdown()
 
-    def _interactive_handle_control(self, command: str) -> bool:
+    def _interactive_handle_control(self, request: ControlRequest) -> bool:
         if not getattr(self, "_interactive_mode", False):
             return False
 
+        command = request.command
+        response_extra = (
+            {"request_id": request.request_id} if request.request_id is not None else {}
+        )
         if command == CONTROL_STOP:
             self.should_stop = True
             self.taskspec.mark_cancelled(reason="STOP command received")
@@ -541,7 +546,7 @@ class InteractiveTaskMixin(ABC):
                 self._cleanup_reserved_if_needed()
             if self._stop_event:
                 self._stop_event.set()
-            self._send_control_response("STOP", "ack")
+            self._send_control_response("STOP", "ack", **response_extra)
             self._interactive_shutdown(reason="cancelled")
             return True
         if command == CONTROL_KILL:
@@ -556,7 +561,7 @@ class InteractiveTaskMixin(ABC):
                 self._cleanup_reserved_if_needed()
             if self._stop_event:
                 self._stop_event.set()
-            self._send_control_response("KILL", "ack")
+            self._send_control_response("KILL", "ack", **response_extra)
             self._interactive_shutdown(reason="killed")
             return True
         return False

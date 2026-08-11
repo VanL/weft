@@ -35,8 +35,13 @@ from weft._constants import (
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
+from weft.core.control_messages import encode_control_message
 from weft.core.manager import Manager
 from weft.core.manager_runtime import build_manager_spec, generate_tid
+from weft.core.service_convergence import (
+    manager_service_key,
+    project_manager_service_record,
+)
 from weft.ext import RunnerHandle
 from weft.helpers import (
     is_canonical_manager_record,
@@ -874,10 +879,15 @@ class WeftTestHarness:
         latest: dict[str, tuple[dict[str, object], int]] = {}
         try:
             for payload, timestamp in iter_queue_json_entries(queue):
-                tid = payload.get("tid")
-                if not isinstance(tid, str):
+                projected = project_manager_service_record(
+                    payload,
+                    timestamp=timestamp,
+                    service_key=manager_service_key(self.context),
+                )
+                if projected is None:
                     continue
-                record = dict(payload)
+                tid = projected["tid"]
+                record = dict(projected)
                 previous = latest.get(tid)
                 if previous is None or previous[1] < timestamp:
                     latest[tid] = (record, timestamp)
@@ -948,7 +958,7 @@ class WeftTestHarness:
             config=self.context.broker_config,
         )
         try:
-            queue.write(CONTROL_STOP)
+            queue.write(encode_control_message(CONTROL_STOP))
         finally:
             queue.close()
 

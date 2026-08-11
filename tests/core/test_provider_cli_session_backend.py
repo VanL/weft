@@ -37,6 +37,7 @@ def make_agent_section(
 ) -> AgentSection:
     payload = {
         "runtime": "provider_cli",
+        "authority_class": "general",
         "model": model,
         "instructions": "base instructions",
         "conversation_scope": "per_task",

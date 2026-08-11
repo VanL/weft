@@ -19,6 +19,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft.core.control_messages import encode_control_message
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 
@@ -133,7 +134,9 @@ def test_tid_mapping_includes_metadata_role(
     assert data["role"] == "manager"
 
 
-def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) -> None:
+def test_tid_mapping_records_runtime_identity_from_start_hooks(
+    broker_env, task_factory, unique_tid
+) -> None:
     _db_path, make_queue = broker_env
     mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     drain_queue(mapping_queue)
@@ -399,7 +402,7 @@ def test_control_stop_logged_and_cancelled(
     spec = build_function_spec(unique_tid)
     task = task_factory(spec)
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task.process_once()
 

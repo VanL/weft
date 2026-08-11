@@ -2304,12 +2304,10 @@ def test_native_waiter_activity_forces_inactive_queue_probe(
             "native-precheck.two": {"handler": handler},
         },
         db=db_path,
-        check_interval=10,
     )
 
     try:
         watcher._next_inactive_probe_at = time.monotonic() + 60
-        watcher._check_counter = 1
         watcher.wait_for_activity(timeout=0.25)
         watcher._drain_queue()
     finally:
@@ -2340,7 +2338,6 @@ def test_native_waiter_timeout_does_not_probe_inactive_queues_before_deadline(
     watcher = MultiQueueWatcher(
         queue_configs={"native-timeout.one": {"handler": handler}},
         db=db_path,
-        check_interval=10,
     )
     monkeypatch.setattr(
         watcher,
@@ -2352,7 +2349,6 @@ def test_native_waiter_timeout_does_not_probe_inactive_queues_before_deadline(
 
     try:
         watcher._next_inactive_probe_at = time.monotonic() + 60
-        watcher._check_counter = 1
         watcher.wait_for_activity(timeout=0.01)
         watcher._drain_queue()
     finally:
@@ -2382,11 +2378,9 @@ def test_inactive_queue_discovery_is_time_bounded(
             "periodic-discovery.two": {"handler": handler},
         },
         db=db_path,
-        check_interval=10,
     )
 
     try:
-        watcher._check_counter = 1
         watcher._next_inactive_probe_at = time.monotonic() + 60
         watcher._drain_queue()
         assert seen == []

@@ -18,8 +18,14 @@ class _FakeRunnerPlugin:
     def check_version(self) -> None:
         return None
 
-    def validate_taskspec(self, taskspec_payload, *, preflight: bool = False) -> None:
-        del taskspec_payload, preflight
+    def validate_taskspec(
+        self,
+        taskspec_payload,
+        *,
+        bundle_root: str | None = None,
+        preflight: bool = False,
+    ) -> None:
+        del taskspec_payload, bundle_root, preflight
 
     def create_runner(self, **kwargs):
         del kwargs
@@ -73,6 +79,21 @@ def test_require_runner_plugin_loads_entry_point_plugin(
     loaded = require_runner_plugin("fake")
 
     assert loaded is plugin
+
+
+def test_require_runner_plugin_rejects_mapping_style_entry_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = _FakeRunnerPlugin(name="fake")
+    legacy_entry_points = {"weft.runners": [_FakeEntryPoint("fake", plugin)]}
+
+    monkeypatch.setattr(
+        "weft._runner_plugins.metadata.entry_points",
+        lambda: legacy_entry_points,
+    )
+
+    with pytest.raises(AttributeError, match="select"):
+        require_runner_plugin("fake")
 
 
 def test_require_runner_plugin_rejects_mismatched_plugin_name(

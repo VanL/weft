@@ -108,6 +108,7 @@ Create these internal contracts in `_task_snapshot_reducer.py`:
 @dataclass(frozen=True, slots=True)
 class FoldedTaskRecord:
     """Immutable result of reducing ordered log events for one TID."""
+
     tid: str
     tid_short: str
     name: str
@@ -130,6 +131,7 @@ class FoldedTaskRecord:
 @dataclass(frozen=True, slots=True)
 class SnapshotDraft:
     """Policy state after lifecycle and task-local evidence, before probes."""
+
     record: FoldedTaskRecord
     lifecycle_status: str
     public_status: str
@@ -139,6 +141,7 @@ class SnapshotDraft:
 @dataclass(frozen=True, slots=True)
 class RuntimeObservation:
     """Host/runtime liveness result; absence means the probe was not run."""
+
     live: bool
     evidence: str
     strength: str
@@ -147,6 +150,7 @@ class RuntimeObservation:
 @dataclass(frozen=True, slots=True)
 class SnapshotProbePlan:
     """Pure policy decision made after stale-liveness classification."""
+
     draft: SnapshotDraft
     stale_liveness_reason: str | None
     provisional_public_status: str
@@ -157,6 +161,7 @@ class SnapshotProbePlan:
 @dataclass(frozen=True, slots=True)
 class SnapshotEvidence:
     """All I/O observations acquired outside final reduction."""
+
     resolved_runtime_entry: Mapping[str, Any] | None
     runtime_handle: RunnerHandle | None
     runtime_description: Mapping[str, Any] | None
@@ -400,8 +405,7 @@ involved.
       selected_active_manager_tid: str | None,
       service_owner_index: _InternalServiceOwnerEvidenceIndex,
       now_ns: int,
-  ) -> tuple[SnapshotProbePlan, SnapshotEvidence]:
-      ...
+  ) -> tuple[SnapshotProbePlan, SnapshotEvidence]: ...
   ```
 
   It performs the current queue/runtime probes in the seven-stage order in §3.

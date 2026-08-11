@@ -70,6 +70,7 @@ class EmptyRuntime:
 def _agent(provider: str) -> dict[str, object]:
     return {
         "runtime": "provider_cli",
+        "authority_class": "general",
         "conversation_scope": "per_message",
         "instructions": "answer tersely",
         "runtime_config": {"provider": provider},

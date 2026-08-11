@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from weft.core.agents.backends import register_builtin_agent_runtimes
-from weft.core.taskspec import AgentSection, bundle_root_from_taskspec_payload
+from weft.core.taskspec import AgentSection
 
 from .runtime import get_agent_runtime
 
@@ -20,6 +20,7 @@ from .runtime import get_agent_runtime
 def validate_taskspec_agent_runtime(
     taskspec_payload: Mapping[str, Any],
     *,
+    bundle_root: str | None = None,
     load_runtime: bool = False,
     preflight: bool = False,
 ) -> None:
@@ -38,7 +39,6 @@ def validate_taskspec_agent_runtime(
     agent = AgentSection.model_validate(
         _require_mapping(spec.get("agent"), name="spec.agent")
     )
-    bundle_root = bundle_root_from_taskspec_payload(taskspec_payload)
     runtime = get_agent_runtime(agent.runtime)
     validate = getattr(runtime, "validate", None)
     if callable(validate):
@@ -55,6 +55,7 @@ def validate_taskspec_agent_runtime(
 def validate_taskspec_agent_tool_profile(
     taskspec_payload: Mapping[str, Any],
     *,
+    bundle_root: str | None = None,
     load_runtime: bool = False,
     preflight: bool = False,
 ) -> None:
@@ -73,7 +74,6 @@ def validate_taskspec_agent_tool_profile(
     agent = AgentSection.model_validate(
         _require_mapping(spec.get("agent"), name="spec.agent")
     )
-    bundle_root = bundle_root_from_taskspec_payload(taskspec_payload)
     runtime = get_agent_runtime(agent.runtime)
     validate = getattr(runtime, "validate_tool_profile", None)
     if callable(validate):

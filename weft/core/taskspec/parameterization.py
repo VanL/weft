@@ -127,12 +127,14 @@ def materialize_taskspec_template(
     if isinstance(payload.get("spec"), dict):
         payload["spec"].pop("parameterization", None)
 
-    materialized = type(taskspec).model_validate(
+    # Local import breaks model -> parameterization -> transport -> model.
+    from .transport import validate_taskspec_payload
+
+    return validate_taskspec_payload(
         payload,
-        context={"template": True, "auto_expand": False},
+        bundle_root=taskspec.get_bundle_root(),
+        template=True,
     )
-    materialized.set_bundle_root(taskspec.get_bundle_root())
-    return materialized
 
 
 __all__ = [

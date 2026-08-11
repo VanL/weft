@@ -16,12 +16,10 @@ Key behaviours
   the corresponding BROKER_* keys.  The returned configuration is embedded in
   the context and reused when constructing `simplebroker.Queue` instances.
 * **Broker resolution** – When a task or CLI command does not specify
-  `weft_context`, we consult SimpleBroker's public project-scoping API to
-  locate an existing broker target. Weft passes SimpleBroker a configured
-  project-config location under the Weft metadata directory, so auto-discovery
-  checks `.weft/broker.toml` by default before legacy sqlite discovery and
-  env-selected non-sqlite backend synthesis. If nothing is found we fall back
-  to the current working directory and initialize a fresh default target there.
+  `weft_context`, we search upward for SimpleBroker's configured Weft-scoped
+  project config (by default `.weft/broker.toml`). If none exists, the current
+  working directory is the explicit project root. Parent SQLite files are not
+  discovery markers.
 * **Explicit overrides** – If `weft_context` *is* provided we treat it as the
   authoritative project root, expand the path, and ask SimpleBroker for the
   Weft-scoped target rooted at that directory.
@@ -30,17 +28,12 @@ Key behaviours
   a JSON metadata file exist. These directories belong to Weft and never
   influence SimpleBroker itself.
 
-The module exposes a single dataclass, :class:`WeftContext`, plus two helper
-functions:
+The module exposes a single dataclass, :class:`WeftContext`, plus one context
+construction function:
 
 ``build_context(spec_context=None, create_dirs=True, create_database=True)``
     Build a new :class:`WeftContext` using either the supplied context override
     or the best Weft-scoped broker target discovered via SimpleBroker.
-
-``get_context(spec_context=None)``
-    Convenience wrapper that simply calls :func:`build_context` with default
-    options.  No implicit caching is performed; callers should cache the result
-    if they need to reuse it.
 
 The resulting :class:`WeftContext` carries resolved paths, the merged Weft
 configuration, the derived SimpleBroker configuration, and an opaque broker
@@ -65,7 +58,6 @@ from simplebroker import (
     BrokerTarget,
     Queue,
     open_broker,
-    resolve_broker_target,
     target_for_directory,
 )
 from simplebroker.ext import (
@@ -75,22 +67,22 @@ from simplebroker.ext import (
     project_config_path_for_directory,
 )
 from weft._constants import (
-    BROKER_PROJECT_CONFIG_FILENAME,
     POSTGRES_BACKEND_INSTALL_HINT,
     POSTGRES_BACKEND_UNAVAILABLE,
     WEFT_AUTOSTART_DIRECTORY_NAME,
     WEFT_AUTOSTART_TASKS_DEFAULT,
+    WEFT_BROKER_PROJECT_CONFIG_FILENAME,
+    apply_weft_simplebroker_defaults,
     get_weft_directory_name,
     load_config,
 )
-from weft.helpers import ensure_owner_only_dir
+from weft.helpers import ensure_owner_only_dir, write_json_atomically
 
 __all__ = [
     "POSTGRES_BACKEND_INSTALL_HINT",
     "WeftContext",
     "build_context",
     "find_existing_weft_dir",
-    "get_context",
     "normalize_backend_resolution_error",
     "resolve_context_broker_target",
     "service_context_key",
@@ -133,7 +125,7 @@ class WeftContext:
     """Project metadata loaded from the Weft project config file (may be empty)."""
 
     discovered: bool
-    """True if the database was found via upward project search."""
+    """True if a broker project config and target were found by discovery."""
 
     autostart_dir: Path
     """Directory containing auto-start TaskSpec templates."""
@@ -250,6 +242,10 @@ def build_context(
     Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3]
     """
     resolved_config = dict(config) if config is not None else dict(load_config())
+    apply_weft_simplebroker_defaults(
+        resolved_config,
+        weft_directory_name=get_weft_directory_name(resolved_config),
+    )
     root, broker_target, discovered = _resolve_root_and_target(
         spec_context,
         resolved_config,
@@ -318,15 +314,6 @@ def build_context(
         autostart_dir=autostart_dir,
         autostart_enabled=autostart_enabled,
     )
-
-
-def get_context(
-    spec_context: str | os.PathLike[str] | None = None,
-    *,
-    config: Mapping[str, Any] | None = None,
-) -> WeftContext:
-    """Convenience wrapper around :func:`build_context` with default options (Spec: [SB-0])."""
-    return build_context(spec_context=spec_context, config=config)
 
 
 def resolve_context_broker_target(
@@ -405,17 +392,6 @@ def _tighten_project_broker_config_path(config_path: Path | None) -> None:
         return
 
 
-def _tighten_discovered_project_broker_config(
-    start_dir: Path,
-    config: Mapping[str, Any],
-) -> None:
-    """Tighten the project broker config SimpleBroker would discover."""
-
-    _tighten_project_broker_config_path(
-        find_broker_project_config(start_dir, config=dict(config))
-    )
-
-
 def _resolve_root_and_target(
     spec_context: str | os.PathLike[str] | None,
     config: dict[str, Any],
@@ -429,18 +405,19 @@ def _resolve_root_and_target(
             raise normalize_backend_resolution_error(exc) from exc
 
     start_dir = Path.cwd().resolve()
-    _tighten_discovered_project_broker_config(start_dir, config)
-    try:
-        discovered_target = resolve_broker_target(start_dir, config=config)
-    except RuntimeError as exc:
-        raise normalize_backend_resolution_error(exc) from exc
-    if discovered_target is not None:
-        root = _root_for_discovered_broker_target(
-            discovered_target,
+    project_config_path = find_broker_project_config(start_dir, config=config)
+    _tighten_project_broker_config_path(project_config_path)
+    if project_config_path is not None:
+        root = _root_for_discovered_project_config(
+            project_config_path,
             start_dir=start_dir,
             config=config,
         )
-        return root, _with_project_root(discovered_target, root), True
+        try:
+            target = resolve_context_broker_target(root, config=config)
+        except RuntimeError as exc:
+            raise normalize_backend_resolution_error(exc) from exc
+        return root, target, True
 
     root = start_dir
     try:
@@ -457,28 +434,30 @@ def _with_project_root(target: BrokerTarget, root: Path) -> BrokerTarget:
     return replace(target, project_root=root)
 
 
-def _root_for_discovered_broker_target(
-    target: BrokerTarget,
+def _root_for_discovered_project_config(
+    config_path: Path,
     *,
     start_dir: Path,
     config: Mapping[str, Any],
 ) -> Path:
-    """Derive Weft's root from a SimpleBroker-discovered target."""
-
-    if target.config_path is None:
-        return target.project_root or start_dir
+    """Derive Weft's root from a discovered project config path."""
 
     config_path_prefix = Path(str(config.get("BROKER_PROJECT_CONFIG_PATH", "")))
     if config_path_prefix.is_absolute():
-        return target.project_root or start_dir
+        return start_dir
 
     config_name = Path(
-        str(config.get("BROKER_PROJECT_CONFIG_NAME", BROKER_PROJECT_CONFIG_FILENAME))
+        str(
+            config.get(
+                "BROKER_PROJECT_CONFIG_NAME",
+                WEFT_BROKER_PROJECT_CONFIG_FILENAME,
+            )
+        )
     )
     relative_parent_parts = len(config_path_prefix.parts) + len(
         config_name.parent.parts
     )
-    root = target.config_path.parent
+    root = config_path.parent
     for _ in range(relative_parent_parts):
         root = root.parent
     return root
@@ -508,27 +487,20 @@ def _load_project_config(config_path: Path) -> dict[str, Any]:
             "project_name": config_path.parent.parent.name,
             "created": time.time_ns(),
         }
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_json_atomically(config_path, payload)
         return payload
 
     try:
         text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Unable to read {config_path}: {exc}") from exc
+    try:
         data = json.loads(text)
-        if isinstance(data, dict):
-            return data
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    # Corrupted or unreadable config; fall back to defaults
-    fallback = {
-        "version": "1.0",
-        "project_name": config_path.parent.parent.name,
-        "created": time.time_ns(),
-        "notes": "Auto-generated after config parse failure",
-    }
-    config_path.write_text(json.dumps(fallback, indent=2), encoding="utf-8")
-    return fallback
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Unable to parse {config_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid {config_path}: root value must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-267] exception
+    return data
 
 
 def _project_autostart_default(project_config: Mapping[str, Any]) -> bool | None:
@@ -559,6 +531,5 @@ def update_project_config(
     payload = _load_project_config(config_path)
     for key, value in updates.items():
         payload[key] = value
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_json_atomically(config_path, payload)
     return payload

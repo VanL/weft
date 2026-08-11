@@ -17,6 +17,7 @@ of real tasks is judgment and is NOT checked here — see [DOM-15].
 Usage:
   check-dom15-fixtures [--spec PATH] [--self-test]
 """
+
 from __future__ import annotations
 
 import re
@@ -25,9 +26,7 @@ from pathlib import Path
 
 DEFAULT_SPEC = "docs/agent-context/decision-hierarchy.md"
 
-CLASS_CELL_RE = re.compile(
-    r"^(?:[0-5]\b|Class\s+[0-5]\+P\b|Escalate to [0-5]\b)"
-)
+CLASS_CELL_RE = re.compile(r"^(?:[0-5]\b|Class\s+[0-5]\+P\b|Escalate to [0-5]\b)")
 NEGATIVE_FACT_MARKERS = (
     # weft-local phrasings first; canonical bracket markers kept below
     # because the embedded self-test corpus uses them

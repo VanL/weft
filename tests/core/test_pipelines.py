@@ -9,7 +9,10 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import PIPELINE_EDGE_RUNTIME_METADATA_KEY
+from weft._constants import (
+    PIPELINE_EDGE_RUNTIME_METADATA_KEY,
+    TASKSPEC_BUNDLE_ROOT_FIELD,
+)
 from weft.commands import specs as spec_cmd
 from weft.context import build_context
 from weft.core.pipelines import (
@@ -18,6 +21,11 @@ from weft.core.pipelines import (
     load_pipeline_spec_payload,
     pipeline_public_queues,
     validate_pipeline_spec_payload,
+)
+from weft.core.taskspec import (
+    decode_taskspec_transport_payload,
+    encode_taskspec_transport_payload,
+    validate_taskspec_payload,
 )
 
 
@@ -127,6 +135,33 @@ def test_pipeline_compiler_builds_public_p_queues(tmp_path: Path) -> None:
     )
     assert pipeline_payload["spec"]["function_target"] == PIPELINE_PLACEHOLDER_TARGET
     assert pipeline_payload["spec"]["weft_context"] == str(ctx.root)
+
+
+def test_pipeline_compiler_preserves_stage_bundle_provenance(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    stage = validate_taskspec_payload(
+        _task_payload(function_target="bundle_stage:run"),
+        bundle_root=bundle_root,
+        template=True,
+    )
+    pipeline = load_pipeline_spec_payload(
+        {"name": "pipe", "stages": [{"name": "one", "task": "stage"}]}
+    )
+
+    compiled = compile_linear_pipeline(
+        pipeline,
+        context=ctx,
+        task_loader=lambda _name: encode_taskspec_transport_payload(stage),
+    )
+
+    stage_payload = compiled.runtime.stages[0].taskspec
+    assert stage_payload[TASKSPEC_BUNDLE_ROOT_FIELD] == str(bundle_root.resolve())
+    decoded = decode_taskspec_transport_payload(stage_payload)
+    assert decoded.get_bundle_root() == str(bundle_root.resolve())
+    assert TASKSPEC_BUNDLE_ROOT_FIELD not in decoded.model_dump(mode="json")
 
 
 def test_pipeline_compiler_assigns_stable_child_tids_by_stage_and_edge_name(

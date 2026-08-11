@@ -268,17 +268,6 @@ def _write_checkpoint(path: Path, checkpoint: TaskMonitorCheckpoint) -> None:
     temp_path.replace(path)
 
 
-def _extract_state_timestamp(payload: dict[str, Any], key: str) -> int | None:
-    taskspec = payload.get("taskspec")
-    if not isinstance(taskspec, dict):
-        return None
-    state = taskspec.get("state")
-    if not isinstance(state, dict):
-        return None
-    value = state.get(key)
-    return value if isinstance(value, int) else None
-
-
 def _reduce_task_log(
     queue_entries: Iterable[tuple[dict[str, Any], int]],
     *,
@@ -305,10 +294,16 @@ def _reduce_task_log(
             result.reduced[tid] = existing
         if isinstance(taskspec, dict):
             existing.taskspec_payload = taskspec
-        started_at = _extract_state_timestamp(payload, "started_at")
+        started_at = task_evidence.state_timestamp_from_log_payload(
+            payload,
+            "started_at",
+        )
         if started_at is not None:
             existing.started_at = started_at
-        completed_at = _extract_state_timestamp(payload, "completed_at")
+        completed_at = task_evidence.state_timestamp_from_log_payload(
+            payload,
+            "completed_at",
+        )
         if completed_at is not None:
             existing.completed_at = completed_at
         terminal = task_evidence.log_terminal_evidence(
@@ -386,12 +381,6 @@ def _failure_owner(snapshot: task_evidence.TaskEvidenceSnapshot) -> str | None:
     return None
 
 
-def _monitor_classification(snapshot: task_evidence.TaskEvidenceSnapshot) -> str:
-    if snapshot.classification == "terminal_log" and snapshot.status != "completed":
-        return "domain_failure"
-    return snapshot.classification
-
-
 def _external_reconciliation(
     reconciliation: dict[str, Any],
 ) -> dict[str, Any]:
@@ -409,13 +398,6 @@ def _external_reconciliation(
     return projected
 
 
-def _task_name(taskspec_payload: dict[str, Any] | None) -> str | None:
-    if not isinstance(taskspec_payload, dict):
-        return None
-    value = taskspec_payload.get("name")
-    return value if isinstance(value, str) and value else None
-
-
 def _build_summary_record(
     snapshot: task_evidence.TaskEvidenceSnapshot,
     reduced: ReducedTaskLog,
@@ -423,7 +405,7 @@ def _build_summary_record(
     monitor_run_id: str,
     emitted_at: int,
 ) -> dict[str, Any]:
-    classification = _monitor_classification(snapshot)
+    classification = task_evidence.monitor_failure_classification(snapshot)
     observed_at = snapshot.observed_at or reduced.latest_timestamp
     source = snapshot.source
     event = snapshot.event
@@ -434,7 +416,9 @@ def _build_summary_record(
             "summary_id": summary_id,
             "tid": reduced.tid,
             "tid_short": reduced.tid[-TASKSPEC_TID_SHORT_LENGTH:],
-            "name": _task_name(snapshot.taskspec_payload or reduced.taskspec_payload),
+            "name": task_evidence.task_name_from_taskspec(
+                snapshot.taskspec_payload or reduced.taskspec_payload
+            ),
             "status": snapshot.status,
             "classification": classification,
             "source": source,

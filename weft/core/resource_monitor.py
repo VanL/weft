@@ -14,17 +14,11 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any
 
-from simplebroker import BrokerTarget
+import psutil
+
+from weft._constants import DEFAULT_POLLING_INTERVAL
 
 logger = logging.getLogger(__name__)
-
-_psutil_imported: Any | None
-try:  # pragma: no cover - psutil optional at import time
-    import psutil as _psutil_imported
-except ImportError:  # pragma: no cover
-    _psutil_imported = None
-
-psutil: Any | None = _psutil_imported
 
 PsutilProcess = Any
 
@@ -81,99 +75,48 @@ class BaseResourceMonitor(ABC):
         self,
         *,
         limits: Any | None = None,
-        polling_interval: float = 1.0,
-        db_path: BrokerTarget | str | None = None,
-        config: dict[str, Any] | None = None,
+        polling_interval: float = DEFAULT_POLLING_INTERVAL,
     ) -> None:
         self._pid: int | None = None
         self.limits = limits
         self.polling_interval = polling_interval
-        del db_path, config
-        self._closed = False
-
-    def close(self) -> None:
-        """Release resources owned by the monitor."""
-
-        if self._closed:
-            return
-        self._closed = True
-
-    def start_monitoring(self, pid: int) -> None:
-        """Begin monitoring the given process id (Spec: [RM-5.1])."""
-        if type(self).start is BaseResourceMonitor.start:
-            raise NotImplementedError(
-                "Resource monitor must implement start() or start_monitoring()."
-            )
-        self.start(pid)
-
-    def stop_monitoring(self) -> None:
-        """Stop monitoring and release resources (Spec: [RM-5.1])."""
-        if type(self).stop is BaseResourceMonitor.stop:
-            raise NotImplementedError(
-                "Resource monitor must implement stop() or stop_monitoring()."
-            )
-        try:
-            self.stop()
-        finally:
-            self.close()
-
-    def get_current_metrics(self) -> ResourceMetrics:
-        """Return the current resource utilisation snapshot (Spec: [RM-5.1])."""
-        if type(self).snapshot is BaseResourceMonitor.snapshot:
-            raise NotImplementedError(
-                "Resource monitor must implement snapshot() or get_current_metrics()."
-            )
-        return self.snapshot()
 
     @abstractmethod
-    def check_limits(self, limits: Any | None = None) -> tuple[bool, str | None]:
-        """Return (ok, message) after comparing metrics with limits (Spec: [RM-1], [RM-2], [RM-3], [RM-4])."""
+    def start(self, pid: int) -> None:
+        """Begin monitoring the given process id (Spec: [RM-5.1])."""
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop monitoring and release resources (Spec: [RM-5.1])."""
+
+    @abstractmethod
+    def snapshot(self) -> ResourceMetrics:
+        """Return the current resource utilisation snapshot (Spec: [RM-5.1])."""
+
+    @abstractmethod
+    def check_limits(self) -> tuple[bool, str | None]:
+        """Compare current metrics with the configured limits.
+
+        Spec: [RM-1], [RM-2], [RM-3], [RM-4]
+        """
 
     @abstractmethod
     def last_metrics(self) -> ResourceMetrics | None:
         """Return the most recent metric snapshot, if available (Spec: [RM-5.1])."""
 
-    def start(self, pid: int) -> None:
-        """Short-name runner API for starting monitoring."""
-        if type(self).start_monitoring is BaseResourceMonitor.start_monitoring:
-            raise NotImplementedError(
-                "Resource monitor must implement start() or start_monitoring()."
-            )
-        self.start_monitoring(pid)
 
-    def stop(self) -> None:
-        """Short-name runner API for stopping monitoring."""
-        if type(self).stop_monitoring is BaseResourceMonitor.stop_monitoring:
-            raise NotImplementedError(
-                "Resource monitor must implement stop() or stop_monitoring()."
-            )
-        self.stop_monitoring()
-
-    def snapshot(self) -> ResourceMetrics:
-        """Short-name runner API for reading current metrics."""
-        if type(self).get_current_metrics is BaseResourceMonitor.get_current_metrics:
-            raise NotImplementedError(
-                "Resource monitor must implement snapshot() or get_current_metrics()."
-            )
-        return self.get_current_metrics()
-
-
-class PsutilResourceMonitor(BaseResourceMonitor):
+class ResourceMonitor(BaseResourceMonitor):
     """Default psutil-based resource monitor (Spec: [RM-5.1])."""
 
     def __init__(
         self,
         *,
         limits: Any | None = None,
-        polling_interval: float = 1.0,
-        db_path: BrokerTarget | str | None = None,
-        config: dict[str, Any] | None = None,
+        polling_interval: float = DEFAULT_POLLING_INTERVAL,
     ) -> None:
         super().__init__(
             limits=limits,
             polling_interval=polling_interval,
-            db_path=db_path,
-            config=config,
         )
         self._process: PsutilProcess | None = None
         self.history: list[ResourceMetrics] = []
@@ -182,25 +125,20 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         self._last_cpu_sample_at: float | None = None
         self._last_cpu_times: dict[int, float] = {}
 
-    def start_monitoring(self, pid: int) -> None:
-        if psutil is None:  # pragma: no cover
-            raise RuntimeError("psutil is required for resource monitoring")
+    def start(self, pid: int) -> None:
         self._process = psutil.Process(pid)
         self._pid = pid
         self._last_cpu_sample_at = time.monotonic()
         self._last_cpu_times = self._snapshot_cpu_times(self._process_tree())
 
-    def stop_monitoring(self) -> None:
+    def stop(self) -> None:
         self._process = None
         self._pid = None
         self.history.clear()
         self._last_cpu_sample_at = None
         self._last_cpu_times.clear()
-        self.close()
 
     def _process_tree(self) -> list[PsutilProcess]:
-        if psutil is None:
-            raise RuntimeError("psutil is required for resource monitoring")
         if self._process is None:
             raise RuntimeError("Resource monitor not started")
 
@@ -228,8 +166,6 @@ class PsutilResourceMonitor(BaseResourceMonitor):
 
     @staticmethod
     def _snapshot_cpu_times(processes: list[PsutilProcess]) -> dict[int, float]:
-        if psutil is None:
-            return {}
         cpu_times: dict[int, float] = {}
         for process in processes:
             try:
@@ -245,8 +181,6 @@ class PsutilResourceMonitor(BaseResourceMonitor):
 
     @staticmethod
     def _open_file_count(process: PsutilProcess) -> int:
-        if psutil is None:
-            return 0
         try:
             return int(process.num_fds())
         except (AttributeError, psutil.AccessDenied):
@@ -260,19 +194,8 @@ class PsutilResourceMonitor(BaseResourceMonitor):
 
     @staticmethod
     def _connection_count(process: PsutilProcess) -> int:
-        if psutil is None:
-            return 0
         try:
-            net_connections = process.net_connections
-        except AttributeError:
-            net_connections = None
-        if net_connections is not None:
-            try:
-                return len(net_connections())
-            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
-                return 0
-        try:
-            return len(process.connections())
+            return len(process.net_connections())
         except (
             psutil.NoSuchProcess,
             psutil.ZombieProcess,
@@ -281,9 +204,7 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         ):
             return 0
 
-    def get_current_metrics(self) -> ResourceMetrics:
-        if psutil is None:
-            raise RuntimeError("psutil is required for resource monitoring")
+    def snapshot(self) -> ResourceMetrics:
         processes = self._process_tree()
         if not processes:
             raise RuntimeError("Resource monitor not started")
@@ -345,14 +266,12 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         violations = sum(1 for metric in recent_samples if metric.cpu_percent > limit)
         return violations >= 4
 
-    def check_limits(self, limits: Any | None = None) -> tuple[bool, str | None]:
-        if limits is not None:
-            self.limits = limits
+    def check_limits(self) -> tuple[bool, str | None]:
         if self.limits is None:
             return True, None
 
         try:
-            metrics = self.get_current_metrics()
+            metrics = self.snapshot()
         except RuntimeError:  # pragma: no cover - process may have exited
             return True, None
 
@@ -382,23 +301,8 @@ class PsutilResourceMonitor(BaseResourceMonitor):
             return False, "; ".join(violations)
         return True, None
 
-    def get_max_metrics(self) -> ResourceMetrics:
-        if not self.history:
-            return ResourceMetrics()
-        return ResourceMetrics(
-            timestamp=self.history[-1].timestamp,
-            memory_mb=max(m.memory_mb for m in self.history),
-            cpu_percent=max(m.cpu_percent for m in self.history),
-            open_files=max(m.open_files for m in self.history),
-            connections=max(m.connections for m in self.history),
-        )
-
     def last_metrics(self) -> ResourceMetrics | None:
         return self._last_metrics
-
-
-class ResourceMonitor(PsutilResourceMonitor):
-    """Default monitor exported under the spec-required name (Spec: [RM-5.1])."""
 
 
 def load_resource_monitor(
@@ -406,8 +310,6 @@ def load_resource_monitor(
     *,
     limits: Any | None = None,
     polling_interval: float | None = None,
-    db_path: BrokerTarget | str | None = None,
-    config: dict[str, Any] | None = None,
 ) -> BaseResourceMonitor:
     """Load a monitor implementation by dotted path (Spec: [RM-5])."""
     module_name, class_name = class_path.rsplit(".", 1)
@@ -417,24 +319,16 @@ def load_resource_monitor(
         monitor_cls, BaseResourceMonitor
     ):
         raise TypeError(f"{class_path} must reference a BaseResourceMonitor subclass")
-    kwargs: dict[str, Any] = {}
-    if limits is not None:
-        kwargs["limits"] = limits
-    if polling_interval is not None:
-        kwargs["polling_interval"] = polling_interval
-    if db_path is not None:
-        kwargs["db_path"] = db_path
-    if config is not None:
-        kwargs["config"] = config
-    try:
-        return monitor_cls(**kwargs)
-    except TypeError:
-        return monitor_cls()
+    return monitor_cls(
+        limits=limits,
+        polling_interval=(
+            DEFAULT_POLLING_INTERVAL if polling_interval is None else polling_interval
+        ),
+    )
 
 
 __all__ = [
     "BaseResourceMonitor",
-    "PsutilResourceMonitor",
     "ResourceMetrics",
     "ResourceMonitor",
     "load_resource_monitor",

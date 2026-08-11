@@ -21,7 +21,14 @@ if str(REPO_ROOT) not in sys.path:
 from weft._constants import compile_config  # noqa: E402
 from weft.context import WeftContext, build_context, service_context_key  # noqa: E402
 
+context_module = sys.modules["weft.context"]
+
 pytestmark = [pytest.mark.shared]
+
+
+def test_context_exposes_only_build_context_constructor() -> None:
+    assert "get_context" not in context_module.__dict__
+    assert "get_context" not in context_module.__all__
 
 
 def _write_broker_project_config(
@@ -199,6 +206,11 @@ def test_build_context_discovers_existing_project(tmp_path: Path) -> None:
     """Project databases are discovered via Weft-scoped SimpleBroker config."""
     root = prepare_project_root(tmp_path)
     root_ctx = build_context(spec_context=root)
+    _write_broker_project_config(
+        root,
+        backend="sqlite",
+        target="broker.db",
+    )
     nested_dir = tmp_path / "a" / "b" / "c"
     nested_dir.mkdir(parents=True)
 
@@ -215,11 +227,11 @@ def test_build_context_discovers_existing_project(tmp_path: Path) -> None:
     assert discovered_ctx.discovered is True
 
 
-def test_build_context_discovery_prefers_existing_sqlite_project_over_env_backend(
+def test_build_context_does_not_discover_legacy_sqlite_project(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Nested discovery should keep using the local sqlite project before env backends."""
+    """A parent SQLite file does not claim a nested working directory."""
 
     root = (tmp_path / "existing-project").resolve()
     root.mkdir(parents=True)
@@ -231,6 +243,36 @@ def test_build_context_discovery_prefers_existing_sqlite_project_over_env_backen
     root_ctx = build_context(spec_context=root)
     nested_dir = root / "nested" / "child"
     nested_dir.mkdir(parents=True)
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(nested_dir)
+        discovered_ctx = build_context(create_database=False)
+    finally:
+        os.chdir(original_cwd)
+
+    assert discovered_ctx.root == nested_dir.resolve()
+    assert discovered_ctx.backend_name == "sqlite"
+    assert (
+        discovered_ctx.database_path == (nested_dir / ".weft" / "broker.db").resolve()
+    )
+    assert discovered_ctx.broker_target.target != root_ctx.broker_target.target
+    assert discovered_ctx.discovered is False
+
+
+def test_build_context_discovered_config_beats_env_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "configured-project").resolve()
+    root.mkdir(parents=True)
+    _write_broker_project_config(
+        root,
+        backend="sqlite",
+        target="broker.db",
+    )
+    nested_dir = root / "nested" / "child"
+    nested_dir.mkdir(parents=True)
+    _clear_backend_part_env(monkeypatch)
     monkeypatch.setenv("WEFT_BACKEND", "postgres")
     monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
     monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")
@@ -242,11 +284,45 @@ def test_build_context_discovery_prefers_existing_sqlite_project_over_env_backen
     finally:
         os.chdir(original_cwd)
 
-    assert discovered_ctx.root == root.resolve()
+    assert discovered_ctx.root == root
     assert discovered_ctx.backend_name == "sqlite"
-    assert discovered_ctx.database_path == root_ctx.database_path
-    assert discovered_ctx.broker_target.target == root_ctx.broker_target.target
+    assert discovered_ctx.database_path == (root / ".weft" / "broker.db").resolve()
     assert discovered_ctx.discovered is True
+
+
+def test_build_context_absolute_broker_config_keeps_working_directory_as_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_root = (tmp_path / "external-config").resolve()
+    broker_config_path = _write_broker_project_config(
+        config_root,
+        backend="sqlite",
+        target="broker.db",
+        config_dir="config",
+    )
+    working_directory = (tmp_path / "working-directory").resolve()
+    working_directory.mkdir()
+    config = compile_config(
+        {
+            "BROKER_PROJECT_CONFIG_PATH": str(broker_config_path.parent),
+            "BROKER_PROJECT_CONFIG_NAME": broker_config_path.name,
+        }
+    )
+    monkeypatch.chdir(working_directory)
+
+    ctx = build_context(
+        config=config,
+        create_dirs=False,
+        create_database=False,
+    )
+
+    assert ctx.root == working_directory
+    assert ctx.weft_dir == working_directory / ".weft"
+    assert ctx.database_path == (broker_config_path.parent / "broker.db").resolve()
+    assert ctx.broker_target.config_path == broker_config_path
+    assert ctx.broker_target.project_root == working_directory
+    assert ctx.discovered is True
 
 
 def test_environment_translation(
@@ -344,6 +420,12 @@ def test_build_context_discovers_existing_project_with_custom_weft_directory_nam
 
     root = prepare_project_root(tmp_path)
     root_ctx = build_context(spec_context=root)
+    _write_broker_project_config(
+        root,
+        backend="sqlite",
+        target="broker.db",
+        config_dir=".engram",
+    )
     nested_dir = tmp_path / "a" / "b" / "c"
     nested_dir.mkdir(parents=True)
 
@@ -388,17 +470,46 @@ def test_build_context_discovers_custom_weft_directory_project_config(
     assert ctx.database_path == (root / ".engram" / "custom.db").resolve()
 
 
-def test_project_config_recovers_from_corruption(tmp_path: Path) -> None:
-    """A corrupt config file is replaced with a fresh default."""
+@pytest.mark.parametrize("content", ["not-json", "[]", "null"])
+def test_project_config_rejects_invalid_existing_content_without_modifying_it(
+    tmp_path: Path,
+    content: str,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
+    original = content.encode()
+    ctx.config_path.write_bytes(original)
 
-    ctx.config_path.write_text("not-json", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"config\.json"):
+        build_context(spec_context=tmp_path)
 
-    refreshed_ctx = build_context(spec_context=tmp_path)
-    data = json.loads(refreshed_ctx.config_path.read_text(encoding="utf-8"))
-    assert data["project_name"] == tmp_path.name
-    assert "created" in data
+    assert ctx.config_path.read_bytes() == original
+
+
+def test_project_config_rejects_unreadable_existing_file_without_modifying_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    original = ctx.config_path.read_bytes()
+    original_read_text = Path.read_text
+
+    def unreadable_config(
+        self: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> str:
+        if self == ctx.config_path:
+            raise PermissionError("config is unreadable")
+        return original_read_text(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_config)
+
+    with pytest.raises(ValueError, match=r"config\.json"):
+        build_context(spec_context=tmp_path)
+
+    assert ctx.config_path.read_bytes() == original
 
 
 def test_build_context_reports_weft_pg_install_hint_for_missing_plugin(
@@ -519,12 +630,50 @@ def test_build_context_ignores_root_simplebroker_config_without_weft_config(
         config_dir=".",
         config_name=".broker.toml",
     )
+    nested = root / "nested"
+    nested.mkdir()
 
-    ctx = build_context(spec_context=root, create_database=False)
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(nested)
+        ctx = build_context(create_database=False)
+    finally:
+        os.chdir(original_cwd)
 
     assert ctx.backend_name == "sqlite"
-    assert ctx.database_path == (root / ".weft" / "broker.db").resolve()
+    assert ctx.root == nested
+    assert ctx.database_path == (nested / ".weft" / "broker.db").resolve()
     assert ctx.broker_target.config_path is None
+    assert ctx.discovered is False
+
+
+def test_build_context_empty_config_ignores_root_simplebroker_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "root-simplebroker-config").resolve()
+    root.mkdir(parents=True)
+    _write_broker_project_config(
+        root,
+        backend="sqlite",
+        target="root-owned.db",
+        config_dir=".",
+        config_name=".broker.toml",
+    )
+    nested = root / "nested"
+    nested.mkdir()
+
+    monkeypatch.chdir(nested)
+    ctx = build_context(
+        config={},
+        create_dirs=False,
+        create_database=False,
+    )
+
+    assert ctx.root == nested
+    assert ctx.database_path == (nested / ".weft" / "broker.db").resolve()
+    assert ctx.broker_target.config_path is None
+    assert ctx.discovered is False
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")

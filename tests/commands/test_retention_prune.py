@@ -21,16 +21,39 @@ from weft._constants import (
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft.commands.retention_prune import RetentionPruneConfig, run_retention_prune
+from weft.commands.prune import cmd_prune, run_retention_prune
 from weft.context import WeftContext, build_context
+from weft.core.pruning import retention as retention_pruning
 from weft.core.pruning.retention import (
     RetentionPruneCandidate,
+    RetentionPruneConfig,
     _append_records,
     _candidate_record,
 )
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_retention_prune_preserves_exact_run_id_format(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    monkeypatch.setattr(
+        retention_pruning.time,
+        "strftime",
+        lambda *_args: "2030-01-02T03:04:05",
+    )
+    monkeypatch.setattr(retention_pruning.time, "time_ns", lambda: 9_876_543_210)
+    monkeypatch.setattr(retention_pruning.os, "getpid", lambda: 4321)
+
+    result = retention_pruning.run_retention_prune_for_context(
+        ctx,
+        RetentionPruneConfig(context_path=ctx.root, family="task-log"),
+    )
+
+    assert result.run_id == "2030-01-02T03:04:05.876543210Z:pid-4321"
 
 
 def test_retention_prune_candidate_json_formats_message_id_only() -> None:
@@ -142,7 +165,8 @@ def test_task_log_dry_run_reports_superseded_rows_without_deleting(
         )
     )
 
-    assert result.exit_code == 0
+    assert result.errors == ()
+    assert result.failed == 0
     assert {
         (candidate.message_id, candidate.candidate_class)
         for candidate in result.candidates
@@ -155,6 +179,42 @@ def test_task_log_dry_run_reports_superseded_rows_without_deleting(
         terminal_id,
         latest_terminal_id,
     }
+
+
+def test_retention_selector_includes_candidate_at_exact_minimum_age(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1770000000000001090"
+    created_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "created"},
+    )
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "completed"},
+    )
+    monkeypatch.setattr(
+        retention_pruning.time,
+        "time_ns",
+        lambda: created_id + 5_000_000_000,
+    )
+
+    result = retention_pruning.run_retention_prune_for_context(
+        ctx,
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-log",
+            min_age_seconds=5.0,
+        ),
+    )
+
+    assert [
+        (candidate.message_id, candidate.age_seconds) for candidate in result.candidates
+    ] == [(created_id, 5.0)]
 
 
 def test_task_log_apply_requires_archive_and_deletes_exact_rows(
@@ -178,7 +238,8 @@ def test_task_log_apply_requires_archive_and_deletes_exact_rows(
             min_age_seconds=0,
         )
     )
-    assert missing_archive.exit_code == 1
+    assert missing_archive.errors
+    assert missing_archive.failed == 0
     assert "--archive is required" in missing_archive.errors[0]
 
     result = run_retention_prune(
@@ -191,7 +252,8 @@ def test_task_log_apply_requires_archive_and_deletes_exact_rows(
         )
     )
 
-    assert result.exit_code == 0
+    assert result.errors == ()
+    assert result.failed == 0
     assert result.deleted == 1
     remaining = _read_ids(ctx, WEFT_GLOBAL_LOG_QUEUE)
     assert old_id not in remaining
@@ -199,6 +261,190 @@ def test_task_log_apply_requires_archive_and_deletes_exact_rows(
     archive_records = _read_json_records(archive)
     assert archive_records[0]["message_id"] == str(old_id)
     assert archive_records[-1]["record_type"] == "retention_prune_completed"
+
+
+def test_retention_limit_applies_to_dry_run_and_apply_rescan(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1770000000000001091"
+    oldest_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "created"},
+    )
+    middle_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "running"},
+    )
+    latest_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "completed"},
+    )
+    config = RetentionPruneConfig(
+        context_path=ctx.root,
+        family="task-log",
+        min_age_seconds=0,
+        limit=1,
+    )
+
+    dry_run = retention_pruning.run_retention_prune_for_context(ctx, config)
+
+    assert [candidate.message_id for candidate in dry_run.candidates] == [oldest_id]
+    assert _read_ids(ctx, WEFT_GLOBAL_LOG_QUEUE) >= {
+        oldest_id,
+        middle_id,
+        latest_id,
+    }
+
+    applied = retention_pruning.run_retention_prune_for_context(
+        ctx,
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-log",
+            min_age_seconds=0,
+            limit=1,
+            apply=True,
+            archive_path=tmp_path / "archive.jsonl",
+        ),
+    )
+
+    assert [candidate.message_id for candidate in applied.candidates] == [oldest_id]
+    assert [candidate.message_id for candidate in applied.applied_candidates] == [
+        oldest_id
+    ]
+    remaining_ids = _read_ids(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    assert oldest_id not in remaining_ids
+    assert remaining_ids >= {middle_id, latest_id}
+
+
+def test_retention_apply_report_error_is_classified_after_delete(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    archive = tmp_path / "archive.jsonl"
+    tid = "1770000000000001008"
+    old_id = _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "created"})
+    keep_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "completed"},
+    )
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("occupied", encoding="utf-8")
+
+    exit_code, stdout, stderr = cmd_prune(
+        family="task-log",
+        context=ctx.root,
+        apply=True,
+        min_age_seconds=0,
+        archive_path=archive,
+        report_path=blocked_parent / "report.jsonl",
+        json_output=True,
+    )
+
+    assert exit_code == 1
+    assert json.loads(stdout)["deleted"] == 1
+    assert stderr.startswith("failed to write report:")
+    remaining = _read_ids(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    assert old_id not in remaining
+    assert keep_id in remaining
+
+
+def test_retention_validation_error_does_not_create_or_truncate_report(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    report_path = tmp_path / "retention-report.jsonl"
+    report_path.write_text("sentinel\n", encoding="utf-8")
+
+    result = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            keep_recent_per_task=0,
+        ),
+        report_path=report_path,
+    )
+
+    assert result.errors == ("--keep-recent-per-task must be >= 1",)
+    assert report_path.read_text(encoding="utf-8") == "sentinel\n"
+
+    missing_report = tmp_path / "missing-retention-report.jsonl"
+    run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            keep_recent_per_task=0,
+        ),
+        report_path=missing_report,
+    )
+    assert not missing_report.exists()
+
+
+def test_retention_initial_scan_error_writes_optional_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    report_path = tmp_path / "retention-report.jsonl"
+    monkeypatch.setattr(
+        retention_pruning,
+        "_build_candidates",
+        lambda *_args, **_kwargs: ([], [], ["scan failed"]),
+    )
+
+    result = run_retention_prune(
+        RetentionPruneConfig(context_path=ctx.root),
+        report_path=report_path,
+    )
+
+    assert result.errors == ("scan failed",)
+    records = _read_json_records(report_path)
+    assert records == [
+        {
+            "archived": 0,
+            "candidate_class_counts": {},
+            "candidates": 0,
+            "deleted": 0,
+            "dry_run": True,
+            "errors": ["scan failed"],
+            "failed": 0,
+            "force": False,
+            "record_type": "retention_prune_completed",
+            "run_id": result.run_id,
+            "schema_version": 1,
+            "warnings": [],
+        }
+    ]
+
+
+def test_retention_archive_error_still_writes_optional_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    report_path = tmp_path / "retention-report.jsonl"
+    monkeypatch.setattr(
+        retention_pruning,
+        "_write_archive",
+        lambda *_args, **_kwargs: (0, "archive failed"),
+    )
+
+    result = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            apply=True,
+            archive_path=tmp_path / "archive.jsonl",
+            min_age_seconds=0,
+        ),
+        report_path=report_path,
+    )
+
+    assert result.errors == ("failed to write archive: archive failed",)
+    assert _read_json_records(report_path)[-1]["errors"] == [
+        "failed to write archive: archive failed"
+    ]
 
 
 def test_task_log_apply_appends_to_same_day_archive_across_runs(
@@ -228,7 +474,8 @@ def test_task_log_apply_appends_to_same_day_archive_across_runs(
             min_age_seconds=0,
         )
     )
-    assert result_a.exit_code == 0
+    assert result_a.errors == ()
+    assert result_a.failed == 0
     assert result_a.deleted == 1
     run_id_a = result_a.run_id
 
@@ -247,7 +494,8 @@ def test_task_log_apply_appends_to_same_day_archive_across_runs(
             min_age_seconds=0,
         )
     )
-    assert result_b.exit_code == 0
+    assert result_b.errors == ()
+    assert result_b.failed == 0
     assert result_b.deleted == 1
     run_id_b = result_b.run_id
     assert run_id_a != run_id_b
@@ -472,7 +720,8 @@ def test_ctrl_out_without_log_is_report_only_unless_force(tmp_path: Path) -> Non
         )
     )
 
-    assert forced.exit_code == 0
+    assert forced.errors == ()
+    assert forced.failed == 0
     assert forced.deleted == 1
     assert terminal_id not in _read_ids(ctx, f"T{tid}.ctrl_out")
     assert forced.warnings == ()
@@ -559,7 +808,8 @@ def test_force_without_apply_is_rejected(tmp_path: Path) -> None:
         )
     )
 
-    assert result.exit_code == 1
+    assert result.errors
+    assert result.failed == 0
     assert result.errors == ("--force requires --apply",)
 
 

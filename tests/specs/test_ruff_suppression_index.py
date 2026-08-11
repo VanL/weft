@@ -134,8 +134,9 @@ def test_write_repairs_a_stale_index_and_check_then_passes(tmp_path: Path) -> No
     assert spec.read_bytes() == before_second_write
 
 
-def test_deprecated_spec_option_targets_the_registry(tmp_path: Path) -> None:
+def test_removed_spec_option_is_rejected_without_writing(tmp_path: Path) -> None:
     registry = _write_fixture(tmp_path)
+    original = registry.read_bytes()
 
     result = subprocess.run(
         [
@@ -153,8 +154,9 @@ def test_deprecated_spec_option_targets_the_registry(tmp_path: Path) -> None:
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "`probe.py::contain_failure`" in registry.read_text(encoding="utf-8")
+    assert result.returncode == 2
+    assert "unrecognized arguments: --spec policy.md" in result.stderr
+    assert registry.read_bytes() == original
 
 
 def test_write_cannot_approve_growth_in_an_existing_group(tmp_path: Path) -> None:

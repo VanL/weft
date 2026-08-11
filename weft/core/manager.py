@@ -3,6 +3,7 @@
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3], [CC-2.5]
 - docs/specifications/03-Manager_Architecture.md [MA-0], [MA-1], [MA-2], [MA-3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3]
 """
 
 from __future__ import annotations
@@ -98,6 +99,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
+    WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
@@ -128,6 +130,7 @@ from weft.helpers import (
 )
 from weft.runtime_liveness import runtime_liveness_from_registered_probe
 
+from .control_messages import ControlRequest, encode_control_message
 from .control_probe import (
     coerce_pong_response,
     pong_proves_dispatch_eligible,
@@ -163,6 +166,7 @@ from .service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
     collect_service_owner_records,
+    discard_v1_service_registry_rows,
     manager_service_key,
     parse_service_owner_record,
     plan_service_owner_history_prune,
@@ -173,7 +177,6 @@ from .spec_store import resolve_named_spec_from_root
 from .tasks import Consumer
 from .tasks.base import (
     BaseTask,
-    ControlRequest,
     QueueMessageContext,
     TaskControlPolicy,
     TaskWorkerResult,
@@ -188,8 +191,9 @@ from .tasks.service import (
 from .taskspec import (
     ReservedPolicy,
     TaskSpec,
-    apply_bundle_root_to_taskspec_payload,
-    resolve_taskspec_payload,
+    decode_taskspec_transport_payload,
+    encode_taskspec_transport_payload,
+    validate_taskspec_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -331,6 +335,7 @@ class Manager(ServiceTask):
     ) -> None:
         thread_event = cast(threading.Event | None, stop_event)
         super().__init__(db, taskspec, stop_event=thread_event, config=config)
+        discard_v1_service_registry_rows(self._queue(WEFT_SERVICES_REGISTRY_QUEUE))
         self._register_service_worker(
             ServiceWorkerSpec(
                 name=MANAGER_CHILD_LAUNCH_WORKER_LANE,
@@ -379,12 +384,11 @@ class Manager(ServiceTask):
         self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
-        self._autostart_launched: set[str] = set()
+        self._autostart_sources: set[str] = set()
         self._managed_service_state: dict[str, ManagedServiceState] = {}
         self._managed_service_duplicate_scan_pending: set[str] = set()
         self._managed_internal_spawn_enqueued = False
         self._last_managed_service_convergence_ns = 0
-        self._autostart_state: dict[str, dict[str, Any]] = {}
         self._autostart_last_scan_ns = 0
         self._autostart_scan_interval_ns = 1_000_000_000
         self._task_monitor_enabled = bool(
@@ -820,6 +824,7 @@ class Manager(ServiceTask):
         """Include manager-selection fields in STATUS/PING control snapshots."""
 
         payload = super()._control_snapshot_fields()
+        payload["should_stop"] = self.should_stop or self._draining
         payload.update(
             {
                 "role": "manager",
@@ -963,7 +968,10 @@ class Manager(ServiceTask):
 
         if request.command == CONTROL_STOP:
             self._begin_graceful_shutdown(message_id=context.timestamp)
-            self._send_control_response("STOP", "ack", draining=True)
+            response_extra: dict[str, Any] = {"draining": True}
+            if request.request_id is not None:
+                response_extra["request_id"] = request.request_id
+            self._send_control_response("STOP", "ack", **response_extra)
             return True
         return super()._handle_control_command(request, context)
 
@@ -1622,9 +1630,6 @@ class Manager(ServiceTask):
             queues=queues,
             runtime_handle=runtime_handle.to_dict(),
             capabilities=self.taskspec.metadata.get("capabilities", []),
-            metadata={
-                "legacy_role": self.taskspec.metadata.get("role", "manager"),
-            },
         )
         serialized_payload = json.dumps(payload)
         try:
@@ -1990,9 +1995,6 @@ class Manager(ServiceTask):
             queues=queues,
             runtime_handle=self._manager_runtime_handle().to_dict(),
             capabilities=self.taskspec.metadata.get("capabilities", []),
-            metadata={
-                "legacy_role": self.taskspec.metadata.get("role", "manager"),
-            },
         )
         latest_after_prune = self._latest_registry_entry(registry_queue, self.tid)
         if latest_after_prune is not None:
@@ -2126,10 +2128,6 @@ class Manager(ServiceTask):
         return True
 
     @staticmethod
-    def _pid_alive(pid: int | None) -> bool:
-        return pid_is_live(pid)
-
-    @staticmethod
     def _manager_record_liveness(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-006] exception
         record: Mapping[str, Any],
     ) -> Literal["live", "stale", "unknown"]:
@@ -2198,6 +2196,7 @@ class Manager(ServiceTask):
             record=record,
             ctrl_in_name=ctrl_in_name,
             ctrl_out_name=ctrl_out_name,
+            outbox_name=WEFT_MANAGER_OUTBOX_QUEUE,
             root_context=str(self._manager_context().root),
         )
 
@@ -2243,7 +2242,7 @@ class Manager(ServiceTask):
         ctrl_in_name = self._manager_ctrl_queue_name(tid, record)
         ctrl_out_name = self._manager_ctrl_out_queue_name(tid, record)
         request_id = uuid.uuid4().hex
-        ping_message = self._control_ping_probe_message(request_id)
+        ping_message = encode_control_message(CONTROL_PING, request_id=request_id)
         try:
             ctrl_in = self._manager_context().queue(ctrl_in_name, persistent=True)
             try:
@@ -2278,12 +2277,6 @@ class Manager(ServiceTask):
             source="control-pong",
             reason="ping_pending",
         )
-
-    @staticmethod
-    def _control_ping_probe_message(request_id: str) -> str:
-        """Return the canonical manager-owned PING probe payload."""
-
-        return json.dumps({"command": CONTROL_PING, "request_id": request_id})
 
     def _find_exact_probe_message_id(
         self,
@@ -3152,7 +3145,7 @@ class Manager(ServiceTask):
             child.last_liveness_probe_ns = now_ns
 
         if pid is not None:
-            if self._pid_alive(pid):
+            if pid_is_live(pid):
                 return False
             if child.launched_ns > 0 and now_ns - child.launched_ns < int(
                 MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS * 1_000_000_000
@@ -3464,7 +3457,7 @@ class Manager(ServiceTask):
                 except (AssertionError, OSError, ValueError):
                     still_alive = True
                 surviving_managed_pids = sorted(
-                    pid for pid in managed_pids.get(tid, set()) if self._pid_alive(pid)
+                    pid for pid in managed_pids.get(tid, set()) if pid_is_live(pid)
                 )
                 if still_alive or surviving_managed_pids:
                     survivors.append(
@@ -3634,11 +3627,6 @@ class Manager(ServiceTask):
         self._drain_stops_children = True
         self.should_stop = True
 
-    def handle_termination_signal(self, signum: int) -> None:
-        """Compatibility alias that records through the shared pending source."""
-
-        self.note_termination_signal(signum)
-
     def _apply_termination_request(
         self,
         signum: int,
@@ -3685,7 +3673,7 @@ class Manager(ServiceTask):
             config=self._config,
         )
         try:
-            queue.write(command)
+            queue.write(encode_control_message(command))
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to send %s to %s",
@@ -4380,60 +4368,67 @@ class Manager(ServiceTask):
     ) -> TaskSpec | None:
         """Parse spawn payload and validate a child TaskSpec (Spec: [MA-1.1], [MA-2])."""
         provided_spec = payload.get("taskspec")
-        if provided_spec is not None:
-            candidate = copy.deepcopy(provided_spec)
-        else:
-            spec_section = payload.get("spec")
-            if spec_section is None:
-                logger.warning("Spawn request missing 'spec' field: %s", payload)
-                self._emit_serve_log(
-                    "spawn_spec_validation_failed",
-                    component="spawn",
-                    required_level="debug",
-                    severity="warning",
-                    message_timestamp=timestamp,
-                    error="spawn request missing spec field",
-                )
-                return None
-            candidate = {
-                "tid": payload.get("tid"),
-                "name": payload.get("name", f"{self.taskspec.name}-child"),
-                "version": payload.get("version", "1.0"),
-                "spec": spec_section,
-                "io": payload.get("io", {}),
-                "state": payload.get("state", {}),
-                "metadata": payload.get("metadata", {}),
-            }
-
-        metadata = candidate.setdefault("metadata", {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-            candidate["metadata"] = metadata
-
-        internal_runtime_task_class = payload.get(
-            INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY
-        )
-        if isinstance(internal_runtime_task_class, str) and internal_runtime_task_class:
-            metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY] = internal_runtime_task_class
-
-        internal_endpoint_name = payload.get(
-            INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY
-        )
-        if isinstance(internal_endpoint_name, str) and internal_endpoint_name:
-            metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = internal_endpoint_name
-
-        candidate["metadata"].setdefault("parent_tid", self.tid)
-
         try:
-            resolved_payload = resolve_taskspec_payload(
+            bundle_root = None
+            if provided_spec is not None:
+                transported = decode_taskspec_transport_payload(
+                    provided_spec,
+                    template=True,
+                )
+                candidate = transported.model_dump(mode="json")
+                bundle_root = transported.get_bundle_root()
+            else:
+                spec_section = payload.get("spec")
+                if spec_section is None:
+                    logger.warning("Spawn request missing 'spec' field: %s", payload)
+                    self._emit_serve_log(
+                        "spawn_spec_validation_failed",
+                        component="spawn",
+                        required_level="debug",
+                        severity="warning",
+                        message_timestamp=timestamp,
+                        error="spawn request missing spec field",
+                    )
+                    return None
+                candidate = {
+                    "tid": payload.get("tid"),
+                    "name": payload.get("name", f"{self.taskspec.name}-child"),
+                    "version": payload.get("version", "1.0"),
+                    "spec": spec_section,
+                    "io": payload.get("io", {}),
+                    "state": payload.get("state", {}),
+                    "metadata": payload.get("metadata", {}),
+                }
+
+            metadata = candidate.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                candidate["metadata"] = metadata
+
+            internal_runtime_task_class = payload.get(
+                INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY
+            )
+            if (
+                isinstance(internal_runtime_task_class, str)
+                and internal_runtime_task_class
+            ):
+                metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY] = internal_runtime_task_class
+
+            internal_endpoint_name = payload.get(
+                INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY
+            )
+            if isinstance(internal_endpoint_name, str) and internal_endpoint_name:
+                metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = internal_endpoint_name
+
+            metadata.setdefault("parent_tid", self.tid)
+
+            child_spec = validate_taskspec_payload(
                 candidate,
-                tid=str(timestamp),
+                bundle_root=bundle_root,
+                resolved_tid=str(timestamp),
                 inherited_weft_context=getattr(
                     self.taskspec.spec, "weft_context", None
                 ),
-            )
-            child_spec = TaskSpec.model_validate(
-                resolved_payload, context={"auto_expand": False}
             )
         except (TypeError, ValueError, ValidationError):
             logger.exception(
@@ -4841,7 +4836,7 @@ class Manager(ServiceTask):
             )
 
         request_id = uuid.uuid4().hex
-        ping_message = self._control_ping_probe_message(request_id)
+        ping_message = encode_control_message(CONTROL_PING, request_id=request_id)
         try:
             ctrl_in = self._manager_context().queue(ctrl_in_name, persistent=True)
             try:
@@ -5182,7 +5177,6 @@ class Manager(ServiceTask):
         *,
         desired_keys: set[str],
         runtime_class: str | None = None,
-        manager_event_autostart_source: str | None = None,
     ) -> str | None:
         """Return a trusted service key for Manager-owned evidence.
 
@@ -5220,8 +5214,7 @@ class Manager(ServiceTask):
             metadata.get(INTERNAL_SERVICE_AUTHORITY_METADATA_KEY)
             == INTERNAL_SERVICE_AUTHORITY_MANAGER
         )
-        legacy_manager_event = manager_event_autostart_source == key
-        if not manager_authority and not legacy_manager_event:
+        if not manager_authority:
             return None
         return key
 
@@ -5773,9 +5766,12 @@ class Manager(ServiceTask):
         except (FileNotFoundError, ValueError):
             logger.warning("Failed to resolve stored task spec %s", name)
             return None
-        return apply_bundle_root_to_taskspec_payload(
-            dict(resolved.payload),
-            resolved.bundle_root,
+        return encode_taskspec_transport_payload(
+            validate_taskspec_payload(
+                resolved.payload,
+                bundle_root=resolved.bundle_root,
+                template=True,
+            )
         )
 
     def _load_autostart_pipeline(self, name: str) -> tuple[dict[str, Any], Any] | None:
@@ -5802,9 +5798,12 @@ class Manager(ServiceTask):
                 task_name,
                 spec_type=SPEC_TYPE_TASK,
             )
-            return apply_bundle_root_to_taskspec_payload(
-                dict(stage_resolved.payload),
-                stage_resolved.bundle_root,
+            return encode_taskspec_transport_payload(
+                validate_taskspec_payload(
+                    stage_resolved.payload,
+                    bundle_root=stage_resolved.bundle_root,
+                    template=True,
+                )
             )
 
         try:
@@ -5951,19 +5950,14 @@ class Manager(ServiceTask):
                 and not isinstance(max_restarts_value, bool)
                 else None
             )
-            state = self._autostart_state.get(source)
-            if not isinstance(state, dict):
+            state = self._managed_service_state.get(source)
+            if state is None:
                 return True
-            if not bool(state.get("launched_once", False)):
+            if not state.launched_once:
                 return True
             if max_restarts is None:
                 return True
-            restarts = state.get("restarts", 0)
-            if (
-                isinstance(restarts, int)
-                and not isinstance(restarts, bool)
-                and restarts < max_restarts
-            ):
+            if state.restarts < max_restarts:
                 return True
         return False
 
@@ -6042,21 +6036,10 @@ class Manager(ServiceTask):
         )
 
     def _prune_autostart_state(self, manifest_sources: set[str]) -> None:
-        stale_sources = [
-            source for source in self._autostart_state if source not in manifest_sources
-        ]
+        stale_sources = self._autostart_sources - manifest_sources
         for source in stale_sources:
-            self._autostart_state.pop(source, None)
             self._managed_service_state.pop(source, None)
-            self._autostart_launched.discard(source)
-
-        stale_launched = {
-            source
-            for source in self._autostart_launched
-            if source not in manifest_sources
-        }
-        for source in stale_launched:
-            self._autostart_launched.discard(source)
+        self._autostart_sources = set(manifest_sources)
 
     def _desired_autostart_services(
         self, *, force: bool = False
@@ -6097,17 +6080,7 @@ class Manager(ServiceTask):
                 else {}
             )
             mode = policy.get("mode", "once") if isinstance(policy, dict) else "once"
-            state = self._autostart_state.setdefault(
-                source,
-                {"restarts": 0, "next_allowed_ns": 0, "launched_once": False},
-            )
-            state.setdefault("restarts", 0)
-            state.setdefault("next_allowed_ns", 0)
-            state.setdefault("launched_once", False)
-            service_state = self._service_state(source)
-            service_state.restarts = int(state["restarts"])
-            service_state.next_allowed_ns = int(state["next_allowed_ns"])
-            service_state.launched_once = bool(state["launched_once"])
+            self._service_state(source)
 
             if mode not in {"once", "ensure"}:
                 logger.warning("Unknown autostart policy mode %s for %s", mode, source)
@@ -6157,34 +6130,24 @@ class Manager(ServiceTask):
         now_ns: int,
         launched_before: bool,
     ) -> None:
-        """Synchronize legacy autostart policy counters after enqueue."""
+        """Advance canonical autostart lifecycle state after enqueue."""
 
         source = service.autostart_source
         if source is None:
             return
-        self._autostart_launched.add(source)
-        state = self._autostart_state.setdefault(
-            source,
-            {"restarts": 0, "next_allowed_ns": 0, "launched_once": False},
-        )
-        state.setdefault("restarts", 0)
-        state.setdefault("next_allowed_ns", 0)
+        state = self._service_state(source)
         if launched_before:
-            state["restarts"] = int(state.get("restarts", 0)) + 1
-        state["launched_once"] = True
+            state.restarts += 1
+        state.launched_once = True
         if service.restart_backoff_ns > 0:
-            multiplier = max(0, int(state["restarts"]))
-            state["next_allowed_ns"] = now_ns + service.restart_backoff_ns * (
+            multiplier = max(0, state.restarts)
+            state.next_allowed_ns = now_ns + service.restart_backoff_ns * (
                 2**multiplier
             )
         else:
-            state["next_allowed_ns"] = 0
-        service_state = self._service_state(source)
-        service_state.restarts = int(state["restarts"])
-        service_state.next_allowed_ns = int(state["next_allowed_ns"])
-        service_state.launched_once = True
-        if service_state.next_allowed_ns:
-            self._schedule_autostart_rescan_at(service_state.next_allowed_ns)
+            state.next_allowed_ns = 0
+        if state.next_allowed_ns:
+            self._schedule_autostart_rescan_at(state.next_allowed_ns)
 
     def _schedule_autostart_rescan_at(self, due_ns: int) -> None:
         """Adjust scan throttling so backoff expiry is observed promptly."""
@@ -6600,6 +6563,7 @@ class Manager(ServiceTask):
             # Finish an in-flight drain before reevaluating leadership. Otherwise a
             # slow turn can re-enter the yield path and skip the corresponding
             # *_drained completion event once children are gone.
+            self._drain_control_queue_first()
             self._continue_shutdown_drain()
             self._drain_worker_results()
             return

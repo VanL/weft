@@ -79,7 +79,10 @@ creation.
 _Implementation mapping_: `weft/core/taskspec/model.py` — `TaskSpec`,
 `SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`,
 `AgentSection`, `FrozenList`, `FrozenDict`, `resolve_taskspec_payload`,
-`apply_bundle_root_to_taskspec_payload`; task lifecycle transition selection
+`weft/core/taskspec/transport.py::decode_taskspec_transport_payload`,
+`weft/core/taskspec/transport.py::encode_taskspec_transport_payload`, and
+`weft/core/taskspec/transport.py::validate_taskspec_payload`; task lifecycle
+transition selection
 lives in `weft/core/task_lifecycle.py`; supporting parameterization and
 run-input validation live in `weft/core/taskspec/parameterization.py` and
 `weft/core/taskspec/run_input.py`, and runner-environment materialization lives
@@ -436,7 +439,8 @@ Current task families:
   `task_log.retention`, `monitor_store.lifecycle`,
   `task_local.terminal_runtime`, `task_local.dead_tid`, and
   `runtime_state.retention`. Policy run result values share the internal
-  result type in `weft/core/monitor/policies/types.py`; private helper phases
+  result type `weft/core/monitor/policies/task_log.py::CleanupPolicyRun`;
+  private helper phases
   must not create additional policy identities. The persistent
   monitor also calls the configured task-monitor processor. The persistent
   monitor is a reactor: it owns task-local control, heartbeat registration,
@@ -499,6 +503,20 @@ the same session helpers in `weft/core/tasks/sessions.py`.
 
 Current required control behavior:
 
+- `ctrl_in` accepts one structured JSON object shape containing exactly the
+  required `command` key and optional `request_id` key. `command` is exactly
+  one of `PING`, `STATUS`, `STOP`, `KILL`, `PAUSE`, or `RESUME` without case
+  normalization. When present, `request_id` is a string containing at least
+  one non-whitespace character. Raw command
+  strings, extra keys, and alternate casing are not supported requests
+- every Weft-owned controller uses the shared control-envelope encoder.
+  `BaseTask` uses the matching parser and rejects malformed, non-object, or
+  unsupported envelopes without treating them as commands. A rejected row is
+  exact-acknowledged without a `ctrl_out` reply so it cannot block a later
+  valid request
+- `ctrl_out` carries task-local replies and terminal notifications. Readers
+  ignore malformed or unrelated replies as protocol noise; this robustness
+  does not make removed reply formats current contracts
 - `STOP`, `KILL`, `STATUS`, and `PING` round trips exist for live tasks
 - `PAUSE` and `RESUME` are supported on task types that opt into live pausing
 - durable `state.status` remains the canonical lifecycle state
@@ -515,22 +533,27 @@ Current required control behavior:
   immediate, deferred, draining, broadcast, or local-only, and whether
   reserved-policy handling is applied by the base class, by the subclass, or is
   intentionally not applicable
-- handled raw and structured STOP/KILL commands must produce a `ctrl_out`
-  acknowledgement, echo `request_id` when present, and must not emit duplicate
-  terminal state events when the task is already terminal
+- every reply or acknowledgement to a valid keyed request echoes its
+  `request_id`. Handled STOP/KILL commands must not emit duplicate terminal
+  state events when the task is already terminal
+
+`weft/core/control_messages.py` owns the canonical control-envelope wire
+shape. It does not own task or manager control policy.
+
+_Implementation mapping_: `weft/core/control_messages.py::ControlRequest`,
+`weft/core/control_messages.py::encode_control_message`,
+`weft/core/control_messages.py::decode_control_object`, and
+`weft/core/control_messages.py::parse_control_request` own the strict wire
+shape; `weft/core/tasks/base.py::BaseTask._handle_control_message` and
+`weft/core/tasks/base.py::BaseTask._handle_control_command` own shared task
+policy; specialized policies live on `Manager`, `Consumer`, `PipelineTask`,
+and `Monitor`.
 
 Why this boundary matters:
 
 - operators need one durable truth and one lightweight live explanation
 - control replies should stay off the data plane
 - task-local streaming state should remain explicit and inspectable
-
-_Implementation mapping_: `weft/core/tasks/base.py` owns
-`TaskControlPolicy`, default STOP/KILL behavior, late-terminal guards, and the
-shared `process_once()`/`run_until_stopped()`/`next_wait_timeout()` task-loop
-contract;
-specialized policies live on `Manager`, `Consumer`, `PipelineTask`, and
-`Monitor`.
 
 Implementation plan backlinks:
 [`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md);
@@ -630,9 +653,14 @@ environment-profile materialization in `weft/core/environment_profiles.py`;
 task runner validation in `weft/core/agents/validation.py` and
 `weft/core/runner_validation.py`; plugin loading in `weft/_runner_plugins.py`;
 runner plugin interface in `weft/ext.py`; built-in host runner in
-`weft/core/runners/`; optional first-party runner extensions in
-`extensions/weft_docker`, `extensions/weft_macos_sandbox`, and
-`extensions/weft_microsandbox`.
+`weft/core/runners/`; runner completion details in
+`weft/core/runners/outcome.py::RunnerOutcome`; optional first-party runner extensions in
+`extensions/weft_docker/weft_docker/plugin.py::get_runner_plugin`,
+`extensions/weft_macos_sandbox/weft_macos_sandbox/plugin.py::get_runner_plugin`,
+and
+`extensions/weft_microsandbox/weft_microsandbox/plugin.py::get_runner_plugin`.
+Those factories are leaf-module entrypoints; the extension package roots do
+not re-export them.
 
 Why this boundary exists:
 
@@ -689,6 +717,9 @@ Current rule:
   no runner-specific runtime handle exists. This keeps endpoint liveness and
   control proof on the runtime-handle contract rather than legacy top-level PID
   fields.
+- runners publish live host identity through `on_worker_started` and
+  `on_runtime_handle_started`; completed `RunnerOutcome` values retain the
+  runtime handle without a duplicate worker-PID field
 - legacy handle keys such as `runner_name`, `runtime_id`, and top-level
   `host_pids` are invalid at runtime-contract boundaries
 - manager records use the same `runtime_handle` shape. Detached host launch
@@ -697,9 +728,17 @@ Current rule:
   register process-local runtime liveness probes for specific handle runners;
   inconclusive or missing probes do not replace the generic heartbeat boundary.
 
-_Implementation mapping_: `weft/ext.py` `RunnerHandle`; `weft/core/tasks/base.py`
-`register_runtime_handle()`; CLI status/control surfaces in
-`weft/commands/status.py` and `weft/commands/tasks.py`.
+_Implementation mapping_: `weft/ext.py::RunnerHandle`;
+`weft/core/tasks/runner.py::TaskRunner.run_with_hooks()` owns the live callback
+seam; `weft/core/tasks/consumer.py` registers callback events and the returned
+`weft/core/runners/outcome.py::RunnerOutcome` owns the completed runtime-handle
+field;
+`weft/core/runners/host.py::HostTaskRunner.run_with_hooks` owns the host-runner
+publication path;
+`extensions/weft_docker/weft_docker/agent_runner.py::DockerProviderCLIRunner.run_with_hooks`
+owns the Docker agent-runner path; `weft/core/tasks/base.py::BaseTask.register_runtime_handle`
+publishes the durable mapping; CLI status/control surfaces live in
+`weft/commands/system.py` and `weft/commands/tasks.py`.
 
 Plan backlink:
 [`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md).
@@ -774,8 +813,11 @@ That means:
 
 _Implementation mapping_: `weft/core/resource_monitor.py`,
 `weft/core/runner_diagnostics.py`, `weft/core/runners/host.py`,
-`weft/core/runners/subprocess_runner.py`; the shared result contract lives in
-`weft/core/runners/outcome.py`. Session and task ownership lives in
+`weft/core/runners/subprocess_runner.py`;
+`weft/commands/tasks.py::format_runner_diagnostics` is the user-facing
+presentation adapter over `weft/core/runner_diagnostics.py::diagnostic_summary`;
+the shared result contract lives in `weft/core/runners/outcome.py`. Session and
+task ownership lives in
 `weft/core/tasks/sessions.py`,
 `weft/core/tasks/consumer.py`. Monitor-owned durable collation is implemented
 by `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`,
@@ -859,6 +901,7 @@ observations, apply effects, and own cleanup.
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)

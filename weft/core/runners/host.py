@@ -1,7 +1,7 @@
 """Built-in host runner implementation.
 
 Spec references:
-- docs/specifications/01-Core_Components.md [CC-3], [CC-3.4], [CC-3.5]
+- docs/specifications/01-Core_Components.md [CC-3], [CC-3.2], [CC-3.4], [CC-3.5]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
 - docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1], [RM-5.2]
 - docs/specifications/07-System_Invariants.md [EXEC.5]-[EXEC.10]
@@ -427,8 +427,6 @@ class HostTaskRunner:
         monitor_class: str | None,
         monitor_interval: float | None,
         bundle_root: str | None = None,
-        db_path: BrokerTarget | str | None = None,
-        config: dict[str, Any] | None = None,
     ) -> None:
         self._spec_data = {
             "type": target_type,
@@ -449,8 +447,6 @@ class HostTaskRunner:
         self._limits = limits
         self._monitor_class = monitor_class
         self._monitor_interval = monitor_interval or 1.0
-        self._db_path = db_path
-        self._config = dict(config) if config is not None else None
 
     def run(self, work_item: Any) -> RunnerOutcome:
         """Execute a work item with resource monitoring and timeout handling."""
@@ -468,7 +464,8 @@ class HostTaskRunner:
     ) -> RunnerOutcome:
         """Execute a work item with optional lifecycle hooks.
 
-        Spec: [RM-5], [RM-5.1] (resource monitor polling and limit enforcement)
+        Spec: [CC-3.2] (live runtime identity callbacks); [RM-5], [RM-5.1]
+        (resource monitor polling and limit enforcement).
         """
         if self._spec_data["type"] == "command":
             return self._run_command_with_hooks(
@@ -544,8 +541,6 @@ class HostTaskRunner:
                 self._monitor_class,
                 limits=self._limits,
                 polling_interval=self._monitor_interval,
-                db_path=self._db_path,
-                config=self._config,
             )
             monitor = _start_optional_monitor(monitor, worker_pid)
 
@@ -817,7 +812,6 @@ class HostTaskRunner:
                         logger.warning("Failed to snapshot final host resource metrics")
 
             outcome.metrics = outcome.metrics or last_metrics
-            outcome.worker_pid = worker_pid
             outcome.runtime_handle = outcome.runtime_handle or runtime_handle
             return outcome
         finally:
@@ -945,8 +939,6 @@ class HostTaskRunner:
             monitor_class=self._monitor_class,
             monitor_interval=self._monitor_interval,
             monitor=None,
-            db_path=self._db_path,
-            config=self._config,
             runtime_handle=runtime_handle,
             cancel_requested=cancel_requested,
             on_worker_started=on_worker_started,
@@ -1082,8 +1074,6 @@ class HostTaskRunner:
                 self._monitor_class,
                 limits=self._limits,
                 polling_interval=self._monitor_interval,
-                db_path=self._db_path,
-                config=self._config,
             )
             monitor = _start_optional_monitor(monitor, process.pid)
 
@@ -1092,7 +1082,6 @@ class HostTaskRunner:
             stdout_queue,
             stderr_queue,
             monitor,
-            self._limits,
             handle=_host_handle(process.pid),
         )
 
@@ -1131,8 +1120,6 @@ class HostTaskRunner:
                     self._monitor_class,
                     limits=self._limits,
                     polling_interval=self._monitor_interval,
-                    db_path=self._db_path,
-                    config=self._config,
                 )
                 monitor = _start_optional_monitor(monitor, process.pid)
             session = AgentSession(
@@ -1140,7 +1127,6 @@ class HostTaskRunner:
                 request_queue,
                 response_receiver,
                 monitor,
-                self._limits,
                 timeout=self._timeout,
                 handle=_host_handle(process.pid),
             )
@@ -1186,9 +1172,10 @@ class HostRunnerPlugin:
         self,
         taskspec_payload: Mapping[str, Any],
         *,
+        bundle_root: str | None = None,
         preflight: bool = False,
     ) -> None:
-        del taskspec_payload, preflight
+        del taskspec_payload, bundle_root, preflight
 
     def create_runner(
         self,
@@ -1213,7 +1200,7 @@ class HostRunnerPlugin:
         db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
     ) -> HostTaskRunner:
-        del persistent, interactive, runner_options
+        del persistent, interactive, runner_options, db_path, config
         return HostTaskRunner(
             target_type=target_type,
             tid=tid,
@@ -1229,8 +1216,6 @@ class HostRunnerPlugin:
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
             bundle_root=bundle_root,
-            db_path=db_path,
-            config=config,
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:

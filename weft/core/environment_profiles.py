@@ -13,7 +13,6 @@ from types import MappingProxyType
 from typing import Any, cast
 
 from weft.core.imports import import_callable_ref
-from weft.core.taskspec import bundle_root_from_taskspec_payload
 from weft.ext import RunnerEnvironmentProfile, RunnerEnvironmentProfileResult
 
 
@@ -129,6 +128,8 @@ def materialize_runner_environment(
 
 def materialize_runner_environment_from_taskspec(
     taskspec_payload: Mapping[str, Any],
+    *,
+    bundle_root: str | None = None,
 ) -> MaterializedRunnerEnvironment:
     """Resolve environment-profile defaults for a TaskSpec mapping payload."""
     spec = _require_mapping(taskspec_payload.get("spec"), name="spec")
@@ -152,7 +153,6 @@ def materialize_runner_environment_from_taskspec(
     env = _mapping_of_strings(spec.get("env") or {}, name="spec.env")
     tid = taskspec_payload.get("tid")
     tid_value = tid if isinstance(tid, str) else None
-    bundle_root = bundle_root_from_taskspec_payload(taskspec_payload)
     return materialize_runner_environment(
         target_type=target_type,
         runner_name=runner_name,

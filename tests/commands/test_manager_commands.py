@@ -26,11 +26,60 @@ from weft.commands import manager as manager_cmd
 from weft.commands.types import ManagerSnapshot
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
+from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
-from weft.core.service_convergence import build_manager_service_payload
+from weft.core.service_convergence import (
+    build_manager_service_payload,
+    manager_service_key,
+    project_manager_service_record,
+)
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_manager_runtime_exposes_only_canonical_lifecycle_names() -> None:
+    """Legacy private twins must not coexist with the public runtime API."""
+
+    canonical_names = {
+        "DetachedManagerLaunch",
+        "ManagerRegistryView",
+        "ManagerRuntimeInvocation",
+        "build_manager_spec",
+        "ensure_manager",
+        "generate_tid",
+        "list_manager_records",
+        "manager_diagnostic_records",
+        "manager_record",
+        "manager_registry_record_is_stale",
+        "normalize_manager_registry_record",
+        "replace_active_manager",
+        "select_active_manager",
+        "serve_manager_foreground",
+        "start_manager",
+        "stop_manager",
+    }
+    legacy_names = {
+        "_DetachedManagerLaunch",
+        "_ManagerRegistryView",
+        "_ManagerRuntimeInvocation",
+        "_build_manager_spec",
+        "_ensure_manager",
+        "_generate_tid",
+        "_list_manager_records",
+        "_manager_diagnostic_records",
+        "_manager_record",
+        "_manager_record_is_stale",
+        "_normalize_manager_record",
+        "_replace_active_manager",
+        "_select_active_manager",
+        "_serve_manager_foreground",
+        "_start_manager",
+        "_stop_manager",
+    }
+
+    assert all(hasattr(core_manager_runtime, name) for name in canonical_names)
+    assert not {name for name in legacy_names if hasattr(core_manager_runtime, name)}
 
 
 class _CleanupProcess:
@@ -206,10 +255,14 @@ def test_manager_json_commands_use_external_id_projection(
     }
     monkeypatch.setattr(manager_cmd, "build_context", lambda _path=None: object())
     monkeypatch.setattr(
-        manager_cmd, "_list_manager_records", lambda *_args, **_kwargs: [record]
+        core_manager_runtime,
+        "list_manager_records",
+        lambda *_args, **_kwargs: [record],
     )
     monkeypatch.setattr(
-        manager_cmd, "_manager_record", lambda *_args, **_kwargs: record
+        core_manager_runtime,
+        "manager_record",
+        lambda *_args, **_kwargs: record,
     )
 
     list_exit, list_payload = manager_cmd.list_command(json_output=True)
@@ -279,10 +332,15 @@ def _latest_manager_record(context, tid: str) -> dict[str, object] | None:
     try:
         latest: tuple[dict[str, object], int] | None = None
         for payload, timestamp in iter_queue_json_entries(queue):
-            if payload.get("tid") != tid:
+            record = project_manager_service_record(
+                payload,
+                timestamp=timestamp,
+                service_key=manager_service_key(context),
+            )
+            if record is None or record.get("tid") != tid:
                 continue
             if latest is None or latest[1] < timestamp:
-                latest = (payload, timestamp)
+                latest = (record, timestamp)
         return None if latest is None else latest[0]
     finally:
         queue.close()
@@ -299,6 +357,13 @@ def _write_manager_registry_row(
     **overrides: Any,
 ) -> int:
     return queue.write(json.dumps(_manager_service_payload(context, tid, **overrides)))
+
+
+def _manager_service_record(context: Any, tid: str) -> dict[str, Any]:
+    payload = _manager_service_payload(context, tid)
+    record = project_manager_service_record(payload, timestamp=1)
+    assert record is not None
+    return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -896,6 +961,7 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
             "ctrl_out": ctrl_out_name,
             "outbox": "weft.manager.outbox",
             "weft_context": str(context.root),
+            "should_stop": False,
         }
         if pong_kind == "malformed-manager-fields":
             payload["role"] = 1
@@ -944,9 +1010,8 @@ def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
-    def _fake_ensure(context_arg, *, verbose):
+    def _fake_ensure(context_arg):
         assert context_arg is context
-        assert verbose is False
         calls.append("ensure")
         return (
             {
@@ -957,7 +1022,7 @@ def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
             None,
         )
 
-    monkeypatch.setattr(manager_cmd, "_ensure_manager", _fake_ensure)
+    monkeypatch.setattr(core_manager_runtime, "ensure_manager", _fake_ensure)
 
     exit_code, message = manager_cmd.start_command(context_path=context_root)
 
@@ -972,9 +1037,9 @@ def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
     monkeypatch.setattr(
-        manager_cmd,
-        "_ensure_manager",
-        lambda context_arg, *, verbose: (
+        core_manager_runtime,
+        "ensure_manager",
+        lambda context_arg: (
             {
                 "tid": "1761000000000000001",
                 "runtime_handle": _host_runtime_handle(54321),
@@ -1002,9 +1067,8 @@ def test_start_command_replace_supersedes_before_start(tmp_path, monkeypatch):
         calls.append("replace")
         return True, None
 
-    def fake_start(context_arg, *, verbose):
+    def fake_start(context_arg):
         assert context_arg is context
-        assert verbose is False
         calls.append("start")
         return (
             {
@@ -1015,8 +1079,8 @@ def test_start_command_replace_supersedes_before_start(tmp_path, monkeypatch):
             None,
         )
 
-    monkeypatch.setattr(manager_cmd, "_replace_active_manager", fake_replace)
-    monkeypatch.setattr(manager_cmd, "_start_manager", fake_start)
+    monkeypatch.setattr(core_manager_runtime, "replace_active_manager", fake_replace)
+    monkeypatch.setattr(core_manager_runtime, "start_manager", fake_start)
 
     exit_code, message = manager_cmd.start_command(
         context_path=context_root,
@@ -1035,13 +1099,13 @@ def test_start_command_replace_failure_does_not_start(tmp_path, monkeypatch):
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
     monkeypatch.setattr(
-        manager_cmd,
-        "_replace_active_manager",
+        core_manager_runtime,
+        "replace_active_manager",
         lambda context_arg: (False, "failed to send STOP"),
     )
     monkeypatch.setattr(
-        manager_cmd,
-        "_start_manager",
+        core_manager_runtime,
+        "start_manager",
         lambda *args, **kwargs: calls.append("start"),
     )
 
@@ -1100,7 +1164,7 @@ def test_replace_active_manager_sends_stop_and_marks_superseded(
         config=context.config,
     )
     try:
-        assert ctrl_queue.read_one() == "STOP"
+        assert ctrl_queue.read_one() == encode_control_message("STOP")
     finally:
         ctrl_queue.close()
     latest = _latest_manager_record(context, tid)
@@ -1181,7 +1245,7 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
         assert stop_if_absent is False
         return True, None
 
-    monkeypatch.setattr(manager_cmd, "_stop_manager", fake_stop_manager)
+    monkeypatch.setattr(core_manager_runtime, "stop_manager", fake_stop_manager)
 
     exit_code, message = manager_cmd.stop_command(
         tid="1761000000000000001",
@@ -1231,9 +1295,11 @@ def test_stop_command_without_tid_stops_active_manager(tmp_path, monkeypatch):
         return True, None
 
     monkeypatch.setattr(
-        manager_cmd, "_select_active_manager", fake_select_active_manager
+        core_manager_runtime,
+        "select_active_manager",
+        fake_select_active_manager,
     )
-    monkeypatch.setattr(manager_cmd, "_stop_manager", fake_stop_manager)
+    monkeypatch.setattr(core_manager_runtime, "stop_manager", fake_stop_manager)
 
     exit_code, message = manager_cmd.stop_command(
         tid=None,
@@ -1258,13 +1324,13 @@ def test_stop_command_without_tid_noops_when_no_active_manager(
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
     monkeypatch.setattr(
-        manager_cmd,
-        "_select_active_manager",
+        core_manager_runtime,
+        "select_active_manager",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        manager_cmd,
-        "_stop_manager",
+        core_manager_runtime,
+        "stop_manager",
         lambda *args, **kwargs: stop_calls.append(args),
     )
 
@@ -1304,7 +1370,7 @@ def test_stop_command_default_timeout_exceeds_manager_drain_budget(
         calls.append(timeout)
         return True, None
 
-    monkeypatch.setattr(manager_cmd, "_stop_manager", fake_stop_manager)
+    monkeypatch.setattr(core_manager_runtime, "stop_manager", fake_stop_manager)
 
     exit_code, message = manager_cmd.stop_command(
         tid="1761000000000000001",
@@ -1343,7 +1409,7 @@ def test_stop_manager_default_timeout_exceeds_manager_drain_budget(
         calls.append(timeout)
         return True, None
 
-    monkeypatch.setattr(manager_cmd, "_stop_manager", fake_stop_manager)
+    monkeypatch.setattr(core_manager_runtime, "stop_manager", fake_stop_manager)
 
     manager_cmd.stop_manager(context, "1761000000000000001")
 
@@ -1360,8 +1426,8 @@ def test_stop_command_rewrites_timeout_message(tmp_path, monkeypatch):
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
     monkeypatch.setattr(
-        manager_cmd,
-        "_stop_manager",
+        core_manager_runtime,
+        "stop_manager",
         lambda *args, **kwargs: (
             False,
             "Manager 1761000000000000001 did not stop within 0.1s",
@@ -1416,7 +1482,7 @@ def test_stop_command_writes_stop_for_active_manager(tmp_path):
         persistent=False,
         config=context.config,
     )
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
 def test_stop_command_noops_for_stopped_manager(tmp_path):
@@ -1490,7 +1556,7 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
         persistent=False,
         config=context.config,
     )
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
 def test_stop_command_stop_if_absent_still_sends_stop(tmp_path):
@@ -1514,7 +1580,7 @@ def test_stop_command_stop_if_absent_still_sends_stop(tmp_path):
         persistent=False,
         config=context.config,
     )
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
 def test_stop_command_waits_for_pid_exit_after_stopped_status(
@@ -1525,7 +1591,9 @@ def test_stop_command_waits_for_pid_exit_after_stopped_status(
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
     monkeypatch.setattr(
-        manager_cmd, "_stop_manager", lambda *args, **kwargs: (True, None)
+        core_manager_runtime,
+        "stop_manager",
+        lambda *args, **kwargs: (True, None),
     )
 
     exit_code, message = manager_cmd.stop_command(
@@ -1768,16 +1836,13 @@ def test_ensure_manager_does_not_start_when_host_pid_incumbent_is_namespace_ambi
     )
     monkeypatch.setattr(
         core_manager_runtime,
-        "_start_manager",
+        "start_manager",
         lambda *args, **kwargs: pytest.fail(
             "namespace-ambiguous incumbent must block manager startup"
         ),
     )
 
-    record, started, process = core_manager_runtime.ensure_manager(
-        context,
-        verbose=False,
-    )
+    record, started, process = core_manager_runtime.ensure_manager(context)
 
     assert record is not None
     assert record["tid"] == tid
@@ -1829,12 +1894,9 @@ def test_ensure_manager_starts_when_ambiguous_incumbent_strands_spawn_backlog(
     def _start_replacement(*_args, **_kwargs):
         return {"tid": replacement_tid, "status": "active"}, True, None
 
-    monkeypatch.setattr(core_manager_runtime, "_start_manager", _start_replacement)
+    monkeypatch.setattr(core_manager_runtime, "start_manager", _start_replacement)
 
-    record, started, process = core_manager_runtime.ensure_manager(
-        context,
-        verbose=False,
-    )
+    record, started, process = core_manager_runtime.ensure_manager(context)
 
     assert record is not None
     assert record["tid"] == replacement_tid
@@ -1977,7 +2039,7 @@ def test_stop_command_force_replaces_active_registry_record(
         termination_started = True
         return {pid}
 
-    monkeypatch.setattr("weft.core.manager_runtime._is_pid_alive", is_pid_alive)
+    monkeypatch.setattr("weft.core.manager_runtime.pid_is_live", is_pid_alive)
     monkeypatch.setattr("weft.core.manager_runtime.terminate_process_tree", terminate)
 
     exit_code, message = manager_cmd.stop_command(
@@ -2007,7 +2069,7 @@ def test_stop_command_force_replaces_active_registry_record(
         reader.close()
 
     assert len(records) == 1
-    assert records[0]["tid"] == tid
+    assert records[0]["owner_tid"] == tid
     assert records[0]["status"] == "stopped"
 
 
@@ -2032,11 +2094,8 @@ def test_stop_manager_force_requires_dead_pid_evidence_after_signal_failure(
     context = build_context(prepare_project_root(tmp_path / "ctx"))
     tid = "1761000000000000010"
     kill_pid = 8765
-    record = _manager_service_payload(
-        context,
-        tid,
-        runtime_handle=_host_runtime_handle(kill_pid),
-    )
+    record = _manager_service_record(context, tid)
+    record["runtime_handle"] = _host_runtime_handle(kill_pid)
     signal_attempted = False
     marked: list[str] = []
 
@@ -2067,11 +2126,11 @@ def test_stop_manager_force_requires_dead_pid_evidence_after_signal_failure(
         marked.append(tid)
         return True
 
-    monkeypatch.setattr(core_manager_runtime, "_is_pid_alive", is_pid_alive)
+    monkeypatch.setattr(core_manager_runtime, "pid_is_live", is_pid_alive)
     monkeypatch.setattr(core_manager_runtime, "terminate_process_tree", terminate)
     monkeypatch.setattr(core_manager_runtime, "_mark_manager_stopped", mark_stopped)
 
-    success, message = core_manager_runtime._stop_manager(
+    success, message = core_manager_runtime.stop_manager(
         context,
         record,
         timeout=0.0,
@@ -2106,7 +2165,7 @@ def test_stop_manager_force_requires_process_exit_evidence_after_signal_failure(
 ) -> None:
     context = build_context(prepare_project_root(tmp_path / "ctx"))
     tid = "1761000000000000010"
-    record = _manager_service_payload(context, tid)
+    record = _manager_service_record(context, tid)
     marked: list[str] = []
 
     class FailingProcess:
@@ -2142,7 +2201,7 @@ def test_stop_manager_force_requires_process_exit_evidence_after_signal_failure(
 
     monkeypatch.setattr(core_manager_runtime, "_mark_manager_stopped", mark_stopped)
 
-    success, message = core_manager_runtime._stop_manager(
+    success, message = core_manager_runtime.stop_manager(
         context,
         record,
         process=process,  # type: ignore[arg-type]

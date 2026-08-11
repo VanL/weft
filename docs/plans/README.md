@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 171 plan files in this directory.
+There are currently 173 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,8 @@ There are currently 171 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](./2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md) | Canonical Contract and Dead Code Cleanup Plan | `completed` | none |
+| [`2026-08-10-subprocess-coverage-collection-plan.md`](./2026-08-10-subprocess-coverage-collection-plan.md) | Subprocess Coverage Collection Plan | `draft` | none |
 | [`2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](./2026-08-10-simplebroker-7-json-message-id-boundary-plan.md) | SimpleBroker 7 JSON Message-ID Boundary Plan | `completed` | none |
 | [`2026-08-10-interactive-session-lifecycle-refactor-plan.md`](./2026-08-10-interactive-session-lifecycle-refactor-plan.md) | Interactive Session Lifecycle Refactor Plan | `completed` | none |
 | [`2026-08-10-result-observation-and-control-transition-refactor-plan.md`](./2026-08-10-result-observation-and-control-transition-refactor-plan.md) | Result Observation And Control Transition Refactor Plan | `completed` | none |

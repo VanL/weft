@@ -49,26 +49,22 @@ def _run_module(
 
 
 def _probe_default_export_path(
-    module: str,
-    *,
     cwd: Path,
     env_file: Path,
 ) -> subprocess.CompletedProcess[str]:
-    script = "\n".join(
-        [
-            "from __future__ import annotations",
-            "import importlib",
-            "import runpy",
-            "import sys",
-            f"sys.argv = [{module!r}, '--version']",
-            "try:",
-            f"    runpy.run_module({module!r}, run_name='__main__')",
-            "except SystemExit:",
-            "    pass",
-            "cli_app = importlib.import_module('weft.cli.app')",
-            "print(cli_app.default_export_path_help)",
-        ]
-    )
+    script = """\
+from __future__ import annotations
+import importlib
+import runpy
+import sys
+sys.argv = ['weft', '--version']
+try:
+    runpy.run_module('weft', run_name='__main__')
+except SystemExit:
+    pass
+cli_app = importlib.import_module('weft.cli.app')
+print(cli_app.default_export_path_help)
+"""
     return subprocess.run(
         [sys.executable, "-c", script],
         cwd=cwd,
@@ -80,6 +76,23 @@ def _probe_default_export_path(
         timeout=30,
         check=False,
     )
+
+
+def test_cli_reports_corrupt_project_config_without_replacing_or_traceback(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / ".weft" / "config.json"
+    config_path.parent.mkdir()
+    original = b"not-json"
+    config_path.write_bytes(original)
+
+    completed = _run_module("weft", "status", cwd=tmp_path)
+
+    assert completed.returncode != 0
+    combined = f"{completed.stdout}\n{completed.stderr}"
+    assert "config.json" in combined
+    assert "Traceback" not in combined
+    assert config_path.read_bytes() == original
 
 
 def test_parse_env_file_accepts_supported_lines(tmp_path: Path) -> None:
@@ -135,31 +148,13 @@ def test_python_m_weft_loads_env_file_before_cli_import(tmp_path: Path) -> None:
     assert (tmp_path / ".envfile-weft" / "weft_export.jsonl").exists()
 
 
-def test_python_m_weft_cli_loads_env_file_before_cli_import(tmp_path: Path) -> None:
-    env_file = tmp_path / "weft.env"
-    env_file.write_text("WEFT_DIRECTORY_NAME=.envfile-cli\n", encoding="utf-8")
-
-    result = _run_module(
-        "weft.cli",
-        "system",
-        "dump",
-        cwd=tmp_path,
-        env_file=env_file,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / ".envfile-cli" / "weft_export.jsonl").exists()
-
-
-@pytest.mark.parametrize("module", ["weft", "weft.cli"])
 def test_env_file_applies_before_cli_app_import(
     tmp_path: Path,
-    module: str,
 ) -> None:
     env_file = tmp_path / "weft.env"
     env_file.write_text("WEFT_DIRECTORY_NAME=.import-order\n", encoding="utf-8")
 
-    result = _probe_default_export_path(module, cwd=tmp_path, env_file=env_file)
+    result = _probe_default_export_path(cwd=tmp_path, env_file=env_file)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[-1] == ".import-order/weft_export.jsonl"
@@ -179,7 +174,7 @@ def test_env_file_values_participate_in_context_resolution(tmp_path: Path) -> No
     )
 
     result = _run_module(
-        "weft.cli",
+        "weft",
         "queue",
         "write",
         "envfile.queue",
@@ -199,7 +194,7 @@ def test_process_env_wins_over_env_file(tmp_path: Path) -> None:
     env = _clean_subprocess_env(env_file)
     env["WEFT_DIRECTORY_NAME"] = ".from-process"
 
-    result = _run_module("weft.cli", "system", "dump", cwd=tmp_path, env=env)
+    result = _run_module("weft", "system", "dump", cwd=tmp_path, env=env)
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / ".from-process" / "weft_export.jsonl").exists()
@@ -209,7 +204,7 @@ def test_process_env_wins_over_env_file(tmp_path: Path) -> None:
 def test_missing_env_file_fails_before_cli_import(tmp_path: Path) -> None:
     missing = tmp_path / "missing.env"
 
-    result = _run_module("weft.cli", "--version", cwd=tmp_path, env_file=missing)
+    result = _run_module("weft", "--version", cwd=tmp_path, env_file=missing)
 
     assert result.returncode == 2
     assert str(missing) in result.stderr
@@ -222,7 +217,7 @@ def test_malformed_env_file_does_not_echo_secret_value(tmp_path: Path) -> None:
     env_file = tmp_path / "weft.env"
     env_file.write_text("WEFT_SECRET='super-secret\n", encoding="utf-8")
 
-    result = _run_module("weft.cli", "--version", cwd=tmp_path, env_file=env_file)
+    result = _run_module("weft", "--version", cwd=tmp_path, env_file=env_file)
 
     assert result.returncode == 2
     assert f"{env_file}:1" in result.stderr
@@ -240,7 +235,7 @@ def test_env_file_does_not_recurse(tmp_path: Path) -> None:
     second.write_text("WEFT_DIRECTORY_NAME=.second\n", encoding="utf-8")
 
     result = _run_module(
-        "weft.cli",
+        "weft",
         "system",
         "dump",
         cwd=tmp_path,

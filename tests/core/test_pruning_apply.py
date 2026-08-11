@@ -55,9 +55,8 @@ def test_exact_id_apply_deletes_present_rows(
     """Present rows must be physically deleted and reported deleted.
 
     ``exact_status=False`` with ``reconcile_missing=True`` is the exact call
-    shape of `_delete_monitor_store_task_log_rows` and
-    `_repair_raw_deleted_task_message_refs`; ``exact_status=True`` is the
-    per-row shape. Both must leave the queue empty.
+    shape of `_delete_monitor_store_task_log_rows`; ``exact_status=True`` is
+    the per-row shape. Both must leave the queue empty.
     """
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

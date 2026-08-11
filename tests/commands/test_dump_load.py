@@ -13,7 +13,8 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE
-from weft.commands import _dump_support, _load_support
+from weft.commands import dump as dump_command
+from weft.commands import load as load_command
 from weft.commands.dump import cmd_dump
 from weft.commands.load import ImportReport, cmd_load
 from weft.context import WeftContext, build_context
@@ -252,8 +253,8 @@ def test_parse_import_normalizes_exact_ids_and_builds_canonical_apply_lines(
     ]
     source = StringIO("".join(json.dumps(record) + "\n" for record in records))
 
-    plan = _load_support._parse_import_file(source)
-    apply_lines = _load_support._build_apply_lines(plan)
+    plan = load_command._parse_import_file(source)
+    apply_lines = load_command._build_apply_lines(plan)
 
     assert plan.report.metadata["last_ts"] == last_ts
     assert isinstance(plan.report.metadata["last_ts"], int)
@@ -280,7 +281,7 @@ def test_parse_import_accepts_zero_header_checkpoint(last_ts: int | str) -> None
     ]
     source = StringIO("".join(json.dumps(record) + "\n" for record in records))
 
-    plan = _load_support._parse_import_file(source)
+    plan = load_command._parse_import_file(source)
 
     assert plan.report.metadata["last_ts"] == 0
     assert isinstance(plan.report.metadata["last_ts"], int)
@@ -419,19 +420,19 @@ def test_execute_import_propagates_unexpected_snapshot_restore_error(
 
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
-    snapshot = _load_support.SQLiteSnapshot(
+    snapshot = load_command.SQLiteSnapshot(
         database_path=tmp_path / "broker.db",
         snapshot_dir=tmp_path / "snapshot",
     )
-    plan = _load_support.ImportPlan(apply_lines=["header", "message"])
+    plan = load_command.ImportPlan(apply_lines=["header", "message"])
 
     monkeypatch.setattr(
-        _load_support,
+        load_command,
         "_ensure_exact_message_id_import_supported",
         lambda _plan, _context: None,
     )
     monkeypatch.setattr(
-        _load_support,
+        load_command,
         "_sqlite_snapshot_if_file_backed",
         lambda _context: snapshot,
     )
@@ -439,14 +440,14 @@ def test_execute_import_propagates_unexpected_snapshot_restore_error(
     def fail_apply(_broker: object, _lines: list[str]) -> None:
         raise ValueError("apply failed")
 
-    def fail_restore(_snapshot: _load_support.SQLiteSnapshot) -> None:
+    def fail_restore(_snapshot: load_command.SQLiteSnapshot) -> None:
         raise RuntimeError("restore defect")
 
-    monkeypatch.setattr(_load_support, "load_lines", fail_apply)
-    monkeypatch.setattr(_load_support.SQLiteSnapshot, "restore", fail_restore)
+    monkeypatch.setattr(load_command, "load_lines", fail_apply)
+    monkeypatch.setattr(load_command.SQLiteSnapshot, "restore", fail_restore)
 
     with pytest.raises(RuntimeError, match="restore defect") as exc_info:
-        _load_support._execute_import(plan, context)
+        load_command._execute_import(plan, context)
 
     assert isinstance(exc_info.value.__context__, ValueError)
     assert str(exc_info.value.__context__) == "apply failed"
@@ -460,19 +461,19 @@ def test_execute_import_reports_operational_snapshot_restore_error(
 
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
-    snapshot = _load_support.SQLiteSnapshot(
+    snapshot = load_command.SQLiteSnapshot(
         database_path=tmp_path / "broker.db",
         snapshot_dir=tmp_path / "snapshot",
     )
-    plan = _load_support.ImportPlan(apply_lines=["header", "message"])
+    plan = load_command.ImportPlan(apply_lines=["header", "message"])
 
     monkeypatch.setattr(
-        _load_support,
+        load_command,
         "_ensure_exact_message_id_import_supported",
         lambda _plan, _context: None,
     )
     monkeypatch.setattr(
-        _load_support,
+        load_command,
         "_sqlite_snapshot_if_file_backed",
         lambda _context: snapshot,
     )
@@ -480,11 +481,11 @@ def test_execute_import_reports_operational_snapshot_restore_error(
     def fail_apply(_broker: object, _lines: list[str]) -> None:
         raise ValueError("apply failed")
 
-    def fail_restore(_snapshot: _load_support.SQLiteSnapshot) -> None:
+    def fail_restore(_snapshot: load_command.SQLiteSnapshot) -> None:
         raise OSError("restore failed")
 
-    monkeypatch.setattr(_load_support, "load_lines", fail_apply)
-    monkeypatch.setattr(_load_support.SQLiteSnapshot, "restore", fail_restore)
+    monkeypatch.setattr(load_command, "load_lines", fail_apply)
+    monkeypatch.setattr(load_command.SQLiteSnapshot, "restore", fail_restore)
 
     with pytest.raises(
         ImportError,
@@ -493,7 +494,7 @@ def test_execute_import_reports_operational_snapshot_restore_error(
             "restore failed: restore failed"
         ),
     ) as exc_info:
-        _load_support._execute_import(plan, context)
+        load_command._execute_import(plan, context)
 
     assert isinstance(exc_info.value.__cause__, ValueError)
     assert str(exc_info.value.__cause__) == "apply failed"
@@ -574,7 +575,7 @@ def test_cmd_load_reports_unexpected_context_failure(
         del spec_context
         raise UnexpectedLoadFailure("private context detail")
 
-    monkeypatch.setattr(_load_support, "build_context", fail_context)
+    monkeypatch.setattr(load_command, "build_context", fail_context)
 
     exit_code, message = cmd_load()
 
@@ -592,10 +593,10 @@ def test_cmd_load_reports_unexpected_plan_failure(
     export_path = tmp_path / "unexpected-plan.jsonl"
     export_path.write_text("ignored", encoding="utf-8")
 
-    def fail_plan(_handle: object, _context: WeftContext) -> _load_support.ImportPlan:
+    def fail_plan(_handle: object, _context: WeftContext) -> load_command.ImportPlan:
         raise UnexpectedLoadFailure("private plan detail")
 
-    monkeypatch.setattr(_load_support, "_build_import_plan", fail_plan)
+    monkeypatch.setattr(load_command, "_build_import_plan", fail_plan)
 
     exit_code, message = cmd_load(
         input_file=str(export_path),
@@ -615,21 +616,21 @@ def test_cmd_load_reports_unexpected_apply_failure(
     root = prepare_project_root(tmp_path)
     export_path = tmp_path / "unexpected-apply.jsonl"
     export_path.write_text("ignored", encoding="utf-8")
-    plan = _load_support.ImportPlan()
+    plan = load_command.ImportPlan()
 
     monkeypatch.setattr(
-        _load_support,
+        load_command,
         "_build_import_plan",
         lambda _handle, _context: plan,
     )
 
     def fail_apply(
-        _plan: _load_support.ImportPlan,
+        _plan: load_command.ImportPlan,
         _context: WeftContext,
-    ) -> _load_support.ImportReport:
+    ) -> load_command.ImportReport:
         raise RuntimeError("private apply detail")
 
-    monkeypatch.setattr(_load_support, "_execute_import", fail_apply)
+    monkeypatch.setattr(load_command, "_execute_import", fail_apply)
 
     exit_code, message = cmd_load(
         input_file=str(export_path),
@@ -687,7 +688,7 @@ def test_cmd_dump_reports_unexpected_context_resolution_error(
     def fail_context_resolution(*_args: object, **_kwargs: object) -> None:
         raise ContextResolutionError("context resolution sentinel")
 
-    monkeypatch.setattr(_dump_support, "build_context", fail_context_resolution)
+    monkeypatch.setattr(dump_command, "build_context", fail_context_resolution)
 
     exit_code, message = cmd_dump(context_path="unused")
 
@@ -711,7 +712,7 @@ def test_cmd_dump_reports_unexpected_export_error(
     def fail_export(_output: object, _db: object) -> tuple[int, int, int]:
         raise ExportAdapterError("export adapter sentinel")
 
-    monkeypatch.setattr(_dump_support, "_write_dump", fail_export)
+    monkeypatch.setattr(dump_command, "_write_dump", fail_export)
 
     exit_code, message = cmd_dump(context_path=str(root))
 

@@ -1,4 +1,4 @@
-"""Canonical prune candidate selection and exact-delete helpers.
+"""Prune candidate selection and exact-delete package.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
@@ -6,9 +6,3 @@ Spec references:
 """
 
 from __future__ import annotations
-
-from .apply import apply_exact_prune_candidates
-
-__all__ = [
-    "apply_exact_prune_candidates",
-]

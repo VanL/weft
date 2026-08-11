@@ -33,6 +33,7 @@ def _agent_payload(**options: object) -> dict[str, object]:
             "persistent": False,
             "agent": {
                 "runtime": "provider_cli",
+                "authority_class": "general",
                 "conversation_scope": "per_message",
                 "runtime_config": {"provider": "gemini"},
             },

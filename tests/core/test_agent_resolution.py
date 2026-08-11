@@ -17,6 +17,7 @@ from weft.core.taskspec import AgentSection
 def make_agent_section(**overrides) -> AgentSection:
     payload = {
         "runtime": "provider_cli",
+        "authority_class": "general",
         "model": "gpt-5-codex",
         "runtime_config": {"provider": "codex"},
     }

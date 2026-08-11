@@ -15,6 +15,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
+from weft.core.control_messages import encode_control_message
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
@@ -212,7 +213,7 @@ def test_interactive_command_stop_cancels(broker_env, unique_tid: str) -> None:
     inbox.write(json.dumps({"stdin": "first\n"}))
     _spin(task)
 
-    ctrl_in.write("STOP")
+    ctrl_in.write(encode_control_message("STOP", request_id="interactive-stop"))
     _spin(task, iterations=20)
 
     final_messages = []
@@ -227,6 +228,12 @@ def test_interactive_command_stop_cancels(broker_env, unique_tid: str) -> None:
     ctrl_messages = [json.loads(msg) for msg in _drain(ctrl_out)]
     assert any(
         message.get("type") == "terminal" and message.get("status") == "cancelled"
+        for message in ctrl_messages
+    )
+    assert any(
+        message.get("command") == "STOP"
+        and message.get("status") == "ack"
+        and message.get("request_id") == "interactive-stop"
         for message in ctrl_messages
     )
     assert task.taskspec.state.status == "cancelled"
@@ -324,8 +331,8 @@ def test_interactive_control_commands_report_live_status(
         inbox.write(json.dumps({"stdin": "hello\n"}))
         _spin(task)
 
-        ctrl_in.write("STATUS")
-        ctrl_in.write("PING")
+        ctrl_in.write(encode_control_message("STATUS"))
+        ctrl_in.write(encode_control_message("PING"))
         responses: list[dict[str, object]] = []
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:

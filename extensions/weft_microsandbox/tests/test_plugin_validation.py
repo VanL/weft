@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import pytest
 
+import weft_microsandbox
 from weft_microsandbox.plugin import MicrosandboxRunnerPlugin, get_runner_plugin
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_package_root_does_not_export_runner_plugin_factory() -> None:
+    assert not hasattr(weft_microsandbox, "get_runner_plugin")
 
 
 def _payload(**spec_overrides: object) -> dict[str, object]:

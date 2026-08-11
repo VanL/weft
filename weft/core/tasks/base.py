@@ -80,6 +80,7 @@ from weft._constants import (
 )
 from weft._runner_plugins import require_runner_plugin
 from weft.context import WeftContext, build_context
+from weft.core.control_messages import ControlRequest, parse_control_request
 from weft.core.endpoints import (
     build_endpoint_record_payload,
     find_endpoint_registry_message,
@@ -120,18 +121,6 @@ class TaskControlPolicy:
     reserved_policy: str
     ack: str
     terminal_state: str
-
-
-@dataclass(frozen=True, slots=True)
-class ControlRequest:
-    """Parsed task control request.
-
-    Spec: [CC-2.4], [MF-3]
-    """
-
-    command: str
-    request_id: str | None = None
-    raw: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,13 +226,13 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _ctrl_out_queue(self, queue_obj: Queue) -> None:
         self._ctrl_out_queue_obj = queue_obj
 
-    def _interactive_handle_control(self, command: str) -> bool:
+    def _interactive_handle_control(self, request: ControlRequest) -> bool:
         """Hook for subclasses supporting interactive mode; default is non-interactive."""
         parent = super()
         handler = getattr(parent, "_interactive_handle_control", None)
         if handler is None:
             return False
-        return bool(cast(Callable[[str], bool], handler)(command))
+        return bool(cast(Callable[[ControlRequest], bool], handler)(request))
 
     def __init__(
         self,
@@ -319,7 +308,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             db=db,
             stop_event=stop_event,
             persistent=True,
-            check_interval=1,
             config=config_dict,
         )
 
@@ -1530,21 +1518,12 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.4], [MF-3]
         """
-        request = self._parse_control_request(message)
-
-        if self._handle_control_command(request, context):
+        request = parse_control_request(message)
+        if request is None:
             self._ack_control_message(context.queue_name, context.timestamp)
             return
 
-        self._report_state_change(
-            event="control_unknown",
-            message_id=timestamp,
-            command=request.command,
-        )
-        response_extra: dict[str, Any] = {"error": "Unsupported command"}
-        if request.request_id is not None:
-            response_extra["request_id"] = request.request_id
-        self._send_control_response(request.command, "unknown", **response_extra)
+        self._handle_control_command(request, context)
         self._ack_control_message(context.queue_name, context.timestamp)
 
     def _handle_control_command(
@@ -1564,7 +1543,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         Spec: [CC-2.4], [MF-3]
         """
         command = request.command
-        if self._interactive_handle_control(command):
+        if self._interactive_handle_control(request):
             return True
 
         if command == CONTROL_PING:
@@ -1582,12 +1561,11 @@ class BaseTask(MultiQueueWatcher, ABC):
                 message_id=context.timestamp,
                 apply_reserved_policy=True,
             )
-            response_extra = (
-                {"request_id": request.request_id}
-                if request.request_id is not None
-                else {}
+            self._send_control_response(
+                "STOP",
+                "ack",
+                **self._control_request_id_extra(request),
             )
-            self._send_control_response("STOP", "ack", **response_extra)
             return True
 
         if command == CONTROL_KILL:
@@ -1597,12 +1575,11 @@ class BaseTask(MultiQueueWatcher, ABC):
                 message_id=context.timestamp,
                 apply_reserved_policy=True,
             )
-            response_extra = (
-                {"request_id": request.request_id}
-                if request.request_id is not None
-                else {}
+            self._send_control_response(
+                "KILL",
+                "ack",
+                **self._control_request_id_extra(request),
             )
-            self._send_control_response("KILL", "ack", **response_extra)
             return True
 
         if command == CONTROL_PAUSE:
@@ -1612,7 +1589,12 @@ class BaseTask(MultiQueueWatcher, ABC):
                     event="control_pause", message_id=context.timestamp
                 )
                 self._update_process_title("paused")
-            self._send_control_response(CONTROL_PAUSE, "ack", paused=True)
+            self._send_control_response(
+                CONTROL_PAUSE,
+                "ack",
+                paused=True,
+                **self._control_request_id_extra(request),
+            )
             return True
 
         if command == CONTROL_RESUME:
@@ -1622,7 +1604,12 @@ class BaseTask(MultiQueueWatcher, ABC):
                     event="control_resume", message_id=context.timestamp
                 )
                 self._update_process_title("running")
-            self._send_control_response(CONTROL_RESUME, "ack", paused=False)
+            self._send_control_response(
+                CONTROL_RESUME,
+                "ack",
+                paused=False,
+                **self._control_request_id_extra(request),
+            )
             return True
 
         if command == CONTROL_STATUS:
@@ -1635,33 +1622,13 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         return False
 
-    def _parse_control_request(self, message: str) -> ControlRequest:
-        """Parse raw or JSON-envelope control messages.
+    @staticmethod
+    def _control_request_id_extra(request: ControlRequest) -> dict[str, str]:
+        """Return the optional request-correlation reply field."""
 
-        Spec: [CC-2.4], [MF-3]
-        """
-
-        raw = message.strip()
-        if raw.startswith("{"):
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, dict):
-                command_value = payload.get("command")
-                command = (
-                    command_value.strip().upper()
-                    if isinstance(command_value, str)
-                    else ""
-                )
-                request_id_value = payload.get("request_id")
-                request_id = (
-                    request_id_value
-                    if isinstance(request_id_value, str) and request_id_value
-                    else None
-                )
-                return ControlRequest(command=command, request_id=request_id, raw=raw)
-        return ControlRequest(command=raw.upper(), raw=raw)
+        if request.request_id is None:
+            return {}
+        return {"request_id": request.request_id}
 
     def _control_response_extras(
         self,

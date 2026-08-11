@@ -17,8 +17,8 @@ from weft._constants import (
     WEFT_MANAGER_SERVE_LOG_LEVEL,
     load_config,
 )
-from weft.commands.manager import _replace_active_manager, _serve_manager_foreground
 from weft.context import build_context
+from weft.core import manager_runtime
 
 
 def serve_command(
@@ -37,13 +37,13 @@ def serve_command(
     config = load_config(overrides)
     context = build_context(context_path, config=config)
     if replace:
-        replaced, message = _replace_active_manager(
+        replaced, message = manager_runtime.replace_active_manager(
             context,
             timeout=replace_timeout,
         )
         if not replaced:
             return 1, message or "Manager replacement failed"
-    return _serve_manager_foreground(context)
+    return manager_runtime.serve_manager_foreground(context)
 
 
 __all__ = ["serve_command"]

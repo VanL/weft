@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import itertools
 import logging
 import queue
@@ -19,6 +20,13 @@ from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.ext import RunnerHandle
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_run_monitored_subprocess_does_not_accept_broker_context() -> None:
+    parameters = inspect.signature(run_monitored_subprocess).parameters
+
+    assert "db_path" not in parameters
+    assert "config" not in parameters
 
 
 class _FakeRunnerClock:
@@ -124,8 +132,6 @@ def _run_process_with_monitor(
             monitor_class=None,
             monitor_interval=monitor_interval,
             monitor=monitor,
-            db_path=None,
-            config=None,
             runtime_handle=_runner_handle(process),
             cancel_requested=cancel_requested,
             on_worker_started=None,
@@ -188,8 +194,6 @@ def test_completed_process_at_timeout_wake_boundary_returns_ok(
             monitor_class=None,
             monitor_interval=1.0,
             monitor=None,
-            db_path=None,
-            config=None,
             runtime_handle=_runner_handle(process),
             cancel_requested=None,
             on_worker_started=None,
@@ -235,8 +239,6 @@ def test_start_callback_failures_are_logged_without_replacing_outcome(
                 monitor_class=None,
                 monitor_interval=1.0,
                 monitor=None,
-                db_path=None,
-                config=None,
                 runtime_handle=_runner_handle(process),
                 cancel_requested=None,
                 on_worker_started=fail_callback,
@@ -314,8 +316,6 @@ def test_start_callback_propagates_non_exception_failure_identity(
                 monitor_class=None,
                 monitor_interval=1.0,
                 monitor=None,
-                db_path=None,
-                config=None,
                 runtime_handle=_runner_handle(process),
                 cancel_requested=None,
                 stop_runtime=stop_runtime,
@@ -362,8 +362,6 @@ def _run_fatal_callback_cleanup_scenario(
             monitor_class=None,
             monitor_interval=1.0,
             monitor=None,
-            db_path=None,
-            config=None,
             runtime_handle=_runner_handle(process),  # type: ignore[arg-type]
             cancel_requested=None,
             on_worker_started=fail_callback,

@@ -4,16 +4,29 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
 from weft._constants import PROG_NAME, __version__
-from weft.cli import app
+from weft.cli.app import app
 
 runner = CliRunner()
 pytestmark = [pytest.mark.shared]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_project_metadata_installs_canonical_weft_entrypoint() -> None:
+    """The installed ``weft`` command enters through the bootstrap owner."""
+
+    project = tomllib.loads(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+
+    assert project["project"]["scripts"]["weft"] == "weft.bootstrap:main"
 
 
 class TestCLI:
@@ -97,6 +110,19 @@ class TestModuleExecution:
         # Help output may be in stdout or stderr depending on version
         output = result.stdout or result.stderr
         assert "Weft: the durable task substrate for agent systems" in output
+
+    def test_cli_package_is_not_an_executable_entrypoint(self):
+        """Test that python -m weft.cli does not invoke the CLI."""
+        result = subprocess.run(
+            [sys.executable, "-m", "weft.cli", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "cannot be directly executed" in result.stderr
+        assert result.stdout == ""
 
 
 class TestCLIConstants:

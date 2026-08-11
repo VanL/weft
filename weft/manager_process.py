@@ -14,7 +14,11 @@ from typing import Any
 
 from simplebroker import BrokerTarget, deserialize_broker_target
 from weft.core.launcher import _task_process_entry
-from weft.core.taskspec import TaskSpec
+from weft.core.taskspec import (
+    TaskSpec,
+    decode_taskspec_transport_payload,
+    encode_taskspec_transport_payload,
+)
 
 
 def run_manager_process(
@@ -31,7 +35,7 @@ def run_manager_process(
     _task_process_entry(
         task_cls_path,
         broker_target,
-        spec.model_dump_json(),
+        json.dumps(encode_taskspec_transport_payload(spec)),
         config,
         poll_interval,
         hard_exit_on_return,
@@ -61,8 +65,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        spec = TaskSpec.model_validate_json(spec_json)
-    except ValueError as exc:
+        spec_payload = json.loads(spec_json)
+        if not isinstance(spec_payload, dict):
+            raise TypeError("manager TaskSpec JSON root must be an object")
+        spec = decode_taskspec_transport_payload(spec_payload)
+    except (TypeError, ValueError) as exc:
         sys.stderr.write(f"Invalid manager TaskSpec: {exc}\n")
         return 2
 

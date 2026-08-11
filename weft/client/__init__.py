@@ -8,8 +8,7 @@ Spec references:
 
 from __future__ import annotations
 
-from ._client import WeftClient, connect
-from ._errors import (
+from weft._exceptions import (
     ControlRejected,
     InvalidTID,
     ManagerNotRunning,
@@ -18,6 +17,8 @@ from ._errors import (
     TaskNotFound,
     WeftError,
 )
+
+from ._client import WeftClient, connect
 from ._prepared import PreparedSubmission
 from ._task import Task
 from ._types import (

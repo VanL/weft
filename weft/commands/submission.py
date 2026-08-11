@@ -25,13 +25,18 @@ from weft._constants import (
     SUBMIT_OVERRIDE_NAMES,
 )
 from weft._exceptions import InvalidTID, SpecNotFound
-from weft.commands.manager import _ensure_manager, _generate_tid
 from weft.commands.types import PreparedSubmissionRequest, SubmittedTaskReceipt
 from weft.context import WeftContext
+from weft.core import manager_runtime
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
 from weft.core.spawn_requests import delete_spawn_request, submit_spawn_request
-from weft.core.taskspec import TaskSpec, apply_bundle_root_to_taskspec_payload
+from weft.core.taskspec import (
+    TaskSpec,
+    decode_taskspec_transport_payload,
+    encode_taskspec_transport_payload,
+    validate_taskspec_payload,
+)
 
 from ._spawn_submission import reconcile_submitted_spawn
 from .specs import resolve_named_spec, resolve_spec_reference
@@ -54,17 +59,10 @@ def normalize_taskspec(taskspec: TaskSpec | Mapping[str, Any]) -> TaskSpec:
 
     if isinstance(taskspec, TaskSpec):
         return taskspec
-    payload = dict(taskspec)
-    return TaskSpec.model_validate(
-        payload,
-        context={"template": not bool(payload.get("tid")), "auto_expand": False},
+    return decode_taskspec_transport_payload(
+        taskspec,
+        template=not bool(taskspec.get("tid")),
     )
-
-
-def generate_tid(context: WeftContext) -> str:
-    """Generate one durable task id from the active broker target."""
-
-    return _generate_tid(context)
 
 
 def apply_submit_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-115] exception
@@ -140,12 +138,11 @@ def apply_submit_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-115] excep
                 validate_endpoint_claim_name(name)
             )
 
-    updated = TaskSpec.model_validate(
+    return validate_taskspec_payload(
         payload,
-        context={"template": taskspec.tid is None, "auto_expand": False},
+        bundle_root=taskspec.get_bundle_root(),
+        template=taskspec.tid is None,
     )
-    updated.set_bundle_root(taskspec.get_bundle_root())
-    return updated
 
 
 def _validate_submit_overrides(overrides: Mapping[str, Any]) -> None:
@@ -169,12 +166,11 @@ def _snapshot_payload(payload: Any) -> Any:
 def _snapshot_taskspec(taskspec: TaskSpec | Mapping[str, Any]) -> TaskSpec:
     normalized = normalize_taskspec(taskspec)
     payload = json.loads(json.dumps(normalized.model_dump(mode="json")))
-    snapshotted = TaskSpec.model_validate(
+    return validate_taskspec_payload(
         payload,
-        context={"template": normalized.tid is None, "auto_expand": False},
+        bundle_root=normalized.get_bundle_root(),
+        template=normalized.tid is None,
     )
-    snapshotted.set_bundle_root(normalized.get_bundle_root())
-    return snapshotted
 
 
 def _receipt(name: str, tid: str) -> SubmittedTaskReceipt:
@@ -189,7 +185,6 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
     context: WeftContext,
     *,
     submitted_tid: str | int,
-    verbose: bool = False,
     ensure_manager_fn: Callable[
         ..., tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]
     ]
@@ -199,7 +194,7 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
     """Ensure a manager or reconcile a queue-first submission failure."""
 
     submitted_tid_str = str(submitted_tid)
-    ensure_manager_impl = ensure_manager_fn or _ensure_manager
+    ensure_manager_impl = ensure_manager_fn or manager_runtime.ensure_manager
 
     def _delete_spawn_request_with_context(
         context_arg: WeftContext,
@@ -216,7 +211,7 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
     )
 
     try:
-        return ensure_manager_impl(context, verbose=verbose)
+        return ensure_manager_impl(context)
     except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-354] exception
         startup_error = exc
 
@@ -281,7 +276,6 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
 
 
 def prepare_taskspec(
-    context: WeftContext,
     taskspec: TaskSpec | Mapping[str, Any],
     *,
     payload: Any = None,
@@ -290,7 +284,6 @@ def prepare_taskspec(
 ) -> PreparedSubmissionRequest:
     """Validate and snapshot a TaskSpec submission without queue writes."""
 
-    del context
     normalized = _snapshot_taskspec(taskspec)
     return PreparedSubmissionRequest(
         name=normalized.name,
@@ -334,7 +327,6 @@ def submit_taskspec(
     """Submit a TaskSpec through the durable manager-backed spawn path."""
 
     prepared = prepare_taskspec(
-        context,
         taskspec,
         payload=payload,
         seed_start_envelope=seed_start_envelope,
@@ -354,7 +346,7 @@ def prepare(
 
     _validate_submit_overrides(overrides)
     updated = apply_submit_overrides(normalize_taskspec(taskspec), **overrides)
-    return prepare_taskspec(context, updated, payload=payload)
+    return prepare_taskspec(updated, payload=payload)
 
 
 def submit(
@@ -390,13 +382,13 @@ def prepare_spec(
         )
     except FileNotFoundError as exc:
         raise SpecNotFound(str(exc)) from exc
-    taskspec = TaskSpec.model_validate(
+    taskspec = validate_taskspec_payload(
         resolved.payload,
-        context={"template": True, "auto_expand": False},
+        bundle_root=resolved.bundle_root,
+        template=True,
     )
-    taskspec.set_bundle_root(resolved.bundle_root)
     updated = apply_submit_overrides(taskspec, **overrides)
-    return prepare_taskspec(context, updated, payload=payload)
+    return prepare_taskspec(updated, payload=payload)
 
 
 def submit_spec(
@@ -440,9 +432,12 @@ def prepare_pipeline(
             spec_type=SPEC_TYPE_TASK,
             context_path=context.root,
         )
-        return apply_bundle_root_to_taskspec_payload(
-            dict(stage_ref.payload),
-            stage_ref.bundle_root,
+        return encode_taskspec_transport_payload(
+            validate_taskspec_payload(
+                stage_ref.payload,
+                bundle_root=stage_ref.bundle_root,
+                template=True,
+            )
         )
 
     compiled = compile_linear_pipeline(
@@ -456,7 +451,6 @@ def prepare_pipeline(
         payload if payload is not None else compiled.bootstrap_input_fallback
     )
     return prepare_taskspec(
-        context,
         updated,
         payload=bootstrap_payload,
         seed_start_envelope=False,
@@ -511,7 +505,7 @@ def submit_command(
         raise ValueError("Command cannot be empty")
 
     explicit_name = overrides.get("name")
-    taskspec = TaskSpec.model_validate(
+    taskspec = validate_taskspec_payload(
         {
             "name": _command_name(
                 argv, explicit_name if isinstance(explicit_name, str) else None
@@ -529,7 +523,7 @@ def submit_command(
             },
             "metadata": {"source": "weft.client"},
         },
-        context={"template": True, "auto_expand": False},
+        template=True,
     )
     updated = apply_submit_overrides(taskspec, **overrides)
     return submit_taskspec(context, updated, payload=_command_payload(payload))

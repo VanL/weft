@@ -1,9 +1,11 @@
 """Task listing and control helpers.
 
 Spec references:
+- docs/specifications/10-CLI_Interface.md [CLI-1.2.3]
 - docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
 - docs/specifications/10-CLI_Interface.md [CLI-1.3]
 - docs/specifications/01-Core_Components.md [CC-3.2]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3]
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-5.2], [PL-5.3]
 """
 
@@ -14,13 +16,12 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from typing import Any
 
-import weft.commands.system as status_cmd
-import weft.commands.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
+import weft.commands.system as system_cmd
 from simplebroker import Queue
 from weft._constants import (
     CONTROL_KILL,
@@ -41,9 +42,12 @@ from weft._runner_plugins import require_runner_plugin
 from weft.commands.types import TaskSnapshot as PublicTaskSnapshot
 from weft.commands.types import TaskTerminalSnapshot
 from weft.context import WeftContext, build_context
+from weft.core import task_evidence
+from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.monitor.store import MonitorTaskCollationRecord, open_monitor_store
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.runner_diagnostics import diagnostic_summary
 from weft.helpers import (
     iter_queue_json_entries,
     kill_process_tree,
@@ -59,6 +63,12 @@ from .control_convergence import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def format_runner_diagnostics(diagnostics: Mapping[str, Any] | None) -> str | None:
+    """Return a compact runner diagnostic summary for user-facing surfaces."""
+
+    return diagnostic_summary(diagnostics)
 
 
 def _resolve_context(context_path: str | os.PathLike[str] | None) -> WeftContext:
@@ -112,7 +122,7 @@ def _load_taskspec_payload_bounded(
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     latest: dict[str, Any] | None = None
     try:
-        for payload, _timestamp in status_cmd._iter_log_events(
+        for payload, _timestamp in system_cmd._iter_log_events(
             log_queue,
             since_timestamp=int(tid) - 1,
         ):
@@ -150,7 +160,7 @@ def task_tid(
 ) -> str | None:
     """TID resolution: short-to-full, PID-to-TID, and reverse lookup.
 
-    Spec: [CLI-1.2] (task tid)
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task tid)
     """
     ctx = _resolve_context(context_path)
     if reverse:
@@ -176,9 +186,9 @@ def list_tasks(
     include_terminal: bool = False,
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
-) -> list[status_cmd.TaskSnapshot]:
+) -> list[system_cmd.TaskSnapshot]:
     ctx = _coerce_context(context=context, context_path=context_path)
-    snapshots = status_cmd._collect_task_snapshots(
+    snapshots = system_cmd._collect_task_snapshots(
         ctx, include_terminal=include_terminal, tid_filters=None
     )
     if status_filter:
@@ -250,7 +260,7 @@ def _peek_terminal_ctrl_out_snapshot(
 
 
 def _public_snapshot(
-    status_snapshot: status_cmd.TaskSnapshot,
+    status_snapshot: system_cmd.TaskSnapshot,
     *,
     taskspec_payload: dict[str, Any] | None,
 ) -> PublicTaskSnapshot:
@@ -425,7 +435,7 @@ def task_status(
     ping: bool = False,
     probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     context_path: str | os.PathLike[str] | None = None,
-) -> status_cmd.TaskSnapshot | None:
+) -> system_cmd.TaskSnapshot | None:
     ctx = _resolve_context(context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid)
@@ -448,13 +458,13 @@ def task_status(
                 taskspec_payload=taskspec_payload,
             )
     if full_tid.isdigit() and len(full_tid) == 19:
-        base_snapshot = status_cmd.collect_known_tid_snapshot(
+        base_snapshot = system_cmd.collect_known_tid_snapshot(
             ctx,
             full_tid,
             include_terminal=include_terminal,
         )
     else:
-        snapshots = status_cmd._collect_task_snapshots(
+        snapshots = system_cmd._collect_task_snapshots(
             ctx,
             include_terminal=include_terminal,
             tid_filters={full_tid, full_tid[-TASKSPEC_TID_SHORT_LENGTH:]},
@@ -477,7 +487,7 @@ def task_status(
 
 def _task_snapshot_from_monitor_store_record(
     record: MonitorTaskCollationRecord,
-) -> status_cmd.TaskSnapshot:
+) -> system_cmd.TaskSnapshot:
     """Build a task snapshot from durable Monitor collation state."""
 
     status = record.terminal_status or record.status or "unknown"
@@ -491,8 +501,8 @@ def _task_snapshot_from_monitor_store_record(
     else:
         duration = None
     error = record.state.get("error")
-    status_is_terminal = status in status_cmd.TERMINAL_TASK_STATUSES
-    return status_cmd.TaskSnapshot(
+    status_is_terminal = status in system_cmd.TERMINAL_TASK_STATUSES
+    return system_cmd.TaskSnapshot(
         tid=record.tid,
         tid_short=record.tid[-TASKSPEC_TID_SHORT_LENGTH:],
         name=record.name or str(taskspec_summary.get("name") or record.tid),
@@ -537,7 +547,7 @@ def _monitor_store_task_snapshot(
     tid: str,
     *,
     include_terminal: bool,
-) -> status_cmd.TaskSnapshot | None:
+) -> system_cmd.TaskSnapshot | None:
     """Return a snapshot from Monitor state after raw task-log retirement."""
 
     try:
@@ -546,7 +556,7 @@ def _monitor_store_task_snapshot(
     except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-355] exception
         if _monitor_store_schema_missing(exc):
             return None
-        return status_cmd.TaskSnapshot(
+        return system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
             name=tid,
@@ -571,13 +581,13 @@ def _monitor_store_task_snapshot(
     if record is None:
         return None
     snapshot = _task_snapshot_from_monitor_store_record(record)
-    if not include_terminal and snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
+    if not include_terminal and snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
         return None
     return snapshot
 
 
 def _terminal_snapshot_from_status_snapshot(
-    snapshot: status_cmd.TaskSnapshot | None,
+    snapshot: system_cmd.TaskSnapshot | None,
 ) -> TaskTerminalSnapshot | None:
     """Project the shared status path into the compact terminal snapshot shape."""
 
@@ -596,7 +606,7 @@ def _terminal_snapshot_from_status_snapshot(
                 "reason": "store_read_failed",
             },
         )
-    if snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
+    if snapshot.status not in system_cmd.TERMINAL_TASK_STATUSES:
         return None
 
     reconciliation = snapshot.reconciliation or {}
@@ -676,9 +686,9 @@ def _task_snapshot_from_live_pong(
     tid: str,
     evidence: task_evidence.TaskEvidenceSnapshot,
     *,
-    base_snapshot: status_cmd.TaskSnapshot | None,
+    base_snapshot: system_cmd.TaskSnapshot | None,
     taskspec_payload: dict[str, Any] | None,
-) -> status_cmd.TaskSnapshot:
+) -> system_cmd.TaskSnapshot:
     state = taskspec_payload.get("state") if isinstance(taskspec_payload, dict) else {}
     state = state if isinstance(state, dict) else {}
     spec = taskspec_payload.get("spec") if isinstance(taskspec_payload, dict) else {}
@@ -707,7 +717,7 @@ def _task_snapshot_from_live_pong(
         if isinstance(state.get("completed_at"), int)
         else None
     )
-    if evidence.status not in status_cmd.TERMINAL_TASK_STATUSES:
+    if evidence.status not in system_cmd.TERMINAL_TASK_STATUSES:
         completed_at = None
     elif not isinstance(completed_at, int):
         completed_at = observed_at
@@ -736,17 +746,17 @@ def _task_snapshot_from_live_pong(
         if isinstance(taskspec_payload, dict)
         else tid
     )
-    return status_cmd.TaskSnapshot(
+    return system_cmd.TaskSnapshot(
         tid=tid,
         tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
         name=name,
         status=evidence.status,
         event="live_pong",
         activity=evidence.activity
-        if evidence.status not in status_cmd.TERMINAL_TASK_STATUSES
+        if evidence.status not in system_cmd.TERMINAL_TASK_STATUSES
         else None,
         waiting_on=evidence.waiting_on
-        if evidence.status not in status_cmd.TERMINAL_TASK_STATUSES
+        if evidence.status not in system_cmd.TERMINAL_TASK_STATUSES
         else None,
         started_at=started_at if isinstance(started_at, int) else None,
         completed_at=completed_at if isinstance(completed_at, int) else None,
@@ -796,7 +806,7 @@ def list_task_snapshots(
     """Return public task snapshots for the selected context."""
 
     ctx = _coerce_context(context=context, context_path=context_path)
-    records = status_cmd._collect_task_snapshot_records(
+    records = system_cmd._collect_task_snapshot_records(
         ctx,
         include_terminal=include_terminal,
         tid_filters=None,
@@ -825,7 +835,7 @@ def task_stats(
 
     counts: dict[str, int] = {}
     ctx = _coerce_context(context=context, context_path=context_path)
-    for record in status_cmd._collect_task_snapshot_records(
+    for record in system_cmd._collect_task_snapshot_records(
         ctx,
         include_terminal=include_terminal,
         tid_filters=None,
@@ -840,14 +850,12 @@ def task_stats(
 def task_snapshot(
     tid: str,
     *,
-    include_process: bool = False,
     include_terminal: bool = True,
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> PublicTaskSnapshot | None:
     """Return one public task snapshot or `None` if absent."""
 
-    del include_process
     ctx = _coerce_context(context=context, context_path=context_path)
     snapshot = task_status(
         tid,
@@ -869,7 +877,6 @@ def task_snapshot(
 def watch_task_status(
     tid: str,
     *,
-    include_process: bool = False,
     include_terminal: bool = True,
     timeout: float | None = None,
     context: WeftContext | None = None,
@@ -877,7 +884,6 @@ def watch_task_status(
 ) -> Iterable[PublicTaskSnapshot]:
     """Yield snapshots as the task changes until terminal state."""
 
-    del include_process
     ctx = _coerce_context(context=context, context_path=context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     deadline = _deadline_from_timeout(timeout)
@@ -901,15 +907,15 @@ def watch_task_status(
             if snapshot is not None and current != last_seen:
                 last_seen = current
                 yield snapshot
-                if snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
+                if snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
                     return
             if _deadline_expired(deadline):
                 _raise_watch_timeout(tid=full_tid, timeout=timeout)
             remaining = _remaining_timeout(deadline)
             wait_timeout = (
-                status_cmd.STATUS_WATCH_MIN_INTERVAL
+                system_cmd.STATUS_WATCH_MIN_INTERVAL
                 if remaining is None
-                else min(status_cmd.STATUS_WATCH_MIN_INTERVAL, remaining)
+                else min(system_cmd.STATUS_WATCH_MIN_INTERVAL, remaining)
             )
             monitor.wait(wait_timeout)
     finally:
@@ -945,7 +951,7 @@ def _pipeline_snapshot_timestamp(pipeline_status: dict[str, Any]) -> int | None:
 
 def _prefer_pipeline_snapshot(
     pipeline_status: dict[str, Any],
-    base_snapshot: status_cmd.TaskSnapshot | None,
+    base_snapshot: system_cmd.TaskSnapshot | None,
 ) -> bool:
     if base_snapshot is None:
         return True
@@ -985,8 +991,8 @@ def _pipeline_task_snapshot(
     ctx: WeftContext,
     tid: str,
     pipeline_status: dict[str, Any],
-    base_snapshot: status_cmd.TaskSnapshot | None,
-) -> status_cmd.TaskSnapshot:
+    base_snapshot: system_cmd.TaskSnapshot | None,
+) -> system_cmd.TaskSnapshot:
     taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
     state = taskspec_payload.get("state") if isinstance(taskspec_payload, dict) else {}
     state = state if isinstance(state, dict) else {}
@@ -1028,11 +1034,11 @@ def _pipeline_task_snapshot(
 
     if base_snapshot is None:
         mapping_entry = mapping_for_tid(ctx, tid)
-        runner = status_cmd._runner_name_for_snapshot(
+        runner = system_cmd._runner_name_for_snapshot(
             taskspec=taskspec_payload if isinstance(taskspec_payload, dict) else {},
             mapping_entry=mapping_entry,
         )
-        runtime_handle_obj = status_cmd._runtime_handle_from_mapping(
+        runtime_handle_obj = system_cmd._runtime_handle_from_mapping(
             mapping_entry or {}
         )
         runtime_handle = (
@@ -1042,7 +1048,7 @@ def _pipeline_task_snapshot(
 
     activity = pipeline_status.get("activity")
     waiting_on = pipeline_status.get("waiting_on")
-    if status_text in status_cmd.TERMINAL_TASK_STATUSES:
+    if status_text in system_cmd.TERMINAL_TASK_STATUSES:
         activity = None
         waiting_on = None
 
@@ -1060,7 +1066,7 @@ def _pipeline_task_snapshot(
     else:
         snapshot_name = str(taskspec_payload.get("name") or tid)
 
-    return status_cmd.TaskSnapshot(
+    return system_cmd.TaskSnapshot(
         tid=tid,
         tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
         name=snapshot_name,
@@ -1118,13 +1124,13 @@ def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
     ctrl_in = _ctrl_in_for_tid(ctx, tid)
     queue = ctx.queue(ctrl_in, persistent=True)
     try:
-        queue.write(command)
+        queue.write(encode_control_message(command))
     finally:
         queue.close()
 
 
 def _host_pids_from_mapping(entry: dict[str, Any]) -> tuple[int, ...]:
-    handle = status_cmd._runtime_handle_from_mapping(entry)
+    handle = system_cmd._runtime_handle_from_mapping(entry)
     if handle is None or handle.control.get("authority") != "host-pid":
         return ()
     return handle.scoped_host_pids()
@@ -1139,7 +1145,7 @@ def _host_processes_from_mapping(
     creation-time identity so signal-sending call sites can verify each PID
     with `pid_matches_create_time` before signaling (Spec: [CC-3.2]).
     """
-    handle = status_cmd._runtime_handle_from_mapping(entry)
+    handle = system_cmd._runtime_handle_from_mapping(entry)
     if handle is None or handle.control.get("authority") != "host-pid":
         return ()
     return handle.scoped_host_processes()
@@ -1154,7 +1160,7 @@ def _snapshot_from_terminal_ctrl_out(
     tid: str,
     payload: dict[str, Any],
     taskspec_payload: dict[str, Any],
-) -> status_cmd.TaskSnapshot | None:
+) -> system_cmd.TaskSnapshot | None:
     """Build a terminal snapshot from task-local ctrl_out evidence."""
 
     if payload.get("type") != TERMINAL_ENVELOPE_TYPE:
@@ -1162,7 +1168,7 @@ def _snapshot_from_terminal_ctrl_out(
     if payload.get("tid") != tid:
         return None
     status = payload.get("status")
-    if not isinstance(status, str) or status not in status_cmd.TERMINAL_TASK_STATUSES:
+    if not isinstance(status, str) or status not in system_cmd.TERMINAL_TASK_STATUSES:
         return None
     timestamp_raw = payload.get("timestamp")
     timestamp = timestamp_raw if isinstance(timestamp_raw, int) else time.time_ns()
@@ -1174,7 +1180,7 @@ def _snapshot_from_terminal_ctrl_out(
     spec = spec_raw if isinstance(spec_raw, dict) else {}
     return_code = payload.get("return_code")
     error = payload.get("error")
-    return status_cmd.TaskSnapshot(
+    return system_cmd.TaskSnapshot(
         tid=tid,
         tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
         name=str(taskspec_payload.get("name") or tid),
@@ -1263,7 +1269,7 @@ class _ControlSurfaceResources:
 class _ControlSurfaceObservation:
     """Facts observed while draining the current ctrl-out queue."""
 
-    terminal_snapshot: status_cmd.TaskSnapshot | None
+    terminal_snapshot: system_cmd.TaskSnapshot | None
     public_signal_observed_at: float | None
     kill_ack_observed_at: float | None
 
@@ -1347,7 +1353,7 @@ def _await_control_surface(
     tid: str,
     *,
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
-) -> tuple[dict[str, Any] | None, status_cmd.TaskSnapshot | None]:
+) -> tuple[dict[str, Any] | None, system_cmd.TaskSnapshot | None]:
     """Observe dynamic task-control endpoints within the bounded wait budget.
 
     Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
@@ -1355,7 +1361,7 @@ def _await_control_surface(
 
     deadline = time.monotonic() + timeout
     latest_entry: dict[str, Any] | None = None
-    latest_snapshot: status_cmd.TaskSnapshot | None = None
+    latest_snapshot: system_cmd.TaskSnapshot | None = None
     initial_taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
     watched_pipeline_status_queue = pipeline_status_queue_name(
         tid,
@@ -1420,7 +1426,7 @@ def _await_control_surface(
             snapshot = task_status(tid, context_path=ctx.root)
             if snapshot is not None:
                 latest_snapshot = snapshot
-                if snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
+                if snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
                     return latest_entry, latest_snapshot
                 if (
                     kill_ack_deadline is not None
@@ -1454,7 +1460,7 @@ def _stop_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
 
-    handle = status_cmd._runtime_handle_from_mapping(task_entry)
+    handle = system_cmd._runtime_handle_from_mapping(task_entry)
     if handle is not None:
         if handle.control.get("authority") == "external-supervisor":
             return False
@@ -1481,7 +1487,7 @@ def _stop_terminal_host_process(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
 
-    handle = status_cmd._runtime_handle_from_mapping(task_entry)
+    handle = system_cmd._runtime_handle_from_mapping(task_entry)
     if handle is not None and handle.runner not in {"host", "macos-sandbox"}:
         return False
 
@@ -1492,7 +1498,7 @@ def _kill_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
 
-    handle = status_cmd._runtime_handle_from_mapping(task_entry)
+    handle = system_cmd._runtime_handle_from_mapping(task_entry)
     if handle is not None:
         if handle.control.get("authority") == "external-supervisor":
             return False
@@ -1549,7 +1555,7 @@ def _observable_host_pids_from_mapping(
     if task_entry is None:
         return ()
 
-    handle = status_cmd._runtime_handle_from_mapping(task_entry)
+    handle = system_cmd._runtime_handle_from_mapping(task_entry)
     if handle is None:
         return _host_pids_from_mapping(task_entry)
     return handle.scoped_host_pids()
@@ -1591,9 +1597,9 @@ def _kill_success_is_proven(
 
 
 def _control_terminal_status(
-    snapshot: status_cmd.TaskSnapshot | None,
+    snapshot: system_cmd.TaskSnapshot | None,
 ) -> str | None:
-    if snapshot is None or snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
+    if snapshot is None or snapshot.status not in system_cmd.TERMINAL_TASK_STATUSES:
         return None
     return snapshot.status
 
@@ -1618,7 +1624,7 @@ def stop_tasks(
 ) -> int:
     """Gracefully stop one or more tasks by sending STOP control messages.
 
-    Spec: [CLI-1.2] (task stop)
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task stop)
     """
     ctx = _coerce_context(context=context, context_path=context_path)
     entries = _read_tid_mapping_entries(ctx)
@@ -1705,7 +1711,7 @@ def kill_tasks(
 ) -> int:
     """Force-terminate one or more tasks by sending KILL control messages.
 
-    Spec: [CLI-1.2] (task kill)
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task kill)
     """
     ctx = _coerce_context(context=context, context_path=context_path)
     entries = _read_tid_mapping_entries(ctx)
@@ -1806,7 +1812,7 @@ def kill_task(
 
 
 def filter_tids_by_pattern(
-    snapshots: Iterable[status_cmd.TaskSnapshot | PublicTaskSnapshot],
+    snapshots: Iterable[system_cmd.TaskSnapshot | PublicTaskSnapshot],
     pattern: str,
 ) -> list[str]:
     if not pattern:

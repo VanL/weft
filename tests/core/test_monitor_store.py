@@ -22,6 +22,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
     WEFT_MONITOR_SCHEMA_VERSION,
 )
@@ -134,6 +135,18 @@ def _monitor_table_count(
     return int(rows[0][0])
 
 
+def _monitor_meta_value(ctx, key: str) -> dict[str, object] | None:
+    with ctx.broker() as broker, broker.sidecar() as session:
+        rows = list(
+            session.run(
+                "SELECT value_json FROM weft_monitor_meta WHERE key = ?",
+                (key,),
+                fetch=True,
+            )
+        )
+    return json.loads(str(rows[0][0])) if rows else None
+
+
 def _monitor_message_ids(
     ctx,
     *,
@@ -148,6 +161,125 @@ def _monitor_message_ids(
             fetch=True,
         )
     return tuple(int(row[0]) for row in rows)
+
+
+def _monitor_table_exists(ctx, table: str) -> bool:
+    with ctx.broker() as broker, broker.sidecar() as session:
+        if ctx.backend_name == "postgres":
+            rows = list(
+                session.run(
+                    "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_name = ?)",
+                    (table,),
+                    fetch=True,
+                )
+            )
+        else:
+            rows = list(
+                session.run(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = ?)",
+                    (table,),
+                    fetch=True,
+                )
+            )
+    return bool(rows and rows[0][0])
+
+
+def _monitor_table_columns(ctx, table: str) -> tuple[str, ...]:
+    with ctx.broker() as broker, broker.sidecar() as session:
+        if ctx.backend_name == "postgres":
+            rows = session.run(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = ? "
+                "ORDER BY ordinal_position",
+                (table,),
+                fetch=True,
+            )
+            return tuple(str(row[0]) for row in rows)
+        rows = session.run(f"PRAGMA table_info({table})", fetch=True)
+        return tuple(str(row[1]) for row in rows)
+
+
+def _monitor_index_exists(ctx, index_name: str) -> bool:
+    with ctx.broker() as broker, broker.sidecar() as session:
+        if ctx.backend_name == "postgres":
+            rows = list(
+                session.run(
+                    "SELECT EXISTS(SELECT 1 FROM pg_indexes "
+                    "WHERE schemaname = current_schema() AND indexname = ?)",
+                    (index_name,),
+                    fetch=True,
+                )
+            )
+        else:
+            rows = list(
+                session.run(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'index' AND name = ?)",
+                    (index_name,),
+                    fetch=True,
+                )
+            )
+    return bool(rows and rows[0][0])
+
+
+def _monitor_primary_key(ctx, table: str) -> tuple[str, ...]:
+    with ctx.broker() as broker, broker.sidecar() as session:
+        if ctx.backend_name == "postgres":
+            rows = session.run(
+                "SELECT attribute.attname "
+                "FROM pg_index AS index_definition "
+                "JOIN pg_class AS table_definition "
+                "ON table_definition.oid = index_definition.indrelid "
+                "JOIN pg_namespace AS namespace "
+                "ON namespace.oid = table_definition.relnamespace "
+                "JOIN unnest(index_definition.indkey) WITH ORDINALITY "
+                "AS key_column(attnum, ordinal_position) ON TRUE "
+                "JOIN pg_attribute AS attribute "
+                "ON attribute.attrelid = table_definition.oid "
+                "AND attribute.attnum = key_column.attnum "
+                "WHERE namespace.nspname = current_schema() "
+                "AND table_definition.relname = ? "
+                "AND index_definition.indisprimary "
+                "ORDER BY key_column.ordinal_position",
+                (table,),
+                fetch=True,
+            )
+            return tuple(str(row[0]) for row in rows)
+        rows = session.run(f"PRAGMA table_info({table})", fetch=True)
+        return tuple(
+            str(row[1])
+            for row in sorted(
+                (row for row in rows if int(row[5]) > 0),
+                key=lambda row: int(row[5]),
+            )
+        )
+
+
+def _prepare_v5_tombstone(
+    ctx,
+    store,
+    *,
+    tid: str,
+    message_id: int,
+) -> None:
+    store.upsert_task_event(_update(tid, message_id))
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            ('{"version":5}', "schema_version"),
+        )
+        session.run(
+            "UPDATE weft_monitor_task_messages SET deleted_at_ns = ? "
+            "WHERE context_key = ? AND tid = ? AND message_id = ?",
+            (message_id + 1, store.context_key, tid, message_id),
+        )
+        session.run(
+            "CREATE INDEX idx_weft_monitor_messages_deleted "
+            "ON weft_monitor_task_messages "
+            "(context_key, deleted_at_ns, message_id)"
+        )
 
 
 def test_store_sidecar_session_rolls_back_on_exception(tmp_path) -> None:
@@ -246,6 +378,345 @@ def test_monitor_store_schema_creation_is_idempotent(tmp_path) -> None:
     assert store.status().schema_version == WEFT_MONITOR_SCHEMA_VERSION
 
 
+def test_monitor_store_v6_rejects_missing_table_without_repair(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run("DROP TABLE weft_monitor_deferred_writes")
+
+    with pytest.raises(MonitorStoreUnavailable, match="required Monitor table"):
+        store.ensure_schema()
+
+    assert _monitor_table_exists(ctx, "weft_monitor_deferred_writes") is False
+
+
+def test_monitor_store_v6_rejects_missing_column_without_repair(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "ALTER TABLE weft_monitor_task_collations DROP COLUMN resources_json"
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="Monitor table columns"):
+        store.ensure_schema()
+
+    assert "resources_json" not in _monitor_table_columns(
+        ctx,
+        "weft_monitor_task_collations",
+    )
+
+
+_MONITOR_INDEX_MUTATIONS = (
+    (
+        "idx_weft_monitor_collations_terminal",
+        "weft_monitor_task_collations",
+        "updated_at_ns",
+    ),
+    (
+        "idx_weft_monitor_collations_last_seen",
+        "weft_monitor_task_collations",
+        "updated_at_ns",
+    ),
+    (
+        "idx_weft_monitor_collations_reserved_probe",
+        "weft_monitor_task_collations",
+        "updated_at_ns",
+    ),
+    (
+        "idx_weft_monitor_collations_reserved_cleanup",
+        "weft_monitor_task_collations",
+        "updated_at_ns",
+    ),
+    (
+        "idx_weft_monitor_collations_disposition_terminal",
+        "weft_monitor_task_collations",
+        "updated_at_ns",
+    ),
+    (
+        "idx_weft_monitor_collations_control_cleanup",
+        "weft_monitor_task_collations",
+        "updated_at_ns",
+    ),
+    (
+        "idx_weft_monitor_collations_orphan_recovery",
+        "weft_monitor_task_collations",
+        "updated_at_ns",
+    ),
+    (
+        "idx_weft_monitor_collations_disposition_open",
+        "weft_monitor_task_collations",
+        "updated_at_ns",
+    ),
+    (
+        "idx_weft_monitor_messages_tid",
+        "weft_monitor_task_messages",
+        "message_id",
+    ),
+    (
+        "idx_weft_monitor_deferred_pending",
+        "weft_monitor_deferred_writes",
+        "report_id",
+    ),
+)
+
+
+def test_monitor_store_accepts_complete_empty_unversioned_schema(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tables = (
+        "weft_monitor_meta",
+        "weft_monitor_task_collations",
+        "weft_monitor_task_messages",
+        "weft_monitor_deferred_writes",
+    )
+    columns_before = {table: _monitor_table_columns(ctx, table) for table in tables}
+    primary_keys_before = {table: _monitor_primary_key(ctx, table) for table in tables}
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "DELETE FROM weft_monitor_meta WHERE key = ?",
+            ("schema_version",),
+        )
+
+    store.ensure_schema()
+
+    assert _monitor_meta_value(ctx, "schema_version") == {"version": 6}
+    assert {table: _monitor_table_columns(ctx, table) for table in tables} == (
+        columns_before
+    )
+    assert {table: _monitor_primary_key(ctx, table) for table in tables} == (
+        primary_keys_before
+    )
+    assert all(
+        _monitor_index_exists(ctx, index_name)
+        for index_name, _table_name, _wrong_column in _MONITOR_INDEX_MUTATIONS
+    )
+    assert _monitor_table_count(ctx, "weft_monitor_meta") == 1
+    assert all(_monitor_table_count(ctx, table) == 0 for table in tables[1:])
+
+
+@pytest.mark.parametrize(
+    "index_name,_table_name,_wrong_column",
+    _MONITOR_INDEX_MUTATIONS,
+    ids=[case[0] for case in _MONITOR_INDEX_MUTATIONS],
+)
+def test_monitor_store_v6_rejects_missing_index_without_repair(
+    tmp_path,
+    index_name,
+    _table_name,
+    _wrong_column,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(f"DROP INDEX {index_name}")
+
+    with pytest.raises(MonitorStoreUnavailable, match="required Monitor index"):
+        store.ensure_schema()
+
+    assert _monitor_index_exists(ctx, index_name) is False
+
+
+@pytest.mark.parametrize(
+    "index_name,table_name,wrong_column",
+    _MONITOR_INDEX_MUTATIONS,
+    ids=[case[0] for case in _MONITOR_INDEX_MUTATIONS],
+)
+def test_monitor_store_v6_rejects_wrong_index_shape_without_repair(
+    tmp_path,
+    index_name,
+    table_name,
+    wrong_column,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(f"DROP INDEX {index_name}")
+        session.run(f"CREATE INDEX {index_name} ON {table_name} ({wrong_column})")
+
+    with pytest.raises(MonitorStoreUnavailable, match="invalid Monitor index"):
+        store.ensure_schema()
+
+    assert _monitor_index_exists(ctx, index_name) is True
+
+
+def test_monitor_store_v6_rejects_extra_monitor_index_without_repair(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    index_name = "idx_weft_monitor_extra"
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            f"CREATE INDEX {index_name} ON weft_monitor_task_messages (message_id)"
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="index inventory"):
+        store.ensure_schema()
+
+    assert _monitor_index_exists(ctx, index_name) is True
+
+
+def test_monitor_store_v6_rejects_reordered_columns_without_repair(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run("DROP TABLE weft_monitor_meta")
+        session.run(
+            "CREATE TABLE weft_monitor_meta "
+            "(value_json TEXT NOT NULL, key TEXT PRIMARY KEY, "
+            "updated_at_ns BIGINT NOT NULL)"
+        )
+        session.run(
+            "INSERT INTO weft_monitor_meta (value_json, key, updated_at_ns) "
+            "VALUES (?, ?, ?)",
+            ('{"version":6}', "schema_version", 1),
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="Monitor table columns"):
+        store.ensure_schema()
+
+    assert _monitor_table_columns(ctx, "weft_monitor_meta") == (
+        "value_json",
+        "key",
+        "updated_at_ns",
+    )
+
+
+def test_monitor_store_v6_rejects_missing_primary_key_without_repair(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        if ctx.backend_name == "postgres":
+            session.run(
+                "ALTER TABLE weft_monitor_meta DROP CONSTRAINT weft_monitor_meta_pkey"
+            )
+        else:
+            session.run("ALTER TABLE weft_monitor_meta RENAME TO old_monitor_meta")
+            session.run(
+                "CREATE TABLE weft_monitor_meta "
+                "(key TEXT NOT NULL, value_json TEXT NOT NULL, "
+                "updated_at_ns BIGINT NOT NULL)"
+            )
+            session.run("INSERT INTO weft_monitor_meta SELECT * FROM old_monitor_meta")
+            session.run("DROP TABLE old_monitor_meta")
+
+    with pytest.raises(MonitorStoreUnavailable, match="Monitor primary key"):
+        store.ensure_schema()
+
+    assert _monitor_primary_key(ctx, "weft_monitor_meta") == ()
+
+
+def test_monitor_store_v6_rejects_checkpoint_without_message_id(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "INSERT INTO weft_monitor_meta (key, value_json, updated_at_ns) "
+            "VALUES (?, ?, ?)",
+            (f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}missing", "{}", 1),
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="checkpoint.*message_id"):
+        store.ensure_schema()
+
+
+@pytest.mark.parametrize(
+    "nonempty_table",
+    [
+        "weft_monitor_meta",
+        "weft_monitor_task_collations",
+        "weft_monitor_task_messages",
+        "weft_monitor_deferred_writes",
+    ],
+)
+def test_monitor_store_rejects_nonempty_unversioned_tables(
+    tmp_path,
+    nonempty_table,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "DELETE FROM weft_monitor_meta WHERE key = ?",
+            ("schema_version",),
+        )
+        if nonempty_table == "weft_monitor_meta":
+            session.run(
+                "INSERT INTO weft_monitor_meta (key, value_json, updated_at_ns) "
+                "VALUES (?, ?, ?)",
+                (
+                    "checkpoint:existing",
+                    '{"message_id":"1779000000000000001"}',
+                    1,
+                ),
+            )
+        elif nonempty_table == "weft_monitor_task_collations":
+            session.run(
+                "INSERT INTO weft_monitor_task_collations "
+                "(context_key, tid, terminal_seen, first_message_id, "
+                "last_message_id, taskspec_summary_json, state_json, "
+                "lifecycle_json, resources_json, diagnostics_json, "
+                "bookkeeping_json, reserved_probe_needed, updated_at_ns) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    store.context_key,
+                    "1779000000000000001",
+                    0,
+                    1779000000000000001,
+                    1779000000000000001,
+                    "{}",
+                    "{}",
+                    "{}",
+                    "{}",
+                    "{}",
+                    "{}",
+                    0,
+                    1,
+                ),
+            )
+        elif nonempty_table == "weft_monitor_task_messages":
+            session.run(
+                "INSERT INTO weft_monitor_task_messages "
+                "(context_key, tid, queue_name, message_id) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    store.context_key,
+                    "1779000000000000001",
+                    WEFT_GLOBAL_LOG_QUEUE,
+                    1779000000000000001,
+                ),
+            )
+        else:
+            session.run(
+                "INSERT INTO weft_monitor_deferred_writes "
+                "(context_key, report_id, record_type, body_json, "
+                "created_at_ns, updated_at_ns, attempt_count, "
+                "last_attempt_at_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    store.context_key,
+                    "task-lifetime:unversioned",
+                    "task_lifetime_report",
+                    "{}",
+                    1,
+                    1,
+                    1,
+                    1,
+                ),
+            )
+
+    with pytest.raises(MonitorStoreUnavailable, match="non-empty unversioned"):
+        store.ensure_schema()
+
+
 def test_monitor_store_status_represents_backend_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -292,7 +763,7 @@ def test_monitor_store_deferred_writes_are_bounded_outbox_rows(tmp_path) -> None
     store = open_monitor_store(ctx)
     store.ensure_schema()
     report = {
-        "schema_version": 1,
+        "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
         "record_type": "task_lifetime_report",
         "report_id": "task-lifetime:test",
         "emitted_at_ns": 1779000000000000001,
@@ -324,6 +795,26 @@ def test_monitor_store_deferred_writes_are_bounded_outbox_rows(tmp_path) -> None
 
     assert store.list_pending_deferred_writes(limit=10) == ()
     assert store.deferred_write_status().pending == 0
+
+
+@pytest.mark.parametrize("schema_version", [None, 1, 2.0, 3, "2", True])
+def test_monitor_store_rejects_noncurrent_external_schema_deferred_write(
+    tmp_path,
+    schema_version,
+) -> None:
+    store = open_monitor_store(_context(tmp_path))
+    store.ensure_schema()
+
+    with pytest.raises(ValueError, match="external schema version"):
+        store.upsert_deferred_write(
+            report={
+                "schema_version": schema_version,
+                "record_type": "task_lifetime_report",
+                "report_id": "task-lifetime:old-schema",
+            },
+            external_error="permission denied",
+            now_ns=1779000000000000001,
+        )
 
 
 def test_monitor_store_checkpoint_round_trips(tmp_path) -> None:
@@ -380,7 +871,7 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
     )
     store.upsert_deferred_write(
         report={
-            "schema_version": 1,
+            "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
             "record_type": "task_lifetime_report",
             "report_id": "task-lifetime:json-id-storage",
             "emitted_at_ns": 1779000000000000205,
@@ -402,6 +893,7 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
         external_error="permission denied",
         now_ns=1779000000000000209,
     )
+    store.ensure_schema()
 
     with ctx.broker() as broker, broker.sidecar() as session:
         [collation_row] = list(
@@ -491,37 +983,183 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
     assert deferred_body["observations"]["message_ids"] == [1779000000000000207]
     assert deferred_body["taskspec"]["opaque"]["message_id"] == (1779000000000000217)
 
-    legacy_lifecycle = {
-        "message_id": message_id,
-        "checkpoint": {"message_id": 1779000000000000202},
+
+def test_monitor_store_migrates_v5_owned_json_and_obsolete_delete_state(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    surviving_tid = "1779000000000000300"
+    tombstoned_tid = "1779000000000000400"
+    surviving_message_id = 1779000000000000301
+    tombstoned_message_id = 1779000000000000401
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (
+            _update(surviving_tid, surviving_message_id),
+            _update(tombstoned_tid, tombstoned_message_id),
+        ),
+        checkpoint_message_id=surviving_message_id,
+    )
+    store.upsert_deferred_write(
+        report={
+            "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
+            "record_type": "task_lifetime_report",
+            "report_id": "task-lifetime:migrate-v5",
+            "subject": {"message_id": surviving_message_id},
+        },
+        external_error="permission denied",
+        now_ns=surviving_message_id,
+    )
+    v5_lifecycle = {
+        "message_id": surviving_message_id,
+        "checkpoint": {
+            "message_id": surviving_message_id + 1,
+            "opaque": {"message_id": surviving_message_id + 2},
+        },
     }
-    legacy_bookkeeping = {"last_message_id": message_id}
-    legacy_deferred = {
+    v5_deferred = {
+        "schema_version": 1,
         "record_type": "task_lifetime_report",
-        "report_id": "task-lifetime:json-id-storage",
-        "subject": {"message_id": message_id},
+        "report_id": "task-lifetime:migrate-v5",
+        "subject": {"message_id": surviving_message_id},
         "monitor": {
-            "message_id": 1779000000000000216,
-            "first_message_id": message_id,
-            "last_message_id": 1779000000000000202,
+            "message_id": surviving_message_id + 3,
+            "first_message_id": surviving_message_id,
+            "last_message_id": surviving_message_id + 4,
             "terminal_message_id": None,
         },
         "observations": {
-            "message_id": 1779000000000000206,
-            "message_ids": [1779000000000000207],
+            "message_id": surviving_message_id + 5,
+            "message_ids": [surviving_message_id + 6],
         },
+        "opaque": {"message_id": surviving_message_id + 7},
     }
-    with ctx.broker() as broker, broker.sidecar() as session:
+    tombstone_time = tombstoned_message_id + 10
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            ('{"version":5}', "schema_version"),
+        )
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            (
+                json.dumps({"message_id": surviving_message_id}),
+                f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{WEFT_GLOBAL_LOG_QUEUE}",
+            ),
+        )
         session.run(
             "UPDATE weft_monitor_task_collations "
-            "SET lifecycle_json = ?, bookkeeping_json = ? "
-            "WHERE context_key = ? AND tid = ?",
+            "SET lifecycle_json = ?, bookkeeping_json = ?, "
+            "raw_deleted_at_ns = ? WHERE context_key = ? AND tid = ?",
             (
-                json.dumps(legacy_lifecycle),
-                json.dumps(legacy_bookkeeping),
+                json.dumps(v5_lifecycle),
+                json.dumps({"last_message_id": surviving_message_id}),
+                surviving_message_id + 8,
                 store.context_key,
-                tid,
+                surviving_tid,
             ),
+        )
+        session.run(
+            "UPDATE weft_monitor_task_messages SET deleted_at_ns = ? "
+            "WHERE context_key = ? AND tid = ?",
+            (tombstone_time, store.context_key, tombstoned_tid),
+        )
+        session.run(
+            "UPDATE weft_monitor_deferred_writes SET body_json = ? "
+            "WHERE context_key = ? AND report_id = ?",
+            (
+                json.dumps(v5_deferred),
+                store.context_key,
+                "task-lifetime:migrate-v5",
+            ),
+        )
+        session.run(
+            "CREATE INDEX idx_weft_monitor_messages_deleted "
+            "ON weft_monitor_task_messages "
+            "(context_key, deleted_at_ns, message_id)"
+        )
+
+    store.ensure_schema()
+    store.ensure_schema()
+
+    with ctx.broker() as broker, broker.sidecar() as session:
+        [version_row] = list(
+            session.run(
+                "SELECT value_json FROM weft_monitor_meta WHERE key = ?",
+                ("schema_version",),
+                fetch=True,
+            )
+        )
+        [collation_row] = list(
+            session.run(
+                "SELECT lifecycle_json, bookkeeping_json, raw_deleted_at_ns "
+                "FROM weft_monitor_task_collations "
+                "WHERE context_key = ? AND tid = ?",
+                (store.context_key, surviving_tid),
+                fetch=True,
+            )
+        )
+        [tombstoned_parent_row] = list(
+            session.run(
+                "SELECT raw_deleted_at_ns FROM weft_monitor_task_collations "
+                "WHERE context_key = ? AND tid = ?",
+                (store.context_key, tombstoned_tid),
+                fetch=True,
+            )
+        )
+        [deferred_row] = list(
+            session.run(
+                "SELECT body_json FROM weft_monitor_deferred_writes "
+                "WHERE context_key = ? AND report_id = ?",
+                (store.context_key, "task-lifetime:migrate-v5"),
+                fetch=True,
+            )
+        )
+
+    assert json.loads(str(version_row[0])) == {"version": 6}
+    lifecycle = json.loads(str(collation_row[0]))
+    bookkeeping = json.loads(str(collation_row[1]))
+    deferred = json.loads(str(deferred_row[0]))
+    assert lifecycle["message_id"] == str(surviving_message_id)
+    assert lifecycle["checkpoint"]["message_id"] == str(surviving_message_id + 1)
+    assert lifecycle["checkpoint"]["opaque"]["message_id"] == (surviving_message_id + 2)
+    assert bookkeeping["last_message_id"] == str(surviving_message_id)
+    assert collation_row[2] is None
+    assert tombstoned_parent_row[0] == tombstone_time
+    assert (
+        _monitor_table_count(
+            ctx,
+            "weft_monitor_task_messages",
+            where="context_key = ? AND tid = ?",
+            params=(store.context_key, tombstoned_tid),
+        )
+        == 0
+    )
+    assert deferred["schema_version"] == 2
+    assert deferred["subject"]["message_id"] == str(surviving_message_id)
+    assert deferred["monitor"]["message_id"] == str(surviving_message_id + 3)
+    assert deferred["observations"]["message_ids"] == [str(surviving_message_id + 6)]
+    assert deferred["opaque"]["message_id"] == surviving_message_id + 7
+    assert _monitor_index_exists(ctx, "idx_weft_monitor_messages_deleted") is False
+
+
+def test_monitor_store_v5_migration_rolls_back_all_changes_on_failure(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000500"
+    message_id = 1779000000000000501
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (_update(tid, message_id),),
+        checkpoint_message_id=message_id,
+    )
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            ('{"version":5}', "schema_version"),
         )
         session.run(
             "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
@@ -531,23 +1169,374 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
             ),
         )
         session.run(
-            "UPDATE weft_monitor_deferred_writes SET body_json = ? "
-            "WHERE context_key = ? AND report_id = ?",
+            "UPDATE weft_monitor_task_messages SET deleted_at_ns = ? "
+            "WHERE context_key = ? AND tid = ?",
+            (message_id + 10, store.context_key, tid),
+        )
+        session.run(
+            "INSERT INTO weft_monitor_task_messages "
+            "(context_key, tid, queue_name, message_id, deleted_at_ns) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
-                json.dumps(legacy_deferred),
                 store.context_key,
-                "task-lifetime:json-id-storage",
+                "1779000000000000599",
+                WEFT_GLOBAL_LOG_QUEUE,
+                message_id + 1,
+                message_id + 11,
+            ),
+        )
+        session.run(
+            "CREATE INDEX idx_weft_monitor_messages_deleted "
+            "ON weft_monitor_task_messages "
+            "(context_key, deleted_at_ns, message_id)"
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="orphan child tombstone"):
+        store.ensure_schema()
+
+    with ctx.broker() as broker, broker.sidecar() as session:
+        [version_row] = list(
+            session.run(
+                "SELECT value_json FROM weft_monitor_meta WHERE key = ?",
+                ("schema_version",),
+                fetch=True,
+            )
+        )
+        [checkpoint_row] = list(
+            session.run(
+                "SELECT value_json FROM weft_monitor_meta WHERE key = ?",
+                (f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{WEFT_GLOBAL_LOG_QUEUE}",),
+                fetch=True,
+            )
+        )
+        [parent_row] = list(
+            session.run(
+                "SELECT raw_deleted_at_ns FROM weft_monitor_task_collations "
+                "WHERE context_key = ? AND tid = ?",
+                (store.context_key, tid),
+                fetch=True,
+            )
+        )
+
+    assert json.loads(str(version_row[0])) == {"version": 5}
+    assert json.loads(str(checkpoint_row[0])) == {"message_id": message_id}
+    assert parent_row[0] is None
+    assert _monitor_message_ids(ctx, context_key=store.context_key, tid=tid) == (
+        message_id,
+    )
+    assert _monitor_index_exists(ctx, "idx_weft_monitor_messages_deleted") is True
+
+
+def test_monitor_store_v5_migration_rejects_present_tombstoned_raw_row(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000550"
+    message_id = 1779000000000000551
+    _prepare_v5_tombstone(ctx, store, tid=tid, message_id=message_id)
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as queue:
+        queue.insert_messages(
+            [(json.dumps({"tid": tid, "event": "work_started"}), message_id)]
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="raw row remains"):
+        store.ensure_schema()
+
+    assert _monitor_message_ids(ctx, context_key=store.context_key, tid=tid) == (
+        message_id,
+    )
+    assert _monitor_index_exists(ctx, "idx_weft_monitor_messages_deleted") is True
+    assert _monitor_meta_value(ctx, "schema_version") == {"version": 5}
+    with ctx.broker() as broker:
+        assert (
+            broker.peek_one(
+                WEFT_GLOBAL_LOG_QUEUE,
+                exact_timestamp=message_id,
+                with_timestamps=True,
+                include_claimed=True,
+            )
+            is not None
+        )
+
+
+def test_monitor_store_v5_migration_rolls_back_on_raw_probe_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000570"
+    message_id = 1779000000000000571
+    _prepare_v5_tombstone(ctx, store, tid=tid, message_id=message_id)
+
+    def fail_probe(_queue_name: str, _message_id: int) -> bool:
+        raise RuntimeError("probe unavailable")
+
+    monkeypatch.setattr(store, "_raw_message_is_absent", fail_probe)
+
+    with pytest.raises(MonitorStoreUnavailable, match="unable to verify"):
+        store.ensure_schema()
+
+    assert _monitor_message_ids(ctx, context_key=store.context_key, tid=tid) == (
+        message_id,
+    )
+    assert _monitor_index_exists(ctx, "idx_weft_monitor_messages_deleted") is True
+    assert _monitor_meta_value(ctx, "schema_version") == {"version": 5}
+
+
+@pytest.mark.parametrize("version", [4, 7])
+def test_monitor_store_rejects_unsupported_schema_versions(tmp_path, version) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            (json.dumps({"version": version}), "schema_version"),
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="unsupported|newer"):
+        store.ensure_schema()
+
+
+@pytest.mark.parametrize("version_value", [None, "6", True])
+def test_monitor_store_rejects_malformed_schema_version(
+    tmp_path,
+    version_value,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            (json.dumps({"version": version_value}), "schema_version"),
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="schema version"):
+        store.ensure_schema()
+
+
+@pytest.mark.parametrize("raw_value", ["{not-json", "[]", "null"])
+def test_monitor_store_rejects_malformed_schema_version_metadata(
+    tmp_path,
+    raw_value,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            (raw_value, "schema_version"),
+        )
+
+    with pytest.raises(MonitorStoreUnavailable, match="monitor meta"):
+        store.ensure_schema()
+
+
+def test_monitor_store_v6_rejects_noncanonical_owned_data(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, 1779000000000000601)
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            (
+                json.dumps({"message_id": 1779000000000000601}),
+                f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{WEFT_GLOBAL_LOG_QUEUE}",
             ),
         )
 
-    legacy_record = store.get_task(tid)
-    assert legacy_record is not None
-    assert legacy_record.lifecycle["message_id"] == message_id
-    assert legacy_record.lifecycle["checkpoint"]["message_id"] == (1779000000000000202)
-    assert legacy_record.bookkeeping["last_message_id"] == message_id
-    assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_id
-    [legacy_deferred_record] = store.list_pending_deferred_writes(limit=10)
-    assert legacy_deferred_record.body() == legacy_deferred
+    with pytest.raises(MonitorStoreUnavailable, match="noncanonical"):
+        store.ensure_schema()
+    with pytest.raises(MonitorStoreUnavailable, match="noncanonical"):
+        store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
+
+
+@pytest.mark.parametrize("owned_field", ["collation", "deferred"])
+def test_monitor_store_v6_rejects_malformed_owned_json(
+    tmp_path,
+    owned_field,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000650"
+    message_id = 1779000000000000651
+    store.upsert_task_event(_update(tid, message_id))
+    store.upsert_deferred_write(
+        report={
+            "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
+            "record_type": "task_lifetime_report",
+            "report_id": "task-lifetime:malformed-owned-json",
+        },
+        external_error="permission denied",
+        now_ns=message_id,
+    )
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        if owned_field == "collation":
+            session.run(
+                "UPDATE weft_monitor_task_collations SET lifecycle_json = ? "
+                "WHERE context_key = ? AND tid = ?",
+                ("{not-json", store.context_key, tid),
+            )
+        else:
+            session.run(
+                "UPDATE weft_monitor_deferred_writes SET body_json = ? "
+                "WHERE context_key = ? AND report_id = ?",
+                (
+                    "{not-json",
+                    store.context_key,
+                    "task-lifetime:malformed-owned-json",
+                ),
+            )
+
+    with pytest.raises(MonitorStoreUnavailable, match="invalid JSON"):
+        store.ensure_schema()
+
+
+@pytest.mark.parametrize(
+    "owned_field",
+    [
+        "lifecycle.message_id",
+        "lifecycle.checkpoint.message_id",
+        "bookkeeping.last_message_id",
+        "deferred.subject.message_id",
+        "deferred.monitor.message_id",
+        "deferred.monitor.first_message_id",
+        "deferred.monitor.last_message_id",
+        "deferred.monitor.terminal_message_id",
+        "deferred.observations.message_id",
+        "deferred.observations.message_ids",
+    ],
+)
+def test_monitor_store_v6_rejects_noncanonical_owned_id_family(
+    tmp_path,
+    owned_field,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000670"
+    message_id = 1779000000000000671
+    update = replace(
+        _update(tid, message_id),
+        lifecycle={
+            "message_id": message_id,
+            "checkpoint": {"message_id": message_id + 1},
+        },
+        bookkeeping={"last_message_id": message_id},
+    )
+    store.upsert_task_event(update)
+    report_id = "task-lifetime:noncanonical-owned-id"
+    store.upsert_deferred_write(
+        report={
+            "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
+            "record_type": "task_lifetime_report",
+            "report_id": report_id,
+            "subject": {"message_id": message_id},
+            "monitor": {
+                "message_id": message_id,
+                "first_message_id": message_id,
+                "last_message_id": message_id + 1,
+                "terminal_message_id": message_id + 1,
+            },
+            "observations": {
+                "message_id": message_id,
+                "message_ids": [message_id, message_id + 1],
+            },
+        },
+        external_error="permission denied",
+        now_ns=message_id,
+    )
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        if owned_field.startswith("lifecycle"):
+            [row] = list(
+                session.run(
+                    "SELECT lifecycle_json FROM weft_monitor_task_collations "
+                    "WHERE context_key = ? AND tid = ?",
+                    (store.context_key, tid),
+                    fetch=True,
+                )
+            )
+            value = json.loads(str(row[0]))
+            if owned_field == "lifecycle.message_id":
+                value["message_id"] = message_id
+            else:
+                value["checkpoint"]["message_id"] = message_id + 1
+            session.run(
+                "UPDATE weft_monitor_task_collations SET lifecycle_json = ? "
+                "WHERE context_key = ? AND tid = ?",
+                (json.dumps(value), store.context_key, tid),
+            )
+        elif owned_field.startswith("bookkeeping"):
+            session.run(
+                "UPDATE weft_monitor_task_collations SET bookkeeping_json = ? "
+                "WHERE context_key = ? AND tid = ?",
+                (
+                    json.dumps({"last_message_id": message_id}),
+                    store.context_key,
+                    tid,
+                ),
+            )
+        else:
+            [row] = list(
+                session.run(
+                    "SELECT body_json FROM weft_monitor_deferred_writes "
+                    "WHERE context_key = ? AND report_id = ?",
+                    (store.context_key, report_id),
+                    fetch=True,
+                )
+            )
+            value = json.loads(str(row[0]))
+            path = owned_field.removeprefix("deferred.").split(".")
+            container = value[path[0]]
+            if path[-1] == "message_ids":
+                container[path[-1]] = [message_id, str(message_id + 1)]
+            else:
+                container[path[-1]] = message_id
+            session.run(
+                "UPDATE weft_monitor_deferred_writes SET body_json = ? "
+                "WHERE context_key = ? AND report_id = ?",
+                (json.dumps(value), store.context_key, report_id),
+            )
+
+    with pytest.raises(MonitorStoreUnavailable, match="noncanonical|invalid owned"):
+        store.ensure_schema()
+
+
+@pytest.mark.parametrize("old_state", ["child_tombstone", "raw_parent_with_child"])
+def test_monitor_store_v6_rejects_old_release_delete_states(
+    tmp_path,
+    old_state,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000700"
+    message_id = 1779000000000000701
+    store.upsert_task_event(_update(tid, message_id))
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        if old_state == "child_tombstone":
+            session.run(
+                "UPDATE weft_monitor_task_messages SET deleted_at_ns = ? "
+                "WHERE context_key = ? AND tid = ?",
+                (message_id + 1, store.context_key, tid),
+            )
+        else:
+            session.run(
+                "UPDATE weft_monitor_task_collations SET raw_deleted_at_ns = ? "
+                "WHERE context_key = ? AND tid = ?",
+                (message_id + 1, store.context_key, tid),
+            )
+
+    with pytest.raises(MonitorStoreUnavailable, match="tombstone|raw-deleted"):
+        store.ensure_schema()
 
 
 def test_monitor_store_upsert_is_replay_safe_and_preserves_terminal(tmp_path) -> None:
@@ -1479,48 +2468,6 @@ def test_monitor_store_lists_reserved_cleanup_pending_tasks(tmp_path) -> None:
     assert record.reserved_cleanup_checked_at_ns is None
 
 
-def test_monitor_store_lists_raw_deleted_child_refs_for_repair(tmp_path) -> None:
-    ctx = _context(tmp_path)
-    store = open_monitor_store(ctx)
-    store.ensure_schema()
-    tid = "1779000000000000035"
-    terminal = _update(
-        tid,
-        1779000000000008500,
-        event="work_completed",
-        status="completed",
-        terminal=True,
-    )
-    store.record_task_log_updates(
-        WEFT_GLOBAL_LOG_QUEUE,
-        (terminal,),
-        checkpoint_message_id=None,
-    )
-    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
-        session.run(
-            "UPDATE weft_monitor_task_collations "
-            "SET raw_deleted_at_ns = ?, updated_at_ns = ? "
-            "WHERE context_key = ? AND tid = ?",
-            (
-                terminal.message_id + 1,
-                terminal.message_id + 1,
-                store.context_key,
-                tid,
-            ),
-        )
-
-    refs = store.list_raw_deleted_task_message_refs(limit=10)
-
-    assert [(ref.queue, ref.message_id, ref.tid) for ref in refs] == [
-        (WEFT_GLOBAL_LOG_QUEUE, terminal.message_id, tid)
-    ]
-    store.delete_task_messages_after_raw_delete(
-        (terminal.message_id,),
-        deleted_at_ns=terminal.message_id + 2,
-    )
-    assert store.list_raw_deleted_task_message_refs(limit=10) == ()
-
-
 def test_monitor_store_lists_missing_task_message_ids(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -1542,51 +2489,6 @@ def test_monitor_store_lists_missing_task_message_ids(tmp_path) -> None:
     )
 
     assert missing == (known.message_id - 1, known.message_id + 1)
-
-
-def test_monitor_store_prunes_legacy_message_tombstones(tmp_path) -> None:
-    ctx = _context(tmp_path)
-    store = open_monitor_store(ctx)
-    store.ensure_schema()
-    tid = "1779000000000000031"
-    start = _update(tid, 1779000000000008100)
-    terminal = _update(
-        tid,
-        1779000000000008200,
-        event="work_completed",
-        status="completed",
-        terminal=True,
-    )
-    store.record_task_log_updates(
-        WEFT_GLOBAL_LOG_QUEUE,
-        (start, terminal),
-        checkpoint_message_id=None,
-    )
-    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
-        session.run(
-            "UPDATE weft_monitor_task_messages "
-            "SET deleted_at_ns = ? WHERE context_key = ? AND tid = ?",
-            (terminal.message_id + 1, store.context_key, tid),
-        )
-
-    result = store.prune_deleted_task_message_tombstones(
-        limit=10,
-        pruned_at_ns=terminal.message_id + 2,
-    )
-
-    record = store.get_task(tid)
-    assert record is not None
-    assert result.message_tombstones_pruned == 2
-    assert record.raw_deleted_at_ns == terminal.message_id + 2
-    assert (
-        _monitor_table_count(
-            ctx,
-            "weft_monitor_task_messages",
-            where="context_key = ? AND tid = ?",
-            params=(store.context_key, tid),
-        )
-        == 0
-    )
 
 
 def test_monitor_store_retires_completed_collation_families(tmp_path) -> None:

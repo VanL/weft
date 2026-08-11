@@ -25,7 +25,7 @@ _Implementation mapping_: `weft/core/pipelines.py` compiles stored
 `PipelineSpec`s into a first-class pipeline `TaskSpec` plus generated child
 stage and edge `TaskSpec`s. `weft/core/tasks/pipeline.py` implements the
 pipeline and edge runtime classes. `weft/cli/run.py`,
-`weft/commands/result.py`, `weft/commands/status.py`,
+`weft/commands/result.py`, `weft/commands/system.py`,
 `weft/commands/tasks.py`, and `weft/commands/_task_history.py` expose and
 interpret the task-shaped CLI surface, and `weft/core/manager.py` reuses the
 same compilation path for autostart pipeline targets.
@@ -168,7 +168,7 @@ Current behavior:
 - pipeline-level `result`, `task status`, `task stop`, and `task kill` all act
   on that pipeline TID
 - `weft run --pipeline` rejects `--arg`, `--kw`, `--env`, `--tag`,
-  `--monitor`, `--continuous`, and `--once`
+  `--continuous`, and `--once`
 - `weft result --all` remains an ordinary-task aggregation surface and does
   not include `P{tid}.outbox` pipeline results
 
@@ -937,6 +937,7 @@ before it has a solid, first-class, linear, task-shaped pipeline run.
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
 - [`docs/plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md`](../plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md)
 - [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)

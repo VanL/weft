@@ -183,7 +183,7 @@ def _capture_stream_echo(monkeypatch: pytest.MonkeyPatch) -> list[str]:
             f"{message}{'' if kwargs.get('nl', True) is False else chr(10)}"
         )
 
-    monkeypatch.setattr("weft.commands._streaming.typer.echo", _fake_echo)
+    monkeypatch.setattr("weft.commands._streaming._emit_text", _fake_echo)
     return rendered
 
 
@@ -204,6 +204,36 @@ def test_handle_ctrl_stream_handles_malformed_base64(
     )
 
     assert rendered == []
+
+
+def test_handle_ctrl_stream_preserves_stderr_and_final_newline_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted: list[tuple[str, bool, bool]] = []
+
+    def _fake_emit(
+        text: str = "",
+        *,
+        err: bool = False,
+        nl: bool = True,
+    ) -> None:
+        emitted.append((text, err, nl))
+
+    monkeypatch.setattr("weft.commands._streaming._emit_text", _fake_emit)
+
+    handle_ctrl_stream(
+        json.dumps(
+            {
+                "type": "stream",
+                "stream": "stderr",
+                "encoding": "text",
+                "data": "problem",
+                "final": True,
+            }
+        )
+    )
+
+    assert emitted == [("problem", True, False), ("", True, True)]
 
 
 def test_process_outbox_message_handles_malformed_base64() -> None:
@@ -479,10 +509,12 @@ def test_load_taskspec_payload_closes_log_queue() -> None:
             self,
             *,
             with_timestamps: bool = False,
-            since_timestamp: int | None = None,
+            after_timestamp: int | None = None,
+            before_timestamp: int | None = None,
         ):
             assert with_timestamps is True
-            assert since_timestamp == int(tid) - 1
+            assert after_timestamp == int(tid) - 1
+            assert before_timestamp is None
             payload = json.dumps(
                 {
                     "tid": tid,

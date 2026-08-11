@@ -656,7 +656,7 @@ def reduce_task_log_messages(
                 message_id=timestamp,
                 raw_message=message,
                 tid=tid,
-                status=_status_from_log_payload(payload),
+                status=task_evidence.status_from_log_payload(payload),
                 terminal=terminal,
             )
         )
@@ -695,10 +695,16 @@ def _update_reduced_task_log(
     taskspec = payload.get("taskspec")
     if isinstance(taskspec, dict):
         reduced.taskspec_payload = taskspec
-    started_at = _extract_state_timestamp(payload, "started_at")
+    started_at = task_evidence.state_timestamp_from_log_payload(
+        payload,
+        "started_at",
+    )
     if started_at is not None:
         reduced.started_at = started_at
-    completed_at = _extract_state_timestamp(payload, "completed_at")
+    completed_at = task_evidence.state_timestamp_from_log_payload(
+        payload,
+        "completed_at",
+    )
     if completed_at is not None:
         reduced.completed_at = completed_at
     terminal = task_evidence.log_terminal_evidence(
@@ -741,7 +747,7 @@ def _candidate_for_reduced(
             now_ns=now_ns,
         )
     if snapshot is not None:
-        candidate_class = _monitor_classification(snapshot)
+        candidate_class = task_evidence.monitor_failure_classification(snapshot)
         return _snapshot_candidate(
             reduced,
             snapshot=snapshot,
@@ -751,7 +757,7 @@ def _candidate_for_reduced(
             now_ns=now_ns,
         )
 
-    status = _status_from_log_payload(reduced.latest_payload)
+    status = task_evidence.status_from_log_payload(reduced.latest_payload)
     candidate_class = "active"
     reason = "latest_task_log_is_nonterminal"
     failure_owner: str | None = None
@@ -887,7 +893,7 @@ def _snapshot_candidate(
             reduced,
             candidate_class=candidate_class,
             reason=reason,
-            status=_status_from_log_payload(reduced.latest_payload),
+            status=task_evidence.status_from_log_payload(reduced.latest_payload),
             event=_event_from_payload(reduced.latest_payload),
             source="log",
             failure_owner=failure_owner,
@@ -901,7 +907,9 @@ def _snapshot_candidate(
         "failure_owner": failure_owner,
         "terminal": snapshot.terminal,
         "cleanup_candidate": False,
-        "task_name": _task_name(snapshot.taskspec_payload or reduced.taskspec_payload),
+        "task_name": task_evidence.task_name_from_taskspec(
+            snapshot.taskspec_payload or reduced.taskspec_payload
+        ),
         "reconciliation": snapshot.reconciliation,
         **dict(snapshot.metadata),
     }
@@ -936,7 +944,7 @@ def _base_candidate(
         "failure_owner": failure_owner,
         "terminal": status in TERMINAL_TASK_STATUSES if status is not None else False,
         "cleanup_candidate": False,
-        "task_name": _task_name(reduced.taskspec_payload),
+        "task_name": task_evidence.task_name_from_taskspec(reduced.taskspec_payload),
         "age_seconds": max(0.0, (now_ns - reduced.latest_timestamp) / 1_000_000_000),
     }
     return _candidate_from_metadata(
@@ -1015,12 +1023,6 @@ def _raw_payload_for_target(
     return None
 
 
-def _monitor_classification(snapshot: task_evidence.TaskEvidenceSnapshot) -> str:
-    if snapshot.classification == "terminal_log" and snapshot.status != "completed":
-        return "domain_failure"
-    return snapshot.classification
-
-
 def _classification_reason(
     snapshot: task_evidence.TaskEvidenceSnapshot,
     candidate_class: str,
@@ -1056,8 +1058,11 @@ def _failure_owner(
 
 
 def _lifecycle_conflict_reason(payload: dict[str, Any]) -> str | None:
-    status = _status_from_log_payload(payload)
-    completed_at = _extract_state_timestamp(payload, "completed_at")
+    status = task_evidence.status_from_log_payload(payload)
+    completed_at = task_evidence.state_timestamp_from_log_payload(
+        payload,
+        "completed_at",
+    )
     event = _event_from_payload(payload)
     if (
         isinstance(status, str)
@@ -1080,37 +1085,9 @@ def _is_stale(timestamp: int, now_ns: int) -> bool:
     return now_ns - timestamp > stale_ns
 
 
-def _extract_state_timestamp(payload: dict[str, Any], key: str) -> int | None:
-    taskspec = payload.get("taskspec")
-    if not isinstance(taskspec, dict):
-        return None
-    state = taskspec.get("state")
-    if not isinstance(state, dict):
-        return None
-    value = state.get(key)
-    return value if isinstance(value, int) else None
-
-
-def _status_from_log_payload(payload: Mapping[str, Any]) -> str | None:
-    status = payload.get("status")
-    if isinstance(status, str) and status:
-        return status
-    taskspec = payload.get("taskspec")
-    state = taskspec.get("state") if isinstance(taskspec, Mapping) else None
-    state_status = state.get("status") if isinstance(state, Mapping) else None
-    return state_status if isinstance(state_status, str) and state_status else None
-
-
 def _event_from_payload(payload: Mapping[str, Any]) -> str | None:
     event = payload.get("event")
     return event if isinstance(event, str) and event else None
-
-
-def _task_name(taskspec_payload: dict[str, Any] | None) -> str | None:
-    if not isinstance(taskspec_payload, dict):
-        return None
-    value = taskspec_payload.get("name")
-    return value if isinstance(value, str) and value else None
 
 
 def _json_object(message: str) -> dict[str, Any] | None:

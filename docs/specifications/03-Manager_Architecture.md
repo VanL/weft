@@ -35,6 +35,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Canonical Contract And Dead Code Cleanup Plan](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md) - establish one current service-owner schema, bounded bootstrap discard, and one mutable managed-service state owner.
 - [TaskMonitor Orphan Log And Status Reconciliation Plan](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md) - plan stale internal-service status reconciliation and bounded TaskMonitor recovery for pre-checkpoint raw task-log rows that missed Monitor-store collation.
 - [Service Task Worker API Plan](../plans/2026-05-26-service-task-worker-api-plan.md) - consolidate Manager child launch and TaskMonitor maintenance lanes onto the shared internal `ServiceTask` service-worker API.
 - [Stale Service Owner Runtime Cleanup Plan](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md) - plan stale manager/service Monitor disposition, task-local control cleanup, and internal probe residue cleanup without weakening active manager protection.
@@ -179,9 +180,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
    send one bounded keyed PING to that manager's task-local control queue. A
    matched PONG from the same TID can rescue the row as positive liveness
    evidence for selection only when its manager-selection fields prove dispatch
-   eligibility: manager role, `weft.spawn.requests`, matching control queues,
-   matching context when present, non-terminal `task_status`, and `should_stop`
-   not true. An absent, malformed,
+   eligibility: manager role, `weft.spawn.requests`, matching control and
+   outbox queues, required matching context, `task_status` exactly `created`,
+   `spawning`, or `running`, and `should_stop is False`. An absent, malformed,
    non-matching, draining, or stopping PONG is not negative proof and does not
    authorize unsafe takeover by itself. Manager startup must distinguish
    "no active canonical manager exists" from "a fresh canonical incumbent is
@@ -222,6 +223,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    Pipeline targets are compiled into the same first-class pipeline task used
    by `weft run --pipeline` before the manager enqueues the compiled top-level
    pipeline task on the spawn queue.
+   `ManagedServiceState` is the sole mutable owner of built-in and autostart
+   service launch, restart, deadline, and backoff state. Autostart source
+   discovery may retain a source identity index, but it must not mirror those
+   lifecycle values in parallel maps.
 7. **Managed services** – The manager reconciles autostarts, heartbeat, and
    `TaskMonitor` through one deterministic manager-owned service path. The
    live public managers may supervise built-in internal singleton services;
@@ -301,22 +306,54 @@ Key responsibilities implemented in `weft/core/manager.py`:
   task control contract: `PING` replies with `PONG` plus a live task-local
   status snapshot on `ctrl_out`, echoing `request_id` for structured PING
   envelopes. Manager PONG snapshots also include manager-selection fields
-  (`role`, `inbox`/`requests`, `ctrl_in`, `ctrl_out`, `outbox`, and
-  `weft_context` when available) so external selection code can validate the
+  (`role`, `requests`, `ctrl_in`, `ctrl_out`, `outbox`, and required
+  `weft_context`) so external selection code can validate the
   responding task without importing command-layer helpers.
 
 _Implementation mapping_:
 - [MA-1.1] Spawn queue consumption — `Manager._build_queue_configs`, `Manager._handle_work_message`, `Manager._build_child_spec`, `Manager._drain_public_spawn_requests`, `Manager._drain_spawn_requests_from_queue`, `Manager._handle_child_launch_result`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task` prepares the launch request, enqueues it through the registered `ServiceTask` child-launch worker group, `Manager._run_child_launch_service_worker` reads the local Python input queue, `Manager._run_child_launch_worker` calls `launch_task_process` (`weft/core/launcher.py`) on the broker-free worker lane, and `Manager._commit_child_launch_success` applies durable effects on the manager reactor.
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
-- [MA-1.4] Registry heartbeat and leadership view — `weft/core/service_convergence.py`, `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._update_manager_registry_snapshot`, `Manager._publish_superseded_manager_record`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._manager_pong_dispatch_proof`, `Manager._advance_manager_pong_probe`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/core/manager_runtime.py::_snapshot_registry`, `weft/core/manager_runtime.py::_manager_registry_disposition`, and `weft/core/manager_runtime.py::_retain_latest_included_manager_record`. The shared PONG dispatch-eligibility gate is `weft/core/control_probe.py::pong_proves_dispatch_eligible`; `Manager._pong_dispatch_eligible` and `manager_runtime._matched_pong_proves_manager_record` both delegate to it (the runtime adds the manager-outbox check), and an empty record `weft_context` falls back to the resolved context.
+- [MA-1.4] Registry heartbeat and leadership view — `weft/core/service_convergence.py::build_service_owner_payload`, `weft/core/service_convergence.py::build_manager_service_payload`, `weft/core/service_convergence.py::parse_service_owner_row`, `weft/core/service_convergence.py::project_manager_service_record`, and `weft/core/service_convergence.py::discard_v1_service_registry_rows`; Manager bootstrap plus `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._update_manager_registry_snapshot`, `Manager._publish_superseded_manager_record`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._manager_pong_dispatch_proof`, `Manager._advance_manager_pong_probe`, and `Manager._maybe_yield_leadership`; `weft/core/manager_runtime.py::_registry_queue`, `weft/core/manager_runtime.py::_snapshot_registry`, `weft/core/manager_runtime.py::_manager_registry_disposition`, and `weft/core/manager_runtime.py::_retain_latest_included_manager_record`; `weft/commands/system.py::_collect_service_registry_evidence`; and `weft/core/monitor/task_monitor.py::TaskMonitor._latest_service_owner_records`. The one complete PONG dispatch-eligibility gate is `weft/core/control_probe.py::pong_proves_dispatch_eligible`; manager and manager-runtime selection paths delegate to it without adding a second narrowing rule. Registry-record context fallback may help resolve the expected context, but a manager PONG without its own exact matching `weft_context` never proves authority.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`, `Manager._managed_service_convergence_active` (active convergence resets idle activity), `Manager._manager_owned_work_pending`, `Manager._autostart_ensure_obligation_pending`.
-- [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. Autostarts share `weft/core/manager_services.py` metadata/state primitives and `reduce_managed_service_state` transition selection with built-in singleton services.
-- [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`. Implementation plans: [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md), [`2026-05-11-internal-service-observability-plan.md`](../plans/2026-05-11-internal-service-observability-plan.md), [`2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md), [`2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md), [`2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md), [`2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md); hardening plan: [`2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md).
+- [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. `weft/core/manager_services.py::ManagedServiceState` is the sole launch/restart/backoff state owner for autostarts and built-ins; `weft/core/manager.py` retains autostart source identity only, while `reduce_managed_service_state` owns transition selection.
+- [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 
 Implementation plan backlink for [MA-1.4]:
-[Registry Selection And Pruning Authority Refactor Plan](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md).
+[Registry Selection And Pruning Authority Refactor Plan](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)
+and [Canonical Contract And Dead-Code Cleanup Plan](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md).
+
+Implementation plans for [MA-1.6a]:
+[`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md),
+[`2026-05-11-internal-service-observability-plan.md`](../plans/2026-05-11-internal-service-observability-plan.md),
+[`2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md),
+[`2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md),
+[`2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md),
+[`2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md),
+and the hardening plan
+[`2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md).
+
+`weft.state.services` stores one `schema="weft.service_owner.v2"`
+service-owner object. Required keys are `schema`, `service_key`,
+`service_type`, `owner_tid`, `name`, `status`, `queues`, `runtime_handle`, and
+`metadata`. Manager rows also carry `role` and `capabilities`. `queues` is the
+only persisted queue-name mapping. The persisted object does not duplicate
+`owner_tid` as `tid`, does not copy queue names to top-level fields, does not
+alias `requests` as `inbox`, and does not carry `legacy_role`. Manager/status
+read models may project documented convenience fields from this canonical
+object, but they are not alternate persisted schemas.
+
+Before an existing `weft.state.services` queue is passed to manager, status,
+or Monitor logic, the shared
+`discard_v1_service_registry_rows(queue)` bootstrap helper scans it and
+exact-deletes only rows whose schema discriminator is
+`weft.service_owner.v1`. It does not parse or transform those bodies and never
+republishes them with a fresh timestamp. A verification scan must find no v1
+row before bootstrap returns. Existing v2 rows and their message IDs are
+untouched. An unknown future schema fails bootstrap. Normal service-owner
+parsing accepts v2 only. Running managers and services rebuild discarded state
+by publishing their own current v2 heartbeats.
 
 Current leadership-view rules:
 
@@ -348,8 +385,13 @@ the expanded TaskSpec `tid`, enabling correlation across registry entries,
 task logs, and outbox/control messages.
 
 _Implementation mapping_:
-- Public TID generation — `weft/cli/run.py` :: `_generate_tid` (uses `Queue.generate_timestamp` on the spawn-requests queue); manager-owned internal service requests use the message timestamp assigned by `weft.spawn.internal`.
-- Enqueue with TID as message timestamp — `weft/cli/run.py` :: `_enqueue_taskspec` (writes spawn payload at `int(task_tid)`).
+- Manager lifecycle TID generation — `weft/core/manager_runtime.py::generate_tid`
+  calls `weft/core/spawn_requests.py::generate_spawn_request_timestamp`;
+  manager-owned internal service requests use the message timestamp assigned by
+  `weft.spawn.internal`.
+- Enqueue with TID as message timestamp —
+  `weft/commands/run.py::_enqueue_taskspec` writes the spawn payload at
+  `int(task_tid)`.
 - Manager-side TID propagation — `weft/core/manager.py` :: `Manager._build_child_spec` (passes `str(timestamp)` as child TID via `resolve_taskspec_payload`).
 
 ## Bootstrap and Lifecycle [MA-3]
@@ -415,19 +457,44 @@ Manager may use the full drain budget before publishing its stopped registry
 record, and slower broker backends can add observable registry propagation and
 scheduler delay under release-load parallelism.
 
+Signal handlers record requests through `note_termination_signal`. The manager
+reactor applies them through its owner-thread transition path. There is no
+Manager-specific synchronous signal alias.
+
 _Implementation mapping_:
-- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_replace_active_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_diagnostic_records`, `_manager_record`, `_stop_manager`; `weft/runtime_liveness.py` :: `runtime_liveness_from_registered_probe`; plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, explicit replacement, foreground serve, normalized registry replay, explicit manager-list diagnostics, extension-provided supervised-manager stale checks, bounded manager PONG liveness probes, and graceful/forced stop observation).
+- Shared manager lifecycle owner —
+  `weft/core/manager_runtime.py::generate_tid`,
+  `weft/core/manager_runtime.py::build_manager_spec`,
+  `weft/core/manager_runtime.py::select_active_manager`,
+  `weft/core/manager_runtime.py::ensure_manager`,
+  `weft/core/manager_runtime.py::start_manager`,
+  `weft/core/manager_runtime.py::replace_active_manager`,
+  `weft/core/manager_runtime.py::serve_manager_foreground`,
+  `weft/core/manager_runtime.py::list_manager_records`,
+  `weft/core/manager_runtime.py::manager_diagnostic_records`,
+  `weft/core/manager_runtime.py::manager_record`, and
+  `weft/core/manager_runtime.py::stop_manager`;
+  `weft/runtime_liveness.py::runtime_liveness_from_registered_probe`; plus
+  `weft/core/control_probe.py::send_keyed_ping_probe` (owns canonical manager
+  bootstrap, explicit replacement, foreground serve, normalized registry
+  replay, explicit manager-list diagnostics, extension-provided
+  supervised-manager stale checks, bounded manager PONG liveness probes, and
+  graceful/forced stop observation).
 - Command-side capability surface — `weft/commands/manager.py` and `weft/commands/serve.py` (thin manager-facing commands layered over the shared runtime helper).
-- Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
-- Manager process launch — `weft/core/manager_runtime.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
-- Manager process entry point — `weft/manager_process.py` :: `run_manager_process`, `main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
+- Detached bootstrap launcher — `weft/manager_detached_launcher.py::main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `weft/core/manager_runtime.py::start_manager`).
+- Manager process launch — `weft/core/manager_runtime.py::start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
+- Manager process entry point — `weft/manager_process.py::run_manager_process` and `weft/manager_process.py::main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
 - Leadership election and advisory dispatch view — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._evaluate_dispatch_ownership`; `weft/helpers/__init__.py::is_canonical_manager_record`; `weft/helpers/__init__.py::canonical_owner_tid` (lowest-TID non-superseded canonical manager wins for status and eventual duplicate-manager convergence, while public spawn dispatch itself is work-stealing by atomic reservation).
 - Internal runtime submission envelope — `weft/core/spawn_requests.py`
   `submit_spawn_request` carries internal runtime selectors on the manager-owned
   spawn envelope, and `weft/core/manager.py` `Manager._build_child_spec`
   re-applies them when materializing the child TaskSpec.
-- External signal handling — `weft/core/manager.py` :: `Manager.note_termination_signal` records the signal in plain in-memory state (signal handlers must not touch broker connections); the reactor applies it on the next `process_once` turn (TERM/INT drain, SIGUSR1 kill). `Manager.handle_termination_signal` remains as a delegating alias.
-- CLI management — `weft/commands/manager.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/status.py` :: `_collect_manager_records` reuses the same lifecycle reader for manager views.
+- External signal handling —
+  `weft/core/tasks/base.py::BaseTask.note_termination_signal` records the
+  signal in plain in-memory state (signal handlers must not touch broker
+  connections); `weft/core/manager.py::Manager._apply_termination_request`
+  applies it on the next `process_once` turn (TERM/INT drain, SIGUSR1 kill).
+- CLI management — `weft/commands/manager.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/system.py` :: `_collect_manager_records` reuses the same lifecycle reader for manager views.
 - Foreground supervision command and process-log diagnostics — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli/app.py` as `weft manager serve`; structured process-log emission lives in `weft/core/serve_log.py`, `weft/core/manager.py`, and `weft/core/monitor/task_monitor.py`.
 
 ## Scope Boundary [MA-4]

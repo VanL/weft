@@ -15,9 +15,10 @@ from typing import Any
 from weft._constants import (
     CONTROL_STOP,
 )
+from weft.core.control_messages import ControlRequest
 from weft.core.taskspec import TaskSpec
 
-from .base import BaseTask, ControlRequest, TaskControlPolicy
+from .base import BaseTask, TaskControlPolicy
 from .multiqueue_watcher import QueueMessageContext
 
 
@@ -102,7 +103,12 @@ class Monitor(BaseTask):
                 message_id=context.timestamp,
                 apply_reserved_policy=False,
             )
-            self._send_control_response("STOP", "ack")
+            response_extra = (
+                {"request_id": request.request_id}
+                if request.request_id is not None
+                else {}
+            )
+            self._send_control_response("STOP", "ack", **response_extra)
             return True
         return super()._handle_control_command(request, context)
 

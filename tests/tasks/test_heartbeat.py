@@ -29,6 +29,7 @@ from weft._constants import (
     WEFT_QUEUE_NAMESPACE_PREFIX,
 )
 from weft.context import build_context
+from weft.core.control_messages import encode_control_message
 from weft.core.tasks import HeartbeatTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
@@ -529,7 +530,7 @@ def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None
 
     try:
         task.process_once()
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="ping"))
 
         assert task.next_wait_timeout() == pytest.approx(
             HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS

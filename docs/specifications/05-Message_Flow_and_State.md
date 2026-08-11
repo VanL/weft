@@ -10,7 +10,7 @@ and endpoint/streaming runtime claims live in `weft/core/tasks/base.py` and
 flow live in `weft/core/manager.py`, `weft/core/spawn_requests.py`,
 `weft/cli/run.py`, `weft/commands/_spawn_submission.py`, and
 `weft/core/manager_runtime.py`; status, task-history replay, and shared
-result waiting live in `weft/commands/status.py`, `weft/commands/result.py`,
+result waiting live in `weft/commands/system.py`, `weft/commands/result.py`,
 `weft/commands/_result_wait.py`, `weft/commands/_task_history.py`, and
 `weft/commands/_streaming.py`.
 
@@ -88,7 +88,7 @@ metadata from caller-provided TaskSpecs before queueing. Manager-owned internal
 spawn paths may still use those keys inside explicit internal runtime
 envelopes.
 
-_Implementation mapping_: `weft/cli/run.py` `_enqueue_taskspec`;
+_Implementation mapping_: `weft/commands/run.py::_enqueue_taskspec`;
 `weft/commands/_spawn_submission.py` `reconcile_submitted_spawn`;
 `weft/core/spawn_requests.py` `submit_spawn_request`,
 `delete_spawn_request`;
@@ -142,9 +142,20 @@ Controller -> T{tid}.ctrl_in -> Task -> T{tid}.ctrl_out
 
 The control plane is explicit:
 
-- `ctrl_in` receives raw commands such as `STOP`, `STATUS`, and `PING`, plus
-  structured JSON command envelopes for keyed `PING`/`STATUS` style probes
-- `ctrl_out` carries task-local replies and terminal notifications
+- `ctrl_in` accepts one structured JSON object shape containing exactly the
+  required `command` key and optional `request_id` key. `command` is exactly
+  one of `PING`, `STATUS`, `STOP`, `KILL`, `PAUSE`, or `RESUME` without case
+  normalization. When present, `request_id` is a string containing at least
+  one non-whitespace character. Raw command
+  strings, extra keys, and alternate casing are not supported requests.
+- every Weft-owned controller uses the shared control-envelope encoder.
+  `BaseTask` uses the matching parser and rejects malformed, non-object, or
+  unsupported envelopes without treating them as commands. A rejected row is
+  exact-acknowledged without a `ctrl_out` reply so it cannot block a later
+  valid request.
+- `ctrl_out` carries task-local replies and terminal notifications. Readers
+  ignore malformed or unrelated replies as protocol noise; this robustness
+  does not make removed reply formats current contracts.
 - `weft.log.tasks` remains the runtime lifecycle evidence stream rather than
   the interactive reply channel. It is durable while retained, but it is not
   legal, forensic, or audit-retention evidence.
@@ -153,11 +164,19 @@ The control plane is explicit:
   `activity`, optional `waiting_on`, and optional best-effort `runtime`
   details from the active runner; structured PING envelopes with `request_id`
   must echo the same `request_id` in the PONG
-- manager PONG responses include manager-selection fields when available:
-  `role="manager"`, `inbox`/`requests`, `ctrl_in`, `ctrl_out`, `outbox`, and
-  `weft_context`; selection code may use those fields to validate a matched
-  manager liveness proof, but missing PONGs remain absence of proof rather than
-  proof of death
+- a manager PONG contains `role="manager"`, `requests`, `ctrl_in`, `ctrl_out`,
+  `outbox`, `weft_context`, `task_status`, and `should_stop`. A matched PONG
+  proves manager selection authority only when every field is present with its
+  exact type, every queue and context value matches the candidate and resolved
+  context, `task_status` is exactly `created`, `spawning`, or `running`, and
+  `should_stop is False`. A draining manager publishes `should_stop=true` in
+  its snapshot even while its drain loop remains active. Missing, malformed,
+  mismatched, draining, stopping, or terminal PONG data is absence of authority
+  proof, not proof that the manager is dead
+- a keyed PONG matches only the exact canonical reply fields
+  `command="PING"`, `status="ok"`, `message="PONG"`, the requested `request_id`,
+  and the target `tid`. Readers ignore normalized or otherwise malformed reply
+  noise rather than turning it into liveness proof
 - runner-specific PONG `runtime` details must come from the existing runner
   handle/plugin description contract, such as Docker's
   `RunnerRuntimeDescription`; failure to collect those details must not
@@ -172,14 +191,14 @@ The control plane is explicit:
 - one-shot non-persistent task success publishes a task-owned typed terminal
   `ctrl_out` envelope after the task reaches `completed`, so task-local
   terminal proof exists alongside the `work_completed` task-log event
-- readers must ignore ordinary control replies, legacy stderr stream chunks,
-  malformed JSON, and other `ctrl_out` payloads when looking for terminal state
+- readers must ignore ordinary control replies, malformed JSON, and unrelated
+  `ctrl_out` payloads when looking for terminal state
 - keyed control replies are owned and retired by the prober that issued the
   `request_id` (single-reader rule): a matched keyed PONG is deleted by exact
   message ID on match, and the prober sweeps rows bearing its own
   `request_id` once at timeout or probe abandonment. Rows keyed to other
-  request ids, terminal envelopes, and legacy payloads are never touched by
-  that sweep. A reply landing after the final sweep is bounded by task-exit
+  request ids and terminal envelopes are never touched by that sweep. A reply
+  landing after the final sweep is bounded by task-exit
   purge and terminal/dead-TID cleanup
 - non-interactive command `stream_output` writes stdout and stderr stream frames
   to `T{tid}.outbox`; stderr frames are diagnostics for live/event consumers
@@ -193,13 +212,14 @@ The control plane is explicit:
 - manager-authored terminal envelopes are supervisor observations for child
   wrapper death only; they must be written to the child `ctrl_out` queue, never
   to outbox, and only when task-owned terminal proof is not already visible
-- active STOP/KILL may delete the raw `ctrl_in` message as an internal
+- active STOP/KILL may delete the structured `ctrl_in` message as an internal
   handoff detail, but public acknowledgement remains the post-unwind
   `ctrl_out` reply plus the terminal task-log event on the main task thread
-- active STOP/KILL deferral applies to both raw command strings and structured
-  JSON control envelopes. Structured STOP/KILL envelopes that include
-  `request_id` must echo that value in the eventual post-unwind
-  acknowledgement.
+- active STOP/KILL deferral applies to the structured JSON control envelope.
+  STOP/KILL envelopes that include `request_id` must echo that value in the
+  eventual post-unwind acknowledgement.
+- every other reply or acknowledgement to a valid keyed control request,
+  including PAUSE and RESUME, also echoes the request's `request_id`.
 - a `KILL` acknowledgement means the task accepted the command; it is progress
   evidence only. Readers and CLI control helpers must not promote ack-only
   evidence into terminal lifecycle state. Kill success is proven by terminal
@@ -207,11 +227,32 @@ The control plane is explicit:
   kill action, or by an authoritative runner control surface when no
   host-observable PID exists.
 
-_Implementation mapping_: `weft/core/tasks/base.py`,
-`weft/core/tasks/consumer.py`, `weft/core/manager.py`,
-`weft/commands/task_evidence.py`, `weft/commands/tasks.py`,
-`weft/commands/control_convergence.py`,
-`tests/tasks/test_control_channel.py`.
+_Implementation mapping_: canonical wire encoding and parsing live in
+`weft/core/control_messages.py::encode_control_message`,
+`weft/core/control_messages.py::decode_control_object`, and
+`weft/core/control_messages.py::parse_control_request`; task policy lives in
+`weft/core/tasks/base.py::BaseTask._handle_control_message`,
+`weft/core/tasks/base.py::BaseTask._handle_control_command`,
+`weft/core/tasks/consumer.py::Consumer._poll_active_control_once`, and
+`weft/core/tasks/consumer.py::Consumer._finalize_deferred_active_control`;
+pipeline broadcast and policy live in
+`weft/core/tasks/pipeline.py::PipelineTask._broadcast_control` and
+`weft/core/tasks/pipeline.py::PipelineTask._handle_control_command`; manager
+policy, drain-time control, and snapshots live in
+`weft/core/manager.py::Manager._process_reactor_turn`,
+`weft/core/manager.py::Manager._handle_control_command`, and
+`weft/core/manager.py::Manager._control_snapshot_fields`; manager probes and
+runtime stop writes live in `weft/core/control_probe.py::send_keyed_ping_probe`,
+`weft/core/control_probe.py::coerce_pong_response`,
+`weft/core/control_probe.py::pong_proves_dispatch_eligible`, and
+`weft/core/manager_runtime.py::_send_stop`; command producers live in
+`weft/commands/tasks.py::_send_control` and
+`weft/commands/run.py::_InteractiveRunLifecycle._send_control`. Terminal
+interpretation and CLI convergence live in `weft/core/task_evidence.py` and
+`weft/commands/control_convergence.py`. Direct protocol coverage lives in
+`tests/core/test_control_messages.py`, `tests/core/test_control_probe.py`,
+`tests/tasks/test_control_channel.py`, and `tests/tasks/test_task_execution.py`.
+The wire module owns shape only, not task or manager policy.
 
 Implementation plan backlinks:
 
@@ -384,8 +425,8 @@ Current rules:
   task-owned lifecycle evidence; status/result/task command helpers reconstruct
   public observations from that evidence; the TaskMonitor owns operational
   collation, cleanup selection, and cleanup diagnostics only. This split exists
-  because process cleanup has to survive crashes, partial writes, and older
-  releases without letting cleanup machinery become a second lifecycle
+  because process cleanup has to survive crashes and partial writes without
+  letting cleanup machinery become a second lifecycle
   authority. Verification must assert both sides: public status/result
   reconstruction remains correct from retained task evidence, and monitor
   cleanup/collation can delete only exact rows selected by an explicit policy.
@@ -462,7 +503,7 @@ Current rules:
   opening the configured log path, querying Monitor tables, or flushing
   deferred writes.
   Lifetime report records use `record_type=task_lifetime_report`,
-  `schema_version=1`, deterministic `report_id`, `source_policy` constrained
+  `schema_version=2`, deterministic `report_id`, `source_policy` constrained
   to the five top-level cleanup policies, a `subject`, a top-level `taskspec`
   field, a baseline `lifetime` object, compact `monitor` provenance, and
   policy-specific `observations`. `taskspec` is populated whenever the policy
@@ -537,13 +578,9 @@ Current rules:
   `summary_emitted_at_ns` records accepted report handoff, either external
   JSONL write success or durable deferred write success; it is not public
   lifecycle truth.
-  If an older or partial cleanup cycle left a parent collation row marked
-  `raw_deleted_at_ns` while child refs still exist in
-  `weft_monitor_task_messages`, a bounded repair pass must exact-delete or
-  reconcile those child refs before family retirement.
   A bounded orphan-recovery pass may search for and exact-delete raw task-log
   rows for terminal/disposed families whose child refs are already absent but
-  whose raw broker rows remain from an older or inconsistent cleanup cycle.
+  whose raw broker rows remain from an interrupted current cleanup cycle.
   Orphan recovery is retryable on probe/delete errors. A successful probe that
   finds no raw broker rows records `orphan_raw_recovery_checked_at_ns` on the
   parent collation row so the same family is not selected again until new raw
@@ -556,9 +593,10 @@ Current rules:
   summary/report/delete path own any later exact deletion. Malformed or
   unrecognized pre-checkpoint rows may be exact-deleted only through the same
   durable-before-delete rule used by the selected monitor mode.
-  Legacy child rows marked with `deleted_at_ns` from older releases are
-  physically pruned in bounded Monitor-store cleanup slices. Replaying the same
-  raw row after a delete failure is idempotent. A terminal family may emit a
+  Version 5 child rows marked with `deleted_at_ns` are physically removed by
+  the version 5 to 6 schema migration, not by a normal-cycle compatibility
+  lane. Replaying the same raw row after a delete failure is idempotent. A
+  terminal family may emit a
   compact operational summary only after the FIFO pass reaches a
   completed high-water mark: the scanned FIFO prefix reaches queue end before a
   scan limit or write/delete error. If the pass stops on scan limit, store
@@ -627,6 +665,13 @@ Current rules:
   executor job counts by kind from the last completed cleanup result. PONG must
   not query the store or scan queues
   while answering `PING`.
+
+Monitor repair handles only states reachable from the current writer and
+current cleanup transactions, including interrupted exact deletion,
+pre-checkpoint gaps, pending deferred writes, and forced-process residue. Data
+written by an older Monitor schema is handled by its schema migration, not by
+a permanent normal-cycle compatibility lane.
+
 - terminal Monitor collation rows may emit compact operational summaries
   through the configured task-monitor sink. Ordinary user-task rows emit
   `record_type=task_summary`. Manager, built-in service, and manager-authored
@@ -636,8 +681,14 @@ Current rules:
   service roles, reserved service metadata, autostart metadata, and internal
   runtime class metadata, but it must not classify domain-specific metadata
   such as `runtime=internal` as service evidence by itself. External collated
-  JSONL keeps `record_type=task_log_collated` for compatibility and surfaces
-  `collation_kind` plus `service` when present. In collated mode, durable
+  JSONL uses the same classification: task rows emit
+  `record_type=task_summary` and manager or managed-service rows emit
+  `record_type=service_summary`. The external writer does not rename both
+  classes to `task_log_collated` or add a redundant compatibility
+  discriminator. This record-shape change advances the shared external
+  task-log `schema_version` from 1 to 2; all external task-summary,
+  service-summary, raw, and lifetime-report records use version 2 after the
+  cutover. In collated mode, durable
   Monitor ingestion gates raw `weft.log.tasks` deletion; external summary
   emission gates only family summary/disposition retry, not resurrection of
   already ingested raw rows. Raw external mode remains emit-before-delete and
@@ -741,11 +792,13 @@ runtime description, and structured stdout/stderr extraction;
 `weft/commands/system.py` queue/runtime evidence acquisition and ordered log
 replay; `weft/commands/_task_snapshot_reducer.py` pure event folding, evidence
 precedence, snapshot construction, filtering, and ordering;
-`weft/commands/status.py` status capability adaptation;
 `weft/commands/result.py` materialization and completion waits;
-`weft/commands/task_evidence.py` compatibility re-exports;
+`weft/core/task_evidence.py` shared lifecycle/result evidence;
+`weft/commands/tasks.py` task control and runner-diagnostic presentation over
+`weft/core/runner_diagnostics.py`;
 `weft/commands/task_monitor.py` archive summaries and checkpoints;
-`weft/commands/runtime_prune.py` explicit runtime-only prune reports and
+`weft/commands/prune.py` explicit prune dispatch, reporting, and rendering;
+`weft/core/pruning/runtime.py` runtime-only candidate selection and
 exact-message deletion;
 `weft/commands/_result_wait.py`;
 `weft/core/serve_log.py` manager-serve process-log record construction;
@@ -1124,7 +1177,7 @@ self-maintenance, and explicit operator commands for force and compaction:
   `task_activity` do not close lifecycle groups solely because they carry a
   terminal-looking status. Terminal disposition may clear standard task-local
   residual `ctrl_in`, `ctrl_out`, and `inbox` queues left by forced process
-  death, cleanup failure, or older releases. For proven-dead TIDs, the same
+  death or cleanup failure. For proven-dead TIDs, the same
   policy may clear standard `outbox` and `reserved` queues only when the TID is
   older than the configured task-log retention period. Retained non-interactive
   command stream frames, including stderr diagnostics, live in outbox rather
@@ -1193,12 +1246,12 @@ self-maintenance, and explicit operator commands for force and compaction:
   checkpoint. Wall-clock cutoffs remain correct only for observed-staleness
   windows (stale-open classification). In `jsonl_then_delete`, no raw
   task-log row of a family may be deleted before that family's
-  `summary_emitted_at_ns` is set — the main deletion path, the
-  marked-with-refs repair path, and the marked-without-refs orphan recovery
-  path all carry the summary gate. `raw_deleted_at_ns` means verified
-  deletion: the exact-row apply layer re-verifies each candidate per ID when
-  a batch under-deletes, so a still-present row is never reported deleted and
-  families cannot be marked vacuously.
+  `summary_emitted_at_ns` is set. The main deletion path and the
+  marked-without-refs orphan recovery path both carry the summary gate.
+  `raw_deleted_at_ns` means verified deletion: the exact-row apply layer
+  re-verifies each candidate per ID when a batch under-deletes, so a
+  still-present row is never reported deleted and families cannot be marked
+  vacuously.
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -1210,8 +1263,7 @@ live in `weft/core/pruning/`; Monitor durable collation lives in
 `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`, and
 `weft/core/monitor/collation.py`; monitor cycle wiring lives in
 `weft/core/monitor/task_monitor.py`; command rendering and CLI adaptation live in
-`weft/commands/runtime_prune.py` and
-`weft/commands/retention_prune.py`. The `weft.state.tid_mappings` cleanup
+`weft/commands/prune.py`. The `weft.state.tid_mappings` cleanup
 policy (keep-newest-per-key + payload-liveness gating) lives in
 `weft/core/monitor/policies/tid_mapping.py`; the foreground self-maintenance
 mirror with the same keep-newest-per-key semantic (but no liveness gate,
@@ -1352,6 +1404,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)

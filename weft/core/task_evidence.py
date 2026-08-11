@@ -119,6 +119,53 @@ class QueueMessageCounts:
         return max(0, self.total - self.unclaimed)
 
 
+def state_timestamp_from_log_payload(
+    payload: dict[str, Any],
+    key: str,
+) -> int | None:
+    """Return an integer timestamp from a task-log TaskSpec state."""
+
+    taskspec = payload.get("taskspec")
+    if not isinstance(taskspec, dict):
+        return None
+    state = taskspec.get("state")
+    if not isinstance(state, dict):
+        return None
+    value = state.get(key)
+    return value if isinstance(value, int) else None
+
+
+def monitor_failure_classification(snapshot: TaskEvidenceSnapshot) -> str:
+    """Return the shared monitor-facing failure classification."""
+
+    if snapshot.classification == "terminal_log" and snapshot.status != "completed":
+        return "domain_failure"
+    return snapshot.classification
+
+
+def task_name_from_taskspec(
+    taskspec_payload: dict[str, Any] | None,
+) -> str | None:
+    """Return a non-empty task name from a TaskSpec payload."""
+
+    if not isinstance(taskspec_payload, dict):
+        return None
+    name = taskspec_payload.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def status_from_log_payload(payload: Mapping[str, Any]) -> str | None:
+    """Return the top-level or nested TaskSpec state status for a log row."""
+
+    status = payload.get("status")
+    if isinstance(status, str) and status:
+        return status
+    taskspec = payload.get("taskspec")
+    state = taskspec.get("state") if isinstance(taskspec, Mapping) else None
+    state_status = state.get("status") if isinstance(state, Mapping) else None
+    return state_status if isinstance(state_status, str) and state_status else None
+
+
 def queue_names_for_tid(
     tid: str,
     taskspec_payload: dict[str, Any] | None,

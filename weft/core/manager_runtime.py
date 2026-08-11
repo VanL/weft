@@ -1,8 +1,8 @@
 """Low-level manager runtime launch and registry mechanics.
 
 Spec references:
-- docs/specifications/03-Manager_Architecture.md [MA-1], [MA-3]
-- docs/specifications/05-Message_Flow_and_State.md [MF-7]
+- docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.4], [MA-3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-7]
 """
 
 from __future__ import annotations
@@ -49,12 +49,17 @@ from weft._constants import (
 )
 from weft._exceptions import ManagerStartFailed
 from weft.context import WeftContext
+from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import (
     pong_proves_dispatch_eligible,
     send_keyed_ping_probe,
 )
 from weft.core.spawn_requests import generate_spawn_request_timestamp
-from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
+from weft.core.taskspec import (
+    TaskSpec,
+    encode_taskspec_transport_payload,
+    resolve_taskspec_payload,
+)
 from weft.ext import RunnerHandle
 from weft.helpers import (
     detect_container_runtime,
@@ -71,17 +76,17 @@ from .service_convergence import (
     ServiceOwnerRecord,
     build_manager_service_payload,
     collect_service_owner_records,
+    discard_v1_service_registry_rows,
     manager_service_key,
     project_manager_service_record,
     reduce_service_ownership,
-    sync_manager_service_payload_top_level_queues,
 )
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class _ManagerRuntimeInvocation:
+class ManagerRuntimeInvocation:
     """Canonical manager runtime inputs shared by detached and foreground launchers.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
@@ -93,7 +98,7 @@ class _ManagerRuntimeInvocation:
 
 
 @dataclass(frozen=True)
-class _DetachedManagerLaunch:
+class DetachedManagerLaunch:
     """Bootstrap metadata for a detached manager runtime."""
 
     pid: int
@@ -110,7 +115,7 @@ class _ManagerLaunchAcknowledgementError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class _ManagerRegistryView:
+class ManagerRegistryView:
     """One polled view of the manager registry for a specific lifecycle check."""
 
     records: dict[str, dict[str, Any]]
@@ -133,8 +138,8 @@ class _ManagerDiagnostic:
 _ManagerRegistryDisposition = Literal["keep", "omit", "prune"]
 
 
-def _generate_tid(context: WeftContext) -> str:
-    """Generate a unique TID via broker timestamp (Spec: [MA-2])."""
+def generate_tid(context: WeftContext) -> str:
+    """Generate one durable manager-related TID (Spec: [MA-2])."""
     return str(
         generate_spawn_request_timestamp(
             context.broker_target,
@@ -144,25 +149,13 @@ def _generate_tid(context: WeftContext) -> str:
 
 
 def _registry_queue(context: WeftContext) -> Queue:
-    return context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
-
-
-def _normalize_manager_record(
-    context: WeftContext,
-    payload: dict[str, Any],
-    *,
-    timestamp: int,
-) -> dict[str, Any] | None:
-    projected = project_manager_service_record(
-        payload,
-        timestamp=timestamp,
-        service_key=manager_service_key(context),
-    )
-    if projected is not None:
-        projected.setdefault("requests", WEFT_SPAWN_REQUESTS_QUEUE)
-        projected.setdefault("role", "manager")
-        return projected
-    return None
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    try:
+        discard_v1_service_registry_rows(queue)
+    except (BrokerError, OSError, RuntimeError, ValueError):
+        queue.close()
+        raise
+    return queue
 
 
 def normalize_manager_registry_record(
@@ -173,7 +166,16 @@ def normalize_manager_registry_record(
 ) -> dict[str, Any] | None:
     """Normalize one manager registry payload for command-layer readers."""
 
-    return _normalize_manager_record(context, payload, timestamp=timestamp)
+    projected = project_manager_service_record(
+        payload,
+        timestamp=timestamp,
+        service_key=manager_service_key(context),
+    )
+    if projected is not None:
+        projected.setdefault("requests", WEFT_SPAWN_REQUESTS_QUEUE)
+        projected.setdefault("role", "manager")
+        return projected
+    return None
 
 
 def _manager_registry_disposition(
@@ -234,7 +236,11 @@ def _snapshot_registry(
     stale_timestamps: list[int] = []
     try:
         for data, timestamp in iter_queue_json_entries(registry_queue):
-            record = _normalize_manager_record(context, data, timestamp=timestamp)
+            record = normalize_manager_registry_record(
+                context,
+                data,
+                timestamp=timestamp,
+            )
             if record is None:
                 continue
             tid = record.get("tid")
@@ -287,9 +293,9 @@ def _select_active_manager_from_snapshot(
             continue
         if record.get("status") != "active":
             continue
-        if not _manager_record_is_stale(record) or _manager_record_has_pong_live(
+        if not manager_registry_record_is_stale(
             record
-        ):
+        ) or _manager_record_has_pong_live(record):
             payload = record.get("_service_owner_payload")
             timestamp = _manager_record_timestamp(record)
             if not isinstance(payload, dict) or timestamp is None:
@@ -511,7 +517,7 @@ def _manager_record_diagnostic(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-016] e
     )
 
 
-def _manager_diagnostic_records(
+def manager_diagnostic_records(
     context: WeftContext,
     *,
     include_stopped: bool = False,
@@ -571,7 +577,7 @@ def _registry_view(
     probe_stale: bool = False,
     probe_cache: dict[str, int | None] | None = None,
     queue: Queue | None = None,
-) -> _ManagerRegistryView:
+) -> ManagerRegistryView:
     snapshot = _snapshot_registry(
         context,
         prune_stale=prune_stale,
@@ -579,7 +585,7 @@ def _registry_view(
         probe_cache=probe_cache,
         queue=queue,
     )
-    return _ManagerRegistryView(
+    return ManagerRegistryView(
         records=snapshot,
         active_manager=_select_active_manager_from_snapshot(context, snapshot),
         target_record=snapshot.get(target_tid) if target_tid is not None else None,
@@ -615,7 +621,7 @@ def _live_host_processes_from_handle(
         if (
             pid_matches_create_time(pid, create_time)
             if create_time is not None
-            else _is_pid_alive(pid)
+            else pid_is_live(pid)
         )
     )
 
@@ -645,7 +651,9 @@ def _host_pid_visibility_is_namespace_ambiguous(
     )
 
 
-def _manager_record_is_stale(record: dict[str, Any] | None) -> bool:
+def manager_registry_record_is_stale(record: dict[str, Any] | None) -> bool:
+    """Return whether a normalized manager registry row lacks live proof."""
+
     return _manager_record_stale_status(record)[0]
 
 
@@ -709,12 +717,13 @@ def _manager_record_has_matched_pong(
             min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS),
         ),
     )
-    if result.matched is None or not _matched_pong_proves_manager_record(
+    if result.matched is None or not pong_proves_dispatch_eligible(
         result.matched.payload,
-        context=context,
         record=record,
         ctrl_in_name=ctrl_in_name,
         ctrl_out_name=ctrl_out_name,
+        outbox_name=WEFT_MANAGER_OUTBOX_QUEUE,
+        root_context=str(context.root),
     ):
         if probe_cache is not None:
             probe_cache[tid] = None
@@ -725,32 +734,6 @@ def _manager_record_has_matched_pong(
     if probe_cache is not None:
         probe_cache[tid] = observed_at
     return True
-
-
-def _matched_pong_proves_manager_record(
-    payload: dict[str, Any],
-    *,
-    context: WeftContext,
-    record: dict[str, Any],
-    ctrl_in_name: str,
-    ctrl_out_name: str,
-) -> bool:
-    if not pong_proves_dispatch_eligible(
-        payload,
-        record=record,
-        ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
-        root_context=str(context.root),
-    ):
-        return False
-    outbox = payload.get("outbox")
-    return outbox is None or outbox == WEFT_MANAGER_OUTBOX_QUEUE
-
-
-def manager_registry_record_is_stale(record: dict[str, Any] | None) -> bool:
-    """Return whether a normalized manager registry row lacks live proof."""
-
-    return _manager_record_is_stale(record)
 
 
 def _manager_record_timestamp(record: dict[str, Any] | None) -> int | None:
@@ -764,12 +747,14 @@ def _manager_record_timestamp(record: dict[str, Any] | None) -> int | None:
     return None
 
 
-def _manager_record(
+def manager_record(
     context: WeftContext,
     tid: str,
     *,
     prune_stale: bool = True,
 ) -> dict[str, Any] | None:
+    """Return one manager registry record."""
+
     return _registry_view(
         context,
         target_tid=tid,
@@ -777,13 +762,15 @@ def _manager_record(
     ).target_record
 
 
-def _list_manager_records(
+def list_manager_records(
     context: WeftContext,
     *,
     include_stopped: bool = False,
     canonical_only: bool = False,
     prune_stale: bool = True,
 ) -> list[dict[str, Any]]:
+    """Return manager registry records for command-layer consumers."""
+
     records = list(
         _snapshot_registry(
             context,
@@ -805,21 +792,19 @@ def _list_manager_records(
     return records
 
 
-def _select_active_manager(
+def select_active_manager(
     context: WeftContext,
     *,
     probe_stale: bool = False,
     probe_cache: dict[str, int | None] | None = None,
 ) -> dict[str, Any] | None:
+    """Return the current canonical active manager record, if any."""
+
     return _registry_view(
         context,
         probe_stale=probe_stale,
         probe_cache=probe_cache,
     ).active_manager
-
-
-def _is_pid_alive(pid: int | None) -> bool:
-    return pid_is_live(pid)
 
 
 def _lookup_manager_pid(context: WeftContext, tid: str) -> int | None:
@@ -861,7 +846,7 @@ def _send_stop(
 ) -> None:
     queue = context.queue(_manager_ctrl_queue_name(tid, record), persistent=True)
     try:
-        queue.write("STOP")
+        queue.write(encode_control_message("STOP"))
     finally:
         queue.close()
 
@@ -880,7 +865,11 @@ def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] except
         latest_record = record
         delete_timestamps: list[int] = []
         for data, timestamp in iter_queue_json_entries(registry_queue):
-            normalized = _normalize_manager_record(context, data, timestamp=timestamp)
+            normalized = normalize_manager_registry_record(
+                context,
+                data,
+                timestamp=timestamp,
+            )
             if normalized is None:
                 continue
             if normalized.get("tid") != tid:
@@ -944,7 +933,6 @@ def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] except
                     value = latest_record.get(source_key)
                     if isinstance(value, str) and value:
                         queues_payload[target_key] = value
-                sync_manager_service_payload_top_level_queues(payload)
 
         payload["status"] = status
         try:
@@ -965,12 +953,14 @@ def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] except
         registry_queue.close()
 
 
-def _build_manager_spec(
+def build_manager_spec(
     context: WeftContext,
     tid: str,
     *,
     idle_timeout_override: float | None = None,
 ) -> TaskSpec:
+    """Build the canonical manager TaskSpec."""
+
     idle_timeout = (
         float(idle_timeout_override)
         if idle_timeout_override is not None
@@ -1013,19 +1003,19 @@ def _build_manager_runtime_invocation(
     context: WeftContext,
     *,
     idle_timeout_override: float | None = None,
-) -> _ManagerRuntimeInvocation:
+) -> ManagerRuntimeInvocation:
     """Build canonical manager runtime inputs for all launcher modes.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
     """
 
-    manager_tid = _generate_tid(context)
-    manager_spec = _build_manager_spec(
+    manager_tid = generate_tid(context)
+    manager_spec = build_manager_spec(
         context,
         manager_tid,
         idle_timeout_override=idle_timeout_override,
     )
-    return _ManagerRuntimeInvocation(
+    return ManagerRuntimeInvocation(
         task_cls_path=MANAGER_TASK_CLASS_PATH,
         tid=manager_tid,
         spec=manager_spec,
@@ -1034,14 +1024,14 @@ def _build_manager_runtime_invocation(
 
 def _build_manager_process_command(
     context: WeftContext,
-    invocation: _ManagerRuntimeInvocation,
+    invocation: ManagerRuntimeInvocation,
 ) -> list[str]:
     """Encode the shared manager runtime invocation for detached startup.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
     """
 
-    spec_json = invocation.spec.model_dump_json()
+    spec_json = json.dumps(encode_taskspec_transport_payload(invocation.spec))
     broker_target_json = serialize_broker_target(context.broker_target)
     config_json = json.dumps(context.config)
 
@@ -1065,7 +1055,7 @@ def _build_manager_process_command(
 
 def _build_manager_detached_launcher_command(
     context: WeftContext,
-    invocation: _ManagerRuntimeInvocation,
+    invocation: ManagerRuntimeInvocation,
     stderr_path: Path,
 ) -> list[str]:
     """Build the detached-launch wrapper command for manager bootstrap.
@@ -1135,8 +1125,8 @@ def _cleanup_startup_stderr(path: Path) -> None:
 
 def _launch_detached_manager(
     context: WeftContext,
-    invocation: _ManagerRuntimeInvocation,
-) -> _DetachedManagerLaunch:
+    invocation: ManagerRuntimeInvocation,
+) -> DetachedManagerLaunch:
     stderr_path = _manager_startup_stderr_path(context, invocation.tid)
     launcher_process = subprocess.Popen(
         _build_manager_detached_launcher_command(context, invocation, stderr_path),
@@ -1193,7 +1183,7 @@ def _launch_detached_manager(
         if isinstance(reported_path, str) and reported_path
         else stderr_path
     )
-    return _DetachedManagerLaunch(
+    return DetachedManagerLaunch(
         pid=pid,
         stderr_path=launch_stderr_path,
         launcher_process=launcher_process,
@@ -1231,7 +1221,7 @@ def _communicate_launcher(
 def _format_manager_start_failure(
     *,
     message: str,
-    launch: _DetachedManagerLaunch,
+    launch: DetachedManagerLaunch,
     launcher_events: list[dict[str, Any]],
     launcher_stderr: str,
 ) -> str:
@@ -1342,7 +1332,7 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
             current = view.target_record
             if current is None:
                 if stop_if_absent or entry_observed:  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
-                    if not _is_pid_alive(_record_pid(last_record)):  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
+                    if not pid_is_live(_record_pid(last_record)):  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
                         if _wait_for_process_exit(process, deadline=deadline):
                             return True, last_record
             else:
@@ -1353,7 +1343,7 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
                     "status"
                 ) == "stopped" and _manager_record_is_foreground_serve(current):
                     return True, current
-                if current.get("status") == "stopped" and not _is_pid_alive(  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
+                if current.get("status") == "stopped" and not pid_is_live(  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
                     current_pid
                 ):
                     if _wait_for_process_exit(process, deadline=deadline):
@@ -1362,7 +1352,7 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
                     now = time.monotonic()
                     if now - pid_checked_at >= MANAGER_PID_LIVENESS_RECHECK_INTERVAL:
                         pid_checked_at = now
-                        if not _is_pid_alive(current_pid):  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
+                        if not pid_is_live(current_pid):  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
                             if _wait_for_process_exit(process, deadline=deadline):
                                 return True, current
 
@@ -1408,7 +1398,7 @@ def _manager_record_is_unreachable_foreground_supervisor(
 
 def _fail_manager_start(
     *,
-    launch: _DetachedManagerLaunch,
+    launch: DetachedManagerLaunch,
     message: str,
     abort_launcher: bool,
 ) -> NoReturn:
@@ -1439,7 +1429,7 @@ def _manager_start_record_matches_launch(
     if (
         record.get("status") not in {SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DRAINING}
         or not is_canonical_manager_record(record)
-        or not _is_pid_alive(launch_pid)
+        or not pid_is_live(launch_pid)
     ):
         return False
     handle = _manager_handle_from_record(record)
@@ -1448,11 +1438,11 @@ def _manager_start_record_matches_launch(
     if handle.control.get("authority") == "host-pid":
         return _record_pid(record) == launch_pid
     if handle.control.get("authority") == "external-supervisor":
-        return not _manager_record_is_stale(record)
+        return not manager_registry_record_is_stale(record)
     return False
 
 
-def _acknowledge_manager_launch_success(launch: _DetachedManagerLaunch) -> None:
+def _acknowledge_manager_launch_success(launch: DetachedManagerLaunch) -> None:
     sent, error = _send_launcher_signal(
         launch.launcher_process,
         MANAGER_LAUNCHER_SIGNAL_SUCCESS,
@@ -1478,7 +1468,7 @@ def _acknowledge_manager_launch_success(launch: _DetachedManagerLaunch) -> None:
 
 
 def _acknowledge_competing_launched_manager(
-    launch: _DetachedManagerLaunch,
+    launch: DetachedManagerLaunch,
     *,
     manager_tid: str,
 ) -> None:
@@ -1499,7 +1489,7 @@ def _acknowledge_competing_launched_manager(
 
 
 def _view_contains_registered_launch(
-    view: _ManagerRegistryView,
+    view: ManagerRegistryView,
     *,
     manager_tid: str,
     launch_pid: int,
@@ -1513,7 +1503,7 @@ def _view_contains_registered_launch(
 
 
 def _acknowledge_competing_and_return(
-    launch: _DetachedManagerLaunch,
+    launch: DetachedManagerLaunch,
     *,
     manager_tid: str,
     record: dict[str, Any],
@@ -1535,7 +1525,7 @@ def _acknowledge_competing_and_return(
 def _reconcile_competing_manager_start(
     context: WeftContext,
     *,
-    launch: _DetachedManagerLaunch,
+    launch: DetachedManagerLaunch,
     manager_tid: str,
     record: dict[str, Any],
 ) -> tuple[dict[str, Any], bool, None]:
@@ -1566,14 +1556,13 @@ def _reconcile_competing_manager_start(
     return record, False, None
 
 
-def _start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
-    context: WeftContext, *, verbose: bool
+def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
+    context: WeftContext,
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
     """Launch a new Manager process and wait for its registry entry (Spec: [MA-3])."""
     invocation = _build_manager_runtime_invocation(context)
     manager_tid = invocation.tid
     launch = _launch_detached_manager(context, invocation)
-    del verbose
 
     deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
     competing_record: dict[str, Any] | None = None
@@ -1675,7 +1664,7 @@ def _start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                     message="Failed to start Manager process; detached launcher exited before startup stabilized.",
                     abort_launcher=False,
                 )
-            if not _is_pid_alive(launch.pid):
+            if not pid_is_live(launch.pid):
                 if competing_record is None:
                     competing_record = _await_manager_start_settlement(
                         context,
@@ -1753,8 +1742,8 @@ def _terminate_manager_process(
             return
 
 
-def _ensure_manager(
-    context: WeftContext, *, verbose: bool
+def ensure_manager(
+    context: WeftContext,
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
     """Guarantee a canonical active manager exists, starting one if necessary."""
     probe_cache: dict[str, int | None] = {}
@@ -1774,11 +1763,11 @@ def _ensure_manager(
         )
         if should_block:
             return uncertain_record, False, None
-    return _start_manager(context, verbose=verbose)
+    return start_manager(context)
 
 
 def _run_manager_process_foreground(
-    invocation: _ManagerRuntimeInvocation,
+    invocation: ManagerRuntimeInvocation,
     context: WeftContext,
 ) -> None:
     """Run a foreground manager without importing the CLI module at import time."""
@@ -1795,7 +1784,7 @@ def _run_manager_process_foreground(
     )
 
 
-def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
+def serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     """Run the canonical manager in the current process for supervisor use."""
 
     existing = _foreground_serve_blocking_manager(context)
@@ -1827,7 +1816,7 @@ def _foreground_serve_blocking_manager(context: WeftContext) -> dict[str, Any] |
 
     probe_cache: dict[str, int | None] = {}
     while True:
-        existing = _select_active_manager(
+        existing = select_active_manager(
             context,
             probe_stale=True,
             probe_cache=probe_cache,
@@ -1854,7 +1843,7 @@ def _foreground_serve_blocking_manager(context: WeftContext) -> dict[str, Any] |
             return existing
 
 
-def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
+def stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     context: WeftContext,
     record: dict[str, Any] | None,
     process: subprocess.Popen[Any] | None = None,
@@ -1868,7 +1857,7 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     if not isinstance(target_tid, str) or not target_tid:
         raise ValueError("manager tid is required")
 
-    current = record or _manager_record(context, target_tid)
+    current = record or manager_record(context, target_tid)
     if (
         isinstance(current, dict)
         and current.get("status") == "stopped"
@@ -1903,13 +1892,13 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     if force:
         kill_pid = _lookup_manager_pid(context, target_tid)
 
-        if isinstance(kill_pid, int) and _is_pid_alive(kill_pid):
+        if isinstance(kill_pid, int) and pid_is_live(kill_pid):
             try:
                 terminate_process_tree(kill_pid, timeout=timeout)
             except PermissionError:
                 return False, f"Permission denied sending SIGTERM to PID {kill_pid}"
             except OSError:
-                if not _is_pid_alive(kill_pid):
+                if not pid_is_live(kill_pid):
                     if _mark_manager_stopped(context, target_tid, record=current):
                         return True, None
                     return (
@@ -1917,7 +1906,7 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
                         f"Manager {target_tid} stopped but registry update failed",
                     )
                 return False, f"Failed to terminate Manager PID {kill_pid}"
-            if _is_pid_alive(kill_pid):
+            if pid_is_live(kill_pid):
                 return False, f"Failed to terminate Manager PID {kill_pid}"
             if _mark_manager_stopped(context, target_tid, record=current):
                 return True, None
@@ -1957,7 +1946,7 @@ def _stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     return False, f"Manager {target_tid} did not stop within {timeout:.1f}s"
 
 
-def _replace_active_manager(
+def replace_active_manager(
     context: WeftContext,
     *,
     timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
@@ -1967,7 +1956,7 @@ def _replace_active_manager(
     deadline = time.monotonic() + timeout
     probe_cache: dict[str, int | None] = {}
     while True:
-        current = _select_active_manager(
+        current = select_active_manager(
             context,
             probe_stale=True,
             probe_cache=probe_cache,
@@ -2009,145 +1998,7 @@ def _external_supervisor_record_is_live(record: dict[str, Any] | None) -> bool:
     return (
         handle is not None
         and handle.control.get("authority") == "external-supervisor"
-        and not _manager_record_is_stale(record)
-    )
-
-
-ManagerRuntimeInvocation = _ManagerRuntimeInvocation
-DetachedManagerLaunch = _DetachedManagerLaunch
-ManagerRegistryView = _ManagerRegistryView
-
-
-def generate_tid(context: WeftContext) -> str:
-    """Return one durable manager-related TID from the active broker target."""
-
-    return _generate_tid(context)
-
-
-def manager_record(
-    context: WeftContext,
-    tid: str,
-    *,
-    prune_stale: bool = True,
-) -> dict[str, Any] | None:
-    """Return one manager registry record."""
-
-    return _manager_record(context, tid, prune_stale=prune_stale)
-
-
-def list_manager_records(
-    context: WeftContext,
-    *,
-    include_stopped: bool = False,
-    canonical_only: bool = False,
-    prune_stale: bool = True,
-) -> list[dict[str, Any]]:
-    """Return manager registry records for command-layer consumers."""
-
-    return _list_manager_records(
-        context,
-        include_stopped=include_stopped,
-        canonical_only=canonical_only,
-        prune_stale=prune_stale,
-    )
-
-
-def manager_diagnostic_records(
-    context: WeftContext,
-    *,
-    include_stopped: bool = False,
-) -> list[dict[str, Any]]:
-    """Return manager registry records with explicit liveness diagnostics."""
-
-    return _manager_diagnostic_records(context, include_stopped=include_stopped)
-
-
-def select_active_manager(
-    context: WeftContext,
-    *,
-    probe_stale: bool = False,
-    probe_cache: dict[str, int | None] | None = None,
-) -> dict[str, Any] | None:
-    """Return the current canonical active manager record, if any."""
-
-    return _select_active_manager(
-        context,
-        probe_stale=probe_stale,
-        probe_cache=probe_cache,
-    )
-
-
-def build_manager_spec(
-    context: WeftContext,
-    tid: str,
-    *,
-    idle_timeout_override: float | None = None,
-) -> TaskSpec:
-    """Build the canonical manager TaskSpec."""
-
-    return _build_manager_spec(
-        context,
-        tid,
-        idle_timeout_override=idle_timeout_override,
-    )
-
-
-def start_manager(
-    context: WeftContext,
-    *,
-    verbose: bool,
-) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
-    """Start a canonical manager if one does not already exist."""
-
-    return _start_manager(context, verbose=verbose)
-
-
-def ensure_manager(
-    context: WeftContext,
-    *,
-    verbose: bool,
-) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
-    """Ensure a canonical manager exists."""
-
-    return _ensure_manager(context, verbose=verbose)
-
-
-def serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
-    """Run the canonical manager in the current process."""
-
-    return _serve_manager_foreground(context)
-
-
-def replace_active_manager(
-    context: WeftContext,
-    *,
-    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-) -> tuple[bool, str | None]:
-    """Send STOP to active managers and mark their owner rows superseded."""
-
-    return _replace_active_manager(context, timeout=timeout)
-
-
-def stop_manager(
-    context: WeftContext,
-    record: dict[str, Any] | None,
-    process: subprocess.Popen[Any] | None = None,
-    *,
-    tid: str | None = None,
-    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-    force: bool = False,
-    stop_if_absent: bool = False,
-) -> tuple[bool, str | None]:
-    """Stop one manager via the shared runtime mechanism."""
-
-    return _stop_manager(
-        context,
-        record,
-        process,
-        tid=tid,
-        timeout=timeout,
-        force=force,
-        stop_if_absent=stop_if_absent,
+        and not manager_registry_record_is_stale(record)
     )
 
 

@@ -306,15 +306,16 @@ def restore_lifetime_report_from_external_json(
         ("message_id",),
     )
     if observations is not None:
-        message_ids = observations.get("message_ids")
-        if isinstance(message_ids, Sequence) and not isinstance(
-            message_ids, (str, bytes, bytearray)
-        ):
+        if "message_ids" in observations:
+            message_ids = observations["message_ids"]
+            if not isinstance(message_ids, Sequence) or isinstance(
+                message_ids, (str, bytes, bytearray)
+            ):
+                raise ValueError("external message_ids must be an array")
+            if any(not isinstance(message_id, str) for message_id in message_ids):
+                raise ValueError("noncanonical external message_ids")
             observations["message_ids"] = [
-                normalize_exact_message_id(message_id)
-                if message_id is not None
-                else None
-                for message_id in message_ids
+                normalize_exact_message_id(message_id) for message_id in message_ids
             ]
         restored["observations"] = observations
     return restored
@@ -666,7 +667,12 @@ def _restore_message_id_mapping(
         return None
     restored = dict(value)
     for field in fields:
-        message_id = restored.get(field)
-        if message_id is not None:
-            restored[field] = normalize_exact_message_id(message_id)
+        if field not in restored:
+            continue
+        message_id = restored[field]
+        if message_id is None and field == "terminal_message_id":
+            continue
+        if not isinstance(message_id, str):
+            raise TypeError(f"noncanonical external {field}")
+        restored[field] = normalize_exact_message_id(message_id)
     return restored

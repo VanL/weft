@@ -8,7 +8,6 @@ workflow on top of that.
 
 _Implementation mapping_: `weft/context.py`, `weft/commands/queue.py`,
 `weft/commands/init.py`, `weft/commands/load.py`,
-`weft/commands/_load_support.py`,
 `weft/core/tasks/multiqueue_watcher.py`, `weft/core/tasks/base.py`,
 `weft/core/endpoints.py`, `weft/core/agents/provider_cli/settings.py`.
 
@@ -64,7 +63,7 @@ SimpleBroker message IDs are durable and ordered. Weft relies on that instead
 of generating a second ID space.
 
 _Implementation mapping_: exact input normalization in
-`weft/helpers/message_ids.py`, `weft/commands/_load_support.py`, and
+`weft/helpers/message_ids.py`, `weft/commands/load.py`, and
 `weft/commands/queue.py`; explicit external projections in the owning
 command/CLI, Monitor, pruning, and serve-log modules; runtime ID use in
 `weft/core/tasks/base.py` and `weft/core/manager.py`.
@@ -128,7 +127,6 @@ file-backed SQLite path.
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/load.py`,
-`weft/commands/_load_support.py`,
 `weft/core/tasks/multiqueue_watcher.py` (exact activity signatures,
 `_apply_topology_mutation_on_owner()`, and
 `PollingStrategy.replace_activity_waiter(...)` ownership),
@@ -165,6 +163,19 @@ Current behavior:
   local timer wakes still return immediately without queue probes
 - queue and status command helpers also honor `WEFT_CONTEXT` as an explicit
   project-root override before they fall back to discovery
+
+Automatic Weft context discovery searches upward only for the configured
+Weft-scoped broker configuration (by default `.weft/broker.toml`). If none is
+found, Weft resolves the current explicit root. Weft does not search parent
+directories for an old SQLite database filename.
+
+A missing `.weft/config.json` may be created with current defaults. An
+existing unreadable file, malformed JSON document, or non-object document is
+an error. Weft reports the error and does not replace or modify the file.
+Weft-owned metadata writes described as atomic use a same-directory temporary
+file and atomic replacement. Failure to publish the replacement propagates and
+leaves any prior target bytes unchanged. A caller may suppress that error only
+when its own documented output is advisory.
 
 This backend-neutral path is why the current CLI uses per-command context
 selection rather than a root-level `--dir` / `--file` targeting model.
@@ -204,35 +215,119 @@ traversed. External Monitor JSONL is projected at the final write or
 durable-deferred handoff boundary, and deterministic lifetime-report identity
 is computed before that projection.
 
-- `weft_monitor_meta`
-- `weft_monitor_task_collations`
-- `weft_monitor_task_messages`
+Schema 6 has this exact ordered table structure:
+
+- `weft_monitor_meta`: `key`, `value_json`, `updated_at_ns`; primary key
+  `key`.
+- `weft_monitor_task_collations`: `context_key`, `tid`, `name`, `runner`,
+  `parent_tid`, `role`, `status`, `terminal_seen`, `terminal_event`,
+  `terminal_status`, `terminal_message_id`, `return_code`, `first_message_id`,
+  `last_message_id`, `first_seen_at_ns`, `last_seen_at_ns`, `started_at_ns`,
+  `completed_at_ns`, `taskspec_summary_json`, `state_json`, `lifecycle_json`,
+  `resources_json`, `diagnostics_json`, `bookkeeping_json`,
+  `reserved_probe_needed`, `summary_emitted_at_ns`, `raw_deleted_at_ns`,
+  `suspect_reason`, `suspect_at_ns`, `disposition_reason`,
+  `disposition_at_ns`, `task_control_deleted_at_ns`,
+  `reserved_cleanup_checked_at_ns`, `orphan_raw_recovery_checked_at_ns`,
+  `updated_at_ns`; primary key `context_key, tid`.
+- `weft_monitor_task_messages`: `context_key`, `tid`, `queue_name`,
+  `message_id`, `event`, `status`, `observed_at_ns`,
+  `selected_for_delete_at_ns`, `deleted_at_ns`; primary key
+  `context_key, tid, message_id`.
+- `weft_monitor_deferred_writes`: `context_key`, `report_id`, `record_type`,
+  `body_json`, `created_at_ns`, `updated_at_ns`, `first_external_error`,
+  `last_external_error`, `attempt_count`, `last_attempt_at_ns`,
+  `flushed_at_ns`; primary key `context_key, report_id`.
+
+Schema 6 deliberately retains the two version-5 delete-state columns in the
+task-message table. `selected_for_delete_at_ns` has no current reader or writer;
+retaining it avoids adding a backend-specific column drop or table rebuild to
+the single supported migration edge. `deleted_at_ns` has no current writer, but
+the version-5 migration reads it to identify old tombstones and strict
+version-6 verification rejects any non-null value. Neither column authorizes a
+normal-cycle cleanup or compatibility lane. Physical removal requires a future
+explicit schema version; version-6 startup must not remove or repair them.
+
+The exact schema-6 secondary-index inventory whose names begin
+`idx_weft_monitor_` is:
+
+- `idx_weft_monitor_collations_terminal` on `weft_monitor_task_collations`
+  (`context_key`, `terminal_seen`, `raw_deleted_at_ns`, `completed_at_ns`)
+- `idx_weft_monitor_collations_last_seen` on
+  `weft_monitor_task_collations` (`context_key`, `last_seen_at_ns`)
+- `idx_weft_monitor_collations_reserved_probe` on
+  `weft_monitor_task_collations` (`context_key`, `reserved_probe_needed`,
+  `last_seen_at_ns`)
+- `idx_weft_monitor_collations_reserved_cleanup` on
+  `weft_monitor_task_collations` (`context_key`, `reserved_probe_needed`,
+  `reserved_cleanup_checked_at_ns`, `last_message_id`)
+- `idx_weft_monitor_collations_disposition_terminal` on
+  `weft_monitor_task_collations` (`context_key`, `terminal_seen`,
+  `disposition_at_ns`, `last_message_id`)
+- `idx_weft_monitor_collations_control_cleanup` on
+  `weft_monitor_task_collations` (`context_key`, `terminal_seen`,
+  `summary_emitted_at_ns`, `task_control_deleted_at_ns`,
+  `disposition_at_ns`, `last_message_id`)
+- `idx_weft_monitor_collations_orphan_recovery` on
+  `weft_monitor_task_collations` (`context_key`, `raw_deleted_at_ns`,
+  `orphan_raw_recovery_checked_at_ns`, `last_message_id`)
+- `idx_weft_monitor_collations_disposition_open` on
+  `weft_monitor_task_collations` (`context_key`, `disposition_at_ns`,
+  `last_message_id`)
+- `idx_weft_monitor_messages_tid` on `weft_monitor_task_messages`
+  (`context_key`, `tid`)
+- `idx_weft_monitor_deferred_pending` on `weft_monitor_deferred_writes`
+  (`context_key`, `flushed_at_ns`, `created_at_ns`)
 
 These tables are Monitor-owned and versioned. They are derived from
 `weft.log.tasks`; they are not exposed through queue commands and do not
 replace SimpleBroker queue semantics. The child message table is a temporary
 pending-reference table, not a queue clone: once the corresponding raw broker
 row is deleted or reconciled as already absent, the Monitor physically deletes
-the child row. If parent collation state was already marked raw-deleted while
-child refs still remain, a bounded repair pass uses the same public exact-delete
-path to clear or reconcile those child refs. A bounded recovery pass may use
-public SimpleBroker message search and exact-delete APIs to clear legacy raw
-`weft.log.tasks` rows for terminal Monitor families whose child refs were
-already removed by an older release. When that recovery pass proves no raw
-broker rows remain, it records that completed probe in the Monitor collation row
-so the same family does not stay on the recovery hot path. Reserved-queue cleanup
-proof for terminal
-non-completed families is also stored on the collation row as
+the child row. Reserved-queue cleanup proof for terminal non-completed families
+is also stored on the collation row as
 `reserved_cleanup_checked_at_ns`; it is set after the standard reserved queue is
 deleted or proved already absent, and left unset on probe/delete errors. The
-Monitor may create, verify, and
-additively migrate only these Monitor tables inside an already initialized
-Weft broker database. It
+Monitor may create, verify, and migrate only these Monitor tables through the
+supported version edge inside an already initialized Weft broker database. It
 must use the resolved `WeftContext` and broker target; it must not parse DSNs,
 rediscover a different database target, provision Postgres, or create the
 broker database itself. Broker queue rows still go through public SimpleBroker
 queue APIs; Monitor-table SQL is allowed only for the Monitor-owned tables
 listed above.
+
+Monitor schema version 6 has one migration edge. A newly created store writes
+version 6. Existing Monitor tables with no version metadata may be initialized
+as version 6 only when every Monitor-owned table is empty; non-empty
+unversioned stores fail. Version 5 migrates transactionally to version 6.
+Version 6 verifies the exact required table, ordered-column, primary-key, and
+secondary-index structure before reading owned data. It performs no schema
+DDL and does not recreate a missing object. Only the new/empty path and the
+version 5 migration may create or alter Monitor schema objects. Versions below
+5 and above 6 fail as unsupported. There is no generic "lower than current"
+version advance.
+
+The version 5 to 6 migration rewrites only the explicitly owned JSON
+message-ID fields. It also upgrades pending version 5 deferred external
+envelopes from external schema version 1 to 2 without traversing opaque
+payloads. Obsolete child-message tombstones are physically removed after
+their parent is verified and a public exact-ID queue probe, including claimed
+rows, proves the corresponding raw row absent. A present raw row or probe
+error fails and rolls back the migration; the migration does not delete raw
+queue rows. The migration also drops the obsolete exact
+`idx_weft_monitor_messages_deleted` index. A version 5 parent already marked
+raw-deleted while live child refs survive has that marker reset solely by the
+migration. The schema version advances only after every rewrite and
+normalization succeeds in the same transaction. Checkpoint-prefixed metadata
+must contain canonical `message_id`. Ordinary version 6 readers accept only
+the canonical stored form. Startup fails on malformed owned data; there is no
+tolerant current reader or normal-cycle old-release repair lane.
+
+Monitor repair handles only states reachable from the current writer and
+current cleanup transactions, including interrupted exact deletion,
+pre-checkpoint gaps, pending deferred writes, and forced-process residue. Data
+written by an older Monitor schema is handled by its schema migration, not by
+a permanent normal-cycle compatibility lane.
 
 _Implementation mapping_: `weft/core/monitor/store.py` uses the resolved
 `WeftContext` and owns table access; `weft/core/monitor/sql.py` owns SQL
@@ -269,12 +364,12 @@ Current contract:
 ## Project Context and Directory Scoping
 
 Weft uses SimpleBroker project discovery with Weft-specific scoping defaults.
-The project root comes from an explicit context override or from SimpleBroker's
-upward project search using Weft's configured project-config and sqlite target
-paths. The Weft metadata directory is materialized at that resolved root for
-Weft-owned artifacts. Its default name is `.weft/`, and `WEFT_DIRECTORY_NAME`
-may override that default. The default Weft broker config is
-`.weft/broker.toml`.
+The project root comes from an explicit context override or from upward search
+for Weft's configured project-config path only. SQLite target filenames are not
+discovery markers. The Weft metadata directory is materialized at that resolved
+root for Weft-owned artifacts. Its default name is `.weft/`, and
+`WEFT_DIRECTORY_NAME` may override that default. The default Weft broker config
+is `.weft/broker.toml`.
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/init.py`
@@ -296,10 +391,9 @@ Current broker target precedence:
 2. for an explicit root, delegate to `simplebroker.target_for_directory()`:
    the configured Weft-scoped broker config first, then env-selected
    non-sqlite backend synthesis, then sqlite fallback rooted at that directory
-3. for auto-discovery, delegate to `simplebroker.resolve_broker_target()`:
-   upward Weft-scoped broker config first, then upward legacy sqlite discovery
-   using the configured default DB name, then env-selected non-sqlite backend
-   synthesis
+3. for auto-discovery, search upward for the configured Weft-scoped broker
+   config. If none exists, use current environment backend selection for
+   explicit-root resolution at the current working directory
 4. if auto-discovery finds nothing, Weft falls back to explicit-root resolution
    at the current working directory
 
@@ -312,6 +406,10 @@ Current boundary notes:
 - Weft maps the configured metadata-directory name onto SimpleBroker's
   project-config discovery keys. By default the Weft broker config path is
   `.weft/broker.toml`, not root `.broker.toml`
+- an absolute `BROKER_PROJECT_CONFIG_PATH` selects the broker configuration and
+  target only. Without an explicit `spec_context`, the current working
+  directory remains `WeftContext.root` and owns the Weft metadata directory;
+  the absolute configuration file's parent does not become the Weft root
 - the metadata directory's `config.json` file is project metadata, not a broker
   target source; it may carry the project-local autostart default used by
   `build_context()`
@@ -372,7 +470,7 @@ target.
 Related plan:
 - `docs/plans/2026-04-16-configurable-weft-directory-name-plan.md`
 
-_Implementation mapping_: `weft/context.py` (`build_context`, `get_context`,
+_Implementation mapping_: `weft/context.py` (`build_context`,
 `WeftContext.queue`, `WeftContext.broker`); `weft/bootstrap.py` for
 optional pre-import `WEFT_ENV_FILE` loading before CLI callers reach
 `load_config()`.
@@ -389,7 +487,6 @@ Current contract:
   values loaded from that file participate in the ordinary `load_config()` and
   `build_context()` path. The env file fills missing process env values only;
   it does not override explicit supervisor or shell environment values.
-- `get_context(...)` is a convenience wrapper
 - `WeftContext.queue(name)` returns a queue bound to the resolved broker target
 - `WeftContext.broker()` opens a broker handle for backend-native operations
 - callers should work with broker targets, queue helpers, and context objects,
@@ -413,7 +510,7 @@ project initializer is different: `weft init [DIRECTORY]` creates or selects the
 project root itself.
 
 _Implementation mapping_: `weft/commands/init.py`, `weft/context.py`,
-`weft/commands/queue.py`, `weft/commands/status.py`, `weft/cli/run.py`.
+`weft/commands/queue.py`, `weft/commands/system.py`, `weft/cli/run.py`.
 
 Current rules:
 
@@ -475,6 +572,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)

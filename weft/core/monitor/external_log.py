@@ -349,18 +349,19 @@ class ExternalTaskLogSink:
         """Emit one collated task lifecycle summary for a terminal family."""
 
         projected_summary = project_task_summary_for_external_json(task_summary)
+        service_summary = projected_summary.get("service")
         record: dict[str, Any] = {
             "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
-            "record_type": "task_log_collated",
+            "record_type": (
+                "service_summary"
+                if isinstance(service_summary, Mapping)
+                else "task_summary"
+            ),
             "monitor_tid": self._monitor_tid,
             "emitted_at_ns": int(emitted_at_ns),
             "close_reason": close_reason,
             "task": projected_summary,
         }
-        collation_kind = projected_summary.get("collation_kind")
-        if isinstance(collation_kind, str):
-            record["collation_kind"] = collation_kind
-        service_summary = projected_summary.get("service")
         if isinstance(service_summary, Mapping):
             record["service"] = dict(service_summary)
         self._emit(record, emitted_at_ns=emitted_at_ns, level=logging.INFO)
@@ -373,6 +374,15 @@ class ExternalTaskLogSink:
     ) -> None:
         """Emit one task lifetime report JSONL record."""
 
+        schema_version = report.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION
+        ):
+            raise ExternalTaskLogError(
+                "lifetime report must use the current external schema version"
+            )
         self._emit(
             project_lifetime_report_for_external_json(report),
             emitted_at_ns=emitted_at_ns,

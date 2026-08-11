@@ -397,6 +397,7 @@ class RunnerPlugin(Protocol):
         self,
         taskspec_payload: Mapping[str, Any],
         *,
+        bundle_root: str | None = None,
         preflight: bool = False,
     ) -> None: ...
 

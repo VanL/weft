@@ -81,12 +81,18 @@ def scan_queue_window(
     return tuple(rows)
 
 
+def message_age_seconds(message_id: int, now_ns: int) -> float:
+    """Return a broker message ID's non-negative age in seconds."""
+
+    return max(0.0, (now_ns - int(message_id)) / 1_000_000_000)
+
+
 def is_old_enough(message_id: int, now_ns: int, min_age_seconds: float) -> bool:
     """Return whether a broker message ID is at least ``min_age_seconds`` old."""
 
     if min_age_seconds <= 0:
         return True
-    return max(0.0, (now_ns - int(message_id)) / 1_000_000_000) >= min_age_seconds
+    return message_age_seconds(message_id, now_ns) >= min_age_seconds
 
 
 def payload_string(payload: Mapping[str, Any] | None, key: str) -> str | None:

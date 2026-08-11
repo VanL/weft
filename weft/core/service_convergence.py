@@ -7,12 +7,14 @@ Spec references:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+from simplebroker import Queue
 from weft._constants import (
     LIVE_SERVICE_STATUSES,
     SERVICE_OWNER_SCHEMA,
@@ -132,8 +134,26 @@ def parse_service_owner_row(
     service_type = payload.get("service_type")
     owner_tid = payload.get("owner_tid")
     status = payload.get("status")
+    required_keys = {
+        "schema",
+        "service_key",
+        "service_type",
+        "owner_tid",
+        "name",
+        "status",
+        "queues",
+        "runtime_handle",
+        "metadata",
+    }
+    if service_type == SERVICE_TYPE_MANAGER:
+        required_keys.update({"role", "capabilities"})
+    queues = payload.get("queues")
+    runtime_handle = payload.get("runtime_handle")
+    metadata = payload.get("metadata")
+    name = payload.get("name")
     if not (
-        isinstance(timestamp, int)
+        set(payload) == required_keys
+        and isinstance(timestamp, int)
         and timestamp > 0
         and isinstance(service_key, str)
         and service_key
@@ -141,7 +161,17 @@ def parse_service_owner_row(
         and service_type
         and isinstance(owner_tid, str)
         and owner_tid
+        and owner_tid.isascii()
         and owner_tid.isdigit()
+        and isinstance(name, str)
+        and name
+        and isinstance(queues, Mapping)
+        and all(
+            isinstance(key, str) and key and isinstance(value, str) and value
+            for key, value in queues.items()
+        )
+        and isinstance(runtime_handle, Mapping)
+        and isinstance(metadata, Mapping)
         and status
         in {
             SERVICE_STATUS_ACTIVE,
@@ -151,6 +181,13 @@ def parse_service_owner_row(
             SERVICE_STATUS_TERMINAL,
             "uncertain",
         }
+        and (
+            service_type != SERVICE_TYPE_MANAGER
+            or (
+                payload.get("role") == "manager"
+                and isinstance(payload.get("capabilities"), list)
+            )
+        )
     ):
         return ServiceOwnerParseResult("malformed")
     return ServiceOwnerParseResult(
@@ -199,6 +236,68 @@ def collect_service_owner_records(
         malformed=malformed,
         read_failed=read_failed,
     )
+
+
+def _service_owner_schema_version(body: str) -> int | None:
+    """Return a numeric service-owner schema version when one is present."""
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    schema = payload.get("schema")
+    if not isinstance(schema, str) or not schema.startswith("weft.service_owner.v"):
+        return None
+    suffix = schema.removeprefix("weft.service_owner.v")
+    if not suffix.isascii() or not suffix.isdigit():
+        return None
+    version = int(suffix)
+    return version if suffix == str(version) else None
+
+
+def discard_v1_service_registry_rows(queue: Queue) -> None:
+    """Discard obsolete v1 service-owner rows before live interpretation.
+
+    The scan includes claimed rows and completes before any deletion so a
+    numeric future schema aborts without partially changing the registry.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.4].
+    """
+
+    def scan_schema_rows() -> tuple[tuple[int, int], ...]:
+        rows = cast(
+            Iterable[tuple[str, int]],
+            queue.peek_generator(with_timestamps=True, include_claimed=True),
+        )
+        return tuple(
+            (int(message_id), version)
+            for body, message_id in rows
+            if (version := _service_owner_schema_version(body)) is not None
+        )
+
+    schema_rows = scan_schema_rows()
+    v1_ids = [message_id for message_id, version in schema_rows if version == 1]
+    future_versions = [version for _message_id, version in schema_rows if version > 2]
+    if future_versions:
+        raise ValueError(
+            f"future service-owner schema v{min(future_versions)} is unsupported"
+        )
+    if v1_ids:
+        queue.delete_many(v1_ids)
+
+    schema_rows = scan_schema_rows()
+    remaining_v1_ids = [
+        message_id for message_id, version in schema_rows if version == 1
+    ]
+    future_versions = [version for _message_id, version in schema_rows if version > 2]
+    if future_versions:
+        raise ValueError(
+            f"future service-owner schema v{min(future_versions)} is unsupported"
+        )
+    if remaining_v1_ids:
+        raise RuntimeError("v1 service-owner rows remain after discard")
 
 
 def reduce_latest_by_service_owner(
@@ -402,10 +501,6 @@ def project_manager_service_record(
 ) -> dict[str, Any] | None:
     """Project a manager service-owner row into the manager command shape."""
 
-    if payload.get("schema") == SERVICE_OWNER_SCHEMA:
-        service_type = payload.get("service_type")
-        if service_type != SERVICE_TYPE_MANAGER:
-            return None
     record = parse_service_owner_record(payload, timestamp=timestamp)
     if record is None or record.service_type != SERVICE_TYPE_MANAGER:
         return None
@@ -416,8 +511,8 @@ def project_manager_service_record(
         queues = {}
     projected: dict[str, Any] = {
         "tid": record.owner_tid,
-        "name": payload.get("name", "manager"),
-        "capabilities": payload.get("capabilities", []),
+        "name": payload["name"],
+        "capabilities": payload["capabilities"],
         "status": record.status,
         "timestamp": timestamp,
         "requests": queues.get("requests", WEFT_SPAWN_REQUESTS_QUEUE),
@@ -427,15 +522,13 @@ def project_manager_service_record(
         "outbox": queues.get("outbox"),
         "internal_requests": queues.get("internal_requests"),
         "internal_reserved": queues.get("internal_reserved"),
-        "role": payload.get("role", "manager"),
-        "runtime_handle": payload.get("runtime_handle", {}),
+        "role": payload["role"],
+        "runtime_handle": payload["runtime_handle"],
         "service_key": record.service_key,
         "service_type": record.service_type,
         "_service_owner_payload": dict(payload),
     }
-    metadata = payload.get("metadata")
-    if isinstance(metadata, Mapping):
-        projected["metadata"] = dict(metadata)
+    projected["metadata"] = dict(payload["metadata"])
     return projected
 
 
@@ -452,28 +545,17 @@ def build_manager_service_payload(
 ) -> dict[str, Any]:
     """Build one canonical manager service-owner payload."""
 
-    clean_queues = {
-        key: value for key, value in queues.items() if isinstance(value, str) and value
-    }
-    payload = {
-        "schema": SERVICE_OWNER_SCHEMA,
-        "service_key": manager_service_key(context),
-        "service_type": SERVICE_TYPE_MANAGER,
-        "owner_tid": tid,
-        "tid": tid,
-        "name": name,
-        "capabilities": list(capabilities),
-        "status": status,
-        "queues": clean_queues,
-        "runtime_handle": dict(runtime_handle),
-        "role": "manager",
-        "metadata": dict(metadata or {}),
-    }
-    for key, value in clean_queues.items():
-        payload[key] = value
-    request_queue = clean_queues.get("requests")
-    if request_queue is not None:
-        payload["inbox"] = request_queue
+    payload = build_service_owner_payload(
+        service_key=manager_service_key(context),
+        service_type=SERVICE_TYPE_MANAGER,
+        owner_tid=tid,
+        status=status,
+        name=name,
+        queues=queues,
+        runtime_handle=runtime_handle,
+        metadata=metadata,
+    )
+    payload.update(role="manager", capabilities=list(capabilities))
     return payload
 
 
@@ -500,34 +582,10 @@ def build_service_owner_payload(
         "service_key": service_key,
         "service_type": service_type,
         "owner_tid": owner_tid,
-        "tid": owner_tid,
         "name": name,
         "status": status,
         "queues": clean_queues,
         "runtime_handle": dict(runtime_handle or {}),
         "metadata": dict(metadata or {}),
     }
-    for key, value in clean_queues.items():
-        payload[key] = value
     return payload
-
-
-def sync_manager_service_payload_top_level_queues(payload: dict[str, Any]) -> None:
-    """Mirror nested manager queue fields to top-level compatibility fields."""
-
-    queues = payload.get("queues")
-    if not isinstance(queues, Mapping):
-        return
-    for key in (
-        "requests",
-        "reserved",
-        "ctrl_in",
-        "ctrl_out",
-        "outbox",
-        "internal_requests",
-        "internal_reserved",
-    ):
-        value = queues.get(key)
-        if isinstance(value, str) and value:
-            payload[key] = value
-    payload["inbox"] = payload.get("requests")

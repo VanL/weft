@@ -23,10 +23,9 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core import manager_runtime
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import iter_queue_json_entries
-
-from .manager import _list_manager_records
 
 _spawn_reconciliation_static_queue_specs: Final[tuple[tuple[str, bool], ...]] = (
     (WEFT_TID_MAPPINGS_QUEUE, False),
@@ -128,7 +127,7 @@ def _find_reserved_spawn_request_queue(
     *,
     message_timestamp: int,
 ) -> str | None:
-    for record in _list_manager_records(
+    for record in manager_runtime.list_manager_records(
         context,
         include_stopped=True,
         canonical_only=True,
@@ -149,7 +148,7 @@ def _find_reserved_spawn_request_queue(
 
 def _reserved_spawn_request_queue_names(context: WeftContext) -> tuple[str, ...]:
     queue_names: list[str] = []
-    for record in _list_manager_records(
+    for record in manager_runtime.list_manager_records(
         context,
         include_stopped=True,
         canonical_only=True,

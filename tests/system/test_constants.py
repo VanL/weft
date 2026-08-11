@@ -127,7 +127,8 @@ def test_env_loader_and_explicit_override_normalizer_keys_stay_in_parity() -> No
     [
         ("WEFT_DEBUG", "yes", True),
         ("WEFT_DEBUG", 0, False),
-        ("WEFT_LOGGING_ENABLED", "off", False),
+        ("WEFT_LOGGING_ENABLED", "false", False),
+        ("WEFT_LOGGING_ENABLED", "off", True),
         ("WEFT_LOGGING_ENABLED", True, True),
         ("WEFT_LOGS_DIR", "  /tmp/weft-logs  ", "/tmp/weft-logs"),
         ("WEFT_LOGS_DIR", None, None),
@@ -184,9 +185,6 @@ _RUNTIME_OBJECT_ALLOWLIST = {
     "extensions/weft_docker/weft_docker/plugin.py": {"_PLUGIN"},
     "extensions/weft_macos_sandbox/weft_macos_sandbox/plugin.py": {"_PLUGIN"},
     "extensions/weft_microsandbox/weft_microsandbox/plugin.py": {"_PLUGIN"},
-    "weft/__init__.py": {"_LAZY_EXPORTS"},
-    "weft/commands/__init__.py": {"_LAZY_EXPORTS", "_LAZY_MODULES"},
-    "weft/core/__init__.py": {"_LAZY_EXPORTS"},
     "weft/core/agents/provider_cli/registry.py": {"_PROVIDERS"},
     "weft/core/agents/provider_cli/windows_shims.py": {"_TOKEN_RE"},
     "weft/core/agents/runtime.py": {"_RUNTIME_REGISTRY"},
@@ -747,13 +745,12 @@ class TestLoadConfig:
 
     def test_logging_setting(self) -> None:
         """Test logging environment variable."""
-        # Only "1" should enable logging
-        with patch.dict(os.environ, {"WEFT_LOGGING_ENABLED": "1"}):
-            config = load_config()
-            assert config["WEFT_LOGGING_ENABLED"] is True
+        for value in ["1", "true", "yes", "enabled", "off"]:
+            with patch.dict(os.environ, {"WEFT_LOGGING_ENABLED": value}):
+                config = load_config()
+                assert config["WEFT_LOGGING_ENABLED"] is True
 
-        # Any other value should be False
-        for value in ["0", "true", "yes", "enabled", ""]:
+        for value in ["", "0", "f", "false", "none", "null"]:
             with patch.dict(os.environ, {"WEFT_LOGGING_ENABLED": value}):
                 config = load_config()
                 assert config["WEFT_LOGGING_ENABLED"] is False

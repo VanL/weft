@@ -18,6 +18,12 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.task_evidence import (
+    coerce_terminal_envelope,
+    select_terminal_envelope,
+    terminal_error_message,
+    terminal_status_from_event,
+)
 from weft.helpers import closing_queue_iterator
 
 from ._streaming import (
@@ -26,12 +32,6 @@ from ._streaming import (
     drain_available_outbox_values,
     handle_ctrl_stream,
     poll_log_events,
-)
-from .task_evidence import (
-    coerce_terminal_envelope,
-    select_terminal_envelope,
-    terminal_error_message,
-    terminal_status_from_event,
 )
 
 

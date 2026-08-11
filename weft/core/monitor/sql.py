@@ -163,16 +163,131 @@ def sqlite_table_info(table: str) -> str:
     return f"PRAGMA table_info({identifier(table)})"
 
 
-def postgres_column_exists() -> str:
-    """Build a Postgres information-schema column lookup."""
+def sqlite_table_exists() -> str:
+    """Build a SQLite table-existence query."""
 
     return """
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = ?
-          AND column_name = ?
-        LIMIT 1
+        SELECT EXISTS(
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+        )
         """
+
+
+def sqlite_index_table() -> str:
+    """Build a SQLite index-owner query."""
+
+    return """
+        SELECT tbl_name FROM sqlite_master
+        WHERE type = 'index' AND name = ?
+        """
+
+
+def sqlite_index_list(table: str) -> str:
+    """Build a SQLite table-index list pragma."""
+
+    return f"PRAGMA index_list({identifier(table)})"
+
+
+def sqlite_index_info(index_name: str) -> str:
+    """Build a SQLite index-column pragma."""
+
+    return f"PRAGMA index_info({identifier(index_name)})"
+
+
+def sqlite_monitor_index_names() -> str:
+    """Build a SQLite index inventory query."""
+
+    return """
+        SELECT name FROM sqlite_master
+        WHERE type = 'index'
+        ORDER BY name
+        """
+
+
+def postgres_table_exists() -> str:
+    """Build a Postgres current-schema table-existence query."""
+
+    return """
+        SELECT EXISTS(
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = current_schema() AND table_name = ?
+        )
+        """
+
+
+def postgres_table_columns() -> str:
+    """Build a Postgres ordered table-column query."""
+
+    return """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = ?
+        ORDER BY ordinal_position
+        """
+
+
+def postgres_primary_key_columns() -> str:
+    """Build a Postgres ordered primary-key-column query."""
+
+    return """
+        SELECT attribute.attname
+        FROM pg_index AS index_definition
+        JOIN pg_class AS table_definition
+          ON table_definition.oid = index_definition.indrelid
+        JOIN pg_namespace AS namespace
+          ON namespace.oid = table_definition.relnamespace
+        JOIN unnest(index_definition.indkey) WITH ORDINALITY
+          AS key_column(attnum, ordinal_position) ON TRUE
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = table_definition.oid
+         AND attribute.attnum = key_column.attnum
+        WHERE namespace.nspname = current_schema()
+          AND table_definition.relname = ?
+          AND index_definition.indisprimary
+        ORDER BY key_column.ordinal_position
+        """
+
+
+def postgres_index_shape() -> str:
+    """Build a Postgres named-index owner, uniqueness, and column query."""
+
+    return """
+        SELECT table_definition.relname,
+               index_definition.indisunique,
+               attribute.attname
+        FROM pg_index AS index_definition
+        JOIN pg_class AS named_index
+          ON named_index.oid = index_definition.indexrelid
+        JOIN pg_class AS table_definition
+          ON table_definition.oid = index_definition.indrelid
+        JOIN pg_namespace AS namespace
+          ON namespace.oid = table_definition.relnamespace
+        JOIN unnest(index_definition.indkey) WITH ORDINALITY
+          AS key_column(attnum, ordinal_position) ON TRUE
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = table_definition.oid
+         AND attribute.attnum = key_column.attnum
+        WHERE namespace.nspname = current_schema()
+          AND named_index.relname = ?
+        ORDER BY key_column.ordinal_position
+        """
+
+
+def postgres_monitor_index_names() -> str:
+    """Build a Postgres current-schema index inventory query."""
+
+    return """
+        SELECT indexname FROM pg_indexes
+        WHERE schemaname = current_schema()
+        ORDER BY indexname
+        """
+
+
+def drop_index(index_name: str) -> str:
+    """Build an exact index drop for the supported v5 migration."""
+
+    return f"DROP INDEX IF EXISTS {identifier(index_name)}"
 
 
 def select_meta(meta_table: str) -> str:
@@ -191,6 +306,155 @@ def upsert_meta(meta_table: str) -> str:
         ON CONFLICT (key) DO UPDATE SET
           value_json = excluded.value_json,
           updated_at_ns = excluded.updated_at_ns
+        """
+
+
+def select_row_count(table: str) -> str:
+    """Build a row-count query for one Monitor-owned table."""
+
+    return f"SELECT COUNT(*) FROM {identifier(table)}"
+
+
+def select_meta_rows(meta_table: str) -> str:
+    """Build a complete Monitor metadata scan for schema verification."""
+
+    return f"SELECT key, value_json FROM {identifier(meta_table)} ORDER BY key"
+
+
+def update_meta_value(meta_table: str) -> str:
+    """Build a Monitor metadata value update."""
+
+    return f"UPDATE {identifier(meta_table)} SET value_json = ? WHERE key = ?"
+
+
+def select_collation_json_rows(table: str) -> str:
+    """Build a complete scan of Monitor-owned collation JSON fields."""
+
+    return f"""
+        SELECT context_key, tid, taskspec_summary_json, state_json,
+               lifecycle_json, resources_json, diagnostics_json, bookkeeping_json
+        FROM {identifier(table)}
+        ORDER BY context_key, tid
+        """
+
+
+def update_collation_owned_json(table: str) -> str:
+    """Build an update for the two collation JSON fields with owned IDs."""
+
+    return f"""
+        UPDATE {identifier(table)}
+        SET lifecycle_json = ?, bookkeeping_json = ?
+        WHERE context_key = ? AND tid = ?
+        """
+
+
+def select_deferred_json_rows(table: str) -> str:
+    """Build a complete scan of Monitor-owned deferred envelopes."""
+
+    return f"""
+        SELECT context_key, report_id, record_type, body_json
+        FROM {identifier(table)}
+        ORDER BY context_key, report_id
+        """
+
+
+def update_deferred_body(table: str) -> str:
+    """Build a deferred-envelope body update."""
+
+    return f"""
+        UPDATE {identifier(table)}
+        SET body_json = ?
+        WHERE context_key = ? AND report_id = ?
+        """
+
+
+def select_deleted_message_rows(messages_table: str) -> str:
+    """Build the v5 child-tombstone migration scan."""
+
+    return f"""
+        SELECT context_key, tid, queue_name, message_id, deleted_at_ns
+        FROM {identifier(messages_table)}
+        WHERE deleted_at_ns IS NOT NULL
+        ORDER BY context_key, tid, message_id
+        """
+
+
+def select_collation_exists(collations_table: str) -> str:
+    """Build a parent-existence probe for a v5 child tombstone."""
+
+    return f"""
+        SELECT 1 FROM {identifier(collations_table)}
+        WHERE context_key = ? AND tid = ?
+        LIMIT 1
+        """
+
+
+def delete_message_row(messages_table: str) -> str:
+    """Build an exact v5 child-tombstone deletion."""
+
+    return f"""
+        DELETE FROM {identifier(messages_table)}
+        WHERE context_key = ? AND tid = ? AND message_id = ?
+        """
+
+
+def reset_raw_deleted_parents_with_children(
+    collations_table: str,
+    messages_table: str,
+) -> str:
+    """Build the v5-only reset for parents that retain child refs."""
+
+    collations = identifier(collations_table)
+    messages = identifier(messages_table)
+    return f"""
+        UPDATE {collations}
+        SET raw_deleted_at_ns = NULL
+        WHERE raw_deleted_at_ns IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM {messages} AS m
+            WHERE m.context_key = {collations}.context_key
+              AND m.tid = {collations}.tid
+          )
+        """
+
+
+def mark_migrated_tombstone_parent_raw_deleted(
+    collations_table: str,
+    messages_table: str,
+) -> str:
+    """Build the v5-only parent reconciliation after tombstone deletion."""
+
+    collations = identifier(collations_table)
+    messages = identifier(messages_table)
+    return f"""
+        UPDATE {collations}
+        SET raw_deleted_at_ns = COALESCE(raw_deleted_at_ns, ?)
+        WHERE context_key = ? AND tid = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM {messages} AS m
+            WHERE m.context_key = {collations}.context_key
+              AND m.tid = {collations}.tid
+          )
+        """
+
+
+def select_raw_deleted_parents_with_children(
+    collations_table: str,
+    messages_table: str,
+) -> str:
+    """Build the v6 old-parent-state rejection probe."""
+
+    collations = identifier(collations_table)
+    messages = identifier(messages_table)
+    return f"""
+        SELECT 1 FROM {collations}
+        WHERE raw_deleted_at_ns IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM {messages} AS m
+            WHERE m.context_key = {collations}.context_key
+              AND m.tid = {collations}.tid
+          )
+        LIMIT 1
         """
 
 
@@ -528,7 +792,6 @@ def select_deletable_task_log_messages(
         JOIN {identifier(collations_table)} AS c
           ON c.context_key = m.context_key AND c.tid = m.tid
         WHERE m.context_key = ?
-          AND m.deleted_at_ns IS NULL
           AND c.raw_deleted_at_ns IS NULL
           {state_condition}
           {summary_condition}
@@ -558,7 +821,6 @@ def select_deletable_task_log_messages_for_tids(
           ON c.context_key = m.context_key AND c.tid = m.tid
         WHERE m.context_key = ?
           AND m.tid IN ({placeholders(tid_count)})
-          AND m.deleted_at_ns IS NULL
           AND c.raw_deleted_at_ns IS NULL
           {state_condition}
           {summary_condition}
@@ -590,47 +852,11 @@ def select_manager_task_spawned_retention_refs(
           WHERE m.context_key = ?
             AND m.queue_name = ?
             AND m.event = 'task_spawned'
-            AND m.deleted_at_ns IS NULL
             AND c.raw_deleted_at_ns IS NULL
             AND (c.role = 'manager' OR c.name = 'manager')
         ) ranked
         WHERE newest_rank > ?
         ORDER BY message_id
-        LIMIT ?
-        """
-
-
-def select_raw_deleted_task_message_refs(
-    messages_table: str,
-    collations_table: str,
-    *,
-    require_summary: bool,
-) -> str:
-    """Build a query for child refs left after parent raw deletion.
-
-    ``require_summary`` enforces the jsonl_then_delete audit invariant: no
-    raw task-log row of a family may be deleted unless that family's
-    ``summary_emitted_at_ns`` is set, so the repair path must not select
-    refs of unsummarized marked families. Unsummarized marked families are
-    terminal, so the normal summary stage picks them up first and repair
-    proceeds on a later pass.
-
-    Spec: [MF-5], [OBS.13], [OBS.17]
-    """
-
-    summary_condition = ""
-    if require_summary:
-        summary_condition = "AND c.summary_emitted_at_ns IS NOT NULL"
-    return f"""
-        SELECT m.queue_name, m.message_id, m.tid
-        FROM {identifier(messages_table)} AS m
-        JOIN {identifier(collations_table)} AS c
-          ON c.context_key = m.context_key AND c.tid = m.tid
-        WHERE m.context_key = ?
-          AND m.deleted_at_ns IS NULL
-          AND c.raw_deleted_at_ns IS NOT NULL
-          {summary_condition}
-        ORDER BY m.message_id
         LIMIT ?
         """
 
@@ -755,22 +981,6 @@ def select_missing_task_message_ids(
         """
 
 
-def select_deleted_task_message_refs(messages_table: str) -> str:
-    """Build a bounded query for legacy child message tombstones.
-
-    Spec: [MF-5], [OBS.13]
-    """
-
-    return f"""
-        SELECT tid, message_id
-        FROM {identifier(messages_table)}
-        WHERE context_key = ?
-          AND deleted_at_ns IS NOT NULL
-        ORDER BY message_id
-        LIMIT ?
-        """
-
-
 def delete_task_messages(messages_table: str, message_id_count: int) -> str:
     """Build a batched exact child message delete.
 
@@ -807,16 +1017,6 @@ def select_remaining_task_message(messages_table: str) -> str:
         WHERE context_key = ?
           AND tid = ?
         LIMIT 1
-        """
-
-
-def mark_raw_deleted(collations_table: str) -> str:
-    """Build a task raw-deleted marker update."""
-
-    return f"""
-        UPDATE {identifier(collations_table)}
-        SET raw_deleted_at_ns = ?, updated_at_ns = ?
-        WHERE context_key = ? AND tid = ?
         """
 
 

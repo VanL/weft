@@ -14,20 +14,16 @@ Spec references:
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
-from simplebroker import format_message_id
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    EXIT_ERROR,
-    EXIT_SUCCESS,
     RUNTIME_PRUNE_CLASS_STALE_ENDPOINT,
     RUNTIME_PRUNE_CLASS_STALE_MANAGER,
     RUNTIME_PRUNE_CLASS_STALE_STREAMING,
@@ -38,9 +34,7 @@ from weft._constants import (
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
     RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-    RUNTIME_PRUNE_DEFAULT_QUEUE_GROUPS,
     RUNTIME_PRUNE_REPORT_ONLY_CLASSIFICATIONS,
-    RUNTIME_PRUNE_SCHEMA_VERSION,
     RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS,
     SERVICE_TYPE_MANAGED,
     TERMINAL_TASK_STATUSES,
@@ -51,7 +45,7 @@ from weft._constants import (
     WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft.context import WeftContext, build_context
+from weft.context import WeftContext
 from weft.core.endpoints import (
     endpoint_record_from_payload,
     endpoint_record_owner_is_live,
@@ -63,6 +57,7 @@ from weft.core.manager_runtime import (
     normalize_manager_registry_record,
 )
 from weft.core.pruning.apply import apply_exact_prune_candidates
+from weft.core.queue_window import is_old_enough, message_age_seconds
 from weft.core.service_convergence import (
     parse_service_owner_row,
     plan_service_owner_history_prune,
@@ -96,8 +91,6 @@ class RuntimePruneConfig:
     min_age_seconds: float = RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS
     keep_recent_per_key: int = RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY
     limit: int | None = None
-    json_output: bool = False
-    report_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +149,7 @@ class RuntimePruneResult:
     applied_candidates: tuple[RuntimePruneCandidate, ...]
     scan_stats: tuple[RuntimeQueueScanStats, ...]
     errors: tuple[str, ...] = ()
+    halted_at: Literal["validation", "initial_scan"] | None = None
 
     @property
     def dry_run(self) -> bool:
@@ -174,10 +168,6 @@ class RuntimePruneResult:
         return sum(1 for candidate in self.applied_candidates if candidate.error)
 
     @property
-    def exit_code(self) -> int:
-        return EXIT_ERROR if self.errors or self.failed else EXIT_SUCCESS
-
-    @property
     def classification_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for candidate in self.candidates:
@@ -187,16 +177,6 @@ class RuntimePruneResult:
         return counts
 
 
-def run_runtime_prune(config: RuntimePruneConfig) -> RuntimePruneResult:
-    """Scan and optionally prune runtime-only state queues.
-
-    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
-    """
-
-    ctx = build_context(spec_context=config.context_path)
-    return run_runtime_prune_for_context(ctx, config)
-
-
 def run_runtime_prune_for_context(
     ctx: WeftContext,
     config: RuntimePruneConfig,
@@ -204,7 +184,7 @@ def run_runtime_prune_for_context(
     """Run runtime-state pruning against an already-resolved context."""
 
     validation_error = _validate_config(config)
-    run_id = _new_run_id()
+    run_id = f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}.{time.time_ns() % 1_000_000_000:09d}Z:pid-{os.getpid()}"
     if validation_error is not None:
         return RuntimePruneResult(
             config=config,
@@ -213,10 +193,13 @@ def run_runtime_prune_for_context(
             applied_candidates=(),
             scan_stats=(),
             errors=(validation_error,),
+            halted_at="validation",
         )
 
     candidates, stats, scan_errors = _build_candidates(ctx, config)
-    visible_candidates = _apply_limit(candidates, config.limit)
+    visible_candidates = list(
+        candidates if config.limit is None else candidates[: config.limit]
+    )
     if scan_errors:
         return RuntimePruneResult(
             config=config,
@@ -225,18 +208,23 @@ def run_runtime_prune_for_context(
             applied_candidates=(),
             scan_stats=tuple(stats),
             errors=tuple(scan_errors),
+            halted_at="initial_scan",
         )
 
     applied: tuple[RuntimePruneCandidate, ...] = ()
     apply_stats = stats
     if config.apply:
         fresh_candidates, apply_stats, apply_errors = _build_candidates(ctx, config)
-        to_apply = _apply_limit(fresh_candidates, config.limit)
+        to_apply = list(
+            fresh_candidates
+            if config.limit is None
+            else fresh_candidates[: config.limit]
+        )
         applied = tuple(_apply_candidates(ctx, to_apply))
         scan_errors.extend(apply_errors)
         visible_candidates = to_apply
 
-    result = RuntimePruneResult(
+    return RuntimePruneResult(
         config=config,
         run_id=run_id,
         candidates=tuple(visible_candidates),
@@ -244,154 +232,6 @@ def run_runtime_prune_for_context(
         scan_stats=tuple(apply_stats if config.apply else stats),
         errors=tuple(scan_errors),
     )
-    if config.report_path is not None:
-        try:
-            write_runtime_prune_report(result, config.report_path)
-        except OSError as exc:
-            return RuntimePruneResult(
-                config=config,
-                run_id=run_id,
-                candidates=result.candidates,
-                applied_candidates=result.applied_candidates,
-                scan_stats=result.scan_stats,
-                errors=(*result.errors, f"failed to write report: {exc}"),
-            )
-    return result
-
-
-def cmd_prune(
-    *,
-    context: Path | None = None,
-    apply: bool = False,
-    queues: Sequence[str] | None = None,
-    min_age_seconds: float = RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-    keep_recent_per_key: int = RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
-    limit: int | None = None,
-    json_output: bool = False,
-    report_path: Path | None = None,
-) -> tuple[int, str, str]:
-    """Command adapter for `weft system prune`."""
-
-    try:
-        normalized_queues = normalize_queue_filters(queues)
-    except ValueError as exc:
-        return EXIT_ERROR, "", str(exc)
-
-    config = RuntimePruneConfig(
-        context_path=context,
-        apply=apply,
-        queues=normalized_queues,
-        min_age_seconds=min_age_seconds,
-        keep_recent_per_key=keep_recent_per_key,
-        limit=limit,
-        json_output=json_output,
-        report_path=report_path,
-    )
-    result = run_runtime_prune(config)
-    if json_output:
-        stdout = json.dumps(runtime_prune_summary(result), sort_keys=True)
-    else:
-        stdout = render_runtime_prune_human(result)
-    stderr = "\n".join(result.errors)
-    return result.exit_code, stdout, stderr
-
-
-def normalize_queue_filters(
-    values: Sequence[str] | None,
-) -> tuple[RuntimeQueueName, ...]:
-    """Normalize CLI queue filters and reject unknown values."""
-
-    if not values:
-        return cast(tuple[RuntimeQueueName, ...], RUNTIME_PRUNE_DEFAULT_QUEUE_GROUPS)
-    normalized: list[str] = []
-    for raw_value in values:
-        for part in raw_value.split(","):
-            value = part.strip()
-            if not value:
-                continue
-            normalized.append(value)
-    if not normalized or "all" in normalized:
-        return cast(tuple[RuntimeQueueName, ...], RUNTIME_PRUNE_DEFAULT_QUEUE_GROUPS)
-
-    unknown = sorted(
-        {
-            value
-            for value in normalized
-            if value not in RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS
-        }
-    )
-    if unknown:
-        allowed = ", ".join([*RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS, "all"])
-        raise ValueError(
-            f"unknown runtime-state queue filter: {', '.join(unknown)}; allowed: {allowed}"
-        )
-    deduped: list[RuntimeQueueName] = []
-    for value in normalized:
-        deduped.append(cast(RuntimeQueueName, value))
-    return tuple(dict.fromkeys(deduped))
-
-
-def runtime_prune_summary(result: RuntimePruneResult) -> dict[str, Any]:
-    """Return the JSON summary contract for a prune run."""
-
-    return {
-        "schema_version": RUNTIME_PRUNE_SCHEMA_VERSION,
-        "record_type": "runtime_prune_completed",
-        "run_id": result.run_id,
-        "dry_run": result.dry_run,
-        "queues_scanned": [stat.queue for stat in result.scan_stats],
-        "records_scanned": result.records_scanned,
-        "candidates": len(result.candidates),
-        "deleted": result.deleted,
-        "failed": result.failed,
-        "classification_counts": result.classification_counts,
-        "errors": list(result.errors),
-    }
-
-
-def render_runtime_prune_human(result: RuntimePruneResult) -> str:
-    """Render concise human output for the CLI."""
-
-    mode = "dry-run" if result.dry_run else "apply"
-    lines = [
-        (
-            f"Runtime state prune {mode}: scanned {result.records_scanned} records, "
-            f"found {len(result.candidates)} candidates, deleted {result.deleted}, "
-            f"failed {result.failed}."
-        )
-    ]
-    for candidate in result.candidates:
-        applied = "report-only" if candidate.report_only else "kept"
-        if not result.dry_run and candidate.applied:
-            applied = "deleted"
-        elif candidate.error:
-            applied = f"error: {candidate.error}"
-        lines.append(
-            f"{candidate.queue} {candidate.message_id} {candidate.classification} "
-            f"{candidate.key} {applied}"
-        )
-    return "\n".join(lines)
-
-
-def write_runtime_prune_report(result: RuntimePruneResult, path: Path) -> None:
-    """Write JSONL candidate records plus a final summary record."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    applied_by_id = {
-        (candidate.queue, candidate.message_id): candidate
-        for candidate in result.applied_candidates
-    }
-    with path.open("w", encoding="utf-8") as handle:
-        for candidate in result.candidates:
-            candidate = applied_by_id.get(
-                (candidate.queue, candidate.message_id), candidate
-            )
-            handle.write(
-                json.dumps(_candidate_record(result, candidate), sort_keys=True)
-            )
-            handle.write("\n")
-        handle.write(json.dumps(runtime_prune_summary(result), sort_keys=True))
-        handle.write("\n")
 
 
 def _validate_config(config: RuntimePruneConfig) -> str | None:
@@ -402,19 +242,6 @@ def _validate_config(config: RuntimePruneConfig) -> str | None:
     if config.limit is not None and config.limit < 1:
         return "--limit must be >= 1"
     return None
-
-
-def _new_run_id() -> str:
-    return f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}.{time.time_ns() % 1_000_000_000:09d}Z:pid-{os.getpid()}"
-
-
-def _apply_limit(
-    candidates: Sequence[RuntimePruneCandidate],
-    limit: int | None,
-) -> list[RuntimePruneCandidate]:
-    if limit is None:
-        return list(candidates)
-    return list(candidates[:limit])
 
 
 def _build_candidates(
@@ -468,16 +295,6 @@ def _read_runtime_queue(
         queue.close()
 
 
-def _is_old_enough(message_id: int, now_ns: int, min_age_seconds: float) -> bool:
-    if min_age_seconds <= 0:
-        return True
-    return _age_seconds(message_id, now_ns) >= min_age_seconds
-
-
-def _age_seconds(message_id: int, now_ns: int) -> float:
-    return max(0.0, (now_ns - int(message_id)) / 1_000_000_000)
-
-
 def _payload_excerpt(payload: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {
         "tid",
@@ -515,7 +332,7 @@ def _candidate(
         key=key,
         classification=classification,
         reason=reason,
-        age_seconds=_age_seconds(message_id, now_ns),
+        age_seconds=message_age_seconds(message_id, now_ns),
         payload_excerpt=_payload_excerpt(payload),
         report_only=report_only
         or classification in RUNTIME_PRUNE_REPORT_ONLY_CLASSIFICATIONS,
@@ -543,7 +360,7 @@ def _tid_mapping_candidates(
         for payload, message_id in ordered[config.keep_recent_per_key :]:
             if message_id in protected_ids:
                 continue
-            if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+            if not is_old_enough(message_id, now_ns, config.min_age_seconds):
                 continue
             candidates.append(
                 _candidate(
@@ -573,7 +390,7 @@ def _manager_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-033] exceptio
     for payload, message_id in entries:
         parse_result = parse_service_owner_row(payload, timestamp=message_id)
         if parse_result.disposition == "malformed":
-            if _is_old_enough(message_id, now_ns, config.min_age_seconds):
+            if is_old_enough(message_id, now_ns, config.min_age_seconds):
                 candidates.append(
                     _candidate(
                         queue=WEFT_SERVICES_REGISTRY_QUEUE,
@@ -608,7 +425,7 @@ def _manager_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-033] exceptio
             candidate_payload = payload_by_id.get(message_id)
             if record is None or candidate_payload is None:
                 continue
-            if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+            if not is_old_enough(message_id, now_ns, config.min_age_seconds):
                 continue
             if record.get("status") == "active" and manager_registry_record_is_stale(
                 record
@@ -675,7 +492,7 @@ def _service_candidates(
             candidate_payload = payload_by_id.get(message_id)
             if candidate_payload is None:
                 continue
-            if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+            if not is_old_enough(message_id, now_ns, config.min_age_seconds):
                 continue
             candidates.append(
                 _candidate(
@@ -740,7 +557,7 @@ def _streaming_candidates(
             message_id for _payload, message_id in ordered[: config.keep_recent_per_key]
         }
         for payload, message_id in ordered:
-            if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+            if not is_old_enough(message_id, now_ns, config.min_age_seconds):
                 continue
             tid = payload.get("tid")
             if not isinstance(tid, str) or not tid:
@@ -800,7 +617,7 @@ def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] excepti
         for payload, message_id in ordered[config.keep_recent_per_key :]:
             if message_id in protected_ids:
                 continue
-            if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+            if not is_old_enough(message_id, now_ns, config.min_age_seconds):
                 continue
             superseded_ids.add(message_id)
             candidates.append(
@@ -821,7 +638,7 @@ def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] excepti
             continue
         if record.status != "active":
             continue
-        if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+        if not is_old_enough(message_id, now_ns, config.min_age_seconds):
             continue
         if endpoint_record_owner_is_live(
             record,
@@ -852,7 +669,7 @@ def _pipeline_candidates(
     entries, scanned = _read_runtime_queue(ctx, WEFT_PIPELINES_STATE_QUEUE)
     candidates: list[RuntimePruneCandidate] = []
     for payload, message_id in entries:
-        if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+        if not is_old_enough(message_id, now_ns, config.min_age_seconds):
             continue
         key = payload.get("tid") or payload.get("pipeline_tid") or payload.get("id")
         if not isinstance(key, str) or not key:
@@ -885,25 +702,3 @@ def _apply_candidates(
             error=error,
         ),
     )
-
-
-def _candidate_record(
-    result: RuntimePruneResult,
-    candidate: RuntimePruneCandidate,
-) -> dict[str, Any]:
-    return {
-        "schema_version": RUNTIME_PRUNE_SCHEMA_VERSION,
-        "record_type": "runtime_prune_candidate",
-        "run_id": result.run_id,
-        "emitted_at": time.time_ns(),
-        "queue": candidate.queue,
-        "message_id": format_message_id(candidate.message_id),
-        "key": candidate.key,
-        "classification": candidate.classification,
-        "reason": candidate.reason,
-        "age_seconds": candidate.age_seconds,
-        "dry_run": result.dry_run,
-        "applied": candidate.applied,
-        "error": candidate.error,
-        "payload_excerpt": candidate.payload_excerpt,
-    }

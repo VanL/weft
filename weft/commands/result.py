@@ -1,7 +1,7 @@
 """Fetch task results from Weft queues.
 
 Spec references:
-- docs/specifications/10-CLI_Interface.md [CLI-1.2] (result)
+- docs/specifications/10-CLI_Interface.md [CLI-1.2.2] (result)
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 
-import weft.commands.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
@@ -24,6 +23,7 @@ from weft._constants import (
 )
 from weft.commands.types import TaskResult
 from weft.context import WeftContext, build_context
+from weft.core import task_evidence
 from weft.core.pipelines import pipeline_public_queues
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import closing_queue_iterator, iter_queue_json_entries

@@ -245,10 +245,9 @@ weft/
 ├── client/             # Public Python adapter package
 ├── helpers.py          # Shared utilities
 ├── commands/           # Shared application capabilities
-├── core/               # Runtime internals
-│   ├── taskspec.py     # Data models
-│   └── tasks/          # Task implementations
-└── shell/              # Subprocess helpers
+└── core/               # Runtime internals
+    ├── taskspec.py     # Data models
+    └── tasks/          # Task implementations
 ```
 
 **Conventions**:
@@ -733,7 +732,7 @@ the repo-managed toolchain and local `bin/` wiring.
 1. Create or extend the shared capability in `weft/commands/`
 2. Add or extend the CLI adapter in `weft/cli/app.py` or `weft/cli/*.py`
 3. Keep `weft/cli/* -> weft/commands/* -> weft/core/*` one-way
-4. Add test in `tests/cli/test_cli_mycommand.py`
+4. Add test in `tests/cli/test_<command>.py`
 
 **Debug a task**:
 ```bash

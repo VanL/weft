@@ -43,11 +43,9 @@ from weft._constants import (
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     PONG_EXTENSION_KEY,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
-    SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGED,
-    SERVICE_TYPE_MANAGER,
     STALE_SERVICE_OWNER_DISPOSITION_REASONS,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_CLEANUP_POLICY_NAMES,
@@ -63,6 +61,7 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
+from weft.core.control_messages import encode_control_message
 from weft.core.monitor.collation import update_from_task_log_payload
 from weft.core.monitor.runtime import (
     TaskMonitorProcessorRequest,
@@ -83,6 +82,7 @@ from weft.core.pruning.runtime import (
     run_runtime_prune_for_context,
 )
 from weft.core.service_convergence import (
+    build_manager_service_payload,
     build_service_owner_payload,
     manager_service_key,
 )
@@ -95,6 +95,8 @@ PROCESSOR_REQUESTS: list[TaskMonitorProcessorRequest] = []
 BLOCKING_PROCESSOR_STARTED = threading.Event()
 BLOCKING_PROCESSOR_RELEASE = threading.Event()
 BLOCKING_PROCESSOR_TIMEOUT_SECONDS = 5.0
+CONTROL_REPLY_TIMEOUT_SECONDS = 3.0
+CONTROL_REPLY_WAIT_SLICE_SECONDS = 0.1
 
 
 class _CloseRecordingProxy:
@@ -1718,14 +1720,14 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     log_queue.write(json.dumps({"event": "work_started", "tid": "1778084345905438720"}))
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping-before"}))
+    ctrl_in.write(encode_control_message(CONTROL_PING, request_id="ping-before"))
 
     task = TaskMonitor(db_path, spec, config=config)
     responses: list[dict[str, object]] = []
     try:
         task.process_once()
         drive_task_monitor_until_idle(task)
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping-after"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="ping-after"))
         task.wait_for_activity(timeout=task.next_wait_timeout())
         task.process_once()
         responses = [json.loads(item) for item in ctrl_out.peek_generator()]
@@ -1855,7 +1857,7 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
             raise AssertionError("PING must not run Monitor store collation")
 
         monkeypatch.setattr(task, "_run_monitor_store_cycle", fail_store_cycle)
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "store"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="store"))
         task.wait_for_activity(timeout=task.next_wait_timeout())
         task.process_once()
         responses = [json.loads(item) for item in ctrl_out.peek_generator()]
@@ -3015,7 +3017,8 @@ def test_task_monitor_collated_external_log_precedes_processor_delete(
     ] == []
     [line] = external_path.read_text(encoding="utf-8").splitlines()
     external = json.loads(line)
-    assert external["record_type"] == "task_log_collated"
+    assert external["schema_version"] == 2
+    assert external["record_type"] == "task_summary"
     assert external["task"]["tid"] == payload["tid"]
     assert task._external_task_log_status.healthy is True
 
@@ -3427,6 +3430,7 @@ def test_task_monitor_deferred_output_retries_on_same_instance_after_transient_f
     store = task._ensure_monitor_store()
     assert store is not None
     report = {
+        "schema_version": 2,
         "report_id": "same-instance-report",
         "record_type": "task_lifetime_report",
         "subject": {"tid": "1778084345905438760"},
@@ -4047,78 +4051,6 @@ def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_dispositi
         task.stop()
 
 
-def test_task_monitor_repairs_raw_deleted_parent_with_child_refs(
-    broker_env,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    config = load_config(
-        {
-            "WEFT_TASK_MONITOR_ENABLED": "1",
-            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_MODE": "delete",
-            "WEFT_TASK_MONITOR_LOG_SINK": "none",
-        }
-    )
-    tid = "1778084345905438734"
-    terminal = update_from_task_log_payload(
-        {
-            "event": "work_completed",
-            "status": "completed",
-            "tid": tid,
-        },
-        queue_name=WEFT_GLOBAL_LOG_QUEUE,
-        message_id=1778084345905438735,
-    )
-    assert terminal is not None
-    task = TaskMonitor(
-        db_path,
-        make_task_monitor_taskspec("1778089999999999875"),
-        config=config,
-    )
-    try:
-        store = task._ensure_monitor_store()
-        assert store is not None
-        store.record_task_log_updates(
-            WEFT_GLOBAL_LOG_QUEUE,
-            (terminal,),
-            checkpoint_message_id=None,
-        )
-        with task._monitor_context().broker() as broker:
-            runner = broker._runner
-            runner.run(
-                "UPDATE weft_monitor_task_collations "
-                "SET raw_deleted_at_ns = ?, updated_at_ns = ? "
-                "WHERE context_key = ? AND tid = ?",
-                (
-                    terminal.message_id + 1,
-                    terminal.message_id + 1,
-                    store.context_key,
-                    tid,
-                ),
-            )
-            runner.commit()
-        assert store.list_deletable_task_log_messages(limit=10) == ()
-        assert store.list_raw_deleted_task_message_refs(limit=10)[0].tid == tid
-
-        repair = task._repair_raw_deleted_task_message_refs(store)
-        second_repair = task._repair_raw_deleted_task_message_refs(store)
-    finally:
-        task.stop()
-
-    assert repair.message_rows_deleted == 1
-    assert second_repair.message_rows_deleted == 0
-    assert store.list_raw_deleted_task_message_refs(limit=10) == ()
-    assert task._last_policy_progress[-1].policy == (
-        TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE
-    )
-    assert task._last_policy_progress[-1].base_reached is True
-
-
 def test_task_monitor_delete_removes_stale_reserved_queue_without_monitor_record(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -4241,13 +4173,13 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
     services = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     services.write(
         json.dumps(
-            {
-                "schema": SERVICE_OWNER_SCHEMA,
-                "service_key": f"managed:{tid}",
-                "service_type": SERVICE_TYPE_MANAGED,
-                "owner_tid": tid,
-                "status": SERVICE_STATUS_ACTIVE,
-            }
+            build_service_owner_payload(
+                service_key=f"managed:{tid}",
+                service_type=SERVICE_TYPE_MANAGED,
+                owner_tid=tid,
+                status=SERVICE_STATUS_ACTIVE,
+                name="managed-service",
+            )
         )
     )
 
@@ -5073,13 +5005,13 @@ def test_task_monitor_dead_task_cleanup_skips_live_service_owner(
     services = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     services.write(
         json.dumps(
-            {
-                "schema": SERVICE_OWNER_SCHEMA,
-                "service_key": f"managed:{tid}",
-                "service_type": SERVICE_TYPE_MANAGED,
-                "owner_tid": tid,
-                "status": SERVICE_STATUS_ACTIVE,
-            }
+            build_service_owner_payload(
+                service_key=f"managed:{tid}",
+                service_type=SERVICE_TYPE_MANAGED,
+                owner_tid=tid,
+                status=SERVICE_STATUS_ACTIVE,
+                name="managed-service",
+            )
         )
     )
 
@@ -5355,13 +5287,14 @@ def test_task_monitor_disposes_old_stale_service_owner_collation(
         assert store is not None
         make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
             json.dumps(
-                {
-                    "schema": SERVICE_OWNER_SCHEMA,
-                    "service_key": manager_service_key(task._monitor_context()),
-                    "service_type": SERVICE_TYPE_MANAGER,
-                    "owner_tid": active_tid,
-                    "status": SERVICE_STATUS_ACTIVE,
-                }
+                build_manager_service_payload(
+                    context=task._monitor_context(),
+                    tid=active_tid,
+                    name="manager",
+                    status=SERVICE_STATUS_ACTIVE,
+                    queues={},
+                    runtime_handle={},
+                )
             )
         )
         update = update_from_task_log_payload(
@@ -5470,13 +5403,14 @@ def test_task_monitor_jsonl_then_delete_disposes_stale_service_owner(
         assert store is not None
         make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
             json.dumps(
-                {
-                    "schema": SERVICE_OWNER_SCHEMA,
-                    "service_key": manager_service_key(task._monitor_context()),
-                    "service_type": SERVICE_TYPE_MANAGER,
-                    "owner_tid": active_tid,
-                    "status": SERVICE_STATUS_ACTIVE,
-                }
+                build_manager_service_payload(
+                    context=task._monitor_context(),
+                    tid=active_tid,
+                    name="manager",
+                    status=SERVICE_STATUS_ACTIVE,
+                    queues={},
+                    runtime_handle={},
+                )
             )
         )
         update = update_from_task_log_payload(
@@ -5658,7 +5592,8 @@ def test_stale_service_owner_disposes_after_maintenance_prune(
                 min_age_seconds=0.0,
             ),
         )
-        assert prune_result.exit_code == 0
+        assert prune_result.errors == ()
+        assert prune_result.failed == 0
         assert prune_result.deleted == 1
         remaining_service_ids = set(_queue_json_rows(services))
         assert superseded_owner_id not in remaining_service_ids
@@ -5803,24 +5738,25 @@ def test_stale_service_owner_disposes_only_after_retention_window(
         services = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
         services.write(
             json.dumps(
-                {
-                    "schema": SERVICE_OWNER_SCHEMA,
-                    "service_key": manager_service_key(task._monitor_context()),
-                    "service_type": SERVICE_TYPE_MANAGER,
-                    "owner_tid": live_manager_tid,
-                    "status": SERVICE_STATUS_ACTIVE,
-                }
+                build_manager_service_payload(
+                    context=task._monitor_context(),
+                    tid=live_manager_tid,
+                    name="manager",
+                    status=SERVICE_STATUS_ACTIVE,
+                    queues={},
+                    runtime_handle={},
+                )
             )
         )
         services.write(
             json.dumps(
-                {
-                    "schema": SERVICE_OWNER_SCHEMA,
-                    "service_key": INTERNAL_SERVICE_KEY_HEARTBEAT,
-                    "service_type": SERVICE_TYPE_MANAGED,
-                    "owner_tid": live_heartbeat_tid,
-                    "status": SERVICE_STATUS_ACTIVE,
-                }
+                build_service_owner_payload(
+                    service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+                    service_type=SERVICE_TYPE_MANAGED,
+                    owner_tid=live_heartbeat_tid,
+                    status=SERVICE_STATUS_ACTIVE,
+                    name="heartbeat",
+                )
             )
         )
         updates = []
@@ -6044,13 +5980,13 @@ def test_task_monitor_stale_service_owner_cleanup_skips_active_owner(
     ctrl_out.write("active-pong")
     make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
         json.dumps(
-            {
-                "schema": SERVICE_OWNER_SCHEMA,
-                "service_key": INTERNAL_SERVICE_KEY_TASK_MONITOR,
-                "service_type": SERVICE_TYPE_MANAGED,
-                "owner_tid": tid,
-                "status": SERVICE_STATUS_ACTIVE,
-            }
+            build_service_owner_payload(
+                service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                service_type=SERVICE_TYPE_MANAGED,
+                owner_tid=tid,
+                status=SERVICE_STATUS_ACTIVE,
+                name="task-monitor",
+            )
         )
     )
 
@@ -7271,9 +7207,9 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
             task.process_once()
         owner_lifecycle_after_drive = task._task_lifecycle
 
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
         ctrl_in.write(
-            json.dumps({"command": CONTROL_STATUS, "request_id": "during-status"})
+            encode_control_message(CONTROL_STATUS, request_id="during-status")
         )
         pong = None
         status = None
@@ -7437,7 +7373,7 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
         assert started.wait(timeout=0.1)
         assert task._builtin_cycle_work_in_flight is not None
 
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
         pong = None
         deadline = time.monotonic() + 3.0
         while pong is None and time.monotonic() < deadline:
@@ -7737,7 +7673,7 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
             raise AssertionError("PING must not run cleanup")
 
         monkeypatch.setattr(task_monitor_mod, "run_task_monitor_cleanup", fail_cleanup)
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "cached"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="cached"))
         deadline = time.monotonic() + 3.0
         while pong is None and time.monotonic() < deadline:
             task.wait_for_activity(timeout=min(0.1, task.next_wait_timeout()))
@@ -7797,7 +7733,7 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
         assert BLOCKING_PROCESSOR_STARTED.wait(timeout=2.0)
         assert task._processor_work_in_flight is not None
 
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
         pong = None
         deadline = time.monotonic() + 3.0
         while pong is None and time.monotonic() < deadline:
@@ -8022,19 +7958,12 @@ def _broker_rows_by_tid(log_queue: Any) -> dict[str, set[int]]:
 
 
 def _live_monitor_store_refs(store: MonitorStore) -> tuple[Any, ...]:
-    """Return all live (non-tombstoned) Monitor-store raw-message refs.
+    """Return all current Monitor-store raw-message refs."""
 
-    Unmarked families come from the deletable listing with no summary or
-    state filter; marked families come from the repair listing. Together
-    they cover every live ref that has a collation parent.
-    """
-
-    unmarked = store.list_deletable_task_log_messages(
+    return store.list_deletable_task_log_messages(
         limit=1000,
         require_summary=False,
     )
-    marked = store.list_raw_deleted_task_message_refs(limit=1000)
-    return (*unmarked, *marked)
 
 
 def _assert_raw_deleted_oracle(
@@ -8484,7 +8413,7 @@ def test_task_monitor_jsonl_lifecycle_deletes_terminal_family_despite_clock_lag(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """Minimized red repro: the lifecycle silently stalls behind message IDs.
+    """Clock lag cannot stall the post-terminal lifecycle behind message IDs.
 
     SimpleBroker hybrid message IDs are durably monotonic: ``meta.last_ts``
     never regresses, and after any clock regression the generator carries
@@ -8506,8 +8435,7 @@ def test_task_monitor_jsonl_lifecycle_deletes_terminal_family_despite_clock_lag(
     tick behind the seeded family's broker-assigned IDs and asserts the
     spec-desired outcome: a terminal, fully ingested family processed at
     high-water with a healthy sink must be summarized, exported, and its
-    raw rows deleted. It is EXPECTED RED until Task A3 fixes the
-    cross-domain comparison.
+    raw rows deleted. This pins the repaired cross-domain comparison.
 
     Spec: [MF-5], [OBS.13], [OBS.17]
     """
@@ -8939,31 +8867,6 @@ def _ingest_live_rows_without_deletion(
     return last_message_id
 
 
-def _force_raw_deleted_marks(
-    store: MonitorStore,
-    tids: tuple[str, ...],
-    marked_at_ns: int,
-) -> None:
-    """Set ``raw_deleted_at_ns`` directly, simulating pre-fix vacuous damage.
-
-    The fixed runtime can no longer produce a marked family whose raw rows
-    survive (that is the WS-A invariant), so production's damage shape is
-    constructed with the same direct UPDATE the Monitor-store unit tests
-    use (tests/core/test_monitor_store.py repair-listing test).
-    """
-
-    with store._context.broker() as broker:
-        runner = broker._runner
-        for tid in tids:
-            runner.run(
-                "UPDATE weft_monitor_task_collations "
-                "SET raw_deleted_at_ns = ?, updated_at_ns = ? "
-                "WHERE context_key = ? AND tid = ?",
-                (marked_at_ns, marked_at_ns, store.context_key, tid),
-            )
-        runner.commit()
-
-
 def _run_quiet_store_cycle(task: TaskMonitor, *, cycle: str) -> None:
     """Run one real collated-store cycle and require zero recorded errors."""
 
@@ -9231,175 +9134,6 @@ def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_row
         task.stop()
 
 
-def test_task_monitor_jsonl_converges_marked_families_with_refs_and_rows(
-    broker_env,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    """A5(1): the production damage state converges, then stays converged.
-
-    Constructs production's post-defect shape directly: terminal families,
-    summaries already emitted, collations marked ``raw_deleted_at_ns``,
-    store refs present, raw broker rows present (2,068 families in the
-    2026-06-10 investigation). The repair slice must re-drive the marked
-    families' refs through real exact deletion: rows and refs converge to
-    gone within a bounded number of cycles, the raw-deleted oracle holds
-    afterward, further cycles are no-ops, and no family is re-exported
-    (their summaries already landed before the damage).
-
-    Spec: [MF-5], [OBS.13], [OBS.17]
-    """
-
-    db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    external_path = tmp_path / "task-lifetime.jsonl"
-    config = _jsonl_lifecycle_config(external_path)
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    base_tid = time.time_ns()
-    tids = (str(base_tid), str(base_tid + 1))
-    _seed_terminal_family_backlog(log_queue, tids)
-
-    task = TaskMonitor(
-        db_path,
-        make_task_monitor_taskspec(str(base_tid + 100)),
-        config=config,
-    )
-    try:
-        store = task._ensure_monitor_store()
-        assert store is not None
-        marked_at_ns = _ingest_live_rows_without_deletion(store, log_queue, tids)
-        for tid in tids:
-            store.mark_summary_emitted(tid, marked_at_ns)
-        _force_raw_deleted_marks(store, tids, marked_at_ns)
-        # The exact production probe shape: marked families, live refs,
-        # live raw rows, summaries emitted, zero errors anywhere.
-        for tid in tids:
-            record = store.get_task(tid)
-            assert record is not None
-            assert record.terminal_seen is True
-            assert record.raw_deleted_at_ns is not None
-            assert record.summary_emitted_at_ns is not None
-            assert _broker_rows_by_tid(log_queue).get(tid)
-        assert _seeded_refs_remaining(store, tids)
-
-        converged_at: int | None = None
-        for index in range(6):
-            _run_quiet_store_cycle(task, cycle=f"cycle {index + 1}")
-            if not _seeded_rows_remaining(
-                log_queue, tids
-            ) and not _seeded_refs_remaining(store, tids):
-                converged_at = index + 1
-                break
-        assert converged_at is not None, (
-            "marked-but-undeleted families did not converge: rows "
-            f"{_broker_rows_by_tid(log_queue)} refs "
-            f"{[(ref.tid, ref.message_id) for ref in _live_monitor_store_refs(store)]}"
-        )
-        _assert_raw_deleted_oracle(store, log_queue, tids, cycle="converged")
-        # Healing must not re-export already-summarized families.
-        assert _external_report_tids(external_path) == []
-
-        # Idempotence: further cycles change nothing and record no errors.
-        for extra in range(2):
-            _run_quiet_store_cycle(task, cycle=f"idempotent cycle {extra + 1}")
-            assert not _seeded_rows_remaining(log_queue, tids)
-            assert not _seeded_refs_remaining(store, tids)
-            _assert_raw_deleted_oracle(
-                store,
-                log_queue,
-                tids,
-                cycle=f"idempotent cycle {extra + 1}",
-            )
-        assert _external_report_tids(external_path) == []
-    finally:
-        task.stop()
-
-
-@pytest.mark.parametrize("disposed", [False, True])
-def test_task_monitor_repair_path_exports_summary_before_deleting_rows(
-    broker_env,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    disposed: bool,
-) -> None:
-    """A5(2): repair-path audit pin — summary/JSONL before raw deletion.
-
-    A family marked raw-deleted WITH live refs but WITHOUT a summary may
-    only lose its raw rows after its summary/JSONL export lands. In the
-    undisposed shape the summary stage (which runs before the repair
-    slice) exports the family and deletion follows. In the disposed shape
-    the summary stage can never select the family (dispositions exclude
-    it), so the summary-gated repair selection must hold the rows
-    indefinitely rather than silently destroying unexported data — the
-    pre-fix repair selection deleted them on the first destructive pass.
-
-    Spec: [MF-5], [OBS.13], [OBS.17]
-    """
-
-    db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    external_path = tmp_path / "task-lifetime.jsonl"
-    config = _jsonl_lifecycle_config(external_path)
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    tid = str(time.time_ns())
-    _seed_terminal_family_backlog(log_queue, (tid,))
-
-    task = TaskMonitor(
-        db_path,
-        make_task_monitor_taskspec(str(time.time_ns())),
-        config=config,
-    )
-    try:
-        store = task._ensure_monitor_store()
-        assert store is not None
-        marked_at_ns = _ingest_live_rows_without_deletion(store, log_queue, (tid,))
-        _force_raw_deleted_marks(store, (tid,), marked_at_ns)
-        if disposed:
-            store.mark_family_disposed(
-                tid,
-                marked_at_ns,
-                disposition_reason="terminal",
-            )
-        record = store.get_task(tid)
-        assert record is not None
-        assert record.raw_deleted_at_ns is not None
-        assert record.summary_emitted_at_ns is None
-        assert _seeded_refs_remaining(store, (tid,))
-
-        for index in range(4):
-            _run_quiet_store_cycle(task, cycle=f"cycle {index + 1}")
-            # The audit invariant, checked at every cycle boundary: raw
-            # rows may only be gone once the JSONL export landed.
-            if not _broker_rows_by_tid(log_queue).get(tid):
-                assert tid in _external_report_tids(external_path), (
-                    f"cycle {index + 1}: raw rows deleted before the "
-                    "family's summary/JSONL export"
-                )
-
-        rows_remaining = sorted(_broker_rows_by_tid(log_queue).get(tid, set()))
-        if disposed:
-            # No summary owner exists for a disposed-unsummarized family;
-            # the gate must hold its rows and refs rather than lose them.
-            assert len(rows_remaining) == 2
-            assert _seeded_refs_remaining(store, (tid,))
-            assert tid not in _external_report_tids(external_path)
-        else:
-            # Summary stage exports first, repair deletes afterward.
-            assert rows_remaining == []
-            assert not _seeded_refs_remaining(store, (tid,))
-            assert _external_report_tids(external_path).count(tid) == 1
-            record = store.get_task(tid)
-            assert record is not None
-            assert record.summary_emitted_at_ns is not None
-            _assert_raw_deleted_oracle(store, log_queue, (tid,), cycle="converged")
-    finally:
-        task.stop()
-
-
 @pytest.mark.parametrize("disposed", [False, True])
 def test_task_monitor_orphan_path_exports_summary_before_deleting_rows(
     broker_env,
@@ -9496,19 +9230,86 @@ def _read_status_reply(
     *,
     request_id: str,
 ) -> dict[str, Any]:
-    """Round-trip one STATUS control request through the live monitor."""
+    """Round-trip STATUS through the same multi-turn loop used in production."""
 
-    ctrl_in.write(json.dumps({"command": CONTROL_STATUS, "request_id": request_id}))
-    task.wait_for_activity(timeout=task.next_wait_timeout())
-    task.process_once()
-    drive_task_monitor_until_idle(task)
-    responses = [json.loads(item) for item in ctrl_out.peek_generator()]
-    return next(
-        response
-        for response in responses
-        if response.get("command") == CONTROL_STATUS
-        and response.get("request_id") == request_id
+    ctrl_in.write(encode_control_message(CONTROL_STATUS, request_id=request_id))
+    deadline = time.monotonic() + CONTROL_REPLY_TIMEOUT_SECONDS
+    attempts = 0
+    responses: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        attempts += 1
+        remaining = deadline - time.monotonic()
+        wait_timeout = min(
+            CONTROL_REPLY_WAIT_SLICE_SECONDS,
+            max(0.0, task.next_wait_timeout()),
+            remaining,
+        )
+        task.wait_for_activity(timeout=wait_timeout)
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        response = next(
+            (
+                candidate
+                for candidate in responses
+                if candidate.get("command") == CONTROL_STATUS
+                and candidate.get("request_id") == request_id
+            ),
+            None,
+        )
+        if response is not None:
+            return response
+
+    pytest.fail(
+        f"Task monitor did not answer STATUS {request_id!r} after {attempts} turns; "
+        f"pending_control={ctrl_in.peek_one()!r}; responses={responses!r}; "
+        f"{_task_monitor_idle_diagnostics(task)}"
     )
+
+
+def test_status_reply_helper_drives_past_zero_timeout_local_turn(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A due local turn cannot make a pending STATUS request disappear."""
+
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": False,
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999961904")
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    task = TaskMonitor(db_path, spec, config=config)
+    real_next_wait_timeout = task.next_wait_timeout
+    first_wait = True
+
+    def next_wait_timeout() -> float:
+        nonlocal first_wait
+        if first_wait:
+            first_wait = False
+            return 0.0
+        return real_next_wait_timeout()
+
+    monkeypatch.setattr(task, "next_wait_timeout", next_wait_timeout)
+    try:
+        task.process_once()
+        task._next_inactive_probe_at = time.monotonic() + 60.0
+
+        status = _read_status_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            request_id="status-after-local-turn",
+        )
+
+        assert status["request_id"] == "status-after-local-turn"
+        assert status["role"] == "task_monitor"
+    finally:
+        task.stop()
 
 
 def _maintenance_service_owner_payload(

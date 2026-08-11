@@ -50,11 +50,7 @@ from weft.core.spec_store import (
 from weft.core.spec_store import (
     resolve_named_spec as core_resolve_named_spec,
 )
-from weft.core.taskspec import (
-    apply_bundle_root_to_taskspec_payload,
-    bundle_root_from_taskspec_payload,
-    validate_taskspec,
-)
+from weft.core.taskspec import validate_taskspec
 from weft.core.taskspec.parameterization import validate_parameterization_adapter
 from weft.core.taskspec.run_input import validate_run_input_adapter
 
@@ -421,14 +417,14 @@ def validate_spec_source(
         bundle_root = (
             resolved_source.parent
             if resolved_source.name == spec_entry_filename(SPEC_TYPE_TASK)
-            else bundle_root_from_taskspec_payload(payload)
+            else None
         )
     else:
         payload = deepcopy(source)
         effective_type = spec_type or (
             SPEC_TYPE_PIPELINE if "stages" in payload else SPEC_TYPE_TASK
         )
-        bundle_root = bundle_root_from_taskspec_payload(payload)
+        bundle_root = None
 
     if effective_type == SPEC_TYPE_TASK:
         result = validate_task_spec_text(
@@ -516,10 +512,17 @@ def _validate_task_spec_payload(
 ) -> SpecValidationResult:
     visible_payload = deepcopy(payload)
     validation_payload = deepcopy(payload)
-    apply_bundle_root_to_taskspec_payload(validation_payload, bundle_root)
+    validation_bundle_root = (
+        str(Path(bundle_root).expanduser().resolve())
+        if bundle_root is not None
+        else None
+    )
 
     try:
-        _validate_taskspec_parameterization(validation_payload)
+        _validate_taskspec_parameterization(
+            validation_payload,
+            bundle_root=validation_bundle_root,
+        )
     except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
         return _validation_failure(
             spec_type=SPEC_TYPE_TASK,
@@ -530,7 +533,10 @@ def _validate_task_spec_payload(
         )
 
     try:
-        _validate_taskspec_run_input(validation_payload)
+        _validate_taskspec_run_input(
+            validation_payload,
+            bundle_root=validation_bundle_root,
+        )
     except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
         return _validation_failure(
             spec_type=SPEC_TYPE_TASK,
@@ -543,7 +549,8 @@ def _validate_task_spec_payload(
     if load_runner:
         try:
             materialized_environment = validate_taskspec_runner_environment(
-                validation_payload
+                validation_payload,
+                bundle_root=validation_bundle_root,
             )
         except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
             return _validation_failure(
@@ -560,6 +567,7 @@ def _validate_task_spec_payload(
                 load_runner=True,
                 preflight=preflight,
                 materialized_environment=materialized_environment,
+                bundle_root=validation_bundle_root,
             )
         except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
             return _validation_failure(
@@ -575,6 +583,7 @@ def _validate_task_spec_payload(
                 validation_payload,
                 load_runtime=True,
                 preflight=preflight,
+                bundle_root=validation_bundle_root,
             )
         except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
             return _validation_failure(
@@ -591,6 +600,7 @@ def _validate_task_spec_payload(
                     validation_payload,
                     load_runtime=True,
                     preflight=preflight,
+                    bundle_root=validation_bundle_root,
                 )
             except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-318] exception
                 return _validation_failure(
@@ -608,7 +618,11 @@ def _validate_task_spec_payload(
     )
 
 
-def _validate_taskspec_parameterization(payload: dict[str, Any]) -> None:
+def _validate_taskspec_parameterization(
+    payload: dict[str, Any],
+    *,
+    bundle_root: str | Path | None,
+) -> None:
     spec = payload.get("spec")
     if not isinstance(spec, dict):
         return
@@ -619,11 +633,15 @@ def _validate_taskspec_parameterization(payload: dict[str, Any]) -> None:
     if isinstance(adapter_ref, str):
         validate_parameterization_adapter(
             adapter_ref,
-            bundle_root=bundle_root_from_taskspec_payload(payload),
+            bundle_root=bundle_root,
         )
 
 
-def _validate_taskspec_run_input(payload: dict[str, Any]) -> None:
+def _validate_taskspec_run_input(
+    payload: dict[str, Any],
+    *,
+    bundle_root: str | Path | None,
+) -> None:
     spec = payload.get("spec")
     if not isinstance(spec, dict):
         return
@@ -634,7 +652,7 @@ def _validate_taskspec_run_input(payload: dict[str, Any]) -> None:
     if isinstance(adapter_ref, str):
         validate_run_input_adapter(
             adapter_ref,
-            bundle_root=bundle_root_from_taskspec_payload(payload),
+            bundle_root=bundle_root,
         )
 
 

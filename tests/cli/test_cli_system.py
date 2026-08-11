@@ -165,6 +165,8 @@ def test_system_prune_dry_run_json_deletes_nothing(workdir) -> None:
     rc, out, err = run_cli(
         "system",
         "prune",
+        "--family",
+        "runtime-state",
         "--dry-run",
         "--json",
         "--min-age",
@@ -201,6 +203,8 @@ def test_system_prune_apply_deletes_candidate(workdir) -> None:
     rc, out, err = run_cli(
         "system",
         "prune",
+        "--family",
+        "runtime-state",
         "--apply",
         "--json",
         "--min-age",
@@ -222,10 +226,44 @@ def test_system_prune_apply_deletes_candidate(workdir) -> None:
     assert new_id in remaining_ids
 
 
+def test_system_prune_apply_requires_explicit_family_before_mutation(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    old_id = _write_queue_json(
+        context,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "111", "full": "1770000000000000502"},
+    )
+    new_id = _write_queue_json(
+        context,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "222", "full": "1770000000000000502"},
+    )
+
+    rc, _out, err = run_cli(
+        "system",
+        "prune",
+        "--apply",
+        "--json",
+        "--min-age",
+        "0",
+        "--queue",
+        "tid-mappings",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 2
+    assert "Missing option '--family'" in err
+    assert _read_queue_ids(context, WEFT_TID_MAPPINGS_QUEUE) >= {old_id, new_id}
+
+
 def test_system_prune_rejects_invalid_options(workdir) -> None:
     rc, _out, err = run_cli(
         "system",
         "prune",
+        "--family",
+        "runtime-state",
         "--queue",
         "nonsense",
         "--context",
@@ -239,6 +277,8 @@ def test_system_prune_rejects_invalid_options(workdir) -> None:
     rc, _out, err = run_cli(
         "system",
         "prune",
+        "--family",
+        "runtime-state",
         "--keep-recent-per-key",
         "0",
         "--context",

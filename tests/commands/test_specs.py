@@ -196,6 +196,11 @@ def test_validate_spec_source_contains_open_validation_probe_failures_by_stage(
             "type": "agent",
             "agent": {
                 "runtime": agent_runtime,
+                **(
+                    {"authority_class": "general"}
+                    if agent_runtime == "provider_cli"
+                    else {}
+                ),
                 "runtime_config": (
                     {"provider": "codex", "executable": "unused-provider"}
                     if agent_runtime == "provider_cli"

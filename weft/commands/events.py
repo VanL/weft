@@ -22,6 +22,7 @@ from weft._constants import (
 from weft.commands.types import TaskEvent
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.task_evidence import queue_names_for_tid
 from weft.helpers import iter_queue_entries, iter_queue_json_entries
 
 from ._result_wait import (
@@ -35,7 +36,6 @@ from .result import (
     await_task_result,
 )
 from .submission import normalize_tid
-from .task_evidence import queue_names_for_tid
 
 
 def _task_event_type(payload: dict[str, object]) -> str:

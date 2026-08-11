@@ -24,9 +24,6 @@ from .model import (
     SpecSection,
     StateSection,
     TaskSpec,
-    apply_bundle_root_to_taskspec_payload,
-    bundle_root_from_taskspec_payload,
-    normalize_taskspec_bundle_root,
     resolve_taskspec_payload,
     rewrite_tid_in_io,
     validate_taskspec,
@@ -52,6 +49,11 @@ from .run_input import (
     validate_run_input_adapter,
     validate_run_input_adapter_ref,
 )
+from .transport import (
+    decode_taskspec_transport_payload,
+    encode_taskspec_transport_payload,
+    validate_taskspec_payload,
+)
 
 __all__ = [
     "RUN_COMMAND_RESERVED_OPTION_NAMES",
@@ -74,15 +76,14 @@ __all__ = [
     "SpecSection",
     "StateSection",
     "TaskSpec",
-    "apply_bundle_root_to_taskspec_payload",
-    "bundle_root_from_taskspec_payload",
+    "decode_taskspec_transport_payload",
+    "encode_taskspec_transport_payload",
     "ensure_json_serializable_work_payload",
     "invoke_parameterization_adapter",
     "invoke_run_input_adapter",
     "materialize_taskspec_template",
     "normalize_declared_option_name",
     "normalize_run_input_value",
-    "normalize_taskspec_bundle_root",
     "parse_declared_option_args",
     "parse_declared_parameterization_args",
     "parse_declared_run_input_args",
@@ -93,4 +94,5 @@ __all__ = [
     "validate_run_input_adapter",
     "validate_run_input_adapter_ref",
     "validate_taskspec",
+    "validate_taskspec_payload",
 ]

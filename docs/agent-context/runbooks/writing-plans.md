@@ -135,7 +135,7 @@ Status/Source specs/Superseded by, per the plan-metadata test); a
 post-hoc class claim with no mid-flight escalator history is a review
 smell.
 
-- Put plans in `docs/plans/` — no other location (not `docs/superpowers/plans/`,
+- Put plans in `docs/plans/` — no other location (not docs/superpowers/plans,
   not project subdirectories, not alongside specs).
 - **Always** use a date-prefixed filename: `YYYY-MM-DD-<descriptive-name>.md`.
   The date is the creation date of the plan.

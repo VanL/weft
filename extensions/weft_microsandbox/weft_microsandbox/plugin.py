@@ -393,8 +393,10 @@ class MicrosandboxRunnerPlugin:
         self,
         taskspec_payload: Mapping[str, Any],
         *,
+        bundle_root: str | None = None,
         preflight: bool = False,
     ) -> None:
+        del bundle_root
         parse_options_from_payload(taskspec_payload)
         if preflight:
             MicrosandboxRuntime().check_preflight()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -37,6 +38,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
+    TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -51,26 +53,30 @@ from weft.commands._spawn_submission import (
 )
 from weft.commands.run import (
     RunUsageError,
-    _build_manager_spec,
     _collect_interactive_queue_output,
     _delete_spawn_request,
     _enqueue_taskspec,
-    _run_inline,
-    _run_pipeline,
-    _run_spec_via_manager,
-    _select_active_manager,
-    _start_manager,
+    _execute_inline,
+    _execute_pipeline,
+    _execute_spec_via_manager,
     _wait_for_task_completion,
     render_run_execution_result,
 )
 from weft.commands.types import RunExecutionResult
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
+from weft.core.control_messages import parse_control_request
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import open_monitor_store
 from weft.core.service_convergence import build_manager_service_payload
-from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+from weft.core.taskspec import (
+    IOSection,
+    SpecSection,
+    StateSection,
+    TaskSpec,
+    decode_taskspec_transport_payload,
+)
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
@@ -278,6 +284,8 @@ def _select_active_manager_while_answering_probe(
             "ctrl_in": ctrl_in_name,
             "ctrl_out": ctrl_out_name,
             "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+            "weft_context": str(ctx.root),
+            "should_stop": False,
         }
         if pong_fields is not None:
             pong_payload.update(pong_fields)
@@ -292,7 +300,7 @@ def _select_active_manager_while_answering_probe(
 
     monkeypatch.setattr(core_manager_runtime, "send_keyed_ping_probe", _fake_probe)
 
-    return core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+    return core_manager_runtime.select_active_manager(ctx, probe_stale=True)
 
 
 def _read_all_queue_messages(
@@ -474,7 +482,9 @@ class _InteractiveExitQueue:
 
     def write(self, message: str) -> None:
         if self._messages is not None:
-            self._messages.append(message)
+            request = parse_control_request(message)
+            assert request is not None
+            self._messages.append(request.command)
 
     def close(self) -> None:
         self.close_count += 1
@@ -871,9 +881,9 @@ def _wait_for_task_snapshot(
     tid: str,
     *,
     timeout: float = 10.0,
-) -> task_cmd.status_cmd.TaskSnapshot:
+) -> task_cmd.system_cmd.TaskSnapshot:
     deadline = time.time() + timeout
-    last_snapshot: task_cmd.status_cmd.TaskSnapshot | None = None
+    last_snapshot: task_cmd.system_cmd.TaskSnapshot | None = None
     while time.time() < deadline:
         snapshot = task_cmd.task_status(tid, context_path=root)
         if snapshot is not None:
@@ -892,9 +902,9 @@ def _wait_for_task_status(
     *,
     expected_status: str,
     timeout: float = 30.0,
-) -> task_cmd.status_cmd.TaskSnapshot:
+) -> task_cmd.system_cmd.TaskSnapshot:
     deadline = time.time() + timeout
-    last_snapshot: task_cmd.status_cmd.TaskSnapshot | None = None
+    last_snapshot: task_cmd.system_cmd.TaskSnapshot | None = None
     while time.time() < deadline:
         snapshot = task_cmd.task_status(tid, context_path=root)
         if snapshot is not None:
@@ -1438,6 +1448,33 @@ class _FakeManagerSpec:
         return "{}"
 
 
+def test_build_manager_process_command_preserves_bundle_transport_provenance(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    taskspec = _make_taskspec("1777000000000000123")
+    bundle_root = tmp_path / "manager-bundle"
+    bundle_root.mkdir()
+    taskspec.set_bundle_root(bundle_root)
+    invocation = core_manager_runtime.ManagerRuntimeInvocation(
+        task_cls_path="weft.core.manager.Manager",
+        tid=str(taskspec.tid),
+        spec=taskspec,
+    )
+
+    command = core_manager_runtime._build_manager_process_command(
+        context,
+        invocation,
+    )
+
+    payload = json.loads(base64.b64decode(command[5]).decode("utf-8"))
+    assert payload[TASKSPEC_BUNDLE_ROOT_FIELD] == str(bundle_root.resolve())
+    decoded = decode_taskspec_transport_payload(payload)
+    assert decoded.get_bundle_root() == str(bundle_root.resolve())
+    assert TASKSPEC_BUNDLE_ROOT_FIELD not in taskspec.model_dump(mode="json")
+
+
 class _FakePopen:
     def __init__(
         self,
@@ -1521,7 +1558,7 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
         _unexpected_terminate,
     )
 
-    record, started_here, handle = _start_manager(ctx, verbose=False)
+    record, started_here, handle = core_manager_runtime.start_manager(ctx)
 
     assert record == competing_record
     assert started_here is False
@@ -1584,7 +1621,7 @@ def test_start_manager_detaches_registered_startup_manager_after_losing_selectio
         ),
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: True,
     )
     monkeypatch.setattr(
@@ -1603,7 +1640,7 @@ def test_start_manager_detaches_registered_startup_manager_after_losing_selectio
         lambda path: None,
     )
 
-    record, started_here, handle = _start_manager(ctx, verbose=False)
+    record, started_here, handle = core_manager_runtime.start_manager(ctx)
 
     assert record == competing_record
     assert started_here is False
@@ -1661,7 +1698,7 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
         lambda context, *, manager_tid, deadline: competing_record,
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: False,
     )
     monotonic_values = iter([0.0, 0.0, 0.1, 0.2])
@@ -1678,7 +1715,7 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
         lambda path: cleaned_paths.append(path),
     )
 
-    record, started_here, handle = _start_manager(ctx, verbose=False)
+    record, started_here, handle = core_manager_runtime.start_manager(ctx)
 
     assert record == competing_record
     assert started_here is False
@@ -1741,7 +1778,7 @@ def test_start_manager_adopts_competing_manager_after_startup_timeout_settles(
         _settle,
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: True,
     )
     monotonic_values = iter([0.0, 0.0, 11.0, 11.0])
@@ -1758,7 +1795,7 @@ def test_start_manager_adopts_competing_manager_after_startup_timeout_settles(
         lambda path: cleaned_paths.append(path),
     )
 
-    record, started_here, handle = _start_manager(ctx, verbose=False)
+    record, started_here, handle = core_manager_runtime.start_manager(ctx)
 
     assert record == competing_record
     assert started_here is False
@@ -1827,7 +1864,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
         ),
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: True,
     )
     monkeypatch.setattr(
@@ -1839,7 +1876,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
         lambda seconds: None,
     )
 
-    record, started_here, handle = _start_manager(ctx, verbose=False)
+    record, started_here, handle = core_manager_runtime.start_manager(ctx)
 
     assert record["tid"] == invocation.tid
     assert record["runtime_handle"] == _host_runtime_handle(fake_process.pid)
@@ -1906,7 +1943,7 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
         ),
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: True,
     )
     monkeypatch.setattr(
@@ -1922,7 +1959,7 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
         lambda seconds: None,
     )
 
-    record, started_here, handle = _start_manager(ctx, verbose=False)
+    record, started_here, handle = core_manager_runtime.start_manager(ctx)
 
     assert record["tid"] == invocation.tid
     assert record["runtime_handle"] == _host_runtime_handle(fake_process.pid)
@@ -1986,7 +2023,7 @@ def test_start_manager_rejects_ack_failure_before_success_signal(
         ),
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: True,
     )
     monkeypatch.setattr(
@@ -1995,13 +2032,17 @@ def test_start_manager_rejects_ack_failure_before_success_signal(
     )
 
     with pytest.raises(ManagerStartFailed, match="success signal was not sent"):
-        _start_manager(ctx, verbose=False)
+        core_manager_runtime.start_manager(ctx)
 
 
 def test_manager_start_record_matches_external_supervisor_launch_pid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("weft.core.manager_runtime._is_pid_alive", lambda pid: True)
+    monkeypatch.setattr("weft.core.manager_runtime.pid_is_live", lambda pid: True)
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.runtime_liveness_from_registered_probe",
+        lambda handle: "unknown",
+    )
 
     assert core_manager_runtime._manager_start_record_matches_launch(
         {
@@ -2060,7 +2101,7 @@ def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(
     )
 
     with pytest.raises(ManagerStartFailed) as exc_info:
-        _start_manager(ctx, verbose=False)
+        core_manager_runtime.start_manager(ctx)
 
     message = str(exc_info.value)
     assert "return code 23" in message
@@ -2087,7 +2128,7 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
         calls.append("enqueue")
         return 1775679597297004544
 
-    def _fake_ensure(context_arg, *, verbose):
+    def _fake_ensure(context_arg):
         calls.append("ensure")
         return (
             {"tid": "1775679596841701376", "ctrl_in": "Tmanager.ctrl_in"},
@@ -2096,9 +2137,9 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
         )
 
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _fake_enqueue)
-    monkeypatch.setattr("weft.commands.run._ensure_manager", _fake_ensure)
+    monkeypatch.setattr("weft.core.manager_runtime.ensure_manager", _fake_ensure)
 
-    exit_code = _run_inline(
+    execution = _execute_inline(
         command=(),
         function_target="tests.tasks.sample_targets:echo_payload",
         args=(),
@@ -2118,7 +2159,7 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
         autostart_enabled=True,
     )
 
-    assert exit_code == 0
+    assert execution.submission_error is None
     assert calls == ["enqueue", "ensure"]
 
 
@@ -2181,8 +2222,8 @@ def test_execute_run_inline_returns_structured_result_without_rendering(
         lambda context_arg, taskspec, work_payload: 1775679597297004544,
     )
     monkeypatch.setattr(
-        "weft.commands.run._ensure_manager",
-        lambda context_arg, *, verbose: (
+        "weft.core.manager_runtime.ensure_manager",
+        lambda context_arg: (
             {"tid": "1775679596841701376", "ctrl_in": "Tmanager.ctrl_in"},
             False,
             None,
@@ -2210,7 +2251,6 @@ def test_execute_run_inline_returns_structured_result_without_rendering(
         wait=False,
         json_output=False,
         verbose=False,
-        monitor=False,
         persistent_override=None,
         autostart_enabled=True,
     )
@@ -2294,7 +2334,7 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     try:
-        exit_code = _run_inline(
+        execution = _execute_inline(
             command=(),
             function_target="tests.tasks.sample_targets:provide_payload",
             args=(),
@@ -2314,7 +2354,7 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
             autostart_enabled=True,
         )
 
-        assert exit_code == 0
+        assert execution.submission_error is None
         tid = submitted_tid["value"]
         snapshot = _wait_for_task_status(root, tid, expected_status="completed")
         assert snapshot.tid == tid
@@ -2350,7 +2390,7 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     try:
-        exit_code = _run_inline(
+        execution = _execute_inline(
             command=(),
             function_target="tests.tasks.sample_targets:provide_payload",
             args=(),
@@ -2370,7 +2410,7 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
             autostart_enabled=True,
         )
 
-        assert exit_code == 0
+        assert execution.status == "completed"
         tid = submitted_tid["value"]
         snapshot = _wait_for_task_status(root, tid, expected_status="completed")
         assert snapshot.tid == tid
@@ -2425,7 +2465,7 @@ def test_enqueue_template_uses_committed_submission_id(
         captured["kwargs"] = kwargs
         return committed_id
 
-    monkeypatch.setattr(run_cmd, "_generate_tid", fail_preallocation)
+    monkeypatch.setattr(core_manager_runtime, "generate_tid", fail_preallocation)
     monkeypatch.setattr(run_cmd, "submit_spawn_request", fake_submit)
 
     submitted_id = _enqueue_taskspec(context, taskspec, None)
@@ -2835,11 +2875,11 @@ def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
     monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "weft.commands.run._ensure_manager",
-        lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
+        "weft.core.manager_runtime.ensure_manager",
+        lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    exit_code = _run_inline(
+    execution = _execute_inline(
         command=(),
         function_target="tests.tasks.sample_targets:echo_payload",
         args=(),
@@ -2864,7 +2904,7 @@ def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
         assert queue.read_one() is None
     finally:
         queue.close()
-    assert exit_code == 1
+    assert execution.submission_error == "Error submitting task: boom"
 
 
 def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
@@ -2893,11 +2933,11 @@ def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "weft.commands.run._ensure_manager",
-        lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
+        "weft.core.manager_runtime.ensure_manager",
+        lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    exit_code = _run_spec_via_manager(
+    execution = _execute_spec_via_manager(
         spec_path,
         name=None,
         verbose=False,
@@ -2912,7 +2952,7 @@ def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
         assert queue.read_one() is None
     finally:
         queue.close()
-    assert exit_code == 1
+    assert execution.submission_error == "Error submitting TaskSpec: boom"
 
 
 def test_execute_spec_contains_unexpected_command_boundary_failure(
@@ -2984,7 +3024,7 @@ def test_run_spec_via_manager_returns_timeout_exit_code(
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid, verbose: (None, False, None),
+        lambda context, *, submitted_tid: (None, False, None),
     )
     monkeypatch.setattr(
         "weft.commands.run._enqueue_taskspec",
@@ -3002,7 +3042,7 @@ def test_run_spec_via_manager_returns_timeout_exit_code(
     )
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
-    exit_code = _run_spec_via_manager(
+    execution = _execute_spec_via_manager(
         spec_path,
         name=None,
         verbose=False,
@@ -3012,7 +3052,8 @@ def test_run_spec_via_manager_returns_timeout_exit_code(
         persistent_override=None,
     )
 
-    assert exit_code == 124
+    assert execution.status == "timeout"
+    assert execution.error_message == "Timed out waiting for task"
 
 
 def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
@@ -3058,12 +3099,12 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid, verbose: (None, False, None),
+        lambda context, *, submitted_tid: (None, False, None),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
-    exit_code = _run_spec_via_manager(
+    execution = _execute_spec_via_manager(
         spec_path,
         name="mayor",
         verbose=False,
@@ -3073,7 +3114,7 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
         persistent_override=None,
     )
 
-    assert exit_code == 0
+    assert execution.submission_error is None
     assert captured["name"] == "mayor"
     assert captured["metadata"][INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] == "mayor"
 
@@ -3120,12 +3161,12 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid, verbose: (None, False, None),
+        lambda context, *, submitted_tid: (None, False, None),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
-    exit_code = _run_spec_via_manager(
+    execution = _execute_spec_via_manager(
         spec_path,
         name="mayor",
         verbose=False,
@@ -3135,7 +3176,7 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
         persistent_override=None,
     )
 
-    assert exit_code == 0
+    assert execution.submission_error is None
     assert captured["name"] == "mayor"
     assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in captured["metadata"]
 
@@ -3170,7 +3211,7 @@ def test_run_spec_via_manager_rejects_reserved_internal_name_prefix(
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
 
     with pytest.raises(RunUsageError, match="reserved for internal runtime services"):
-        _run_spec_via_manager(
+        _execute_spec_via_manager(
             spec_path,
             name="_weft.heartbeat",
             verbose=False,
@@ -3214,12 +3255,12 @@ def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
     )
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
-        "weft.commands.run._ensure_manager",
-        lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
+        "weft.core.manager_runtime.ensure_manager",
+        lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
     with pytest.raises(RuntimeError, match="boom"):
-        _run_pipeline(
+        _execute_pipeline(
             pipeline_path,
             name=None,
             pipeline_input=None,
@@ -3282,12 +3323,12 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid, verbose: (None, False, None),
+        lambda context, *, submitted_tid: (None, False, None),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
-    exit_code = _run_pipeline(
+    execution = _execute_pipeline(
         pipeline_path,
         name="nightly",
         pipeline_input=None,
@@ -3298,7 +3339,7 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
         autostart_enabled=True,
     )
 
-    assert exit_code == 0
+    assert execution.submission_error is None
     assert captured["name"] == "nightly"
     assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in captured["metadata"]
 
@@ -3336,15 +3377,15 @@ def test_run_pipeline_without_input_does_not_inject_work_envelope_start(
     )
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
-        "weft.commands.run._ensure_manager",
-        lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
+        "weft.core.manager_runtime.ensure_manager",
+        lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     monkeypatch.setattr(
         "weft.commands.run._delete_spawn_request", lambda *args, **kwargs: None
     )
 
     with pytest.raises(RuntimeError, match="rollback could not be confirmed"):
-        _run_pipeline(
+        _execute_pipeline(
             pipeline_path,
             name=None,
             pipeline_input=None,
@@ -3370,7 +3411,7 @@ def test_build_manager_spec_uses_tid_scoped_control_queues(tmp_path: Path) -> No
     ctx = build_context(spec_context=root)
     tid = "1775622400000000001"
 
-    spec = _build_manager_spec(ctx, tid)
+    spec = core_manager_runtime.build_manager_spec(ctx, tid)
 
     assert spec.io.control["ctrl_in"] == f"T{tid}.ctrl_in"
     assert spec.io.control["ctrl_out"] == f"T{tid}.ctrl_out"
@@ -3402,7 +3443,7 @@ def test_select_active_manager_ignores_zombie_registry_pid(
         finally:
             registry.close()
 
-        assert _select_active_manager(ctx) is None
+        assert core_manager_runtime.select_active_manager(ctx) is None
     finally:
         process.wait()
 
@@ -3428,7 +3469,7 @@ def test_select_active_manager_ignores_noncanonical_request_queue(
     finally:
         registry.close()
 
-    assert _select_active_manager(ctx) is None
+    assert core_manager_runtime.select_active_manager(ctx) is None
 
 
 def test_select_active_manager_uses_matched_pong_for_stale_supervised_record(
@@ -3538,7 +3579,7 @@ def test_select_active_manager_prunes_stale_record_without_pong(
         runtime_handle=_external_supervisor_runtime_handle(),
     )
 
-    record = core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+    record = core_manager_runtime.select_active_manager(ctx, probe_stale=True)
 
     assert record is None
     assert len(_read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True)) == 1
@@ -3631,7 +3672,7 @@ def test_select_active_manager_does_not_probe_fresh_supervised_record(
         runtime_handle=_external_supervisor_runtime_handle(),
     )
 
-    record = core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+    record = core_manager_runtime.select_active_manager(ctx, probe_stale=True)
 
     assert record is not None
     assert record["tid"] == tid
@@ -3659,7 +3700,7 @@ def test_select_active_manager_prunes_missing_docker_supervised_record_immediate
         runtime_handle=_external_supervisor_runtime_handle(),
     )
 
-    record = core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+    record = core_manager_runtime.select_active_manager(ctx, probe_stale=True)
 
     assert record is None
     assert _read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True) == []
@@ -3689,7 +3730,7 @@ def test_select_active_manager_uses_supervisor_liveness_before_host_pid_identity
     )
     _write_active_manager_registry_record(ctx, tid=tid, runtime_handle=handle)
 
-    record = core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+    record = core_manager_runtime.select_active_manager(ctx, probe_stale=True)
 
     assert record is not None
     assert record["tid"] == tid
@@ -3802,7 +3843,7 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
     finally:
         registry_reader.close()
 
-    assert [entry["tid"] for entry in entries] == [stopped_tid]
+    assert [entry["owner_tid"] for entry in entries] == [stopped_tid]
 
 
 def test_list_manager_records_prunes_host_pid_identity_mismatch(
@@ -3913,7 +3954,7 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
         seen_pids.append(pid)
         return next(pid_states)
 
-    monkeypatch.setattr("weft.core.manager_runtime._is_pid_alive", fake_pid_alive)
+    monkeypatch.setattr("weft.core.manager_runtime.pid_is_live", fake_pid_alive)
 
     stopped, message = core_manager_runtime.stop_manager(
         ctx,
@@ -3984,7 +4025,7 @@ def test_stop_manager_confirms_observed_absence_in_evidence_order(
     )
     monkeypatch.setattr(
         core_manager_runtime,
-        "_is_pid_alive",
+        "pid_is_live",
         dead_recorded_pid,
     )
     monkeypatch.setattr(
@@ -4053,7 +4094,7 @@ def test_stop_manager_accepts_foreground_serve_stopped_registry_before_pid_exit(
         lambda *args, **kwargs: next(responses),
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: True,
     )
 
@@ -4128,7 +4169,7 @@ def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(
     )
     liveness = iter((True, False))
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: pid == 8765 and next(liveness),
     )
 
@@ -4182,7 +4223,7 @@ def test_stop_manager_force_refuses_stopped_state_while_tree_root_is_live(
         lambda *args, **kwargs: 8765,
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._is_pid_alive",
+        "weft.core.manager_runtime.pid_is_live",
         lambda pid: pid == 8765 and next(liveness),
     )
     monkeypatch.setattr(
@@ -4248,7 +4289,7 @@ def test_stop_manager_force_does_not_publish_stopped_after_permission_denial(
             lambda *args, **kwargs: 8765,
         )
         monkeypatch.setattr(
-            "weft.core.manager_runtime._is_pid_alive",
+            "weft.core.manager_runtime.pid_is_live",
             lambda pid: pid == 8765,
         )
         monkeypatch.setattr(

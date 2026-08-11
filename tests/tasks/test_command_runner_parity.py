@@ -23,7 +23,7 @@ from tests.helpers.test_backend import (
 )
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
 from weft._runner_plugins import require_runner_plugin
-from weft.commands import status as status_cmd
+from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
 from weft.core.launcher import launch_task_process

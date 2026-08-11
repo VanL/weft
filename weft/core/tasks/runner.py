@@ -1,7 +1,7 @@
 """Runner facade for task execution backends.
 
 Spec references:
-- docs/specifications/01-Core_Components.md [CC-3], [CC-3.1], [CC-3.3]
+- docs/specifications/01-Core_Components.md [CC-3], [CC-3.1], [CC-3.2], [CC-3.3]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
 - docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1]
 """
@@ -21,7 +21,6 @@ from weft.core.agents.validation import (
 from weft.core.environment_profiles import materialize_runner_environment
 from weft.core.runner_validation import validate_runner_capabilities
 from weft.core.runners.outcome import RunnerOutcome
-from weft.core.taskspec import apply_bundle_root_to_taskspec_payload
 from weft.ext import RunnerHandle
 
 from .sessions import AgentSession, CommandSession
@@ -94,7 +93,6 @@ class TaskRunner:
             runner_name=self._runner_name,
             runner_options=self._runner_options,
             environment_profile_ref=self._environment_profile_ref,
-            bundle_root=bundle_root,
             persistent=persistent,
             interactive=interactive,
         )
@@ -102,14 +100,20 @@ class TaskRunner:
         plugin = require_runner_plugin(self._runner_name)
         plugin.check_version()
         validate_runner_capabilities(plugin, self._taskspec_payload)
-        plugin.validate_taskspec(self._taskspec_payload, preflight=False)
+        plugin.validate_taskspec(
+            self._taskspec_payload,
+            bundle_root=bundle_root,
+            preflight=False,
+        )
         validate_taskspec_agent_runtime(
             self._taskspec_payload,
+            bundle_root=bundle_root,
             load_runtime=target_type == "agent",
             preflight=False,
         )
         validate_taskspec_agent_tool_profile(
             self._taskspec_payload,
+            bundle_root=bundle_root,
             load_runtime=target_type == "agent",
             preflight=False,
         )
@@ -156,7 +160,7 @@ class TaskRunner:
     ) -> RunnerOutcome:
         """Execute *work_item* with optional lifecycle hooks.
 
-        Spec: [CC-3], [RM-5.1]
+        Spec: [CC-3], [CC-3.2], [RM-5.1]
         """
         kwargs: dict[str, Any] = {
             "cancel_requested": cancel_requested,
@@ -203,7 +207,6 @@ def _build_runner_validation_payload(
     runner_name: str,
     runner_options: Mapping[str, Any] | None,
     environment_profile_ref: str | None,
-    bundle_root: str | None,
     persistent: bool,
     interactive: bool,
 ) -> dict[str, Any]:
@@ -239,7 +242,7 @@ def _build_runner_validation_payload(
             },
         },
     }
-    return apply_bundle_root_to_taskspec_payload(payload, bundle_root)
+    return payload
 
 
 __all__ = ["AgentSession", "CommandSession", "RunnerOutcome", "TaskRunner"]

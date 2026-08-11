@@ -77,11 +77,9 @@ _SHARED_MODULES = frozenset(
         "tests/cli/test_cli_result.py",
         "tests/cli/test_cli_spec.py",
         "tests/cli/test_cli_system.py",
-        "tests/cli/test_rearrange_args.py",
         "tests/cli/test_status.py",
         "tests/commands/test_queue.py",
         "tests/system/test_release_script.py",
-        "tests/shell/test_known_interpreters.py",
         "tests/core/test_agent_resolution.py",
         "tests/core/test_agent_runtime.py",
         "tests/core/test_agent_tools.py",
@@ -92,6 +90,7 @@ _SHARED_MODULES = frozenset(
         "tests/core/test_callable.py",
         "tests/core/test_client.py",
         "tests/core/test_container_detection.py",
+        "tests/core/test_control_messages.py",
         "tests/core/test_control_probe.py",
         "tests/core/test_debugger.py",
         "tests/core/test_environment_profiles.py",
@@ -376,7 +375,7 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
     harness: WeftTestHarness | None = None,
     prepare_root: bool = True,
 ) -> tuple[int, str, str]:
-    """Execute the Weft CLI (`python -m weft.cli …`) inside *cwd*."""
+    """Execute the Weft CLI (`python -m weft …`) inside *cwd*."""
     env_vars = os.environ.copy() if env is None else env.copy()
     env_vars.pop("__PYVENV_LAUNCHER__", None)
     existing_path = env_vars.get("PYTHONPATH", "")
@@ -398,7 +397,7 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
             "--active",
             "python",
             "-m",
-            "weft.cli",
+            "weft",
             *map(str, args),
         ]
     else:
@@ -410,7 +409,7 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
                 python_path = Path(python_override)
             else:
                 python_path = _preferred_test_python()
-        cmd = [str(python_path), "-m", "weft.cli", *map(str, args)]
+        cmd = [str(python_path), "-m", "weft", *map(str, args)]
 
     if prepare_root:
         prepare_cli_root(args, cwd=cwd, env=env_vars)

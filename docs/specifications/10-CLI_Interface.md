@@ -13,11 +13,11 @@ The design intent is conservative:
 - avoid CLI sugar that hides which project or broker target is in play
 
 _Implementation mapping_: `weft/cli/app.py` (command registration),
-`weft/cli/run.py`, `weft/commands/status.py`, `weft/commands/result.py`,
+`weft/cli/run.py`, `weft/commands/system.py`, `weft/commands/result.py`,
 `weft/commands/queue.py`, `weft/commands/manager.py`, `weft/commands/serve.py`,
 `weft/commands/tasks.py`, `weft/commands/specs.py`,
 `weft/commands/builtins.py`, `weft/commands/init.py`, `weft/commands/dump.py`,
-`weft/commands/load.py`, `weft/commands/_load_support.py`,
+`weft/commands/load.py`,
 `weft/commands/tidy.py`,
 `weft/cli/validate_taskspec.py`.
 
@@ -58,11 +58,21 @@ weft queue <subcommand> [options]
 weft system <subcommand> [options]
 ```
 
+Supported process entry points are the installed `weft` command and
+`python -m weft`. Both enter through `weft/bootstrap.py` so `WEFT_ENV_FILE` is
+processed before normal configuration import. The `weft.cli` package is not a
+separate executable entry point.
+
+_Implementation mapping_: `weft/bootstrap.py::main` owns import-light startup,
+`weft/__main__.py` owns the supported module entry, `weft/cli/app.py` owns the
+Typer command tree, and `weft/cli/__init__.py` is a package marker only.
+
 ## Global Options [CLI-0.3]
 
 The current root-level global options are intentionally small.
 
-_Implementation mapping_: `weft/cli/app.py` `app` and callback helpers.
+_Implementation mapping_: `weft/cli/app.py` owns the Typer application and
+root callback helpers.
 
 | Option | Current behavior |
 | --- | --- |
@@ -94,11 +104,8 @@ owns option parsing and delegates rendering; shared submission lives in
 `weft/core/manager_runtime.py` and is surfaced through
 `weft/commands/manager.py`.
 
-The command-layer `cmd_run()` wrapper remains as a compatibility renderer for
-tests and non-Typer callers, but new adapter work should prefer
-`execute_run()` plus `render_run_execution_result()`. Interactive prompt mode
-still has presentation callbacks in the command layer because the prompt loop
-is not yet a public `WeftClient.run()` API.
+Interactive prompt mode still has presentation callbacks in the command layer
+because the prompt loop is not yet a public `WeftClient.run()` API.
 
 Current behavior:
 
@@ -143,8 +150,6 @@ Current options:
 - `--interactive`
 - `--continuous` / `--once`
 - `--autostart` / `--no-autostart`
-- hidden `--monitor` exists in the parser, but it is currently unsupported and
-  always errors
 
 Current `--name` behavior:
 
@@ -203,8 +208,8 @@ Current rules:
   interactive mode rejects `--json`
 - `--continuous` / `--once` is only supported with `--spec`; it maps to a
   persistent override for that invocation
-- `--monitor` is accepted by the parser, but `weft run` currently rejects it on
-  every path
+- `weft run` has no `--monitor` option. Monitoring is configured in a stored
+  TaskSpec and is not represented by a rejected compatibility flag
 - when a selected TaskSpec declares `spec.parameterization`, `weft run --spec`
   materializes a concrete TaskSpec locally before queueing
 - parameterization parsing may apply TaskSpec-declared defaults and preserve
@@ -356,13 +361,19 @@ other commands operate within an existing root.
 
 ## Inspection Commands [CLI-1.2]
 
+_Implementation mapping_: shared inspection adapters live in
+`weft/cli/app.py`, `weft/client/_namespaces.py`, `weft/client/_types.py`,
+`weft/commands/_streaming.py`, `weft/commands/_task_history.py`,
+`weft/commands/events.py`, `weft/commands/result.py`, and
+`weft/core/queue_wait.py`; exact command ownership is mapped by the child
+sections below.
+
 ### `status` - Show project status [CLI-1.2.1]
 
 _Implementation mapping_: `weft/commands/system.py` owns status collection and
-the explicit task/manager/service JSON projections;
-`weft/commands/status.py` re-exports `cmd_status()` and the shared task
-projection; `weft/cli/app.py` registers `weft status` and reuses that task
-projection for task list/status JSON.
+the explicit task/manager/service JSON projections and `cmd_status()`;
+`weft/cli/app.py` registers `weft status` and reuses the shared task projection
+for task list/status JSON.
 
 Current behavior:
 
@@ -453,10 +464,11 @@ Implementation plan backlinks:
 - `docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`
 - `docs/plans/2026-05-11-internal-service-observability-plan.md`
 
-### `result` - Read task output [CLI-1.2]
+### `result` - Read task output [CLI-1.2.2]
 
-_Implementation mapping_: `weft/commands/result.py` `cmd_result()`,
-`_await_single_result()`, `_collect_all_results()`.
+_Implementation mapping_: `weft/commands/result.py::cmd_result`,
+`weft/commands/result.py::_await_single_result`, and
+`weft/commands/result.py::_collect_all_results`.
 
 Current behavior:
 
@@ -475,9 +487,14 @@ Current behavior:
 - `--stream` is single-task only and cannot be combined with `--all` or
   `--json`
 
-### `task list`, `task status`, and `task tid` [CLI-1.2]
+### `task list`, `task status`, and `task tid` [CLI-1.2.3]
 
-_Implementation mapping_: `weft/commands/tasks.py`, `weft/commands/status.py`.
+_Implementation mapping_: `weft/commands/tasks.py` owns task snapshot and watch
+capabilities; `weft/commands/system.py` owns snapshot projection; the CLI-only
+process projection is owned by
+`weft/cli/app.py::_task_status_process_fields()` and
+`weft/cli/app.py::_task_status_plain_lines()`. The command and Python-client
+snapshot surfaces do not accept a process-rendering flag.
 
 Current behavior:
 
@@ -737,7 +754,7 @@ _Implementation mapping_: `weft/commands/queue.py` `resolve_command()`,
 
 ## Configuration [CLI-5]
 
-_Implementation mapping_: `weft/bootstrap.py`, `weft/cli/bootstrap.py`,
+_Implementation mapping_: `weft/bootstrap.py`,
 `weft/_constants.py` `load_config()`, `weft/context.py` `build_context()`.
 
 Current configuration domains:
@@ -787,9 +804,9 @@ Current broker resolution precedence:
 2. explicit-root resolution uses `simplebroker.target_for_directory()`:
    the configured Weft-scoped broker config at that root, else env-selected
    non-sqlite backend, else sqlite fallback rooted at that directory
-3. auto-discovery uses `simplebroker.resolve_broker_target()`:
-   upward Weft-scoped broker config, then upward legacy sqlite discovery using
-   the configured default DB name, then env-selected non-sqlite backend
+3. auto-discovery searches upward only for the configured Weft-scoped broker
+   config; when none exists, current environment backend selection applies to
+   explicit-root resolution at the current working directory
 4. if auto-discovery finds nothing, Weft falls back to explicit-root resolution
    at the current working directory
 
@@ -830,12 +847,11 @@ Related plan:
 
 _Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
 `weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`,
-`weft/commands/_load_support.py` import validation,
+including import validation,
 `weft/commands/builtins.py` `cmd_system_builtins()`,
 `weft/commands/task_monitor.py` `run_task_monitor()`,
-`weft/commands/runtime_prune.py` `cmd_prune()`,
-`weft/commands/retention_prune.py` `cmd_retention_prune()`, and the canonical
-prune implementation under `weft/core/pruning/`, registered in `weft/cli/app.py`
+`weft/commands/prune.py` `cmd_prune()`, and the separate canonical prune policy
+implementations under `weft/core/pruning/`, registered in `weft/cli/app.py`
 under the `system` sub-app.
 
 Current subcommands:
@@ -900,8 +916,8 @@ Current behavior:
   operational cursors only and are not read by `status`, `task status`, or
   `result`
 - `system prune` scans selected prune families and reports candidates. It
-  defaults to `--family runtime-state` for backward compatibility and defaults
-  to `--dry-run`; `--apply` is required for deletion.
+  requires at least one explicit `--family` value and remains dry-run unless
+  `--apply` is supplied. There is no implicit family.
 - `system prune --family` accepts `runtime-state`, `task-local`, `task-log`,
   `retention`, or `all`. `retention` means task-local plus task-log.
 - `system prune --queue` accepts `tid-mappings`, `managers`,
@@ -945,6 +961,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)

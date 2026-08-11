@@ -69,7 +69,6 @@ class CommandSession:
         stdout_queue: queue.Queue[str | None],
         stderr_queue: queue.Queue[str | None],
         monitor: BaseResourceMonitor | None,
-        limits: Any,
         *,
         handle: RunnerHandle | None = None,
         stdin_writer: Callable[[str], None] | None = None,
@@ -80,7 +79,6 @@ class CommandSession:
         self._stdout_queue = stdout_queue
         self._stderr_queue = stderr_queue
         self._monitor: BaseResourceMonitor | None = monitor
-        self._limits = limits
         self._handle = handle
         self._stdin_writer = stdin_writer
         self._stdin_closer = stdin_closer
@@ -192,7 +190,7 @@ class CommandSession:
         if not self._monitor:
             return True, None
         try:
-            ok, violation = self._monitor.check_limits(self._limits)
+            ok, violation = self._monitor.check_limits()
             if not ok:
                 return ok, violation
             self._last_metrics = self._monitor.last_metrics() or self._last_metrics
@@ -238,7 +236,6 @@ class AgentSession:
         request_queue: MPQueue[Any],
         response_receiver: Connection,
         monitor: BaseResourceMonitor | None,
-        limits: Any,
         *,
         timeout: float | None,
         handle: RunnerHandle | None = None,
@@ -247,7 +244,6 @@ class AgentSession:
         self._request_queue = request_queue
         self._response_receiver = response_receiver
         self._monitor = monitor
-        self._limits = limits
         self._timeout = timeout
         self._handle = handle
         self._last_metrics: ResourceMetrics | None = None
@@ -842,7 +838,7 @@ class AgentSession:
         if not self._monitor:
             return True, None
         try:
-            ok, violation = self._monitor.check_limits(self._limits)
+            ok, violation = self._monitor.check_limits()
             if not ok:
                 return ok, violation
             self._last_metrics = self._monitor.last_metrics() or self._last_metrics

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -16,8 +17,16 @@ import weft.commands.submission as submission_mod
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.client import WeftClient
 from weft.commands.types import TaskEvent, TaskResult
+from weft.core import manager_runtime
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_run_submission_bridge_drops_inert_verbose_parameter() -> None:
+    assert (
+        "verbose"
+        not in inspect.signature(run_mod._ensure_manager_after_submission).parameters
+    )
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -34,13 +43,11 @@ def test_run_adapter_routes_manager_recovery_through_shared_submission(
         context,
         *,
         submitted_tid,
-        verbose=False,
         ensure_manager_fn=None,
         delete_spawn_request_fn=None,
     ):
         captured["context"] = context
         captured["submitted_tid"] = submitted_tid
-        captured["verbose"] = verbose
         captured["ensure_manager_fn"] = ensure_manager_fn
         captured["delete_spawn_request_fn"] = delete_spawn_request_fn
         return ({"tid": "1776000000000000000"}, False, None)
@@ -55,14 +62,12 @@ def test_run_adapter_routes_manager_recovery_through_shared_submission(
     result = run_mod._ensure_manager_after_submission(
         context,
         submitted_tid="1776000000000000001",
-        verbose=True,
     )
 
     assert result == ({"tid": "1776000000000000000"}, False, None)
     assert captured["context"] is context
     assert captured["submitted_tid"] == "1776000000000000001"
-    assert captured["verbose"] is True
-    assert captured["ensure_manager_fn"] is run_mod._ensure_manager
+    assert captured["ensure_manager_fn"] is manager_runtime.ensure_manager
     assert captured["delete_spawn_request_fn"] is run_mod._delete_spawn_request
 
 

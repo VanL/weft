@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import multiprocessing
 import os
@@ -47,6 +48,23 @@ from weft.core.terminal_handoff_transport import (
     send_terminal_payload,
 )
 from weft.ext import RunnerCapabilities, RunnerHandle
+
+
+def test_resource_session_and_host_runner_constructors_drop_inert_context() -> None:
+    command_parameters = inspect.signature(sessions_module.CommandSession).parameters
+    agent_parameters = inspect.signature(AgentSession).parameters
+    host_parameters = inspect.signature(HostTaskRunner).parameters
+
+    assert "limits" not in command_parameters
+    assert "limits" not in agent_parameters
+    assert "db_path" not in host_parameters
+    assert "config" not in host_parameters
+
+
+def test_runner_outcome_drops_duplicate_worker_pid_identity() -> None:
+    parameters = inspect.signature(RunnerOutcome).parameters
+
+    assert "worker_pid" not in parameters
 
 
 def test_runner_handle_round_trips_new_shape() -> None:
@@ -336,7 +354,6 @@ def test_agent_session_close_releases_multiprocessing_handles() -> None:  # noqa
         request_queue,  # type: ignore[arg-type]
         response_receiver,  # type: ignore[arg-type]
         monitor=None,
-        limits=None,
         timeout=None,
     )
 
@@ -378,7 +395,6 @@ def test_agent_session_ipc_cleanup_reports_supported_process_close_failure(
         RequestQueue(),  # type: ignore[arg-type]
         ResponseReceiver(),  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
     caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
@@ -418,7 +434,6 @@ def test_agent_session_ipc_cleanup_propagates_unexpected_process_close_failure()
         Endpoint(),  # type: ignore[arg-type]
         Endpoint(),  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
 
@@ -445,7 +460,6 @@ def test_agent_session_reports_monitor_cleanup_failures_and_clears_owner(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         Monitor(),  # type: ignore[arg-type]
-        None,
         timeout=None,
     )
     caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
@@ -485,7 +499,6 @@ def test_agent_session_metrics_failure_returns_cache_and_later_recovers(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         monitor,  # type: ignore[arg-type]
-        None,
         timeout=None,
     )
     session._last_metrics = cached
@@ -510,14 +523,12 @@ def test_agent_session_metrics_failure_returns_cache_and_later_recovers(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
-            None,
         ),
         lambda monitor: AgentSession(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
-            None,
             timeout=None,
         ),
     ],
@@ -526,7 +537,7 @@ def test_session_limit_verdict_survives_optional_metrics_read_failure(
     session_factory: Any,
 ) -> None:
     class Monitor:
-        def check_limits(self, _limits: Any) -> tuple[bool, str]:
+        def check_limits(self) -> tuple[bool, str]:
             return False, "memory limit"
 
         def last_metrics(self) -> ResourceMetrics:
@@ -549,14 +560,12 @@ def test_session_limit_verdict_survives_optional_metrics_read_failure(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
-            None,
         ),
         lambda monitor: AgentSession(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
-            None,
             timeout=None,
         ),
     ],
@@ -572,7 +581,7 @@ def test_session_monitor_adapter_failure_fails_open_and_releases_monitor(
     class Monitor:
         stop_calls = 0
 
-        def check_limits(self, _limits: Any) -> tuple[bool, str | None]:
+        def check_limits(self) -> tuple[bool, str | None]:
             raise AdapterFailure("configured monitor failed")
 
         def last_metrics(self) -> ResourceMetrics:
@@ -598,14 +607,12 @@ def test_session_monitor_adapter_failure_fails_open_and_releases_monitor(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
-            None,
         ),
         lambda monitor: AgentSession(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
-            None,
             timeout=None,
         ),
     ],
@@ -619,7 +626,7 @@ def test_session_monitor_poll_propagates_non_exception_failure_identity(
     fatal = FatalSignal("stop polling")
 
     class Monitor:
-        def check_limits(self, _limits: Any) -> tuple[bool, str | None]:
+        def check_limits(self) -> tuple[bool, str | None]:
             raise fatal
 
     monitor = Monitor()
@@ -695,7 +702,6 @@ def test_agent_startup_late_drain_survives_process_join_os_error(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
 
@@ -729,7 +735,6 @@ def test_agent_startup_late_drain_propagates_unexpected_join_failure(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
     monkeypatch.setattr(
@@ -760,7 +765,6 @@ def test_agent_wait_ready_survives_join_os_error_after_channel_seal(
         Process(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
-        None,
         None,
         timeout=None,
     )
@@ -800,7 +804,6 @@ def test_agent_wait_ready_propagates_unexpected_sealed_channel_join_failure(
         Process(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
-        None,
         None,
         timeout=None,
     )
@@ -871,7 +874,6 @@ def _spawn_agent_session_for_target(
     *,
     timeout: float | None = None,
     monitor: Any | None = None,
-    limits: Any | None = None,
 ) -> AgentSession:
     ctx = multiprocessing.get_context("spawn")
     ctx.set_executable(sys.executable)
@@ -885,7 +887,6 @@ def _spawn_agent_session_for_target(
         request_queue,
         response_receiver,
         monitor=monitor,
-        limits=limits,
         timeout=timeout,
     )
 
@@ -1004,7 +1005,6 @@ def test_production_agent_worker_post_ready_error_survives_immediate_exit() -> N
         request_queue,  # type: ignore[arg-type]
         response_receiver,
         monitor=None,
-        limits=None,
         timeout=5.0,
     )
     try:
@@ -1037,7 +1037,7 @@ def test_agent_session_invalidating_verdict_closes_session(verdict: str) -> None
         def __init__(self) -> None:
             self.stopped = False
 
-        def check_limits(self, _limits: Any) -> tuple[bool, str]:
+        def check_limits(self) -> tuple[bool, str]:
             return False, "test limit"
 
         def last_metrics(self) -> ResourceMetrics:
@@ -1075,7 +1075,7 @@ def test_agent_session_monitor_metrics_failure_cannot_block_invalid_cleanup() ->
         def __init__(self) -> None:
             self.stopped = False
 
-        def check_limits(self, _limits: Any) -> tuple[bool, None]:
+        def check_limits(self) -> tuple[bool, None]:
             return True, None
 
         def last_metrics(self) -> None:
@@ -1226,7 +1226,7 @@ def test_agent_session_does_not_poll_limits_after_producer_exit() -> None:  # no
         def __init__(self) -> None:
             self.check_calls = 0
 
-        def check_limits(self, _limits: Any) -> tuple[bool, str]:
+        def check_limits(self) -> tuple[bool, str]:
             self.check_calls += 1
             return False, "late limit after exit"
 
@@ -1242,7 +1242,6 @@ def test_agent_session_does_not_poll_limits_after_producer_exit() -> None:  # no
         RequestQueue(),  # type: ignore[arg-type]
         SealedReceiver(),  # type: ignore[arg-type]
         monitor,  # type: ignore[arg-type]
-        limits=None,
         timeout=None,
     )
 
@@ -1352,8 +1351,6 @@ def test_run_monitored_subprocess_uses_supplied_monitor(
         monitor_class="weft.core.resource_monitor.ResourceMonitor",
         monitor_interval=0.05,
         monitor=monitor,
-        db_path=None,
-        config=None,
         runtime_handle=runtime_handle,
         cancel_requested=None,
         on_worker_started=None,
@@ -1413,8 +1410,6 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
             monitor_class=None,
             monitor_interval=0.05,
             monitor=None,
-            db_path=None,
-            config=None,
             runtime_handle=RunnerHandle(
                 runner="host",
                 kind="process",
@@ -1503,8 +1498,6 @@ def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> Non
         monitor_class=None,
         monitor_interval=0.05,
         monitor=monitor,
-        db_path=None,
-        config=None,
         runtime_handle=RunnerHandle(
             runner="host",
             kind="process",
@@ -2069,26 +2062,30 @@ def test_task_runner_agent_session_startup_uses_dedicated_ready_timeout(
 def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    validation_calls: list[tuple[str, bool]] = []
-    plugin_calls: list[bool] = []
+    validation_calls: list[tuple[str, bool, str | None]] = []
+    plugin_calls: list[tuple[bool, str | None]] = []
 
     def fake_validate_runtime(
         taskspec_payload,
         *,
+        bundle_root: str | None = None,
         load_runtime: bool = False,
         preflight: bool = False,
     ) -> None:
-        del taskspec_payload, load_runtime
-        validation_calls.append(("runtime", preflight))
+        assert "_weft_bundle_root" not in taskspec_payload
+        del load_runtime
+        validation_calls.append(("runtime", preflight, bundle_root))
 
     def fake_validate_tool_profile(
         taskspec_payload,
         *,
+        bundle_root: str | None = None,
         load_runtime: bool = False,
         preflight: bool = False,
     ) -> None:
-        del taskspec_payload, load_runtime
-        validation_calls.append(("tool_profile", preflight))
+        assert "_weft_bundle_root" not in taskspec_payload
+        del load_runtime
+        validation_calls.append(("tool_profile", preflight, bundle_root))
 
     class FakeBackend:
         def run_with_hooks(self, work_item, **kwargs):
@@ -2111,10 +2108,14 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
             return None
 
         def validate_taskspec(
-            self, taskspec_payload, *, preflight: bool = False
+            self,
+            taskspec_payload,
+            *,
+            bundle_root: str | None = None,
+            preflight: bool = False,
         ) -> None:
-            del taskspec_payload
-            plugin_calls.append(preflight)
+            assert "_weft_bundle_root" not in taskspec_payload
+            plugin_calls.append((preflight, bundle_root))
 
         def create_runner(self, **kwargs):
             del kwargs
@@ -2161,13 +2162,17 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
         limits=None,
         monitor_class=None,
         monitor_interval=0.05,
+        bundle_root="/tmp/weft-test-bundle",
     )
 
     outcome = runner.run({"content": "hello"})
 
     assert outcome.status == "ok"
-    assert plugin_calls == [False]
-    assert validation_calls == [("runtime", False), ("tool_profile", False)]
+    assert plugin_calls == [(False, "/tmp/weft-test-bundle")]
+    assert validation_calls == [
+        ("runtime", False, "/tmp/weft-test-bundle"),
+        ("tool_profile", False, "/tmp/weft-test-bundle"),
+    ]
 
 
 def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
@@ -2179,19 +2184,21 @@ def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
     def fake_validate_runtime(
         taskspec_payload,
         *,
+        bundle_root: str | None = None,
         load_runtime: bool = False,
         preflight: bool = False,
     ) -> None:
-        del taskspec_payload, load_runtime
+        del taskspec_payload, bundle_root, load_runtime
         validation_calls.append(("runtime", preflight))
 
     def fake_validate_tool_profile(
         taskspec_payload,
         *,
+        bundle_root: str | None = None,
         load_runtime: bool = False,
         preflight: bool = False,
     ) -> None:
-        del taskspec_payload, load_runtime
+        del taskspec_payload, bundle_root, load_runtime
         validation_calls.append(("tool_profile", preflight))
 
     class FakeSession:
@@ -2210,9 +2217,13 @@ def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
             return None
 
         def validate_taskspec(
-            self, taskspec_payload, *, preflight: bool = False
+            self,
+            taskspec_payload,
+            *,
+            bundle_root: str | None = None,
+            preflight: bool = False,
         ) -> None:
-            del taskspec_payload
+            del taskspec_payload, bundle_root
             plugin_calls.append(preflight)
 
         def create_runner(self, **kwargs):
@@ -3337,7 +3348,6 @@ def test_agent_session_producer_exit_starts_bounded_drain(
         RequestQueue(),  # type: ignore[arg-type]
         EmptyReceiver(),  # type: ignore[arg-type]
         monitor=None,
-        limits=None,
         timeout=None,
     )
     monkeypatch.setattr(sessions_module.time, "monotonic", lambda: clock["now"])
@@ -3399,7 +3409,6 @@ def test_session_stop_after_begin_drain_preserves_first_deadline(
         RequestQueue(),  # type: ignore[arg-type]
         EmptyReceiver(),  # type: ignore[arg-type]
         monitor=None,
-        limits=None,
         timeout=None,
     )
     monkeypatch.setattr(sessions_module.time, "monotonic", lambda: clock["now"])
@@ -3720,7 +3729,6 @@ def test_session_stop_effect_cannot_reset_absolute_drain_deadline(  # noqa: C901
         RequestQueue(),  # type: ignore[arg-type]
         EmptyReceiver(),  # type: ignore[arg-type]
         monitor=None,
-        limits=None,
         timeout=None,
     )
     monkeypatch.setattr(sessions_module.time, "monotonic", lambda: clock["now"])

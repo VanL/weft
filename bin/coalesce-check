@@ -29,6 +29,7 @@ Read-only by construction. Exit 1 only on an unresolvable cue (a broken
 retrieval contract); local-only pins and count reports are
 informational — publication discipline is the owner's call.
 """
+
 from __future__ import annotations
 
 import os
@@ -46,8 +47,16 @@ CUE_RE = re.compile(r"git show ([0-9a-f]{7,40}):([A-Za-z0-9_./-]+)")
 # Foreign attribution is a REPORTING aid, never a resolution mechanism: it
 # names repositories this repo's own citations refer to, makes no filesystem
 # assumption, and resolves nothing.
-FOREIGN_MARKERS = ("agent-theory", "agent-guidance", "mm", "weft", "taut",
-                   "backstitch", "engram", "simplebroker")
+FOREIGN_MARKERS = (
+    "agent-theory",
+    "agent-guidance",
+    "mm",
+    "weft",
+    "taut",
+    "backstitch",
+    "engram",
+    "simplebroker",
+)
 
 # Opt-in local convenience, unset by default. A sibling working copy is an
 # environment fact, not a portability claim: anything found this way is
@@ -69,7 +78,7 @@ def git(*args: str, repo: Path | None = None) -> subprocess.CompletedProcess:
 
 def attributed_repo(text: str, pos: int) -> str | None:
     """Does the citation name the repository it came from? Reporting only."""
-    ctx = text[max(0, pos - 80):pos].lower()
+    ctx = text[max(0, pos - 80) : pos].lower()
     hits = [m for m in FOREIGN_MARKERS if m in ctx]
     return max(hits, key=len) if hits else None
 
@@ -87,10 +96,12 @@ def in_local_checkout(sha: str) -> str | None:
     if not root.is_dir():
         return None
     for cand in sorted(root.iterdir()):
-        if (cand / ".git").exists() and \
-                git("cat-file", "-e", f"{sha}^{{commit}}", repo=cand).returncode == 0:
+        if (cand / ".git").exists() and git(
+            "cat-file", "-e", f"{sha}^{{commit}}", repo=cand
+        ).returncode == 0:
             return cand.name
     return None
+
 
 def main() -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-224] exception
     if not STATE.is_file():
@@ -115,24 +126,32 @@ def main() -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-224] exception
             continue
         seen.add(sha)
         if resolves_locally(sha):
-            if remote_ok and git("merge-base", "--is-ancestor", sha,
-                                 "origin/main").returncode != 0:
+            if (
+                remote_ok
+                and git("merge-base", "--is-ancestor", sha, "origin/main").returncode
+                != 0
+            ):
                 local_only.append(sha)
             continue
         who = attributed_repo(text, pos)
         if who:
             extra = in_local_checkout(sha)
-            foreign.append(f"{sha} @ {who}" +
-                           (f" (present in a local checkout of {extra})" if extra else ""))
+            foreign.append(
+                f"{sha} @ {who}"
+                + (f" (present in a local checkout of {extra})" if extra else "")
+            )
         else:
-            broken.append(f"`{sha}` resolves nowhere here and names no "
-                          "repository — a cue must say where it is retrievable")
+            broken.append(
+                f"`{sha}` resolves nowhere here and names no "
+                "repository — a cue must say where it is retrievable"
+            )
 
     for sha, path in cues:
-        if not (resolves_locally(sha) and
-                git("cat-file", "-e", f"{sha}:{path}").returncode == 0):
+        if not (
+            resolves_locally(sha)
+            and git("cat-file", "-e", f"{sha}:{path}").returncode == 0
+        ):
             broken.append(f"cue `git show {sha}:{path}` does not resolve here")
-
 
     lessons = REPO_ROOT / "docs" / "lessons.md"
     count = 0
@@ -145,10 +164,14 @@ def main() -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-224] exception
         f"{len(cues)} retrieval cue(s); lessons dated H2 sections: {count}"
     )
     if foreign:
-        print(f"  foreign claim ({len(foreign)}) — not verifiable in this repository;\n    check the citing repository: " + ", ".join(foreign))
+        print(
+            f"  foreign claim ({len(foreign)}) — not verifiable in this repository;\n    check the citing repository: "
+            + ", ".join(foreign)
+        )
     if local_only:
         print(
-            f"  local-only pin ({len(local_only)}): " + ", ".join(local_only)
+            f"  local-only pin ({len(local_only)}): "
+            + ", ".join(local_only)
             + "  [not in origin/main — published history cannot verify these]"
         )
     if broken:

@@ -49,107 +49,19 @@ RESULT_AUTHORITY_SOURCES = (
 
 pytestmark = [pytest.mark.shared]
 
-ROOT_EXPORTS = {
-    "__version__",
-    "PROG_NAME",
+ROOT_METADATA = {"PROG_NAME", "__version__"}
+REMOVED_ROOT_EXPORTS = {
     "Task",
     "TaskEvent",
     "TaskResult",
     "TaskSnapshot",
     "WeftClient",
     "debug_print",
-    "send_log",
     "log_debug",
+    "log_error",
     "log_info",
     "log_warning",
-    "log_error",
-}
-ROOT_LAZY_OWNERS = {
-    "Task": ("weft.client", "Task"),
-    "TaskEvent": ("weft.client", "TaskEvent"),
-    "TaskResult": ("weft.client", "TaskResult"),
-    "TaskSnapshot": ("weft.client", "TaskSnapshot"),
-    "WeftClient": ("weft.client", "WeftClient"),
-    "debug_print": ("weft.helpers", "debug_print"),
-    "send_log": ("weft.helpers", "send_log"),
-    "log_debug": ("weft.helpers", "log_debug"),
-    "log_info": ("weft.helpers", "log_info"),
-    "log_warning": ("weft.helpers", "log_warning"),
-    "log_error": ("weft.helpers", "log_error"),
-}
-COMMAND_EXPORTS = {
-    "cmd_init",
-    "cmd_result",
-    "serve_command",
-    "cmd_status",
-    "cmd_tidy",
-    "manager",
-}
-COMMAND_LAZY_OWNERS = {
-    "cmd_init": ("weft.commands.init", "cmd_init"),
-    "cmd_result": ("weft.commands.result", "cmd_result"),
-    "serve_command": ("weft.commands.serve", "serve_command"),
-    "cmd_status": ("weft.commands.status", "cmd_status"),
-    "cmd_tidy": ("weft.commands.tidy", "cmd_tidy"),
-}
-CORE_EXPORTS = {
-    "Consumer",
-    "Observer",
-    "SelectiveConsumer",
-    "Monitor",
-    "TaskRunner",
-    "Manager",
-    "launch_task_process",
-    "ResourceMonitor",
-    "PsutilResourceMonitor",
-    "BaseResourceMonitor",
-    "make_callable",
-    "ManagedProcessResult",
-    "decode_work_message",
-    "prepare_call_arguments",
-    "execute_function_target",
-    "execute_command_target",
-    "serialize_result",
-    "TaskSpec",
-    "SpecSection",
-    "LimitsSection",
-    "RunnerSection",
-    "IOSection",
-    "StateSection",
-    "validate_taskspec",
-    "format_tid",
-    "parse_tid",
-}
-CORE_LAZY_OWNERS = {
-    "Consumer": ("weft.core.tasks", "Consumer"),
-    "Observer": ("weft.core.tasks", "Observer"),
-    "SelectiveConsumer": ("weft.core.tasks", "SelectiveConsumer"),
-    "Monitor": ("weft.core.tasks", "Monitor"),
-    "TaskRunner": ("weft.core.tasks.runner", "TaskRunner"),
-    "Manager": ("weft.core.manager", "Manager"),
-    "launch_task_process": ("weft.core.launcher", "launch_task_process"),
-    "ResourceMonitor": ("weft.core.resource_monitor", "ResourceMonitor"),
-    "PsutilResourceMonitor": (
-        "weft.core.resource_monitor",
-        "PsutilResourceMonitor",
-    ),
-    "BaseResourceMonitor": ("weft.core.resource_monitor", "BaseResourceMonitor"),
-    "make_callable": ("weft.core.callable", "make_callable"),
-    "ManagedProcessResult": ("weft.core.callable", "ManagedProcessResult"),
-    "decode_work_message": ("weft.core.targets", "decode_work_message"),
-    "prepare_call_arguments": ("weft.core.targets", "prepare_call_arguments"),
-    "execute_function_target": ("weft.core.targets", "execute_function_target"),
-    "execute_command_target": ("weft.core.targets", "execute_command_target"),
-    "serialize_result": ("weft.core.targets", "serialize_result"),
-    "TaskSpec": ("weft.core.taskspec", "TaskSpec"),
-    "SpecSection": ("weft.core.taskspec", "SpecSection"),
-    "LimitsSection": ("weft.core.taskspec", "LimitsSection"),
-    "RunnerSection": ("weft.core.taskspec", "RunnerSection"),
-    "IOSection": ("weft.core.taskspec", "IOSection"),
-    "StateSection": ("weft.core.taskspec", "StateSection"),
-    "validate_taskspec": ("weft.core.taskspec", "validate_taskspec"),
-    "format_tid": ("weft.helpers", "format_tid"),
-    "parse_tid": ("weft.helpers", "parse_tid"),
+    "send_log",
 }
 
 
@@ -910,81 +822,61 @@ def test_host_import_registers_builtin_agent_backends() -> None:
     assert "weft.core.agents.backends.provider_cli" in modules
 
 
-def test_public_facade_exports_keep_identity() -> None:
-    from weft import Task as root_task
-    from weft.client import Task as client_task
-    from weft.commands import cmd_result
-    from weft.commands.result import cmd_result as leaf_cmd_result
-    from weft.core import Manager
-    from weft.core.manager import Manager as leaf_manager
+def test_retained_runner_facades_keep_identity() -> None:
     from weft.core.runners import RunnerOutcome
     from weft.core.runners.host import RunnerOutcome as host_runner_outcome
     from weft.core.runners.outcome import RunnerOutcome as leaf_runner_outcome
     from weft.core.tasks.runner import RunnerOutcome as task_runner_outcome
 
-    assert root_task is client_task
-    assert cmd_result is leaf_cmd_result
-    assert Manager is leaf_manager
     assert RunnerOutcome is leaf_runner_outcome
     assert host_runner_outcome is leaf_runner_outcome
     assert task_runner_outcome is leaf_runner_outcome
 
 
-def test_agent_backend_package_exports_keep_identity() -> None:
-    from weft.core.agents import backends
-    from weft.core.agents.backends.llm import LLMBackend
-    from weft.core.agents.backends.provider_cli import ProviderCLIBackend
+def test_root_package_exposes_only_metadata() -> None:
+    import weft
 
-    assert backends.LLMBackend is LLMBackend
-    assert backends.ProviderCLIBackend is ProviderCLIBackend
-    namespace: dict[str, object] = {}
-    exec("from weft.core.agents.backends import *", namespace)  # noqa: S102 approved [TS-3.1] [RUFF-SUP-254] exception
-    assert namespace["LLMBackend"] is LLMBackend
-    assert namespace["ProviderCLIBackend"] is ProviderCLIBackend
+    assert set(weft.__all__) == ROOT_METADATA
+    assert ROOT_METADATA <= set(weft.__dict__)
+    assert not REMOVED_ROOT_EXPORTS.intersection(weft.__dict__)
+    assert "__getattr__" not in weft.__dict__
+
+
+@pytest.mark.parametrize("module_name", ["weft.cli", "weft.commands", "weft.core"])
+def test_internal_package_initializers_are_markers(module_name: str) -> None:
+    module = importlib.import_module(module_name)
+
+    assert "__all__" not in module.__dict__
+    assert "__getattr__" not in module.__dict__
+
+
+def test_agent_backend_package_exports_registration_only() -> None:
+    from weft.core.agents import backends
+
+    assert backends.__all__ == ["register_builtin_agent_runtimes"]
+    assert "LLMBackend" not in backends.__dict__
+    assert "ProviderCLIBackend" not in backends.__dict__
+
+
+def test_pruning_package_initializer_is_a_marker() -> None:
+    pruning = importlib.import_module("weft.core.pruning")
+
+    assert "__all__" not in pruning.__dict__
+    assert "apply_exact_prune_candidates" not in pruning.__dict__
 
 
 @pytest.mark.parametrize(
-    ("facade_name", "expected_exports", "owners"),
+    "module_name",
     [
-        ("weft", ROOT_EXPORTS, ROOT_LAZY_OWNERS),
-        ("weft.commands", COMMAND_EXPORTS, COMMAND_LAZY_OWNERS),
-        ("weft.core", CORE_EXPORTS, CORE_LAZY_OWNERS),
+        "weft.cli.bootstrap",
+        "weft.client._errors",
+        "weft.commands.diagnostics",
+        "weft.commands.retention_prune",
+        "weft.commands.runtime_prune",
+        "weft.commands.status",
+        "weft.commands.task_evidence",
     ],
 )
-def test_lazy_facades_preserve_inventory_identity_and_cache(
-    facade_name: str,
-    expected_exports: set[str],
-    owners: dict[str, tuple[str, str]],
-) -> None:
-    facade = importlib.import_module(facade_name)
-
-    assert set(facade.__all__) == expected_exports
-    assert expected_exports <= set(dir(facade))
-    for name, (owner_name, owner_attribute) in owners.items():
-        expected = getattr(importlib.import_module(owner_name), owner_attribute)
-        first = getattr(facade, name)
-        second = getattr(facade, name)
-        assert first is expected
-        assert second is first
-        assert facade.__dict__[name] is first
-
-
-def test_commands_manager_export_supports_attribute_from_and_star_imports() -> None:
-    commands = importlib.import_module("weft.commands")
-    manager_module = importlib.import_module("weft.commands.manager")
-
-    assert commands.manager is manager_module
-    namespace: dict[str, object] = {}
-    exec("from weft.commands import manager", namespace)  # noqa: S102 approved [TS-3.1] [RUFF-SUP-254] exception
-    assert namespace["manager"] is manager_module
-
-    namespace = {}
-    exec("from weft.commands import *", namespace)  # noqa: S102 approved [TS-3.1] [RUFF-SUP-254] exception
-    assert namespace["manager"] is manager_module
-
-
-@pytest.mark.parametrize("facade_name", ["weft", "weft.commands", "weft.core"])
-def test_lazy_facades_reject_unknown_attributes(facade_name: str) -> None:
-    facade = importlib.import_module(facade_name)
-    with pytest.raises(AttributeError, match="not_a_public_export"):
-        facade.__getattr__("not_a_public_export")
+def test_removed_compatibility_modules_are_not_importable(module_name: str) -> None:
+    with pytest.raises(ModuleNotFoundError, match=module_name):
+        importlib.import_module(module_name)

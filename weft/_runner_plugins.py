@@ -8,7 +8,7 @@ Spec references:
 from __future__ import annotations
 
 from importlib import metadata
-from typing import Any, cast
+from typing import cast
 
 from weft._constants import (
     DEFAULT_RUNNER_NAME,
@@ -20,15 +20,10 @@ from weft.ext import RunnerPlugin
 
 def _load_entry_point_plugin(name: str) -> RunnerPlugin:
     """Load an external runner plugin by entry point name."""
-    entry_points_obj: Any = metadata.entry_points()
-    if hasattr(entry_points_obj, "select"):
-        matches = entry_points_obj.select(group=RUNNER_ENTRY_POINT_GROUP, name=name)
-    else:  # pragma: no cover - Python <3.10 compatibility fallback
-        matches = [
-            entry_point
-            for entry_point in entry_points_obj.get(RUNNER_ENTRY_POINT_GROUP, [])
-            if entry_point.name == name
-        ]
+    matches = metadata.entry_points().select(
+        group=RUNNER_ENTRY_POINT_GROUP,
+        name=name,
+    )
 
     for entry_point in matches:
         loaded = entry_point.load()

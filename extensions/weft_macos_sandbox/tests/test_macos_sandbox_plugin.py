@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
 import pytest
-from weft_macos_sandbox import get_runner_plugin, plugin
+import weft_macos_sandbox
+from weft_macos_sandbox import plugin
+from weft_macos_sandbox.plugin import get_runner_plugin
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_package_root_does_not_export_runner_plugin_factory() -> None:
+    assert not hasattr(weft_macos_sandbox, "get_runner_plugin")
+
+
+def test_runner_constructor_does_not_accept_broker_context() -> None:
+    parameters = inspect.signature(plugin.MacOSSandboxRunner).parameters
+
+    assert "db_path" not in parameters
+    assert "config" not in parameters
 
 
 def test_macos_sandbox_runner_publishes_runner_authority_handle(

@@ -151,7 +151,7 @@ def create_valid_provider_cli_agent_taskspec(
     model: str | None = None,
     persistent: bool = False,
     conversation_scope: str = "per_message",
-    authority_class: str | None = None,
+    authority_class: str | None = "general",
 ) -> TaskSpec:
     """Create a valid provider_cli agent TaskSpec for fixture-backed tests."""
     return TaskSpec(

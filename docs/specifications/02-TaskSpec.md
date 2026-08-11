@@ -25,8 +25,15 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (`TaskSpec`, `SpecSectio
 
 ## JSON Schema v1.0 [TS-1]
 
-_Implementation coverage_: Field validation and defaults correspond to Pydantic
-models in `weft/core/taskspec/model.py`. Runtime behaviour honours `stream_output`
+_Implementation mapping_: Field validation and defaults correspond to Pydantic
+models in `weft/core/taskspec/model.py`; strict full-payload validation and
+bundle-aware wire encoding live in
+`weft/core/taskspec/transport.py::validate_taskspec_payload`,
+`weft/core/taskspec/transport.py::decode_taskspec_transport_payload`, and
+`weft/core/taskspec/transport.py::encode_taskspec_transport_payload`, with
+direct transport coverage in `tests/taskspec/test_transport.py`.
+
+Runtime behaviour honours `stream_output`
 (chunked, base64-encoded messages), `output_size_limit_mb` (disk spillover),
 and `interactive` (long-lived, line-oriented command sessions with streaming
 stdin/stdout over task-local queues rather than terminal emulation).
@@ -45,8 +52,8 @@ and a provider that has both an explicit shipped Docker image recipe and an
 internal provider container runtime descriptor.
 Weft also exposes a coarse agent authority declaration through
 `spec.agent.authority_class`. `llm` is bounded only. `provider_cli` accepts
-`"bounded"` and `"general"`, with missing values resolving to `"general"` for
-compatibility with older stored specs.
+`"bounded"` and `"general"` and requires one of those values explicitly,
+subject to the selected provider's supported authority.
 `provider_cli` requires `spec.agent.runtime_config.provider`; optional
 string refs such as `executable`, `resolver_ref`, and `tool_profile_ref` are
 resolved by the agent-runtime validation and execution layers.
@@ -228,6 +235,27 @@ constraint in the model layer.
 - Recommended composite key: `tid:message_id`.
 
 **Templates vs runtime-expanded specs**
+- **Strict schema**: Every public TaskSpec model rejects unknown fields,
+  including the top-level object.
+- **Bundle-root provenance**: `weft/core/taskspec/transport.py` is the sole
+  owner of bundle-root provenance.
+  `decode_taskspec_transport_payload()` copies a transport mapping, removes and
+  validates the reserved internal `_weft_bundle_root` key, strictly validates
+  the remaining TaskSpec, and stores the root only in the TaskSpec private
+  attribute. `encode_taskspec_transport_payload()` reattaches that key only
+  when serializing a TaskSpec to a spawn queue or process boundary.
+  `validate_taskspec_payload(..., bundle_root=...)` handles stored-spec and
+  bundle callers that already know the root without first inserting an extra
+  key. Template and resolved validation modes remain explicit: template
+  validation passes `context={"template": True, "auto_expand": False}`;
+  resolved validation leaves automatic expansion enabled, and implicit spawn
+  validation passes the committed spawn-request message-ID TID as
+  `context["resolved_tid"]` at the existing manager boundary. Runner-plugin
+  validation receives bundle provenance through an explicit `bundle_root`
+  keyword because its validation mapping is only a partial TaskSpec shape.
+  That mapping never carries `_weft_bundle_root`, is not decoded as a full
+  TaskSpec, and has no partial compatibility decoder. The private value is
+  absent from ordinary `model_dump()` output.
 - **TaskSpecTemplate**: Stored specs in `.weft/tasks/` may omit `tid`, `io`, `state`, `metadata`, and `spec.weft_context`, or leave those sections empty. These templates declare *what to run*.
 - **Resolved TaskSpec**: The Manager expands templates at spawn time, populating `tid`, `io`, `state`, `metadata`, and `spec.weft_context`, then seeds `io.inputs.inbox` with the initial payload when one was supplied by the caller.
 - **TID assignment**: The spawn-request message ID (SimpleBroker 64-bit timestamp) is the task's TID for the full lifecycle.
@@ -595,6 +623,7 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
 - [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)

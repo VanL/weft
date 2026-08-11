@@ -117,6 +117,23 @@ def test_iter_queue_entries_closes_underlying_generator_on_early_close() -> None
     assert queue.raw_entries.closed is True
 
 
+def test_iter_queue_entries_propagates_generator_type_error_after_one_call() -> None:
+    class FailingQueue:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def peek_generator(self, **_kwargs: object) -> None:
+            self.calls += 1
+            raise TypeError("current generator defect")
+
+    queue = FailingQueue()
+
+    with pytest.raises(TypeError, match="current generator defect"):
+        iter_queue_entries(queue)  # type: ignore[arg-type]
+
+    assert queue.calls == 1
+
+
 def test_resolve_broker_max_message_size_uses_public_config_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -350,7 +367,7 @@ class TestConfigurationUtilities:
 
 
 class TestAtomicFileWriting:
-    """Tests for write_file_atomically covering success and fallback paths."""
+    """Tests for write_file_atomically covering success and failure paths."""
 
     def test_write_file_atomically_text_success(self, tmp_path: Path) -> None:
         target = tmp_path / "example.txt"
@@ -375,30 +392,67 @@ class TestAtomicFileWriting:
         write_file_atomically(target, content="encoding test", encoding="utf-16")
         assert target.read_text(encoding="utf-16") == "encoding test"
 
-    def test_write_file_atomically_fallback_on_replace_error(
+    def test_write_file_atomically_propagates_replace_error_and_preserves_target(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        target = tmp_path / "fallback.txt"
-        with patch.dict("os.environ", {"WEFT_LOGGING_ENABLED": "1"}):
-            reload_config()
+        target = tmp_path / "existing.txt"
+        original = b"existing content"
+        target.write_bytes(original)
+        replace_calls = 0
 
-            def replace_fail(
-                self: Path, target_path: Path
-            ) -> Path:  # pragma: no cover - simple stub
-                raise OSError("replace failed")
+        def replace_fail(self: Path, target_path: Path) -> Path:
+            nonlocal replace_calls
+            del self, target_path
+            replace_calls += 1
+            raise OSError("replace failed")
 
-            monkeypatch.setattr(Path, "replace", replace_fail)
-            with caplog.at_level(logging.WARNING):
-                write_file_atomically(target, content="fallback content")
+        monkeypatch.setattr(Path, "replace", replace_fail)
 
-        assert target.read_text() == "fallback content"
+        with pytest.raises(OSError, match="replace failed"):
+            write_file_atomically(target, content="replacement content")
+
+        assert replace_calls == 1
+        assert target.read_bytes() == original
         assert not list(tmp_path.glob("*.tmp"))
-        assert any(
-            "Atomic write failed" in record.getMessage() for record in caplog.records
-        )
+
+    def test_write_file_atomically_preserves_replace_error_when_cleanup_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "existing.txt"
+        original = b"existing content"
+        target.write_bytes(original)
+        replace_error = OSError("replace failed")
+        temp_files: list[Path] = []
+        original_unlink = Path.unlink
+
+        def replace_fail(self: Path, target_path: Path) -> Path:
+            del target_path
+            temp_files.append(self)
+            raise replace_error
+
+        def cleanup_fail(self: Path, missing_ok: bool = False) -> None:
+            del missing_ok
+            if self in temp_files:
+                raise OSError("cleanup failed")
+            original_unlink(self)
+
+        monkeypatch.setattr(Path, "replace", replace_fail)
+        monkeypatch.setattr(Path, "unlink", cleanup_fail)
+
+        try:
+            with pytest.raises(OSError) as exc_info:
+                write_file_atomically(target, content="replacement content")
+
+            assert exc_info.value is replace_error
+            assert target.read_bytes() == original
+        finally:
+            monkeypatch.setattr(Path, "unlink", original_unlink)
+            for temp_file in temp_files:
+                temp_file.unlink(missing_ok=True)
 
     def test_write_file_atomically_propagates_unexpected_replace_defect(
         self,
@@ -442,21 +496,26 @@ class TestWriteJsonAtomically:
         write_json_atomically(target, data)
         assert json.loads(target.read_text()) == data
 
-    def test_write_json_atomically_fallback_on_replace_error(
+    def test_write_json_atomically_propagates_replace_error_and_preserves_target(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         target = tmp_path / "config.json"
+        original = b'{"status":"existing"}'
+        target.write_bytes(original)
 
-        def replace_fail(
-            self: Path, target_path: Path
-        ) -> Path:  # pragma: no cover - simple stub
+        def replace_fail(self: Path, target_path: Path) -> Path:
+            del self, target_path
             raise OSError("replace failed")
 
         monkeypatch.setattr(Path, "replace", replace_fail)
-        write_json_atomically(target, {"status": "ok"})
-        assert json.loads(target.read_text()) == {"status": "ok"}
+
+        with pytest.raises(OSError, match="replace failed"):
+            write_json_atomically(target, {"status": "replacement"})
+
+        assert target.read_bytes() == original
+        assert not list(tmp_path.glob("*.tmp"))
 
     def test_write_json_atomically_retries_permission_error(
         self,
@@ -479,6 +538,32 @@ class TestWriteJsonAtomically:
 
         assert calls["count"] >= 2
         assert json.loads(target.read_text()) == {"status": "ok"}
+
+    def test_write_json_atomically_exhausts_permission_retries_without_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "retry-exhausted.json"
+        original = b'{"status":"existing"}'
+        target.write_bytes(original)
+        calls = 0
+
+        def replace_blocked(self: Path, target_path: Path) -> Path:
+            nonlocal calls
+            del self, target_path
+            calls += 1
+            raise PermissionError("sharing violation")
+
+        monkeypatch.setattr(Path, "replace", replace_blocked)
+        monkeypatch.setattr(helpers_module.time, "sleep", lambda _seconds: None)
+
+        with pytest.raises(PermissionError, match="sharing violation"):
+            write_json_atomically(target, {"status": "replacement"})
+
+        assert calls == helpers_module.ATOMIC_WRITE_RETRY_ATTEMPTS
+        assert target.read_bytes() == original
+        assert not list(tmp_path.glob("*.tmp"))
 
     def test_write_json_atomically_handles_concurrent_writes(
         self, tmp_path: Path

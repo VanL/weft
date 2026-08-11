@@ -65,9 +65,9 @@ Supported runtimes include:
   runtime descriptor; the shipped set for both is `claude_code`, `codex`,
   `gemini`, `opencode`, and `qwen`
 - authority classes:
-  - `llm`: `bounded`
-  - `provider_cli`: explicit `bounded` or `general`, with missing values
-    resolving to `general` for compatibility
+  - `llm` resolves an omitted `authority_class` to the safe value `bounded`
+  - `provider_cli` requires an explicit `authority_class` of `bounded` or
+    `general`, subject to the selected provider's supported authority
 - tools: `python` for `llm`; `provider_cli` rejects `spec.agent.tools`
 - output modes:
   - `llm`: `text`, `json`, `messages`
@@ -175,9 +175,11 @@ model defines the full `spec.agent` schema. `SpecSection.type` includes
   tasks.
 - `spec.persistent` controls task lifetime. There is no duplicate lifecycle
   field under `spec.agent`.
-- `spec.agent.authority_class` is optional:
-  - `llm` resolves missing values to `bounded`
-  - `provider_cli` resolves missing values to `general` for compatibility
+- `llm` resolves an omitted `spec.agent.authority_class` to the safe value
+  `bounded`.
+- `provider_cli` requires an explicit `spec.agent.authority_class` of
+  `bounded` or `general`, subject to the selected provider's supported
+  authority.
 - `spec.agent.output_schema` is only valid when
   `spec.agent.output_mode="json"`.
 - `spec.agent.tools[*].name` values identify configured tool descriptors for
@@ -206,6 +208,11 @@ model defines the full `spec.agent` schema. `SpecSection.type` includes
   - `workspace_access="workspace-write"` is supported by `codex`
   - explicit stdio MCP server descriptors are supported by `claude_code` only
 
+Agent-runtime and tool-profile validation receive bundle provenance through an
+explicit `bundle_root=` keyword from the owning full-TaskSpec validation path.
+Their partial validation mappings never carry `_weft_bundle_root`, are not
+decoded as full TaskSpecs, and have no partial compatibility decoder.
+
 _Implementation mapping:_ `weft/core/taskspec/model.py` -- `SpecSection` model
 validator `validate_type_targets` enforces mutual exclusion of
 `function_target`/`process_target`/`agent`; `AgentSection.validate_runtime_constraints`
@@ -218,7 +225,7 @@ enforces
 `weft/core/agents/provider_cli/registry.py`,
 `weft/core/agents/backends/provider_cli.py`.
 
-### Security Model [AR-2.1]
+### Security Model
 
 `authority_class` is a coarse, Weft-owned declaration, not a sandbox. Each
 `provider_cli` adapter interprets it independently by deciding, per
@@ -291,10 +298,10 @@ the same psutil-child-tree limitation as any other task.
 - `templates`: named prompt templates declared in the TaskSpec.
 - `tools`: static tool descriptors resolved at execution time. Tool names are
   unique identifiers for override filtering and backend tool declarations.
-  Tool descriptors accept `approval_required` for schema compatibility, but
-  only `false` is valid: Weft does not implement tool approval policy
-  ([AR-0.0]), and validation rejects `approval_required: true` with guidance
-  to enforce approvals in the calling system or a delegated provider CLI.
+  Agent tool descriptors do not contain `approval_required`. Weft does not own
+  interactive tool approval policy at this boundary. Either boolean spelling
+  is an unknown field and validation fails with the same strict-schema error
+  as any other unsupported tool field.
 - `output_mode`: caller-facing output shape.
 - `output_schema`: optional structured-output schema.
 - `max_turns`: maximum model/tool turns before failure.
@@ -309,9 +316,6 @@ _Implementation mapping:_ `weft/core/taskspec/model.py` -- `AgentSection`,
 `AgentToolSection`, `AgentTemplateSection` Pydantic models define all fields.
 Template rendering: `weft/core/agents/templates.py`
 (`render_agent_template`).
-All fields listed above are implemented.
-`approval_required: true` is rejected by a field validator on
-`AgentToolSection` in `weft/core/taskspec/model.py`.
 
 ## Agent Work Envelope [AR-3]
 
@@ -873,6 +877,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)

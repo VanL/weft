@@ -10,6 +10,7 @@ Spec references:
 - docs/specifications/10B-Builtin_TaskSpecs.md
 - docs/specifications/01-Core_Components.md [CC-2.5]
 - docs/specifications/02-TaskSpec.md [TS-1], [TS-1.3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3]
 """
 
 from __future__ import annotations
@@ -48,23 +49,13 @@ from weft.commands._streaming import (
 )
 from weft.commands._task_history import is_pipeline_taskspec_payload
 from weft.commands.interactive import InteractiveStreamClient
-from weft.commands.manager import (
-    _build_manager_spec,
-    _ensure_manager,
-    _generate_tid,
-    _select_active_manager,
-    _start_manager,
-    _stop_manager,
-)
 from weft.commands.submission import (
     ensure_manager_after_submission as _shared_ensure_manager_after_submission,
 )
-from weft.commands.task_evidence import (
-    terminal_error_message,
-    terminal_status_from_event,
-)
 from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext, build_context
+from weft.core import manager_runtime
+from weft.core.control_messages import encode_control_message
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.monitor.store import open_monitor_store
 from weft.core.pipelines import (
@@ -73,16 +64,17 @@ from weft.core.pipelines import (
     load_pipeline_spec_payload,
 )
 from weft.core.spawn_requests import delete_spawn_request, submit_spawn_request
+from weft.core.task_evidence import terminal_error_message, terminal_status_from_event
 from weft.core.taskspec import (
     SpecRunInputRequest,
     TaskSpec,
-    apply_bundle_root_to_taskspec_payload,
+    encode_taskspec_transport_payload,
     invoke_run_input_adapter,
     materialize_taskspec_template,
     normalize_declared_option_name,
     parse_declared_parameterization_args,
     parse_declared_run_input_args,
-    resolve_taskspec_payload,
+    validate_taskspec_payload,
 )
 from weft.helpers import (
     read_limited_stdin,
@@ -166,7 +158,6 @@ def _run_with_managed_execution(
         manager_record, started_here, process_handle = _ensure_manager_after_submission(
             context,
             submitted_tid=tid_int,
-            verbose=verbose,
         )
         if emit_verbose and started_here and verbose and manager_record is not None:
             _emit_manager_started(manager_record)
@@ -196,7 +187,7 @@ def _run_with_managed_execution(
     except Exception:  # pragma: no cover - managed execution cleanup
         failed = True
         if started_here and manager_record is not None:
-            _stop_manager(context, manager_record, process_handle)
+            manager_runtime.stop_manager(context, manager_record, process_handle)
         raise
     finally:
         if (
@@ -206,7 +197,7 @@ def _run_with_managed_execution(
             and not reuse_enabled
             and manager_record is not None
         ):
-            _stop_manager(context, manager_record, process_handle)
+            manager_runtime.stop_manager(context, manager_record, process_handle)
 
 
 def _load_taskspec_reference(
@@ -221,12 +212,11 @@ def _load_taskspec_reference(
             spec_type=spec_cmd.SPEC_TYPE_TASK,
             context_path=context_dir,
         )
-        taskspec = TaskSpec.model_validate(
+        return validate_taskspec_payload(
             resolved.payload,
-            context={"template": True, "auto_expand": False},
+            bundle_root=resolved.bundle_root,
+            template=True,
         )
-        taskspec.set_bundle_root(resolved.bundle_root)
-        return taskspec
     except Exception as exc:  # pragma: no cover - validation tested elsewhere
         raise RunResolutionError(str(exc)) from exc
 
@@ -431,7 +421,8 @@ def _enqueue_taskspec(
     seed_start_envelope: bool = True,
     allow_internal_runtime: bool = False,
 ) -> int:
-    # Spec: docs/specifications/03-Manager_Architecture.md [MA-2], [MF-1]
+    # Spec: docs/specifications/03-Manager_Architecture.md [MA-2];
+    # docs/specifications/05-Message_Flow_and_State.md [MF-1]
     return submit_spawn_request(
         context.broker_target,
         taskspec=taskspec,
@@ -458,19 +449,13 @@ def _ensure_manager_after_submission(
     context: WeftContext,
     *,
     submitted_tid: str | int,
-    verbose: bool = False,
 ) -> tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]:
-    """CLI seam for queue-first submission recovery.
-
-    This keeps `weft.cli.run` patch points stable for CLI tests while
-    routing the actual recovery policy through the shared submission helper.
-    """
+    """Wire queue-first recovery to the manager and request cleanup owners."""
 
     return _shared_ensure_manager_after_submission(
         context,
         submitted_tid=submitted_tid,
-        verbose=verbose,
-        ensure_manager_fn=_ensure_manager,
+        ensure_manager_fn=manager_runtime.ensure_manager,
         delete_spawn_request_fn=_delete_spawn_request,
     )
 
@@ -732,7 +717,7 @@ class _InteractiveRunLifecycle:
     def _send_control(self, command: str) -> None:
         ctrl_queue = self._context.queue(self._ctrl_in_name, persistent=True)
         try:
-            ctrl_queue.write(command)
+            ctrl_queue.write(encode_control_message(command))
         finally:
             ctrl_queue.close()
 
@@ -1119,12 +1104,11 @@ def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> T
     if bool(getattr(taskspec.spec, "persistent", False)):
         metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = endpoint_name
 
-    renamed = TaskSpec.model_validate(
+    return validate_taskspec_payload(
         payload,
-        context={"auto_expand": False, "template": taskspec.tid is None},
+        bundle_root=taskspec.get_bundle_root(),
+        template=taskspec.tid is None,
     )
-    renamed.set_bundle_root(taskspec.get_bundle_root())
-    return renamed
 
 
 def _materialize_parameterized_spec(
@@ -1227,21 +1211,16 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
         metadata=metadata,
     )
 
-    taskspec = TaskSpec.model_validate(
-        template_dict, context={"auto_expand": False, "template": True}
-    )
+    taskspec = validate_taskspec_payload(template_dict, template=True)
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     def _wait_for_inline_completion(tid: str) -> tuple[str, Any, str | None]:
-        resolved_payload = resolve_taskspec_payload(
+        resolved_spec = validate_taskspec_payload(
             taskspec.model_dump(mode="json"),
-            tid=tid,
+            bundle_root=taskspec.get_bundle_root(),
+            resolved_tid=tid,
             inherited_weft_context=taskspec.spec.weft_context,
         )
-        resolved_spec = TaskSpec.model_validate(
-            resolved_payload, context={"auto_expand": False}
-        )
-        resolved_spec.set_bundle_root(taskspec.get_bundle_root())
 
         if interactive:
             use_prompt = stdin_data is None and stdin_is_terminal
@@ -1305,53 +1284,6 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
     )
 
 
-def _run_inline(
-    *,
-    command: Sequence[str],
-    function_target: str | None,
-    args: Sequence[str],
-    kwargs: Sequence[str],
-    env: Sequence[str],
-    name: str | None,
-    interactive: bool,
-    stream_output: bool | None,
-    timeout: float | None,
-    memory: int | None,
-    cpu: int | None,
-    tags: Sequence[str],
-    context_dir: Path | None,
-    wait: bool,
-    json_output: bool,
-    verbose: bool,
-    autostart_enabled: bool,
-) -> int:
-    execution = _execute_inline(
-        command=command,
-        function_target=function_target,
-        args=args,
-        kwargs=kwargs,
-        env=env,
-        name=name,
-        interactive=interactive,
-        stream_output=stream_output,
-        timeout=timeout,
-        memory=memory,
-        cpu=cpu,
-        tags=tags,
-        context_dir=context_dir,
-        wait=wait,
-        json_output=json_output,
-        verbose=verbose,
-        autostart_enabled=autostart_enabled,
-    )
-    return render_run_execution_result(
-        execution,
-        wait=wait,
-        json_output=json_output,
-        verbose=verbose,
-    )
-
-
 def _execute_spec_via_manager(
     spec_ref: str | Path,
     *,
@@ -1370,11 +1302,11 @@ def _execute_spec_via_manager(
     if persistent_override is not None:
         spec_payload.setdefault("spec", {})
         spec_payload["spec"]["persistent"] = persistent_override
-    spec = TaskSpec.model_validate(
+    spec = validate_taskspec_payload(
         spec_payload,
-        context={"template": True, "auto_expand": False},
+        bundle_root=bundle_root,
+        template=True,
     )
-    spec.set_bundle_root(bundle_root)
     spec, remaining_tokens = _materialize_parameterized_spec(
         taskspec=spec,
         context_root=str(context_dir)
@@ -1398,15 +1330,12 @@ def _execute_spec_via_manager(
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     def _wait_for_spec_completion(tid: str) -> tuple[str, Any, str | None]:
-        resolved_payload = resolve_taskspec_payload(
+        resolved_spec = validate_taskspec_payload(
             spec.model_dump(mode="json"),
-            tid=tid,
+            bundle_root=spec.get_bundle_root(),
+            resolved_tid=tid,
             inherited_weft_context=spec.spec.weft_context,
         )
-        resolved_spec = TaskSpec.model_validate(
-            resolved_payload, context={"auto_expand": False}
-        )
-        resolved_spec.set_bundle_root(spec.get_bundle_root())
         return _wait_for_task_completion(
             context,
             resolved_spec,
@@ -1442,37 +1371,6 @@ def _execute_spec_via_manager(
     )
 
 
-def _run_spec_via_manager(
-    spec_ref: str | Path,
-    *,
-    name: str | None = None,
-    context_dir: Path | None = None,
-    run_input_tokens: Sequence[str] = (),
-    verbose: bool,
-    wait: bool,
-    json_output: bool,
-    autostart_enabled: bool,
-    persistent_override: bool | None,
-) -> int:
-    execution = _execute_spec_via_manager(
-        spec_ref,
-        name=name,
-        context_dir=context_dir,
-        run_input_tokens=run_input_tokens,
-        verbose=verbose,
-        wait=wait,
-        json_output=json_output,
-        autostart_enabled=autostart_enabled,
-        persistent_override=persistent_override,
-    )
-    return render_run_execution_result(
-        execution,
-        wait=wait,
-        json_output=json_output,
-        verbose=verbose,
-    )
-
-
 def _execute_pipeline(
     pipeline: str | Path,
     *,
@@ -1502,9 +1400,12 @@ def _execute_pipeline(
             spec_type=spec_cmd.SPEC_TYPE_TASK,
             context_path=context_dir,
         )
-        return apply_bundle_root_to_taskspec_payload(
-            dict(resolved.payload),
-            resolved.bundle_root,
+        return encode_taskspec_transport_payload(
+            validate_taskspec_payload(
+                resolved.payload,
+                bundle_root=resolved.bundle_root,
+                template=True,
+            )
         )
 
     compiled = compile_linear_pipeline(
@@ -1561,35 +1462,6 @@ def _execute_pipeline(
     )
 
 
-def _run_pipeline(
-    pipeline: str | Path,
-    *,
-    name: str | None,
-    pipeline_input: str | None,
-    context_dir: Path | None,
-    wait: bool,
-    json_output: bool,
-    verbose: bool,
-    autostart_enabled: bool,
-) -> int:
-    execution = _execute_pipeline(
-        pipeline,
-        name=name,
-        pipeline_input=pipeline_input,
-        context_dir=context_dir,
-        wait=wait,
-        json_output=json_output,
-        verbose=verbose,
-        autostart_enabled=autostart_enabled,
-    )
-    return render_run_execution_result(
-        execution,
-        wait=wait,
-        json_output=json_output,
-        verbose=verbose,
-    )
-
-
 # -----------------------------------------------------------------------------
 # Public entry point
 # -----------------------------------------------------------------------------
@@ -1617,7 +1489,6 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
     wait: bool,
     json_output: bool,
     verbose: bool,
-    monitor: bool,
     persistent_override: bool | None,
     autostart_enabled: bool,
 ) -> RunExecutionResult:
@@ -1652,8 +1523,6 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             raise RunUsageError(
                 "--arg/--kw/--env/--tag are not compatible with --pipeline."
             )
-        if monitor:
-            raise RunUsageError("--monitor is not supported with pipelines.")
         if persistent_override is not None:
             raise RunUsageError("--continuous/--once is not supported with pipelines.")
         return _execute_pipeline(
@@ -1675,8 +1544,6 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             raise RunUsageError(
                 "--arg/--kw/--env/--tag are not compatible with --spec."
             )
-        if monitor:
-            raise RunUsageError("--monitor is not yet supported with the Manager.")
         return _execute_spec_via_manager(
             spec,
             name=name,
@@ -1689,8 +1556,6 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             persistent_override=persistent_override,
         )
 
-    if monitor:
-        raise RunUsageError("--monitor is only supported together with --spec.")
     if persistent_override is not None:
         raise RunUsageError(
             "--continuous/--once is only supported together with --spec."
@@ -1731,37 +1596,16 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
     )
 
 
-def cmd_run(command: Sequence[str], **kwargs: Any) -> int:
-    """Compatibility renderer for callers that still use the command module."""
-
-    execution = execute_run(command, **kwargs)
-    return render_run_execution_result(
-        execution,
-        wait=bool(kwargs["wait"]),
-        json_output=bool(kwargs["json_output"]),
-        verbose=bool(kwargs["verbose"]),
-    )
-
-
 __all__ = [
     "RunResolutionError",
     "RunUsageError",
-    "_build_manager_spec",
     "_collect_interactive_queue_output",
     "_delete_spawn_request",
     "_enqueue_taskspec",
-    "_ensure_manager",
     "_execute_inline",
     "_execute_pipeline",
     "_execute_spec_via_manager",
-    "_generate_tid",
-    "_run_inline",
-    "_run_pipeline",
-    "_run_spec_via_manager",
-    "_select_active_manager",
-    "_start_manager",
     "_wait_for_task_completion",
-    "cmd_run",
     "execute_run",
     "render_run_execution_result",
     "render_spec_aware_run_help",

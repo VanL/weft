@@ -75,6 +75,86 @@ def test_validate_taskspec_failure(workdir):
     assert "outbox" in out
 
 
+def test_validate_taskspec_rejects_unknown_top_level_field_without_traceback(
+    workdir: Path,
+) -> None:
+    payload = create_valid_function_taskspec().model_dump(mode="json")
+    payload["unsupported"] = True
+    spec_path = workdir / "unknown-top-level.json"
+    write_taskspec(spec_path, payload)
+
+    rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
+
+    assert rc == 1
+    assert "TaskSpec validation failed" in out
+    assert "unsupported" in out
+    assert "Traceback" not in out
+    assert err == ""
+
+
+def test_validate_taskspec_rejects_omitted_provider_authority_without_traceback(
+    workdir: Path,
+) -> None:
+    spec_path = workdir / "missing-provider-authority.json"
+    write_taskspec(
+        spec_path,
+        {
+            "name": "missing-provider-authority",
+            "spec": {
+                "type": "agent",
+                "agent": {
+                    "runtime": "provider_cli",
+                    "runtime_config": {"provider": "codex"},
+                },
+            },
+        },
+    )
+
+    rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
+
+    assert rc == 1
+    assert "TaskSpec validation failed" in out
+    assert "explicit authority_class" in out
+    assert "Traceback" not in out
+    assert err == ""
+
+
+@pytest.mark.parametrize("approval_required", [True, False])
+def test_validate_taskspec_rejects_removed_approval_field_without_traceback(
+    workdir: Path,
+    approval_required: bool,
+) -> None:
+    spec_path = workdir / f"approval-{str(approval_required).lower()}.json"
+    write_taskspec(
+        spec_path,
+        {
+            "name": "removed-approval-field",
+            "spec": {
+                "type": "agent",
+                "agent": {
+                    "runtime": "llm",
+                    "tools": [
+                        {
+                            "name": "echo",
+                            "kind": "python",
+                            "ref": "tests.tasks.sample_targets:echo_payload",
+                            "approval_required": approval_required,
+                        }
+                    ],
+                },
+            },
+        },
+    )
+
+    rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
+
+    assert rc == 1
+    assert "TaskSpec validation failed" in out
+    assert "approval_required" in out
+    assert "Traceback" not in out
+    assert err == ""
+
+
 def test_validate_taskspec_missing_explicit_file_preserves_exit_contract(
     workdir,
 ) -> None:

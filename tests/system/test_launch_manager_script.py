@@ -63,7 +63,13 @@ def test_wait_for_registry_retries_supported_read_errors(
         "service_key": "manager:weft.spawn.requests:file:/tmp/weft.db",
         "service_type": "manager",
         "owner_tid": tid,
+        "name": "manager",
         "status": "active",
+        "queues": {},
+        "runtime_handle": {},
+        "metadata": {},
+        "role": "manager",
+        "capabilities": [],
     }
     queue = _FakeQueue(
         [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 import weft.commands.submission as submission_mod
 from weft.commands._spawn_submission import SpawnSubmissionReconciliation
 from weft.commands.types import PreparedSubmissionRequest
+from weft.core import manager_runtime as core_manager_runtime
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 
 pytestmark = [pytest.mark.shared]
@@ -20,6 +22,29 @@ class ManagerStartupFailure(Exception):
 
 class ManagerStartupSignal(BaseException):
     """Fatal manager-startup signal that reconciliation must not contain."""
+
+
+def test_manager_startup_interfaces_drop_inert_verbose_parameter() -> None:
+    assert (
+        "verbose"
+        not in inspect.signature(core_manager_runtime.start_manager).parameters
+    )
+    assert (
+        "verbose"
+        not in inspect.signature(core_manager_runtime.ensure_manager).parameters
+    )
+    assert (
+        "verbose"
+        not in inspect.signature(
+            submission_mod.ensure_manager_after_submission
+        ).parameters
+    )
+
+
+def test_prepare_taskspec_drops_inert_context_parameter() -> None:
+    assert (
+        "context" not in inspect.signature(submission_mod.prepare_taskspec).parameters
+    )
 
 
 @pytest.mark.parametrize(
@@ -66,15 +91,15 @@ def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
     context = weft_harness.context
     tid = "1777000000000000789"
     startup_error = ManagerStartupFailure("startup detail")
-    calls: list[tuple[str, bool]] = []
+    calls: list[str] = []
 
-    def fail_startup(_context: object, *, verbose: bool) -> object:
-        calls.append(("ensure", verbose))
+    def fail_startup(_context: object) -> object:
+        calls.append("ensure")
         raise startup_error
 
     def reconcile(_context: object, submitted_tid: str, **kwargs: object) -> object:
         assert kwargs == {}
-        calls.append((f"reconcile:{submitted_tid}", False))
+        calls.append(f"reconcile:{submitted_tid}")
         return SpawnSubmissionReconciliation(outcome="spawned", tid=submitted_tid)
 
     monkeypatch.setattr(submission_mod, "reconcile_submitted_spawn", reconcile)
@@ -82,7 +107,6 @@ def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
     result = submission_mod.ensure_manager_after_submission(
         context,
         submitted_tid=tid,
-        verbose=True,
         ensure_manager_fn=fail_startup,
         delete_spawn_request_fn=lambda *_args, **_kwargs: pytest.fail(
             "spawned evidence must not delete the committed request"
@@ -90,7 +114,7 @@ def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
     )
 
     assert result == (None, False, None)
-    assert calls == [("ensure", True), (f"reconcile:{tid}", False)]
+    assert calls == ["ensure", f"reconcile:{tid}"]
 
 
 def test_ensure_manager_rejected_result_preserves_startup_failure_as_cause(
@@ -103,8 +127,7 @@ def test_ensure_manager_rejected_result_preserves_startup_failure_as_cause(
     tid = "1777000000000000790"
     startup_error = ManagerStartupFailure("startup detail")
 
-    def fail_startup(_context: object, *, verbose: bool) -> object:
-        assert verbose is False
+    def fail_startup(_context: object) -> object:
         raise startup_error
 
     monkeypatch.setattr(
@@ -136,8 +159,7 @@ def test_ensure_manager_propagates_fatal_startup_signal_without_reconciliation(
     context = weft_harness.context
     signal = ManagerStartupSignal()
 
-    def fail_startup(_context: object, *, verbose: bool) -> object:
-        assert verbose is False
+    def fail_startup(_context: object) -> object:
         raise signal
 
     monkeypatch.setattr(
@@ -194,7 +216,7 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
     def fake_ensure(_context, *, submitted_tid: str | int) -> None:
         captured["reconciled_tid"] = submitted_tid
 
-    monkeypatch.setattr(submission_mod, "generate_tid", fail_preallocation)
+    monkeypatch.setattr(core_manager_runtime, "generate_tid", fail_preallocation)
     monkeypatch.setattr(submission_mod, "submit_spawn_request", fake_submit)
     monkeypatch.setattr(submission_mod, "ensure_manager_after_submission", fake_ensure)
 

@@ -10,6 +10,7 @@ from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE
 from weft.commands import run as run_cmd
 from weft.context import build_context
+from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -18,7 +19,12 @@ pytestmark = [pytest.mark.shared]
 def test_spawn_request_timestamp_matches_tid(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
-    tid = run_cmd._generate_tid(context)
+    tid = str(
+        generate_spawn_request_timestamp(
+            context.broker_target,
+            config=context.broker_config,
+        )
+    )
 
     taskspec = TaskSpec(
         tid=tid,

@@ -28,8 +28,9 @@ from weft._constants import (
 )
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
-from weft.commands.status import cmd_status, collect_status
+from weft.commands.system import cmd_status, collect_broker_status
 from weft.context import build_context
+from weft.core import manager_runtime
 from weft.core import task_evidence as core_task_evidence
 from weft.core.runners import host as host_runner
 from weft.core.service_convergence import (
@@ -106,6 +107,23 @@ class _FakeQueueChangeMonitor:
 
     def close(self) -> None:
         return
+
+
+def test_queue_json_reader_propagates_generator_type_error_after_one_call() -> None:
+    class FailingQueue:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def peek_generator(self, **_kwargs: object) -> None:
+            self.calls += 1
+            raise TypeError("current generator defect")
+
+    queue = FailingQueue()
+
+    with pytest.raises(TypeError, match="current generator defect"):
+        list(status_cmd._iter_queue_json_messages(queue))  # type: ignore[arg-type]
+
+    assert queue.calls == 1
 
 
 def _write_task_log_entry(
@@ -263,14 +281,14 @@ def _write_pipeline_log_entry(
     )
 
 
-def test_collect_status_reports_message_counts(tmp_path):
+def test_collect_broker_status_reports_message_counts(tmp_path):
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue = ctx.queue("status.queue", persistent=True)
     queue.write("hello")
     queue.write("there")
 
-    snapshot = collect_status(ctx)
+    snapshot = collect_broker_status(ctx)
 
     assert snapshot.total_messages == 2
     assert snapshot.db_size >= 0
@@ -2513,7 +2531,7 @@ def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
                 metadata={"host_pids": [stale_pid]},
             )
 
-    monkeypatch.setattr(status_cmd, "_pid_alive", lambda pid: pid == stale_pid)
+    monkeypatch.setattr(status_cmd, "pid_is_live", lambda pid: pid == stale_pid)
     monkeypatch.setattr(
         status_cmd, "handle_has_live_host_process", lambda handle: False
     )
@@ -2543,6 +2561,18 @@ def test_cmd_status_discovers_parent_context_from_subdirectory(
 
     prepared_root = prepare_project_root(root)
     ctx = build_context(spec_context=prepared_root)
+    assert ctx.database_path is not None
+    (prepared_root / ".weft" / "broker.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                'backend = "sqlite"',
+                f'target = "{ctx.database_path.name}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     queue = ctx.queue("status.queue", persistent=True)
     queue.write("payload")
 
@@ -2580,7 +2610,11 @@ def test_task_snapshot_collection_tolerates_unexpected_manager_selection_failure
         selection_attempts.append(_ctx)
         raise UnexpectedManagerSelectionFailure("runner probe failed")
 
-    monkeypatch.setattr(status_cmd, "_select_active_manager", _fail_manager_selection)
+    monkeypatch.setattr(
+        manager_runtime,
+        "select_active_manager",
+        _fail_manager_selection,
+    )
 
     records = status_cmd._collect_task_snapshot_records(
         ctx,

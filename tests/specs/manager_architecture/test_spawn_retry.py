@@ -12,6 +12,7 @@ from tests.helpers.test_backend import prepare_project_root
 from weft.commands import run as run_module
 from weft.context import build_context
 from weft.core import spawn_requests
+from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -38,7 +39,12 @@ def _build_spec(tid: str) -> TaskSpec:
 def test_spawn_request_uses_insert_messages_api(monkeypatch, tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
-    tid = run_module._generate_tid(context)
+    tid = str(
+        generate_spawn_request_timestamp(
+            context.broker_target,
+            config=context.broker_config,
+        )
+    )
     taskspec = _build_spec(tid)
     called = {"count": 0, "message_id": None}
     original_get_connection = spawn_requests.Queue.get_connection

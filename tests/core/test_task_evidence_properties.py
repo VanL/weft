@@ -8,8 +8,13 @@ from hypothesis import strategies as st
 
 from tests.helpers.hypothesis_strategies import taskspec_tid_strings
 from weft.core.task_evidence import (
+    TaskEvidenceSnapshot,
     control_queue_names_for_tid,
+    monitor_failure_classification,
     queue_names_for_tid,
+    state_timestamp_from_log_payload,
+    status_from_log_payload,
+    task_name_from_taskspec,
 )
 
 pytestmark = [pytest.mark.shared, pytest.mark.property]
@@ -20,6 +25,85 @@ _QUEUE_NAME_VALUES = st.one_of(
     st.just(""),
     st.text(min_size=1, max_size=32),
 )
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({}, None),
+        ({"taskspec": []}, None),
+        ({"taskspec": {"state": []}}, None),
+        ({"taskspec": {"state": {"started_at": "12"}}}, None),
+        ({"taskspec": {"state": {"started_at": 12}}}, 12),
+    ],
+)
+def test_state_timestamp_parser_preserves_strict_nested_shape(
+    payload: dict[str, object],
+    expected: int | None,
+) -> None:
+    assert state_timestamp_from_log_payload(payload, "started_at") == expected
+
+
+@pytest.mark.parametrize(
+    ("classification", "status", "expected"),
+    [
+        ("terminal_log", "failed", "domain_failure"),
+        ("terminal_log", "completed", "terminal_log"),
+        ("runtime_unavailable", "failed", "runtime_unavailable"),
+    ],
+)
+def test_monitor_failure_classification_maps_only_failed_terminal_logs(
+    classification: str,
+    status: str,
+    expected: str,
+) -> None:
+    snapshot = TaskEvidenceSnapshot(
+        tid="123",
+        status=status,
+        classification=classification,
+        source="task_log",
+        terminal=True,
+    )
+
+    assert monitor_failure_classification(snapshot) == expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (None, None),
+        ({}, None),
+        ({"name": 1}, None),
+        ({"name": ""}, None),
+        ({"name": "worker"}, "worker"),
+    ],
+)
+def test_taskspec_name_parser_accepts_only_non_empty_top_level_names(
+    payload: dict[str, object] | None,
+    expected: str | None,
+) -> None:
+    assert task_name_from_taskspec(payload) == expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({}, None),
+        ({"status": ""}, None),
+        ({"status": 1}, None),
+        ({"status": "running"}, "running"),
+        ({"status": "running", "taskspec": {"state": {"status": "failed"}}}, "running"),
+        ({"taskspec": []}, None),
+        ({"taskspec": {"state": []}}, None),
+        ({"taskspec": {"state": {"status": ""}}}, None),
+        ({"taskspec": {"state": {"status": "failed"}}}, "failed"),
+    ],
+)
+def test_log_status_parser_prefers_top_level_then_nested_taskspec_state(
+    payload: dict[str, object],
+    expected: str | None,
+) -> None:
+    assert status_from_log_payload(payload) == expected
 
 
 @given(

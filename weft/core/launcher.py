@@ -24,7 +24,11 @@ from weft._constants import (
     TASK_PROCESS_POLL_INTERVAL,
 )
 
-from .taskspec import TaskSpec, apply_bundle_root_to_taskspec_payload
+from .taskspec import (
+    TaskSpec,
+    decode_taskspec_transport_payload,
+    encode_taskspec_transport_payload,
+)
 
 
 def _load_task_class(path: str) -> type[Any]:
@@ -128,7 +132,7 @@ def _task_process_entry(
         _redirect_standard_streams_to_devnull()
 
     task_cls = _load_task_class(task_cls_path)
-    spec = TaskSpec.model_validate_json(spec_json)
+    spec = decode_taskspec_transport_payload(json.loads(spec_json))
     task = task_cls(db_path, spec, config=config)
     _install_signal_handlers(task)
     initial_parent_pid = os.getppid()
@@ -168,12 +172,7 @@ def launch_task_process(
         args=(
             task_cls_path,
             db_path,
-            json.dumps(
-                apply_bundle_root_to_taskspec_payload(
-                    spec.model_dump(mode="json"),
-                    spec.get_bundle_root(),
-                )
-            ),
+            json.dumps(encode_taskspec_transport_payload(spec)),
             config,
             poll_interval,
             True,

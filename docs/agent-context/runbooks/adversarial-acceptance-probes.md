@@ -19,7 +19,8 @@ action: an implementation that fails any probe is not integration-ready,
 regardless of its own suite passing.
 
 When a repository's spec defines a contractual probe list (a verification
-section naming required probes and their home, e.g. `tests/acceptance/`),
+section naming required probes and their home, e.g.
+`tests/acceptance/<probe>.py`),
 that list governs; this runbook is the generic pattern to derive it from.
 
 ## The Invariant Floors

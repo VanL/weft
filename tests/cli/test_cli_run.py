@@ -752,7 +752,7 @@ def test_cli_run_command_inline(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_cli_run_help_hides_monitor_and_documents_named_or_path_spec(
+def test_cli_run_help_omits_removed_monitor_and_documents_named_or_path_spec(
     workdir, weft_harness
 ) -> None:
     rc, out, err = run_cli(
@@ -2290,20 +2290,17 @@ def test_cli_run_command_and_function_conflict(workdir, weft_harness) -> None:
     assert "Cannot execute a shell command and --function simultaneously." in combined
 
 
-def test_cli_run_monitor_requires_spec(workdir, weft_harness) -> None:
+def test_cli_run_rejects_removed_monitor_option(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--monitor",
-        "--function",
-        "tests.tasks.sample_targets:echo_payload",
-        "--arg",
-        "payload",
         cwd=workdir,
         harness=weft_harness,
     )
     assert rc != 0
     combined = f"{out}\n{err}"
-    assert "--monitor is only supported together with --spec." in combined
+    assert "Unknown option '--monitor'." in combined
+    assert "Traceback" not in combined
 
 
 def test_cli_run_interactive_json_conflict(workdir, weft_harness) -> None:

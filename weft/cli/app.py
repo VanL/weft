@@ -1,7 +1,7 @@
 """Typer entry point for the current Weft CLI surface.
 
 Spec references:
-- docs/specifications/10-CLI_Interface.md [CLI-0], [CLI-0.3], [CLI-1.1]
+- docs/specifications/10-CLI_Interface.md [CLI-0], [CLI-0.3], [CLI-1.1], [CLI-1.2]
 - docs/specifications/11-CLI_Architecture_Crosswalk.md [CLI-X0], [CLI-X1]
 """
 
@@ -21,25 +21,26 @@ from weft._constants import (
     get_weft_directory_name,
 )
 from weft.cli.validate_taskspec import cmd_validate_taskspec
-from weft.commands import cmd_init, cmd_status, cmd_tidy
 from weft.commands import manager as manager_cmd
 from weft.commands import queue as queue_cmd
 from weft.commands import serve as serve_cmd
 from weft.commands import specs as spec_cmd
-from weft.commands import status as status_cmd
+from weft.commands import system as system_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.builtins import cmd_system_builtins
-from weft.commands.diagnostics import format_runner_diagnostics
 from weft.commands.dump import cmd_dump
+from weft.commands.init import cmd_init
 from weft.commands.load import cmd_load
+from weft.commands.prune import cmd_prune
 from weft.commands.result import cmd_result
-from weft.commands.retention_prune import cmd_retention_prune
-from weft.commands.runtime_prune import cmd_prune
+from weft.commands.system import cmd_status
 from weft.commands.task_monitor import (
     TaskMonitorConfig,
     TaskMonitorSinkName,
     run_task_monitor,
 )
+from weft.commands.tasks import format_runner_diagnostics
+from weft.commands.tidy import cmd_tidy
 from weft.ext import RunnerHandle
 
 from .run import cmd_run, render_spec_aware_run_help
@@ -711,7 +712,7 @@ def task_list(
     if json_output:
         typer.echo(
             json.dumps(
-                [status_cmd._task_snapshot_to_json_dict(snap) for snap in snapshots],
+                [system_cmd._task_snapshot_to_json_dict(snap) for snap in snapshots],
                 ensure_ascii=False,
             )
         )
@@ -744,7 +745,7 @@ def _task_status_process_fields(
     live_managed_pids = [
         managed_pid
         for managed_pid in managed_pids
-        if isinstance(managed_pid, int) and status_cmd._pid_alive(managed_pid)
+        if isinstance(managed_pid, int) and system_cmd.pid_is_live(managed_pid)
     ]
     return {
         "host_pids": managed_pids,
@@ -836,7 +837,7 @@ def task_status(
     if snapshot is None:
         typer.echo(f"Task {tid} not found", err=True)
         raise typer.Exit(code=2)
-    status_payload: dict[str, Any] = status_cmd._task_snapshot_to_json_dict(snapshot)
+    status_payload: dict[str, Any] = system_cmd._task_snapshot_to_json_dict(snapshot)
     if process:
         status_payload.update(_task_status_process_fields(snapshot.tid, context_dir))
     if json_output:
@@ -1086,6 +1087,15 @@ def task_monitor(
 
 @system_app.command("prune")
 def prune(
+    family: Annotated[
+        str,
+        typer.Option(
+            "--family",
+            help=(
+                "Prune family: runtime-state, task-local, task-log, retention, or all"
+            ),
+        ),
+    ],
     context: Annotated[
         Path | None,
         typer.Option("--context", help="Run pruning against a specific project root"),
@@ -1097,15 +1107,6 @@ def prune(
             help="Delete selected prune candidates or only report candidates",
         ),
     ] = False,
-    family: Annotated[
-        str,
-        typer.Option(
-            "--family",
-            help=(
-                "Prune family: runtime-state, task-local, task-log, retention, or all"
-            ),
-        ),
-    ] = "runtime-state",
     force: Annotated[
         bool,
         typer.Option(
@@ -1179,83 +1180,22 @@ def prune(
     collation does not cover.
     """
 
-    normalized_family = family.strip()
-    if normalized_family == "runtime-state":
-        if force:
-            exit_code = 1
-            stdout = ""
-            stderr = "--force is only supported for retention prune families"
-        else:
-            exit_code, stdout, stderr = cmd_prune(
-                context=context,
-                apply=apply,
-                queues=queues,
-                min_age_seconds=min_age,
-                keep_recent_per_key=keep_recent_per_key,
-                limit=limit,
-                json_output=json_output,
-                report_path=report,
-            )
-    elif normalized_family in {"task-local", "task-log", "retention"}:
-        exit_code, stdout, stderr = cmd_retention_prune(
-            context=context,
-            family=normalized_family,
-            apply=apply,
-            force=force,
-            tasks=tasks,
-            retention_classes=retention_classes,
-            min_age_seconds=min_age,
-            keep_recent_per_task=keep_recent_per_task,
-            limit=limit,
-            json_output=json_output,
-            archive_path=archive,
-            report_path=report,
-        )
-    elif normalized_family == "all":
-        runtime_code, runtime_out, runtime_err = cmd_prune(
-            context=context,
-            apply=apply,
-            queues=queues,
-            min_age_seconds=min_age,
-            keep_recent_per_key=keep_recent_per_key,
-            limit=limit,
-            json_output=True,
-            report_path=None,
-        )
-        retention_code, retention_out, retention_err = cmd_retention_prune(
-            context=context,
-            family="retention",
-            apply=apply,
-            force=force,
-            tasks=tasks,
-            retention_classes=retention_classes,
-            min_age_seconds=min_age,
-            keep_recent_per_task=keep_recent_per_task,
-            limit=limit,
-            json_output=True,
-            archive_path=archive,
-            report_path=report,
-        )
-        exit_code = 1 if runtime_code or retention_code else 0
-        if json_output:
-            stdout = json.dumps(
-                {
-                    "runtime_state": json.loads(runtime_out),
-                    "retention": json.loads(retention_out),
-                },
-                sort_keys=True,
-            )
-        else:
-            stdout = f"Runtime state:\n{runtime_out}\nRetention:\n{retention_out}"
-        stderr = "\n".join(part for part in (runtime_err, retention_err) if part)
-    else:
-        exit_code = 1
-        stdout = ""
-        stderr = (
-            "unknown prune family: "
-            f"{normalized_family}; allowed: runtime-state, task-local, task-log, "
-            "retention, all"
-        )
+    exit_code, stdout, stderr = cmd_prune(
+        family=family,
+        context=context,
+        apply=apply,
+        force=force,
+        queues=queues,
+        tasks=tasks,
+        retention_classes=retention_classes,
+        min_age_seconds=min_age,
+        keep_recent_per_key=keep_recent_per_key,
+        keep_recent_per_task=keep_recent_per_task,
+        limit=limit,
+        json_output=json_output,
+        archive_path=archive,
+        report_path=report,
+    )
     if stdout:
         typer.echo(stdout)
     if stderr:
@@ -1495,14 +1435,6 @@ def run_command(
         bool,
         typer.Option("--verbose", "-v", help="Show detailed output"),
     ] = False,
-    monitor: Annotated[
-        bool,
-        typer.Option(
-            "--monitor",
-            help="Run TaskSpec in monitor mode (with --spec)",
-            hidden=True,
-        ),
-    ] = False,
     continuous: Annotated[
         bool | None,
         typer.Option(
@@ -1566,7 +1498,6 @@ def run_command(
         wait=wait,
         json_output=json_output,
         verbose=verbose,
-        monitor=monitor,
         persistent_override=continuous,
         autostart_enabled=autostart,
     )

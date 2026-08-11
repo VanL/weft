@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from weft.commands.diagnostics import format_runner_diagnostics
+from weft.commands.tasks import format_runner_diagnostics
 
 pytestmark = [pytest.mark.shared]
 

@@ -62,10 +62,9 @@ Notes:
   `weft_monitor_deferred_writes` is the Monitor-owned durable-before-delete
   outbox for `jsonl_then_delete` lifetime reports; deferred writes are retried
   by bounded monitor cycles and are operational outbox state only.
-- `weft system prune` can explicitly dry-run or apply exact-message pruning.
-  It defaults to runtime-only `weft.state.*` pruning. Retention families can
-  also prune selected `weft.log.tasks` and task-local `T{tid}.*` rows with
-  archive-backed ordinary apply or explicit human `--force`.
+- `weft system prune` requires an explicit family and defaults to dry-run.
+  Runtime-state, retention, and `all` family behavior retain their current
+  deletion and archive protections.
 - named endpoint records resolve stable project-local names to ordinary
   task-local queues.
 - Full queue behaviors are defined in `05-Message_Flow_and_State.md`.
@@ -75,9 +74,8 @@ _Implementation mapping_: `weft/_constants.py` (global queue constants),
 `weft/core/endpoints.py` (named endpoint resolution),
 `weft/core/manager.py` (manager registry), `weft/core/pipelines.py`
 (pipeline queue compilation), `weft/core/tasks/pipeline.py`
-(pipeline runtime queues), `weft/commands/runtime_prune.py`
-(explicit runtime-state pruning), `weft/commands/retention_prune.py`
-(explicit task-local and task-log retention pruning), `weft/core/monitor/store.py`
+(pipeline runtime queues), `weft/commands/prune.py` (explicit runtime-state,
+task-local, and task-log pruning), `weft/core/monitor/store.py`
 (Monitor-owned operational tables), `weft/core/monitor/sql.py`
 (Monitor table SQL builders).
 
@@ -124,6 +122,12 @@ Notes:
 State transitions and rules live in `05-Message_Flow_and_State.md`.
 
 ## Control Messages
+
+Every request is a JSON object containing exactly `command` and, when keyed,
+`request_id`. `command` is one of the exact uppercase values below;
+`request_id`, when present, is a string containing at least one non-whitespace
+character. Raw strings, extra keys, and
+case-normalized command variants are not current request formats.
 
 | Message | Effect |
 |---------|--------|
@@ -177,12 +181,18 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS` | Minimum seconds between monitor self-maintenance passes. A wall-clock deadline, not a cycle count. Defaults to 3600 seconds. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |
 | `WEFT_LOGS_DIR` | Optional log-root override. Relative values resolve against the project root; absolute values are used directly. Defaults to `.weft/logs`. |
-| `WEFT_DEFAULT_DB_LOCATION` | Broker default database location for SimpleBroker project resolution. |
-| `WEFT_DEFAULT_DB_NAME` | Default sqlite broker path for explicit-root resolution and for legacy sqlite project auto-discovery when no Weft-scoped broker config owns the target. |
+| `WEFT_DEFAULT_DB_LOCATION` | Default SQLite broker location used for current explicit-root resolution. |
+| `WEFT_DEFAULT_DB_NAME` | Default SQLite broker filename used for current explicit-root resolution. It is not an upward-discovery marker. |
 | `WEFT_PROJECT_CONFIG_PATH` | Optional override for the SimpleBroker project-config directory used by Weft. Defaults to `WEFT_DIRECTORY_NAME`. |
 | `WEFT_PROJECT_CONFIG_NAME` | Optional override for the SimpleBroker project-config filename used by Weft. Defaults to `broker.toml`. |
-| `WEFT_PROJECT_SCOPE` | Whether SimpleBroker should search upward for a project-scoped target. |
-| `WEFT_BACKEND`, `WEFT_BACKEND_TARGET`, `WEFT_BACKEND_HOST`, `WEFT_BACKEND_PORT`, `WEFT_BACKEND_USER`, `WEFT_BACKEND_PASSWORD`, `WEFT_BACKEND_DATABASE`, `WEFT_BACKEND_SCHEMA` | Env-selected broker backend and connection details. They win for explicit-root resolution when no Weft-scoped broker config exists, but auto-discovery still prefers a Weft-scoped broker config or an existing legacy sqlite project first. |
+| `WEFT_PROJECT_SCOPE` | Whether Weft searches upward for its configured Weft-scoped broker configuration. |
+| `WEFT_BACKEND`, `WEFT_BACKEND_TARGET`, `WEFT_BACKEND_HOST`, `WEFT_BACKEND_PORT`, `WEFT_BACKEND_USER`, `WEFT_BACKEND_PASSWORD`, `WEFT_BACKEND_DATABASE`, `WEFT_BACKEND_SCHEMA` | Environment-selected broker backend and connection details. A discovered Weft-scoped broker configuration wins; otherwise these values apply to current explicit-root resolution. |
+
+Boolean `WEFT_*` settings use one documented normalizer. Unset, empty, `0`,
+`f`, `false`, `none`, and `null` values are false, with matching case ignored;
+any other non-empty string is true. Explicit boolean overrides remain
+booleans, and explicit string overrides use the same string parser.
+`WEFT_LOGGING_ENABLED` does not use a private compatibility truth table.
 
 Internal supervision inputs (not operator configuration) are deliberately not
 indexed here; `WEFT_MANAGER_RUNTIME_HANDLE_JSON` is documented in
@@ -203,6 +213,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)

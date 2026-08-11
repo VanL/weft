@@ -98,21 +98,8 @@ def test_sandbox_name_handles_current_sdk_attribute_shape() -> None:
         name = "sandbox-attribute"
 
     assert (
-        asyncio.run(_runtime._sandbox_name(AttributeNameSandbox(), fallback="fallback"))
+        _runtime._sandbox_name(AttributeNameSandbox(), fallback="fallback")
         == "sandbox-attribute"
-    )
-
-
-def test_sandbox_name_handles_legacy_async_method_shape() -> None:
-    class AsyncMethodNameSandbox:
-        async def name(self) -> str:
-            return "sandbox-method"
-
-    assert (
-        asyncio.run(
-            _runtime._sandbox_name(AsyncMethodNameSandbox(), fallback="fallback")
-        )
-        == "sandbox-method"
     )
 
 
@@ -120,15 +107,13 @@ def test_sandbox_name_reports_lookup_failure_and_uses_fallback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     class FailingNameSandbox:
-        @staticmethod
-        def name() -> str:
+        @property
+        def name(self) -> str:
             raise RuntimeError("sensitive sandbox name failure")
 
     caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
 
-    name = asyncio.run(
-        _runtime._sandbox_name(FailingNameSandbox(), fallback="sensitive-fallback")
-    )
+    name = _runtime._sandbox_name(FailingNameSandbox(), fallback="sensitive-fallback")
 
     assert name == "sensitive-fallback"
     assert [record.getMessage() for record in caplog.records] == [

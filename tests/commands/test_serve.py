@@ -15,7 +15,11 @@ from weft._constants import (
 )
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
-from weft.core.service_convergence import build_manager_service_payload
+from weft.core.service_convergence import (
+    build_manager_service_payload,
+    manager_service_key,
+    project_manager_service_record,
+)
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
@@ -76,10 +80,15 @@ def _latest_manager_record(context, tid: str) -> dict[str, object] | None:
     try:
         latest: tuple[dict[str, object], int] | None = None
         for payload, timestamp in iter_queue_json_entries(queue):
-            if payload.get("tid") != tid:
+            record = project_manager_service_record(
+                payload,
+                timestamp=timestamp,
+                service_key=manager_service_key(context),
+            )
+            if record is None or record.get("tid") != tid:
                 continue
             if latest is None or latest[1] < timestamp:
-                latest = (payload, timestamp)
+                latest = (record, timestamp)
         return None if latest is None else latest[0]
     finally:
         queue.close()
@@ -106,7 +115,11 @@ def test_serve_command_delegates_to_shared_foreground_helper(
         calls.append("serve")
         return 0, None
 
-    monkeypatch.setattr(serve_cmd, "_serve_manager_foreground", fake_serve_manager)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "serve_manager_foreground",
+        fake_serve_manager,
+    )
 
     exit_code, message = serve_cmd.serve_command(context_path=context_root)
 
@@ -130,8 +143,8 @@ def test_serve_command_returns_preflight_message(tmp_path, monkeypatch) -> None:
         lambda spec_context=None, *, config=None: context,
     )
     monkeypatch.setattr(
-        serve_cmd,
-        "_serve_manager_foreground",
+        core_manager_runtime,
+        "serve_manager_foreground",
         lambda context_arg: (
             1,
             "Manager 1761000000000000001 already running (pid 54321)",
@@ -171,8 +184,8 @@ def test_serve_command_replace_supersedes_before_foreground(
         calls.append("serve")
         return 0, None
 
-    monkeypatch.setattr(serve_cmd, "_replace_active_manager", fake_replace)
-    monkeypatch.setattr(serve_cmd, "_serve_manager_foreground", fake_serve)
+    monkeypatch.setattr(core_manager_runtime, "replace_active_manager", fake_replace)
+    monkeypatch.setattr(core_manager_runtime, "serve_manager_foreground", fake_serve)
 
     exit_code, message = serve_cmd.serve_command(
         context_path=context_root,
@@ -200,13 +213,13 @@ def test_serve_command_replace_failure_does_not_serve(
         lambda spec_context=None, *, config=None: context,
     )
     monkeypatch.setattr(
-        serve_cmd,
-        "_replace_active_manager",
+        core_manager_runtime,
+        "replace_active_manager",
         lambda *args, **kwargs: (False, "failed to send STOP"),
     )
     monkeypatch.setattr(
-        serve_cmd,
-        "_serve_manager_foreground",
+        core_manager_runtime,
+        "serve_manager_foreground",
         lambda *args, **kwargs: calls.append("serve"),
     )
 

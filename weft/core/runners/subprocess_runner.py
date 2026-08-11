@@ -17,7 +17,6 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from typing import IO, Any, Literal
 
-from simplebroker import BrokerTarget
 from weft._constants import (
     ACTIVE_CONTROL_POLL_INTERVAL,
     SUBPROCESS_POLL_INTERVAL_FLOOR,
@@ -80,8 +79,6 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
     monitor_class: str | None,
     monitor_interval: float,
     monitor: Any | None,
-    db_path: BrokerTarget | str | None,
-    config: dict[str, Any] | None,
     runtime_handle: RunnerHandle,
     cancel_requested: Callable[[], bool] | None,
     on_worker_started: Callable[[int | None], None] | None,
@@ -126,8 +123,6 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
             monitor_class,
             limits=limits,
             polling_interval=monitor_interval,
-            db_path=db_path,
-            config=config,
         )
     if monitor is not None:
         try:
@@ -197,7 +192,6 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 returncode=None,
                 duration=time.monotonic() - start_time,
                 metrics=last_metrics,
-                worker_pid=actual_worker_pid,
                 runtime_handle=runtime_handle,
             )
 
@@ -237,7 +231,6 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 returncode=None,
                 duration=timeout,
                 metrics=last_metrics,
-                worker_pid=actual_worker_pid,
                 runtime_handle=runtime_handle,
                 diagnostics=runner_diagnostics(
                     phase="execute",
@@ -308,7 +301,6 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                     returncode=None,
                     duration=time.monotonic() - start_time,
                     metrics=last_metrics,
-                    worker_pid=actual_worker_pid,
                     runtime_handle=runtime_handle,
                     diagnostics=runner_diagnostics(
                         phase="execute",
@@ -360,7 +352,6 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
             returncode=None,
             duration=time.monotonic() - start_time,
             metrics=last_metrics,
-            worker_pid=actual_worker_pid,
             runtime_handle=runtime_handle,
             diagnostics=runner_diagnostics(
                 phase="execute",
@@ -385,7 +376,6 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
             returncode=returncode,
             duration=time.monotonic() - start_time,
             metrics=last_metrics,
-            worker_pid=actual_worker_pid,
             runtime_handle=runtime_handle,
             diagnostics=runner_diagnostics(
                 phase="execute",
@@ -408,7 +398,6 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
         returncode=returncode,
         duration=time.monotonic() - start_time,
         metrics=last_metrics,
-        worker_pid=actual_worker_pid,
         runtime_handle=runtime_handle,
     )
 

@@ -20,6 +20,7 @@ from weft.core.monitor.runtime import (
     TaskMonitorProcessorResult,
     TaskMonitorRuntimeConfig,
     build_task_monitor_cycle_snapshot,
+    reduce_task_log_messages,
     resolve_task_monitor_processor,
     task_log_seen_candidate,
 )
@@ -50,6 +51,34 @@ def custom_processor(
 
 def noop(_request: TaskMonitorProcessorRequest) -> TaskMonitorProcessorResult:
     return TaskMonitorProcessorResult(success=True)
+
+
+def test_supervised_reducer_observes_and_counts_every_scanned_row() -> None:
+    tid = "1778084345905438705"
+    rows = (
+        ("not-json", 10),
+        ("[]", 11),
+        (json.dumps({"event": "work_started"}), 12),
+        (json.dumps({"event": "work_started", "tid": tid}), 13),
+        (json.dumps({"tid": "1778084345905438706"}), 14),
+    )
+    observed: list[tuple[str, str, int]] = []
+
+    scan = reduce_task_log_messages(
+        rows,
+        limit=4,
+        observer=lambda queue_name, message, timestamp: observed.append(
+            (queue_name, message, timestamp)
+        ),
+    )
+
+    assert scan.events_scanned == 4
+    assert scan.last_task_log_timestamp == 13
+    assert list(scan.reduced) == [tid]
+    assert [row.message_id for row in scan.rows] == [13]
+    assert observed == [
+        (WEFT_GLOBAL_LOG_QUEUE, message, timestamp) for message, timestamp in rows[:4]
+    ]
 
 
 def test_task_monitor_old_tasks_module_path_is_removed() -> None:

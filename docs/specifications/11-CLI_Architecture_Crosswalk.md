@@ -25,32 +25,37 @@ command grows beyond its owning module.
 |---|---|---|
 | `init` | `weft/commands/init.py` | project bootstrap and root discovery |
 | `run` | `weft/cli/run.py`, `weft/commands/run.py`, `weft/commands/submission.py`, `weft/commands/manager.py`, `weft/core/manager_runtime.py`, `weft/commands/_result_wait.py`, `weft/commands/_spawn_submission.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | Typer adapter renders structured `execute_run()` results from the shared run orchestration; durable submission, explicit `NAME|PATH` spec resolution, local spec materialization or run-input shaping when declared, queue-first spawn reconciliation, and optional completion wait or interactive queue-stream handling stay below the adapter |
-| `status` | `weft/commands/status.py`, `weft/core/manager_runtime.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | reconstruct current status from task logs, manager registry records, and watch loops |
-| `result` | `weft/commands/result.py`, `weft/core/queue_wait.py`, `weft/commands/_result_wait.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | gather public output with the shared waiter, stream decoder, and task-log classification helpers |
-| `task` | `weft/commands/tasks.py`, `weft/commands/status.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | TID lookup, list, stop, kill, and task-level status built on shared snapshot and control helpers |
+| `status` | `weft/commands/system.py`, `weft/core/task_evidence.py`, `weft/core/manager_runtime.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | reconstruct current status from task logs, manager registry records, and watch loops |
+| `result` | `weft/commands/result.py`, `weft/core/task_evidence.py`, `weft/core/queue_wait.py`, `weft/commands/_result_wait.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | gather public output with the shared waiter, stream decoder, and task-log classification helpers |
+| `task` | `weft/commands/tasks.py`, `weft/commands/system.py`, `weft/core/task_evidence.py`, `weft/core/runner_diagnostics.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | TID lookup, list, stop, kill, task-level status, and user-facing runner diagnostics built on shared snapshot and control helpers |
 | `manager` / `serve` | `weft/commands/manager.py`, `weft/commands/serve.py`, `weft/core/manager_runtime.py` | manage the canonical manager lifecycle and registry control |
 | `queue` | `weft/commands/queue.py` | direct SimpleBroker queue access |
 | `spec` | `weft/commands/specs.py`, `weft/cli/validate_taskspec.py` | stored spec management, resolution, builtin task-spec discovery, structured TaskSpec validation, and CLI rendering |
-| `system` | `weft/commands/builtins.py`, `weft/commands/tidy.py`, `weft/commands/dump.py`, `weft/commands/load.py` | builtin inventory plus maintenance and broker-state operations |
+| `system` | `weft/commands/builtins.py`, `weft/commands/tidy.py`, `weft/commands/dump.py`, `weft/commands/load.py`, `weft/commands/task_monitor.py`, `weft/commands/prune.py` | builtin inventory plus maintenance, broker-state operations, foreground task monitoring, and explicit prune dispatch |
 
 ## Current Helper Boundaries [CLI-X2]
 
 The command-family table above is only the top layer. Several shared helpers
 are already shipped and are part of the current ownership map:
 
-- `weft/core/manager_runtime.py` owns shared manager discovery,
-  detached or foreground startup, registry polling, and convergence on the
-  canonical live manager record; `weft/commands/manager.py` and
+- `weft/core/manager_runtime.py` owns shared manager discovery and lifecycle
+  through `list_manager_records`, `manager_record`, `select_active_manager`,
+  `start_manager`, `ensure_manager`, `stop_manager`, `replace_active_manager`,
+  and `serve_manager_foreground`; `weft/commands/manager.py` and
   `weft/commands/serve.py` are the command-side capability surfaces
 - `weft/core/queue_wait.py`, `weft/commands/_result_wait.py`, and
   `weft/commands/_streaming.py` own queue-native waiting, result assembly,
   completion-boundary handling, and stream decoding reused by `run`, `result`,
   and long-lived task surfaces
-- `weft/commands/status.py` owns task-snapshot reconstruction from
+- `weft/commands/system.py` owns task-snapshot reconstruction from
   `weft.log.tasks`, manager registry records, and live queue hints for status
   surfaces
 - `weft/commands/tasks.py` owns short/full TID resolution, PID-to-TID lookup,
-  control fallback, and pipeline-status precedence for task-centric surfaces
+  control fallback, pipeline-status precedence, and
+  `format_runner_diagnostics`, which delegates summary construction to
+  `weft/core/runner_diagnostics.py`
+- `weft/core/task_evidence.py` owns shared lifecycle/result evidence used by
+  status, result, and task-control capabilities
 - `weft/commands/_task_history.py` owns logged TaskSpec lookup and pipeline
   status-queue inference reused by `result` and `task status`
 - `weft/core/spec_store.py` owns named stored-spec and builtin-spec resolution
@@ -77,6 +82,7 @@ stays separate.
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
 - [`docs/plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md`](../plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md)
 - [`docs/plans/2026-04-14-system-builtins-command-plan.md`](../plans/2026-04-14-system-builtins-command-plan.md)

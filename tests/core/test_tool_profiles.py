@@ -34,6 +34,7 @@ def make_agent_section(
     return AgentSection.model_validate(
         {
             "runtime": "provider_cli",
+            "authority_class": "general",
             "model": model,
             "instructions": "base instructions",
             "options": options or {},

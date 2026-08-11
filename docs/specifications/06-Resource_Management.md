@@ -55,10 +55,9 @@ Current behavior:
   runner error until SDK metrics or a native OOM signal are wired into outcome
   mapping.
 
-_Implementation mapping_: `weft/core/resource_monitor.py`
-`ResourceMonitor`, `PsutilResourceMonitor.check_limits`;
-`weft/core/taskspec/model.py`
-`LimitsSection.memory_mb`.
+_Implementation mapping_:
+`weft/core/resource_monitor.py::ResourceMonitor.check_limits`;
+`weft/core/taskspec/model.py::LimitsSection` field memory_mb.
 
 ### 2. CPU Management [RM-2]
 
@@ -73,10 +72,10 @@ Current behavior:
   for the sandbox instead of relying on a host psutil process tree
 - the response is termination, not throttling
 
-_Implementation mapping_: `weft/core/resource_monitor.py`
-`PsutilResourceMonitor._is_sustained_cpu_violation`,
-`_get_average_cpu`; `weft/core/taskspec/model.py`
-`LimitsSection.cpu_percent`.
+_Implementation mapping_:
+`weft/core/resource_monitor.py::ResourceMonitor._is_sustained_cpu_violation`,
+`weft/core/resource_monitor.py::ResourceMonitor._get_average_cpu`;
+`weft/core/taskspec/model.py::LimitsSection` field cpu_percent.
 
 ### 3. File Descriptor Management [RM-3]
 
@@ -87,9 +86,9 @@ Current behavior:
 - Docker-backed runners map fd limits into native runtime ulimits
 - the Microsandbox runner maps `max_fds` into an SDK `nofile` rlimit
 
-_Implementation mapping_: `weft/core/resource_monitor.py`
-`PsutilResourceMonitor._open_file_count`; `weft/core/taskspec/model.py`
-`LimitsSection.max_fds`.
+_Implementation mapping_:
+`weft/core/resource_monitor.py::ResourceMonitor._open_file_count`;
+`weft/core/taskspec/model.py::LimitsSection` field max_fds.
 
 ### 4. Network Connection Management [RM-4]
 
@@ -104,9 +103,9 @@ Current behavior:
   `network="allow"` conflicts with `max_connections=0`, and non-zero
   `max_connections` values are rejected
 
-_Implementation mapping_: `weft/core/resource_monitor.py`
-`PsutilResourceMonitor._connection_count`; `weft/core/taskspec/model.py`
-`LimitsSection.max_connections`.
+_Implementation mapping_:
+`weft/core/resource_monitor.py::ResourceMonitor._connection_count`;
+`weft/core/taskspec/model.py::LimitsSection` field max_connections.
 
 ## Resource Monitoring Implementation [RM-5]
 
@@ -123,17 +122,33 @@ Why:
 
 ### Default psutil-Based Monitor [RM-5.1]
 
-The current default monitor name is `weft.core.resource_monitor.ResourceMonitor`;
-it aliases the psutil-backed `PsutilResourceMonitor` implementation.
+The default and only built-in psutil monitor class is
+`weft.core.resource_monitor.ResourceMonitor`. The monitor protocol is
+`start()`, `stop()`, `snapshot()`, `check_limits()`, and `last_metrics`.
+Custom monitor classes use that protocol and one documented keyword
+constructor accepting the current limits and polling interval. The loader
+invokes that constructor once. Constructor `TypeError` and other implementation
+errors propagate; they are not reinterpreted as evidence for an older
+signature.
 
-_Implementation mapping_: `weft/core/resource_monitor.py`
-(`ResourceMetrics`, `BaseResourceMonitor`, `ResourceMonitor`,
-`PsutilResourceMonitor`, `load_resource_monitor`);
-`weft/core/runners/host.py` (`HostTaskRunner.run_with_hooks`,
-`HostRunnerPlugin.stop`, `HostRunnerPlugin.kill`, `HostRunnerPlugin.describe`);
-`weft/core/runners/subprocess_runner.py` (`run_monitored_subprocess`);
-`weft/ext.py` (`RunnerPlugin`, `RunnerHandle`); `weft/_runner_plugins.py`
-(`get_runner_plugin`, `require_runner_plugin`).
+The built-in monitor imports the required psutil dependency directly and uses
+its supported `net_connections()` API. Platform-specific file descriptor,
+handle, and process-disappearance behavior remains part of the current monitor
+implementation.
+
+_Implementation mapping_:
+`weft/core/resource_monitor.py::ResourceMetrics`,
+`weft/core/resource_monitor.py::BaseResourceMonitor`,
+`weft/core/resource_monitor.py::ResourceMonitor`,
+`weft/core/resource_monitor.py::load_resource_monitor`;
+`weft/core/runners/host.py::HostTaskRunner.run_with_hooks`,
+`weft/core/runners/host.py::HostRunnerPlugin.stop`,
+`weft/core/runners/host.py::HostRunnerPlugin.kill`,
+`weft/core/runners/host.py::HostRunnerPlugin.describe`;
+`weft/core/runners/subprocess_runner.py::run_monitored_subprocess`;
+`weft/ext.py::RunnerPlugin`, `weft/ext.py::RunnerHandle`;
+`weft/_runner_plugins.py::get_runner_plugin`,
+`weft/_runner_plugins.py::require_runner_plugin`.
 
 Current responsibilities:
 
@@ -152,7 +167,7 @@ Enforcement mechanics and security boundary:
   `run_monitored_subprocess`'s `monitor_interval`). Each poll takes one
   `ResourceMetrics` snapshot and calls `check_limits()`.
 - Memory and file-descriptor/connection limits are enforced on a **single
-  sample**: `PsutilResourceMonitor.check_limits` kills the runtime the first
+  sample**: `ResourceMonitor.check_limits` kills the runtime the first
   poll where `metrics.memory_mb` (or `open_files`/`connections`) exceeds the
   configured limit — there is no grace window or debounce for memory.
 - CPU is the one exception: `_is_sustained_cpu_violation` requires at least 5
@@ -305,6 +320,7 @@ controls stay here only when they are already shipped and observable:
 
 ## Related Plans
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)

@@ -5,6 +5,7 @@ Spec references:
 - docs/specifications/01-Core_Components.md [CC-3.2], [CC-3.4]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
+- docs/specifications/03-Manager_Architecture.md [MA-1.4]
 """
 
 from __future__ import annotations
@@ -16,10 +17,8 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, cast
 
-import weft.commands.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
 from simplebroker import Queue, format_message_id
 from simplebroker.ext import BrokerError
 from weft._constants import (
@@ -48,27 +47,24 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft.builtins import builtin_task_catalog
 from weft.commands.manager import (
-    _list_manager_records,
     _manager_record_to_json,
     _manager_snapshot,
-    _select_active_manager,
 )
 from weft.commands.types import (
     ServiceSnapshot,
-    SystemLoadResult,
     SystemStatusSnapshot,
-    SystemTidyResult,
 )
 from weft.commands.types import (
     TaskSnapshot as PublicTaskSnapshot,
 )
 from weft.context import WeftContext, build_context
+from weft.core import manager_runtime, task_evidence
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.service_convergence import (
     ServiceOwnerRecord,
     collect_service_owner_records,
+    discard_v1_service_registry_rows,
     reduce_latest_by_service_owner,
 )
 from weft.ext import RunnerHandle
@@ -81,8 +77,6 @@ from weft.helpers import (
     pid_is_live,
 )
 
-from ._dump_support import cmd_dump
-from ._load_support import cmd_load
 from ._task_snapshot_reducer import (
     CollectedTaskSnapshot,
     FoldedTaskRecord,
@@ -98,7 +92,6 @@ from ._task_snapshot_reducer import (
     runner_name_for_snapshot,
     service_key_from_taskspec,
 )
-from ._tidy_support import cmd_tidy
 
 StatusMapping = Mapping[str, int | float | str | None]
 _runner_name_for_snapshot = runner_name_for_snapshot
@@ -264,12 +257,6 @@ def collect_broker_status(ctx: WeftContext) -> BrokerStatusSnapshot:
     return BrokerStatusSnapshot.from_mapping(metrics)
 
 
-def collect_status(ctx: WeftContext) -> BrokerStatusSnapshot:
-    """Backward-compatible alias for :func:`collect_broker_status`."""
-
-    return collect_broker_status(ctx)
-
-
 def _queue(
     ctx: WeftContext,
     name: str,
@@ -282,7 +269,7 @@ def _queue(
 def _collect_manager_records(
     ctx: WeftContext, *, include_stopped: bool = False
 ) -> list[dict[str, Any]]:
-    return _list_manager_records(
+    return manager_runtime.list_manager_records(
         ctx,
         include_stopped=include_stopped,
         canonical_only=False,
@@ -472,10 +459,6 @@ def _merge_runtime_entry(
     return merged or None
 
 
-def _pid_alive(pid: int | None) -> bool:
-    return pid_is_live(pid)
-
-
 def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
     handle = _runtime_handle_from_mapping(mapping_entry or {})
     if handle is None or handle.control.get("authority") != "host-pid":
@@ -577,10 +560,7 @@ def _service_key_from_spawn_payload(payload: Mapping[str, Any]) -> str | None:
 
 
 def _iter_queue_json_messages(queue: Queue) -> Iterable[tuple[dict[str, Any], int]]:
-    try:
-        iterator_raw = queue.peek_generator(with_timestamps=True)
-    except TypeError:  # pragma: no cover - backend compatibility
-        iterator_raw = queue.peek_generator()
+    iterator_raw = queue.peek_generator(with_timestamps=True)
     with closing_queue_iterator(cast(Iterable[Any], iterator_raw)) as rows:
         for item in rows:
             if isinstance(item, tuple) and len(item) == 2:
@@ -845,7 +825,7 @@ def _collect_task_snapshot_records(
     records: dict[str, FoldedTaskRecord] = {}
     tid_mapping_entries = _latest_tid_mapping_entries(ctx)
     try:
-        selected_manager = _select_active_manager(ctx)
+        selected_manager = manager_runtime.select_active_manager(ctx)
         selected_active_manager_tid = (
             str(selected_manager["tid"])
             if isinstance(selected_manager, Mapping)
@@ -1091,6 +1071,11 @@ def _collect_service_registry_evidence(
     now_ns: int,
 ) -> list[_ServiceEvidence]:
     queue = _queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+    try:
+        discard_v1_service_registry_rows(queue)
+    except (BrokerError, OSError, RuntimeError, ValueError):
+        queue.close()
+        raise
     try:
         read = collect_service_owner_records(
             iter_queue_json_entries(queue),
@@ -1823,86 +1808,10 @@ def system_status(context: WeftContext) -> SystemStatusSnapshot:
     )
 
 
-def tidy_system(context: WeftContext) -> SystemTidyResult:
-    """Run broker compaction and return the broker display target."""
-
-    exit_code, message = cmd_tidy(context.root)
-    if exit_code != 0:
-        raise RuntimeError(message or "weft tidy failed")
-    return SystemTidyResult(target=context.broker_display_target)
-
-
-def dump_system(
-    context: WeftContext,
-    *,
-    output: str | Path | None = None,
-) -> Path:
-    """Dump broker state and return the output path."""
-
-    output_path = (
-        context.weft_dir / "weft_export.jsonl"
-        if output is None
-        else Path(output)
-        if Path(output).is_absolute()
-        else Path.cwd() / Path(output)
-    )
-    exit_code, message = cmd_dump(
-        output=str(output_path), context_path=str(context.root)
-    )
-    if exit_code != 0:
-        raise RuntimeError(message or "weft dump failed")
-    return output_path
-
-
-def load_system(
-    context: WeftContext,
-    *,
-    input_file: str | Path | None = None,
-    dry_run: bool = False,
-) -> SystemLoadResult:
-    """Load broker state from a dump file."""
-
-    exit_code, message = cmd_load(
-        input_file=str(input_file) if input_file is not None else None,
-        dry_run=dry_run,
-        context_path=str(context.root),
-    )
-    if exit_code != 0:
-        raise RuntimeError(message or "weft load failed")
-    return SystemLoadResult(imported=not dry_run, message=message or "")
-
-
-def list_builtins() -> list[dict[str, Any]]:
-    """Return the builtin task inventory as serialized rows."""
-
-    return [
-        {
-            "type": "task",
-            "name": item.name,
-            "description": item.description,
-            "category": item.category,
-            "function_target": item.function_target,
-            "supported_platforms": (
-                list(item.supported_platforms)
-                if item.supported_platforms is not None
-                else None
-            ),
-            "path": str(item.path),
-            "source": item.source,
-        }
-        for item in builtin_task_catalog()
-    ]
-
-
 __all__ = [
     "BrokerStatusSnapshot",
     "TaskSnapshot",
     "cmd_status",
     "collect_broker_status",
-    "collect_status",
-    "dump_system",
-    "list_builtins",
-    "load_system",
     "system_status",
-    "tidy_system",
 ]

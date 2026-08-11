@@ -54,6 +54,51 @@ def test_model_post_init_context_is_runtime_positional_only() -> None:
         ]
 
 
+def test_taskspec_rejects_unknown_top_level_field() -> None:
+    payload = fixtures.create_valid_function_taskspec().model_dump(mode="json")
+    payload["unsupported"] = True
+
+    with pytest.raises(ValidationError, match="unsupported"):
+        TaskSpec.model_validate(payload, context={"auto_expand": False})
+
+
+@pytest.mark.parametrize(
+    ("section", "unknown_field"),
+    [
+        ("spec", "unsupported_spec"),
+        ("io", "unsupported_io"),
+        ("state", "unsupported_state"),
+    ],
+)
+def test_taskspec_rejects_unknown_section_fields(
+    section: str,
+    unknown_field: str,
+) -> None:
+    payload = fixtures.create_valid_function_taskspec().model_dump(mode="json")
+    payload[section][unknown_field] = True
+
+    with pytest.raises(ValidationError, match=unknown_field):
+        TaskSpec.model_validate(payload, context={"auto_expand": False})
+
+
+@pytest.mark.parametrize(
+    ("section", "unknown_field"),
+    [
+        ("runner", "unsupported_runner"),
+        ("limits", "unsupported_limits"),
+    ],
+)
+def test_taskspec_rejects_unknown_nested_spec_fields(
+    section: str,
+    unknown_field: str,
+) -> None:
+    payload = fixtures.create_valid_function_taskspec().model_dump(mode="json")
+    payload["spec"][section][unknown_field] = True
+
+    with pytest.raises(ValidationError, match=unknown_field):
+        TaskSpec.model_validate(payload, context={"auto_expand": False})
+
+
 @pytest.mark.parametrize(
     ("limit_field", "limit_value", "state_field", "state_value", "reason"),
     [
@@ -106,13 +151,6 @@ class TestCreationDefaults:
         assert taskspec.io.outputs["outbox"] == f"T{taskspec.tid}.outbox"
         assert taskspec.io.control["ctrl_in"] == f"T{taskspec.tid}.ctrl_in"
         assert taskspec.io.control["ctrl_out"] == f"T{taskspec.tid}.ctrl_out"
-
-    def test_apply_defaults_idempotent(self) -> None:
-        taskspec = fixtures.create_valid_function_taskspec()
-        initial_state = taskspec.model_dump()
-        taskspec.apply_defaults()
-        after_state = taskspec.model_dump()
-        assert after_state == initial_state
 
     def test_agent_taskspec_defaults(self) -> None:
         taskspec = fixtures.create_valid_agent_taskspec()
@@ -340,20 +378,6 @@ class TestTemplates:
         assert template.io.control == {}
         assert template.io.inputs == {}
 
-    def test_template_apply_defaults_raises(self) -> None:
-        template = TaskSpec.model_validate(
-            {
-                "name": "template-task",
-                "spec": {"type": "function", "function_target": "pkg:fn"},
-                "io": {},
-                "state": {},
-                "metadata": {},
-            },
-            context={"template": True, "auto_expand": False},
-        )
-        with pytest.raises(ValueError):
-            template.apply_defaults()
-
     def test_agent_template_is_valid_for_validate_taskspec(self) -> None:
         agent_template = {
             "name": "template-agent",
@@ -380,6 +404,7 @@ class TestTemplates:
                 "type": "agent",
                 "agent": {
                     "runtime": "provider_cli",
+                    "authority_class": "general",
                     "runtime_config": {
                         "provider": "codex",
                     },
@@ -480,6 +505,7 @@ class TestProviderCLIValidation:
             persistent=True,
             agent=AgentSection(
                 runtime="provider_cli",
+                authority_class="general",
                 conversation_scope="per_task",
                 runtime_config={"provider": "codex"},
             ),
@@ -489,16 +515,15 @@ class TestProviderCLIValidation:
         assert spec.agent is not None
         assert spec.agent.conversation_scope == "per_task"
 
-    def test_provider_cli_defaults_authority_class_to_general_for_compatibility(
-        self,
-    ) -> None:
-        agent = AgentSection(
-            runtime="provider_cli",
-            runtime_config={"provider": "codex"},
-        )
-
-        assert agent.authority_class is None
-        assert agent.resolved_authority_class == "general"
+    def test_provider_cli_requires_explicit_authority_class(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="provider_cli requires an explicit authority_class",
+        ):
+            AgentSection(
+                runtime="provider_cli",
+                runtime_config={"provider": "codex"},
+            )
 
     def test_provider_cli_accepts_explicit_bounded_authority_class(self) -> None:
         agent = AgentSection(
@@ -547,6 +572,7 @@ class TestProviderCLIValidation:
                 persistent=True,
                 agent=AgentSection(
                     runtime="provider_cli",
+                    authority_class="general",
                     conversation_scope="per_message",
                     runtime_config={"provider": "codex"},
                 ),
@@ -556,6 +582,7 @@ class TestProviderCLIValidation:
         with pytest.raises(ValueError, match="only supports output_mode='text'"):
             AgentSection(
                 runtime="provider_cli",
+                authority_class="general",
                 output_mode="json",
                 runtime_config={"provider": "codex"},
             )
@@ -564,6 +591,7 @@ class TestProviderCLIValidation:
         with pytest.raises(ValueError, match="does not support spec.agent.tools"):
             AgentSection(
                 runtime="provider_cli",
+                authority_class="general",
                 tools=(
                     {
                         "name": "echo_payload",
@@ -757,36 +785,15 @@ def test_agent_tool_approval_required_true_is_rejected() -> None:
         )
 
 
-def test_agent_tool_approval_required_false_still_validates() -> None:
-    """The default (False) and explicit False stay accepted."""
-    tool = AgentToolSection(
-        name="safe_tool",
-        kind="python",
-        ref="tests.tasks.sample_targets:echo_payload",
-        approval_required=False,
-    )
-    assert tool.approval_required is False
-
-
-def test_agent_tool_approval_required_true_rejected_on_post_construction_assignment() -> (
-    None
-):
-    """Post-construction assignment must re-run the field validator too.
-
-    Building a valid tool and then flipping ``approval_required`` to True
-    before the TaskSpec freezes it must not silently bypass the rejection
-    enforced at construction time.
-
-    Spec: [AR-0.0], [AR-2.2].
-    """
-    tool = AgentToolSection(
-        name="safe_tool",
-        kind="python",
-        ref="tests.tasks.sample_targets:echo_payload",
-    )
+def test_agent_tool_approval_required_false_is_rejected() -> None:
+    """Both boolean spellings are unknown under the current tool schema."""
     with pytest.raises(ValidationError, match="approval_required"):
-        tool.approval_required = True
-    assert tool.approval_required is False
+        AgentToolSection(
+            name="safe_tool",
+            kind="python",
+            ref="tests.tasks.sample_targets:echo_payload",
+            approval_required=False,
+        )
 
 
 def test_agent_tool_frozen_instance_rejects_assignment_with_attribute_error() -> None:

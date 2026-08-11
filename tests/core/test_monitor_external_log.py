@@ -42,6 +42,7 @@ def test_external_task_log_sink_writes_raw_jsonl(tmp_path) -> None:
 
     [line] = path.read_text(encoding="utf-8").splitlines()
     record = json.loads(line)
+    assert record["schema_version"] == 2
     assert record["record_type"] == "task_log_raw"
     assert record["message_id"] == "1779100000000000002"
     assert record["payload"]["event"] == "work_completed"
@@ -411,7 +412,8 @@ def test_external_task_log_sink_writes_collated_jsonl(tmp_path) -> None:
 
     [line] = path.read_text(encoding="utf-8").splitlines()
     record = json.loads(line)
-    assert record["record_type"] == "task_log_collated"
+    assert record["schema_version"] == 2
+    assert record["record_type"] == "task_summary"
     assert record["close_reason"] == "terminal"
     assert record["task"]["tid"] == "1779100000000000011"
     assert record["task"]["first_message_id"] == "1779100000000000016"
@@ -430,6 +432,7 @@ def test_external_task_log_sink_projects_lifetime_ids_after_report_identity(
         monitor_tid="1779100000000000023",
     )
     report = {
+        "schema_version": 2,
         "record_type": "task_lifetime_report",
         "report_id": "task-lifetime:stable",
         "emitted_at_ns": 1779100000000000024,
@@ -448,6 +451,7 @@ def test_external_task_log_sink_projects_lifetime_ids_after_report_identity(
     sink.emit_lifetime_report(report, emitted_at_ns=1779100000000000024)
 
     record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["schema_version"] == 2
     assert report["subject"]["message_id"] == 1779100000000000025
     assert record["report_id"] == "task-lifetime:stable"
     assert record["subject"]["message_id"] == "1779100000000000025"
@@ -456,6 +460,30 @@ def test_external_task_log_sink_projects_lifetime_ids_after_report_identity(
     assert record["monitor"]["terminal_message_id"] is None
     assert record["observations"]["message_ids"] == ["1779100000000000028"]
     assert record["observations"]["observed_at_ns"] == 1779100000000000029
+
+
+@pytest.mark.parametrize("schema_version", [None, 1, 2.0, 3, "2", True])
+def test_external_task_log_sink_rejects_noncurrent_lifetime_schema(
+    tmp_path,
+    schema_version,
+) -> None:
+    sink = ExternalTaskLogSink(
+        path=tmp_path / "old-lifetime.jsonl",
+        mode="collated",
+        monitor_tid="1779100000000000033",
+    )
+
+    with pytest.raises(ExternalTaskLogError, match="current external schema"):
+        sink.emit_lifetime_report(
+            {
+                "schema_version": schema_version,
+                "record_type": "task_lifetime_report",
+                "report_id": "task-lifetime:old-schema",
+            },
+            emitted_at_ns=1779100000000000034,
+        )
+
+    assert not (tmp_path / "old-lifetime.jsonl").exists()
 
 
 def test_external_task_log_sink_surfaces_service_classification(tmp_path) -> None:
@@ -482,8 +510,9 @@ def test_external_task_log_sink_surfaces_service_classification(tmp_path) -> Non
 
     [line] = path.read_text(encoding="utf-8").splitlines()
     record = json.loads(line)
-    assert record["record_type"] == "task_log_collated"
-    assert record["collation_kind"] == "internal_service"
+    assert record["schema_version"] == 2
+    assert record["record_type"] == "service_summary"
+    assert "collation_kind" not in record
     assert record["service"]["kind"] == "internal_service"
     assert record["task"]["tid"] == "1779100000000000014"
 

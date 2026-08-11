@@ -229,7 +229,6 @@ def _build_watcher_cls(
     watcher = watcher_cls(
         queue_configs=queue_configs,
         db=context.broker_target,
-        check_interval=1,
         config=context.config,
     )
     return watcher, context

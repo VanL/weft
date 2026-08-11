@@ -47,6 +47,7 @@ from weft._constants import (
     WORK_ENVELOPE_START,
 )
 from weft.core import launcher as launcher_module
+from weft.core.control_messages import encode_control_message
 from weft.core.launcher import _request_parent_loss_shutdown, _task_process_entry
 from weft.core.manager import Manager
 from weft.core.monitor.task_monitor import TaskMonitor
@@ -1285,7 +1286,6 @@ def test_agent_session_close_caps_join_to_caller_deadline() -> None:
         FakeQueue(),  # type: ignore[arg-type]
         FakeQueue(),  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
     started_at = time.monotonic()
@@ -1318,7 +1318,6 @@ def test_agent_session_close_reports_stop_request_failure_and_cleans_up(
         Process(),  # type: ignore[arg-type]
         RequestQueue(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
-        None,
         None,
         timeout=None,
     )
@@ -1371,7 +1370,6 @@ def test_agent_session_close_reports_join_os_error_and_cleans_up(
         RequestQueue(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
     monkeypatch.setattr(
@@ -1419,7 +1417,6 @@ def test_agent_session_close_propagates_unexpected_join_failure_after_cleanup(
         Process(),  # type: ignore[arg-type]
         RequestQueue(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
-        None,
         None,
         timeout=None,
     )
@@ -1541,7 +1538,6 @@ def test_agent_session_terminate_reports_os_join_failure_by_branch(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
     monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
@@ -1574,7 +1570,6 @@ def test_agent_session_terminate_propagates_unexpected_join_failure(
         Process(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
-        None,
         None,
         timeout=None,
     )
@@ -1627,7 +1622,6 @@ def test_agent_session_deadline_close_does_not_join_ipc_feeder_threads() -> None
         request_queue,  # type: ignore[arg-type]
         response_endpoint,  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
 
@@ -1679,7 +1673,6 @@ def test_agent_session_deadline_preserves_process_tree_kill_escalation(
         process,  # type: ignore[arg-type]
         FakeQueue(),  # type: ignore[arg-type]
         FakeQueue(),  # type: ignore[arg-type]
-        None,
         None,
         timeout=None,
     )
@@ -1737,7 +1730,6 @@ def test_agent_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
         FakeQueue(),  # type: ignore[arg-type]
         FakeQueue(),  # type: ignore[arg-type]
         None,
-        None,
         timeout=None,
     )
 
@@ -1775,7 +1767,6 @@ def test_command_session_expired_cleanup_deadline_does_not_start_fresh_wait() ->
         queue.Queue(),
         queue.Queue(),
         None,
-        None,
     )
 
     session.terminate(deadline=time.monotonic())
@@ -1798,7 +1789,6 @@ def test_command_session_reports_cleanup_callback_failure_once(
         object(),  # type: ignore[arg-type]
         queue.Queue(),
         queue.Queue(),
-        None,
         None,
         cleanup_callback=cleanup,
     )
@@ -1834,7 +1824,6 @@ def test_command_session_reports_monitor_cleanup_failures_and_clears_owner(
         queue.Queue(),
         queue.Queue(),
         Monitor(),  # type: ignore[arg-type]
-        None,
     )
     caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
 
@@ -1885,7 +1874,6 @@ def test_command_session_deadline_preserves_process_tree_kill_escalation(
         queue.Queue(),
         queue.Queue(),
         None,
-        None,
     )
 
     session.terminate(deadline=time.monotonic() + 0.2)
@@ -1931,7 +1919,6 @@ def test_command_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
         process,  # type: ignore[arg-type]
         queue.Queue(),
         queue.Queue(),
-        None,
         None,
     )
 
@@ -2741,7 +2728,7 @@ def test_deferred_stop_finalizes_before_timeout_outcome(
         assert worker_started.wait(timeout=2.0)
         assert task.taskspec.state.status == "running"
 
-        ctrl_in.write(CONTROL_STOP)
+        ctrl_in.write(encode_control_message(CONTROL_STOP))
         task.process_once()
         assert task._deferred_active_control_command == CONTROL_STOP
     finally:
@@ -2815,7 +2802,7 @@ def test_deferred_kill_finalizes_before_limit_outcome(
         assert worker_started.wait(timeout=2.0)
         assert task.taskspec.state.status == "running"
 
-        ctrl_in.write(CONTROL_KILL)
+        ctrl_in.write(encode_control_message(CONTROL_KILL))
         task.process_once()
         assert task._deferred_active_control_command == CONTROL_KILL
     finally:
@@ -2854,7 +2841,7 @@ def test_structured_active_stop_kill_defers_until_finalize(
     task.taskspec.mark_started(pid=0)
     task.taskspec.mark_running(pid=0)
     task._active_work_in_flight = True
-    ctrl_in.write(json.dumps({"command": command.lower(), "request_id": request_id}))
+    ctrl_in.write(encode_control_message(command, request_id=request_id))
 
     task._poll_active_control_once()
 
@@ -2872,6 +2859,42 @@ def test_structured_active_stop_kill_defers_until_finalize(
     assert response["request_id"] == request_id
     assert task.taskspec.state.status == expected_status
     assert task._deferred_active_control_command is None
+    task.cleanup()
+
+
+def test_active_consumer_acks_invalid_control_then_defers_later_valid_stop(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    """An invalid active-control head cannot block a later canonical request."""
+
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(unique_tid, sys.executable)
+    task = Consumer(db_path, spec)
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    task.taskspec.mark_started(pid=0)
+    task.taskspec.mark_running(pid=0)
+    task._active_work_in_flight = True
+    invalid_id = int(ctrl_in.write("STOP"))
+    valid_body = encode_control_message(CONTROL_STOP, request_id="later-stop")
+    valid_id = int(ctrl_in.write(valid_body))
+
+    task._poll_active_control_once()
+
+    assert list(ctrl_in.peek_generator(with_timestamps=True)) == [
+        (valid_body, valid_id)
+    ]
+    assert invalid_id != valid_id
+    assert drain_queue(ctrl_out) == []
+    assert task._deferred_active_control_command is None
+
+    task._poll_active_control_once()
+
+    assert ctrl_in.peek_one() is None
+    assert task._deferred_active_control_command == CONTROL_STOP
+    assert task._deferred_active_control_request_id == "later-stop"
     task.cleanup()
 
 
@@ -2944,7 +2967,7 @@ def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
         assert worker_started.wait(timeout=2.0)
         assert task.taskspec.state.status == "running"
 
-        ctrl_in.write(command)
+        ctrl_in.write(encode_control_message(command))
         task.process_once()
         assert task._deferred_active_control_command == command
     finally:
@@ -3045,7 +3068,7 @@ def test_deferred_stop_finalizes_one_shot_task_without_double_terminal_emission(
         assert worker_started.wait(timeout=2.0)
         assert task.taskspec.state.status == "running"
 
-        ctrl_in.write(CONTROL_STOP)
+        ctrl_in.write(encode_control_message(CONTROL_STOP))
         task.process_once()
         assert task._deferred_active_control_command == CONTROL_STOP
     finally:
@@ -3139,7 +3162,7 @@ def test_deferred_stop_on_ok_outcome_does_not_requeue_completed_work(
         assert worker_started.wait(timeout=2.0)
         assert task.taskspec.state.status == "running"
 
-        ctrl_in.write(CONTROL_STOP)
+        ctrl_in.write(encode_control_message(CONTROL_STOP))
         task.process_once()
         assert task._deferred_active_control_command == CONTROL_STOP
     finally:
@@ -3300,7 +3323,7 @@ def test_task_handles_stop_control_message(broker_env, unique_tid: str) -> None:
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task.process_once()
 
@@ -3324,7 +3347,7 @@ def test_task_run_until_stopped_honors_pending_stop_control(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
 
     inbox.write(json.dumps({"args": ["indef"], "kwargs": {"suffix": "!"}}))
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task.run_until_stopped(poll_interval=0.0, max_iterations=5)
 
@@ -3478,7 +3501,7 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
     assert task._has_worker_activity() is True
     assert outbox.read_one() is None
 
-    ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
+    ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
     task.process_once()
 
     responses = [json.loads(msg) for msg in drain_queue(ctrl_out)]
@@ -3518,7 +3541,7 @@ def test_consumer_reactor_stop_cancels_active_command_on_main_thread(
     task.process_once()
     assert task.taskspec.state.status == "running"
 
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
     task.process_once()
     assert task.should_stop is True
 
@@ -3632,7 +3655,7 @@ def test_consumer_active_wait_activity_ignores_reserved_work_queue(
         assert reserved.has_pending() is True
         assert task._has_pending_messages() is False
 
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "active"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="active"))
         assert task._has_pending_messages() is True
     finally:
         release_worker.set()
@@ -3763,7 +3786,7 @@ def test_consumer_active_control_gets_turn_while_stream_events_remain(
             time.sleep(0.01)
         assert task._worker_result_queue.qsize() >= 6
 
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "stream"}))
+        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="stream"))
         task.process_once()
 
         responses = [json.loads(msg) for msg in drain_queue(ctrl_out)]
@@ -4815,7 +4838,7 @@ def test_task_cleanup_removes_standard_control_queues_after_success(
         task,
         lambda: task.taskspec.state.status == "completed",
     )
-    ctrl_in.write(CONTROL_PING)
+    ctrl_in.write(encode_control_message(CONTROL_PING))
 
     assert ctrl_in.stats().total == 1
     assert ctrl_out.stats().total > 0
@@ -4841,7 +4864,7 @@ def test_task_cleanup_removes_standard_control_queues_after_stop(
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task.process_once()
 
@@ -4866,7 +4889,7 @@ def test_reserved_policy_keep_on_stop(broker_env, unique_tid: str) -> None:
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     reserved.write("job")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task.process_once()
 
@@ -4885,7 +4908,7 @@ def test_reserved_policy_clear_on_stop(broker_env, unique_tid: str) -> None:
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     reserved.write("job")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task.process_once()
 
@@ -4910,7 +4933,7 @@ def test_reserved_policy_requeue_on_stop(broker_env, unique_tid: str) -> None:
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     reserved.write("job")
     ctrl_in = make_queue(custom_ctrl_in_name)
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task.process_once()
 
@@ -4948,7 +4971,7 @@ def test_stop_with_default_cleanup_preserves_reserved_when_keep(
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     reserved.write("job")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_in.write(CONTROL_STOP)
+    ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task.process_once()
 

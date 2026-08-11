@@ -21,10 +21,10 @@ from weft._constants import (
     CONTROL_PING,
     CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
-    SERVICE_STATUS_DRAINING,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.control_messages import decode_control_object, encode_control_message
 from weft.helpers import closing_queue_iterator
 
 logger = logging.getLogger(__name__)
@@ -58,19 +58,18 @@ def coerce_pong_response(
     """Return a matched structured PONG response or None.
 
     A matched PONG is a positive liveness proof for the exact task and probe.
-    Non-matching, malformed, stale, or legacy responses remain visible in the
+    Non-matching, malformed, stale, or noncanonical responses remain visible in the
     broker and are ignored by this helper.
+
+    Spec: [MF-3]
     """
 
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
+    payload = decode_control_object(raw)
+    if payload is None:
         return None
-    if not isinstance(payload, dict):
+    if payload.get("command") != CONTROL_PING:
         return None
-    if str(payload.get("command", "")).strip().upper() != CONTROL_PING:
-        return None
-    if str(payload.get("status", "")).strip().lower() != "ok":
+    if payload.get("status") != "ok":
         return None
     if payload.get("message") != "PONG":
         return None
@@ -79,7 +78,16 @@ def coerce_pong_response(
     if payload.get("tid") != tid:
         return None
     task_status = payload.get("task_status")
-    if not isinstance(task_status, str) or not task_status:
+    if not isinstance(task_status, str) or task_status not in {
+        "created",
+        "spawning",
+        "running",
+        "completed",
+        "failed",
+        "timeout",
+        "cancelled",
+        "killed",
+    }:
         return None
     return payload
 
@@ -89,20 +97,25 @@ def reply_bears_request_id(raw: str, *, request_id: str) -> bool:
 
     Sweep predicate for keyed-reply retirement: the prober that issued
     ``request_id`` owns every reply keyed to it, including malformed or late
-    ones that ``coerce_pong_response`` would reject. Rows without the exact
-    ``request_id`` — other probes' replies, terminal envelopes, legacy
-    responses, non-JSON bodies — never match.
+    ones that ``coerce_pong_response`` would reject. A row matches only when it
+    contains exactly one ``request_id`` with the requested value. Other probes'
+    replies, terminal envelopes without that key, duplicate request IDs, and
+    non-JSON bodies never match; unrelated noncanonical fields do not change
+    keyed ownership.
 
     Spec: [MF-3], [MANAGER.8]
     """
 
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
+        payload = json.loads(raw, object_pairs_hook=list)
+    except (json.JSONDecodeError, TypeError, ValueError):
         return False
-    if not isinstance(payload, dict):
+    if not isinstance(payload, list) or not all(
+        isinstance(item, tuple) and len(item) == 2 for item in payload
+    ):
         return False
-    return payload.get("request_id") == request_id
+    request_ids = [value for key, value in payload if key == "request_id"]
+    return request_ids == [request_id]
 
 
 def pong_proves_dispatch_eligible(
@@ -111,53 +124,43 @@ def pong_proves_dispatch_eligible(
     record: Mapping[str, Any],
     ctrl_in_name: str,
     ctrl_out_name: str,
+    outbox_name: str,
     root_context: str,
 ) -> bool:
     """Whether a matched PONG proves a record is a dispatch-eligible manager.
 
     Shared authority gate for the in-process Manager and the out-of-process
-    runtime so both reach the same decision from the same fields. Absent
-    manager-selection fields are accepted (legacy-compatible); only
-    present-but-mismatched values reject. An empty ``weft_context`` string means
-    "no context present" and falls back to ``root_context``.
-
-    Callers may add their own narrowing (for example, the runtime additionally
-    requires the manager outbox queue) after this gate passes.
+    runtime so both reach the same decision from the same complete field set.
+    An empty record ``weft_context`` falls back to ``root_context`` when
+    selecting the expected context, but the PONG must carry that exact value.
 
     Spec: [MA-1] item 4, [MANAGER.8]
     """
 
     task_status = payload.get("task_status")
-    if task_status in {
-        SERVICE_STATUS_DRAINING,
-        "stopping",
-        "cancelled",
-        "completed",
-        "failed",
-        "timeout",
-        "killed",
+    if not isinstance(task_status, str) or task_status not in {
+        "created",
+        "spawning",
+        "running",
     }:
         return False
-    if payload.get("should_stop") is True:
+    if payload.get("should_stop") is not False:
         return False
-    role = payload.get("role")
-    if role is not None and role != "manager":
+    if payload.get("role") != "manager":
         return False
-    requests = payload.get("requests")
-    if requests is not None and requests != WEFT_SPAWN_REQUESTS_QUEUE:
+    if payload.get("requests") != WEFT_SPAWN_REQUESTS_QUEUE:
         return False
-    ctrl_in = payload.get("ctrl_in")
-    if ctrl_in is not None and ctrl_in != ctrl_in_name:
+    if payload.get("ctrl_in") != ctrl_in_name:
         return False
-    ctrl_out = payload.get("ctrl_out")
-    if ctrl_out is not None and ctrl_out != ctrl_out_name:
+    if payload.get("ctrl_out") != ctrl_out_name:
+        return False
+    if payload.get("outbox") != outbox_name:
         return False
     record_context = record.get("weft_context")
     expected_context = root_context
     if isinstance(record_context, str) and record_context:
         expected_context = record_context
-    weft_context = payload.get("weft_context")
-    return weft_context is None or weft_context == expected_context
+    return payload.get("weft_context") == expected_context
 
 
 def _retire_reply_row(ctrl_out: Queue, ctrl_out_name: str, message_id: int) -> None:
@@ -227,7 +230,7 @@ def send_keyed_ping_probe(
     ``request_id`` (single-reader contract): a matched PONG is deleted by
     exact message id on match, and one final sweep at timeout deletes any
     remaining row bearing this probe's ``request_id``. Rows keyed to other
-    request ids — other probes' replies, terminal envelopes, legacy
+    request ids — other probes' replies, terminal envelopes, noncanonical
     responses — are never touched. A reply landing after the final sweep can
     still remain; its lifetime is bounded by task-exit purge and
     terminal/dead-TID cleanup. Queue I/O errors are returned as probe errors
@@ -241,7 +244,7 @@ def send_keyed_ping_probe(
         ctrl_in = ctx.queue(ctrl_in_name, persistent=True)
         try:
             ctrl_in.write(
-                json.dumps({"command": CONTROL_PING, "request_id": probe_request_id})
+                encode_control_message(CONTROL_PING, request_id=probe_request_id)
             )
         finally:
             ctrl_in.close()

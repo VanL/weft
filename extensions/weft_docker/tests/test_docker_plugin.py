@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 from collections.abc import Callable, Iterator
@@ -11,14 +12,27 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import weft_docker
 from docker.errors import APIError, NotFound
 from weft_docker import _sdk as docker_sdk
-from weft_docker import get_runner_plugin, plugin
+from weft_docker import plugin
+from weft_docker.plugin import get_runner_plugin
 
 from weft import runtime_liveness
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_package_root_does_not_export_runner_plugin_factory() -> None:
+    assert not hasattr(weft_docker, "get_runner_plugin")
+
+
+def test_command_runner_constructor_does_not_accept_broker_context() -> None:
+    parameters = inspect.signature(plugin.DockerCommandRunner).parameters
+
+    assert "db_path" not in parameters
+    assert "config" not in parameters
 
 
 @pytest.mark.parametrize(
@@ -706,6 +720,36 @@ def test_docker_runner_preflight_checks_profile_network_only_during_preflight(
         runner_plugin.validate_taskspec(payload, preflight=True)
 
     assert fake_client.network_gets == ["missing_network"]
+
+
+def test_docker_plugin_validation_uses_explicit_bundle_root(tmp_path: Path) -> None:
+    bundle_root = tmp_path / "bundle"
+    _write_profile(
+        bundle_root / ".weft" / "docker-profiles.toml",
+        """
+        [profiles.ops]
+        image = "busybox:latest"
+        """,
+    )
+    payload = {
+        "spec": {
+            "type": "command",
+            "process_target": "python3",
+            "env": {},
+            "runner": {
+                "name": "docker",
+                "options": {"container_profile": "ops"},
+            },
+        }
+    }
+
+    get_runner_plugin().validate_taskspec(
+        payload,
+        bundle_root=str(bundle_root),
+        preflight=False,
+    )
+
+    assert "_weft_bundle_root" not in payload
 
 
 def test_docker_runner_rejects_conflicting_agent_mount_targets() -> None:

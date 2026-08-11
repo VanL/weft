@@ -278,13 +278,13 @@ bug evidence.
 
 ## What Is Not Canonical [TS-2]
 
-- There is no dedicated `tests/integration/` tree yet. Integration-style
+- There is no dedicated tests/integration tree yet. Integration-style
   coverage already lives inside the existing CLI, command, core, task, and
   spec suites.
-- There is no dedicated `tests/performance/` tree yet. Current performance work
+- There is no dedicated tests/performance tree yet. Current performance work
   is in the dev-only benchmark modules under `tests/`, but those modules are not
   part of the canonical pytest contract.
-- There is no dedicated `tests/property/` tree yet. Property-style checks remain
+- There is no dedicated tests/property tree yet. Property-style checks remain
   embedded in normal pytest modules where they are needed.
 - Property tests are not the proof mechanism for live Manager, Consumer,
   SimpleBroker reservation, process execution, or wall-clock lifecycle
@@ -295,6 +295,7 @@ bug evidence.
 
 ## Related Plans
 
+- [`docs/plans/2026-08-10-subprocess-coverage-collection-plan.md`](../plans/2026-08-10-subprocess-coverage-collection-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)

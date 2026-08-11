@@ -61,7 +61,6 @@ def cmd_run(
     wait: bool,
     json_output: bool,
     verbose: bool,
-    monitor: bool,
     persistent_override: bool | None,
     autostart_enabled: bool,
 ) -> int:
@@ -87,7 +86,6 @@ def cmd_run(
             wait=wait,
             json_output=json_output,
             verbose=verbose,
-            monitor=monitor,
             persistent_override=persistent_override,
             autostart_enabled=autostart_enabled,
         )

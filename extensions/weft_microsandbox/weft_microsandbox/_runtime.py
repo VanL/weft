@@ -8,7 +8,6 @@ Spec references:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import platform
 import time
@@ -165,7 +164,7 @@ class MicrosandboxRuntime:
                 labels=dict(spec.labels or {}),
                 **_resource_create_kwargs(spec),
             )
-            sandbox_name = await _sandbox_name(sandbox, fallback=spec.name)
+            sandbox_name = _sandbox_name(sandbox, fallback=spec.name)
             if on_started is not None:
                 on_started(
                     MicrosandboxStarted(
@@ -204,7 +203,7 @@ class MicrosandboxRuntime:
             )
         except Exception as exc:
             if _is_timeout_error(exc):
-                sandbox_name = await _sandbox_name(sandbox, fallback=spec.name)
+                sandbox_name = _sandbox_name(sandbox, fallback=spec.name)
                 return MicrosandboxRunResult(
                     sandbox_id=sandbox_name,
                     sandbox_name=sandbox_name,
@@ -438,15 +437,11 @@ async def _exec_with_cancel(
         return None
 
 
-async def _sandbox_name(sandbox: Any | None, *, fallback: str) -> str:
+def _sandbox_name(sandbox: Any | None, *, fallback: str) -> str:
     if sandbox is None:
         return fallback
     try:
         value = getattr(sandbox, "name", None)
-        if callable(value):
-            value = value()
-        if inspect.isawaitable(value):
-            value = await value
     except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-317] exception
         logger.warning("Failed to read Microsandbox name; using fallback")
         return fallback

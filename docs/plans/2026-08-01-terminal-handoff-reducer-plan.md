@@ -763,17 +763,19 @@ TerminalHandoffEventKind = Literal[
 
 TerminalHandoffObservationPolicy = Literal["one_shot", "persistent_session"]
 
+
 @dataclass(frozen=True, slots=True)
 class TerminalHandoffEvent:
     kind: TerminalHandoffEventKind
     outcome: object | None = None
     detail: str | None = None
 
+
 def reduce_terminal_handoff(
     current: TerminalHandoffState,
     event: TerminalHandoffEvent,
-) -> StateDecision[TerminalHandoffState, TerminalHandoffAction]:
-    ...
+) -> StateDecision[TerminalHandoffState, TerminalHandoffAction]: ...
+
 
 def select_terminal_handoff_event(
     observations: Collection[TerminalHandoffEvent],

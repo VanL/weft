@@ -24,10 +24,13 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
-    WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import build_context
 from weft.core.control_probe import send_keyed_ping_probe
+from weft.core.service_convergence import (
+    manager_service_key,
+    project_manager_service_record,
+)
 from weft.helpers import (
     is_canonical_manager_record,
     iter_queue_json_entries,
@@ -58,9 +61,9 @@ def _popen_cli(
     command_args = tuple(map(str, args))
     foreground_serve = command_args[:2] == ("manager", "serve")
     if active_test_backend(env_vars) == "postgres" and not foreground_serve:
-        cmd = ["uv", "run", "--active", "python", "-m", "weft.cli", *command_args]
+        cmd = ["uv", "run", "--active", "python", "-m", "weft", *command_args]
     else:
-        cmd = [sys.executable, "-m", "weft.cli", *command_args]
+        cmd = [sys.executable, "-m", "weft", *command_args]
 
     return subprocess.Popen(
         cmd,
@@ -79,13 +82,15 @@ def _manager_records(context) -> list[dict[str, Any]]:
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         snapshot: dict[str, dict[str, Any]] = {}
-        for data, ts in iter_queue_json_entries(queue):
-            tid = data.get("tid")
-            if not isinstance(tid, str) or not tid:
+        for payload, ts in iter_queue_json_entries(queue):
+            record = project_manager_service_record(
+                payload,
+                timestamp=ts,
+                service_key=manager_service_key(context),
+            )
+            if record is None:
                 continue
-            record = dict(data)
-            record["timestamp"] = ts
-            record.setdefault("requests", WEFT_SPAWN_REQUESTS_QUEUE)
+            tid = record["tid"]
             existing = snapshot.get(tid)
             if existing is None or int(existing["timestamp"]) < ts:
                 snapshot[tid] = record

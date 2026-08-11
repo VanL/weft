@@ -92,8 +92,10 @@ def test_status_json_includes_manager_records(workdir) -> None:
 
         payload = json.loads(out)
         managers = payload["managers"]
-        assert any(item.get("tid") == record["tid"] for item in managers)
-        entry = next(item for item in managers if item.get("tid") == record["tid"])
+        assert any(item.get("tid") == record["owner_tid"] for item in managers)
+        entry = next(
+            item for item in managers if item.get("tid") == record["owner_tid"]
+        )
         assert entry["requests"] == WEFT_SPAWN_REQUESTS_QUEUE
         assert entry["runtime_handle"] == record["runtime_handle"]
         assert payload["tasks"] == []
@@ -124,7 +126,7 @@ def test_status_json_excludes_wrong_service_key_manager_records(workdir) -> None
 
         payload = json.loads(out)
         managers = payload["managers"]
-        assert not any(item.get("tid") == record["tid"] for item in managers)
+        assert not any(item.get("tid") == record["owner_tid"] for item in managers)
     finally:
         registry.read_many(limit=100)
 
@@ -146,12 +148,12 @@ def test_status_filters_stopped_managers_by_default(workdir) -> None:
         rc, out, _err = run_cli("status", cwd=workdir)
 
         assert rc == 0
-        assert stopped_record["tid"] not in out
+        assert stopped_record["owner_tid"] not in out
 
         rc, out, _err = run_cli("status", "--all", cwd=workdir)
 
         assert rc == 0
-        assert stopped_record["tid"] in out
+        assert stopped_record["owner_tid"] in out
     finally:
         registry.read_many(limit=100)
 

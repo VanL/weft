@@ -47,7 +47,6 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
-    TASKSPEC_BUNDLE_ROOT_FIELD,
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
 )
@@ -161,7 +160,8 @@ def _freeze_container_value(value: Any) -> Any:
 def rewrite_tid_in_io(io_section: dict[str, Any], old_tid: str, new_tid: str) -> None:
     """Rewrite default queue names that embed an old TID prefix.
 
-    Spec: [TS-1] (TID assignment and io queue naming).
+    Spec: docs/specifications/02-TaskSpec.md [TS-1]
+    (TID assignment and io queue naming).
     """
     if not old_tid or not new_tid or old_tid == new_tid:
         return
@@ -188,7 +188,8 @@ def resolve_taskspec_payload(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-050] exc
     Expands templates into resolved TaskSpecs by populating tid, io queues,
     state, metadata, limits defaults, and runner defaults.
 
-    Spec: [TS-1] (Templates vs runtime-expanded specs).
+    Spec: docs/specifications/02-TaskSpec.md [TS-1]
+    (Templates vs runtime-expanded specs).
     """
     candidate = copy.deepcopy(dict(payload))
     original_tid = candidate.get("tid")
@@ -282,38 +283,6 @@ def resolve_taskspec_payload(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-050] exc
     return candidate
 
 
-def normalize_taskspec_bundle_root(value: object) -> str | None:
-    """Normalize an internal bundle-root value when present."""
-    if value is None:
-        return None
-    if isinstance(value, Path):
-        return str(value.resolve())
-    if not isinstance(value, str):
-        raise TypeError(
-            f"{TASKSPEC_BUNDLE_ROOT_FIELD} must be a string path when present"
-        )
-    cleaned = value.strip()
-    if not cleaned:
-        raise ValueError(f"{TASKSPEC_BUNDLE_ROOT_FIELD} must not be empty")
-    return str(Path(cleaned).expanduser().resolve())
-
-
-def bundle_root_from_taskspec_payload(payload: Mapping[str, Any]) -> str | None:
-    """Return the internal bundle root recorded on a TaskSpec payload."""
-    return normalize_taskspec_bundle_root(payload.get(TASKSPEC_BUNDLE_ROOT_FIELD))
-
-
-def apply_bundle_root_to_taskspec_payload(
-    payload: dict[str, Any],
-    bundle_root: str | Path | None,
-) -> dict[str, Any]:
-    """Attach an internal bundle root to a TaskSpec payload when present."""
-    normalized = normalize_taskspec_bundle_root(bundle_root)
-    if normalized is not None:
-        payload[TASKSPEC_BUNDLE_ROOT_FIELD] = normalized
-    return payload
-
-
 class ReservedPolicy(StrEnum):
     """Reserved queue policy options (Spec: [TS-1.1])."""
 
@@ -323,7 +292,12 @@ class ReservedPolicy(StrEnum):
 
 
 class LimitsSection(BaseModel):
-    """Resource limits for task execution (Spec: [CC-1], [TS-1])."""
+    """Resource limits for task execution.
+
+    Spec: [CC-1]; docs/specifications/02-TaskSpec.md [TS-1].
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     memory_mb: int | None = Field(
         None, ge=MIN_MEMORY_LIMIT, description="Memory limit in MB"
@@ -367,7 +341,12 @@ class LimitsSection(BaseModel):
 
 
 class RunnerSection(BaseModel):
-    """Runner selection for task execution (Spec: [CC-1], [TS-1], [TS-1.3])."""
+    """Runner selection for task execution.
+
+    Spec: [CC-1]; docs/specifications/02-TaskSpec.md [TS-1], [TS-1.3].
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field("host", min_length=1)
     options: dict[str, Any] = Field(default_factory=dict)
@@ -742,28 +721,7 @@ class AgentToolSection(BaseModel):
     ref: str = Field(..., min_length=1)
     description: str | None = None
     args_schema: dict[str, Any] | None = None
-    approval_required: bool = False
     config: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("approval_required")
-    @classmethod
-    def _reject_unsupported_approval_required(cls, v: bool) -> bool:
-        """Reject the unimplemented approval flag instead of ignoring it.
-
-        Weft does not implement tool approval policy ([AR-0.0]); approvals
-        belong to the calling system or to a delegated provider CLI.
-
-        Spec: [AR-0.0], [AR-2.2]
-        """
-        if v:
-            raise ValueError(
-                "approval_required is not supported: Weft does not implement "
-                "tool approval policy. Enforce approvals in the calling "
-                "system, or use a provider_cli runtime where the provider "
-                "CLI owns approvals. See "
-                "docs/specifications/13-Agent_Runtime.md [AR-0.0]."
-            )
-        return v
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -873,6 +831,11 @@ class AgentSection(BaseModel):
         if self.runtime == "llm" and self.authority_class == "general":
             raise ValueError("llm only supports authority_class='bounded'")
         if self.runtime == "provider_cli":
+            if self.authority_class is None:
+                raise ValueError(
+                    "provider_cli requires an explicit authority_class of "
+                    "'bounded' or 'general'"
+                )
             provider = self.runtime_config.get("provider")
             if not isinstance(provider, str) or not provider.strip():
                 raise ValueError(
@@ -915,8 +878,6 @@ class AgentSection(BaseModel):
         """Return the effective authority class for this agent runtime."""
         if self.authority_class is not None:
             return self.authority_class
-        if self.runtime == "provider_cli":
-            return "general"
         return "bounded"
 
     def model_post_init(self, context: Any, /) -> None:
@@ -974,12 +935,18 @@ class AgentSection(BaseModel):
 
 
 class SpecSection(BaseModel):
-    """Execution configuration (Spec: [CC-1], [TS-1])."""
+    """Execution configuration.
+
+    Spec: [CC-1]; docs/specifications/02-TaskSpec.md [TS-1].
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["function", "command", "agent"]
     persistent: bool = False
     function_target: str | None = None
-    # Spec: process_target is a single executable path; args are appended. [TS-1]
+    # Spec: docs/specifications/02-TaskSpec.md [TS-1]. process_target is one
+    # executable path; args are appended.
     process_target: str | None = Field(default=None, min_length=1)
     agent: AgentSection | None = None
     parameterization: ParameterizationSection | None = None
@@ -1017,7 +984,7 @@ class SpecSection(BaseModel):
     def validate_target(self) -> SpecSection:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-052] exception
         """Ensure either function_target or process_target is provided based on type.
 
-        Spec: [TS-1] (Target semantics).
+        Spec: docs/specifications/02-TaskSpec.md [TS-1] (Target semantics).
         """
         if self.type == "function" and not self.function_target:
             raise ValueError("function_target is required when type is 'function'")
@@ -1165,12 +1132,17 @@ class SpecSection(BaseModel):
 
 
 class IOSection(BaseModel):
-    """IO queue definitions (Spec: [CC-1], [TS-1], [MF-2], [MF-3]).
+    """IO queue definitions.
+
+    Spec: [CC-1], [MF-2], [MF-3];
+    docs/specifications/02-TaskSpec.md [TS-1].
 
     According to the spec:
     - inputs: REQUIRED element (can be empty dict)
     - outputs: REQUIRED element, must include 'outbox'
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     inputs: dict[str, str] = Field(default_factory=dict)  # REQUIRED, can be empty
     outputs: dict[str, str] = Field(default_factory=dict)  # REQUIRED, must have outbox
@@ -1186,11 +1158,12 @@ class IOSection(BaseModel):
         - outputs MUST include 'outbox'
         - control MUST include 'ctrl_in' and 'ctrl_out'
 
-        Note: Validation is skipped if all sections are empty (defaults will be applied later)
+        Note: Validation is skipped for an unresolved template with empty sections.
 
-        Spec: [TS-1] (io section requirements).
+        Spec: docs/specifications/02-TaskSpec.md [TS-1]
+        (io section requirements).
         """
-        # Skip validation if this is an empty default (will be populated by apply_defaults)
+        # Unresolved templates may leave every IO section empty.
         if not self.outputs and not self.control and not self.inputs:
             return self
 
@@ -1224,7 +1197,10 @@ class IOSection(BaseModel):
 
 
 class StateSection(BaseModel):
-    """Runtime state and metrics (Spec: [CC-1], [TS-1], [MF-1], [MF-5]).
+    """Runtime state and metrics.
+
+    Spec: [CC-1], [MF-1], [MF-5];
+    docs/specifications/02-TaskSpec.md [TS-1].
 
     According to the spec, the following are REQUIRED:
     - status: REQUIRED (defaults to 'created')
@@ -1232,6 +1208,8 @@ class StateSection(BaseModel):
     - started_at: REQUIRED (None means not yet started)
     - completed_at: REQUIRED (None means not yet completed)
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     # REQUIRED fields with defaults
     status: Literal[
@@ -1265,7 +1243,8 @@ class StateSection(BaseModel):
     def validate_state_consistency(self) -> StateSection:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-053] exception
         """Ensure state fields are consistent and transitions are valid.
 
-        Spec: [TS-1] (state section), [MF-5] (state transitions).
+        Spec: docs/specifications/02-TaskSpec.md [TS-1] (state section);
+        [MF-5] (state transitions).
         """
 
         # Define valid state requirements
@@ -1328,7 +1307,9 @@ class StateSection(BaseModel):
 
 
 class TaskSpec(BaseModel):
-    """Complete TaskSpec structure with validation (Spec: [CC-1], [TS-1]).
+    """Complete TaskSpec structure with validation.
+
+    Spec: [CC-1]; docs/specifications/02-TaskSpec.md [TS-1].
 
     Args (via model_validate or __init__):
         auto_expand: If True (default), resolves defaults before model
@@ -1350,6 +1331,12 @@ class TaskSpec(BaseModel):
         default_factory=dict
     )  # REQUIRED per spec, but can be empty
     _bundle_root: str | None = PrivateAttr(default=None)
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+        use_enum_values=True,
+    )
 
     @field_validator("tid")
     @classmethod
@@ -1412,7 +1399,8 @@ class TaskSpec(BaseModel):
     def prepare_payload(cls, data: Any, info: ValidationInfo) -> Any:
         """Resolve defaults before model construction for resolved TaskSpecs.
 
-        Spec: [TS-1] (Templates vs runtime-expanded specs).
+        Spec: docs/specifications/02-TaskSpec.md [TS-1]
+        (Templates vs runtime-expanded specs).
         """
         if isinstance(data, cls):
             return data
@@ -1435,23 +1423,20 @@ class TaskSpec(BaseModel):
 
         Enforces partial immutability after initialization.
         """
-        self._consume_bundle_root()
         # Enforce partial immutability after initialization
         self._freeze_spec()
 
-    def _consume_bundle_root(self) -> None:
-        extra = getattr(self, "__pydantic_extra__", None)
-        if not isinstance(extra, dict):
-            return
-        if TASKSPEC_BUNDLE_ROOT_FIELD not in extra:
-            return
-        self._bundle_root = normalize_taskspec_bundle_root(
-            extra.pop(TASKSPEC_BUNDLE_ROOT_FIELD)
-        )
-
     def set_bundle_root(self, bundle_root: str | Path | None) -> None:
         """Record the bundle root that owns this TaskSpec, if any."""
-        self._bundle_root = normalize_taskspec_bundle_root(bundle_root)
+        if bundle_root is None:
+            self._bundle_root = None
+            return
+        if not isinstance(bundle_root, str | Path):
+            raise TypeError("bundle_root must be a string path, Path, or None")
+        cleaned = str(bundle_root).strip()
+        if not cleaned:
+            raise ValueError("bundle_root must not be empty")
+        self._bundle_root = str(Path(cleaned).expanduser().resolve())
 
     def get_bundle_root(self) -> str | None:
         """Return the bundle root that owns this TaskSpec, if any."""
@@ -1468,7 +1453,8 @@ class TaskSpec(BaseModel):
         - tid, spec and io sections become frozen after initialization
         - state and metadata remain mutable for runtime updates
 
-        Spec: [TS-0] (partial immutability), [TS-1].
+        Spec: docs/specifications/02-TaskSpec.md [TS-0] (partial immutability)
+        and docs/specifications/02-TaskSpec.md [TS-1].
         """
         # Mark the instance as having frozen fields
         # This is checked in __setattr__ to prevent modification
@@ -1499,41 +1485,6 @@ class TaskSpec(BaseModel):
 
         # Allow normal assignment for mutable fields and during initialization
         super().__setattr__(name, value)
-
-    def get_default_queues(self) -> tuple[dict[str, str], dict[str, str]]:
-        """Generate default queue names based on TID.
-
-        Returns:
-            Tuple of (input_queues, control_queues)
-        """
-        if self.is_template():
-            raise ValueError("cannot derive default queues from template TaskSpec")
-        default_inputs = {}
-        default_control = {}
-
-        # Add defaults if not specified
-        if not self.io.inputs:
-            default_inputs[QUEUE_INBOX_SUFFIX] = f"T{self.tid}.{QUEUE_INBOX_SUFFIX}"
-
-        if not self.io.control:
-            default_control[QUEUE_CTRL_IN_SUFFIX] = (
-                f"T{self.tid}.{QUEUE_CTRL_IN_SUFFIX}"
-            )
-            default_control[QUEUE_CTRL_OUT_SUFFIX] = (
-                f"T{self.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-            )
-
-        return default_inputs, default_control
-
-    def apply_defaults(self) -> None:
-        """Compatibility shim for older code paths.
-
-        Resolved TaskSpecs are expanded before construction. This method remains
-        only as an idempotent compatibility shim for existing callers.
-        """
-        if self.is_template():
-            raise ValueError("cannot apply defaults to a template TaskSpec")
-        self._validate_strict_requirements()
 
     def _validate_strict_requirements(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-054] exception
         """Validate that this TaskSpec meets all REQUIRED fields per the specification.
@@ -1612,12 +1563,6 @@ class TaskSpec(BaseModel):
             raise ValueError(
                 f"TaskSpec validation failed after resolution: {'; '.join(errors)}"
             )
-
-    model_config = {
-        "extra": "allow",  # Allow extra fields for forward compatibility
-        "validate_assignment": True,  # Validate on assignment
-        "use_enum_values": True,  # Use enum values in serialization
-    }
 
     # === Convenience Methods for State Management ===
 

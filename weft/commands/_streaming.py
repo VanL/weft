@@ -36,24 +36,13 @@ __all__ = [
 ]
 
 
-class _TyperCompat:
-    """Tiny echo surface kept for test compatibility without importing Typer."""
-
-    @staticmethod
-    def echo(text: str = "", *, err: bool = False, nl: bool = True) -> None:
-        stream = sys.stderr if err else sys.stdout
-        if text:
-            stream.write(text)
-        if nl:
-            stream.write("\n")
-        stream.flush()
-
-
-typer = _TyperCompat()
-
-
 def _emit_text(text: str = "", *, err: bool = False, nl: bool = True) -> None:
-    typer.echo(text, err=err, nl=nl)
+    stream = sys.stderr if err else sys.stdout
+    if text:
+        stream.write(text)
+    if nl:
+        stream.write("\n")
+    stream.flush()
 
 
 def handle_ctrl_stream(raw: str) -> None:

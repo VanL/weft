@@ -12,6 +12,7 @@ def test_prepare_provider_cli_execution_uses_supplied_cwd_and_tempdir(tmp_path) 
     agent = AgentSection.model_validate(
         {
             "runtime": "provider_cli",
+            "authority_class": "general",
             "instructions": "base instructions",
             "runtime_config": {
                 "provider": "codex",

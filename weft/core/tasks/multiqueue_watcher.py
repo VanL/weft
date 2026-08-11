@@ -127,7 +127,6 @@ class MultiQueueWatcher(BaseWatcher):
         persistent: bool = True,
         polling_strategy: PollingStrategy | None = None,
         yield_strategy: str = "round_robin",
-        check_interval: int = 10,
         inactive_probe_interval: float = TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS,
         default_error_handler_fn: Callable[
             [Exception, str, int], bool | None
@@ -146,8 +145,6 @@ class MultiQueueWatcher(BaseWatcher):
             persistent: Whether queues should be persistent
             polling_strategy: Optional SimpleBroker polling strategy override
             yield_strategy: Queue iteration strategy (currently round_robin)
-            check_interval: Legacy turn-count discovery setting retained for
-                existing callers; inactive discovery is now time-bounded.
             inactive_probe_interval: Minimum seconds between broad inactive
                 queue discovery probes when no native activity hint is pending.
             default_error_handler_fn: Fallback error handler when queue config
@@ -167,7 +164,6 @@ class MultiQueueWatcher(BaseWatcher):
 
         self._persistent = persistent
         self._yield_strategy = yield_strategy
-        self._check_interval = check_interval
         self._inactive_probe_interval = max(0.0, float(inactive_probe_interval))
         self._default_error_handler = default_error_handler_fn
         self._handler: Callable[[str, int], None] | None = None
@@ -280,7 +276,6 @@ class MultiQueueWatcher(BaseWatcher):
         # Processing state
         self._active_queues: list[str] = []
         self._queue_iterator: itertools.cycle[str] = itertools.cycle([])
-        self._check_counter = 0
         self._queue_generation = 0
         self._multi_activity_waiter: Any | None = None
         self._multi_activity_waiter_generation: int | None = None
@@ -1034,8 +1029,6 @@ class MultiQueueWatcher(BaseWatcher):
                 if self._active_queues
                 else itertools.cycle([])
             )
-
-        self._check_counter += 1
 
     def _fetch_next_message(self, config: QueueRuntimeConfig) -> tuple[str, int] | None:
         """Fetch the next message for a queue based on its configured processing mode.

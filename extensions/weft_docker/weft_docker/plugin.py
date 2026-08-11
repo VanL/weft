@@ -31,7 +31,7 @@ from weft.core.runners.subprocess_runner import (
     run_monitored_subprocess,
 )
 from weft.core.tasks.runner import AgentSession, CommandSession
-from weft.core.taskspec import AgentSection, bundle_root_from_taskspec_payload
+from weft.core.taskspec import AgentSection
 from weft.ext import (
     RunnerCapabilities,
     RunnerHandle,
@@ -124,10 +124,8 @@ class DockerCommandRunner:
         monitor_class: str | None,
         monitor_interval: float | None,
         runner_options: Mapping[str, Any] | None,
-        db_path: BrokerTarget | str | None = None,
-        config: dict[str, Any] | None = None,
     ) -> None:
-        del db_path, config, monitor_class
+        del monitor_class
         if not isinstance(process_target, str) or not process_target.strip():
             raise ValueError("Docker runner requires spec.process_target")
 
@@ -260,8 +258,6 @@ class DockerCommandRunner:
                     monitor_class=None,
                     monitor_interval=self._monitor_interval,
                     monitor=monitor,
-                    db_path=None,
-                    config=None,
                     runtime_handle=runtime_handle,
                     cancel_requested=cancel_requested,
                     on_worker_started=on_worker_started,
@@ -399,6 +395,7 @@ class DockerRunnerPlugin:
         self,
         taskspec_payload: Mapping[str, Any],
         *,
+        bundle_root: str | None = None,
         preflight: bool = False,
     ) -> None:
         spec = _require_mapping(taskspec_payload.get("spec"), name="spec")
@@ -420,9 +417,9 @@ class DockerRunnerPlugin:
         runner = _require_mapping(spec.get("runner"), name="spec.runner")
         options = _require_mapping(runner.get("options"), name="spec.runner.options")
         materialized_profile = _materialize_command_container_profile(
-            taskspec_payload,
             spec=spec,
             options=options,
+            bundle_root=bundle_root,
             preflight=preflight,
         )
         options = materialized_profile.runner_options
@@ -553,8 +550,6 @@ class DockerRunnerPlugin:
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
             runner_options=materialized_profile.runner_options,
-            db_path=db_path,
-            config=config,
         )
 
     def _reject_agent_container_profile(self, spec: Mapping[str, Any]) -> None:
@@ -685,17 +680,17 @@ class DockerRunnerPlugin:
 
 
 def _materialize_command_container_profile(
-    taskspec_payload: Mapping[str, Any],
     *,
     spec: Mapping[str, Any],
     options: Mapping[str, Any],
+    bundle_root: str | None,
     preflight: bool,
 ) -> MaterializedContainerProfile:
     env = _mapping_of_strings(spec.get("env") or {}, name="spec.env")
     return materialize_container_profile(
         runner_options=options,
         env=env,
-        bundle_root=bundle_root_from_taskspec_payload(taskspec_payload),
+        bundle_root=bundle_root,
         preflight=preflight,
     )
 

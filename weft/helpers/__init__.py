@@ -243,7 +243,7 @@ def resolve_cli_command(command: str, *, search_path: str | None = None) -> str:
     return resolved
 
 
-def iter_queue_entries(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-123] exception
+def iter_queue_entries(
     queue: Queue,
     *,
     since_timestamp: int | None = None,
@@ -257,20 +257,11 @@ def iter_queue_entries(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-123] exception
 
     try:
         queue_api = cast(Any, queue)
-        try:
-            raw_entries = queue_api.peek_generator(
-                with_timestamps=True,
-                after_timestamp=since_timestamp,
-                before_timestamp=before_timestamp,
-            )
-        except TypeError:
-            if before_timestamp is None:
-                raw_entries = queue_api.peek_generator(
-                    with_timestamps=True,
-                    since_timestamp=since_timestamp,
-                )
-            else:
-                raw_entries = queue_api.peek_generator(with_timestamps=True)
+        raw_entries = queue_api.peek_generator(
+            with_timestamps=True,
+            after_timestamp=since_timestamp,
+            before_timestamp=before_timestamp,
+        )
     except (
         BrokerError,
         OSError,
@@ -735,7 +726,7 @@ def is_debug_enabled() -> bool:
     return bool(_config["WEFT_DEBUG"])
 
 
-def write_file_atomically(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-125] exception
+def write_file_atomically(
     file_path: Path | str,
     content: str | None = None,
     data: bytes | None = None,
@@ -773,68 +764,37 @@ def write_file_atomically(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-125] except
     retry_attempts = ATOMIC_WRITE_RETRY_ATTEMPTS
     retry_sleep_seconds = ATOMIC_WRITE_RETRY_INTERVAL
 
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_fd, temp_path = tempfile.mkstemp(
+        suffix=".tmp", prefix=f".{target_path.name}_", dir=target_path.parent
+    )
+    temp_file = Path(temp_path)
     try:
-        # Create parent directory if it doesn't exist
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write to temporary file first (atomic on most filesystems)
-        temp_fd, temp_path = tempfile.mkstemp(
-            suffix=".tmp", prefix=f".{target_path.name}_", dir=target_path.parent
-        )
-
-        try:
-            if data is not None:
-                with os.fdopen(temp_fd, "wb") as f:
-                    f.write(data)
-            else:
-                assert content is not None
-                with os.fdopen(temp_fd, "w", encoding=encoding) as f:
-                    f.write(content)
-
-            temp_file = Path(temp_path)
-            for attempt in range(retry_attempts):
-                try:
-                    # Atomic rename (on most filesystems)
-                    temp_file.replace(target_path)
-                    break
-                except PermissionError:
-                    if attempt == retry_attempts - 1:
-                        raise
-                    time.sleep(retry_sleep_seconds)
-
-            log_debug(
-                f"Atomically wrote {'binary' if is_binary else 'text'} to {target_path}"
-            )
-
-        except Exception:  # pragma: no cover - atomic cleanup before re-raise
-            # Clean up temp file on error
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass  # Best effort cleanup
-            raise
-
-    except OSError as e:  # pragma: no cover - atomic write fallback
-        # Fallback to simple write if atomic approach fails
-        # This maintains compatibility but loses race condition protection
-        log_warning(
-            f"Atomic write failed for {target_path}, falling back to simple write: {e}"
-        )
+        if data is not None:
+            with os.fdopen(temp_fd, "wb") as f:
+                f.write(data)
+        else:
+            assert content is not None
+            with os.fdopen(temp_fd, "w", encoding=encoding) as f:
+                f.write(content)
 
         for attempt in range(retry_attempts):
             try:
-                if data is not None:
-                    with open(target_path, "wb") as f:
-                        f.write(data)
-                else:
-                    assert content is not None
-                    with open(target_path, "w", encoding=encoding) as f:
-                        f.write(content)
+                temp_file.replace(target_path)
                 break
             except PermissionError:
                 if attempt == retry_attempts - 1:
                     raise
                 time.sleep(retry_sleep_seconds)
+
+        log_debug(
+            f"Atomically wrote {'binary' if is_binary else 'text'} to {target_path}"
+        )
+    finally:
+        try:
+            temp_file.unlink()
+        except OSError:
+            pass
 
 
 def write_json_atomically(file_path: Path | str, data: dict[str, Any]) -> None:

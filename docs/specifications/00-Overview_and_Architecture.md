@@ -182,6 +182,21 @@ _Implementation mapping per layer_:
   `weft/ext.py`
 - **Queues and persistence**: SimpleBroker broker target and queue API
 
+**Single current contract.** Weft does not preserve alternate import paths,
+CLI spellings, control envelopes, persisted record shapes, dependency APIs,
+or accepted schema fields solely for backward compatibility. A contract
+change updates all Weft-owned producers and consumers in one coordinated
+release. Durable old data is handled by a bounded forward migration; normal
+readers and writers use only the current shape after that migration. Multiple
+documented forms may meet at one boundary normalizer only when all forms are
+part of the current contract and immediately become one internal
+representation.
+
+The public Python adapter is `weft.client`. Internal and command code imports
+its owning leaf modules directly. The `weft` package root exposes package
+metadata only; `weft.commands` and `weft.core` do not preserve symbol
+inventories from older module layouts.
+
 ### Manager Model
 
 The manager is the dispatcher for spawn requests. It watches
@@ -227,6 +242,7 @@ The companion file answers "what may exist later."
 
 ## Related Documents
 
+- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
 import pytest
 
+import weft._exceptions as exception_types
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import (
     DEFAULT_TASK_COMPLETION_TIMEOUT,
@@ -17,6 +19,8 @@ from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.client import (
     ControlRejected,
     InvalidTID,
+    ManagerNotRunning,
+    ManagerStartFailed,
     PreparedSubmission,
     SpecNotFound,
     Task,
@@ -43,6 +47,11 @@ from weft.core.monitor.store import open_monitor_store
 from weft.core.taskspec import TaskSpec
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_tasks_namespace_drops_inert_process_parameter() -> None:
+    assert "include_process" not in inspect.signature(TasksNamespace.status).parameters
+    assert "include_process" not in inspect.signature(TasksNamespace.watch).parameters
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -96,6 +105,8 @@ def _assert_task_result_value(
 def test_public_names_are_importable() -> None:
     assert ControlRejected is not None
     assert InvalidTID is not None
+    assert ManagerNotRunning is not None
+    assert ManagerStartFailed is not None
     assert PreparedSubmission is not None
     assert SpecNotFound is not None
     assert Task is not None
@@ -107,6 +118,23 @@ def test_public_names_are_importable() -> None:
     assert WeftClient is not None
     assert WeftError is not None
     assert connect is not None
+
+
+def test_public_exception_types_come_from_the_canonical_owner() -> None:
+    public_types = (
+        ControlRejected,
+        InvalidTID,
+        ManagerNotRunning,
+        ManagerStartFailed,
+        SpecNotFound,
+        TaskNotFound,
+        WeftError,
+    )
+
+    assert public_types == tuple(
+        getattr(exception_types, exception_type.__name__)
+        for exception_type in public_types
+    )
 
 
 CLIENT_API_PARITY_EXPECTATIONS = {
