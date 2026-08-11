@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -898,6 +899,36 @@ def test_release_workflows_require_green_test_workflow() -> None:
     assert 'event: "push"' in release_workflow
     assert 'MAX_WAIT_SECONDS: "3000"' in release_workflow
     assert "- verify-main-test-workflow" in release_workflow
+
+
+@pytest.mark.parametrize(
+    "workflow_path",
+    [
+        Path(".github/workflows/test.yml"),
+        Path(".github/workflows/release-gate.yml"),
+    ],
+)
+def test_ci_pytest_target_paths_exist(workflow_path: Path) -> None:
+    """A stale explicit target must not disable an entire CI test shard."""
+
+    root = Path(__file__).resolve().parents[2]
+    workflow_text = (root / workflow_path).read_text(encoding="utf-8")
+    target_groups = re.findall(
+        r"^\s*pytest_targets:\s*(\S.*)$",
+        workflow_text,
+        flags=re.MULTILINE,
+    )
+
+    assert target_groups, f"{workflow_path} declares no pytest target groups"
+    missing = sorted(
+        {
+            target
+            for target_group in target_groups
+            for target in target_group.split()
+            if not (root / target).exists()
+        }
+    )
+    assert missing == [], f"{workflow_path} has missing pytest targets: {missing}"
 
 
 @pytest.mark.parametrize(

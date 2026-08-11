@@ -153,7 +153,7 @@ jobs:
             pytest_targets: tests/commands tests/core
             pytest_diagnostic_args: --durations=100 --durations-min=0.5 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
           - test_slice: remaining
-            pytest_targets: tests/architecture tests/context tests/helpers tests/shell tests/specs tests/system tests/tasks tests/taskspec tests/test_harness_registration.py
+            pytest_targets: tests/architecture tests/context tests/helpers tests/specs tests/system tests/tasks tests/taskspec tests/test_harness_registration.py
             pytest_diagnostic_args: --durations=100 --durations-min=0.5 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
 
     steps:
@@ -201,7 +201,7 @@ jobs:
             pytest_targets: tests/commands tests/core
             pytest_diagnostic_args: --durations=100 --durations-min=0.5 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
           - test_slice: remaining
-            pytest_targets: tests/architecture tests/context tests/helpers tests/shell tests/specs tests/system tests/tasks tests/taskspec tests/test_harness_registration.py
+            pytest_targets: tests/architecture tests/context tests/helpers tests/specs tests/system tests/tasks tests/taskspec tests/test_harness_registration.py
             pytest_diagnostic_args: --durations=100 --durations-min=0.5 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
 
     steps:
