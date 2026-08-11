@@ -15,8 +15,15 @@ from weft.core.agents.provider_cli.registry import list_provider_cli_providers
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 LIVE_PROVIDER_TARGET_ENV: Final[str] = "WEFT_LIVE_PROVIDER_CLI_TARGETS"
+LIVE_PROVIDER_QWEN_MODEL_ENV: Final[str] = "WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN"
 RUN_LIVE_PROVIDER_ENV: Final[str] = "WEFT_RUN_LIVE_PROVIDER_CLI_TESTS"
 RUN_LIVE_PROVIDER_MCP_ENV: Final[str] = "WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS"
+OPENROUTER_API_KEY_ENV: Final[str] = "OPENROUTER_API_KEY"
+QWEN_DEFAULT_AUTH_TYPE_ENV: Final[str] = "QWEN_DEFAULT_AUTH_TYPE"
+OPENAI_API_KEY_ENV: Final[str] = "OPENAI_API_KEY"
+OPENAI_BASE_URL_ENV: Final[str] = "OPENAI_BASE_URL"
+OPENROUTER_BASE_URL: Final[str] = "https://openrouter.ai/api/v1"
+OPENROUTER_SMOKE_MODEL: Final[str] = "poolside/laguna-s-2.1:free"
 
 
 def build_pytest_command(provider_names: Sequence[str]) -> tuple[str, ...]:
@@ -97,6 +104,41 @@ def resolve_live_provider_targets(explicit_targets: str | None) -> tuple[str, ..
     return selected
 
 
+def build_provider_env(
+    provider_name: str,
+    *,
+    base_env: dict[str, str],
+) -> dict[str, str]:
+    """Build one provider-scoped live-test environment.
+
+    Provider CLIs can use the same generic credential variables for unrelated
+    services. Running each provider in its own process keeps those credentials
+    from changing another provider's authentication path.
+    """
+
+    env = base_env.copy()
+    env[RUN_LIVE_PROVIDER_ENV] = "1"
+    env[LIVE_PROVIDER_TARGET_ENV] = provider_name
+    env[RUN_LIVE_PROVIDER_MCP_ENV] = "1" if provider_name == "claude_code" else "0"
+    env["PYTEST_ADDOPTS"] = ""
+
+    openrouter_api_key = env.get(OPENROUTER_API_KEY_ENV, "").strip()
+    qwen_auth_is_explicit = bool(
+        env.get(QWEN_DEFAULT_AUTH_TYPE_ENV, "").strip()
+        or env.get(OPENAI_BASE_URL_ENV, "").strip()
+    )
+    if provider_name == "qwen" and openrouter_api_key and not qwen_auth_is_explicit:
+        # Qwen OAuth's free tier was discontinued in 2026. Use Qwen's supported
+        # OpenAI-compatible automation path when an OpenRouter credential is
+        # already available, without exposing it to the other provider CLIs.
+        env[QWEN_DEFAULT_AUTH_TYPE_ENV] = "openai"
+        env[OPENAI_API_KEY_ENV] = openrouter_api_key
+        env[OPENAI_BASE_URL_ENV] = OPENROUTER_BASE_URL
+        env.setdefault(LIVE_PROVIDER_QWEN_MODEL_ENV, OPENROUTER_SMOKE_MODEL)
+
+    return env
+
+
 def main() -> int:
     try:
         provider_names = resolve_live_provider_targets(
@@ -113,17 +155,17 @@ def main() -> int:
         )
         return 1
 
-    env = os.environ.copy()
-    env[RUN_LIVE_PROVIDER_ENV] = "1"
-    env[LIVE_PROVIDER_TARGET_ENV] = ",".join(provider_names)
-    env[RUN_LIVE_PROVIDER_MCP_ENV] = "1" if "claude_code" in provider_names else "0"
-    env["PYTEST_ADDOPTS"] = ""
-    return subprocess.run(
-        build_pytest_command(provider_names),
-        cwd=ROOT,
-        env=env,
-        check=False,
-    ).returncode
+    base_env = os.environ.copy()
+    for provider_name in provider_names:
+        result = subprocess.run(
+            build_pytest_command((provider_name,)),
+            cwd=ROOT,
+            env=build_provider_env(provider_name, base_env=base_env),
+            check=False,
+        )
+        if result.returncode != 0:
+            return result.returncode
+    return 0
 
 
 if __name__ == "__main__":

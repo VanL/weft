@@ -154,9 +154,7 @@ def test_main_runs_exact_live_suite_with_isolated_pytest_environment(
     exit_code = live_providers.main()
 
     assert exit_code == 7
-    assert recorded["command"] == live_providers.build_pytest_command(
-        ("claude_code", "codex")
-    )
+    assert recorded["command"] == live_providers.build_pytest_command(("claude_code",))
     assert recorded["cwd"] == live_providers.ROOT
     assert recorded["check"] is False
     child_env = recorded["env"]
@@ -164,7 +162,103 @@ def test_main_runs_exact_live_suite_with_isolated_pytest_environment(
     assert child_env["PYTEST_ADDOPTS"] == ""
     assert child_env["WEFT_RUN_LIVE_PROVIDER_CLI_TESTS"] == "1"
     assert child_env["WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS"] == "1"
-    assert child_env["WEFT_LIVE_PROVIDER_CLI_TARGETS"] == "claude_code,codex"
+    assert child_env["WEFT_LIVE_PROVIDER_CLI_TARGETS"] == "claude_code"
+
+
+def test_build_provider_env_isolates_qwen_openrouter_authentication() -> None:
+    """Qwen's OpenRouter compatibility variables must stay provider-scoped."""
+
+    live_providers = _load_live_provider_module()
+    base_env = {
+        "OPENAI_API_KEY": "openai-key",
+        "OPENROUTER_API_KEY": "openrouter-key",
+        "PYTEST_ADDOPTS": "--collect-only",
+    }
+
+    qwen_env = live_providers.build_provider_env("qwen", base_env=base_env)
+    codex_env = live_providers.build_provider_env("codex", base_env=base_env)
+
+    assert qwen_env["QWEN_DEFAULT_AUTH_TYPE"] == "openai"
+    assert qwen_env["OPENAI_API_KEY"] == "openrouter-key"
+    assert qwen_env["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
+    assert qwen_env["WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN"] == "poolside/laguna-s-2.1:free"
+    assert qwen_env["WEFT_LIVE_PROVIDER_CLI_TARGETS"] == "qwen"
+    assert qwen_env["WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS"] == "0"
+    assert codex_env["OPENAI_API_KEY"] == "openai-key"
+    assert "OPENAI_BASE_URL" not in codex_env
+
+
+def test_build_provider_env_preserves_explicit_qwen_model() -> None:
+    """A model override should reuse provider-scoped OpenRouter auth unchanged."""
+
+    live_providers = _load_live_provider_module()
+    qwen_env = live_providers.build_provider_env(
+        "qwen",
+        base_env={
+            "OPENROUTER_API_KEY": "openrouter-key",
+            "WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN": "operator/model",
+        },
+    )
+
+    assert qwen_env["WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN"] == "operator/model"
+    assert qwen_env["QWEN_DEFAULT_AUTH_TYPE"] == "openai"
+    assert qwen_env["OPENAI_API_KEY"] == "openrouter-key"
+
+
+def test_build_provider_env_preserves_explicit_qwen_authentication() -> None:
+    """An operator-selected Qwen endpoint must take priority over OpenRouter."""
+
+    live_providers = _load_live_provider_module()
+    qwen_env = live_providers.build_provider_env(
+        "qwen",
+        base_env={
+            "OPENROUTER_API_KEY": "openrouter-key",
+            "QWEN_DEFAULT_AUTH_TYPE": "openai",
+            "OPENAI_API_KEY": "operator-key",
+            "OPENAI_BASE_URL": "https://operator.invalid/v1",
+            "WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN": "operator/model",
+        },
+    )
+
+    assert qwen_env["OPENAI_API_KEY"] == "operator-key"
+    assert qwen_env["OPENAI_BASE_URL"] == "https://operator.invalid/v1"
+    assert qwen_env["WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN"] == "operator/model"
+
+
+def test_main_runs_each_provider_in_its_own_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful provider must not share credentials with the next provider."""
+
+    live_providers = _load_live_provider_module()
+    recorded: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    class _CompletedProcess:
+        returncode = 0
+
+    def _fake_run(command: tuple[str, ...], **kwargs: object) -> _CompletedProcess:
+        child_env = kwargs["env"]
+        assert isinstance(child_env, dict)
+        recorded.append((command, child_env))
+        return _CompletedProcess()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setattr(
+        live_providers,
+        "resolve_live_provider_targets",
+        lambda _raw_targets: ("codex", "qwen"),
+    )
+    monkeypatch.setattr(live_providers.subprocess, "run", _fake_run)
+
+    assert live_providers.main() == 0
+    assert [command for command, _env in recorded] == [
+        live_providers.build_pytest_command(("codex",)),
+        live_providers.build_pytest_command(("qwen",)),
+    ]
+    assert recorded[0][1]["WEFT_LIVE_PROVIDER_CLI_TARGETS"] == "codex"
+    assert "QWEN_DEFAULT_AUTH_TYPE" not in recorded[0][1]
+    assert recorded[1][1]["WEFT_LIVE_PROVIDER_CLI_TARGETS"] == "qwen"
+    assert recorded[1][1]["QWEN_DEFAULT_AUTH_TYPE"] == "openai"
 
 
 def test_main_fails_when_auto_discovery_finds_no_provider(

@@ -44,7 +44,7 @@ _LIVE_PROVIDER_FAILURE_STATES: Final[frozenset[str]] = frozenset(
     {"failed", "timeout", "cancelled", "killed"}
 )
 _LIVE_PROVIDER_DEFAULT_MODELS: Final[dict[str, str]] = {
-    "qwen": "z-ai/glm-4.5-air",
+    "qwen": "poolside/laguna-s-2.1:free",
 }
 
 
@@ -191,15 +191,15 @@ def test_live_provider_agent_overrides_allow_codex_in_isolated_workdir() -> None
     assert overrides["options"] == {"skip_git_repo_check": True}
 
 
-def test_live_provider_agent_overrides_pin_qwen_model_by_default() -> None:
-    """The live Qwen smoke should not depend on mutable account defaults."""
+def test_live_provider_agent_overrides_pin_qwen_smoke_model_by_default() -> None:
+    """The live Qwen smoke should use the release canary's low-latency model."""
 
     overrides = _live_provider_agent_overrides(
         provider_name="qwen",
         executable="/tools/qwen",
     )
 
-    assert overrides["model"] == "z-ai/glm-4.5-air"
+    assert overrides["model"] == "poolside/laguna-s-2.1:free"
 
 
 def test_live_provider_agent_overrides_accept_provider_model_env(
