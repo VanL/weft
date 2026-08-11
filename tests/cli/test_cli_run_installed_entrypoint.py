@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.test_backend import prepare_project_root
+
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(90)]
 
 
@@ -46,12 +48,11 @@ def test_installed_console_function_handoffs_from_fresh_project(
 
     console = Path(sys.executable).with_name("weft")
     assert console.is_file(), f"installed console script is missing: {console}"
-    root = tmp_path / "external-project"
-    root.mkdir()
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
-    env.pop("BROKER_TEST_BACKEND", None)
     env["WEFT_TASK_MONITOR_MODE"] = "report_only"
+    root = prepare_project_root(tmp_path / "external-project", env=env)
+    env.pop("BROKER_TEST_BACKEND", None)
 
     initialized = subprocess.run(
         [str(console), "init", str(root)],

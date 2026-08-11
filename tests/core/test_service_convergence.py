@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.test_backend import prepare_project_root
 from weft.commands import system as system_commands
 from weft.context import build_context
 from weft.core import manager_runtime
@@ -413,7 +414,8 @@ def test_service_registry_surfaces_discard_v1_before_reading(
     tmp_path: Path,
     surface: str,
 ) -> None:
-    context = build_context(spec_context=tmp_path / surface)
+    root = prepare_project_root(tmp_path / surface)
+    context = build_context(spec_context=root)
     queue = context.queue("weft.state.services", persistent=False)
     try:
         v1_id = _write_schema_row(queue, "weft.service_owner.v1")
@@ -439,7 +441,8 @@ def test_service_registry_surfaces_propagate_future_schema(
     tmp_path: Path,
     surface: str,
 ) -> None:
-    context = build_context(spec_context=tmp_path / surface)
+    root = prepare_project_root(tmp_path / surface)
+    context = build_context(spec_context=root)
     queue = context.queue("weft.state.services", persistent=False)
     try:
         future_id = _write_schema_row(queue, "weft.service_owner.v3")
