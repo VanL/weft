@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
-import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -46,7 +47,12 @@ def test_installed_console_function_handoffs_from_fresh_project(
 ) -> None:
     """Fresh-project stdlib, local, stored, reuse, and no-wait paths complete."""
 
-    console = Path(sys.executable).with_name("weft")
+    scripts_dir = Path(sysconfig.get_path("scripts"))
+    console_path = shutil.which("weft", path=str(scripts_dir))
+    assert console_path is not None, (
+        f"installed console script is missing from {scripts_dir}"
+    )
+    console = Path(console_path)
     assert console.is_file(), f"installed console script is missing: {console}"
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)

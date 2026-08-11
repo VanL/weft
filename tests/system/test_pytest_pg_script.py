@@ -89,6 +89,7 @@ def test_send_pytest_interrupt_contains_os_failure_and_uses_terminate(
         pytest_pg.os,
         "killpg",
         lambda *_args: (_ for _ in ()).throw(OSError("signal failed")),
+        raising=False,
     )
     monkeypatch.setattr(process, "terminate", lambda: calls.append("terminate"))
 
@@ -107,6 +108,7 @@ def test_send_pytest_interrupt_propagates_unexpected_signal_defect(
         pytest_pg.os,
         "killpg",
         lambda *_args: (_ for _ in ()).throw(RuntimeError("signal defect")),
+        raising=False,
     )
 
     with pytest.raises(RuntimeError, match="signal defect"):
@@ -123,6 +125,7 @@ def test_send_pytest_interrupt_contains_terminate_os_failure(
         pytest_pg.os,
         "killpg",
         lambda *_args: (_ for _ in ()).throw(OSError("signal failed")),
+        raising=False,
     )
     monkeypatch.setattr(
         process,
@@ -143,6 +146,7 @@ def test_send_pytest_interrupt_propagates_unexpected_terminate_defect(
         pytest_pg.os,
         "killpg",
         lambda *_args: (_ for _ in ()).throw(OSError("signal failed")),
+        raising=False,
     )
     monkeypatch.setattr(
         process,
@@ -291,6 +295,7 @@ def test_main_reports_unexpected_cli_boundary_failure(
         raise CliBoundaryFailure("cli boundary detail")
 
     cleanup_events: list[str] = []
+    monkeypatch.setattr(pytest_pg.shutil, "which", lambda name: f"/test/bin/{name}")
     monkeypatch.setattr(pytest_pg, "_start_postgres_container", start_container)
     monkeypatch.setattr(
         pytest_pg,

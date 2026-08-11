@@ -1529,12 +1529,19 @@ def _kill_via_fallback(task_entry: dict[str, Any] | None) -> bool:
 
 
 def _force_kill_task_processes(task_entry: dict[str, Any] | None) -> bool:
+    """Attempt a force-kill for each identity-verified mapped host process.
+
+    The return value records whether the host fallback was attempted. Runtime
+    death is proven separately by ``_kill_success_is_proven`` because Windows
+    may keep a terminated PID observable while process handles remain open.
+    """
+
     if task_entry is None:
         return False
 
     processes: dict[int, float | None] = dict(_host_processes_from_mapping(task_entry))
 
-    task_killed = False
+    kill_attempted = False
     for pid_value, create_time in processes.items():
         if not pid_matches_create_time(pid_value, create_time):
             logger.debug(
@@ -1543,10 +1550,9 @@ def _force_kill_task_processes(task_entry: dict[str, Any] | None) -> bool:
                 create_time,
             )
             continue
-        killed = kill_process_tree(pid_value, timeout=0.2)
-        if killed or not _pid_exists(pid_value):
-            task_killed = True
-    return task_killed
+        kill_process_tree(pid_value, timeout=0.2)
+        kill_attempted = True
+    return kill_attempted
 
 
 def _observable_host_pids_from_mapping(
@@ -1585,15 +1591,15 @@ def _kill_success_is_proven(
     task_entry: dict[str, Any] | None,
     *,
     handled_by_runner: bool,
-    task_killed: bool,
+    host_fallback_attempted: bool,
 ) -> bool:
     observed_dead = _observed_host_pids_are_dead(
         task_entry,
-        timeout=0.2 if handled_by_runner or task_killed else 0.0,
+        timeout=0.2 if handled_by_runner or host_fallback_attempted else 0.0,
     )
     if observed_dead is not None:
         return observed_dead
-    return handled_by_runner or task_killed
+    return handled_by_runner or host_fallback_attempted
 
 
 def _control_terminal_status(
@@ -1765,14 +1771,14 @@ def kill_tasks(
             continue
 
         task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
-        task_killed = False
+        host_fallback_attempted = False
         observed_dead = _observed_host_pids_are_dead(task_entry)
         if not handled_by_runner or observed_dead is False:
-            task_killed = _force_kill_task_processes(task_entry)
+            host_fallback_attempted = _force_kill_task_processes(task_entry)
         success_proven = _kill_success_is_proven(
             task_entry,
             handled_by_runner=handled_by_runner,
-            task_killed=task_killed,
+            host_fallback_attempted=host_fallback_attempted,
         )
         decision = reduce_control_convergence(
             "escalating_host",
@@ -1780,7 +1786,7 @@ def kill_tasks(
                 command=CONTROL_KILL,
                 runtime_dead_after_control=success_proven,
                 runner_fallback_attempted=True,
-                host_fallback_attempted=task_killed,
+                host_fallback_attempted=host_fallback_attempted,
                 observation_budget_expired=True,
             ),
         )

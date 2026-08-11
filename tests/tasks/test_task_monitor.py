@@ -1362,6 +1362,80 @@ def drive_task_monitor_until(
     assert predicate()
 
 
+def drive_task_monitor_until_observed(
+    task: TaskMonitor,
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = CONTROL_REPLY_TIMEOUT_SECONDS,
+) -> None:
+    """Drive real reactor turns until an externally visible condition holds."""
+
+    deadline = time.monotonic() + timeout
+    attempts = 0
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        attempts += 1
+        remaining = deadline - time.monotonic()
+        wait_timeout = min(
+            CONTROL_REPLY_WAIT_SLICE_SECONDS,
+            max(0.0, task.next_wait_timeout()),
+            remaining,
+        )
+        task.wait_for_activity(timeout=wait_timeout)
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+    assert predicate(), (
+        f"Task monitor condition was not observed after {attempts} turns; "
+        f"{_task_monitor_idle_diagnostics(task)}"
+    )
+
+
+def _read_control_reply(
+    task: TaskMonitor,
+    ctrl_in: Any,
+    ctrl_out: Any,
+    *,
+    command: str,
+    request_id: str,
+) -> dict[str, Any]:
+    """Round-trip one control request through the production multi-turn loop."""
+
+    ctrl_in.write(encode_control_message(command, request_id=request_id))
+    deadline = time.monotonic() + CONTROL_REPLY_TIMEOUT_SECONDS
+    attempts = 0
+    responses: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        attempts += 1
+        remaining = deadline - time.monotonic()
+        wait_timeout = min(
+            CONTROL_REPLY_WAIT_SLICE_SECONDS,
+            max(0.0, task.next_wait_timeout()),
+            remaining,
+        )
+        task.wait_for_activity(timeout=wait_timeout)
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        response = next(
+            (
+                candidate
+                for candidate in responses
+                if candidate.get("command") == command
+                and candidate.get("request_id") == request_id
+            ),
+            None,
+        )
+        if response is not None:
+            return response
+
+    pytest.fail(
+        f"Task monitor did not answer {command} {request_id!r} after "
+        f"{attempts} turns; pending_control={ctrl_in.peek_one()!r}; "
+        f"responses={responses!r}; {_task_monitor_idle_diagnostics(task)}"
+    )
+
+
 @pytest.fixture(autouse=True)
 def clear_processor_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     PROCESSOR_REQUESTS.clear()
@@ -1669,9 +1743,10 @@ def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
         )
 
         assert task.next_wait_timeout() == pytest.approx(1.0)
-        task.wait_for_activity(timeout=task.next_wait_timeout())
-        task.process_once()
-        drive_task_monitor_until_idle(task)
+        drive_task_monitor_until_observed(
+            task,
+            lambda: len(PROCESSOR_REQUESTS) == 2,
+        )
         assert len(PROCESSOR_REQUESTS) == 2
     finally:
         task.stop()
@@ -1749,9 +1824,13 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     try:
         task.process_once()
         drive_task_monitor_until_idle(task)
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="ping-after"))
-        task.wait_for_activity(timeout=task.next_wait_timeout())
-        task.process_once()
+        _read_control_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            command=CONTROL_PING,
+            request_id="ping-after",
+        )
         responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     finally:
         task.stop()
@@ -1879,9 +1958,13 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
             raise AssertionError("PING must not run Monitor store collation")
 
         monkeypatch.setattr(task, "_run_monitor_store_cycle", fail_store_cycle)
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="store"))
-        task.wait_for_activity(timeout=task.next_wait_timeout())
-        task.process_once()
+        _read_control_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            command=CONTROL_PING,
+            request_id="store",
+        )
         responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     finally:
         task.stop()
@@ -9254,38 +9337,12 @@ def _read_status_reply(
 ) -> dict[str, Any]:
     """Round-trip STATUS through the same multi-turn loop used in production."""
 
-    ctrl_in.write(encode_control_message(CONTROL_STATUS, request_id=request_id))
-    deadline = time.monotonic() + CONTROL_REPLY_TIMEOUT_SECONDS
-    attempts = 0
-    responses: list[dict[str, Any]] = []
-    while time.monotonic() < deadline:
-        attempts += 1
-        remaining = deadline - time.monotonic()
-        wait_timeout = min(
-            CONTROL_REPLY_WAIT_SLICE_SECONDS,
-            max(0.0, task.next_wait_timeout()),
-            remaining,
-        )
-        task.wait_for_activity(timeout=wait_timeout)
-        task.process_once()
-        drive_task_monitor_until_idle(task)
-        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
-        response = next(
-            (
-                candidate
-                for candidate in responses
-                if candidate.get("command") == CONTROL_STATUS
-                and candidate.get("request_id") == request_id
-            ),
-            None,
-        )
-        if response is not None:
-            return response
-
-    pytest.fail(
-        f"Task monitor did not answer STATUS {request_id!r} after {attempts} turns; "
-        f"pending_control={ctrl_in.peek_one()!r}; responses={responses!r}; "
-        f"{_task_monitor_idle_diagnostics(task)}"
+    return _read_control_reply(
+        task,
+        ctrl_in,
+        ctrl_out,
+        command=CONTROL_STATUS,
+        request_id=request_id,
     )
 
 

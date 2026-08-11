@@ -50,6 +50,7 @@ from weft.core.terminal_handoff import (
 )
 from weft.core.terminal_handoff_transport import (
     TerminalHandoffTransportError,
+    poll_terminal_payload,
     receive_terminal_payload,
 )
 from weft.ext import RunnerHandle
@@ -384,7 +385,7 @@ class AgentSession:
         """Read one private response frame, preserving EOF and decode failures."""
 
         try:
-            ready = self._response_receiver.poll(timeout)
+            ready = poll_terminal_payload(self._response_receiver, timeout)
         except (OSError, ValueError) as exc:
             raise TerminalHandoffTransportError(
                 f"terminal payload poll failed: {exc}"
@@ -486,7 +487,7 @@ class AgentSession:
                     drain_deadline=drain_deadline,
                 )
                 try:
-                    self._response_receiver.poll(wait_for)
+                    poll_terminal_payload(self._response_receiver, wait_for)
                 except (OSError, ValueError) as exc:
                     pending_transport_failure = str(exc)
                 continue

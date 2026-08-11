@@ -579,7 +579,10 @@ def test_monitor_poll_failures_preserve_cached_metrics_and_primary_outcome(
     )
     assert any(
         record.message
-        == "Subprocess resource monitor failed while reading metrics during limit check"
+        in {
+            "Subprocess resource monitor failed while reading metrics during limit check",
+            "Subprocess resource monitor failed while reading metrics during completion cleanup",
+        }
         for record in caplog.records
     )
     assert caplog.records[-1].message == (

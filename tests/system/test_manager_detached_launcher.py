@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import subprocess
+from pathlib import Path
 from typing import Never
 
 import pytest
@@ -14,10 +15,10 @@ from weft import manager_detached_launcher
 pytestmark = [pytest.mark.shared]
 
 
-def _launcher_payload() -> str:
+def _launcher_payload(stderr_path: Path) -> str:
     payload = {
         "command": ["python", "-m", "weft.manager_process"],
-        "stderr_path": "/tmp/weft-manager.stderr.log",
+        "stderr_path": str(stderr_path),
     }
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
@@ -139,14 +140,16 @@ def test_main_does_not_contain_fatal_payload_failure(
 def test_main_reports_arbitrary_launch_failure_as_structured_event(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
+    stderr_path = tmp_path / "weft-manager.stderr.log"
     monkeypatch.setattr(
         manager_detached_launcher,
         "_launch_runtime",
         lambda _command, _stderr_path: _raise(_OrdinaryBoundaryError("spawn detail")),
     )
 
-    result = manager_detached_launcher.main([_launcher_payload()])
+    result = manager_detached_launcher.main([_launcher_payload(stderr_path)])
 
     assert result == 2
     captured = capsys.readouterr()
@@ -154,13 +157,14 @@ def test_main_reports_arbitrary_launch_failure_as_structured_event(
     assert json.loads(captured.out) == {
         "event": "spawn_failed",
         "error": "spawn detail",
-        "stderr_path": "/tmp/weft-manager.stderr.log",
+        "stderr_path": str(stderr_path),
     }
 
 
 def test_main_does_not_contain_fatal_launch_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     fatal = BaseException("fatal spawn")
     monkeypatch.setattr(
@@ -170,7 +174,9 @@ def test_main_does_not_contain_fatal_launch_failure(
     )
 
     with pytest.raises(BaseException) as caught:
-        manager_detached_launcher.main([_launcher_payload()])
+        manager_detached_launcher.main(
+            [_launcher_payload(tmp_path / "weft-manager.stderr.log")]
+        )
 
     assert caught.value is fatal
     captured = capsys.readouterr()

@@ -1801,11 +1801,16 @@ def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
             kill_process_tree(target_pid)
 
 
-def test_force_kill_task_processes_accepts_dead_after_verified_attempt(
+def test_force_kill_task_processes_records_attempt_while_verified_pid_lingers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A verified host PID that exits during the force-kill attempt counts as
-    converged even when the process helper cannot return a killed PID."""
+    """A verified host fallback is recorded before Windows releases the PID.
+
+    Windows can keep a terminated PID observable while another process owns an
+    open handle. Final runtime-death proof is a separate control-convergence
+    step, so this helper reports the verified kill attempt rather than an
+    immediate PID-disappearance result.
+    """
 
     entry = {
         "runtime_handle": _runtime_handle(
@@ -1826,7 +1831,7 @@ def test_force_kill_task_processes_accepts_dead_after_verified_attempt(
         "kill_process_tree",
         lambda pid, timeout=0.2: kill_calls.append(pid) or set(),
     )
-    monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: False)
+    monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: True)
 
     task_killed = task_cmd._force_kill_task_processes(entry)
 

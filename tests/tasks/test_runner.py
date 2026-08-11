@@ -3008,6 +3008,23 @@ class _FailingResponseReadConnection:
         self._receiver.close()
 
 
+class _WindowsSealedResponseConnection:
+    """Model Windows' broken-pipe signal after the writer closes."""
+
+    def __init__(self, receiver: Connection) -> None:
+        self._receiver = receiver
+
+    def poll(self, timeout: float = 0.0) -> bool:
+        del timeout
+        raise BrokenPipeError(109, "The pipe has been ended")
+
+    def recv_bytes(self) -> bytes:
+        raise BrokenPipeError(109, "The pipe has been ended")
+
+    def close(self) -> None:
+        self._receiver.close()
+
+
 def test_host_terminal_receive_failure_is_transport_failure() -> None:
     """A ready channel whose receive fails produces bounded transport evidence."""
 
@@ -3042,6 +3059,41 @@ def test_host_terminal_receive_failure_is_transport_failure() -> None:
     assert outcome.diagnostics is not None
     assert outcome.diagnostics["handoff_event"] == "transport_failed"
     assert "terminal payload receive failed" in outcome.diagnostics["message"]
+
+
+def test_host_windows_broken_pipe_is_channel_seal() -> None:
+    """Windows' ended-pipe signal preserves worker-exit diagnostics."""
+
+    class DeadProcess:
+        pid = None
+        exitcode = 73
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    raw_receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    receiver = _WindowsSealedResponseConnection(raw_receiver)
+    try:
+        outcome = _build_function_host_runner(
+            timeout=5.0
+        )._run_one_shot_terminal_handoff(
+            DeadProcess(),  # type: ignore[arg-type]
+            receiver,  # type: ignore[arg-type]
+            worker_pid=None,
+            runtime_handle=None,
+            cancel_requested=None,
+        )
+
+        assert outcome.error == "Worker exited before returning a result (exit code 73)"
+        assert outcome.returncode == 73
+        assert outcome.diagnostics is not None
+        assert outcome.diagnostics["handoff_event"] == "channel_sealed"
+    finally:
+        sender.close()
+        receiver.close()
 
 
 def test_host_terminal_wrong_decoded_payload_type_is_transport_failure() -> None:
@@ -3273,6 +3325,27 @@ def test_agent_session_response_read_failure_is_transport_failure() -> None:
         assert result.diagnostics is not None
         assert result.diagnostics["handoff_event"] == "transport_failed"
         assert "session read failed" in result.diagnostics["message"]
+        with pytest.raises(RuntimeError, match="Agent session is closed"):
+            session.execute("again")
+    finally:
+        session.close()
+
+
+def test_agent_session_windows_broken_pipe_is_channel_seal() -> None:
+    """Windows' ended-pipe signal cannot become a transport failure."""
+
+    session = _spawn_agent_session_for_target(_agent_session_ready_then_hang_worker)
+    try:
+        session.wait_ready(timeout=5.0)
+        session._response_receiver = _WindowsSealedResponseConnection(  # type: ignore[assignment]
+            session._response_receiver
+        )
+
+        result = session.execute("hello")
+
+        assert result.status == "error"
+        assert result.diagnostics is not None
+        assert result.diagnostics["handoff_event"] == "channel_sealed"
         with pytest.raises(RuntimeError, match="Agent session is closed"):
             session.execute("again")
     finally:

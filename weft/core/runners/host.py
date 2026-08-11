@@ -64,6 +64,7 @@ from weft.core.terminal_handoff import (
 from weft.core.terminal_handoff_transport import (
     TerminalHandoffTransportError,
     TerminalPayloadSerializationFailure,
+    poll_terminal_payload,
     receive_terminal_payload,
     send_terminal_payload,
 )
@@ -576,7 +577,7 @@ class HostTaskRunner:
                     pending_transport_failure = None
                 else:
                     try:
-                        channel_ready = response_receiver.poll(0.0)
+                        channel_ready = poll_terminal_payload(response_receiver, 0.0)
                     except (OSError, ValueError) as exc:
                         channel_ready = False
                         observations["transport_failed"] = TerminalHandoffEvent(
@@ -681,7 +682,7 @@ class HostTaskRunner:
                         drain_deadline=drain_deadline,
                     )
                     try:
-                        response_receiver.poll(wait_for)
+                        poll_terminal_payload(response_receiver, wait_for)
                     except (OSError, ValueError) as exc:
                         pending_transport_failure = str(exc)
                     continue

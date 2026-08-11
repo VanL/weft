@@ -1801,6 +1801,14 @@ def test_sigint_probe_reports_fatal_mutation_failure_from_thread(
         def list_queues(self) -> list[str]:
             return ["sigint.a", "sigint.b"]
 
+    # The probe replaces this module global as part of its standalone setup.
+    # Register its current value so in-process execution restores the real
+    # factory during monkeypatch teardown.
+    monkeypatch.setattr(
+        multiqueue_sigint_probe.watcher_module,
+        "create_activity_waiter_for_queues",
+        multiqueue_sigint_probe.watcher_module.create_activity_waiter_for_queues,
+    )
     monkeypatch.setattr(
         multiqueue_sigint_probe,
         "MultiQueueWatcher",

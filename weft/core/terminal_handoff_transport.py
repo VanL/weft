@@ -84,6 +84,21 @@ def send_terminal_payload(
     return not used_fallback
 
 
+def poll_terminal_payload(receiver: Connection, timeout: float = 0.0) -> bool:
+    """Report a frame or channel seal ready for a receive attempt.
+
+    POSIX marks a closed pipe readable so the following receive raises EOF.
+    Windows instead raises ``BrokenPipeError`` from ``Connection.poll`` after
+    the final frame has been drained. Normalize both forms to the same
+    receiver-visible contract.
+    """
+
+    try:
+        return receiver.poll(timeout)
+    except BrokenPipeError:
+        return True
+
+
 def receive_terminal_payload(receiver: Connection) -> Any:
     """Receive and decode one framed private terminal payload.
 
@@ -93,6 +108,8 @@ def receive_terminal_payload(receiver: Connection) -> Any:
 
     try:
         frame = receiver.recv_bytes()
+    except BrokenPipeError as exc:
+        raise EOFError from exc
     except EOFError:
         raise
     except OSError as exc:
@@ -112,6 +129,7 @@ __all__ = [
     "TerminalHandoffTransportError",
     "TerminalPayloadSerializationFailure",
     "bounded_terminal_handoff_cause",
+    "poll_terminal_payload",
     "receive_terminal_payload",
     "send_terminal_payload",
 ]

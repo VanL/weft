@@ -1,6 +1,6 @@
 # Structural Review Remediation Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-3.3], [CC-3.4]; docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/10-CLI_Interface.md [CLI-1.4.1]
 Superseded by: none
 
@@ -720,3 +720,16 @@ or rejected, with reasoning, because verification changed the picture.
 | 9 | `helpers/__init__.py` mixes domains | **Deferred, with the rationale corrected** | The cohesion claim is correct and understated: 953 lines of implementation across seven domains, only 6 of 45 definitions touch module state, and caller sets are largely disjoint. But the review's stated justification — transitive import cost — is false: the marginal cost of `weft.helpers` is 0.0 ms and 0 added modules, because `weft/__init__.py` imports `.client` one line earlier and psutil is independently required by `weft/core/resource_monitor.py`. A split is defensible on navigability grounds alone, but it is a wide, low-urgency mechanical change that would collide with Tasks 3–5 across the same tree. Deferred to its own plan. |
 | 10 | Tautological queue tests | **Accepted** → Task 6a | Confirmed: the test asserts against the same object it passed in, proven by `test_task_has_basic_attributes` asserting `task.taskspec is taskspec`. Repairing it also surfaces that `_resolve_queue_names` ignores non-`inbox` input queues — recorded, not fixed here. |
 | 11 | Three weak names | **Rejected** | The two long names encode discriminators the proposed shortenings drop. `_requeue_public_reserved_spawn_requests_before_yield` → `requeue_reserved_requests()` loses "public" (which distinguishes `weft.spawn.requests` from `weft.spawn.internal`) and the "before yield" precondition; `list_terminal_control_deleted_disposition_backfill_tasks` → `list_missing_dispositions()` loses "terminal", "control-deleted", and "backfill". Both renames are lossy in a codebase whose house style favors grep-ability and encoded preconditions — the review concedes this counterargument itself. `body()` is idiomatic as a record accessor; the mildly interesting thing at `store.py:407` is the silent `{}` on `JSONDecodeError`, which is a different concern and may well be intentional. No rename campaign. |
+
+## 12. Completion Record
+
+Completed 2026-07-29 through four focused implementation plans:
+
+- [`2026-07-29-validation-capability-layering-plan.md`](./2026-07-29-validation-capability-layering-plan.md), landed in `e7b5942e8e6c1f3760678268a3f851735d1228f1`.
+- [`2026-07-29-import-boundary-remediation-plan.md`](./2026-07-29-import-boundary-remediation-plan.md), landed in `a692c08becd6db2d8c0672828ce487dc10b08354`.
+- [`2026-07-29-task-snapshot-reducer-plan.md`](./2026-07-29-task-snapshot-reducer-plan.md), landed in `05070d79193f6098e18a3b23d6aa935ca98242d2`.
+- [`2026-07-29-deduplication-and-test-integrity-plan.md`](./2026-07-29-deduplication-and-test-integrity-plan.md), landed in `834839bfa1488858fbc797a669906f6aa7f82fd9`.
+
+Each focused plan records its implementation review and verification evidence.
+Together they cover the accepted work from this umbrella plan; the rejected and
+deferred findings remain dispositioned in section 11 rather than open work.

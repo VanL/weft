@@ -8,6 +8,7 @@ import pytest
 
 from weft.core.terminal_handoff_transport import (
     TerminalHandoffTransportError,
+    poll_terminal_payload,
     receive_terminal_payload,
     send_terminal_payload,
 )
@@ -23,7 +24,7 @@ def test_terminal_transport_round_trips_one_frame() -> None:
         assert send_terminal_payload(sender, {"result": [1, 2]}) is True
         sender.close()
         assert receive_terminal_payload(receiver) == {"result": [1, 2]}
-        assert receiver.poll(1.0)
+        assert poll_terminal_payload(receiver, 1.0)
         with pytest.raises(EOFError):
             receive_terminal_payload(receiver)
     finally:
@@ -49,7 +50,7 @@ def test_terminal_transport_serialization_fallback_is_the_only_frame() -> None:
         payload = receive_terminal_payload(receiver)
         assert isinstance(payload, dict)
         assert "lambda" in payload["error"]
-        assert receiver.poll(1.0)
+        assert poll_terminal_payload(receiver, 1.0)
         with pytest.raises(EOFError):
             receive_terminal_payload(receiver)
     finally:
@@ -99,3 +100,21 @@ def test_terminal_transport_rejects_malformed_frame() -> None:
     finally:
         receiver.close()
         sender.close()
+
+
+def test_terminal_transport_normalizes_windows_broken_pipe_to_eof() -> None:
+    """Windows' ended-pipe signal is the same clean seal POSIX exposes as EOF."""
+
+    class WindowsSealedReceiver:
+        def poll(self, timeout: float = 0.0) -> bool:
+            del timeout
+            raise BrokenPipeError(109, "The pipe has been ended")
+
+        def recv_bytes(self) -> bytes:
+            raise BrokenPipeError(109, "The pipe has been ended")
+
+    receiver = WindowsSealedReceiver()
+
+    assert poll_terminal_payload(receiver) is True  # type: ignore[arg-type]
+    with pytest.raises(EOFError):
+        receive_terminal_payload(receiver)  # type: ignore[arg-type]
