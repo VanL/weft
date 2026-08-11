@@ -27,6 +27,7 @@ import pytest
 import weft.core.monitor.task_monitor as task_monitor_mod
 import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.service as service_task_mod
+from simplebroker.ext import BrokerError
 from weft._constants import (
     _WORKER_SNAPSHOT_EXPECTED_FIELDS,
     _WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS,
@@ -1185,10 +1186,31 @@ def _task_monitor_idle_diagnostics(task: TaskMonitor) -> str:
             continue
         stack = "".join(traceback.format_stack(frame, limit=12))
         stacks.append(f"{thread.name}:\n{stack}")
+    queue_pending: dict[str, bool | str] = {}
+    for queue_name, runtime_config in task._queues.items():
+        try:
+            queue_pending[queue_name] = task._queue_has_pending(runtime_config.queue)
+        except (BrokerError, OSError, RuntimeError) as exc:
+            queue_pending[queue_name] = f"{type(exc).__name__}: {exc}"
     return json.dumps(
         {
+            "active_queues": tuple(task._active_queues),
             "builtin_cycle_work_in_flight": repr(task._builtin_cycle_work_in_flight),
+            "drive_owner": repr(task._drive_owner_thread),
+            "lifecycle": task._task_lifecycle.value,
+            "monitor_enabled": task._monitor_config.enabled,
+            "multi_activity_waiter": type(task._multi_activity_waiter).__name__,
+            "multi_activity_waiter_generation": (
+                task._multi_activity_waiter_generation
+            ),
+            "multi_activity_waiter_signature": task._multi_activity_waiter_signature,
+            "next_inactive_probe_in": (task._next_inactive_probe_at - time.monotonic()),
+            "pending_messages_precheck_confirmed": (
+                task._pending_messages_precheck_confirmed
+            ),
             "processor_work_in_flight": repr(task._processor_work_in_flight),
+            "queue_pending": queue_pending,
+            "should_stop": task.should_stop,
             "control_cleanup_work_in_flight": repr(
                 task._control_cleanup_work_in_flight
             ),
