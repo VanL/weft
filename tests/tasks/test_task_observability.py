@@ -80,12 +80,59 @@ def drain_queue(queue) -> list[str]:
 
 def drive_task_until(task, predicate, *, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    turns = 0
+    while True:
+        turns += 1
         task.process_once()
         if predicate():
             return
-        task.wait_for_activity(timeout=0.02)
-    raise AssertionError("Task did not reach expected state before timeout")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if task._has_pending_worker_results():
+                turns += 1
+                task.process_once()
+                if predicate():
+                    return
+            break
+        task.wait_for_activity(timeout=min(0.02, remaining))
+    raise AssertionError(
+        "Task did not reach expected state before timeout "
+        f"(status={task.taskspec.state.status!r}, "
+        f"should_stop={task.should_stop!r}, turns={turns}, "
+        f"worker_snapshot={task._worker_activity_snapshot()!r})"
+    )
+
+
+def test_drive_task_until_applies_ready_result_after_wall_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DelayedReadyTask:
+        def __init__(self) -> None:
+            self.completed = False
+            self.pending = False
+            self.process_calls = 0
+
+        def process_once(self) -> None:
+            self.process_calls += 1
+            if self.process_calls == 1:
+                self.pending = True
+                return
+            self.pending = False
+            self.completed = True
+
+        def _has_pending_worker_results(self) -> bool:
+            return self.pending
+
+        def wait_for_activity(self, *, timeout: float) -> None:
+            raise AssertionError(f"unexpected wait after deadline: {timeout}")
+
+    monotonic_values = iter((0.0, 6.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic_values))
+    task = DelayedReadyTask()
+
+    drive_task_until(task, lambda: task.completed, timeout=5.0)
+
+    assert task.process_calls == 2
 
 
 def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
