@@ -10,6 +10,7 @@ import itertools
 import json
 import signal
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,38 @@ def _drive_consumer_once_until_idle(
         consumer.wait_for_activity(timeout=0.05)
         consumer.process_once()
     raise AssertionError("consumer worker did not finish")
+
+
+def _drive_pipeline_until_snapshot(
+    task: PipelineTask,
+    status_queue: Any,
+    predicate: Callable[[dict[str, Any]], bool],
+    *,
+    timeout: float = 3.0,
+) -> dict[str, Any]:
+    """Drive production reactor turns until an observable snapshot matches."""
+
+    deadline = time.monotonic() + timeout
+    latest: dict[str, Any] | None = None
+    turns = 0
+    while time.monotonic() < deadline:
+        task.process_once()
+        turns += 1
+        snapshots = _drain_json(status_queue)
+        if snapshots:
+            latest = snapshots[-1]
+            if predicate(latest):
+                return latest
+        remaining = deadline - time.monotonic()
+        task.wait_for_activity(timeout=min(0.05, max(0.0, remaining)))
+
+    raise AssertionError(
+        "pipeline did not publish the expected status before the deadline: "
+        f"turns={turns}, task_status={task.taskspec.state.status!r}, "
+        f"active_queues={task._active_queues!r}, "
+        f"pending_prechecked={task._pending_messages_precheck_confirmed!r}, "
+        f"latest={latest!r}"
+    )
 
 
 def _task_payload(
@@ -1184,12 +1217,14 @@ def test_pipeline_task_updates_child_status_from_started_owner_events(
         )
     )
 
-    task.wait_for_activity(timeout=0.05)
-    task.process_once()
-    task.process_once()
-
-    snapshots = _drain_json(ctx.queue(compiled.runtime.queues.status, persistent=True))
-    latest = snapshots[-1]
+    latest = _drive_pipeline_until_snapshot(
+        task,
+        ctx.queue(compiled.runtime.queues.status, persistent=True),
+        lambda snapshot: (
+            snapshot["stages"][0]["status"] == "running"
+            and snapshot["edges"][0]["status"] == "running"
+        ),
+    )
     assert latest["current_stage"] is None
     assert latest["current_edge"] is None
     assert latest["stages"][0]["status"] == "running"
@@ -1230,11 +1265,11 @@ def test_pipeline_task_sets_current_edge_after_successful_stage_terminal(
         )
     )
 
-    task.wait_for_activity(timeout=0.05)
-    task.process_once()
-
-    snapshots = _drain_json(ctx.queue(compiled.runtime.queues.status, persistent=True))
-    latest = snapshots[-1]
+    latest = _drive_pipeline_until_snapshot(
+        task,
+        ctx.queue(compiled.runtime.queues.status, persistent=True),
+        lambda snapshot: snapshot["stages"][0]["status"] == "completed",
+    )
     assert latest["current_stage"] is None
     assert latest["current_edge"] == compiled.runtime.edges[-1].name
     assert latest["stages"][0]["status"] == "completed"
@@ -1270,12 +1305,12 @@ def test_pipeline_task_marks_completed_when_exit_edge_checks_in(tmp_path: Path) 
         )
     )
 
-    task.wait_for_activity(timeout=0.05)
-    task.process_once()
-
+    latest = _drive_pipeline_until_snapshot(
+        task,
+        ctx.queue(compiled.runtime.queues.status, persistent=True),
+        lambda snapshot: snapshot["status"] == "completed",
+    )
     assert task.taskspec.state.status == "completed"
-    snapshots = _drain_json(ctx.queue(compiled.runtime.queues.status, persistent=True))
-    latest = snapshots[-1]
     assert latest["status"] == "completed"
     assert latest["current_edge"] is None
     assert latest["last_checkpoint"]["edge_name"] == compiled.runtime.edges[-1].name
@@ -1310,14 +1345,14 @@ def test_pipeline_task_fails_fast_when_child_stage_fails(tmp_path: Path) -> None
         )
     )
 
-    task.wait_for_activity(timeout=0.05)
-    task.process_once()
-
+    latest = _drive_pipeline_until_snapshot(
+        task,
+        ctx.queue(compiled.runtime.queues.status, persistent=True),
+        lambda snapshot: snapshot["status"] == "failed",
+    )
     assert task.taskspec.state.status == "failed"
     ctrl_queue = ctx.queue(compiled.runtime.stages[0].ctrl_in_queue, persistent=True)
     assert ctrl_queue.read_one() == encode_control_message(CONTROL_STOP)
-    snapshots = _drain_json(ctx.queue(compiled.runtime.queues.status, persistent=True))
-    latest = snapshots[-1]
     assert latest["status"] == "failed"
     assert latest["failure"]["child_kind"] == "stage"
     assert latest["failure"]["child_name"] == "first"
@@ -1352,12 +1387,12 @@ def test_pipeline_task_fails_fast_when_child_edge_fails(tmp_path: Path) -> None:
         )
     )
 
-    task.wait_for_activity(timeout=0.05)
-    task.process_once()
-
+    latest = _drive_pipeline_until_snapshot(
+        task,
+        ctx.queue(compiled.runtime.queues.status, persistent=True),
+        lambda snapshot: snapshot["status"] == "failed",
+    )
     assert task.taskspec.state.status == "failed"
-    snapshots = _drain_json(ctx.queue(compiled.runtime.queues.status, persistent=True))
-    latest = snapshots[-1]
     assert latest["status"] == "failed"
     assert latest["failure"]["child_kind"] == "edge"
     assert latest["failure"]["child_name"] == compiled.runtime.edges[-1].name
@@ -1382,9 +1417,11 @@ def test_pipeline_task_stop_propagates_to_waiting_children(tmp_path: Path) -> No
     ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(
         encode_control_message(CONTROL_STOP, request_id="pipeline-stop")
     )
-    task.wait_for_activity(timeout=0.05)
-    task.process_once()
-
+    _drive_pipeline_until_snapshot(
+        task,
+        ctx.queue(compiled.runtime.queues.status, persistent=True),
+        lambda snapshot: snapshot["status"] == "cancelled",
+    )
     assert task.taskspec.state.status == "cancelled"
     responses = _drain_json(
         ctx.queue(compiled.runtime.queues.ctrl_out, persistent=True)
@@ -1419,9 +1456,11 @@ def test_pipeline_task_kill_propagates_to_waiting_children(tmp_path: Path) -> No
     ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(
         encode_control_message(CONTROL_KILL, request_id="pipeline-kill")
     )
-    task.wait_for_activity(timeout=0.05)
-    task.process_once()
-
+    _drive_pipeline_until_snapshot(
+        task,
+        ctx.queue(compiled.runtime.queues.status, persistent=True),
+        lambda snapshot: snapshot["status"] == "killed",
+    )
     assert task.taskspec.state.status == "killed"
     responses = _drain_json(
         ctx.queue(compiled.runtime.queues.ctrl_out, persistent=True)
