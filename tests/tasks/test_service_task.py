@@ -277,11 +277,12 @@ def test_service_task_full_sentinel_queue_respects_cleanup_deadline(
     registration.input_queue.put_nowait("occupy-sentinel-slot")
 
     started_at = time.monotonic()
-    task.stop(timeout=0.05)
+    task._stop_service_worker("blocked", deadline=started_at + 0.05)
     elapsed = time.monotonic() - started_at
     release_worker.set()
     for thread in registration.threads:
         thread.join(timeout=2.0)
+    task.stop(timeout=2.0)
 
     assert elapsed < 0.3
     assert task._task_lifecycle.value == "closed"
