@@ -72,7 +72,7 @@ def test_typed_package_markers_are_included_in_builds() -> None:
     )
 
 
-def test_simplebroker_floor_is_7_0_0() -> None:
+def test_simplebroker_floor_is_7_1_0() -> None:
     """The root floor must include the public JSON message-ID boundary API."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
     minimum = _minimum_dependency_version(
@@ -80,11 +80,11 @@ def test_simplebroker_floor_is_7_0_0() -> None:
         "simplebroker",
     )
 
-    assert minimum == "7.0.0"
+    assert minimum == "7.1.0"
 
 
 @pytest.mark.parametrize("extra", ["pg", "all", "dev"])
-def test_simplebroker_pg_floor_is_3_5_2(extra: str) -> None:
+def test_simplebroker_pg_floor_is_3_6_0(extra: str) -> None:
     """Every root extra carrying PostgreSQL must use the paired patch floor."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
 
@@ -93,7 +93,7 @@ def test_simplebroker_pg_floor_is_3_5_2(extra: str) -> None:
         "simplebroker-pg",
     )
 
-    assert minimum == "3.5.2"
+    assert minimum == "3.6.0"
 
 
 def test_root_extras_do_not_undercut_local_extension_versions() -> None:

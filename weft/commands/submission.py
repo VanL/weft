@@ -312,9 +312,9 @@ def submit_prepared(
     """Write a previously prepared submission through the spawn queue."""
 
     normalized = normalize_taskspec(prepared.taskspec)
-    runtime_root = Path(
-        normalized.spec.weft_context or context.root
-    ).expanduser().resolve()
+    runtime_root = (
+        Path(normalized.spec.weft_context or context.root).expanduser().resolve()
+    )
     runtime_context = (
         context
         if runtime_root == context.root.resolve()
@@ -386,7 +386,7 @@ def submit(
     )
 
 
-def prepare_spec(  # noqa: C901 approved [PY-3] declared-input pipeline
+def prepare_spec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-369] exception
     context: WeftContext,
     reference: str | Path,
     *,
@@ -445,7 +445,11 @@ def prepare_spec(  # noqa: C901 approved [PY-3] declared-input pipeline
                 raise CommandUsageError(
                     "stdin_text requires a TaskSpec run_input stdin contract"
                 )
-            if run_input.stdin is not None and run_input.stdin.required and stdin_text is None:
+            if (
+                run_input.stdin is not None
+                and run_input.stdin.required
+                and stdin_text is None
+            ):
                 raise CommandUsageError("This TaskSpec requires stdin_text")
             arguments = parse_declared_run_input_args(
                 remaining,

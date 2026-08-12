@@ -20,7 +20,6 @@ from weft.commands.tidy import cmd_system_tidy
 from weft.commands.types import (
     BuiltinSpecRecord,
     SystemDumpResult,
-    SystemLoadResult,
     SystemPruneResult,
     SystemTidyResult,
 )
@@ -85,14 +84,12 @@ def test_cmd_system_load_dry_run_returns_structured_counts(tmp_path: Path) -> No
 
     result = cmd_system_load(input=str(dump_path), dry_run=True, context=target_root)
 
-    assert result == SystemLoadResult(
-        imported=False,
-        message="Import preview",
-        aliases_created=0,
-        aliases_updated=0,
-        queues_created=1,
-        total_messages=1,
-    )
+    assert result.imported is False
+    assert result.message.startswith("Import Preview:")
+    assert result.aliases_created == 0
+    assert result.aliases_updated == 0
+    assert result.queues_created == 1
+    assert result.total_messages == 1
 
 
 def test_cmd_system_prune_returns_lossless_structured_details(tmp_path: Path) -> None:

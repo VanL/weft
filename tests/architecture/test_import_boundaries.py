@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ast
 import importlib
+import inspect
 import json
 import subprocess
 import sys
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -844,39 +846,101 @@ def test_root_package_exposes_only_metadata() -> None:
 
 
 COMMAND_EXPORTS = {
-    "cmd_init", "cmd_status", "cmd_result", "cmd_run",
-    "cmd_queue_read", "cmd_queue_write", "cmd_queue_peek", "cmd_queue_move",
-    "cmd_queue_list", "cmd_queue_exists", "cmd_queue_stats",
-    "cmd_queue_resolve", "cmd_queue_watch", "cmd_queue_delete",
-    "cmd_queue_broadcast", "cmd_queue_alias_add", "cmd_queue_alias_list",
-    "cmd_queue_alias_remove", "cmd_spec_create", "cmd_spec_list",
-    "cmd_spec_show", "cmd_spec_delete", "cmd_spec_validate",
-    "cmd_spec_generate", "cmd_task_list", "cmd_task_status", "cmd_task_ping",
-    "cmd_task_stop", "cmd_task_kill", "cmd_task_tid", "cmd_manager_start",
-    "cmd_manager_serve", "cmd_manager_stop", "cmd_manager_list",
-    "cmd_manager_status", "cmd_system_tidy", "cmd_system_task_monitor",
-    "cmd_system_prune", "cmd_system_dump", "cmd_system_builtins",
+    "cmd_init",
+    "cmd_status",
+    "cmd_result",
+    "cmd_run",
+    "cmd_queue_read",
+    "cmd_queue_write",
+    "cmd_queue_peek",
+    "cmd_queue_move",
+    "cmd_queue_list",
+    "cmd_queue_exists",
+    "cmd_queue_stats",
+    "cmd_queue_resolve",
+    "cmd_queue_watch",
+    "cmd_queue_delete",
+    "cmd_queue_broadcast",
+    "cmd_queue_alias_add",
+    "cmd_queue_alias_list",
+    "cmd_queue_alias_remove",
+    "cmd_spec_create",
+    "cmd_spec_list",
+    "cmd_spec_show",
+    "cmd_spec_delete",
+    "cmd_spec_validate",
+    "cmd_spec_generate",
+    "cmd_task_list",
+    "cmd_task_status",
+    "cmd_task_ping",
+    "cmd_task_stop",
+    "cmd_task_kill",
+    "cmd_task_tid",
+    "cmd_manager_start",
+    "cmd_manager_serve",
+    "cmd_manager_stop",
+    "cmd_manager_list",
+    "cmd_manager_status",
+    "cmd_system_tidy",
+    "cmd_system_task_monitor",
+    "cmd_system_prune",
+    "cmd_system_dump",
+    "cmd_system_builtins",
     "cmd_system_load",
 }
 
 COMMAND_TYPES = {
-    "InitResult", "RunSpecDescription", "RunSession", "CommandStream",
-    "RunExecutionResult", "SubmittedTaskReceipt", "TaskSnapshot", "TaskResult",
-    "TaskEvent", "ServiceSnapshot", "TaskPingResult", "TaskControlResult",
-    "QueueEntry", "QueueInfo", "QueueWriteReceipt", "QueueMoveResult",
-    "QueueDeleteReceipt", "QueueBroadcastReceipt", "QueueAliasRecord",
-    "EndpointResolution", "ManagerSnapshot", "SpecRecord",
-    "SpecValidationResult", "SpecMutationResult", "SystemStatusSnapshot",
-    "SystemTidyResult", "SystemLoadResult", "SystemDumpResult",
-    "SystemPruneResult", "BuiltinSpecRecord", "TaskMonitorConfig",
-    "TaskMonitorResult", "TaskMonitorRecord", "TaskMonitorSummary",
+    "InitResult",
+    "RunSpecDescription",
+    "RunSession",
+    "CommandStream",
+    "RunExecutionResult",
+    "SubmittedTaskReceipt",
+    "TaskSnapshot",
+    "TaskResult",
+    "TaskEvent",
+    "ServiceSnapshot",
+    "TaskPingResult",
+    "TaskControlResult",
+    "QueueEntry",
+    "QueueInfo",
+    "QueueWriteReceipt",
+    "QueueMoveResult",
+    "QueueDeleteReceipt",
+    "QueueBroadcastReceipt",
+    "QueueAliasRecord",
+    "EndpointResolution",
+    "ManagerSnapshot",
+    "SpecRecord",
+    "SpecValidationResult",
+    "SpecMutationResult",
+    "SystemStatusSnapshot",
+    "SystemTidyResult",
+    "SystemLoadResult",
+    "SystemDumpResult",
+    "SystemPruneResult",
+    "BuiltinSpecRecord",
+    "TaskMonitorConfig",
+    "TaskMonitorResult",
+    "TaskMonitorRecord",
+    "TaskMonitorSummary",
 }
 
 COMMAND_ERRORS = {
-    "WeftError", "CommandError", "CommandUsageError", "CommandTimeoutError",
-    "CommandExecutionError", "InvalidTID", "TaskNotFound", "SpecNotFound",
-    "ControlRejected", "ManagerNotRunning", "ManagerStartFailed",
-    "SubmissionError", "SubmissionValidationError", "SubmissionManagerError",
+    "WeftError",
+    "CommandError",
+    "CommandUsageError",
+    "CommandTimeoutError",
+    "CommandExecutionError",
+    "InvalidTID",
+    "TaskNotFound",
+    "SpecNotFound",
+    "ControlRejected",
+    "ManagerNotRunning",
+    "ManagerStartFailed",
+    "SubmissionError",
+    "SubmissionValidationError",
+    "SubmissionManagerError",
 }
 
 
@@ -886,26 +950,49 @@ COMMAND_ERRORS = {
         (
             "weft.client",
             {
-                "ControlRejected", "InvalidTID", "ManagerNotRunning",
-                "ManagerStartFailed", "PreparedSubmission", "QueueAckTarget",
-                "SpecNotFound", "Task", "TaskEvent", "TaskNotFound",
-                "TaskResult", "TaskSnapshot", "TaskTerminalSnapshot",
-                "WeftClient", "WeftError", "connect",
+                "ControlRejected",
+                "InvalidTID",
+                "ManagerNotRunning",
+                "ManagerStartFailed",
+                "PreparedSubmission",
+                "QueueAckTarget",
+                "SpecNotFound",
+                "Task",
+                "TaskEvent",
+                "TaskNotFound",
+                "TaskResult",
+                "TaskSnapshot",
+                "TaskTerminalSnapshot",
+                "WeftClient",
+                "WeftError",
+                "connect",
             }
             | {
-                "CommandError", "CommandUsageError", "CommandTimeoutError",
-                "CommandExecutionError", "SubmissionError",
-                "SubmissionValidationError", "SubmissionManagerError",
+                "CommandError",
+                "CommandUsageError",
+                "CommandTimeoutError",
+                "CommandExecutionError",
+                "SubmissionError",
+                "SubmissionValidationError",
+                "SubmissionManagerError",
             },
         ),
         (
             "weft.ext",
             {
-                "RunnerHandle", "RunnerCapabilities", "RunnerRuntimeDescription",
-                "AgentResolverResult", "AgentToolProfileResult",
-                "AgentMCPServerDescriptor", "RunnerEnvironmentProfileResult",
-                "AgentResolver", "AgentToolProfile", "RunnerEnvironmentProfile",
-                "TaskRunnerBackend", "RunnerPlugin", "SpecRunInputRequest",
+                "RunnerHandle",
+                "RunnerCapabilities",
+                "RunnerRuntimeDescription",
+                "AgentResolverResult",
+                "AgentToolProfileResult",
+                "AgentMCPServerDescriptor",
+                "RunnerEnvironmentProfileResult",
+                "AgentResolver",
+                "AgentToolProfile",
+                "RunnerEnvironmentProfile",
+                "TaskRunnerBackend",
+                "RunnerPlugin",
+                "SpecRunInputRequest",
             },
         ),
         ("weft.commands", COMMAND_EXPORTS | COMMAND_TYPES | COMMAND_ERRORS),
@@ -952,10 +1039,85 @@ def test_cli_verb_names_are_a_bijection_with_command_exports() -> None:
     from weft.cli.app import app
 
     paths = _leaf_paths(typer.main.get_command(app))
-    derived = {"cmd_" + "_".join(part.replace("-", "_") for part in path) for path in paths}
+    derived = {
+        "cmd_" + "_".join(part.replace("-", "_") for part in path) for path in paths
+    }
     assert len(paths) == 41
     assert derived == COMMAND_EXPORTS
     assert {name for name in commands.__all__ if name.startswith("cmd_")} == derived
+
+
+def test_commands_never_read_process_stdin() -> None:
+    """Command capabilities receive decoded input from their adapters [PY-2]."""
+
+    forbidden_names = {
+        "stdin_is_tty",
+        "read_limited_stdin",
+        "resolve_cli_message_content",
+    }
+    violations: list[str] = []
+    for path in sorted((PACKAGE_ROOT / "commands").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "sys"
+                and node.attr == "stdin"
+            ):
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}:sys.stdin"
+                )
+            if isinstance(node, ast.Name) and node.id in forbidden_names:
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}:{node.id}"
+                )
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "input"
+            ):
+                violations.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}:input")
+    assert violations == []
+
+
+def _leaf_callbacks(
+    command: object,
+    prefix: tuple[str, ...] = (),
+) -> list[tuple[tuple[str, ...], object]]:
+    children = getattr(command, "commands", None)
+    if children:
+        return [
+            item
+            for name, child in children.items()
+            for item in _leaf_callbacks(child, (*prefix, str(name)))
+        ]
+    return [(prefix, command.callback)]
+
+
+def test_cli_callbacks_only_reach_their_matching_command_export() -> None:
+    """Every verb's semantic call crosses the canonical facade [PY-2], [PY-4]."""
+
+    from weft.cli.app import app
+
+    violations: list[str] = []
+    for path, callback in _leaf_callbacks(typer.main.get_command(app)):
+        expected = "cmd_" + "_".join(part.replace("-", "_") for part in path)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(callback)))
+        calls = [
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "commands"
+            and node.func.attr.startswith("cmd_")
+        ]
+        if calls != [expected]:
+            violations.append(
+                f"{' '.join(path)}: expected {expected}, found {sorted(calls)}"
+            )
+    assert violations == []
 
 
 def test_runtime_import_graph_is_one_way_through_ext() -> None:
@@ -974,34 +1136,45 @@ def test_runtime_import_graph_is_one_way_through_ext() -> None:
         ):
             core_ext_edges.append(edge)
         if (
-            _is_module_or_child(source, "weft.core")
-            and any(
-                _is_module_or_child(target, layer)
-                for layer in ("weft.commands", "weft.cli", "weft.client")
+            (
+                _is_module_or_child(source, "weft.core")
+                and any(
+                    _is_module_or_child(target, layer)
+                    for layer in ("weft.commands", "weft.cli", "weft.client")
+                )
             )
-        ) or (
-            _is_module_or_child(source, "weft.commands")
-            and any(
-                _is_module_or_child(target, layer)
-                for layer in ("weft.cli", "weft.client")
+            or (
+                _is_module_or_child(source, "weft.commands")
+                and any(
+                    _is_module_or_child(target, layer)
+                    for layer in ("weft.cli", "weft.client")
+                )
             )
-        ) or (
-            _is_module_or_child(source, "weft.cli")
-            and any(
-                _is_module_or_child(target, layer)
-                for layer in ("weft.core", "weft.client", "weft.ext")
+            or (
+                _is_module_or_child(source, "weft.cli")
+                and any(
+                    _is_module_or_child(target, layer)
+                    for layer in ("weft.core", "weft.client", "weft.ext")
+                )
             )
-        ) or (
-            _is_module_or_child(source, "weft.client")
-            and any(
-                _is_module_or_child(target, layer)
-                for layer in ("weft.core", "weft.cli", "weft.ext")
+            or (
+                _is_module_or_child(source, "weft.client")
+                and any(
+                    _is_module_or_child(target, layer)
+                    for layer in ("weft.core", "weft.cli", "weft.ext")
+                )
             )
-        ) or (
-            _is_module_or_child(source, "weft.ext")
-            and any(
-                _is_module_or_child(target, layer)
-                for layer in ("weft.core", "weft.commands", "weft.cli", "weft.client")
+            or (
+                _is_module_or_child(source, "weft.ext")
+                and any(
+                    _is_module_or_child(target, layer)
+                    for layer in (
+                        "weft.core",
+                        "weft.commands",
+                        "weft.cli",
+                        "weft.client",
+                    )
+                )
             )
         ):
             forbidden.append(edge)

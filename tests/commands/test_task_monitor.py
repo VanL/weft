@@ -404,9 +404,7 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
     assert len(completed["checkpoint_timestamp"]) == 19
     assert completed["checkpoint_timestamp"].isascii()
     assert isinstance(result.checkpoint_timestamp, int)
-    assert (
-        str(result.checkpoint_timestamp) == completed["checkpoint_timestamp"]
-    )
+    assert str(result.checkpoint_timestamp) == completed["checkpoint_timestamp"]
 
 
 def test_task_failure_without_task_monitor_anomaly_is_domain_failure(workdir) -> None:

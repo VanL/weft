@@ -14,7 +14,9 @@ from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
     postgres_env_overrides_for_root,
 )
+from weft._exceptions import CommandExecutionError
 from weft.commands.init import cmd_init
+from weft.commands.types import InitResult
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
@@ -83,19 +85,11 @@ def test_cmd_init_reports_ordinary_backend_plugin_failure(
         ),
     )
 
-    result = cmd_init(
-        tmp_path,
-        quiet=False,
-        overrides={"BROKER_BACKEND": "postgres"},
-    )
+    monkeypatch.setattr(init_cmd, "load_config", lambda: {"BROKER_BACKEND": "postgres"})
 
-    captured = capsys.readouterr()
-    assert result == 1
-    assert captured.out == ""
-    assert (
-        captured.err
-        == "weft: failed to initialize SimpleBroker database: backend detail\n"
-    )
+    with pytest.raises(CommandExecutionError, match="backend detail"):
+        cmd_init(tmp_path)
+    assert capsys.readouterr() == ("", "")
 
 
 def test_cmd_init_propagates_fatal_backend_plugin_signal(
@@ -114,11 +108,7 @@ def test_cmd_init_propagates_fatal_backend_plugin_signal(
     monkeypatch.setattr(init_cmd, "resolve_context_broker_target", fail_resolution)
 
     with pytest.raises(InitBackendSignal) as exc_info:
-        cmd_init(
-            tmp_path,
-            quiet=False,
-            overrides={"BROKER_BACKEND": "postgres"},
-        )
+        cmd_init(tmp_path)
 
     captured = capsys.readouterr()
     assert exc_info.value is signal
@@ -192,13 +182,17 @@ def test_cmd_init_accepts_in_process_config_overrides(
     project_root = tmp_path / "embedded-project"
     monkeypatch.delenv("WEFT_DIRECTORY_NAME", raising=False)
 
-    rc = cmd_init(
-        project_root,
-        quiet=True,
-        overrides={"WEFT_DIRECTORY_NAME": ".engram"},
+    monkeypatch.setattr(
+        init_cmd,
+        "load_config",
+        lambda: {
+            "WEFT_DIRECTORY_NAME": ".engram",
+            "BROKER_DEFAULT_DB_NAME": "broker.db",
+        },
     )
+    result = cmd_init(project_root)
 
-    assert rc == 0
+    assert isinstance(result, InitResult)
     assert os.environ.get("WEFT_DIRECTORY_NAME") is None
     weft_dir = project_root / ".engram"
     assert weft_dir.is_dir()
@@ -371,12 +365,13 @@ def test_cmd_init_reports_weft_pg_install_hint_for_missing_plugin(
         "weft.commands.init.load_config", lambda: {"BROKER_BACKEND": "postgres"}
     )
 
-    rc = cmd_init(tmp_path, quiet=False)
+    with pytest.raises(CommandExecutionError) as exc_info:
+        cmd_init(tmp_path)
     captured = capsys.readouterr()
 
-    assert rc == 1
-    assert "uv add 'weft[pg]'" in captured.err
-    assert "simplebroker-pg" in captured.err
+    assert "uv add 'weft[pg]'" in str(exc_info.value)
+    assert "simplebroker-pg" in str(exc_info.value)
+    assert captured == ("", "")
 
 
 def test_cmd_init_prefers_project_postgres_target_over_env_target(
@@ -410,9 +405,9 @@ def test_cmd_init_prefers_project_postgres_target_over_env_target(
 
     monkeypatch.setattr("weft.commands.init.sb_cmd_init", _fake_init)
 
-    rc = cmd_init(project_root, quiet=True)
+    result = cmd_init(project_root)
 
-    assert rc == 0
+    assert isinstance(result, InitResult)
     broker_target = captured["target"]
     assert broker_target.backend_name == "postgres"
     assert broker_target.target == "postgresql://toml-user@toml-host/toml-db"
@@ -448,9 +443,9 @@ def test_cmd_init_ignores_root_simplebroker_config(
 
     monkeypatch.setattr("weft.commands.init.sb_cmd_init", _fake_init)
 
-    rc = cmd_init(project_root, quiet=True)
+    result = cmd_init(project_root)
 
-    assert rc == 0
+    assert isinstance(result, InitResult)
     broker_target = captured["target"]
     assert broker_target.backend_name == "sqlite"
     assert broker_target.target_path == (project_root / ".weft" / "broker.db").resolve()

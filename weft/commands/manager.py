@@ -8,6 +8,7 @@ Spec references:
 from __future__ import annotations
 
 import json
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -166,10 +167,11 @@ def cmd_manager_start(
         replaced, message = manager_runtime.replace_active_manager(resolved)
         if not replaced:
             raise ManagerStartFailed(message or "Manager replacement failed")
-        record, _started_here, _process_handle = manager_runtime.start_manager(resolved)
+        record, started_here, _process_handle = manager_runtime.start_manager(resolved)
     else:
-        record, _started_here, _process_handle = manager_runtime.ensure_manager(resolved)
-    return _manager_snapshot(record)
+        record, started_here, _process_handle = manager_runtime.ensure_manager(resolved)
+    snapshot = _manager_snapshot(record)
+    return dataclass_replace(snapshot, started_here=started_here)
 
 
 def serve_manager(context: WeftContext) -> None:

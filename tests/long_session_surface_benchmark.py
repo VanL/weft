@@ -31,13 +31,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from weft import commands
 from weft._constants import WEFT_COMPLETED_RESULT_GRACE_SECONDS
-from weft.cli.run import cmd_run
-from weft.commands import queue as queue_cmd
-from weft.commands.manager import stop_command
-from weft.commands.result import cmd_result
-from weft.commands.system import cmd_status
-from weft.commands.tasks import stop_tasks
+from weft.commands import RunExecutionResult
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -528,15 +524,15 @@ class ApiSurface:
             redirect_stdout(stdout),
             redirect_stderr(stderr),
         ):
-            rc = cmd_run(
+            outcome = commands.cmd_run(
                 tuple(command),
-                spec_run_args=(),
+                spec_args=(),
                 spec=spec,
                 pipeline=None,
-                pipeline_input=None,
+                input=None,
                 function=function,
-                args=tuple(args),
-                kwargs=tuple(kwargs),
+                arg=tuple(args),
+                kw=tuple(kwargs),
                 env=tuple(env_vars),
                 name=name,
                 interactive=interactive,
@@ -544,14 +540,28 @@ class ApiSurface:
                 timeout=timeout,
                 memory=None,
                 cpu=None,
-                tags=tuple(tags),
-                context_dir=workdir,
+                tag=tuple(tags),
+                context=workdir,
                 wait=wait,
-                json_output=False,
-                verbose=False,
-                persistent_override=None,
-                autostart_enabled=True,
+                continuous=None,
+                autostart=True,
+                run_input_stdin_text=stdin if spec is not None else None,
+                work_input_text=stdin if spec is None else None,
             )
+            if wait:
+                try:
+                    execution = outcome.wait()
+                finally:
+                    outcome.close()
+            else:
+                execution = outcome
+            assert isinstance(execution, RunExecutionResult)
+            if execution.status == "completed" and execution.result_value not in (
+                None,
+                "",
+            ):
+                print(execution.result_value)
+            rc = 0 if execution.status in {None, "completed"} else 1
         return rc, stdout.getvalue().strip(), stderr.getvalue().strip()
 
     def run_task(
@@ -599,10 +609,8 @@ class ApiSurface:
         target: str,
     ) -> tuple[int, str, str]:
         with _api_call_environment(workdir, env):
-            rc, out, err = queue_cmd.alias_add_command(
-                alias, target, spec_context=str(workdir)
-            )
-        return rc, out.strip(), err.strip()
+            commands.cmd_queue_alias_add(alias, target)
+        return 0, "", ""
 
     def queue_alias_remove(
         self,
@@ -611,10 +619,8 @@ class ApiSurface:
         alias: str,
     ) -> tuple[int, str, str]:
         with _api_call_environment(workdir, env):
-            rc, out, err = queue_cmd.alias_remove_command(
-                alias, spec_context=str(workdir)
-            )
-        return rc, out.strip(), err.strip()
+            commands.cmd_queue_alias_remove(alias)
+        return 0, "", ""
 
     def queue_write(
         self,
@@ -624,8 +630,8 @@ class ApiSurface:
         message: str,
     ) -> tuple[int, str, str]:
         with _api_call_environment(workdir, env):
-            rc, out, err = queue_cmd.write_command(queue_name, message)
-        return rc, out.strip(), err.strip()
+            commands.cmd_queue_write(queue_name, message)
+        return 0, "", ""
 
     def status_json(
         self,
@@ -635,14 +641,11 @@ class ApiSurface:
         all_tasks: bool = False,
     ) -> tuple[int, str]:
         with _api_call_environment(workdir, env):
-            rc, payload = cmd_status(
-                json_output=True,
-                include_terminal=all_tasks,
-                spec_context=str(workdir),
+            snapshot = commands.cmd_status(
+                all=all_tasks,
+                context=workdir,
             )
-        if rc != 0:
-            raise RuntimeError(payload or "status command failed")
-        return rc, (payload or "").strip()
+        return 0, json.dumps(asdict(snapshot), default=str)
 
     def result_json(
         self,
@@ -653,19 +656,20 @@ class ApiSurface:
         timeout: float,
     ) -> tuple[int, str]:
         with _api_call_environment(workdir, env):
-            rc, payload = cmd_result(
-                tid=tid,
-                all_results=False,
+            result = commands.cmd_result(
+                tid,
+                all=False,
                 peek=False,
                 timeout=timeout,
                 stream=False,
-                json_output=True,
-                show_stderr=False,
-                context_path=str(workdir),
+                context=workdir,
             )
-        if rc != 0:
-            raise RuntimeError(payload or f"result command failed for {tid}")
-        return rc, (payload or "").strip()
+        assert isinstance(result, commands.TaskResult)
+        if result.status != "completed":
+            raise RuntimeError(result.error or f"result command failed for {tid}")
+        return 0, json.dumps(
+            {"tid": result.tid, "status": result.status, "result": result.value}
+        )
 
     def result_all_json(
         self,
@@ -673,19 +677,22 @@ class ApiSurface:
         env: Mapping[str, str],
     ) -> tuple[int, str]:
         with _api_call_environment(workdir, env):
-            rc, payload = cmd_result(
-                tid=None,
-                all_results=True,
+            results = commands.cmd_result(
+                None,
+                all=True,
                 peek=False,
                 timeout=None,
                 stream=False,
-                json_output=True,
-                show_stderr=False,
-                context_path=str(workdir),
+                context=workdir,
             )
-        if rc != 0:
-            raise RuntimeError(payload or "result --all failed")
-        return rc, (payload or "").strip()
+        assert isinstance(results, tuple)
+        return 0, json.dumps(
+            {
+                "results": [
+                    {"tid": result.tid, "result": result.value} for result in results
+                ]
+            }
+        )
 
     def stop_task(
         self,
@@ -694,9 +701,9 @@ class ApiSurface:
         tid: str,
     ) -> tuple[int, str, str]:
         with _api_call_environment(workdir, env):
-            count = stop_tasks([tid], context_path=str(workdir))
-        if count != 1:
-            return 1, "", f"expected to stop 1 task, stopped {count}"
+            result = commands.cmd_task_stop(tid, context=workdir)
+        if len(result.accepted) != 1:
+            return 1, "", f"expected to stop 1 task, stopped {len(result.accepted)}"
         return 0, "Stopped 1 task(s)", ""
 
     def stop_worker(
@@ -708,13 +715,13 @@ class ApiSurface:
         timeout: float,
     ) -> tuple[int, str, str]:
         with _api_call_environment(workdir, env):
-            rc, payload = stop_command(
+            snapshot = commands.cmd_manager_stop(
                 tid=tid,
                 force=False,
                 timeout=timeout,
-                context_path=workdir,
+                context=workdir,
             )
-        return rc, (payload or "").strip(), ""
+        return 0, "" if snapshot is None else f"Stopped manager {snapshot.tid}", ""
 
 
 def _status_payload(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import sys
 import time
@@ -180,6 +179,11 @@ def test_public_queue_metadata_alias_and_broadcast_commands(
     added = queue_cmd.cmd_queue_alias_add("public-alias", "public.target")
     assert added == QueueAliasRecord(alias="public-alias", target="public.target")
     assert queue_cmd.cmd_queue_alias_list() == (added,)
+    alias_write = queue_cmd.cmd_queue_write("@public-alias", "via-alias")
+    assert alias_write.queue == "public.target"
+    assert (
+        queue_cmd.cmd_queue_read("@public-alias", all=True)[-1].message == "via-alias"
+    )
     assert queue_cmd.cmd_queue_alias_remove("public-alias") == added
     assert queue_cmd.cmd_queue_alias_list() == ()
 
@@ -269,7 +273,9 @@ def test_public_queue_watch_returns_closable_structured_stream(
     monkeypatch.setattr(queue_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
 
     stream = queue_cmd.cmd_queue_watch("watch.queue", limit=1, interval=0.01)
-    assert next(stream) == QueueEntry(queue="watch.queue", message="payload", timestamp=5)
+    assert next(stream) == QueueEntry(
+        queue="watch.queue", message="payload", timestamp=5
+    )
     with pytest.raises(StopIteration):
         next(stream)
     stream.close()
@@ -284,7 +290,9 @@ def test_public_queue_watch_returns_closable_structured_stream(
         (lambda: queue_cmd.cmd_queue_write("q", None), "message is required"),
         (lambda: queue_cmd.cmd_queue_broadcast(None), "message is required"),
         (
-            lambda: queue_cmd.cmd_queue_read("q", all=True, message="1779600000000000001"),
+            lambda: queue_cmd.cmd_queue_read(
+                "q", all=True, message="1779600000000000001"
+            ),
             "message cannot be used with all, after, or before",
         ),
         (
@@ -354,7 +362,9 @@ def test_public_queue_backend_failures_are_typed_and_chained(
 
     monkeypatch.setattr(queue_cmd, "_context", fail_context)
 
-    with pytest.raises(CommandExecutionError, match="failed to resolve queue context") as caught:
+    with pytest.raises(
+        CommandExecutionError, match="failed to resolve queue context"
+    ) as caught:
         queue_cmd.cmd_queue_exists("queue")
     assert caught.value.__cause__ is failure
 
@@ -762,7 +772,7 @@ def test_watch_queue_closes_generator_when_limit_stops_iteration(
     assert monitor_queue.closed
 
 
-def test_write_command_reads_omitted_message_from_stdin(
+def test_write_command_rejects_omitted_message_without_reading_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_ctx = SimpleNamespace(broker_target="db", config={})
@@ -776,17 +786,13 @@ def test_write_command_reads_omitted_message_from_stdin(
 
     monkeypatch.setattr(queue_cmd, "_context", lambda spec_context=None: fake_ctx)
     monkeypatch.setattr(queue_cmd, "_run_simplebroker_command", fake_run)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("line1\nline2"))
-
     result = queue_cmd.write_command("stdin.queue", None)
 
-    assert result == (0, "", "")
-    assert captured["fn"] is queue_cmd.sb_commands.cmd_write
-    assert captured["args"] == ("db", "stdin.queue", "line1\nline2")
-    assert captured["kwargs"] == {}
+    assert result == (1, "", "message content must be supplied by the CLI adapter")
+    assert captured == {}
 
 
-def test_broadcast_command_reads_omitted_message_from_stdin(
+def test_broadcast_command_rejects_omitted_message_without_reading_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_ctx = SimpleNamespace(broker_target="db", config={})
@@ -800,14 +806,10 @@ def test_broadcast_command_reads_omitted_message_from_stdin(
 
     monkeypatch.setattr(queue_cmd, "_context", lambda spec_context=None: fake_ctx)
     monkeypatch.setattr(queue_cmd, "_run_simplebroker_command", fake_run)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("broadcast-body"))
-
     result = queue_cmd.broadcast_command(None, pattern="jobs.*")
 
-    assert result == (0, "", "")
-    assert captured["fn"] is queue_cmd.sb_commands.cmd_broadcast
-    assert captured["args"] == ("db", "broadcast-body")
-    assert captured["kwargs"] == {"pattern": "jobs.*"}
+    assert result == (1, "", "message content must be supplied by the CLI adapter")
+    assert captured == {}
 
 
 def test_resolve_command_returns_registered_endpoint_details(tmp_path) -> None:

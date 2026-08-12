@@ -21,10 +21,10 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import weft.commands.specs as spec_cmd
 from simplebroker import Queue, format_message_id
@@ -40,6 +40,8 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
 )
+from weft._exceptions import CommandTimeoutError, CommandUsageError, SubmissionError
+from weft.commands._boundary import typed_command_errors
 from weft.commands._result_wait import await_one_shot_result
 from weft.commands._streaming import (
     collect_interactive_queue_output as _collect_interactive_queue_output,
@@ -49,10 +51,18 @@ from weft.commands._streaming import (
 )
 from weft.commands._task_history import is_pipeline_taskspec_payload
 from weft.commands.interactive import InteractiveStreamClient
+from weft.commands.result import await_task_result
 from weft.commands.submission import (
     ensure_manager_after_submission as _shared_ensure_manager_after_submission,
 )
-from weft.commands.types import RunExecutionResult
+from weft.commands.types import (
+    CommandStream,
+    RunExecutionResult,
+    RunSession,
+    RunSpecDescription,
+    TaskControlResult,
+    TaskEvent,
+)
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 from weft.core.control_messages import encode_control_message
@@ -76,18 +86,13 @@ from weft.core.taskspec import (
     validate_taskspec_payload,
 )
 from weft.ext import SpecRunInputRequest
-from weft.helpers import (
-    read_limited_stdin,
-    resolve_broker_max_message_size,
-    stdin_is_tty,
-)
 
 # -----------------------------------------------------------------------------
 # Explicit spec helpers
 # -----------------------------------------------------------------------------
 
 
-class RunUsageError(ValueError):
+class RunUsageError(CommandUsageError):
     """Raised when run-surface inputs do not satisfy the command contract."""
 
     def __init__(self, message: str, *, param_hint: str | None = None) -> None:
@@ -95,7 +100,7 @@ class RunUsageError(ValueError):
         self.param_hint = param_hint
 
 
-class RunResolutionError(RuntimeError):
+class RunResolutionError(CommandUsageError):
     """Raised when a spec or pipeline reference cannot be loaded for run-mode use."""
 
 
@@ -144,7 +149,7 @@ def _run_with_managed_execution(
     reuse_enabled: bool,
     emit_verbose: bool = True,
     wait_for_completion: Callable[[str], tuple[str, Any, str | None]] | None = None,
-    on_submitted: Callable[[str], None] | None = None,
+    on_submitted: Callable[[str, WeftContext], None] | None = None,
 ) -> RunExecutionResult:
     """Share the manager-backed bootstrap -> submit -> wait -> optional stop flow."""
     manager_record: dict[str, Any] | None = None
@@ -165,7 +170,7 @@ def _run_with_managed_execution(
             manager_started_payload = _manager_started_payload(manager_record)
         tid = str(tid_int)
         if on_submitted is not None:
-            on_submitted(tid)
+            on_submitted(tid, context)
 
         if not wait:
             return RunExecutionResult(
@@ -316,6 +321,125 @@ def render_spec_aware_run_help(
     return "\n".join(lines)
 
 
+def _describe_taskspec(
+    reference: str | Path,
+    *,
+    context_dir: Path | None,
+) -> RunSpecDescription:
+    """Resolve lossless, parser-independent help metadata for one TaskSpec."""
+
+    taskspec = _load_taskspec_reference(reference, context_dir=context_dir)
+    argument_records: list[Mapping[str, Any]] = []
+    parameterization = taskspec.spec.parameterization
+    if parameterization is not None:
+        for name, parameter_declaration in parameterization.arguments.items():
+            argument_records.append(
+                {"name": name, **parameter_declaration.model_dump(mode="json")}
+            )
+    run_input = taskspec.spec.run_input
+    if run_input is not None:
+        for name, run_input_declaration in run_input.arguments.items():
+            argument_records.append(
+                {
+                    "name": name,
+                    "source": "run_input",
+                    **run_input_declaration.model_dump(mode="json"),
+                }
+            )
+    stdin_record: Mapping[str, Any] | None = None
+    if run_input is not None and run_input.stdin is not None:
+        stdin_record = run_input.stdin.model_dump(mode="json")
+    return RunSpecDescription(
+        reference=str(reference),
+        usage=render_spec_aware_run_help(
+            "Usage: weft run --spec NAME|PATH [SPEC OPTIONS]",
+            spec=reference,
+            context_dir=context_dir,
+        ),
+        arguments=tuple(argument_records),
+        stdin=stdin_record,
+    )
+
+
+class _LiveRunSession:
+    """Queue-backed session returned immediately after durable submission."""
+
+    def __init__(
+        self,
+        execution: RunExecutionResult,
+        context: WeftContext,
+    ) -> None:
+        self.tid = execution.tid
+        self._context = context
+        self._streams: list[CommandStream[TaskEvent]] = []
+        self._result: RunExecutionResult | None = None
+        self._closed = False
+
+    def events(self) -> CommandStream[TaskEvent]:
+        # Late import breaks the real result/events cycle.
+        from .events import iter_task_realtime_events
+
+        stream = cast(
+            CommandStream[TaskEvent],
+            iter_task_realtime_events(self._context, self.tid, follow=True),
+        )
+        self._streams.append(stream)
+        return stream
+
+    def send_input(self, text: str) -> None:
+        queue = self._context.queue(
+            f"T{self.tid}.{QUEUE_INBOX_SUFFIX}", persistent=True
+        )
+        try:
+            queue.write(json.dumps({"stdin": text}))
+        finally:
+            queue.close()
+
+    def close_input(self) -> None:
+        queue = self._context.queue(
+            f"T{self.tid}.{QUEUE_INBOX_SUFFIX}", persistent=True
+        )
+        try:
+            queue.write(json.dumps({"close": True}))
+        finally:
+            queue.close()
+
+    def stop(self) -> TaskControlResult:
+        # Late import avoids the tasks -> system -> run dependency closure.
+        from .tasks import cmd_task_stop
+
+        return cmd_task_stop(self.tid, context=self._context.root)
+
+    def wait(self, timeout: float | None = None) -> RunExecutionResult:
+        if self._result is not None:
+            return self._result
+        result = await_task_result(
+            self._context,
+            self.tid,
+            timeout=timeout,
+            wait_for_materialization=True,
+        )
+        if result.status == "timeout" and timeout is not None:
+            raise CommandTimeoutError(
+                result.error or f"timed out waiting for task {self.tid}"
+            )
+        self._result = RunExecutionResult(
+            tid=self.tid,
+            status=result.status,
+            result_value=result.value,
+            error_message=result.error,
+        )
+        return self._result
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for stream in self._streams:
+            stream.close()
+        self._streams.clear()
+
+
 # -----------------------------------------------------------------------------
 # Inline execution helpers
 # -----------------------------------------------------------------------------
@@ -351,18 +475,6 @@ def _parse_env(values: Sequence[str]) -> dict[str, str]:
         key, value = item.split("=", 1)
         env[key] = value
     return env
-
-
-def _read_piped_stdin(context: WeftContext) -> str | None:
-    """Read non-interactive stdin using the active broker size limit."""
-    if not stdin_is_tty():
-        try:
-            max_bytes = resolve_broker_max_message_size(context.config)
-            data = read_limited_stdin(max_bytes)
-        except ValueError as exc:
-            raise RunUsageError(str(exc)) from exc
-        return data if data else None
-    return None
 
 
 def _derive_name(
@@ -974,10 +1086,6 @@ def render_run_execution_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-112] 
     if verbose and execution.submitted_payload is not None:
         emit(json.dumps(execution.submitted_payload, indent=2))
 
-    if execution.submission_error is not None:
-        emit(execution.submission_error, err=True)
-        return 1
-
     tid = execution.tid
     if not wait:
         if json_output:
@@ -1154,6 +1262,8 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
     json_output: bool,
     verbose: bool,
     autostart_enabled: bool,
+    stdin_data: str | None = None,
+    on_submitted: Callable[[str, WeftContext], None] | None = None,
 ) -> RunExecutionResult:
     target_type = "command" if command else "function"
     if target_type == "command" and not command:
@@ -1180,8 +1290,7 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
         metadata["tags"] = list(tags)
     metadata["source"] = "weft.cli"
 
-    stdin_data = _read_piped_stdin(context)
-    stdin_is_terminal = stdin_is_tty()
+    stdin_is_terminal = False
     work_payload = _initial_work_payload(
         target_type=target_type,
         stdin_data=stdin_data,
@@ -1267,12 +1376,10 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
             reuse_enabled=reuse_enabled,
             emit_verbose=False,
             wait_for_completion=_wait_for_inline_completion if wait else None,
+            on_submitted=on_submitted,
         )
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-333] exception
-        return RunExecutionResult(
-            tid="",
-            submission_error=f"Error submitting task: {exc}",
-        )
+    except Exception as exc:
+        raise SubmissionError(f"Error submitting task: {exc}") from exc
 
     return replace(
         execution,
@@ -1295,6 +1402,9 @@ def _execute_spec_via_manager(
     json_output: bool,
     autostart_enabled: bool,
     persistent_override: bool | None,
+    stdin_data: str | None = None,
+    on_submitted: Callable[[str, WeftContext], None] | None = None,
+    session_wait_requested: bool = False,
 ) -> RunExecutionResult:
     spec = _load_taskspec_reference(spec_ref, context_dir=context_dir)
     bundle_root = spec.get_bundle_root()
@@ -1315,12 +1425,11 @@ def _execute_spec_via_manager(
         run_input_tokens=run_input_tokens,
     )
     spec = _apply_explicit_run_name(spec, name)
-    if spec.spec.persistent and wait:
+    if spec.spec.persistent and (wait or session_wait_requested):
         raise RunUsageError(
             "--wait is not supported for persistent TaskSpecs; use --no-wait."
         )
     context = build_context(spec.spec.weft_context, autostart=autostart_enabled)
-    stdin_data = _read_piped_stdin(context)
     work_payload = _build_spec_work_payload(
         taskspec=spec,
         context=context,
@@ -1354,12 +1463,10 @@ def _execute_spec_via_manager(
             reuse_enabled=reuse_enabled,
             emit_verbose=False,
             wait_for_completion=_wait_for_spec_completion if wait else None,
+            on_submitted=on_submitted,
         )
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-333] exception
-        return RunExecutionResult(
-            tid="",
-            submission_error=f"Error submitting TaskSpec: {exc}",
-        )
+    except Exception as exc:
+        raise SubmissionError(f"Error submitting TaskSpec: {exc}") from exc
 
     return replace(
         execution,
@@ -1381,10 +1488,11 @@ def _execute_pipeline(
     json_output: bool,
     verbose: bool,
     autostart_enabled: bool,
+    stdin_data: str | None = None,
+    on_submitted: Callable[[str, WeftContext], None] | None = None,
 ) -> RunExecutionResult:
     context = build_context(spec_context=context_dir, autostart=autostart_enabled)
     pipeline_spec, source_ref = _load_pipeline_spec(pipeline, context_dir=context_dir)
-    stdin_data = _read_piped_stdin(context)
     if pipeline_input is not None and stdin_data is not None:
         raise RunUsageError("--input cannot be used together with piped stdin")
 
@@ -1449,6 +1557,7 @@ def _execute_pipeline(
             if wait
             else None
         ),
+        on_submitted=on_submitted,
     )
 
     return replace(
@@ -1491,6 +1600,10 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
     verbose: bool,
     persistent_override: bool | None,
     autostart_enabled: bool,
+    run_input_stdin_text: str | None = None,
+    work_input_text: str | None = None,
+    on_submitted: Callable[[str, WeftContext], None] | None = None,
+    session_wait_requested: bool = False,
 ) -> RunExecutionResult:
     """Execute a command, function, task spec, or pipeline without rendering.
 
@@ -1534,6 +1647,8 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             json_output=json_output,
             verbose=verbose,
             autostart_enabled=autostart_enabled,
+            stdin_data=work_input_text,
+            on_submitted=on_submitted,
         )
     if spec is not None:
         if command:
@@ -1554,6 +1669,11 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             json_output=json_output,
             autostart_enabled=autostart_enabled,
             persistent_override=persistent_override,
+            stdin_data=run_input_stdin_text
+            if run_input_stdin_text is not None
+            else work_input_text,
+            on_submitted=on_submitted,
+            session_wait_requested=session_wait_requested,
         )
 
     if persistent_override is not None:
@@ -1593,7 +1713,91 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
         json_output=json_output,
         verbose=verbose,
         autostart_enabled=autostart_enabled,
+        stdin_data=work_input_text,
+        on_submitted=on_submitted,
     )
+
+
+@typed_command_errors
+def cmd_run(
+    command: Sequence[str],
+    *,
+    spec_args: Sequence[str] = (),
+    spec: str | Path | None = None,
+    pipeline: str | Path | None = None,
+    input: str | None = None,
+    function: str | None = None,
+    arg: Sequence[str] = (),
+    kw: Sequence[str] = (),
+    env: Sequence[str] = (),
+    name: str | None = None,
+    interactive: bool = False,
+    stream_output: bool | None = None,
+    timeout: float | None = None,
+    memory: int | None = None,
+    cpu: int | None = None,
+    tag: Sequence[str] = (),
+    context: str | Path | None = None,
+    wait: bool = True,
+    continuous: bool | None = None,
+    autostart: bool = True,
+    describe: bool = False,
+    run_input_stdin_text: str | None = None,
+    work_input_text: str | None = None,
+) -> RunSpecDescription | RunSession | RunExecutionResult:
+    """Execute the same semantic operation exposed by ``weft run``.
+
+    Process input and output remain adapter concerns. The two decoded stdin
+    channels are explicit so embedded callers never touch ambient process I/O.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    context_dir = Path(context) if context is not None else None
+    if describe:
+        if spec is None:
+            raise RunUsageError("describe mode requires --spec", param_hint="--spec")
+        return _describe_taskspec(spec, context_dir=context_dir)
+
+    submitted_context: WeftContext | None = None
+
+    def _capture_submission(_tid: str, resolved_context: WeftContext) -> None:
+        nonlocal submitted_context
+        submitted_context = resolved_context
+
+    execution = execute_run(
+        tuple(command),
+        spec_run_args=tuple(spec_args),
+        spec=spec,
+        pipeline=pipeline,
+        pipeline_input=input,
+        function=function,
+        args=tuple(arg),
+        kwargs=tuple(kw),
+        env=tuple(env),
+        name=name,
+        interactive=interactive,
+        stream_output=stream_output,
+        timeout=timeout,
+        memory=memory,
+        cpu=cpu,
+        tags=tuple(tag),
+        context_dir=context_dir,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        persistent_override=continuous,
+        autostart_enabled=autostart,
+        run_input_stdin_text=run_input_stdin_text,
+        work_input_text=work_input_text,
+        on_submitted=_capture_submission,
+        session_wait_requested=wait,
+    )
+    if wait:
+        if submitted_context is None:  # pragma: no cover - execution invariant
+            raise SubmissionError("run submission completed without a context")
+        return _LiveRunSession(execution, submitted_context)
+    return execution
 
 
 __all__ = [
@@ -1606,6 +1810,7 @@ __all__ = [
     "_execute_pipeline",
     "_execute_spec_via_manager",
     "_wait_for_task_completion",
+    "cmd_run",
     "execute_run",
     "render_run_execution_result",
     "render_spec_aware_run_help",

@@ -128,6 +128,9 @@ New/refined exact contracts:
   `dispatch_eligible: bool | None = None`,
   `canonical_candidate: bool | None = None`, and
   `canonical: bool | None = None`; diagnostic mode populates them.
+  `started_here: bool | None = None` is populated only by
+  `cmd_manager_start` so the CLI can preserve its started-versus-existing
+  lifecycle message without a second semantic query.
 
 ### Deterministic return matrix
 

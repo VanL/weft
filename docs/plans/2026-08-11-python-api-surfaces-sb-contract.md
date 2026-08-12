@@ -1,6 +1,6 @@
 # Python API Surfaces: Adopt the SimpleBroker Three-Surface Contract
 
-Status: draft
+Status: completed
 Source specs: `docs/specifications/09-Implementation_Plan.md` [IP-1.0]; `docs/specifications/10-CLI_Interface.md` [CLI-0.2], [CLI-1.1.1] (run-input/parameterization clauses); `docs/specifications/02-TaskSpec.md` (parameterization and run-input sections currently scoped to `weft run --spec`); `docs/specifications/11-CLI_Architecture_Crosswalk.md` [CLI-X1], [CLI-X2], [CLI-X3]; `docs/specifications/13C-Using_Weft_With_Django.md` [DJ-2.1], [DJ-8.2], [DJ-8.4]. No weft spec currently owns a complete public-Python-surface contract; this plan adds one (new spec file, Section 7). Design source (non-normative for weft, normative for the pattern being adopted): `../simplebroker/docs/specs/16-python-library-api.md` [SB-API-1], [SB-API-10].
 Superseded by: none
 
@@ -560,7 +560,10 @@ populates them, while other snapshot producers leave them `None`.
 `canonical_candidate: bool | None = None`, and
 `canonical: bool | None = None` fields;
 `cmd_manager_list(diagnostic=True)` populates them and non-diagnostic calls
-leave them `None`.
+leave them `None`. `ManagerSnapshot` also has
+`started_here: bool | None = None`; only `cmd_manager_start` populates it so
+the CLI can preserve its started-versus-existing lifecycle message without a
+second semantic query.
 
 The return matrix is normative for implementation and tests:
 
@@ -853,7 +856,9 @@ public helper or allowing CLI access to command leaves/core.
 > `dispatch_eligible: bool | None = None`,
 > `canonical_candidate: bool | None = None`, and
 > `canonical: bool | None = None` fields; manager-list diagnostic mode populates
-> them.
+> them. `started_here: bool | None = None` is populated only by
+> `cmd_manager_start` so the CLI can preserve its started-versus-existing
+> lifecycle message without a second semantic query.
 >
 > Return selection is deterministic. `cmd_run(..., describe=True)` returns
 > `RunSpecDescription` and never submits. Otherwise `cmd_run(..., wait=True)`
@@ -1412,3 +1417,6 @@ completion.
 | 2026-08-11 | Focused round-3 review (v9) | accepted v8 residue fixes only | PASS | All v6/v7 blocking findings now dispositioned and their final fixes verified. Plan is ready for the separate spec-promotion review required by §12. |
 | 2026-08-12 | Full spec-promotion review | v9 plus grounded 41-verb inventory | BLOCKED→PASS | Reviewer found and verified fixes for exact type, signature, stream-data, diagnostic-data, and backlink residues. Final verdict PASS; no promotion blocker remained. |
 | 2026-08-12 | Spec promotion | `fd544c33092cd8fb135098cfd43b7dc6c7aaadc3` plus reviewed Section 7 diff | complete | Promoted [PY-1]–[PY-4] into `14-Python_API_Surfaces.md`, synchronized affected specs/index/crosswalk, and added reciprocal plan backlinks. Metadata, spec hygiene, and doc-path gates passed before production edits. |
+| 2026-08-12 | Command facade and adapter implementation | `20117ec` spec-promotion commit through the working implementation diff | complete | Added the exact lazy `weft.commands.__all__` inventory, structured outcomes and typed errors, all 41 canonical `cmd_<full_cli_path>` functions, explicit-input command seams, and CLI adapters that call the matching facade export once. Updated `weft.client`, `weft.ext`, Django submission plumbing, and the direct-API long-session harness to the promoted contracts. |
+| 2026-08-12 | Independent implementation review | focused command/CLI/architecture evidence | BLOCKED→PASS | Review found three release blockers: `cmd_run(wait=True)` returned an already-completed session, status had a stale test seam, and task-monitor follow exposed the wrong annotation. The implementation now submits without blocking, returns a queue-backed closable `RunSession`, renders interactive output from structured events, uses the exact `CommandStream` return, and passes the corrected status seam. |
+| 2026-08-12 | Final verification | full default pytest; serial spec/architecture/commands/CLI suite; full production mypy; repo-wide Ruff | complete | Default fast suite passed with two environment-specific skips. The serial boundary-heavy suite passed with one Postgres-only skip. Full production mypy, Ruff lint, Ruff format, spec metadata/hygiene, lazy facade, 41-verb bijection, callback-purity, no-command-stdin, and one-way import gates passed. |

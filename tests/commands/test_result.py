@@ -11,6 +11,12 @@ from psycopg_pool import PoolTimeout
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._exceptions import (
+    CommandExecutionError,
+    CommandTimeoutError,
+    CommandUsageError,
+    TaskNotFound,
+)
 from weft.commands import _result_wait as result_wait
 from weft.commands import events as events_cmd
 from weft.commands import result as result_cmd
@@ -25,8 +31,11 @@ from weft.commands.result import (
     _load_taskspec_payload,
     await_one_shot_result,
     await_task_result,
-    cmd_result,
 )
+from weft.commands.result import (
+    _legacy_cmd_result as cmd_result,
+)
+from weft.commands.types import TaskEvent, TaskResult
 from weft.context import build_context
 from weft.core import task_evidence
 from weft.helpers import iter_queue_json_entries
@@ -36,6 +45,118 @@ pytestmark = [pytest.mark.shared]
 RESULT_WAIT_TIMEOUT = 2.0
 RESULT_MATERIALIZATION_TEST_TIMEOUT = 15.0
 """Backend-tolerant timeout for tests that validate eventual queue discovery."""
+
+
+def test_public_cmd_result_returns_structured_single_and_all_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = object()
+    completed = TaskResult(
+        tid="1779600000000000001",
+        status="completed",
+        value="done",
+        stdout=None,
+        stderr=None,
+        error=None,
+    )
+    monkeypatch.setattr(result_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        result_cmd, "await_task_result", lambda *_args, **_kwargs: completed
+    )
+    monkeypatch.setattr(
+        result_cmd, "_collect_all_task_results", lambda *_args, **_kwargs: (completed,)
+    )
+
+    assert result_cmd.cmd_result("1779600000000000001") is completed
+    assert result_cmd.cmd_result(all=True) == (completed,)
+
+
+def test_public_cmd_result_returns_structured_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = object()
+    event = TaskEvent(
+        tid="1779600000000000001",
+        event_type="stdout",
+        timestamp=1779600000000000002,
+        payload={"data": "chunk"},
+    )
+    monkeypatch.setattr(result_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        result_cmd,
+        "_result_task_event_stream",
+        lambda *_args, **_kwargs: iter((event,)),
+    )
+
+    stream = result_cmd.cmd_result("1779600000000000001", stream=True)
+    assert tuple(stream) == (event,)
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda: result_cmd.cmd_result(),
+        lambda: result_cmd.cmd_result("1779600000000000001", all=True),
+        lambda: result_cmd.cmd_result(all=True, stream=True),
+        lambda: result_cmd.cmd_result("1779600000000000001", peek=True),
+        lambda: result_cmd.cmd_result(all=True, timeout=1.0),
+    ],
+)
+def test_public_cmd_result_rejects_invalid_mode_combinations(invoke) -> None:
+    with pytest.raises(CommandUsageError):
+        invoke()
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "expected"),
+    [
+        ("missing", "missing", TaskNotFound),
+        ("timeout", "late", CommandTimeoutError),
+    ],
+)
+def test_public_cmd_result_translates_missing_and_timeout_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    error: str,
+    expected: type[Exception],
+) -> None:
+    monkeypatch.setattr(result_cmd, "build_context", lambda spec_context=None: object())
+    monkeypatch.setattr(
+        result_cmd,
+        "await_task_result",
+        lambda *_args, **_kwargs: TaskResult(
+            tid="1779600000000000001",
+            status=status,
+            value=None,
+            stdout=None,
+            stderr=None,
+            error=error,
+        ),
+    )
+
+    with pytest.raises(expected, match=error):
+        result_cmd.cmd_result("1779600000000000001", timeout=0.01)
+
+
+def test_public_cmd_result_is_silent_and_translates_context_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    failure = OSError("context unavailable")
+
+    def fail_context(*_args: object, **_kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(result_cmd, "build_context", fail_context)
+
+    with pytest.raises(
+        CommandExecutionError, match="failed to resolve result context"
+    ) as caught:
+        result_cmd.cmd_result("1779600000000000001")
+    assert caught.value.__cause__ is failure
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 class ResultContextFailure(Exception):

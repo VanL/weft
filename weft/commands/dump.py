@@ -108,7 +108,9 @@ def cmd_system_dump(
         raise CommandExecutionError(
             f"weft dump: failed to resolve context: {exc}"
         ) from exc
-    output_path = resolved.weft_dir / "weft_export.jsonl" if output is None else Path(output)
+    output_path = (
+        resolved.weft_dir / "weft_export.jsonl" if output is None else Path(output)
+    )
     if not output_path.is_absolute():
         output_path = Path.cwd() / output_path
     try:

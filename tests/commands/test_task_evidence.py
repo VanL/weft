@@ -357,7 +357,7 @@ def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
         assert task_status.reconciliation is not None
         assert task_status.reconciliation["classification"] == "wrapper_lost"
 
-        exit_code, payload = status_cmd.cmd_status(
+        exit_code, payload = status_cmd._legacy_cmd_status(
             json_output=True,
             include_terminal=True,
             spec_context=root,
@@ -371,7 +371,7 @@ def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
         assert rows[0]["return_code"] == 1
         assert rows[0]["reconciliation"]["classification"] == "wrapper_lost"
 
-        exit_code, payload = status_cmd.cmd_status(
+        exit_code, payload = status_cmd._legacy_cmd_status(
             json_output=True,
             spec_context=root,
         )
@@ -420,7 +420,7 @@ def test_one_shot_outbox_without_terminal_log_classifies_completed(
         assert task_status.reconciliation is not None
         assert task_status.reconciliation["classification"] == "result_without_terminal"
 
-        exit_code, payload = status_cmd.cmd_status(
+        exit_code, payload = status_cmd._legacy_cmd_status(
             json_output=True,
             include_terminal=True,
             spec_context=root,
@@ -798,7 +798,7 @@ def test_project_status_does_not_active_ping_tasks_by_default(tmp_path) -> None:
     )
     ctrl_in = ctx.queue(f"T{tid}.ctrl_in", persistent=True)
     try:
-        exit_code, payload = status_cmd.cmd_status(
+        exit_code, payload = status_cmd._legacy_cmd_status(
             json_output=True,
             include_terminal=True,
             spec_context=root,

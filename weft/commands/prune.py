@@ -292,11 +292,7 @@ def cmd_system_prune(
     except (OSError, RuntimeError) as exc:
         raise CommandExecutionError(str(exc)) from exc
 
-    families = (
-        ("runtime-state", "retention")
-        if normalized == "all"
-        else (normalized,)
-    )
+    families = ("runtime-state", "retention") if normalized == "all" else (normalized,)
     return SystemPruneResult(
         families=families,
         applied=apply,

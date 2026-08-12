@@ -286,6 +286,7 @@ def test_cmd_manager_start_returns_structured_snapshot(tmp_path, monkeypatch) ->
 
     assert result.tid == "1761000000000000002"
     assert result.status == "active"
+    assert result.started_here is True
 
 
 def test_cmd_manager_stop_returns_none_when_active_manager_is_absent(

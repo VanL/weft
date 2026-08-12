@@ -49,8 +49,6 @@ from weft.core.endpoints import (
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import (
     closing_queue_iterator,
-    resolve_broker_max_message_size,
-    resolve_cli_message_content,
 )
 from weft.helpers.message_ids import normalize_exact_message_id
 
@@ -161,8 +159,10 @@ def _resolve_message_content(
     ctx: WeftContext,
     message: str | None,
 ) -> str:
-    max_bytes = resolve_broker_max_message_size(ctx.config)
-    return resolve_cli_message_content(message, max_bytes=max_bytes)
+    del ctx
+    if message is None or message == "-":
+        raise ValueError("message content must be supplied by the CLI adapter")
+    return message
 
 
 def _format_resolved_endpoint(record: ResolvedEndpoint) -> str:
@@ -891,6 +891,15 @@ def _command_failure(action: str, exc: Exception) -> CommandError:
     return CommandExecutionError(f"queue {action} failed: {exc}")
 
 
+def _canonical_queue_operand(ctx: WeftContext, name: str) -> str:
+    """Resolve the SimpleBroker ``@alias`` syntax at the command boundary."""
+
+    if not name.startswith("@"):
+        return name
+    with ctx.broker() as broker:
+        return str(broker.canonicalize_queue(name))
+
+
 def cmd_queue_read(
     name: str,
     *,
@@ -921,10 +930,11 @@ def cmd_queue_read(
     if message is not None and (all or after is not None or before is not None):
         raise CommandUsageError("message cannot be used with all, after, or before")
     try:
+        context = _public_command_context()
         return tuple(
             read_queue(
-                _public_command_context(),
-                name,
+                context,
+                _canonical_queue_operand(context, name),
                 all_messages=all,
                 message_id=_exact_message_id(message),
                 after=_selection_timestamp(after, option="after"),
@@ -972,7 +982,11 @@ def cmd_queue_write(
             return write_endpoint(context, endpoint, queue_name)
         if message is None:
             raise CommandUsageError("message is required")
-        return write_queue(context, queue_name, message)
+        return write_queue(
+            context,
+            _canonical_queue_operand(context, queue_name),
+            message,
+        )
     except Exception as exc:
         raise _command_failure("write", exc) from exc
 
@@ -1002,10 +1016,11 @@ def cmd_queue_peek(
     if message is not None and (all or after is not None or before is not None):
         raise CommandUsageError("message cannot be used with all, after, or before")
     try:
+        context = _public_command_context()
         return tuple(
             peek_queue(
-                _public_command_context(),
-                name,
+                context,
+                _canonical_queue_operand(context, name),
                 all_messages=all,
                 message_id=_exact_message_id(message),
                 after=_selection_timestamp(after, option="after"),
@@ -1103,17 +1118,24 @@ def cmd_queue_move(
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    if source == destination:
-        raise CommandUsageError("source and destination queues cannot be the same")
     if limit is not None and limit < 0:
         raise CommandUsageError("limit must be non-negative")
-    if message is not None and (limit is not None or all or after is not None or before is not None):
-        raise CommandUsageError("message cannot be used with limit, all, after, or before")
+    if message is not None and (
+        limit is not None or all or after is not None or before is not None
+    ):
+        raise CommandUsageError(
+            "message cannot be used with limit, all, after, or before"
+        )
     try:
+        context = _public_command_context()
+        canonical_source = _canonical_queue_operand(context, source)
+        canonical_destination = _canonical_queue_operand(context, destination)
+        if canonical_source == canonical_destination:
+            raise CommandUsageError("source and destination queues cannot be the same")
         return _move_queue_entries(
-            _public_command_context(),
-            source,
-            destination,
+            context,
+            canonical_source,
+            canonical_destination,
             limit=limit,
             all_messages=all,
             message_id=_exact_message_id(message),
@@ -1185,7 +1207,8 @@ def cmd_queue_exists(name: str) -> bool:
     """
 
     try:
-        return queue_exists(_public_command_context(), name)
+        context = _public_command_context()
+        return queue_exists(context, _canonical_queue_operand(context, name))
     except Exception as exc:
         raise _command_failure("exists", exc) from exc
 
@@ -1201,7 +1224,8 @@ def cmd_queue_stats(name: str) -> QueueInfo:
     """
 
     try:
-        return queue_info(_public_command_context(), name)
+        context = _public_command_context()
+        return queue_info(context, _canonical_queue_operand(context, name))
     except Exception as exc:
         raise _command_failure("stats", exc) from exc
 
@@ -1266,17 +1290,24 @@ def cmd_queue_watch(
         raise CommandUsageError("peek cannot be used with move")
     if move is not None and after is not None:
         raise CommandUsageError("move cannot be used with after")
-    context = _public_command_context()
-    after_timestamp = _selection_timestamp(after, option="after")
-    source = watch_queue_entries(
-        context,
-        name,
-        limit=limit,
-        interval=interval,
-        peek=peek,
-        after=after_timestamp,
-        move_to=move,
-    )
+    try:
+        context = _public_command_context()
+        after_timestamp = _selection_timestamp(after, option="after")
+        canonical_name = _canonical_queue_operand(context, name)
+        canonical_move = (
+            _canonical_queue_operand(context, move) if move is not None else None
+        )
+        source = watch_queue_entries(
+            context,
+            canonical_name,
+            limit=limit,
+            interval=interval,
+            peek=peek,
+            after=after_timestamp,
+            move_to=canonical_move,
+        )
+    except Exception as exc:
+        raise _command_failure("watch", exc) from exc
 
     def _stream() -> Iterator[QueueEntry]:
         try:
@@ -1324,11 +1355,14 @@ def cmd_queue_delete(
         raise CommandUsageError("queue name is required unless all=True")
     try:
         context = _public_command_context()
+        canonical_name = (
+            _canonical_queue_operand(context, name) if name is not None else None
+        )
         exact_message = _exact_message_id(message)
         if exact_message is not None:
             receipt = delete_queue_messages(
                 context,
-                name,
+                canonical_name,
                 message_id=exact_message,
             )
             return QueueDeleteReceipt(
@@ -1340,8 +1374,10 @@ def cmd_queue_delete(
             )
         with context.broker() as db:
             existing = {str(item.queue) for item in db.list_queue_stats()}
-        receipt = delete_queue_messages(context, name, all_queues=all)
-        queues_deleted = len(existing) if all else int(cast(str, name) in existing)
+        receipt = delete_queue_messages(context, canonical_name, all_queues=all)
+        queues_deleted = (
+            len(existing) if all else int(cast(str, canonical_name) in existing)
+        )
         return QueueDeleteReceipt(
             queue=receipt.queue,
             deleted_count=receipt.deleted_count,

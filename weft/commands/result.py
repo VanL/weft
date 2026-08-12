@@ -2,6 +2,7 @@
 
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.2.2] (result)
+- docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import json
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import Queue
@@ -21,7 +23,15 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
-from weft.commands.types import TaskResult
+from weft._exceptions import (
+    CommandError,
+    CommandExecutionError,
+    CommandTimeoutError,
+    CommandUsageError,
+    InvalidTID,
+    TaskNotFound,
+)
+from weft.commands.types import CommandStream, TaskEvent, TaskResult
 from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.pipelines import pipeline_public_queues
@@ -168,6 +178,7 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
     tid: str,
     *,
     timeout: float | None,
+    wait_without_timeout: bool = False,
 ) -> ResultMaterialization | None:
     """Wait for taskspec metadata or live result activity to become visible.
 
@@ -307,8 +318,11 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
                     )
                 continue
 
-            if deadline is None:
+            if deadline is None and not wait_without_timeout:
                 return None
+            if deadline is None:
+                monitor.wait(poll_interval)
+                continue
             wait_timeout = max(0.0, deadline - time.monotonic())
             if wait_timeout <= 0:
                 return None
@@ -784,6 +798,7 @@ def await_task_result(
     timeout: float | None = None,
     show_stderr: bool = False,
     emit_stream: bool = False,
+    wait_for_materialization: bool = False,
 ) -> TaskResult:
     """Wait for and return the public result payload for one task."""
 
@@ -793,6 +808,7 @@ def await_task_result(
         context,
         normalized_tid,
         timeout=timeout,
+        wait_without_timeout=wait_for_materialization,
     )
     if materialized is None:
         if timeout is not None:
@@ -810,7 +826,7 @@ def await_task_result(
             value=None,
             stdout=None,
             stderr=None,
-            error=f"No outbox queue for task {normalized_tid}",
+            error=f"no outbox queue for task {normalized_tid}",
         )
 
     claimed_evidence = _claimed_result_blockage(
@@ -933,7 +949,7 @@ def _single_result_response(
     return 2, f"weft result: task {tid} not found"
 
 
-def cmd_result(
+def _legacy_cmd_result(
     *,
     tid: str | None,
     all_results: bool,
@@ -1020,6 +1036,255 @@ def cmd_result(
         error_message,
         json_output=json_output,
     )
+
+
+def _peek_outbox_task_result(
+    context: WeftContext,
+    *,
+    name: str,
+    tid: str,
+) -> TaskResult | None:
+    """Peek one outbox and return its structured aggregate, if any."""
+
+    queue = context.queue(name, persistent=True)
+    try:
+        stream_buffer: list[str] = []
+        values: list[Any] = []
+        for payload in _iter_queue_messages(queue, peek=True):
+            final, decoded = process_outbox_message(
+                payload,
+                stream_buffer,
+                emit_stream=False,
+            )
+            if final and decoded is not None:
+                append_public_value(values, decoded, show_stderr=False)
+        value = aggregate_public_outputs(values)
+    except Exception as exc:
+        raise CommandExecutionError(
+            f"failed to inspect result for task {tid}: {exc}"
+        ) from exc
+    finally:
+        queue.close()
+    if value is None:
+        return None
+    stdout, stderr = task_evidence.split_stdio(value)
+    return TaskResult(
+        tid=tid,
+        status="completed",
+        value=value,
+        stdout=stdout,
+        stderr=stderr,
+        error=None,
+    )
+
+
+def _consume_outbox_task_result(context: WeftContext, tid: str) -> TaskResult | None:
+    """Consume one already-enumerated task result when it remains available."""
+
+    try:
+        result = await_task_result(context, tid, timeout=0.0)
+    except Exception as exc:
+        if isinstance(exc, CommandError):
+            raise
+        raise CommandExecutionError(
+            f"failed to collect result for task {tid}: {exc}"
+        ) from exc
+    return result if result.status not in {"missing", "timeout"} else None
+
+
+def _collect_all_task_results(
+    context: WeftContext,
+    *,
+    peek: bool,
+) -> tuple[TaskResult, ...]:
+    """Collect structured results from non-streaming task outboxes."""
+
+    try:
+        with context.broker() as db:
+            queue_names = db.list_queues(pattern=f"T*.{QUEUE_OUTBOX_SUFFIX}")
+        streaming = _active_streaming_queues(context)
+    except Exception as exc:
+        raise CommandExecutionError(f"failed to enumerate task results: {exc}") from exc
+
+    results: list[TaskResult] = []
+    for raw_name in queue_names:
+        name = str(raw_name)
+        if name in streaming:
+            continue
+        tid = name.split(".", 1)[0][1:]
+        result = _peek_outbox_task_result(context, name=name, tid=tid)
+        if result is not None and not peek:
+            queue = context.queue(name, persistent=True)
+            try:
+                for _payload in _iter_queue_messages(queue, peek=False):
+                    pass
+            except Exception as exc:
+                raise CommandExecutionError(
+                    f"failed to consume result for task {tid}: {exc}"
+                ) from exc
+            finally:
+                queue.close()
+        if result is not None:
+            results.append(result)
+    return tuple(results)
+
+
+def _result_task_event_stream(
+    context: WeftContext,
+    tid: str,
+    *,
+    timeout: float | None,
+) -> CommandStream[TaskEvent]:
+    """Return structured realtime events and consume the result on exhaustion."""
+
+    # Late import breaks the real result <-> events cycle: events uses
+    # await_task_result for its synthetic terminal event.
+    from .events import iter_task_realtime_events
+
+    source = iter_task_realtime_events(
+        context,
+        tid,
+        follow=True,
+        timeout=timeout,
+    )
+
+    def _stream() -> Iterator[TaskEvent]:
+        try:
+            yield from source
+            result = await_task_result(context, tid, timeout=0.0)
+            if result.status == "timeout":
+                raise CommandTimeoutError(
+                    result.error or f"timed out waiting for task {tid} result"
+                )
+            if result.status == "missing":
+                raise TaskNotFound(result.error or f"task {tid} not found")
+        except (CommandError, TaskNotFound):
+            raise
+        except TimeoutError as exc:
+            raise CommandTimeoutError(str(exc)) from exc
+        except Exception as exc:
+            raise CommandExecutionError(f"result stream failed: {exc}") from exc
+        finally:
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+
+    return cast(CommandStream[TaskEvent], _stream())
+
+
+def _validate_public_result_request(
+    *,
+    tid: str | None,
+    all_results: bool,
+    peek: bool,
+    timeout: float | None,
+    stream: bool,
+) -> None:
+    """Validate canonical result modes before opening a context."""
+
+    if all_results and tid is not None:
+        raise CommandUsageError("task id cannot be used with all")
+    if all_results and stream:
+        raise CommandUsageError("stream cannot be used with all")
+    if all_results and timeout is not None:
+        raise CommandUsageError("timeout is not supported with all")
+    if not all_results and peek:
+        raise CommandUsageError("peek requires all")
+    if not all_results and tid is None:
+        raise CommandUsageError("task id is required")
+    if timeout is not None and timeout < 0:
+        raise CommandUsageError("timeout must be non-negative")
+
+
+def _public_result_tid(tid: str | None) -> str:
+    """Normalize the already-required result TID or raise its public error."""
+
+    try:
+        return _normalize_tid(cast(str, tid))
+    except ValueError as exc:
+        raise InvalidTID(str(exc)) from exc
+
+
+def _require_available_result(result: TaskResult) -> TaskResult:
+    """Translate absence/wait statuses while preserving task terminal outcomes."""
+
+    if result.status == "timeout":
+        raise CommandTimeoutError(
+            result.error or f"timed out waiting for task {result.tid}"
+        )
+    if result.status == "missing":
+        raise TaskNotFound(result.error or f"task {result.tid} not found")
+    return result
+
+
+def cmd_result(
+    tid: str | None = None,
+    *,
+    all: bool = False,
+    peek: bool = False,
+    timeout: float | None = None,
+    stream: bool = False,
+    context: str | Path | None = None,
+) -> TaskResult | tuple[TaskResult, ...] | CommandStream[TaskEvent]:
+    """Return one result, all completed results, or a structured result stream.
+
+    Args:
+        tid: Task ID for single-result and stream modes.
+        all: Collect completed results across task outboxes.
+        peek: Inspect all results without consuming them.
+        timeout: Maximum wait for a single result or stream.
+        stream: Return a closable structured event stream.
+        context: Optional project context path.
+
+    Returns:
+        One task result, a tuple in all mode, or an event stream in stream mode.
+
+    Raises:
+        CommandUsageError: If modes conflict or required input is absent.
+        InvalidTID: If ``tid`` is malformed.
+        TaskNotFound: If the requested task result surface is absent.
+        CommandTimeoutError: If the requested wait reaches ``timeout``.
+        CommandExecutionError: If context or result collection fails.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    _validate_public_result_request(
+        tid=tid,
+        all_results=all,
+        peek=peek,
+        timeout=timeout,
+        stream=stream,
+    )
+
+    try:
+        resolved_context = build_context(spec_context=context)
+    except Exception as exc:
+        raise CommandExecutionError(f"failed to resolve result context: {exc}") from exc
+
+    if all:
+        return _collect_all_task_results(resolved_context, peek=peek)
+
+    normalized_tid = _public_result_tid(tid)
+    if stream:
+        return _result_task_event_stream(
+            resolved_context,
+            normalized_tid,
+            timeout=timeout,
+        )
+    try:
+        result = await_task_result(
+            resolved_context,
+            normalized_tid,
+            timeout=timeout,
+            show_stderr=False,
+            emit_stream=False,
+        )
+    except Exception as exc:
+        if isinstance(exc, CommandError):
+            raise
+        raise CommandExecutionError(f"failed to collect task result: {exc}") from exc
+    return _require_available_result(result)
 
 
 __all__ = ["ResultMaterialization", "await_task_result", "cmd_result"]

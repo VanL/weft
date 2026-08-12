@@ -26,9 +26,12 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft._exceptions import CommandExecutionError
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
-from weft.commands.system import cmd_status, collect_broker_status
+from weft.commands.system import _legacy_cmd_status as cmd_status
+from weft.commands.system import collect_broker_status
+from weft.commands.types import SystemStatusSnapshot, TaskEvent, TaskSnapshot
 from weft.context import build_context
 from weft.core import manager_runtime
 from weft.core import task_evidence as core_task_evidence
@@ -41,6 +44,89 @@ from weft.ext import RunnerRuntimeDescription
 from weft.helpers.container_detection import ContainerRuntimeDetection
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_public_cmd_status_returns_filtered_structured_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = TaskSnapshot(
+        tid="1779600000000000001",
+        name="active",
+        status="running",
+        return_code=None,
+        started_at=None,
+        completed_at=None,
+        error=None,
+        runtime_handle=None,
+        metadata={},
+    )
+    terminal = TaskSnapshot(
+        tid="1779600000000000002",
+        name="terminal",
+        status="completed",
+        return_code=0,
+        started_at=None,
+        completed_at=None,
+        error=None,
+        runtime_handle=None,
+        metadata={},
+    )
+    snapshot = SystemStatusSnapshot(
+        broker={"backend": "fake"},
+        managers=[],
+        tasks=[active, terminal],
+    )
+    monkeypatch.setattr(status_cmd, "_resolve_context", lambda _context=None: object())
+    monkeypatch.setattr(
+        status_cmd,
+        "system_status",
+        lambda _context, **_kwargs: snapshot,
+    )
+
+    current = status_cmd.cmd_status()
+    assert isinstance(current, SystemStatusSnapshot)
+    assert current.tasks == [active]
+    assert status_cmd.cmd_status(all=True).tasks == [active, terminal]
+    assert status_cmd.cmd_status(all=True, status="completed").tasks == [terminal]
+
+
+def test_public_cmd_status_returns_structured_watch_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = TaskEvent(
+        tid="1779600000000000001",
+        event_type="running",
+        timestamp=1779600000000000002,
+        payload={"status": "running"},
+    )
+    monkeypatch.setattr(status_cmd, "_resolve_context", lambda _context=None: object())
+    monkeypatch.setattr(
+        status_cmd, "_status_event_stream", lambda *_args, **_kwargs: iter((event,))
+    )
+
+    stream = status_cmd.cmd_status(watch=True, interval=0.01)
+    assert tuple(stream) == (event,)
+
+
+def test_public_cmd_status_is_silent_and_translates_context_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    failure = OSError("context unavailable")
+
+    def fail_context(_context=None):
+        raise failure
+
+    monkeypatch.setattr(status_cmd, "_resolve_context", fail_context)
+
+    with pytest.raises(
+        CommandExecutionError, match="failed to resolve status context"
+    ) as caught:
+        status_cmd.cmd_status()
+    assert caught.value.__cause__ is failure
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def _runtime_handle(

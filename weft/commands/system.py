@@ -6,6 +6,7 @@ Spec references:
 - docs/specifications/02-TaskSpec.md [TS-1.3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/03-Manager_Architecture.md [MA-1.4]
+- docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -47,13 +48,16 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft._exceptions import CommandError, CommandExecutionError, CommandUsageError
 from weft.commands.manager import (
     _manager_record_to_json,
     _manager_snapshot,
 )
 from weft.commands.types import (
+    CommandStream,
     ServiceSnapshot,
     SystemStatusSnapshot,
+    TaskEvent,
 )
 from weft.commands.types import (
     TaskSnapshot as PublicTaskSnapshot,
@@ -1623,7 +1627,7 @@ def _watch_task_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-119] exception
         queue.close()
 
 
-def cmd_status(
+def _legacy_cmd_status(
     *,
     tid: str | None = None,
     include_terminal: bool = False,
@@ -1704,6 +1708,151 @@ def cmd_status(
     return 0, payload
 
 
+def _public_status_event(
+    payload: dict[str, Any],
+    timestamp: int,
+    *,
+    status_filter: str | None,
+) -> TaskEvent | None:
+    """Project one task-log payload into a filtered public event."""
+
+    tid = payload.get("tid")
+    if not isinstance(tid, str):
+        return None
+    taskspec = payload.get("taskspec")
+    state = taskspec.get("state") if isinstance(taskspec, dict) else None
+    status = payload.get("status")
+    if not isinstance(status, str) and isinstance(state, dict):
+        state_status = state.get("status")
+        status = state_status if isinstance(state_status, str) else None
+    if status_filter is not None and status != status_filter:
+        return None
+    event_type = payload.get("event") or status or "task_event"
+    return TaskEvent(
+        tid=tid,
+        event_type=str(event_type),
+        timestamp=timestamp,
+        payload=dict(payload),
+    )
+
+
+def _iter_public_status_events(
+    context: WeftContext,
+    *,
+    status_filter: str | None,
+    interval: float,
+) -> Iterator[TaskEvent]:
+    """Iterate structured project-wide task events."""
+
+    last_timestamp = 0
+    queue = _queue(context, WEFT_GLOBAL_LOG_QUEUE)
+    monitor: QueueChangeMonitor | None = None
+    try:
+        monitor = QueueChangeMonitor([queue], config=context.config)
+        while True:
+            emitted = False
+            for payload, timestamp in _iter_log_events(
+                queue,
+                since_timestamp=last_timestamp,
+            ):
+                if timestamp <= last_timestamp:
+                    continue
+                last_timestamp = max(last_timestamp, timestamp)
+                event = _public_status_event(
+                    payload,
+                    timestamp,
+                    status_filter=status_filter,
+                )
+                if event is not None:
+                    yield event
+                    emitted = True
+            if not emitted:
+                monitor.wait(max(STATUS_WATCH_MIN_INTERVAL, interval))
+    except CommandError:
+        raise
+    except Exception as exc:
+        raise CommandExecutionError(f"status watch failed: {exc}") from exc
+    finally:
+        if monitor is not None:
+            monitor.close()
+        queue.close()
+
+
+def _status_event_stream(
+    context: WeftContext,
+    *,
+    status_filter: str | None,
+    interval: float,
+) -> CommandStream[TaskEvent]:
+    """Return the closable structured project-wide task event stream."""
+
+    return cast(
+        CommandStream[TaskEvent],
+        _iter_public_status_events(
+            context,
+            status_filter=status_filter,
+            interval=interval,
+        ),
+    )
+
+
+def cmd_status(
+    *,
+    all: bool = False,
+    status: str | None = None,
+    watch: bool = False,
+    interval: float = 1.0,
+    context: str | os.PathLike[str] | None = None,
+) -> SystemStatusSnapshot | CommandStream[TaskEvent]:
+    """Return project status or a structured task-event stream.
+
+    Args:
+        all: Include terminal tasks in snapshot mode.
+        status: Optional task-status filter.
+        watch: Return a live event stream instead of a snapshot.
+        interval: Maximum polling interval for watch mode.
+        context: Optional project context path.
+
+    Returns:
+        A structured project snapshot, or a closable event stream when watching.
+
+    Raises:
+        CommandUsageError: If a parsed semantic value is invalid.
+        CommandExecutionError: If context resolution or status collection fails.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    if interval < 0:
+        raise CommandUsageError("interval must be non-negative")
+    try:
+        resolved_context = _resolve_context(context)
+    except Exception as exc:
+        raise CommandExecutionError(f"failed to resolve status context: {exc}") from exc
+    if watch:
+        return _status_event_stream(
+            resolved_context,
+            status_filter=status,
+            interval=interval,
+        )
+    try:
+        snapshot = system_status(resolved_context, include_stopped_managers=all)
+    except Exception as exc:
+        raise CommandExecutionError(f"failed to collect project status: {exc}") from exc
+    tasks = [
+        task
+        for task in snapshot.tasks
+        if (all or task.status not in TERMINAL_TASK_STATUSES)
+        and (status is None or task.status == status)
+    ]
+    return SystemStatusSnapshot(
+        broker=dict(snapshot.broker),
+        managers=list(snapshot.managers),
+        tasks=tasks,
+        services=list(snapshot.services),
+    )
+
+
 def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
     payload = snapshot.to_dict()
     return PublicTaskSnapshot(
@@ -1778,14 +1927,21 @@ def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
     )
 
 
-def system_status(context: WeftContext) -> SystemStatusSnapshot:
+def system_status(
+    context: WeftContext,
+    *,
+    include_stopped_managers: bool = False,
+) -> SystemStatusSnapshot:
     """Return the top-level broker, manager, and task status view."""
 
     now_ns = time.time_ns()
     service_registry_evidence = tuple(
         _collect_service_registry_evidence(context, now_ns=now_ns)
     )
-    managers = _collect_manager_records(context)
+    managers = _collect_manager_records(
+        context,
+        include_stopped=include_stopped_managers,
+    )
     task_records = _collect_task_snapshot_records(
         context,
         include_terminal=True,

@@ -1,102 +1,190 @@
-"""Typer adapter for `weft run`.
+"""Input decoding and output formatting for ``weft run``.
 
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
 - docs/specifications/11-CLI_Architecture_Crosswalk.md [CLI-X1]
+- docs/specifications/14-Python_API_Surfaces.md [PY-2], [PY-4]
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from pathlib import Path
+import base64
+import json
+import threading
 
 import typer
 
-from weft.commands import run as run_cmd
+from weft._constants import load_config
+from weft.commands import (
+    CommandStream,
+    RunExecutionResult,
+    RunSession,
+    RunSpecDescription,
+    TaskEvent,
+)
+from weft.helpers import (
+    read_limited_stdin,
+    resolve_broker_max_message_size,
+    stdin_is_tty,
+)
 
 
-def _translate_run_error(exc: Exception) -> Exception:
-    if isinstance(exc, run_cmd.RunUsageError):
-        return typer.BadParameter(str(exc), param_hint=exc.param_hint)
-    if isinstance(exc, run_cmd.RunResolutionError):
-        return typer.Exit(code=2)
-    return exc
+def read_run_stdin() -> str | None:
+    """Decode bounded piped stdin before entering the command layer."""
+
+    if stdin_is_tty():
+        return None
+    maximum = resolve_broker_max_message_size(load_config())
+    value = read_limited_stdin(maximum)
+    return value if value else None
 
 
-def render_spec_aware_run_help(
+def render_run_description(
     ctx: typer.Context,
-    *,
-    spec: str | Path,
-    context_dir: Path | None,
-) -> str:
-    try:
-        return run_cmd.render_spec_aware_run_help(
-            ctx.get_help(),
-            spec=spec,
-            context_dir=context_dir,
-        )
-    except Exception as exc:  # pragma: no cover - cli error boundary
-        raise _translate_run_error(exc) from exc
+    description: RunSpecDescription,
+) -> None:
+    """Render dynamic spec metadata after the canonical describe call."""
+
+    usage = description.usage
+    marker = "\n\nSpec Help:"
+    suffix = usage[usage.index(marker) :] if marker in usage else f"\n\n{usage}"
+    typer.echo(f"{ctx.get_help()}{suffix}")
 
 
-def cmd_run(
-    command: Sequence[str],
+def render_run_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-367] exception
+    execution: RunExecutionResult,
     *,
-    spec_run_args: Sequence[str],
-    spec: str | Path | None,
-    pipeline: str | Path | None,
-    pipeline_input: str | None,
-    function: str | None,
-    args: Sequence[str],
-    kwargs: Sequence[str],
-    env: Sequence[str],
-    name: str | None,
-    interactive: bool,
-    stream_output: bool | None,
-    timeout: float | None,
-    memory: int | None,
-    cpu: int | None,
-    tags: Sequence[str],
-    context_dir: Path | None,
     wait: bool,
     json_output: bool,
     verbose: bool,
-    persistent_override: bool | None,
-    autostart_enabled: bool,
+    suppress_result_value: bool = False,
 ) -> int:
+    """Format one structured run outcome using the historical CLI bytes."""
+
+    if verbose and execution.manager_started_payload is not None:
+        typer.echo(json.dumps(execution.manager_started_payload, ensure_ascii=False))
+    if verbose and execution.submitted_payload is not None:
+        typer.echo(json.dumps(execution.submitted_payload, indent=2))
+
+    if not wait:
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {"tid": execution.tid, "status": "queued"}, ensure_ascii=False
+                )
+            )
+        else:
+            typer.echo(execution.tid)
+        return 0
+
+    status = execution.status
+    result_value = execution.result_value
+    error_message = execution.error_message
+    if status == "completed":
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "tid": execution.tid,
+                        "status": status,
+                        "result": result_value,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        elif suppress_result_value:
+            pass
+        elif isinstance(result_value, (dict, list)):
+            typer.echo(json.dumps(result_value, ensure_ascii=False))
+        elif result_value not in (None, ""):
+            typer.echo(str(result_value))
+        return 0
+
+    display_error = error_message
+    if status == "cancelled":
+        display_error = "Task cancelled"
+    elif status == "killed":
+        display_error = "Task killed"
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "tid": execution.tid,
+                    "status": status,
+                    "error": display_error,
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        typer.echo(f"{execution.error_prefix}: {display_error}", err=True)
+    return 124 if status == "timeout" else 1
+
+
+def consume_run_session(session: RunSession) -> RunExecutionResult:
+    """Wait for and close the session returned by the command API."""
+
     try:
-        execution = run_cmd.execute_run(
-            command,
-            spec_run_args=spec_run_args,
-            spec=spec,
-            pipeline=pipeline,
-            pipeline_input=pipeline_input,
-            function=function,
-            args=args,
-            kwargs=kwargs,
-            env=env,
-            name=name,
-            interactive=interactive,
-            stream_output=stream_output,
-            timeout=timeout,
-            memory=memory,
-            cpu=cpu,
-            tags=tags,
-            context_dir=context_dir,
-            wait=wait,
-            json_output=json_output,
-            verbose=verbose,
-            persistent_override=persistent_override,
-            autostart_enabled=autostart_enabled,
-        )
-        return run_cmd.render_run_execution_result(
-            execution,
-            wait=wait,
-            json_output=json_output,
-            verbose=verbose,
-        )
-    except Exception as exc:  # pragma: no cover - cli error boundary
-        raise _translate_run_error(exc) from exc
+        return session.wait()
+    finally:
+        session.close()
 
 
-__all__ = ["cmd_run", "render_spec_aware_run_help"]
+def _render_interactive_events(events: CommandStream[TaskEvent]) -> None:
+    """Render structured stdout/stderr events without consuming result queues."""
+
+    try:
+        for event in events:
+            if event.event_type not in {"stdout", "stderr"}:
+                continue
+            data = str(event.payload.get("data", ""))
+            if event.payload.get("encoding") == "base64":
+                data = base64.b64decode(data).decode("utf-8", errors="replace")
+            if data:
+                typer.echo(data, err=event.event_type == "stderr", nl=False)
+    finally:
+        events.close()
+
+
+def drive_interactive_session(session: RunSession, stdin_text: str | None) -> None:
+    """Drive terminal input while rendering the session's structured events."""
+
+    if stdin_text is not None:
+        _render_interactive_events(session.events())
+        return
+    try:
+        # Optional dependency is imported only for the interactive terminal mode.
+        from prompt_toolkit import PromptSession
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise RuntimeError("prompt_toolkit is required for interactive mode") from exc
+
+    def _stream_output() -> None:
+        _render_interactive_events(session.events())
+
+    output_thread = threading.Thread(target=_stream_output, daemon=True)
+    output_thread.start()
+    prompt: PromptSession[str] = PromptSession()
+    try:
+        while True:
+            try:
+                line = prompt.prompt("weft> ")
+            except EOFError:
+                session.close_input()
+                break
+            except KeyboardInterrupt:
+                continue
+            if line.strip() in {":quit", ":exit"}:
+                session.stop()
+                break
+            session.send_input(line if line.endswith("\n") else f"{line}\n")
+    finally:
+        output_thread.join()
+
+
+__all__ = [
+    "consume_run_session",
+    "drive_interactive_session",
+    "read_run_stdin",
+    "render_run_description",
+    "render_run_result",
+]

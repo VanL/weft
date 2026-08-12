@@ -34,6 +34,23 @@ def test_queue_write_and_read(workdir):
     assert err == ""
 
 
+def test_queue_write_resolves_explicit_alias_operand(workdir):
+    build_context(spec_context=workdir)
+
+    rc, out, err = run_cli(
+        "queue", "alias", "add", "jobs", "cli.alias.target", cwd=workdir
+    )
+    assert (rc, out, err) == (0, "", "")
+
+    rc, out, err = run_cli("queue", "write", "@jobs", "through-alias", cwd=workdir)
+    assert (rc, out, err) == (0, "", "")
+
+    rc, out, err = run_cli("queue", "read", "cli.alias.target", cwd=workdir)
+    assert rc == 0
+    assert out == "through-alias"
+    assert err == ""
+
+
 def test_queue_write_reads_implicit_stdin(workdir):
     build_context(spec_context=workdir)
 

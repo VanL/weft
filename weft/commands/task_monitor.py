@@ -36,6 +36,7 @@ from weft._constants import (
     WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
 )
 from weft._exceptions import CommandExecutionError, CommandUsageError
+from weft.commands.types import CommandStream
 from weft.context import WeftContext, build_context
 from weft.core.monitor.task_monitor import (
     TaskMonitor,
@@ -631,7 +632,7 @@ def cmd_system_task_monitor(
     no_checkpoint: bool = False,
     since: int | None = None,
     limit: int | None = None,
-) -> TaskMonitorResult | Iterator[TaskMonitorSummary]:
+) -> TaskMonitorResult | CommandStream[TaskMonitorSummary]:
     """Run once or follow task-monitor summaries without process output.
 
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].

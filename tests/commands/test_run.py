@@ -45,7 +45,7 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft._exceptions import ManagerStartFailed
+from weft._exceptions import ManagerStartFailed, SubmissionError
 from weft.commands import tasks as task_cmd
 from weft.commands._spawn_submission import (
     SpawnSubmissionReconciliation,
@@ -2120,8 +2120,6 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
-    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     def _fake_enqueue(context_arg, taskspec, work_payload):
@@ -2139,7 +2137,7 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _fake_enqueue)
     monkeypatch.setattr("weft.core.manager_runtime.ensure_manager", _fake_ensure)
 
-    execution = _execute_inline(
+    _execute_inline(
         command=(),
         function_target="tests.tasks.sample_targets:echo_payload",
         args=(),
@@ -2159,7 +2157,6 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
         autostart_enabled=True,
     )
 
-    assert execution.submission_error is None
     assert calls == ["enqueue", "ensure"]
 
 
@@ -2209,8 +2206,6 @@ def test_execute_run_inline_returns_structured_result_without_rendering(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
-    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
     monkeypatch.setattr(
         "weft.commands.run._echo",
         lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -2256,7 +2251,6 @@ def test_execute_run_inline_returns_structured_result_without_rendering(
     )
 
     assert execution.tid == "1775679597297004544"
-    assert execution.submission_error is None
 
 
 def test_execute_inline_contains_unexpected_command_boundary_failure(
@@ -2271,8 +2265,6 @@ def test_execute_inline_contains_unexpected_command_boundary_failure(
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
     monkeypatch.setattr(run_cmd, "build_context", lambda **kwargs: context)
-    monkeypatch.setattr(run_cmd, "_read_piped_stdin", lambda context: None)
-    monkeypatch.setattr(run_cmd, "stdin_is_tty", lambda: False)
     monkeypatch.setattr(
         run_cmd,
         "_run_with_managed_execution",
@@ -2281,29 +2273,26 @@ def test_execute_inline_contains_unexpected_command_boundary_failure(
         ),
     )
 
-    execution = run_cmd._execute_inline(
-        command=(),
-        function_target="tests.tasks.sample_targets:echo_payload",
-        args=(),
-        kwargs=(),
-        env=(),
-        name=None,
-        interactive=False,
-        stream_output=None,
-        timeout=None,
-        memory=None,
-        cpu=None,
-        tags=(),
-        context_dir=root,
-        wait=False,
-        json_output=False,
-        verbose=False,
-        autostart_enabled=True,
-    )
-
-    assert execution.tid == ""
-    assert execution.submission_error == "Error submitting task: adapter detail"
-    assert "UnexpectedSubmissionFailure" not in execution.submission_error
+    with pytest.raises(SubmissionError, match="Error submitting task: adapter detail"):
+        run_cmd._execute_inline(
+            command=(),
+            function_target="tests.tasks.sample_targets:echo_payload",
+            args=(),
+            kwargs=(),
+            env=(),
+            name=None,
+            interactive=False,
+            stream_output=None,
+            timeout=None,
+            memory=None,
+            cpu=None,
+            tags=(),
+            context_dir=root,
+            wait=False,
+            json_output=False,
+            verbose=False,
+            autostart_enabled=True,
+        )
 
 
 def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
@@ -2324,8 +2313,6 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
-    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
     monkeypatch.setattr(
         "weft.core.manager_runtime._acknowledge_manager_launch_success",
@@ -2334,7 +2321,7 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     try:
-        execution = _execute_inline(
+        _execute_inline(
             command=(),
             function_target="tests.tasks.sample_targets:provide_payload",
             args=(),
@@ -2354,7 +2341,6 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
             autostart_enabled=True,
         )
 
-        assert execution.submission_error is None
         tid = submitted_tid["value"]
         snapshot = _wait_for_task_status(root, tid, expected_status="completed")
         assert snapshot.tid == tid
@@ -2380,8 +2366,6 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
-    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
     monkeypatch.setattr(
         "weft.core.manager_runtime._acknowledge_manager_launch_success",
@@ -2871,40 +2855,38 @@ def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
-    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "weft.core.manager_runtime.ensure_manager",
         lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    execution = _execute_inline(
-        command=(),
-        function_target="tests.tasks.sample_targets:echo_payload",
-        args=(),
-        kwargs=(),
-        env=(),
-        name=None,
-        interactive=False,
-        stream_output=None,
-        timeout=None,
-        memory=None,
-        cpu=None,
-        tags=(),
-        context_dir=root,
-        wait=False,
-        json_output=False,
-        verbose=False,
-        autostart_enabled=True,
-    )
+    with pytest.raises(SubmissionError, match="Error submitting task: boom"):
+        _execute_inline(
+            command=(),
+            function_target="tests.tasks.sample_targets:echo_payload",
+            args=(),
+            kwargs=(),
+            env=(),
+            name=None,
+            interactive=False,
+            stream_output=None,
+            timeout=None,
+            memory=None,
+            cpu=None,
+            tags=(),
+            context_dir=root,
+            wait=False,
+            json_output=False,
+            verbose=False,
+            autostart_enabled=True,
+        )
 
     queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
     try:
         assert queue.read_one() is None
     finally:
         queue.close()
-    assert execution.submission_error == "Error submitting task: boom"
 
 
 def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
@@ -2930,29 +2912,28 @@ def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "weft.core.manager_runtime.ensure_manager",
         lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    execution = _execute_spec_via_manager(
-        spec_path,
-        name=None,
-        verbose=False,
-        wait=False,
-        json_output=False,
-        autostart_enabled=True,
-        persistent_override=None,
-    )
+    with pytest.raises(SubmissionError, match="Error submitting TaskSpec: boom"):
+        _execute_spec_via_manager(
+            spec_path,
+            name=None,
+            verbose=False,
+            wait=False,
+            json_output=False,
+            autostart_enabled=True,
+            persistent_override=None,
+        )
 
     queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
     try:
         assert queue.read_one() is None
     finally:
         queue.close()
-    assert execution.submission_error == "Error submitting TaskSpec: boom"
 
 
 def test_execute_spec_contains_unexpected_command_boundary_failure(
@@ -2979,7 +2960,6 @@ def test_execute_spec_contains_unexpected_command_boundary_failure(
         },
     )
     monkeypatch.setattr(run_cmd, "build_context", lambda *args, **kwargs: context)
-    monkeypatch.setattr(run_cmd, "_read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         run_cmd,
         "_run_with_managed_execution",
@@ -2988,19 +2968,18 @@ def test_execute_spec_contains_unexpected_command_boundary_failure(
         ),
     )
 
-    execution = run_cmd._execute_spec_via_manager(
-        spec_path,
-        name=None,
-        verbose=False,
-        wait=False,
-        json_output=False,
-        autostart_enabled=True,
-        persistent_override=None,
-    )
-
-    assert execution.tid == ""
-    assert execution.submission_error == "Error submitting TaskSpec: adapter detail"
-    assert "UnexpectedSubmissionFailure" not in execution.submission_error
+    with pytest.raises(
+        SubmissionError, match="Error submitting TaskSpec: adapter detail"
+    ):
+        run_cmd._execute_spec_via_manager(
+            spec_path,
+            name=None,
+            verbose=False,
+            wait=False,
+            json_output=False,
+            autostart_enabled=True,
+            persistent_override=None,
+        )
 
 
 def test_run_spec_via_manager_returns_timeout_exit_code(
@@ -3021,7 +3000,6 @@ def test_run_spec_via_manager_returns_timeout_exit_code(
         },
     )
 
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
         lambda context, *, submitted_tid: (None, False, None),
@@ -3096,7 +3074,6 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
         lambda context, *, submitted_tid: (None, False, None),
@@ -3104,7 +3081,7 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
-    execution = _execute_spec_via_manager(
+    _execute_spec_via_manager(
         spec_path,
         name="mayor",
         verbose=False,
@@ -3114,7 +3091,6 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
         persistent_override=None,
     )
 
-    assert execution.submission_error is None
     assert captured["name"] == "mayor"
     assert captured["metadata"][INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] == "mayor"
 
@@ -3158,7 +3134,6 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
         lambda context, *, submitted_tid: (None, False, None),
@@ -3166,7 +3141,7 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
-    execution = _execute_spec_via_manager(
+    _execute_spec_via_manager(
         spec_path,
         name="mayor",
         verbose=False,
@@ -3176,7 +3151,6 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
         persistent_override=None,
     )
 
-    assert execution.submission_error is None
     assert captured["name"] == "mayor"
     assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in captured["metadata"]
 
@@ -3208,7 +3182,6 @@ def test_run_spec_via_manager_rejects_reserved_internal_name_prefix(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
 
     with pytest.raises(RunUsageError, match="reserved for internal runtime services"):
         _execute_spec_via_manager(
@@ -3253,7 +3226,6 @@ def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.core.manager_runtime.ensure_manager",
         lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
@@ -3320,7 +3292,6 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
         captured["metadata"] = dict(taskspec.metadata)
         return 1777000000000000003
 
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
         lambda context, *, submitted_tid: (None, False, None),
@@ -3328,7 +3299,7 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
-    execution = _execute_pipeline(
+    _execute_pipeline(
         pipeline_path,
         name="nightly",
         pipeline_input=None,
@@ -3339,7 +3310,6 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
         autostart_enabled=True,
     )
 
-    assert execution.submission_error is None
     assert captured["name"] == "nightly"
     assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in captured["metadata"]
 
@@ -3375,7 +3345,6 @@ def test_run_pipeline_without_input_does_not_inject_work_envelope_start(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
     )
-    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr(
         "weft.core.manager_runtime.ensure_manager",
         lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),

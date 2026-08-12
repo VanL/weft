@@ -176,7 +176,6 @@ class RunExecutionResult:
     status: str | None = None
     result_value: Any | None = None
     error_message: str | None = None
-    submission_error: str | None = None
     error_prefix: str = "Error executing task"
     submitted_payload: dict[str, Any] | None = None
     manager_started_payload: dict[str, Any] | None = None
@@ -296,6 +295,7 @@ class ManagerSnapshot:
     dispatch_eligible: bool | None = None
     canonical_candidate: bool | None = None
     canonical: bool | None = None
+    started_here: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

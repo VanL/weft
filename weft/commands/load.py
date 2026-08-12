@@ -590,7 +590,9 @@ def cmd_system_load(
         raise CommandExecutionError(
             f"weft load: failed to resolve context: {exc}"
         ) from exc
-    input_path = resolved.weft_dir / "weft_export.jsonl" if input is None else Path(input)
+    input_path = (
+        resolved.weft_dir / "weft_export.jsonl" if input is None else Path(input)
+    )
     if not input_path.is_absolute():
         input_path = Path.cwd() / input_path
     if not input_path.exists():
@@ -610,7 +612,7 @@ def cmd_system_load(
         raise CommandExecutionError(f"weft load: import failed: {exc}") from exc
     return SystemLoadResult(
         imported=not dry_run,
-        message="Import preview" if dry_run else "Import completed successfully",
+        message=report.format_preview() if dry_run else report.format_completion(),
         aliases_created=len(report.aliases_to_create),
         aliases_updated=0,
         queues_created=len(report.queues_to_create),

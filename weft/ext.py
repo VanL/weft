@@ -27,11 +27,19 @@ if TYPE_CHECKING:
     from weft.core.taskspec import AgentSection
 
 __all__ = [
-    "AgentMCPServerDescriptor", "AgentResolver", "AgentResolverResult",
-    "AgentToolProfile", "AgentToolProfileResult", "RunnerCapabilities",
-    "RunnerEnvironmentProfile", "RunnerEnvironmentProfileResult",
-    "RunnerHandle", "RunnerPlugin", "RunnerRuntimeDescription",
-    "SpecRunInputRequest", "TaskRunnerBackend",
+    "AgentMCPServerDescriptor",
+    "AgentResolver",
+    "AgentResolverResult",
+    "AgentToolProfile",
+    "AgentToolProfileResult",
+    "RunnerCapabilities",
+    "RunnerEnvironmentProfile",
+    "RunnerEnvironmentProfileResult",
+    "RunnerHandle",
+    "RunnerPlugin",
+    "RunnerRuntimeDescription",
+    "SpecRunInputRequest",
+    "TaskRunnerBackend",
 ]
 
 
