@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from tests.helpers.reactor_driver import drive_until
 from weft._constants import TERMINAL_TASK_STATUSES, WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -54,13 +55,9 @@ def _drain(queue) -> list[str]:
 
 
 def _drive_task_until_complete(task: Consumer, *, timeout: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        task.process_once()
+    def observe() -> str:
         status = task.taskspec.state.status
-        if status == "completed":
-            return
-        if status in TERMINAL_TASK_STATUSES:
+        if status != "completed" and status in TERMINAL_TASK_STATUSES:
             raise AssertionError(
                 "Task reached terminal state before completion; "
                 f"status={status!r}, "
@@ -68,13 +65,22 @@ def _drive_task_until_complete(task: Consumer, *, timeout: float = 30.0) -> None
                 f"should_stop={task.should_stop!r}, "
                 f"worker_activity={task._has_worker_activity()!r}"
             )
-        task.wait_for_activity(timeout=0.02)
-    raise AssertionError(
-        "Task did not complete before timeout; "
-        f"status={task.taskspec.state.status!r}, "
-        f"error={task.taskspec.state.error!r}, "
-        f"should_stop={task.should_stop!r}, "
-        f"worker_activity={task._has_worker_activity()!r}"
+        return status
+
+    drive_until(
+        observe,
+        lambda status: status == "completed",
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.02,
+        pending_work=(task._has_pending_worker_results,),
+        diagnostics=lambda: {
+            "status": task.taskspec.state.status,
+            "error": task.taskspec.state.error,
+            "should_stop": task.should_stop,
+            "worker_activity": task._has_worker_activity(),
+        },
     )
 
 

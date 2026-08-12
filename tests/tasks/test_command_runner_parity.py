@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import (
     POSTGRES_TEST_BACKEND,
     active_test_backend,
@@ -501,15 +502,15 @@ def _drive_consumer_until(
     timeout: float = 10.0,
     timeout_detail: Callable[[], str] | None = None,
 ) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        task.process_once()
-        if predicate():
-            return
-        task.wait_for_activity(timeout=0.02)
-    detail = f": {timeout_detail()}" if timeout_detail is not None else ""
-    raise AssertionError(
-        f"Consumer did not reach expected state before timeout{detail}"
+    drive_until(
+        predicate,
+        bool,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.02,
+        pending_work=(task._has_pending_worker_results,),
+        diagnostics=timeout_detail,
     )
 
 

@@ -237,8 +237,9 @@ generated source index defined by that policy.
 | `RUFF-SUP-363` | `BLE001` | `1` directive; raw: `BLE001=1` | Provider-image failures are reported per item while later providers continue in the declared provider sequence; no mapping-order contract is used. | Two-provider ordinary continuation and fatal identity tests. | Catching outside the loop loses continuation; helper extraction separates the owned report. | Clean exact order/locality review `NET POSITIVE`; owner approved 2026-08-07. |
 | `RUFF-SUP-364` | `BLE001` | `1` directive; raw: `BLE001=1` | Ordinary Monitor-store access failure returns the exact unavailable status shape; fatal exits propagate. | Direct full-shape and fatal-identity tests. | Wider containment hides successful-status construction defects. | Clean exact review `NET POSITIVE`; owner approved 2026-08-07. |
 | `RUFF-SUP-365` | `BLE001` | `1` directive; raw: `BLE001=1` | Ordinary runtime-plugin resolution/description failure returns exact unknown best-effort evidence; fatal exits propagate. | Direct fallback-shape and fatal-identity tests. | Wider containment hides evidence interpretation defects. | Clean exact review `NET POSITIVE`; owner approved 2026-08-07. |
+| `RUFF-SUP-366` | `BLE001` | `1` directive; raw: `BLE001=1` | Ordinary caller-owned diagnostic failure remains secondary to the shared reactor timeout assertion; fatal exits propagate unchanged. | `tests/system/test_reactor_driver.py::test_drive_until_keeps_timeout_primary_when_diagnostics_raise`; fatal diagnostic identity test. | Narrow exception lists cannot cover caller-defined diagnostic adapters; allowing ordinary diagnostic failure to escape masks the timeout evidence this callback exists to enrich. | Slice 1 independent implementation review PASS; owner authorized plan implementation 2026-08-11. |
 
-Global raw-`noqa` inventory: `BLE001=130`, `C901=136`, `E402=22`, `F401=5`, `FLY002=12`, `PLR0402=3`, `RUF022=4`, `S110=1`, `SIM102=6`, `SIM115=1`, `SIM905=2`, `TRY004=69`
+Global raw-`noqa` inventory: `BLE001=131`, `C901=136`, `E402=22`, `F401=5`, `FLY002=12`, `PLR0402=3`, `RUF022=4`, `S110=1`, `SIM102=6`, `SIM115=1`, `SIM905=2`, `TRY004=69`
 
 <!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->
 | Group | Locations | Directives | Raw diagnostics |
@@ -466,4 +467,5 @@ Global raw-`noqa` inventory: `BLE001=130`, `C901=136`, `E402=22`, `F401=5`, `FLY
 | `RUFF-SUP-363` | `weft/builtins/agent_images.py::prepare_agent_images_task` | 1 | `BLE001=1` |
 | `RUFF-SUP-364` | `weft/core/monitor/store.py::MonitorStore.status` | 1 | `BLE001=1` |
 | `RUFF-SUP-365` | `weft/core/task_evidence.py::describe_runtime` | 1 | `BLE001=1` |
+| `RUFF-SUP-366` | `tests/helpers/reactor_driver.py::drive_until` | 1 | `BLE001=1` |
 <!-- END GENERATED RUFF SUPPRESSION INDEX -->

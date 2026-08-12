@@ -30,6 +30,7 @@ import pytest
 import weft.core.manager as manager_mod
 import weft.core.tasks.base as base_task_mod
 from simplebroker.ext import BrokerError
+from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from weft._constants import (
     CONTROL_KILL,
@@ -883,13 +884,15 @@ def drive_manager_until(
     *,
     timeout: float = 5.0,
 ) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        manager.process_once()
-        if predicate():
-            return
-        manager.wait_for_activity(timeout=0.02)
-    raise AssertionError("Manager did not reach expected state before timeout")
+    drive_until(
+        predicate,
+        lambda matched: matched,
+        step=manager.process_once,
+        wait=manager.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.02,
+        pending_work=(manager._has_pending_worker_results,),
+    )
 
 
 class FakeLaunchProcess:

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
 
 import weft.core.tasks.base as base_task
+from tests.helpers.reactor_driver import drive_until
 from tests.tasks import sample_targets as targets  # noqa: F401
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
@@ -37,13 +37,15 @@ def _read_all(queue):
 
 
 def _drive_task_until(task: Consumer, predicate, *, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        task.process_once()
-        if predicate():
-            return
-        task.wait_for_activity(timeout=0.02)
-    raise AssertionError("Task did not reach expected state before timeout")
+    drive_until(
+        predicate,
+        bool,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.02,
+        pending_work=(task._has_pending_worker_results,),
+    )
 
 
 def _make_manager_taskspec(tid: str) -> TaskSpec:

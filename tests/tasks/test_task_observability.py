@@ -11,6 +11,7 @@ import pytest
 
 from simplebroker.ext import BrokerError
 from tests.helpers.queue_payloads import terminal_envelopes
+from tests.helpers.reactor_driver import drive_until
 from tests.tasks import sample_targets as targets  # noqa: F401
 from weft import helpers as weft_helpers
 from weft._constants import (
@@ -79,27 +80,18 @@ def drain_queue(queue) -> list[str]:
 
 
 def drive_task_until(task, predicate, *, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    turns = 0
-    while True:
-        turns += 1
-        task.process_once()
-        if predicate():
-            return
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            if task._has_pending_worker_results():
-                turns += 1
-                task.process_once()
-                if predicate():
-                    return
-            break
-        task.wait_for_activity(timeout=min(0.02, remaining))
-    raise AssertionError(
-        "Task did not reach expected state before timeout "
-        f"(status={task.taskspec.state.status!r}, "
-        f"should_stop={task.should_stop!r}, turns={turns}, "
-        f"worker_snapshot={task._worker_activity_snapshot()!r})"
+    drive_until(
+        predicate,
+        bool,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=timeout,
+        pending_work=(task._has_pending_worker_results,),
+        diagnostics=lambda: {
+            "status": task.taskspec.state.status,
+            "should_stop": task.should_stop,
+            "worker_snapshot": task._worker_activity_snapshot(),
+        },
     )
 
 

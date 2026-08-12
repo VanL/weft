@@ -84,6 +84,27 @@ Use the narrowest real harness that still proves the behavior:
    tests should avoid assuming a terminal log event means the result is already
    readable.
 
+### Manual Reactor Test Drivers
+
+Use `tests.helpers.reactor_driver.drive_until` when a test owns one in-process
+task reactor and repeatedly calls `process_once()` plus
+`wait_for_activity()` until caller-defined evidence matches. Keep a local,
+domain-named wrapper when it explains what is being observed or supplies richer
+diagnostics; delegate only the common deadline/turn/wait mechanics.
+
+The driver owns liveness, not global safety. Before asserting that an event is
+unique or absent, establish producer closure: for example, a real process has
+exited, or reactor finalization has completed and the test has separately
+proved that no relevant worker/producer remains live and no deliverable result
+remains. The driver's final ready-result turn alone is never producer closure.
+A terminal-looking task-log row alone is not producer closure either.
+
+Do not use the reactor driver for process joins, PID/file/database release,
+queue-history cursor management, native event/watcher waits, multi-actor
+interleaving protocols, nested/composed reactor drivers, domain-specific
+deadline settlement, or tests of timeout and wait behavior themselves. Use the
+strongest synchronization primitive owned by that boundary.
+
 ## Property-Based Tests
 
 Use Hypothesis for pure invariant sweeps where generated examples shrink to a

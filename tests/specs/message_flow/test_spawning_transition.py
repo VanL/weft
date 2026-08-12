@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from tests.helpers.reactor_driver import drive_until
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -48,13 +49,15 @@ def _drain(queue) -> list[str]:
 
 
 def _drive_task_until_complete(task: Consumer, *, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        task.process_once()
-        if task.taskspec.state.status == "completed":
-            return
-        task.wait_for_activity(timeout=0.02)
-    raise AssertionError("Task did not complete before timeout")
+    drive_until(
+        lambda: task.taskspec.state.status,
+        lambda status: status == "completed",
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.02,
+        pending_work=(task._has_pending_worker_results,),
+    )
 
 
 def test_work_spawning_logged(broker_env, unique_tid: str) -> None:

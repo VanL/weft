@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 import weft.core.tasks.pipeline as pipeline_module
+from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     CONTROL_KILL,
@@ -92,18 +93,19 @@ def _drive_consumer_once_until_idle(
     *,
     timeout: float = 20.0,
 ) -> None:
-    deadline = time.monotonic() + timeout
-    consumer.process_once()
-    while time.monotonic() < deadline:
-        if (
+    drive_until(
+        lambda: (
             not consumer._active_work_in_flight
             and not consumer._has_pending_worker_results()
             and not consumer._has_active_worker_threads()
-        ):
-            return
-        consumer.wait_for_activity(timeout=0.05)
-        consumer.process_once()
-    raise AssertionError("consumer worker did not finish")
+        ),
+        bool,
+        step=consumer.process_once,
+        wait=consumer.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.05,
+        pending_work=(consumer._has_pending_worker_results,),
+    )
 
 
 def _drive_pipeline_until_snapshot(
@@ -115,27 +117,65 @@ def _drive_pipeline_until_snapshot(
 ) -> dict[str, Any]:
     """Drive production reactor turns until an observable snapshot matches."""
 
-    deadline = time.monotonic() + timeout
     latest: dict[str, Any] | None = None
-    turns = 0
-    while time.monotonic() < deadline:
-        task.process_once()
-        turns += 1
+
+    def observe() -> dict[str, Any] | None:
+        nonlocal latest
         snapshots = _drain_json(status_queue)
         if snapshots:
             latest = snapshots[-1]
-            if predicate(latest):
-                return latest
-        remaining = deadline - time.monotonic()
-        task.wait_for_activity(timeout=min(0.05, max(0.0, remaining)))
+            return latest
+        return None
 
-    raise AssertionError(
-        "pipeline did not publish the expected status before the deadline: "
-        f"turns={turns}, task_status={task.taskspec.state.status!r}, "
-        f"active_queues={task._active_queues!r}, "
-        f"pending_prechecked={task._pending_messages_precheck_confirmed!r}, "
-        f"latest={latest!r}"
+    result = drive_until(
+        observe,
+        lambda snapshot: snapshot is not None and predicate(snapshot),
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.05,
+        diagnostics=lambda: {
+            "task_status": task.taskspec.state.status,
+            "active_queues": task._active_queues,
+            "pending_prechecked": task._pending_messages_precheck_confirmed,
+            "latest": latest,
+        },
     )
+    assert result is not None
+    return result
+
+
+def test_drive_consumer_until_idle_observes_after_exactly_one_first_turn() -> None:
+    """The idle adapter neither skips nor duplicates its reactor-owner turn."""
+
+    class InitiallyIdleConsumer:
+        def __init__(self) -> None:
+            self.process_calls = 0
+            self.observed_after: list[int] = []
+
+        @property
+        def _active_work_in_flight(self) -> bool:
+            self.observed_after.append(self.process_calls)
+            return False
+
+        def process_once(self) -> None:
+            self.process_calls += 1
+
+        def _has_pending_worker_results(self) -> bool:
+            return False
+
+        def _has_active_worker_threads(self) -> bool:
+            return False
+
+        def wait_for_activity(self, *, timeout: float) -> None:
+            raise AssertionError(f"unexpected wait while idle: {timeout}")
+
+    consumer = InitiallyIdleConsumer()
+
+    _drive_consumer_once_until_idle(consumer)  # type: ignore[arg-type]
+
+    assert consumer.process_calls == 1
+    assert consumer.observed_after == [1]
 
 
 def _task_payload(

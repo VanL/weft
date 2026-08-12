@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import time
 from typing import Final
 
 import pytest
@@ -17,6 +16,7 @@ from tests.fixtures.provider_cli_fixture import (
     PROVIDER_FIXTURE_NAMES,
     write_provider_cli_wrapper,
 )
+from tests.helpers.reactor_driver import drive_until
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
@@ -54,17 +54,19 @@ def _drive_consumer_until(
     *,
     timeout: float = 30.0,
 ) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        task.process_once()
-        if predicate():
-            return
-        task.wait_for_activity(timeout=0.02)
-    raise AssertionError(
-        "Consumer did not reach expected state before timeout "
-        f"(status={task.taskspec.state.status!r}, "
-        f"should_stop={task.should_stop!r}, "
-        f"worker_activity={task._has_worker_activity()!r})"
+    drive_until(
+        predicate,
+        bool,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.02,
+        pending_work=(task._has_pending_worker_results,),
+        diagnostics=lambda: {
+            "status": task.taskspec.state.status,
+            "should_stop": task.should_stop,
+            "worker_activity": task._has_worker_activity(),
+        },
     )
 
 

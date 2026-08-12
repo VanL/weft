@@ -27,6 +27,7 @@ import pytest
 
 from simplebroker import Queue
 from tests.helpers.queue_payloads import terminal_envelopes
+from tests.helpers.reactor_driver import drive_until
 from tests.tasks import (
     sample_targets as targets,  # noqa: F401 - ensure module importable
 )
@@ -3436,19 +3437,24 @@ def _drive_consumer_until(
     *,
     timeout: float = 60.0,
 ) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        task.process_once()
-        if predicate():
-            return
-        task.wait_for_activity(timeout=0.02)
-    raise AssertionError(
-        "Consumer did not reach expected state before timeout "
-        f"(status={task.taskspec.state.status!r}, "
-        f"should_stop={task.should_stop!r}, "
-        f"worker_activity={task._has_worker_activity()!r}, "
-        f"worker_snapshot={task._worker_activity_snapshot()!r}, "
-        f"worker_stacks={_consumer_worker_stacks(task)!r})"
+    def diagnostics() -> str:
+        return (
+            f"status={task.taskspec.state.status!r}, "
+            f"should_stop={task.should_stop!r}, "
+            f"worker_activity={task._has_worker_activity()!r}, "
+            f"worker_snapshot={task._worker_activity_snapshot()!r}, "
+            f"worker_stacks={_consumer_worker_stacks(task)!r}"
+        )
+
+    drive_until(
+        predicate,
+        lambda matched: matched,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=timeout,
+        wait_slice=0.02,
+        pending_work=(task._has_pending_worker_results,),
+        diagnostics=diagnostics,
     )
 
 

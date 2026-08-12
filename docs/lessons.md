@@ -1127,3 +1127,44 @@ index is not a dated section and does not count toward the coalescing trigger.
   scheduler load. When a concurrent suite changes only fixed-deadline outcomes,
   distinguish shared-host contention from shared-database state with direct
   container/port/database evidence before changing production behavior.
+
+## 2026-08-11 Manual Reactor Test Driver Boundary
+
+- The April 27 Test Sleep Hygiene rule still protects domain-specific evidence,
+  actor ordering, and useful failure shape. Keep those concerns in local,
+  domain-named wrappers even when they delegate common timing mechanics.
+- The shared boundary is the tested monotonic
+  `step -> observe -> wait -> final settlement` engine. The August 11 deadline
+  races proved that wait clipping, the turn paired with a completed wait, and
+  pending-result settlement at the deadline belong in that one engine.
+- Liveness, producer closure, and safety are three separate test obligations.
+  Evidence appearing proves liveness only. Exact-count or absence assertions
+  also need proof that the relevant producer can no longer emit, followed by a
+  safety assertion over the closed history. See
+  [Spec 08 [TS-0]](specifications/08-Testing_Strategy.md#why-this-shape-exists-ts-0)
+  and the
+  [shared reactor driver adoption plan](plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md).
+
+## 2026-08-11 Review State Is a Property of the Artifact
+
+- A Class 5 plan was authored, indexed, and gate-checked, then delivered as a
+  finished draft with no independent review run. No literal gate was violated:
+  every review obligation in the guidance attaches to a lifecycle transition
+  (spec promotion, implementation, completion claims) that sits downstream of
+  authoring, so an unreviewed draft and a reviewed draft are indistinguishable
+  to every mechanical check. The author's own "Independent Review Protocol"
+  section pattern-matched as review coverage while deferring the act.
+- The reviews, once run, returned BLOCKED twice with convergent findings from
+  two model families — including facts the author had personally verified
+  earlier in the same session and failed to carry into the plan. Self-review
+  does not substitute for fresh-context review even when the author has the
+  relevant evidence in context.
+- Corrective pattern: make review state explicit on the artifact, not implicit
+  in the lifecycle. A plan handoff must either carry independent-review rows
+  in its Execution Log or declare review as not yet run; the plan-metadata
+  gate is the natural mechanical owner for that requirement, and
+  `writing-plans.md`'s authoring flow should end with the instruction to run
+  the review-loops Planning Review Prompt for Class 3+ drafts rather than
+  leaving the trigger in a sibling runbook's read order. See
+  [plans/2026-08-11-python-api-surfaces-sb-contract.md](plans/2026-08-11-python-api-surfaces-sb-contract.md)
+  Execution Log for the full record.

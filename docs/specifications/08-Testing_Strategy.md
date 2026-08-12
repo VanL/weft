@@ -28,6 +28,28 @@ harnesses:
   `tests/multiqueue_polling_benchmark.py` are dev-only measurement tools, not
   part of the canonical test contract.
 
+Manual in-process tests with one task reactor and the exact repeated control
+frame `process_once -> observe -> bounded owner wait` use the shared
+`tests/helpers/reactor_driver.py` timing engine for condition observation, an
+absolute monotonic deadline, clipped owner-legal waits, one final pending-worker
+turn at the deadline, and lazy caller-owned diagnostics. Domain-named local
+wrappers remain appropriate when they define the evidence, add
+domain-specific stepping, or preserve a useful failure shape.
+
+PID, process-exit, file, database-release, queue-native, and
+`WeftTestHarness` completion waits do not route through the reactor driver;
+neither do nested or composed reactor drivers, multi-actor interleavings,
+domain-specific deadline-settlement protocols, or tests whose subject is wait
+ownership, timeout selection, poll cadence, or exact turn ordering. A
+liveness marker proves only that evidence appeared. Exact-count and absence
+assertions require a named producer-closure boundary, meaning proof that the
+relevant producer can no longer emit the event being counted, before ordered
+history is asserted.
+
+_Implementation mapping_: `tests/helpers/reactor_driver.py::drive_until` owns
+the shared timing engine; `tests/system/test_reactor_driver.py` owns its direct
+contract tests.
+
 The point is not to maximize suite count. The point is to keep the current
 contract exercised where it matters and to make backend-sensitive drift easy to
 see.
@@ -295,6 +317,7 @@ bug evidence.
 
 ## Related Plans
 
+- [`docs/plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md`](../plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md)
 - [`docs/plans/2026-08-10-subprocess-coverage-collection-plan.md`](../plans/2026-08-10-subprocess-coverage-collection-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
