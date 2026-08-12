@@ -6,6 +6,7 @@ Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.4], [CLI-1.4.1]
 - docs/specifications/10B-Builtin_TaskSpecs.md
 - docs/specifications/12-Pipeline_Composition_and_UX.md
+- docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from weft._constants import (
 )
 from weft._exceptions import SpecNotFound
 from weft.builtins import builtin_task_specs
-from weft.commands.types import SpecRecord, SpecValidationResult
+from weft.commands.types import SpecMutationResult, SpecRecord, SpecValidationResult
 from weft.context import WeftContext, build_context
 from weft.core.agents.validation import (
     validate_taskspec_agent_runtime,
@@ -53,6 +54,8 @@ from weft.core.spec_store import (
 from weft.core.taskspec import validate_taskspec
 from weft.core.taskspec.parameterization import validate_parameterization_adapter
 from weft.core.taskspec.run_input import validate_run_input_adapter
+
+from ._boundary import typed_command_errors
 
 
 def _coerce_context(
@@ -461,6 +464,149 @@ def validate_spec_source(
         message=f"Unknown spec type: {effective_type}",
         payload=payload,
     )
+
+
+@typed_command_errors
+def cmd_spec_create(
+    name: str,
+    *,
+    file: Path,
+    type: str = SPEC_TYPE_TASK,
+    context: Path | None = None,
+    force: bool = False,
+) -> SpecMutationResult:
+    """Create a stored spec and return its structured mutation record.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    spec_type = normalize_spec_type(type)
+    try:
+        record = create_spec_record(
+            name,
+            file,
+            spec_type=spec_type,
+            force=force,
+            context_path=context,
+        )
+    except FileNotFoundError as exc:
+        raise SpecNotFound(str(exc)) from exc
+    return SpecMutationResult(action="create", record=record)
+
+
+@typed_command_errors
+def cmd_spec_list(
+    *,
+    type: str | None = None,
+    context: Path | None = None,
+) -> tuple[SpecRecord, ...]:
+    """List stored and builtin specs as structured records.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    spec_type = normalize_spec_type(type) if type is not None else None
+    return tuple(list_spec_records(spec_type=spec_type, context_path=context))
+
+
+@typed_command_errors
+def cmd_spec_show(
+    name: str,
+    *,
+    type: str | None = None,
+    context: Path | None = None,
+) -> SpecRecord:
+    """Return one stored or builtin spec with its serialized payload.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    spec_type = normalize_spec_type(type) if type is not None else None
+    try:
+        resolved = resolve_named_spec(
+            name,
+            spec_type=spec_type,
+            context_path=context,
+        )
+    except FileNotFoundError as exc:
+        raise SpecNotFound(str(exc)) from exc
+    return SpecRecord(
+        spec_type=resolved.spec_type,
+        name=resolved.name,
+        path=resolved.path,
+        source=resolved.source,
+        payload=deepcopy(resolved.payload),
+    )
+
+
+@typed_command_errors
+def cmd_spec_delete(
+    name: str,
+    *,
+    type: str | None = None,
+    context: Path | None = None,
+) -> SpecMutationResult:
+    """Delete one stored spec and return the deleted record.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    spec_type = normalize_spec_type(type) if type is not None else None
+    try:
+        resolved = resolve_named_spec(
+            name,
+            spec_type=spec_type,
+            context_path=context,
+        )
+    except FileNotFoundError as exc:
+        raise SpecNotFound(str(exc)) from exc
+    record = SpecRecord(
+        spec_type=resolved.spec_type,
+        name=resolved.name,
+        path=resolved.path,
+        source=resolved.source,
+    )
+    delete_spec(
+        name,
+        spec_type=spec_type,
+        context_path=context,
+    )
+    return SpecMutationResult(action="delete", record=record)
+
+
+@typed_command_errors
+def cmd_spec_validate(
+    file: Path,
+    *,
+    type: str | None = None,
+    load_runner: bool = False,
+    preflight: bool = False,
+) -> SpecValidationResult:
+    """Validate a task or pipeline spec and return all structured findings.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    spec_type = normalize_spec_type(type) if type is not None else None
+    try:
+        return validate_spec_source(
+            file,
+            spec_type=spec_type,
+            load_runner=load_runner,
+            preflight=preflight,
+        )
+    except FileNotFoundError as exc:
+        raise SpecNotFound(str(exc)) from exc
+
+
+@typed_command_errors
+def cmd_spec_generate(*, type: str = SPEC_TYPE_TASK) -> dict[str, Any]:
+    """Return the generated example mapping for one spec type.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    return generate_spec(normalize_spec_type(type))
 
 
 def validate_task_spec_text(

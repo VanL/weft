@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -490,12 +490,16 @@ def submit_taskspec_on_commit(
 def submit_spec_reference(
     reference: str | Any,
     *,
+    spec_args: Sequence[str] = (),
+    stdin_text: str | None = None,
     payload: Any = None,
     **overrides: Any,
 ) -> WeftSubmission:
     _reject_legacy_payload_names(overrides)
     task = get_core_client().submit_spec(
         reference,
+        spec_args=spec_args,
+        stdin_text=stdin_text,
         payload=payload,
         **_submit_kwargs(overrides),
     )
@@ -513,6 +517,8 @@ def submit_spec_reference(
 def submit_spec_reference_on_commit(
     reference: str | Any,
     *,
+    spec_args: Sequence[str] = (),
+    stdin_text: str | None = None,
     payload: Any = None,
     **overrides: Any,
 ) -> WeftDeferredSubmission:
@@ -527,6 +533,8 @@ def submit_spec_reference_on_commit(
     )
     prepared = get_core_client().prepare_spec(
         reference,
+        spec_args=spec_args,
+        stdin_text=stdin_text,
         payload=payload,
         **submit_overrides,
     )

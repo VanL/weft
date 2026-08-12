@@ -22,8 +22,7 @@ from weft._constants import (
     CLAUDE_PORTABLE_AUTH_ENV_NAMES,
     DOCKERIZED_AGENT_CONTAINER_DOC_PATH,
 )
-from weft.core.taskspec.run_input import SpecRunInputRequest
-from weft.ext import RunnerEnvironmentProfileResult
+from weft.ext import RunnerEnvironmentProfileResult, SpecRunInputRequest
 
 
 def dockerized_agent_environment_profile(

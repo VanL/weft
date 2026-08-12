@@ -22,6 +22,7 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft._exceptions import ManagerNotRunning
 from weft.commands import manager as manager_cmd
 from weft.commands.types import ManagerSnapshot
 from weft.context import build_context
@@ -215,6 +216,107 @@ def test_manager_snapshot_discards_malformed_optional_fields() -> None:
         runtime_handle=None,
         timestamp=None,
     )
+
+
+def test_cmd_manager_list_returns_lossless_diagnostic_snapshots(
+    tmp_path, monkeypatch
+) -> None:
+    """Diagnostic mode returns structured proof fields without rendering."""
+
+    context_root = prepare_project_root(tmp_path / "proj")
+    context = build_context(context_root)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "manager_diagnostic_records",
+        lambda context_arg, *, include_stopped: [
+            {
+                "tid": "1761000000000000001",
+                "status": "active",
+                "name": "manager",
+                "liveness": "live",
+                "proof_source": "pong",
+                "proof_detail": "matched nonce",
+                "dispatch_eligible": True,
+                "canonical_candidate": True,
+                "canonical": True,
+            }
+        ],
+    )
+
+    result = manager_cmd.cmd_manager_list(
+        all=False,
+        diagnostic=True,
+        context=context_root,
+    )
+
+    assert result == (
+        ManagerSnapshot(
+            tid="1761000000000000001",
+            status="active",
+            name="manager",
+            runtime_handle=None,
+            timestamp=None,
+            liveness="live",
+            proof_source="pong",
+            proof_detail="matched nonce",
+            dispatch_eligible=True,
+            canonical_candidate=True,
+            canonical=True,
+        ),
+    )
+
+
+def test_cmd_manager_start_returns_structured_snapshot(tmp_path, monkeypatch) -> None:
+    context_root = prepare_project_root(tmp_path / "proj")
+    context = build_context(context_root)
+    record = {
+        "tid": "1761000000000000002",
+        "status": "active",
+        "name": "manager",
+    }
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "ensure_manager",
+        lambda context_arg: (record, True, None),
+    )
+
+    result = manager_cmd.cmd_manager_start(context=context_root)
+
+    assert result.tid == "1761000000000000002"
+    assert result.status == "active"
+
+
+def test_cmd_manager_stop_returns_none_when_active_manager_is_absent(
+    tmp_path, monkeypatch
+) -> None:
+    context_root = prepare_project_root(tmp_path / "proj")
+    context = build_context(context_root)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "select_active_manager",
+        lambda context_arg, *, probe_stale, probe_cache: None,
+    )
+
+    assert manager_cmd.cmd_manager_stop(context=context_root) is None
+
+
+def test_cmd_manager_status_raises_typed_error_when_absent(
+    tmp_path, monkeypatch
+) -> None:
+    context_root = prepare_project_root(tmp_path / "proj")
+    context = build_context(context_root)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "manager_record",
+        lambda context_arg, tid: None,
+    )
+
+    with pytest.raises(ManagerNotRunning, match="not found"):
+        manager_cmd.cmd_manager_status("1761000000000000003", context=context_root)
 
 
 def test_manager_json_projection_formats_only_owned_broker_ids() -> None:

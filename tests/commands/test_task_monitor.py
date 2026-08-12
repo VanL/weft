@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._exceptions import CommandExecutionError
 from weft.commands.task_monitor import (
     DiskJsonlTaskMonitorSink,
     ReducedTaskLog,
@@ -71,6 +72,10 @@ def _records(output: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in output.splitlines() if line.strip()]
 
 
+def _result_records(result: Any) -> list[dict[str, Any]]:
+    return [dict(item.record) for item in result.records]
+
+
 def test_foreground_reducer_counts_only_rows_with_valid_tids() -> None:
     first_tid = "1778084345905438701"
     second_tid = "1778084345905438702"
@@ -114,10 +119,10 @@ def test_foreground_scan_filters_malformed_rows_before_counts_and_checkpoint(
 
     result = run_task_monitor(
         TaskMonitorConfig(
-            context_path=workdir,
+            context=workdir,
             sink="stdout",
             no_checkpoint=True,
-            since_timestamp=0,
+            since=0,
             limit=4,
         )
     )
@@ -216,25 +221,19 @@ def test_monitor_checkpoint_advances_after_successful_sink_write(workdir) -> Non
 
     result = run_task_monitor(
         TaskMonitorConfig(
-            context_path=workdir,
+            context=workdir,
             sink="disk",
             log_dir=workdir / "logs",
-            checkpoint_path=checkpoint,
+            checkpoint=checkpoint,
             no_checkpoint=False,
-            since_timestamp=0,
+            since=0,
             limit=None,
-            json_output=True,
         )
     )
 
-    assert result.exit_code == 0
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert isinstance(payload["last_task_log_timestamp"], int)
     assert payload["last_task_log_timestamp"] > 0
-    command_summary = json.loads(result.stdout)
-    assert command_summary["checkpoint_timestamp"] == str(
-        payload["last_task_log_timestamp"]
-    )
     assert isinstance(result.checkpoint_timestamp, int)
 
 
@@ -253,32 +252,30 @@ def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir) -> None:
     log_dir = workdir / "logs"
     checkpoint = workdir / "checkpoint.json"
     config = TaskMonitorConfig(
-        context_path=workdir,
+        context=workdir,
         sink="disk",
         log_dir=log_dir,
-        checkpoint_path=checkpoint,
+        checkpoint=checkpoint,
         no_checkpoint=False,
-        since_timestamp=0,
+        since=0,
         limit=None,
-        json_output=False,
     )
 
     first = run_task_monitor(config)
     second = run_task_monitor(
         TaskMonitorConfig(
-            context_path=workdir,
+            context=workdir,
             sink="disk",
             log_dir=log_dir,
-            checkpoint_path=checkpoint,
+            checkpoint=checkpoint,
             no_checkpoint=False,
-            since_timestamp=None,
+            since=None,
             limit=None,
-            json_output=False,
         )
     )
 
-    assert first.exit_code == 0
-    assert second.exit_code == 0
+    assert first.records_written > 0
+    assert second.records_written > 0
     path = next(log_dir.glob("*.jsonl"))
     task_summaries = [
         record
@@ -302,18 +299,17 @@ def test_monitor_crash_window_duplicate_has_stable_summary_id(workdir) -> None:
     )
     log_dir = workdir / "logs"
     config = TaskMonitorConfig(
-        context_path=workdir,
+        context=workdir,
         sink="disk",
         log_dir=log_dir,
-        checkpoint_path=workdir / "missing-checkpoint.json",
+        checkpoint=workdir / "missing-checkpoint.json",
         no_checkpoint=True,
-        since_timestamp=0,
+        since=0,
         limit=None,
-        json_output=False,
     )
 
-    assert run_task_monitor(config).exit_code == 0
-    assert run_task_monitor(config).exit_code == 0
+    assert run_task_monitor(config).records_written > 0
+    assert run_task_monitor(config).records_written > 0
 
     path = next(log_dir.glob("*.jsonl"))
     summary_ids = [
@@ -329,21 +325,18 @@ def test_corrupt_checkpoint_fails_clearly(workdir) -> None:
     checkpoint = workdir / "checkpoint.json"
     checkpoint.write_text("not-json", encoding="utf-8")
 
-    result = run_task_monitor(
-        TaskMonitorConfig(
-            context_path=workdir,
-            sink="disk",
-            log_dir=workdir / "logs",
-            checkpoint_path=checkpoint,
-            no_checkpoint=False,
-            since_timestamp=None,
-            limit=None,
-            json_output=False,
+    with pytest.raises(CommandExecutionError, match="Invalid task monitor checkpoint"):
+        run_task_monitor(
+            TaskMonitorConfig(
+                context=workdir,
+                sink="disk",
+                log_dir=workdir / "logs",
+                checkpoint=checkpoint,
+                no_checkpoint=False,
+                since=None,
+                limit=None,
+            )
         )
-    )
-
-    assert result.exit_code == 1
-    assert "Invalid task monitor checkpoint" in result.stderr
 
 
 def test_checkpoint_loader_rejects_non_object_json_as_value_error(
@@ -383,18 +376,17 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
 
     result = run_task_monitor(
         TaskMonitorConfig(
-            context_path=workdir,
+            context=workdir,
             sink="stdout",
             no_checkpoint=True,
-            since_timestamp=0,
+            since=0,
             limit=None,
-            json_output=False,
         )
     )
 
     summaries = [
         record
-        for record in _records(result.stdout)
+        for record in _result_records(result)
         if record["record_type"] == "task_summary"
     ]
     assert summaries[0]["classification"] == "terminal_log"
@@ -405,7 +397,7 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
     assert summaries[0]["last_task_log_timestamp"].isascii()
     completed = next(
         record
-        for record in _records(result.stdout)
+        for record in _result_records(result)
         if record["record_type"] == "monitor_run_completed"
     )
     assert isinstance(completed["checkpoint_timestamp"], str)
@@ -413,8 +405,7 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
     assert completed["checkpoint_timestamp"].isascii()
     assert isinstance(result.checkpoint_timestamp, int)
     assert (
-        result.summary_payload()["checkpoint_timestamp"]
-        == (completed["checkpoint_timestamp"])
+        str(result.checkpoint_timestamp) == completed["checkpoint_timestamp"]
     )
 
 
@@ -434,18 +425,17 @@ def test_task_failure_without_task_monitor_anomaly_is_domain_failure(workdir) ->
 
     result = run_task_monitor(
         TaskMonitorConfig(
-            context_path=workdir,
+            context=workdir,
             sink="stdout",
             no_checkpoint=True,
-            since_timestamp=0,
+            since=0,
             limit=None,
-            json_output=False,
         )
     )
 
     summary = next(
         record
-        for record in _records(result.stdout)
+        for record in _result_records(result)
         if record["record_type"] == "task_summary"
     )
     assert summary["classification"] == "domain_failure"
@@ -468,16 +458,15 @@ def test_active_task_emits_no_task_summary(workdir) -> None:
 
     result = run_task_monitor(
         TaskMonitorConfig(
-            context_path=workdir,
+            context=workdir,
             sink="stdout",
             no_checkpoint=True,
-            since_timestamp=0,
+            since=0,
             limit=None,
-            json_output=False,
         )
     )
 
-    records = _records(result.stdout)
+    records = _result_records(result)
     assert not any(record["record_type"] == "task_summary" for record in records)
     completed = next(
         record for record in records if record["record_type"] == "monitor_run_completed"
@@ -528,18 +517,17 @@ def test_wrapper_lost_and_result_without_terminal_do_not_consume_queues(
 
         result = run_task_monitor(
             TaskMonitorConfig(
-                context_path=workdir,
+                context=workdir,
                 sink="stdout",
                 no_checkpoint=True,
-                since_timestamp=0,
+                since=0,
                 limit=None,
-                json_output=False,
             )
         )
 
         summaries = {
             record["tid"]: record
-            for record in _records(result.stdout)
+            for record in _result_records(result)
             if record["record_type"] == "task_summary"
         }
         assert summaries[wrapper_tid]["classification"] == "wrapper_lost"

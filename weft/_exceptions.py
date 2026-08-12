@@ -12,6 +12,34 @@ class WeftError(Exception):
     """Base exception for Weft-specific failures."""
 
 
+class CommandError(WeftError):
+    """Base exception for public command-surface failures. Spec: [PY-2]."""
+
+
+class CommandUsageError(CommandError, ValueError):
+    """Raised when parsed command arguments are semantically invalid."""
+
+
+class CommandTimeoutError(CommandError, TimeoutError):
+    """Raised when a command operation reaches its timeout."""
+
+
+class CommandExecutionError(CommandError, RuntimeError):
+    """Raised when command orchestration fails."""
+
+
+class SubmissionError(CommandError):
+    """Base exception for public submission failures."""
+
+
+class SubmissionValidationError(SubmissionError):
+    """Raised when a submission cannot be validated or materialized."""
+
+
+class SubmissionManagerError(SubmissionError):
+    """Raised when manager readiness or submission transport fails."""
+
+
 class InvalidTID(WeftError, ValueError):
     """Raised when a TID is malformed."""
 

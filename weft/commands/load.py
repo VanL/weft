@@ -22,6 +22,7 @@ from weft._constants import (
     SQLITE_SNAPSHOT_SUFFIXES,
     WEFT_STATE_QUEUE_PREFIX,
 )
+from weft._exceptions import CommandExecutionError, CommandUsageError
 from weft.commands.types import SystemLoadResult
 from weft.context import WeftContext, build_context
 from weft.helpers.message_ids import normalize_exact_message_id
@@ -572,6 +573,51 @@ def cmd_load(
     return 0, report.format_completion()
 
 
+def cmd_system_load(
+    *,
+    input: str | None = None,
+    dry_run: bool = False,
+    context: Path | None = None,
+) -> SystemLoadResult:
+    """Validate or import a broker dump and return structured counts.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    try:
+        resolved = build_context(spec_context=context)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CommandExecutionError(
+            f"weft load: failed to resolve context: {exc}"
+        ) from exc
+    input_path = resolved.weft_dir / "weft_export.jsonl" if input is None else Path(input)
+    if not input_path.is_absolute():
+        input_path = Path.cwd() / input_path
+    if not input_path.exists():
+        raise CommandUsageError(f"weft load: input file not found: {input_path}")
+    try:
+        with input_path.open(encoding="utf-8") as handle:
+            plan = _build_import_plan(handle, resolved)
+        if plan.report.alias_conflicts:
+            conflicts = ", ".join(sorted(plan.report.alias_conflicts))
+            raise CommandExecutionError(
+                "weft load: alias conflicts detected: " + conflicts
+            )
+        report = plan.report if dry_run else _execute_import(plan, resolved)
+    except (CommandExecutionError, CommandUsageError):
+        raise
+    except (BrokerError, ImportError, OSError, RuntimeError, ValueError) as exc:
+        raise CommandExecutionError(f"weft load: import failed: {exc}") from exc
+    return SystemLoadResult(
+        imported=not dry_run,
+        message="Import preview" if dry_run else "Import completed successfully",
+        aliases_created=len(report.aliases_to_create),
+        aliases_updated=0,
+        queues_created=len(report.queues_to_create),
+        total_messages=report.total_messages,
+    )
+
+
 def load_system(
     context: WeftContext,
     *,
@@ -590,4 +636,4 @@ def load_system(
     return SystemLoadResult(imported=not dry_run, message=message or "")
 
 
-__all__ = ["ImportReport", "cmd_load", "load_system"]
+__all__ = ["ImportReport", "cmd_load", "cmd_system_load", "load_system"]

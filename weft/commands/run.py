@@ -66,7 +66,6 @@ from weft.core.pipelines import (
 from weft.core.spawn_requests import delete_spawn_request, submit_spawn_request
 from weft.core.task_evidence import terminal_error_message, terminal_status_from_event
 from weft.core.taskspec import (
-    SpecRunInputRequest,
     TaskSpec,
     encode_taskspec_transport_payload,
     invoke_run_input_adapter,
@@ -76,6 +75,7 @@ from weft.core.taskspec import (
     parse_declared_run_input_args,
     validate_taskspec_payload,
 )
+from weft.ext import SpecRunInputRequest
 from weft.helpers import (
     read_limited_stdin,
     resolve_broker_max_message_size,

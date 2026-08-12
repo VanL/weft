@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from weft.core.taskspec.run_input import SpecRunInputRequest
+from weft.ext import SpecRunInputRequest
 
 
 def arguments_payload(request: SpecRunInputRequest) -> dict[str, str]:

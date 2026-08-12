@@ -8,12 +8,14 @@ Spec references:
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, cast
 
 import typer
 
 from simplebroker import format_message_id
+from weft import commands
 from weft._constants import (
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     PROG_NAME,
@@ -27,21 +29,16 @@ from weft.commands import serve as serve_cmd
 from weft.commands import specs as spec_cmd
 from weft.commands import system as system_cmd
 from weft.commands import tasks as task_cmd
-from weft.commands.builtins import cmd_system_builtins
 from weft.commands.dump import cmd_dump
-from weft.commands.init import cmd_init
 from weft.commands.load import cmd_load
 from weft.commands.prune import cmd_prune
 from weft.commands.result import cmd_result
 from weft.commands.system import cmd_status
 from weft.commands.task_monitor import (
-    TaskMonitorConfig,
     TaskMonitorSinkName,
-    run_task_monitor,
 )
 from weft.commands.tasks import format_runner_diagnostics
 from weft.commands.tidy import cmd_tidy
-from weft.ext import RunnerHandle
 
 from .run import cmd_run, render_spec_aware_run_help
 
@@ -727,33 +724,6 @@ def task_list(
         )
 
 
-def _task_status_process_fields(
-    tid: str,
-    context_dir: Path | None,
-) -> dict[str, list[int]]:
-    """Return additive scoped and live host-PID fields for task status."""
-    ctx = task_cmd._resolve_context(context_dir)
-    mapping = task_cmd.mapping_for_tid(ctx, tid) or {}
-    runtime_handle = mapping.get("runtime_handle")
-    managed_pids: list[int] = []
-    if isinstance(runtime_handle, dict):
-        try:
-            handle = RunnerHandle.from_dict(runtime_handle)
-            managed_pids = list(handle.scoped_host_pids())
-        except (TypeError, ValueError):
-            managed_pids = []
-    live_managed_pids = [
-        managed_pid
-        for managed_pid in managed_pids
-        if isinstance(managed_pid, int) and system_cmd.pid_is_live(managed_pid)
-    ]
-    return {
-        "host_pids": managed_pids,
-        "managed_pids": managed_pids,
-        "live_managed_pids": live_managed_pids,
-    }
-
-
 def _task_status_plain_lines(
     status_payload: dict[str, Any],
     *,
@@ -829,17 +799,32 @@ def task_status(
             typer.echo(watch_payload)
         raise typer.Exit(code=exit_code)
 
-    snapshot = task_cmd.task_status(
-        tid,
-        context_path=context_dir,
-        ping=ping,
-    )
-    if snapshot is None:
+    try:
+        snapshot = commands.cmd_task_status(
+            tid,
+            process=process,
+            ping=ping,
+            context=context_dir,
+        )
+    except (commands.InvalidTID, commands.TaskNotFound) as exc:
         typer.echo(f"Task {tid} not found", err=True)
-        raise typer.Exit(code=2)
-    status_payload: dict[str, Any] = system_cmd._task_snapshot_to_json_dict(snapshot)
+        raise typer.Exit(code=2) from exc
+    status_payload: dict[str, Any] = asdict(snapshot)
+    if isinstance(snapshot.last_timestamp, int):
+        status_payload["last_timestamp"] = format_message_id(snapshot.last_timestamp)
+    reconciliation = status_payload.get("reconciliation")
+    if isinstance(reconciliation, dict):
+        observed_at = reconciliation.get("observed_at")
+        if isinstance(observed_at, int):
+            reconciliation["observed_at"] = format_message_id(observed_at)
     if process:
-        status_payload.update(_task_status_process_fields(snapshot.tid, context_dir))
+        status_payload.update(
+            {
+                "host_pids": list(snapshot.host_pids or ()),
+                "managed_pids": list(snapshot.managed_pids or ()),
+                "live_managed_pids": list(snapshot.live_managed_pids or ()),
+            }
+        )
     if json_output:
         typer.echo(json.dumps(status_payload, ensure_ascii=False))
         return
@@ -1000,8 +985,14 @@ def init(
 ) -> None:
     """Initialize a new Weft project."""
 
-    exit_code = cmd_init(directory, quiet=quiet, autostart=autostart)
-    raise typer.Exit(code=exit_code)
+    try:
+        result = commands.cmd_init(directory, autostart=autostart)
+    except commands.CommandError as exc:
+        if not quiet:
+            typer.echo(f"weft: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not quiet:
+        typer.echo(f"Initialized Weft project in {result.root}")
 
 
 @system_app.command("tidy")
@@ -1064,25 +1055,42 @@ def task_monitor(
 ) -> None:
     """Scan task evidence and emit non-destructive JSONL."""
 
-    result = run_task_monitor(
-        TaskMonitorConfig(
-            context_path=context,
-            once=once,
-            follow=not once,
-            sink=cast(TaskMonitorSinkName, sink),
-            log_dir=log_dir,
-            checkpoint_path=checkpoint,
-            no_checkpoint=no_checkpoint,
-            since_timestamp=since,
-            limit=limit,
-            json_output=json_output,
-        )
+    if sink == "stdout" and json_output:
+        typer.echo("--json cannot be combined with --sink stdout", err=True)
+        raise typer.Exit(code=1)
+
+    result = commands.cmd_system_task_monitor(
+        context=context,
+        follow=not once,
+        sink=cast(TaskMonitorSinkName, sink),
+        log_dir=log_dir,
+        checkpoint=checkpoint,
+        no_checkpoint=no_checkpoint,
+        since=since,
+        limit=limit,
     )
-    if result.stdout:
-        typer.echo(result.stdout, nl=not result.stdout.endswith("\n"))
-    if result.stderr:
-        typer.echo(result.stderr, err=True)
-    raise typer.Exit(code=result.exit_code)
+    if not once:
+        for summary in result:
+            typer.echo(json.dumps(dict(summary.record), ensure_ascii=False))
+        return
+    if sink == "stdout":
+        for record in result.records:
+            typer.echo(json.dumps(dict(record.record), ensure_ascii=False))
+    elif json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "records_written": result.records_written,
+                    "events_scanned": result.events_scanned,
+                    "tids_seen": result.tids_seen,
+                    "summaries_emitted": result.summaries_emitted,
+                    "checkpoint_timestamp": result.checkpoint_timestamp,
+                    "log_path": str(result.log_path) if result.log_path else None,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
 
 
 @system_app.command("prune")
@@ -1684,10 +1692,35 @@ def system_builtins_command(
 ) -> None:
     """List the builtin TaskSpecs shipped with Weft."""
 
-    exit_code, payload = cmd_system_builtins(json_output=json_output)
-    if payload:
-        typer.echo(payload, err=exit_code != 0)
-    raise typer.Exit(code=exit_code)
+    records = commands.cmd_system_builtins()
+    if json_output:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "type": "task",
+                        "name": record.name,
+                        "description": record.description,
+                        "category": record.category,
+                        "function_target": record.function_target,
+                        "supported_platforms": list(record.supported_platforms),
+                        "path": str(record.path),
+                        "source": record.source,
+                    }
+                    for record in records
+                ],
+                ensure_ascii=False,
+            )
+        )
+        return
+    for record in records:
+        platforms = ", ".join(record.supported_platforms) or "all platforms"
+        typer.echo(f"task: {record.name}")
+        typer.echo(f"  Description: {record.description or ''}")
+        typer.echo(f"  Category: {record.category or 'uncategorized'}")
+        if record.function_target:
+            typer.echo(f"  Target: {record.function_target}")
+        typer.echo(f"  Platforms: {platforms}")
 
 
 @system_app.command("load")

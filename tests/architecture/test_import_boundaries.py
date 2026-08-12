@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+import typer
 
 import simplebroker
 import simplebroker.ext as simplebroker_ext
@@ -842,7 +843,173 @@ def test_root_package_exposes_only_metadata() -> None:
     assert "__getattr__" not in weft.__dict__
 
 
-@pytest.mark.parametrize("module_name", ["weft.cli", "weft.commands", "weft.core"])
+COMMAND_EXPORTS = {
+    "cmd_init", "cmd_status", "cmd_result", "cmd_run",
+    "cmd_queue_read", "cmd_queue_write", "cmd_queue_peek", "cmd_queue_move",
+    "cmd_queue_list", "cmd_queue_exists", "cmd_queue_stats",
+    "cmd_queue_resolve", "cmd_queue_watch", "cmd_queue_delete",
+    "cmd_queue_broadcast", "cmd_queue_alias_add", "cmd_queue_alias_list",
+    "cmd_queue_alias_remove", "cmd_spec_create", "cmd_spec_list",
+    "cmd_spec_show", "cmd_spec_delete", "cmd_spec_validate",
+    "cmd_spec_generate", "cmd_task_list", "cmd_task_status", "cmd_task_ping",
+    "cmd_task_stop", "cmd_task_kill", "cmd_task_tid", "cmd_manager_start",
+    "cmd_manager_serve", "cmd_manager_stop", "cmd_manager_list",
+    "cmd_manager_status", "cmd_system_tidy", "cmd_system_task_monitor",
+    "cmd_system_prune", "cmd_system_dump", "cmd_system_builtins",
+    "cmd_system_load",
+}
+
+COMMAND_TYPES = {
+    "InitResult", "RunSpecDescription", "RunSession", "CommandStream",
+    "RunExecutionResult", "SubmittedTaskReceipt", "TaskSnapshot", "TaskResult",
+    "TaskEvent", "ServiceSnapshot", "TaskPingResult", "TaskControlResult",
+    "QueueEntry", "QueueInfo", "QueueWriteReceipt", "QueueMoveResult",
+    "QueueDeleteReceipt", "QueueBroadcastReceipt", "QueueAliasRecord",
+    "EndpointResolution", "ManagerSnapshot", "SpecRecord",
+    "SpecValidationResult", "SpecMutationResult", "SystemStatusSnapshot",
+    "SystemTidyResult", "SystemLoadResult", "SystemDumpResult",
+    "SystemPruneResult", "BuiltinSpecRecord", "TaskMonitorConfig",
+    "TaskMonitorResult", "TaskMonitorRecord", "TaskMonitorSummary",
+}
+
+COMMAND_ERRORS = {
+    "WeftError", "CommandError", "CommandUsageError", "CommandTimeoutError",
+    "CommandExecutionError", "InvalidTID", "TaskNotFound", "SpecNotFound",
+    "ControlRejected", "ManagerNotRunning", "ManagerStartFailed",
+    "SubmissionError", "SubmissionValidationError", "SubmissionManagerError",
+}
+
+
+@pytest.mark.parametrize(
+    ("module_name", "expected"),
+    [
+        (
+            "weft.client",
+            {
+                "ControlRejected", "InvalidTID", "ManagerNotRunning",
+                "ManagerStartFailed", "PreparedSubmission", "QueueAckTarget",
+                "SpecNotFound", "Task", "TaskEvent", "TaskNotFound",
+                "TaskResult", "TaskSnapshot", "TaskTerminalSnapshot",
+                "WeftClient", "WeftError", "connect",
+            }
+            | {
+                "CommandError", "CommandUsageError", "CommandTimeoutError",
+                "CommandExecutionError", "SubmissionError",
+                "SubmissionValidationError", "SubmissionManagerError",
+            },
+        ),
+        (
+            "weft.ext",
+            {
+                "RunnerHandle", "RunnerCapabilities", "RunnerRuntimeDescription",
+                "AgentResolverResult", "AgentToolProfileResult",
+                "AgentMCPServerDescriptor", "RunnerEnvironmentProfileResult",
+                "AgentResolver", "AgentToolProfile", "RunnerEnvironmentProfile",
+                "TaskRunnerBackend", "RunnerPlugin", "SpecRunInputRequest",
+            },
+        ),
+        ("weft.commands", COMMAND_EXPORTS | COMMAND_TYPES | COMMAND_ERRORS),
+    ],
+)
+def test_official_python_surface_inventories_are_exact(
+    module_name: str,
+    expected: set[str],
+) -> None:
+    module = importlib.import_module(module_name)
+    assert set(module.__all__) == expected
+    for name in expected:
+        assert getattr(module, name) is module.__dict__[name]
+
+
+def test_commands_facade_is_lazy_and_resolves_one_export() -> None:
+    modules = _fresh_import_modules("import weft.commands")
+    assert not {module for module in modules if module.startswith("weft.commands.")}
+
+    modules = _fresh_import_modules(
+        "import weft.commands as commands\n"
+        "assert callable(commands.cmd_system_builtins)\n"
+        "assert commands.cmd_system_builtins is commands.cmd_system_builtins"
+    )
+    assert "weft.commands.builtins" in modules
+    assert "weft.commands.run" not in modules
+    assert "weft.commands.queue" not in modules
+    assert "weft.commands.tasks" not in modules
+
+
+def _leaf_paths(command: object, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+    children = getattr(command, "commands", None)
+    if not children:
+        return {prefix}
+    return {
+        path
+        for name, child in children.items()
+        for path in _leaf_paths(child, (*prefix, str(name)))
+    }
+
+
+def test_cli_verb_names_are_a_bijection_with_command_exports() -> None:
+    from weft import commands
+    from weft.cli.app import app
+
+    paths = _leaf_paths(typer.main.get_command(app))
+    derived = {"cmd_" + "_".join(part.replace("-", "_") for part in path) for path in paths}
+    assert len(paths) == 41
+    assert derived == COMMAND_EXPORTS
+    assert {name for name in commands.__all__ if name.startswith("cmd_")} == derived
+
+
+def test_runtime_import_graph_is_one_way_through_ext() -> None:
+    forbidden: list[ImportEdge] = []
+    core_ext_edges: list[ImportEdge] = []
+    for edge in _iter_import_edges(PACKAGE_ROOT):
+        if edge.type_checking or any(
+            _is_module_or_child(edge.target_module, allowed)
+            for allowed in ALLOWED_ANYWHERE
+        ):
+            continue
+        source = edge.source_module
+        target = edge.target_module
+        if _is_module_or_child(source, "weft.core") and _is_module_or_child(
+            target, "weft.ext"
+        ):
+            core_ext_edges.append(edge)
+        if (
+            _is_module_or_child(source, "weft.core")
+            and any(
+                _is_module_or_child(target, layer)
+                for layer in ("weft.commands", "weft.cli", "weft.client")
+            )
+        ) or (
+            _is_module_or_child(source, "weft.commands")
+            and any(
+                _is_module_or_child(target, layer)
+                for layer in ("weft.cli", "weft.client")
+            )
+        ) or (
+            _is_module_or_child(source, "weft.cli")
+            and any(
+                _is_module_or_child(target, layer)
+                for layer in ("weft.core", "weft.client", "weft.ext")
+            )
+        ) or (
+            _is_module_or_child(source, "weft.client")
+            and any(
+                _is_module_or_child(target, layer)
+                for layer in ("weft.core", "weft.cli", "weft.ext")
+            )
+        ) or (
+            _is_module_or_child(source, "weft.ext")
+            and any(
+                _is_module_or_child(target, layer)
+                for layer in ("weft.core", "weft.commands", "weft.cli", "weft.client")
+            )
+        ):
+            forbidden.append(edge)
+    assert core_ext_edges
+    assert forbidden == []
+
+
+@pytest.mark.parametrize("module_name", ["weft.cli", "weft.core"])
 def test_internal_package_initializers_are_markers(module_name: str) -> None:
     module = importlib.import_module(module_name)
 

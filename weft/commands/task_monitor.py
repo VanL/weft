@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import tempfile
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,7 +33,9 @@ from weft._constants import (
     TASK_MONITOR_SCHEMA_VERSION,
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
     TASKSPEC_TID_SHORT_LENGTH,
+    WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
 )
+from weft._exceptions import CommandExecutionError, CommandUsageError
 from weft.context import WeftContext, build_context
 from weft.core.monitor.task_monitor import (
     TaskMonitor,
@@ -48,17 +49,33 @@ TaskMonitorSinkName = Literal["stdout", "disk"]
 class TaskMonitorConfig:
     """Configuration for one foreground task monitor invocation."""
 
-    context_path: str | Path | None = None
-    once: bool = True
+    context: str | Path | None = None
     follow: bool = False
     sink: TaskMonitorSinkName = "stdout"
     log_dir: Path | None = None
-    checkpoint_path: Path | None = None
+    checkpoint: Path | None = None
     no_checkpoint: bool = False
-    since_timestamp: int | None = None
+    since: int | None = None
     limit: int | None = None
-    json_output: bool = False
     monitor_name: str = "default"
+
+    @property
+    def context_path(self) -> str | Path | None:
+        """Internal compatibility spelling for context construction."""
+
+        return self.context
+
+    @property
+    def checkpoint_path(self) -> Path | None:
+        """Internal compatibility spelling for checkpoint helpers."""
+
+        return self.checkpoint
+
+    @property
+    def since_timestamp(self) -> int | None:
+        """Internal compatibility spelling for scan helpers."""
+
+        return self.since
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,36 +90,22 @@ class TaskMonitorCheckpoint:
 
 @dataclass(frozen=True, slots=True)
 class TaskMonitorResult:
-    """Command result returned to the CLI adapter."""
+    """Structured result of one task-monitor pass. Spec: [PY-2]."""
 
-    exit_code: int
-    stdout: str = ""
-    stderr: str = ""
-    log_path: Path | None = None
-    records_written: int = 0
-    events_scanned: int = 0
-    tids_seen: int = 0
-    summaries_emitted: int = 0
-    checkpoint_timestamp: int | None = None
+    log_path: Path | None
+    records_written: int
+    events_scanned: int
+    tids_seen: int
+    summaries_emitted: int
+    checkpoint_timestamp: int | None
+    records: tuple[TaskMonitorRecord, ...]
 
-    def summary_payload(self) -> dict[str, Any]:
-        """Return the final command summary."""
 
-        payload: dict[str, Any] = {
-            "exit_code": self.exit_code,
-            "records_written": self.records_written,
-            "events_scanned": self.events_scanned,
-            "tids_seen": self.tids_seen,
-            "summaries_emitted": self.summaries_emitted,
-            "checkpoint_timestamp": (
-                format_message_id(self.checkpoint_timestamp)
-                if self.checkpoint_timestamp is not None
-                else None
-            ),
-        }
-        if self.log_path is not None:
-            payload["log_path"] = str(self.log_path)
-        return payload
+@dataclass(frozen=True, slots=True)
+class TaskMonitorRecord:
+    """Lossless pre-serialization task-monitor record. Spec: [PY-2]."""
+
+    record: Mapping[str, Any]
 
 
 @dataclass(slots=True)
@@ -124,7 +127,7 @@ class ReducedTaskLog:
 class TaskMonitorSummary:
     """Compact task-monitor summary for one terminal or anomalous task."""
 
-    record: dict[str, Any]
+    record: Mapping[str, Any]
 
 
 @dataclass(slots=True)
@@ -163,7 +166,6 @@ class StdoutTaskMonitorSink:
         for record in records:
             self._lines.append(json.dumps(record, ensure_ascii=False, sort_keys=True))
             count += 1
-        sys.stdout.flush()
         return count
 
 
@@ -504,22 +506,13 @@ def _resolve_since(
     return None
 
 
-def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-120] exception
-    """Run one foreground task monitor pass.
-
-    The first Release 4 implementation accepts `follow` for CLI shape but keeps
-    command execution to a single pass unless a later slice expands it.
-    """
+def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:
+    """Run one task-monitor pass and return pre-serialization records."""
 
     if config.sink not in {"stdout", "disk"}:
-        return TaskMonitorResult(1, stderr=f"Invalid sink: {config.sink}")
-    if config.sink == "stdout" and config.json_output:
-        return TaskMonitorResult(
-            1,
-            stderr="--sink stdout and --json cannot be combined",
-        )
+        raise CommandUsageError(f"Invalid sink: {config.sink}")
     if config.limit is not None and config.limit < 0:
-        return TaskMonitorResult(1, stderr="--limit must be non-negative")
+        raise CommandUsageError("--limit must be non-negative")
 
     try:
         ctx = build_context(spec_context=config.context_path)
@@ -561,15 +554,16 @@ def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:  # noqa: C
             checkpoint_timestamp=checkpoint_timestamp,
         )
 
-        sink: TaskMonitorSink
-        if config.sink == "stdout":
-            sink = StdoutTaskMonitorSink()
-        else:
+        log_path: Path | None = None
+        if config.sink == "disk":
             sink = DiskJsonlTaskMonitorSink(
                 config.log_dir or default_log_dir(ctx),
                 run_date=run_date,
             )
-        records_written = sink.write_records(records)
+            records_written = sink.write_records(records)
+            log_path = sink.log_path
+        else:
+            records_written = len(records)
 
         if not config.no_checkpoint and checkpoint_timestamp is not None:
             _write_checkpoint(
@@ -582,39 +576,77 @@ def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:  # noqa: C
                 ),
             )
 
-        stdout = ""
-        if isinstance(sink, StdoutTaskMonitorSink):
-            stdout = sink.output
-        elif config.json_output:
-            stdout = json.dumps(
-                {
-                    "records_written": records_written,
-                    "events_scanned": scan.events_scanned,
-                    "tids_seen": len(scan.reduced),
-                    "summaries_emitted": summaries,
-                    "checkpoint_timestamp": (
-                        format_message_id(checkpoint_timestamp)
-                        if checkpoint_timestamp is not None
-                        else None
-                    ),
-                    "log_path": str(sink.log_path),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        else:
-            stdout = (
-                f"Task monitor wrote {records_written} record(s) to {sink.log_path}"
-            )
         return TaskMonitorResult(
-            0,
-            stdout=stdout,
-            log_path=sink.log_path,
+            log_path=log_path,
             records_written=records_written,
             events_scanned=scan.events_scanned,
             tids_seen=len(scan.reduced),
             summaries_emitted=summaries,
             checkpoint_timestamp=checkpoint_timestamp,
+            records=tuple(TaskMonitorRecord(record) for record in records),
         )
     except (ValueError, OSError, BrokerError, RuntimeError) as exc:
-        return TaskMonitorResult(1, stderr=str(exc))
+        raise CommandExecutionError(str(exc)) from exc
+
+
+class _TaskMonitorSummaryStream(Iterator[TaskMonitorSummary]):
+    """Closable polling stream over newly emitted task summaries."""
+
+    def __init__(self, config: TaskMonitorConfig) -> None:
+        self._config = config
+        self._buffer: list[TaskMonitorSummary] = []
+        self._closed = False
+
+    def __iter__(self) -> _TaskMonitorSummaryStream:
+        return self
+
+    def __next__(self) -> TaskMonitorSummary:
+        while not self._closed:
+            if self._buffer:
+                return self._buffer.pop(0)
+            result = run_task_monitor(self._config)
+            self._buffer.extend(
+                TaskMonitorSummary(record.record)
+                for record in result.records
+                if record.record.get("record_type") == "task_summary"
+            )
+            if not self._buffer:
+                time.sleep(WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT)
+        raise StopIteration
+
+    def close(self) -> None:
+        """Stop polling; repeated calls are harmless."""
+
+        self._closed = True
+        self._buffer.clear()
+
+
+def cmd_system_task_monitor(
+    *,
+    context: str | Path | None = None,
+    follow: bool = False,
+    sink: TaskMonitorSinkName = "stdout",
+    log_dir: Path | None = None,
+    checkpoint: Path | None = None,
+    no_checkpoint: bool = False,
+    since: int | None = None,
+    limit: int | None = None,
+) -> TaskMonitorResult | Iterator[TaskMonitorSummary]:
+    """Run once or follow task-monitor summaries without process output.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    config = TaskMonitorConfig(
+        context=context,
+        follow=follow,
+        sink=sink,
+        log_dir=log_dir,
+        checkpoint=checkpoint,
+        no_checkpoint=no_checkpoint,
+        since=since,
+        limit=limit,
+    )
+    if follow:
+        return _TaskMonitorSummaryStream(config)
+    return run_task_monitor(config)

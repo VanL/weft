@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from simplebroker.ext import BrokerError
+from weft._exceptions import CommandExecutionError
 from weft.commands.types import SystemTidyResult
 from weft.context import WeftContext, build_context
 
@@ -31,4 +33,19 @@ def tidy_system(context: WeftContext) -> SystemTidyResult:
     return SystemTidyResult(target=context.broker_display_target)
 
 
-__all__ = ["cmd_tidy", "tidy_system"]
+def cmd_system_tidy(*, context: Path | None = None) -> SystemTidyResult:
+    """Compact the active broker and return its display target.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    try:
+        resolved = build_context(spec_context=context)
+        with resolved.broker() as broker:
+            broker.vacuum(compact=True)
+    except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+        raise CommandExecutionError(str(exc)) from exc
+    return SystemTidyResult(target=resolved.broker_display_target)
+
+
+__all__ = ["cmd_system_tidy", "cmd_tidy", "tidy_system"]

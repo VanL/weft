@@ -3,17 +3,83 @@
 from __future__ import annotations
 
 import inspect
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 import weft.commands.submission as submission_mod
+from weft._exceptions import CommandUsageError
 from weft.commands._spawn_submission import SpawnSubmissionReconciliation
 from weft.commands.types import PreparedSubmissionRequest
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 
 pytestmark = [pytest.mark.shared]
+
+
+def _write_declared_argument_spec(root: Path) -> Path:
+    spec_path = root / "declared.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "name": "declared",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "weft_context": str(root),
+                    "parameterization": {
+                        "adapter_ref": "tests.commands.test_submission:materialize_for_test",
+                        "arguments": {"provider": {"type": "string"}},
+                    },
+                    "run_input": {
+                        "adapter_ref": "weft.builtins.run_input:arguments_payload",
+                        "arguments": {"prompt": {"type": "string"}},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return spec_path
+
+
+def materialize_for_test(request: Any) -> dict[str, Any]:
+    """Materialize the fixture without relying on a bundle-local import."""
+
+    payload = json.loads(json.dumps(request.taskspec_payload))
+    payload["name"] = "task-" + request.arguments["provider"]
+    return payload
+
+
+def test_prepare_spec_processes_parameterization_then_run_input(
+    weft_harness,
+) -> None:
+    spec_path = _write_declared_argument_spec(weft_harness.root)
+
+    prepared = submission_mod.prepare_spec(
+        weft_harness.context,
+        spec_path,
+        spec_args=("--provider", "gemini", "--prompt", "hello"),
+    )
+
+    assert prepared.taskspec.name == "task-gemini"
+    assert prepared.payload == {"prompt": "hello"}
+
+
+def test_prepare_spec_rejects_payload_when_run_input_is_declared(
+    weft_harness,
+) -> None:
+    spec_path = _write_declared_argument_spec(weft_harness.root)
+
+    with pytest.raises(CommandUsageError, match="payload cannot be combined"):
+        submission_mod.prepare_spec(
+            weft_harness.context,
+            spec_path,
+            spec_args=("--provider", "gemini", "--prompt", "hello"),
+            payload={"other": True},
+        )
 
 
 class ManagerStartupFailure(Exception):

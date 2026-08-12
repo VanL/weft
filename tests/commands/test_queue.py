@@ -14,7 +14,18 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import WEFT_ENDPOINTS_REGISTRY_QUEUE
+from weft._exceptions import CommandExecutionError, CommandUsageError
 from weft.commands import queue as queue_cmd
+from weft.commands.types import (
+    EndpointResolution,
+    QueueAliasRecord,
+    QueueBroadcastReceipt,
+    QueueDeleteReceipt,
+    QueueEntry,
+    QueueInfo,
+    QueueMoveResult,
+    QueueWriteReceipt,
+)
 from weft.context import build_context
 from weft.core.endpoints import build_endpoint_record_payload
 from weft.core.tasks import Consumer
@@ -117,6 +128,235 @@ class _ClosableWatchQueue(_FakeWatchQueue):
         generator = _ClosableIterator(batch)
         self.generators.append(generator)
         return generator
+
+
+def test_public_queue_commands_return_structured_values(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+
+    written = queue_cmd.cmd_queue_write("public.source", "one")
+    queue_cmd.cmd_queue_write("public.source", "two")
+    assert isinstance(written, QueueWriteReceipt)
+    assert written == QueueWriteReceipt(queue="public.source", message="one")
+
+    peeked = queue_cmd.cmd_queue_peek("public.source", all=True)
+    assert isinstance(peeked, tuple)
+    assert all(isinstance(entry, QueueEntry) for entry in peeked)
+    assert [entry.message for entry in peeked] == ["one", "two"]
+
+    moved = queue_cmd.cmd_queue_move(
+        "public.source",
+        "public.destination",
+        all=True,
+    )
+    assert isinstance(moved, QueueMoveResult)
+    assert [entry.message for entry in moved.entries] == ["one", "two"]
+    assert moved.moved_count == 2
+
+    read = queue_cmd.cmd_queue_read("public.destination", all=True)
+    assert [entry.message for entry in read] == ["one", "two"]
+    assert queue_cmd.cmd_queue_exists("public.destination") is True
+
+
+def test_public_queue_metadata_alias_and_broadcast_commands(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+    queue_cmd.write_message(ctx, "public.target", "seed")
+
+    listed = queue_cmd.cmd_queue_list(stats=True)
+    assert all(isinstance(info, QueueInfo) for info in listed)
+    assert next(info for info in listed if info.name == "public.target").messages == 1
+    assert queue_cmd.cmd_queue_exists("public.target") is True
+    assert queue_cmd.cmd_queue_stats("public.target").total_messages == 1
+
+    added = queue_cmd.cmd_queue_alias_add("public-alias", "public.target")
+    assert added == QueueAliasRecord(alias="public-alias", target="public.target")
+    assert queue_cmd.cmd_queue_alias_list() == (added,)
+    assert queue_cmd.cmd_queue_alias_remove("public-alias") == added
+    assert queue_cmd.cmd_queue_alias_list() == ()
+
+    broadcast_result = queue_cmd.cmd_queue_broadcast("payload", pattern="public.*")
+    assert isinstance(broadcast_result, QueueBroadcastReceipt)
+    assert broadcast_result.target_count >= 1
+
+
+def test_public_queue_endpoint_commands_return_endpoint_records(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+    tid = str(time.time_ns())
+    task = Consumer(
+        ctx.broker_target,
+        make_function_taskspec(
+            tid,
+            "tests.tasks.sample_targets:echo_payload",
+            weft_context=str(root),
+        ),
+        config=ctx.config,
+    )
+    try:
+        task.register_endpoint_name("public-endpoint")
+        resolved = queue_cmd.cmd_queue_resolve("public-endpoint")
+        assert isinstance(resolved, EndpointResolution)
+        assert resolved.tid == tid
+        endpoints = queue_cmd.cmd_queue_list(endpoints=True)
+        assert endpoints == (resolved,)
+        receipt = queue_cmd.cmd_queue_write(
+            "endpoint payload",
+            endpoint="public-endpoint",
+        )
+        assert receipt.queue == resolved.inbox
+    finally:
+        task.cleanup()
+
+
+def test_public_queue_delete_reports_exact_and_queue_counts(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+    queue_cmd.write_message(ctx, "delete.public", "one")
+    entry = queue_cmd.peek_queue(ctx, "delete.public")[0]
+    assert entry.timestamp is not None
+
+    exact = queue_cmd.cmd_queue_delete(
+        "delete.public",
+        message=str(entry.timestamp),
+    )
+    assert exact == QueueDeleteReceipt(
+        queue="delete.public",
+        deleted_count=1,
+        queues_deleted=0,
+        all_queues=False,
+        exact_message=str(entry.timestamp),
+    )
+
+    queue_cmd.write_message(ctx, "delete.public", "two")
+    whole_queue = queue_cmd.cmd_queue_delete("delete.public")
+    assert whole_queue.deleted_count == 1
+    assert whole_queue.queues_deleted == 1
+
+
+def test_public_queue_watch_returns_closable_structured_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_queue = _ClosableWatchQueue("watch.queue", [[("payload", 5)]])
+    monitor_queue = _FakeWatchQueue("watch.queue", [])
+
+    class _FakeContext:
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {}
+            self._queues = [data_queue, monitor_queue]
+
+        def queue(self, _name: str, *, persistent: bool = True):
+            del persistent
+            return self._queues.pop(0)
+
+    monkeypatch.setattr(queue_cmd, "_context", lambda: _FakeContext())
+    monkeypatch.setattr(queue_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
+
+    stream = queue_cmd.cmd_queue_watch("watch.queue", limit=1, interval=0.01)
+    assert next(stream) == QueueEntry(queue="watch.queue", message="payload", timestamp=5)
+    with pytest.raises(StopIteration):
+        next(stream)
+    stream.close()
+    stream.close()
+    assert data_queue.closed
+    assert monitor_queue.closed
+
+
+@pytest.mark.parametrize(
+    ("invoke", "message"),
+    [
+        (lambda: queue_cmd.cmd_queue_write("q", None), "message is required"),
+        (lambda: queue_cmd.cmd_queue_broadcast(None), "message is required"),
+        (
+            lambda: queue_cmd.cmd_queue_read("q", all=True, message="1779600000000000001"),
+            "message cannot be used with all, after, or before",
+        ),
+        (
+            lambda: queue_cmd.cmd_queue_move("q", "q"),
+            "source and destination queues cannot be the same",
+        ),
+        (
+            lambda: queue_cmd.cmd_queue_list(pattern="a*", prefix="a"),
+            "pattern and prefix cannot be used together",
+        ),
+        (
+            lambda: queue_cmd.cmd_queue_watch("q", peek=True, move="other"),
+            "peek cannot be used with move",
+        ),
+        (
+            lambda: queue_cmd.cmd_queue_delete(None),
+            "queue name is required unless all=True",
+        ),
+    ],
+)
+def test_public_queue_commands_raise_typed_usage_errors(invoke, message: str) -> None:
+    with pytest.raises(CommandUsageError, match=message):
+        invoke()
+
+
+def test_public_queue_resolve_raises_typed_error_for_missing_endpoint(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+
+    with pytest.raises(CommandExecutionError, match="No active endpoint"):
+        queue_cmd.cmd_queue_resolve("missing")
+
+
+def test_public_queue_commands_do_not_read_stdin_or_write_process_output(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _ForbiddenStdin:
+        def read(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("public queue command read process stdin")
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+    monkeypatch.setattr(sys, "stdin", _ForbiddenStdin())
+
+    queue_cmd.cmd_queue_write("no.io", "payload")
+    queue_cmd.cmd_queue_broadcast("broadcast", pattern="no.*")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_public_queue_backend_failures_are_typed_and_chained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = OSError("broker unavailable")
+
+    def fail_context():
+        raise failure
+
+    monkeypatch.setattr(queue_cmd, "_context", fail_context)
+
+    with pytest.raises(CommandExecutionError, match="failed to resolve queue context") as caught:
+        queue_cmd.cmd_queue_exists("queue")
+    assert caught.value.__cause__ is failure
 
 
 def test_read_and_write_messages(tmp_path):

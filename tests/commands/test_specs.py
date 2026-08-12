@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,8 +14,66 @@ from tests.taskspec.fixtures import (
     create_valid_provider_cli_agent_taskspec,
 )
 from weft.commands import specs as spec_cmd
+from weft.commands.types import SpecMutationResult, SpecRecord, SpecValidationResult
 
 pytestmark = pytest.mark.shared
+
+
+def test_canonical_spec_commands_return_structured_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    record = SpecRecord(
+        spec_type="task",
+        name="demo",
+        path=tmp_path / "demo.json",
+        source="stored",
+    )
+    validation = SpecValidationResult(valid=True, spec_type="task")
+    resolved = SimpleNamespace(
+        spec_type="task",
+        name="demo",
+        path=record.path,
+        source="stored",
+        payload={"name": "demo"},
+    )
+
+    monkeypatch.setattr(spec_cmd, "create_spec_record", lambda *args, **kwargs: record)
+    monkeypatch.setattr(spec_cmd, "list_spec_records", lambda **kwargs: [record])
+    monkeypatch.setattr(
+        spec_cmd, "resolve_named_spec", lambda *args, **kwargs: resolved
+    )
+    monkeypatch.setattr(spec_cmd, "delete_spec", lambda *args, **kwargs: record.path)
+    monkeypatch.setattr(
+        spec_cmd, "validate_spec_source", lambda *args, **kwargs: validation
+    )
+    monkeypatch.setattr(
+        spec_cmd, "generate_spec", lambda spec_type: {"type": spec_type}
+    )
+
+    assert spec_cmd.cmd_spec_create("demo", file=record.path) == SpecMutationResult(
+        action="create", record=record
+    )
+    assert spec_cmd.cmd_spec_list() == (record,)
+    assert spec_cmd.cmd_spec_show("demo") == SpecRecord(
+        spec_type="task",
+        name="demo",
+        path=record.path,
+        source="stored",
+        payload={"name": "demo"},
+    )
+    assert spec_cmd.cmd_spec_delete("demo") == SpecMutationResult(
+        action="delete", record=record
+    )
+    assert spec_cmd.cmd_spec_validate(record.path) is validation
+    assert spec_cmd.cmd_spec_generate() == {"type": "task"}
+
+
+def test_canonical_spec_commands_translate_invalid_type_to_typed_usage_error() -> None:
+    from weft._exceptions import CommandUsageError
+
+    with pytest.raises(CommandUsageError, match="Unknown spec type"):
+        spec_cmd.cmd_spec_generate(type="unknown")
 
 
 def _write_json(path: Path, payload: dict) -> None:

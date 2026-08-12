@@ -8,18 +8,17 @@ Spec references:
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from simplebroker.commands import cmd_init as sb_cmd_init
 from weft._constants import (
-    EXIT_ERROR,
-    EXIT_SUCCESS,
     WEFT_BROKER_PROJECT_CONFIG_FILENAME,
     load_config,
 )
+from weft._exceptions import CommandExecutionError
+from weft.commands.types import InitResult
 from weft.context import (
     build_context,
     normalize_backend_resolution_error,
@@ -56,20 +55,15 @@ def _tighten_existing_project_broker_config(path: Path) -> None:
 def cmd_init(
     directory: Path | None = None,
     *,
-    quiet: bool = False,
     autostart: bool = True,
-    overrides: Mapping[str, Any] | None = None,
-) -> int:
+) -> InitResult:
     """Initialize a Weft project rooted at *directory*.
 
-    Returns the SimpleBroker exit code.  When successful the project structure
-    (the Weft metadata directory, config metadata, database) is ensured.
-    Explicit overrides let embedding callers supply WEFT_* or BROKER_* config
-    without temporarily mutating process environment.
+    Returns a structured project-initialization outcome.
 
     Spec: [SB-0] (Project Context and Directory Scoping)
     """
-    config = load_config(overrides) if overrides is not None else load_config()
+    config = load_config()
     root = Path(directory or Path.cwd()).expanduser().resolve()
     backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
     project_broker_config_path = _project_config_path(root, config)
@@ -78,27 +72,24 @@ def cmd_init(
         and not config.get("BROKER_DEFAULT_DB_NAME")
         and not project_broker_config_path.is_file()
     ):
-        if not quiet:
-            print(
-                "weft: BROKER_DEFAULT_DB_NAME not set in global config; cannot initialize project",
-                file=sys.stderr,
-            )
-        return EXIT_ERROR
+        raise CommandExecutionError(
+            "BROKER_DEFAULT_DB_NAME not set in global config; cannot initialize project"
+        )
+    created = not project_broker_config_path.is_file()
     try:
         _tighten_existing_project_broker_config(project_broker_config_path)
         broker_target = resolve_context_broker_target(root, config=config)
         result = int(sb_cmd_init(broker_target, quiet=True))
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-352] exception
+    except Exception as exc:
         friendly_exc = normalize_backend_resolution_error(exc)
-        if not quiet:
-            print(
-                f"weft: failed to initialize SimpleBroker database: {friendly_exc}",
-                file=sys.stderr,
-            )
-        return 1
+        raise CommandExecutionError(
+            f"failed to initialize SimpleBroker database: {friendly_exc}"
+        ) from exc
 
     if result != 0:
-        return result
+        raise CommandExecutionError(
+            f"SimpleBroker initialization failed with exit code {result}"
+        )
 
     context = build_context(
         spec_context=root,
@@ -109,7 +100,4 @@ def cmd_init(
     )
     update_project_config(context.config_path, {"autostart": autostart})
 
-    if not quiet:
-        print(f"Initialized Weft project in {root}")
-
-    return EXIT_SUCCESS
+    return InitResult(root=root, config_path=context.config_path, created=created)

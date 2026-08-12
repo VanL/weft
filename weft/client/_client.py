@@ -8,6 +8,7 @@ Spec references:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -84,22 +85,34 @@ class WeftClient:
         self,
         reference: str | Path,
         *,
+        spec_args: Sequence[str] = (),
         payload: Any = None,
+        stdin_text: str | None = None,
         **overrides: Any,
     ) -> Task:
-        return self.prepare_spec(reference, payload=payload, **overrides).submit()
+        return self.prepare_spec(
+            reference,
+            spec_args=spec_args,
+            payload=payload,
+            stdin_text=stdin_text,
+            **overrides,
+        ).submit()
 
     def prepare_spec(
         self,
         reference: str | Path,
         *,
+        spec_args: Sequence[str] = (),
         payload: Any = None,
+        stdin_text: str | None = None,
         **overrides: Any,
     ) -> PreparedSubmission:
         request = submission.prepare_spec(
             self.context,
             reference,
+            spec_args=spec_args,
             payload=payload,
+            stdin_text=stdin_text,
             **overrides,
         )
         return PreparedSubmission(self, request)

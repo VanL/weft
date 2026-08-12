@@ -9,11 +9,18 @@ Spec references:
 from __future__ import annotations
 
 from weft._exceptions import (
+    CommandError,
+    CommandExecutionError,
+    CommandTimeoutError,
+    CommandUsageError,
     ControlRejected,
     InvalidTID,
     ManagerNotRunning,
     ManagerStartFailed,
     SpecNotFound,
+    SubmissionError,
+    SubmissionManagerError,
+    SubmissionValidationError,
     TaskNotFound,
     WeftError,
 )
@@ -30,6 +37,10 @@ from ._types import (
 )
 
 __all__ = [
+    "CommandError",
+    "CommandExecutionError",
+    "CommandTimeoutError",
+    "CommandUsageError",
     "ControlRejected",
     "InvalidTID",
     "ManagerNotRunning",
@@ -37,6 +48,9 @@ __all__ = [
     "PreparedSubmission",
     "QueueAckTarget",
     "SpecNotFound",
+    "SubmissionError",
+    "SubmissionManagerError",
+    "SubmissionValidationError",
     "Task",
     "TaskEvent",
     "TaskNotFound",

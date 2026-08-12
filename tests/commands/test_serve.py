@@ -13,6 +13,7 @@ from weft._constants import (
     SERVICE_STATUS_SUPERSEDED,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
+from weft._exceptions import CommandExecutionError
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.service_convergence import (
@@ -129,6 +130,34 @@ def test_serve_command_delegates_to_shared_foreground_helper(
     assert context_calls
     assert context_calls[0][0] == context_root
     assert context_calls[0][1][MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] is True
+
+
+def test_cmd_manager_serve_returns_none_and_raises_typed_runtime_failures(
+    tmp_path, monkeypatch
+) -> None:
+    from weft.commands import serve as serve_cmd
+
+    context_root = prepare_project_root(tmp_path / "proj")
+    context = build_context(context_root)
+    monkeypatch.setattr(
+        serve_cmd,
+        "build_context",
+        lambda spec_context=None, *, config=None: context,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "serve_manager_foreground",
+        lambda context_arg: (0, None),
+    )
+    assert serve_cmd.cmd_manager_serve(context=context_root) is None
+
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "serve_manager_foreground",
+        lambda context_arg: (1, "foreground failed"),
+    )
+    with pytest.raises(CommandExecutionError, match="foreground failed"):
+        serve_cmd.cmd_manager_serve(context=context_root)
 
 
 def test_serve_command_returns_preflight_message(tmp_path, monkeypatch) -> None:

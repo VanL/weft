@@ -24,9 +24,15 @@ from weft._constants import (
     SPEC_TYPE_TASK,
     SUBMIT_OVERRIDE_NAMES,
 )
-from weft._exceptions import InvalidTID, SpecNotFound
+from weft._exceptions import (
+    CommandUsageError,
+    InvalidTID,
+    SpecNotFound,
+    SubmissionManagerError,
+    SubmissionValidationError,
+)
 from weft.commands.types import PreparedSubmissionRequest, SubmittedTaskReceipt
-from weft.context import WeftContext
+from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
@@ -35,8 +41,13 @@ from weft.core.taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
     encode_taskspec_transport_payload,
+    invoke_run_input_adapter,
+    materialize_taskspec_template,
+    parse_declared_parameterization_args,
+    parse_declared_run_input_args,
     validate_taskspec_payload,
 )
+from weft.ext import SpecRunInputRequest
 
 from ._spawn_submission import reconcile_submitted_spawn
 from .specs import resolve_named_spec, resolve_spec_reference
@@ -301,18 +312,29 @@ def submit_prepared(
     """Write a previously prepared submission through the spawn queue."""
 
     normalized = normalize_taskspec(prepared.taskspec)
+    runtime_root = Path(
+        normalized.spec.weft_context or context.root
+    ).expanduser().resolve()
+    runtime_context = (
+        context
+        if runtime_root == context.root.resolve()
+        else build_context(runtime_root)
+    )
     submitted_tid = submit_spawn_request(
-        context.broker_target,
+        runtime_context.broker_target,
         taskspec=normalized,
         work_payload=prepared.payload,
-        config=context.broker_config,
+        config=runtime_context.broker_config,
         tid=normalized.tid,
         inherited_weft_context=normalized.spec.weft_context,
         seed_start_envelope=prepared.seed_start_envelope,
         allow_internal_runtime=prepared.allow_internal_runtime,
     )
     task_tid = str(submitted_tid)
-    ensure_manager_after_submission(context, submitted_tid=task_tid)
+    try:
+        ensure_manager_after_submission(runtime_context, submitted_tid=task_tid)
+    except RuntimeError as exc:
+        raise SubmissionManagerError(str(exc)) from exc
     return _receipt(prepared.name, task_tid)
 
 
@@ -364,11 +386,13 @@ def submit(
     )
 
 
-def prepare_spec(
+def prepare_spec(  # noqa: C901 approved [PY-3] declared-input pipeline
     context: WeftContext,
     reference: str | Path,
     *,
+    spec_args: Sequence[str] = (),
     payload: Any = None,
+    stdin_text: str | None = None,
     **overrides: Any,
 ) -> PreparedSubmissionRequest:
     """Resolve, validate, and snapshot a stored or file-backed task spec."""
@@ -382,27 +406,89 @@ def prepare_spec(
         )
     except FileNotFoundError as exc:
         raise SpecNotFound(str(exc)) from exc
-    taskspec = validate_taskspec_payload(
-        resolved.payload,
-        bundle_root=resolved.bundle_root,
-        template=True,
-    )
-    updated = apply_submit_overrides(taskspec, **overrides)
-    return prepare_taskspec(updated, payload=payload)
+    try:
+        taskspec = validate_taskspec_payload(
+            resolved.payload,
+            bundle_root=resolved.bundle_root,
+            template=True,
+        )
+        remaining = list(spec_args)
+        parameterization = taskspec.spec.parameterization
+        if parameterization is not None:
+            arguments, remaining = parse_declared_parameterization_args(
+                remaining,
+                parameterization.arguments,
+            )
+            taskspec = materialize_taskspec_template(
+                taskspec,
+                arguments=arguments,
+                context_root=str(context.root),
+            )
+        updated = apply_submit_overrides(taskspec, **overrides)
+        run_input = updated.spec.run_input
+        if run_input is None:
+            if remaining:
+                raise CommandUsageError(
+                    "This TaskSpec does not declare submission arguments"
+                )
+            if stdin_text is not None:
+                raise CommandUsageError(
+                    "stdin_text requires a TaskSpec run_input stdin contract"
+                )
+            work_payload = payload
+        else:
+            if payload is not None:
+                raise CommandUsageError(
+                    "payload cannot be combined with a TaskSpec run_input contract"
+                )
+            if stdin_text is not None and run_input.stdin is None:
+                raise CommandUsageError(
+                    "stdin_text requires a TaskSpec run_input stdin contract"
+                )
+            if run_input.stdin is not None and run_input.stdin.required and stdin_text is None:
+                raise CommandUsageError("This TaskSpec requires stdin_text")
+            arguments = parse_declared_run_input_args(
+                remaining,
+                run_input.arguments,
+            )
+            work_payload = invoke_run_input_adapter(
+                run_input.adapter_ref,
+                request=SpecRunInputRequest(
+                    arguments=arguments,
+                    stdin_text=stdin_text,
+                    context_root=updated.spec.weft_context,
+                    spec_name=updated.name,
+                ),
+                bundle_root=updated.get_bundle_root(),
+            )
+        return prepare_taskspec(updated, payload=work_payload)
+    except CommandUsageError:
+        raise
+    except (TypeError, ValueError, OSError) as exc:
+        raise SubmissionValidationError(str(exc)) from exc
 
 
 def submit_spec(
     context: WeftContext,
     reference: str | Path,
     *,
+    spec_args: Sequence[str] = (),
     payload: Any = None,
+    stdin_text: str | None = None,
     **overrides: Any,
 ) -> SubmittedTaskReceipt:
     """Resolve and submit a stored, builtin, or file-backed task spec."""
 
     return submit_prepared(
         context,
-        prepare_spec(context, reference, payload=payload, **overrides),
+        prepare_spec(
+            context,
+            reference,
+            spec_args=spec_args,
+            payload=payload,
+            stdin_text=stdin_text,
+            **overrides,
+        ),
     )
 
 

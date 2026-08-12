@@ -13,6 +13,8 @@ from typing import Any, TextIO
 from simplebroker import dump_lines
 from simplebroker.ext import BrokerError
 from weft._constants import WEFT_STATE_QUEUE_PREFIX
+from weft._exceptions import CommandError, CommandExecutionError
+from weft.commands.types import SystemDumpResult
 from weft.context import WeftContext, build_context
 from weft.helpers import open_owner_only_text
 
@@ -72,48 +74,59 @@ def cmd_dump(
 ) -> tuple[int, str | None]:
     """Export database state to JSONL format."""
     try:
-        context = build_context(spec_context=context_path)
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-330] exception
-        return 1, f"weft dump: failed to resolve context: {exc}"
+        result = cmd_system_dump(
+            output=output,
+            context=Path(context_path) if context_path is not None else None,
+        )
+    except CommandError as exc:
+        return 1, str(exc)
+    message = f"Exported {result.messages} messages from {result.queues} queues"
+    if result.aliases > 0:
+        message += f" and {result.aliases} aliases"
+    if result.omitted_claimed_messages > 0:
+        message += (
+            f"; omitted {result.omitted_claimed_messages} claimed messages from "
+            f"{result.omitted_claimed_queues} queues"
+        )
+    message += f" to {result.path}"
+    return 0, message
 
-    if output is None:
-        output_path = context.weft_dir / "weft_export.jsonl"
-    else:
-        output_path = Path(output)
-        if not output_path.is_absolute():
-            output_path = Path.cwd() / output_path
 
+def cmd_system_dump(
+    *,
+    output: str | None = None,
+    context: Path | None = None,
+) -> SystemDumpResult:
+    """Export broker state and return exact exported and omitted counts.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    try:
+        resolved = build_context(spec_context=context)
+    except Exception as exc:  # public command boundary [PY-2]
+        raise CommandExecutionError(
+            f"weft dump: failed to resolve context: {exc}"
+        ) from exc
+    output_path = resolved.weft_dir / "weft_export.jsonl" if output is None else Path(output)
+    if not output_path.is_absolute():
+        output_path = Path.cwd() / output_path
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        return 1, f"weft dump: failed to create output directory: {exc}"
-
-    alias_count = 0
-    exported_queues = 0
-    exported_messages = 0
-    claimed_queues = 0
-    claimed_messages = 0
-
-    try:
-        with context.broker() as db:
+        with resolved.broker() as db:
             with open_owner_only_text(output_path) as output_file:
-                alias_count, exported_messages, exported_queues = _write_dump(
-                    output_file, db
-                )
-            claimed_queues, claimed_messages = _claimed_summary(db)
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-330] exception
-        return 1, f"weft dump: export failed: {exc}"
-
-    message = f"Exported {exported_messages} messages from {exported_queues} queues"
-    if alias_count > 0:
-        message += f" and {alias_count} aliases"
-    if claimed_messages > 0:
-        message += (
-            f"; omitted {claimed_messages} claimed messages from "
-            f"{claimed_queues} queues"
-        )
-    message += f" to {output_path}"
-    return 0, message
+                aliases, messages, queues = _write_dump(output_file, db)
+            omitted_queues, omitted_messages = _claimed_summary(db)
+    except Exception as exc:  # public command boundary [PY-2]
+        raise CommandExecutionError(f"weft dump: export failed: {exc}") from exc
+    return SystemDumpResult(
+        path=output_path,
+        queues=queues,
+        messages=messages,
+        aliases=aliases,
+        omitted_claimed_queues=omitted_queues,
+        omitted_claimed_messages=omitted_messages,
+    )
 
 
 def dump_system(
@@ -138,4 +151,4 @@ def dump_system(
     return output_path
 
 
-__all__ = ["cmd_dump", "dump_system"]
+__all__ = ["cmd_dump", "cmd_system_dump", "dump_system"]

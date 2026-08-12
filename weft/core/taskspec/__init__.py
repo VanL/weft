@@ -39,7 +39,6 @@ from .parameterization import (
 from .run_input import (
     RUN_COMMAND_RESERVED_OPTION_NAMES,
     ParsedDeclaredOptions,
-    SpecRunInputRequest,
     ensure_json_serializable_work_payload,
     invoke_run_input_adapter,
     normalize_declared_option_name,
@@ -72,7 +71,6 @@ __all__ = [
     "RunInputSection",
     "RunnerSection",
     "SpecParameterizationRequest",
-    "SpecRunInputRequest",
     "SpecSection",
     "StateSection",
     "TaskSpec",

@@ -7,6 +7,7 @@ Spec references:
 - docs/specifications/01-Core_Components.md [CC-3.2]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3]
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-5.2], [PL-5.3]
+- docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal, cast
 
 import weft.commands.system as system_cmd
 from simplebroker import Queue
@@ -37,10 +39,21 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft._exceptions import ControlRejected, TaskNotFound
+from weft._exceptions import (
+    CommandUsageError,
+    ControlRejected,
+    InvalidTID,
+    TaskNotFound,
+)
 from weft._runner_plugins import require_runner_plugin
-from weft.commands.types import TaskSnapshot as PublicTaskSnapshot
-from weft.commands.types import TaskTerminalSnapshot
+from weft.commands.types import (
+    CommandStream,
+    TaskControlResult,
+    TaskEvent,
+    TaskPingResult,
+    TaskSnapshot,
+    TaskTerminalSnapshot,
+)
 from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
@@ -56,6 +69,7 @@ from weft.helpers import (
     terminate_process_tree,
 )
 
+from ._boundary import typed_command_errors
 from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
 from .control_convergence import (
     ControlConvergenceEvidence,
@@ -263,11 +277,11 @@ def _public_snapshot(
     status_snapshot: system_cmd.TaskSnapshot,
     *,
     taskspec_payload: dict[str, Any] | None,
-) -> PublicTaskSnapshot:
+) -> TaskSnapshot:
     state = _state_from_taskspec(taskspec_payload)
     error = state.get("error")
     return_code = state.get("return_code")
-    return PublicTaskSnapshot(
+    return TaskSnapshot(
         tid=status_snapshot.tid,
         tid_short=status_snapshot.tid_short,
         name=status_snapshot.name,
@@ -802,7 +816,7 @@ def list_task_snapshots(
     include_terminal: bool = False,
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
-) -> list[PublicTaskSnapshot]:
+) -> list[TaskSnapshot]:
     """Return public task snapshots for the selected context."""
 
     ctx = _coerce_context(context=context, context_path=context_path)
@@ -853,7 +867,7 @@ def task_snapshot(
     include_terminal: bool = True,
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
-) -> PublicTaskSnapshot | None:
+) -> TaskSnapshot | None:
     """Return one public task snapshot or `None` if absent."""
 
     ctx = _coerce_context(context=context, context_path=context_path)
@@ -881,7 +895,7 @@ def watch_task_status(
     timeout: float | None = None,
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
-) -> Iterable[PublicTaskSnapshot]:
+) -> Iterable[TaskSnapshot]:
     """Yield snapshots as the task changes until terminal state."""
 
     ctx = _coerce_context(context=context, context_path=context_path)
@@ -1818,9 +1832,276 @@ def kill_task(
 
 
 def filter_tids_by_pattern(
-    snapshots: Iterable[system_cmd.TaskSnapshot | PublicTaskSnapshot],
+    snapshots: Iterable[system_cmd.TaskSnapshot | TaskSnapshot],
     pattern: str,
 ) -> list[str]:
     if not pattern:
         return [snap.tid for snap in snapshots]
     return [snap.tid for snap in snapshots if fnmatchcase(snap.name, pattern)]
+
+
+def _process_fields_for_tid(
+    ctx: WeftContext,
+    tid: str,
+) -> dict[str, tuple[int, ...]]:
+    """Return structured process enrichment for task status."""
+
+    mapping = mapping_for_tid(ctx, tid) or {}
+    managed_pids: tuple[int, ...] = ()
+    handle = system_cmd._runtime_handle_from_mapping(mapping)
+    if handle is not None:
+        managed_pids = handle.scoped_host_pids()
+    return {
+        "host_pids": managed_pids,
+        "managed_pids": managed_pids,
+        "live_managed_pids": tuple(pid for pid in managed_pids if pid_is_live(pid)),
+    }
+
+
+def _command_tid(
+    raw: str,
+    *,
+    context: WeftContext,
+    allow_unknown_full: bool = False,
+) -> str:
+    """Normalize one public command TID or raise its typed failure."""
+
+    candidate = raw.strip().lstrip("T")
+    if not candidate or not candidate.isdigit():
+        raise InvalidTID(f"Invalid task ID: {raw!r}")
+    if len(candidate) == 19:
+        if allow_unknown_full:
+            return candidate
+        resolved = resolve_tid(tid=candidate, context=context)
+        return resolved or candidate
+    resolved = resolve_tid(tid=candidate, context=context)
+    if resolved is None or not resolved.isdigit() or len(resolved) != 19:
+        raise TaskNotFound(f"Task {raw} not found")
+    return resolved
+
+
+@typed_command_errors
+def cmd_task_list(
+    *,
+    status: str | None = None,
+    all: bool = False,
+    context: Path | None = None,
+) -> tuple[TaskSnapshot, ...]:
+    """Return the selected task snapshots.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    return tuple(
+        list_task_snapshots(
+            status_filter=status,
+            include_terminal=all,
+            context_path=context,
+        )
+    )
+
+
+@typed_command_errors
+def cmd_task_status(
+    tid: str,
+    *,
+    process: bool = False,
+    watch: bool = False,
+    ping: bool = False,
+    context: Path | None = None,
+) -> TaskSnapshot | CommandStream[TaskEvent]:
+    """Return one task snapshot or a structured event stream.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    ctx = _coerce_context(context_path=context)
+    full_tid = _command_tid(tid, context=ctx, allow_unknown_full=True)
+    if ping:
+        internal_snapshot = task_status(
+            full_tid,
+            include_terminal=True,
+            ping=True,
+            context_path=ctx.root,
+        )
+        snapshot = (
+            _public_snapshot(
+                internal_snapshot,
+                taskspec_payload=_load_taskspec_payload_bounded(ctx, full_tid),
+            )
+            if internal_snapshot is not None
+            else None
+        )
+    else:
+        snapshot = task_snapshot(full_tid, context=ctx)
+    if snapshot is None:
+        raise TaskNotFound(f"Task {tid} not found")
+    if watch:
+        # Late import breaks the intentional tasks <-> events helper cycle.
+        from .events import follow_task_events
+
+        return cast(CommandStream[TaskEvent], follow_task_events(ctx, full_tid))
+    if process:
+        process_fields = _process_fields_for_tid(ctx, full_tid)
+        snapshot = replace(
+            snapshot,
+            host_pids=process_fields["host_pids"],
+            managed_pids=process_fields["managed_pids"],
+            live_managed_pids=process_fields["live_managed_pids"],
+        )
+    return snapshot
+
+
+@typed_command_errors
+def cmd_task_ping(
+    tid: str,
+    *,
+    timeout: float = TASK_PING_TIMEOUT_SECONDS,
+    context: Path | None = None,
+) -> TaskPingResult:
+    """Send a keyed task PING and return its structured observation.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    ctx = _coerce_context(context_path=context)
+    full_tid = _command_tid(tid, context=ctx, allow_unknown_full=True)
+    payload = task_ping(full_tid, timeout=timeout, context=ctx)
+    timed_out = bool(payload.get("timed_out"))
+    pong = payload.get("pong")
+    normalized_pong = dict(pong) if isinstance(pong, Mapping) else None
+    return TaskPingResult(
+        tid=full_tid,
+        acknowledged=not timed_out and normalized_pong is not None,
+        timed_out=timed_out,
+        error=str(payload["error"]) if payload.get("error") is not None else None,
+        observed_at=(
+            int(payload["observed_at"])
+            if isinstance(payload.get("observed_at"), int)
+            else None
+        ),
+        pong=normalized_pong,
+        snapshot=task_snapshot(full_tid, context=ctx),
+    )
+
+
+def _selected_control_tids(
+    tid: str | None,
+    *,
+    all_tasks: bool,
+    pattern: str | None,
+    context: WeftContext,
+) -> tuple[str, ...]:
+    if all_tasks or pattern:
+        snapshots = list_task_snapshots(include_terminal=False, context=context)
+        return tuple(filter_tids_by_pattern(snapshots, pattern or ""))
+    if tid is None:
+        raise CommandUsageError("Provide a task id or use --all or --pattern")
+    return (_command_tid(tid, context=context, allow_unknown_full=True),)
+
+
+def _task_control_result(
+    command: Literal["stop", "kill"],
+    tid: str | None,
+    *,
+    all_tasks: bool,
+    pattern: str | None,
+    context_path: Path | None,
+) -> TaskControlResult:
+    ctx = _coerce_context(context_path=context_path)
+    requested = _selected_control_tids(
+        tid,
+        all_tasks=all_tasks,
+        pattern=pattern,
+        context=ctx,
+    )
+    operation = stop_task if command == "stop" else kill_task
+    accepted: list[str] = []
+    for full_tid in requested:
+        operation(full_tid, context=ctx)
+        accepted.append(full_tid)
+    snapshots = tuple(
+        snapshot
+        for full_tid in accepted
+        if (snapshot := task_snapshot(full_tid, context=ctx)) is not None
+    )
+    return TaskControlResult(
+        command=command,
+        requested=requested,
+        accepted=tuple(accepted),
+        snapshots=snapshots,
+    )
+
+
+@typed_command_errors
+def cmd_task_stop(
+    tid: str | None = None,
+    *,
+    all: bool = False,
+    pattern: str | None = None,
+    context: Path | None = None,
+) -> TaskControlResult:
+    """Gracefully stop the selected tasks.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    return _task_control_result(
+        "stop",
+        tid,
+        all_tasks=all,
+        pattern=pattern,
+        context_path=context,
+    )
+
+
+@typed_command_errors
+def cmd_task_kill(
+    tid: str | None = None,
+    *,
+    all: bool = False,
+    pattern: str | None = None,
+    context: Path | None = None,
+) -> TaskControlResult:
+    """Force-kill the selected tasks.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    return _task_control_result(
+        "kill",
+        tid,
+        all_tasks=all,
+        pattern=pattern,
+        context_path=context,
+    )
+
+
+@typed_command_errors
+def cmd_task_tid(
+    tid: str | None = None,
+    *,
+    pid: int | None = None,
+    reverse: str | None = None,
+    context: Path | None = None,
+) -> str:
+    """Resolve one selector to a canonical full task ID.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    selectors = sum(value is not None for value in (tid, pid, reverse))
+    if selectors != 1:
+        raise CommandUsageError("Provide exactly one of tid, --pid, or --reverse")
+    ctx = _coerce_context(context_path=context)
+    if reverse is not None:
+        candidate = reverse.strip().lstrip("T")
+        if not candidate.isdigit() or len(candidate) != 19:
+            raise InvalidTID(f"Invalid full task ID: {reverse!r}")
+        return candidate
+    resolved = resolve_tid(tid=tid, pid=pid, context=ctx)
+    if resolved is None:
+        raise TaskNotFound("No matching TID found")
+    if not resolved.isdigit() or len(resolved) != 19:
+        raise InvalidTID(f"Invalid resolved task ID: {resolved!r}")
+    return resolved

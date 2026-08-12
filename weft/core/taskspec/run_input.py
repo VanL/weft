@@ -15,16 +15,7 @@ from typing import Any
 
 from weft._constants import RUN_COMMAND_RESERVED_OPTION_NAMES
 from weft.core.imports import import_callable_ref, split_import_ref
-
-
-@dataclass(frozen=True, slots=True)
-class SpecRunInputRequest:
-    """Submission-time request passed to a spec-owned input adapter."""
-
-    arguments: dict[str, str]
-    stdin_text: str | None
-    context_root: str | None
-    spec_name: str
+from weft.ext import SpecRunInputRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +202,6 @@ def invoke_run_input_adapter(
 __all__ = [
     "RUN_COMMAND_RESERVED_OPTION_NAMES",
     "ParsedDeclaredOptions",
-    "SpecRunInputRequest",
     "ensure_json_serializable_work_payload",
     "invoke_run_input_adapter",
     "normalize_declared_option_name",

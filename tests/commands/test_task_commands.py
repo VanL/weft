@@ -6,6 +6,7 @@ import inspect
 import json
 import time
 from collections import Counter
+from dataclasses import replace
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import CONTROL_KILL, WEFT_TID_MAPPINGS_QUEUE
+from weft.commands import events as event_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.control_convergence import (
     ControlConvergenceAction,
@@ -22,6 +24,7 @@ from weft.commands.control_convergence import (
     control_convergence_machine,
     reduce_control_convergence,
 )
+from weft.commands.types import TaskControlResult, TaskPingResult, TaskSnapshot
 from weft.context import build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
@@ -37,6 +40,193 @@ from weft.helpers import (
 )
 
 pytestmark = [pytest.mark.shared]
+
+
+def _public_task_snapshot(tid: str, *, name: str = "demo") -> TaskSnapshot:
+    return TaskSnapshot(
+        tid=tid,
+        name=name,
+        status="running",
+        return_code=None,
+        started_at=None,
+        completed_at=None,
+        error=None,
+        runtime_handle=None,
+        metadata={},
+    )
+
+
+def test_canonical_task_list_and_status_return_public_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000123"
+    snapshot = _public_task_snapshot(tid)
+    monkeypatch.setattr(task_cmd, "list_task_snapshots", lambda **kwargs: [snapshot])
+    monkeypatch.setattr(task_cmd, "task_snapshot", lambda *args, **kwargs: snapshot)
+
+    assert task_cmd.cmd_task_list(status="running", all=True) == (snapshot,)
+    assert task_cmd.cmd_task_status(tid) is snapshot
+
+
+def test_canonical_task_status_enriches_process_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000124"
+    snapshot = _public_task_snapshot(tid)
+    monkeypatch.setattr(task_cmd, "task_snapshot", lambda *args, **kwargs: snapshot)
+    monkeypatch.setattr(
+        task_cmd,
+        "_process_fields_for_tid",
+        lambda *args, **kwargs: {
+            "host_pids": (11, 12),
+            "managed_pids": (11, 12),
+            "live_managed_pids": (12,),
+        },
+    )
+
+    assert task_cmd.cmd_task_status(tid, process=True) == replace(
+        snapshot,
+        host_pids=(11, 12),
+        managed_pids=(11, 12),
+        live_managed_pids=(12,),
+    )
+
+
+def test_process_enrichment_uses_scoped_host_pids_and_live_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = build_context(spec_context=Path.cwd())
+    handle = type(
+        "FakeHandle",
+        (),
+        {"scoped_host_pids": lambda self: (21, 22)},
+    )()
+    monkeypatch.setattr(
+        task_cmd,
+        "mapping_for_tid",
+        lambda *args, **kwargs: {"runtime_handle": {"runner": "host"}},
+    )
+    monkeypatch.setattr(
+        task_cmd.system_cmd,
+        "_runtime_handle_from_mapping",
+        lambda mapping: handle,
+    )
+    monkeypatch.setattr(task_cmd, "pid_is_live", lambda pid: pid == 22)
+
+    assert task_cmd._process_fields_for_tid(ctx, "1777000000000000124") == {
+        "host_pids": (21, 22),
+        "managed_pids": (21, 22),
+        "live_managed_pids": (22,),
+    }
+
+
+def test_canonical_task_status_watch_returns_typed_event_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000124"
+    snapshot = _public_task_snapshot(tid)
+    events = (event for event in ())
+    monkeypatch.setattr(task_cmd, "task_snapshot", lambda *args, **kwargs: snapshot)
+    monkeypatch.setattr(event_cmd, "follow_task_events", lambda *args, **kwargs: events)
+
+    assert task_cmd.cmd_task_status(tid, watch=True) is events
+
+
+def test_canonical_task_ping_returns_structured_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000125"
+    snapshot = _public_task_snapshot(tid)
+    monkeypatch.setattr(
+        task_cmd,
+        "task_ping",
+        lambda *args, **kwargs: {
+            "timed_out": False,
+            "error": None,
+            "observed_at": 99,
+            "pong": {"status": "running"},
+        },
+    )
+    monkeypatch.setattr(task_cmd, "task_snapshot", lambda *args, **kwargs: snapshot)
+
+    assert task_cmd.cmd_task_ping(tid) == TaskPingResult(
+        tid=tid,
+        acknowledged=True,
+        timed_out=False,
+        error=None,
+        observed_at=99,
+        pong={"status": "running"},
+        snapshot=snapshot,
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"), [("stop", "stop_task"), ("kill", "kill_task")]
+)
+def test_canonical_task_control_returns_selected_ids_and_snapshots(
+    command: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tids = ("1777000000000000126", "1777000000000000127")
+    snapshots = [
+        _public_task_snapshot(tid, name=f"job-{index}")
+        for index, tid in enumerate(tids)
+    ]
+    calls: list[str] = []
+    monkeypatch.setattr(task_cmd, "list_task_snapshots", lambda **kwargs: snapshots)
+    monkeypatch.setattr(task_cmd, expected, lambda tid, **kwargs: calls.append(tid))
+    monkeypatch.setattr(
+        task_cmd,
+        "task_snapshot",
+        lambda tid, **kwargs: replace(_public_task_snapshot(tid), status="cancelled"),
+    )
+
+    function = task_cmd.cmd_task_stop if command == "stop" else task_cmd.cmd_task_kill
+    result = function(all=True)
+
+    assert calls == list(tids)
+    assert result == TaskControlResult(
+        command=command,
+        requested=tids,
+        accepted=tids,
+        snapshots=tuple(
+            replace(_public_task_snapshot(tid), status="cancelled") for tid in tids
+        ),
+    )
+
+
+def test_canonical_task_control_pattern_selects_matching_active_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tids = ("1777000000000000126", "1777000000000000127")
+    snapshots = (
+        _public_task_snapshot(tids[0], name="job-one"),
+        _public_task_snapshot(tids[1], name="other"),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(task_cmd, "list_task_snapshots", lambda **kwargs: snapshots)
+    monkeypatch.setattr(task_cmd, "stop_task", lambda tid, **kwargs: calls.append(tid))
+    monkeypatch.setattr(task_cmd, "task_snapshot", lambda *args, **kwargs: None)
+
+    result = task_cmd.cmd_task_stop(pattern="job-*")
+
+    assert calls == [tids[0]]
+    assert result.requested == (tids[0],)
+    assert result.accepted == (tids[0],)
+
+
+def test_canonical_task_tid_returns_full_tid_and_rejects_ambiguous_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from weft._exceptions import CommandUsageError
+
+    full_tid = "1777000000000000128"
+    monkeypatch.setattr(task_cmd, "resolve_tid", lambda **kwargs: full_tid)
+
+    assert task_cmd.cmd_task_tid(tid="00128") == full_tid
+    with pytest.raises(CommandUsageError, match="exactly one"):
+        task_cmd.cmd_task_tid(tid="00128", pid=12)
 
 
 def test_task_snapshot_interfaces_drop_inert_process_parameter() -> None:

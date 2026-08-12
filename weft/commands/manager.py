@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from simplebroker import format_message_id
 from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
-from weft._exceptions import ControlRejected, ManagerNotRunning
+from weft._exceptions import ControlRejected, ManagerNotRunning, ManagerStartFailed
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
@@ -81,13 +81,94 @@ def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
         ctrl_out=(
             record.get("ctrl_out") if isinstance(record.get("ctrl_out"), str) else None
         ),
+        liveness=(
+            cast(
+                Literal["live", "stale", "unknown", "non_live"],
+                record["liveness"],
+            )
+            if record.get("liveness") in {"live", "stale", "unknown", "non_live"}
+            else None
+        ),
+        proof_source=(
+            record.get("proof_source")
+            if isinstance(record.get("proof_source"), str)
+            else None
+        ),
+        proof_detail=(
+            record.get("proof_detail")
+            if isinstance(record.get("proof_detail"), str)
+            else None
+        ),
+        dispatch_eligible=(
+            record.get("dispatch_eligible")
+            if isinstance(record.get("dispatch_eligible"), bool)
+            else None
+        ),
+        canonical_candidate=(
+            record.get("canonical_candidate")
+            if isinstance(record.get("canonical_candidate"), bool)
+            else None
+        ),
+        canonical=(
+            record.get("canonical")
+            if isinstance(record.get("canonical"), bool)
+            else None
+        ),
     )
+
+
+def cmd_manager_list(
+    *,
+    all: bool = False,
+    diagnostic: bool = False,
+    context: Path | None = None,
+) -> tuple[ManagerSnapshot, ...]:
+    """Return manager registry snapshots, optionally with liveness proof.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    resolved = build_context(context)
+    records = (
+        manager_runtime.manager_diagnostic_records(
+            resolved,
+            include_stopped=all,
+        )
+        if diagnostic
+        else manager_runtime.list_manager_records(
+            resolved,
+            include_stopped=all,
+            canonical_only=False,
+        )
+    )
+    return tuple(_manager_snapshot(record) for record in records)
 
 
 def start_manager(context: WeftContext) -> ManagerSnapshot:
     """Ensure a canonical manager exists and return its registry snapshot."""
 
     record, _started_here, _process_handle = manager_runtime.ensure_manager(context)
+    return _manager_snapshot(record)
+
+
+def cmd_manager_start(
+    *,
+    context: Path | None = None,
+    replace: bool = False,
+) -> ManagerSnapshot:
+    """Start or reuse the canonical manager and return its snapshot.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    resolved = build_context(context)
+    if replace:
+        replaced, message = manager_runtime.replace_active_manager(resolved)
+        if not replaced:
+            raise ManagerStartFailed(message or "Manager replacement failed")
+        record, _started_here, _process_handle = manager_runtime.start_manager(resolved)
+    else:
+        record, _started_here, _process_handle = manager_runtime.ensure_manager(resolved)
     return _manager_snapshot(record)
 
 
@@ -132,6 +213,51 @@ def stop_manager(
         raise ControlRejected(message or f"Manager {tid} did not stop")
 
 
+def cmd_manager_stop(
+    tid: str | None = None,
+    *,
+    force: bool = False,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    context: Path | None = None,
+) -> ManagerSnapshot | None:
+    """Stop a manager and return its terminal snapshot, or `None` if absent.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    resolved = build_context(context)
+    record: dict[str, Any] | None = None
+    if tid is None:
+        record = manager_runtime.select_active_manager(
+            resolved,
+            probe_stale=True,
+            probe_cache={},
+        )
+        if record is None:
+            return None
+        record_tid = record.get("tid")
+        if not isinstance(record_tid, str) or not record_tid:
+            raise ManagerNotRunning("Active manager record is missing a TID")
+        tid = record_tid
+    else:
+        record = manager_runtime.manager_record(resolved, tid)
+
+    stopped, message = manager_runtime.stop_manager(
+        resolved,
+        record,
+        tid=tid,
+        timeout=timeout,
+        force=force,
+    )
+    if not stopped:
+        raise ControlRejected(message or f"Manager {tid} did not stop")
+    terminal = manager_runtime.manager_record(resolved, tid)
+    if terminal is None:
+        terminal = dict(record or {"tid": tid, "name": "manager"})
+        terminal["status"] = "stopped"
+    return _manager_snapshot(terminal)
+
+
 def list_managers(
     context: WeftContext,
     *,
@@ -158,6 +284,22 @@ def manager_status(
     record = manager_runtime.manager_record(context, tid)
     if record is None:
         return None
+    return _manager_snapshot(record)
+
+
+def cmd_manager_status(
+    tid: str,
+    *,
+    context: Path | None = None,
+) -> ManagerSnapshot:
+    """Return the requested manager snapshot or raise a typed absence error.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    record = manager_runtime.manager_record(build_context(context), tid)
+    if record is None:
+        raise ManagerNotRunning(f"Manager {tid} not found")
     return _manager_snapshot(record)
 
 

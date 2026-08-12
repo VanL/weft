@@ -8,9 +8,10 @@ Spec references:
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 
 from weft.core.task_evidence import QueueAckTarget, TaskTerminalSnapshot
 
@@ -42,6 +43,44 @@ class SubmittedTaskReceipt:
     tid: str
     name: str
     submitted_at_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class InitResult:
+    """Outcome of project initialization. Spec: [PY-2]."""
+
+    root: Path
+    config_path: Path
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RunSpecDescription:
+    """Resolved dynamic help metadata for one stored spec."""
+
+    reference: str
+    usage: str
+    arguments: tuple[Mapping[str, Any], ...]
+    stdin: Mapping[str, Any] | None
+
+
+class CommandStream[T](Iterator[T], Protocol):
+    """Closable structured command event stream."""
+
+    def close(self) -> None: ...
+
+
+class RunSession(Protocol):
+    """Interactive or waiting run session returned by `cmd_run`."""
+
+    tid: str
+
+    def events(self) -> CommandStream[TaskEvent]: ...
+    def send_input(self, text: str) -> None: ...
+    def close_input(self) -> None: ...
+    def stop(self) -> TaskControlResult: ...
+    def wait(self, timeout: float | None = None) -> RunExecutionResult: ...
+    def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +122,9 @@ class TaskSnapshot:
     pipeline_status: dict[str, Any] | None = None
     reconciliation: dict[str, Any] | None = None
     runner_diagnostics: dict[str, Any] | None = None
+    host_pids: tuple[int, ...] | None = None
+    managed_pids: tuple[int, ...] | None = None
+    live_managed_pids: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,12 +221,24 @@ class QueueMoveReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class QueueMoveResult:
+    """Lossless outcome of a queue move."""
+
+    source: str
+    destination: str
+    entries: tuple[QueueEntry, ...]
+    moved_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class QueueDeleteReceipt:
     """Outcome of a queue delete."""
 
     queue: str | None
     deleted_count: int
+    queues_deleted: int = 0
     all_queues: bool = False
+    exact_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +290,12 @@ class ManagerSnapshot:
     outbox: str | None = None
     ctrl_in: str | None = None
     ctrl_out: str | None = None
+    liveness: Literal["live", "stale", "unknown", "non_live"] | None = None
+    proof_source: str | None = None
+    proof_detail: str | None = None
+    dispatch_eligible: bool | None = None
+    canonical_candidate: bool | None = None
+    canonical: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +306,7 @@ class SpecRecord:
     name: str
     path: Path
     source: str
+    payload: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,3 +348,65 @@ class SystemLoadResult:
     aliases_updated: int | None = None
     queues_created: int | None = None
     total_messages: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskPingResult:
+    """Structured task PING observation."""
+
+    tid: str
+    acknowledged: bool
+    timed_out: bool
+    error: str | None
+    observed_at: int | None
+    pong: Mapping[str, Any] | None
+    snapshot: TaskSnapshot | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskControlResult:
+    """Structured stop/kill outcome."""
+
+    command: Literal["stop", "kill"]
+    requested: tuple[str, ...]
+    accepted: tuple[str, ...]
+    snapshots: tuple[TaskSnapshot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SpecMutationResult:
+    """Structured stored-spec mutation outcome."""
+
+    action: Literal["create", "delete"]
+    record: SpecRecord
+
+
+@dataclass(frozen=True, slots=True)
+class SystemDumpResult:
+    path: Path
+    queues: int
+    messages: int
+    aliases: int
+    omitted_claimed_queues: int
+    omitted_claimed_messages: int
+
+
+@dataclass(frozen=True, slots=True)
+class SystemPruneResult:
+    families: tuple[str, ...]
+    applied: bool
+    candidates: int
+    deleted: int
+    failed: int
+    details: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class BuiltinSpecRecord:
+    name: str
+    description: str | None
+    category: str | None
+    function_target: str | None
+    supported_platforms: tuple[str, ...]
+    path: Path
+    source: str = "builtin"

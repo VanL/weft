@@ -26,6 +26,24 @@ if TYPE_CHECKING:
     from weft.core.tasks.sessions import AgentSession, CommandSession
     from weft.core.taskspec import AgentSection
 
+__all__ = [
+    "AgentMCPServerDescriptor", "AgentResolver", "AgentResolverResult",
+    "AgentToolProfile", "AgentToolProfileResult", "RunnerCapabilities",
+    "RunnerEnvironmentProfile", "RunnerEnvironmentProfileResult",
+    "RunnerHandle", "RunnerPlugin", "RunnerRuntimeDescription",
+    "SpecRunInputRequest", "TaskRunnerBackend",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class SpecRunInputRequest:
+    """Submission request passed to a spec-owned input adapter. Spec: [PY-3]."""
+
+    arguments: dict[str, str]
+    stdin_text: str | None
+    context_root: str | None
+    spec_name: str
+
 
 @dataclass(frozen=True, slots=True)
 class RunnerHandle:
