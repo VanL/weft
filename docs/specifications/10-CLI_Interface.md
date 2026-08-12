@@ -166,15 +166,16 @@ Current `--name` behavior:
 
 Current spec-declared option support:
 
-- when the selected TaskSpec declares `spec.parameterization`, `weft run --spec`
-  also accepts that spec's declared long options such as `--provider VALUE`
-- these declared parameterization options run locally first and materialize a
-  concrete TaskSpec template before queueing
-- when the selected TaskSpec declares `spec.run_input`, `weft run --spec` also
-  accepts the spec's declared long options such as `--prompt VALUE`
-- these declared options are submission-time CLI sugar only; they are resolved
-  locally into the ordinary initial work payload after materialization and
-  before the spawn request is queued
+Spec submission surfaces (`weft run --spec`, `cmd_run`, `WeftClient`, and
+`weft_django`) use one declared-argument pipeline [PY-3]. Parameterization
+consumes its declared arguments first and materializes the TaskSpec; the
+run-input adapter then consumes remaining declared arguments and explicit
+stdin text to produce the initial work payload. The CLI alone tokenizes
+dynamic long options and reads bounded piped stdin; it passes `spec_args` and
+either `run_input_stdin_text` or `work_input_text` into the shared command
+path. `run_input_stdin_text` is only for declared run-input stdin;
+`work_input_text` preserves ordinary piped initial input when no run-input
+contract exists. No command function reads process stdin.
 - specs that only need declared options copied into the initial work payload
   can use built-in adapters such as
   `weft.builtins.run_input:arguments_payload` for a flat JSON object or
@@ -189,8 +190,9 @@ Current spec-declared option support:
   long option after normalization
 - declared `path` arguments are resolved to absolute paths before the adapter
   receives them
-- `weft run --spec NAME|PATH --help` loads the selected TaskSpec locally and
-  appends spec-aware help for its declared submission-time options
+- `weft run --spec NAME|PATH --help` calls
+  `cmd_run(spec=..., describe=True)` and formats its returned
+  `RunSpecDescription`; no task is queued
 - specs without `spec.parameterization` or `spec.run_input` do not accept
   extra spec-declared options
 
@@ -210,16 +212,12 @@ Current rules:
   persistent override for that invocation
 - `weft run` has no `--monitor` option. Monitoring is configured in a stored
   TaskSpec and is not represented by a rejected compatibility flag
-- when a selected TaskSpec declares `spec.parameterization`, `weft run --spec`
-  materializes a concrete TaskSpec locally before queueing
-- parameterization parsing may apply TaskSpec-declared defaults and preserve
-  later undeclared tokens for the run-input stage
-- when a selected TaskSpec declares `spec.run_input`, `weft run --spec`
-  resolves declared long options and optional stdin through that adapter after
-  materialization and before queueing work
-- when `--help` is requested together with `--spec`, no task is queued; Weft
-  loads the TaskSpec locally and renders its declared submission-time option
-  surface
+- spec submission surfaces follow the shared [PY-3] ordering: parameterization
+  materializes first, then run-input consumes remaining arguments and explicit
+  stdin text before queueing
+- `weft run --spec NAME|PATH --help` calls
+  `cmd_run(spec=..., describe=True)` and formats `RunSpecDescription`; no task
+  is queued
 - run-input parsing rejects undeclared or repeated spec-owned options
 - inline command and function runs synthesize a TaskSpec using the default
   `host` runner unless the spec itself says otherwise
@@ -961,6 +959,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)

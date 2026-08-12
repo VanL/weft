@@ -71,6 +71,8 @@ directly. It should not appear as "not yet implemented."
   current pipeline composition contract
 - [`13-Agent_Runtime.md`](13-Agent_Runtime.md): current first-class agent
   runtime contract
+- [`14-Python_API_Surfaces.md`](14-Python_API_Surfaces.md): current public
+  Python surface, command-mirroring, and adapter-layering contract
 
 ### Supporting current docs
 
@@ -127,6 +129,7 @@ For current system orientation:
 14. [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
 15. [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
 16. [`13-Agent_Runtime.md`](13-Agent_Runtime.md)
+17. [`14-Python_API_Surfaces.md`](14-Python_API_Surfaces.md)
 
 Then read the matching `A` docs only if you need the intended future surface
 for planning work. Read `12-Future_Ideas.md` only when you need the deferred
@@ -176,3 +179,5 @@ Implementation plans are historical execution records, not behavior contracts.
 The curated index of all plans, with status and supersession pointers, lives at
 [`docs/plans/README.md`](../plans/README.md). Individual specs carry plan
 backlinks next to the sections those plans implemented.
+
+- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)

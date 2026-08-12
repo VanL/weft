@@ -24,7 +24,7 @@ command grows beyond its owning module.
 | Command family | Owning modules | Why it exists |
 |---|---|---|
 | `init` | `weft/commands/init.py` | project bootstrap and root discovery |
-| `run` | `weft/cli/run.py`, `weft/commands/run.py`, `weft/commands/submission.py`, `weft/commands/manager.py`, `weft/core/manager_runtime.py`, `weft/commands/_result_wait.py`, `weft/commands/_spawn_submission.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | Typer adapter renders structured `execute_run()` results from the shared run orchestration; durable submission, explicit `NAME|PATH` spec resolution, local spec materialization or run-input shaping when declared, queue-first spawn reconciliation, and optional completion wait or interactive queue-stream handling stay below the adapter |
+| `run` | `weft.commands.cmd_run` (lazy facade export), `weft/commands/run.py`, `weft/commands/submission.py` | The public command function owns validation and orchestration; `weft/cli/run.py` owns only Typer parsing and formatting of structured outcomes. |
 | `status` | `weft/commands/system.py`, `weft/core/task_evidence.py`, `weft/core/manager_runtime.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | reconstruct current status from task logs, manager registry records, and watch loops |
 | `result` | `weft/commands/result.py`, `weft/core/task_evidence.py`, `weft/core/queue_wait.py`, `weft/commands/_result_wait.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | gather public output with the shared waiter, stream decoder, and task-log classification helpers |
 | `task` | `weft/commands/tasks.py`, `weft/commands/system.py`, `weft/core/task_evidence.py`, `weft/core/runner_diagnostics.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | TID lookup, list, stop, kill, task-level status, and user-facing runner diagnostics built on shared snapshot and control helpers |
@@ -32,6 +32,12 @@ command grows beyond its owning module.
 | `queue` | `weft/commands/queue.py` | direct SimpleBroker queue access |
 | `spec` | `weft/commands/specs.py`, `weft/cli/validate_taskspec.py` | stored spec management, resolution, builtin task-spec discovery, structured TaskSpec validation, and CLI rendering |
 | `system` | `weft/commands/builtins.py`, `weft/commands/tidy.py`, `weft/commands/dump.py`, `weft/commands/load.py`, `weft/commands/task_monitor.py`, `weft/commands/prune.py` | builtin inventory plus maintenance, broker-state operations, foreground task monitoring, and explicit prune dispatch |
+
+Every registered CLI verb maps bijectively to the public
+`weft.commands.cmd_<full_cli_path>` export defined by [PY-2]. The owning
+command function contains semantic validation and orchestration; Typer
+callbacks contain only input parsing, formatting, stream routing, and exit
+adaptation.
 
 ## Current Helper Boundaries [CLI-X2]
 
@@ -82,6 +88,7 @@ stays separate.
 
 ## Related Plans
 
+- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`docs/plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
 - [`docs/plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md`](../plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md)

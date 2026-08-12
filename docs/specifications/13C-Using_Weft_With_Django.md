@@ -205,8 +205,8 @@ with these stable entry points:
 - `WeftClient.from_context(...)`
 - `WeftClient.submit(...)`
 - `WeftClient.prepare(...)`
-- `WeftClient.submit_spec(...)`
-- `WeftClient.prepare_spec(...)`
+- `WeftClient.submit_spec(reference, *, spec_args=(), stdin_text=None, ...)`
+- `WeftClient.prepare_spec(reference, *, spec_args=(), stdin_text=None, ...)`
 - `WeftClient.submit_pipeline(...)`
 - `WeftClient.prepare_pipeline(...)`
 - `WeftClient.submit_command(...)`
@@ -654,8 +654,8 @@ from Django code:
 
 - `weft_django.submit_taskspec(taskspec, *, payload=None, **overrides)`
 - `weft_django.submit_taskspec_on_commit(taskspec, *, payload=None, **overrides)`
-- `weft_django.submit_spec_reference(reference, *, payload=None, **overrides)`
-- `weft_django.submit_spec_reference_on_commit(reference, *, payload=None, **overrides)`
+- `weft_django.submit_spec_reference(reference, *, spec_args=(), stdin_text=None, payload=None, **overrides)`
+- `weft_django.submit_spec_reference_on_commit(reference, *, spec_args=(), stdin_text=None, payload=None, **overrides)`
 - `weft_django.submit_pipeline_reference(reference, *, payload=None, **overrides)`
 - `weft_django.submit_pipeline_reference_on_commit(reference, *, payload=None, **overrides)`
 
@@ -667,6 +667,9 @@ Native-submission rule:
   tasks, and pipelines without ad hoc glue
 - all native helpers use `payload=...`; `work_payload=...` and `input=...` are
   intentionally not part of the v1 API
+- `spec_args` and `stdin_text` follow [PY-3]; `payload` is rejected when the
+  resolved spec declares `run_input`, and `stdin_text` is rejected unless that
+  contract declares stdin
 
 ### Generic Module-Level Helpers [DJ-8.3]
 
@@ -715,6 +718,8 @@ Implementation plan backlinks:
 
 Per-call submission kwargs should support:
 
+- `spec_args`
+- `stdin_text`
 - `name`
 - `description`
 - `tags`
@@ -1314,6 +1319,7 @@ Once the package is split into a sibling repo:
 
 ## Backlinks
 
+- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - Terminal status Monitor-store plan:
   [../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 - Client follow hardening plan:

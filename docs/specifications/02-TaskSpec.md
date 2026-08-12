@@ -102,7 +102,7 @@ schema validity.
       "conversation_scope": "per_message" | "per_task",
       "runtime_config": {}
     },
-    "parameterization": {                   // OPTIONAL. Submission-time TaskSpec materialization for `weft run --spec`. Declares named long options and an adapter that converts those inputs into a concrete TaskSpec template before queueing.
+    "parameterization": {                   // OPTIONAL. Submission-time TaskSpec materialization for spec submission surfaces. Declares named options and an adapter that converts those inputs into a concrete TaskSpec template before queueing.
       "adapter_ref": "pkg.module:function_name",
       "arguments": {
         "provider": {
@@ -114,7 +114,7 @@ schema validity.
         }
       }
     } | null,
-    "run_input": {                          // OPTIONAL. Submission-time shaping for `weft run --spec`. Declares named long options plus optional stdin and an adapter that converts those inputs into the ordinary initial work payload before queueing.
+    "run_input": {                          // OPTIONAL. Submission-time shaping for spec submission surfaces. Declares named options plus optional stdin and an adapter that converts those inputs into the ordinary initial work payload before queueing.
       "adapter_ref": "pkg.module:function_name",
       "arguments": {
         "prompt": {
@@ -281,8 +281,8 @@ _Per-field implementation status_:
 - `spec.persistent`: Implemented. `SpecSection.persistent` — used by agent/interactive task paths.
 - `spec.function_target`, `spec.process_target`: Implemented. Cross-validated in `SpecSection.validate_target()`.
 - `spec.agent`: Implemented. `AgentSection` with full sub-schema (`runtime`, `authority_class`, `model`, `instructions`, `templates`, `tools`, `output_mode`, `output_schema`, `max_turns`, `options`, `conversation_scope`, `runtime_config`).
-- `spec.parameterization`: Implemented. `ParameterizationSection` and `ParameterizationArgumentSection` in `weft/core/taskspec/model.py`; adapter parsing and materialization in `weft/core/taskspec/parameterization.py`; local `weft run --spec` integration in `weft/cli/run.py`.
-- `spec.run_input`: Implemented. `RunInputSection`, `RunInputArgumentSection`, and `RunInputStdinSection` in `weft/core/taskspec/model.py`; adapter parsing and invocation in `weft/core/taskspec/run_input.py`; local `weft run --spec` integration in `weft/cli/run.py`.
+- `spec.parameterization`: Implemented. `ParameterizationSection` and `ParameterizationArgumentSection` live in `weft/core/taskspec/model.py`; parsing/materialization lives in `weft/core/taskspec/parameterization.py`; the shared submission ordering is owned by `weft/commands/submission.py` and used by `cmd_run`, `WeftClient`, and `weft_django` per [PY-3].
+- `spec.run_input`: Implemented. `RunInputSection`, `RunInputArgumentSection`, and `RunInputStdinSection` live in `weft/core/taskspec/model.py`; adapter parsing/invocation lives in `weft/core/taskspec/run_input.py`; the same shared submission path applies it after materialization and before submission per [PY-3].
 - `spec.args`, `spec.keyword_args`: Implemented. Frozen after creation.
 - `spec.timeout`: Implemented. `SpecSection.timeout`; enforced at the
   work-execution boundary by runner/session code, not as a blanket budget for
@@ -352,11 +352,11 @@ user or application writes it, it belongs in `metadata`.
 
 `spec.parameterization` and `spec.run_input` are not metadata.
 
-- `spec.parameterization` is static spec-owned submission behavior for
-  `weft run --spec`: a spec can declare named long options and point them at a
+- `spec.parameterization` is static spec-owned submission behavior shared by
+  `weft run --spec`, `cmd_run`, `WeftClient`, and `weft_django`: a spec can declare named options and point them at a
   Python adapter that returns a concrete TaskSpec template before the spawn
   request is queued.
-- `spec.run_input` is the next local step after materialization: a spec can
+- `spec.run_input` is the next shared submission step after materialization: a spec can
   declare named long options plus optional stdin and point them at a Python
   adapter that returns the ordinary initial work payload before the spawn
   request is queued.
@@ -384,10 +384,10 @@ reinterpret metadata keys as submission configuration.
 Weft exposes several explicit shaping hooks. They are related, but they have
 different owners and run at different points:
 
-- `spec.parameterization`: local `weft run --spec` materialization from
-  declared long options into a concrete TaskSpec template before queueing
-- `spec.run_input`: local `weft run --spec` shaping from declared long options
-  plus optional stdin into the ordinary initial work payload after
+- `spec.parameterization`: submission-surface materialization from declared
+  arguments into a concrete TaskSpec template before queueing
+- `spec.run_input`: submission-surface shaping from remaining declared
+  arguments plus explicit stdin text into the ordinary initial work payload after
   materialization and before queueing
 - explicit `weft run --name TEXT`: local submission-time override of the
   top-level task name and, for persistent resolved tasks only, injection of a
@@ -623,6 +623,7 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 
 ## Related Plans
 
+- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
 - [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)

@@ -23,8 +23,8 @@ There are currently 175 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-08-11-python-api-surfaces-sb-contract.md`](./2026-08-11-python-api-surfaces-sb-contract.md) | Python API Surfaces: Adopt the SimpleBroker Two-Adapter Contract | `draft` | none |
-| [`2026-08-11-shared-reactor-test-driver-adoption-plan.md`](./2026-08-11-shared-reactor-test-driver-adoption-plan.md) | Shared Reactor Test Driver Adoption Plan | `draft` | none |
+| [`2026-08-11-python-api-surfaces-sb-contract.md`](./2026-08-11-python-api-surfaces-sb-contract.md) | Python API Surfaces: Adopt the SimpleBroker Three-Surface Contract | `draft` | none |
+| [`2026-08-11-shared-reactor-test-driver-adoption-plan.md`](./2026-08-11-shared-reactor-test-driver-adoption-plan.md) | Shared Reactor Test Driver Adoption Plan | `completed` | none |
 | [`2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](./2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md) | Canonical Contract and Dead Code Cleanup Plan | `completed` | none |
 | [`2026-08-10-subprocess-coverage-collection-plan.md`](./2026-08-10-subprocess-coverage-collection-plan.md) | Subprocess Coverage Collection Plan | `draft` | none |
 | [`2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](./2026-08-10-simplebroker-7-json-message-id-boundary-plan.md) | SimpleBroker 7 JSON Message-ID Boundary Plan | `completed` | none |

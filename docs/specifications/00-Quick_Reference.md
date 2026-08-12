@@ -92,6 +92,11 @@ Current top-level verbs and subcommands:
 | `weft queue` | `read`, `write`, `peek`, `move`, `list`, `exists`, `stats`, `resolve`, `watch`, `delete`, `broadcast`, `alias add/list/remove` |
 | `weft system` | `tidy`, `dump`, `builtins`, `load`, `task-monitor`, `prune` |
 
+Public Python surfaces: `weft.client`, `weft.ext`, and `weft.commands`.
+Each surface's `__all__` is authoritative. `weft.commands` mirrors every CLI
+verb through `cmd_<full_cli_path>` names; see
+[Python API Surfaces](14-Python_API_Surfaces.md) [PY-1]–[PY-4].
+
 ## Operational Files
 
 | Path | Purpose |
@@ -213,6 +218,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)

@@ -100,10 +100,12 @@ When a change crosses a boundary, update the governing spec and the module
 docstrings together. A new abstraction is justified only when it removes real
 duplication or protects one of these ownership lines.
 
-The public `weft.client` package is the Python adapter. The `weft` package root
-contains package metadata, while `weft.commands` and `weft.core` are package
-namespaces rather than compatibility export surfaces. Production code imports
-the leaf module that owns the behavior.
+The public Python surfaces are `weft.client` (primary adapter),
+`weft.commands` (CLI-equivalent adapter), and `weft.ext` (extension
+contracts). Each surface's `__all__` is authoritative per
+`14-Python_API_Surfaces.md`. The `weft` package root contains metadata;
+`weft.core` is a private namespace. `weft.commands` resolves facade exports
+lazily so public imports do not initialize unrelated command capabilities.
 
 ## Public Python Client Surface [IP-1.1]
 
@@ -206,6 +208,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
+- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
 - [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
