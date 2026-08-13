@@ -18,7 +18,7 @@ import os
 import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -42,6 +42,8 @@ from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,
 )
+
+from ._boundary import typed_command_errors
 
 TaskMonitorSinkName = Literal["stdout", "disk"]
 
@@ -190,8 +192,9 @@ class DiskJsonlTaskMonitorSink:
         count = 0
         with self._log_path.open("a", encoding="utf-8") as handle:
             for record in records:
-                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-                handle.write("\n")
+                handle.write(
+                    json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+                )
                 count += 1
             handle.flush()
         return count
@@ -595,6 +598,7 @@ class _TaskMonitorSummaryStream(Iterator[TaskMonitorSummary]):
 
     def __init__(self, config: TaskMonitorConfig) -> None:
         self._config = config
+        self._high_water = config.since
         self._buffer: list[TaskMonitorSummary] = []
         self._closed = False
 
@@ -605,7 +609,9 @@ class _TaskMonitorSummaryStream(Iterator[TaskMonitorSummary]):
         while not self._closed:
             if self._buffer:
                 return self._buffer.pop(0)
-            result = run_task_monitor(self._config)
+            result = run_task_monitor(replace(self._config, since=self._high_water))
+            if result.checkpoint_timestamp is not None:
+                self._high_water = result.checkpoint_timestamp
             self._buffer.extend(
                 TaskMonitorSummary(record.record)
                 for record in result.records
@@ -622,6 +628,7 @@ class _TaskMonitorSummaryStream(Iterator[TaskMonitorSummary]):
         self._buffer.clear()
 
 
+@typed_command_errors
 def cmd_system_task_monitor(
     *,
     context: str | Path | None = None,

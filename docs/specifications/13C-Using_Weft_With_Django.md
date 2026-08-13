@@ -668,8 +668,11 @@ Native-submission rule:
 - all native helpers use `payload=...`; `work_payload=...` and `input=...` are
   intentionally not part of the v1 API
 - `spec_args` and `stdin_text` follow [PY-3]; `payload` is rejected when the
-  resolved spec declares `run_input`, and `stdin_text` is rejected unless that
-  contract declares stdin
+  resolved spec declares `run_input`. The shared submission seam routes
+  `stdin_text` through declared run-input stdin when available, as the initial
+  work payload when no `run_input` contract exists, and rejects it when a
+  `run_input` contract exists but declares no stdin. `payload` and `stdin_text`
+  are mutually exclusive even without a `run_input` contract
 
 ### Generic Module-Level Helpers [DJ-8.3]
 
@@ -829,7 +832,10 @@ Handle semantics:
 - `terminal_snapshot()` returns the compact non-consuming known-TID terminal
   snapshot used by reconciliation code
 - `wait(timeout=None)` returns the same structured `TaskResult` object as
-  `result(timeout=None)`
+  `result(timeout=None)`; when a non-`None` deadline expires before the task
+  reaches a terminal state, both raise `CommandTimeoutError` ([PY-3]) — a
+  task's own terminal `timeout` status is returned as a `TaskResult`, never
+  raised
 
 ### Result semantics [DJ-10.2]
 
@@ -1320,6 +1326,7 @@ Once the package is split into a sibling repo:
 ## Backlinks
 
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
+- [Public API surface remediation plan](../plans/2026-08-12-public-api-surface-remediation.md)
 - Terminal status Monitor-store plan:
   [../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 - Client follow hardening plan:

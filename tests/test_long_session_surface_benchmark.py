@@ -49,7 +49,7 @@ def test_api_surface_invoke_run_scopes_environment_and_captured_io(
             probe=os.environ["WEFT_SIM117_PROBE"],
             stdin=sys.stdin.read(),
             context_dir=kwargs["context"],
-            work_input_text=kwargs["work_input_text"],
+            stdin_text=kwargs["stdin_text"],
         )
         print("captured-out")
         print("captured-err", file=sys.stderr)
@@ -81,7 +81,7 @@ def test_api_surface_invoke_run_scopes_environment_and_captured_io(
         "probe": "inside",
         "stdin": "input-data",
         "context_dir": tmp_path,
-        "work_input_text": "input-data",
+        "stdin_text": "input-data",
         "waited": True,
         "closed": True,
     }

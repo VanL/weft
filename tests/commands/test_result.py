@@ -71,6 +71,86 @@ def test_public_cmd_result_returns_structured_single_and_all_results(
     assert result_cmd.cmd_result(all=True) == (completed,)
 
 
+def test_collect_all_results_consumes_each_outbox_in_one_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox = ctx.queue(f"T{tid}.outbox", persistent=True)
+    outbox.write(json.dumps({"value": "first"}))
+    outbox.write(json.dumps({"value": "second"}))
+    context_type = type(ctx)
+    original_queue = context_type.queue
+    counts = {"inspections": 0, "exact_reads": 0}
+
+    class QueueSpy:
+        def __init__(self, queue) -> None:
+            self.queue = queue
+
+        def peek_generator(self, **kwargs):
+            counts["inspections"] += 1
+            return self.queue.peek_generator(**kwargs)
+
+        def read_one(self, **kwargs):
+            counts["exact_reads"] += 1
+            return self.queue.read_one(**kwargs)
+
+        def close(self) -> None:
+            self.queue.close()
+
+    def queue_for(self, name: str, **kwargs):
+        queue = original_queue(self, name, **kwargs)
+        return QueueSpy(queue) if self is ctx and name == f"T{tid}.outbox" else queue
+
+    monkeypatch.setattr(context_type, "queue", queue_for)
+    results = result_cmd._collect_all_task_results(ctx, peek=False)
+
+    assert len(results) == 1
+    assert results[0].tid == tid
+    assert counts == {"inspections": 1, "exact_reads": 2}
+    assert outbox.peek_one() is None
+    outbox.close()
+
+
+def test_collect_all_results_leaves_partial_stream_chunks_for_running_task(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox = ctx.queue(f"T{tid}.outbox", persistent=True)
+    partial = json.dumps({"type": "stream", "data": "still running"})
+    outbox.write(partial)
+
+    assert result_cmd._collect_all_task_results(ctx, peek=False) == ()
+    assert outbox.peek_one() == partial
+    outbox.close()
+
+
+def test_collect_all_results_consumes_only_complete_stream_prefix(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox = ctx.queue(f"T{tid}.outbox", persistent=True)
+    complete = json.dumps(
+        {"type": "stream", "stream": "stdout", "data": "done", "final": True}
+    )
+    partial = json.dumps(
+        {"type": "stream", "stream": "stdout", "data": "next", "final": False}
+    )
+    outbox.write(complete)
+    outbox.write(partial)
+
+    results = result_cmd._collect_all_task_results(ctx, peek=False)
+
+    assert len(results) == 1
+    assert results[0].value == "done"
+    assert outbox.peek_one() == partial
+    outbox.close()
+
+
 def test_public_cmd_result_returns_structured_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -107,18 +187,8 @@ def test_public_cmd_result_rejects_invalid_mode_combinations(invoke) -> None:
         invoke()
 
 
-@pytest.mark.parametrize(
-    ("status", "error", "expected"),
-    [
-        ("missing", "missing", TaskNotFound),
-        ("timeout", "late", CommandTimeoutError),
-    ],
-)
-def test_public_cmd_result_translates_missing_and_timeout_outcomes(
+def test_public_cmd_result_translates_missing_outcome(
     monkeypatch: pytest.MonkeyPatch,
-    status: str,
-    error: str,
-    expected: type[Exception],
 ) -> None:
     monkeypatch.setattr(result_cmd, "build_context", lambda spec_context=None: object())
     monkeypatch.setattr(
@@ -126,16 +196,39 @@ def test_public_cmd_result_translates_missing_and_timeout_outcomes(
         "await_task_result",
         lambda *_args, **_kwargs: TaskResult(
             tid="1779600000000000001",
-            status=status,
+            status="missing",
             value=None,
             stdout=None,
             stderr=None,
-            error=error,
+            error="missing",
         ),
     )
 
-    with pytest.raises(expected, match=error):
+    with pytest.raises(TaskNotFound, match="missing"):
         result_cmd.cmd_result("1779600000000000001", timeout=0.01)
+
+
+def test_public_cmd_result_preserves_terminal_timeout_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal_timeout = TaskResult(
+        tid="1779600000000000001",
+        status="timeout",
+        value=None,
+        stdout=None,
+        stderr=None,
+        error="target timed out",
+    )
+    monkeypatch.setattr(result_cmd, "build_context", lambda spec_context=None: object())
+    monkeypatch.setattr(
+        result_cmd,
+        "await_task_result",
+        lambda *_args, **_kwargs: terminal_timeout,
+    )
+
+    assert (
+        result_cmd.cmd_result("1779600000000000001", timeout=0.01) is terminal_timeout
+    )
 
 
 def test_public_cmd_result_is_silent_and_translates_context_failure(
@@ -738,11 +831,11 @@ def test_await_task_result_zero_timeout_reports_materialization_timeout(
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
 
-    result = await_task_result(ctx, tid, timeout=0.0)
-
-    assert result.status == "timeout"
-    assert result.value is None
-    assert result.error == f"Timed out after 0.0 seconds waiting for task {tid}"
+    with pytest.raises(
+        CommandTimeoutError,
+        match=f"Timed out after 0.0 seconds waiting for task {tid}",
+    ):
+        await_task_result(ctx, tid, timeout=0.0)
 
 
 def test_cmd_result_reports_claimed_outbox_without_waiting(
@@ -915,22 +1008,19 @@ def test_await_single_result_zero_timeout_does_not_wait_on_partial_stream(
             )
         )
 
-        status, result, error = _await_single_result(
-            ctx,
-            tid,
-            timeout=0.0,
-            show_stderr=False,
-            emit_stream=False,
-            taskspec_payload=None,
-            outbox_name=outbox_name,
-            ctrl_out_name=f"T{tid}.ctrl_out",
-        )
+        with pytest.raises(CommandTimeoutError, match="Timed out after 0.0 seconds"):
+            _await_single_result(
+                ctx,
+                tid,
+                timeout=0.0,
+                show_stderr=False,
+                emit_stream=False,
+                taskspec_payload=None,
+                outbox_name=outbox_name,
+                ctrl_out_name=f"T{tid}.ctrl_out",
+            )
     finally:
         outbox_queue.close()
-
-    assert status == "timeout"
-    assert result is None
-    assert error == f"Timed out after 0.0 seconds waiting for task {tid}"
 
 
 def test_await_one_shot_result_reads_outbox_after_completion_event(
@@ -1289,20 +1379,39 @@ def test_await_one_shot_result_does_not_infer_completion_from_ambiguous_outbox(
     )
 
     try:
-        status, result, error = await_one_shot_result(
-            ctx,
-            tid,
-            outbox_name=outbox_name,
-            ctrl_out_name=f"T{tid}.ctrl_out",
-            timeout=0.3,
-            show_stderr=False,
-        )
+        with pytest.raises(CommandTimeoutError, match="Timed out after 0.3 seconds"):
+            await_one_shot_result(
+                ctx,
+                tid,
+                outbox_name=outbox_name,
+                ctrl_out_name=f"T{tid}.ctrl_out",
+                timeout=0.3,
+                show_stderr=False,
+            )
     finally:
         outbox_queue.close()
 
-    assert status == "timeout"
-    assert result is None
-    assert error == f"Timed out after 0.3 seconds waiting for task {tid}"
+
+def test_await_task_result_returns_terminal_task_timeout_as_result(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "timeout",
+                "event": "work_timeout",
+                "error": "Target execution timed out",
+            }
+        )
+    )
+
+    result = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
+
+    assert result.status == "timeout"
+    assert result.error == "Target execution timed out"
 
 
 def test_await_single_result_aggregates_multiple_outbox_messages(

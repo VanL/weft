@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -15,6 +16,7 @@ from tests.helpers.weft_harness import (
     WeftTestHarness,
 )
 from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
+from weft import commands
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.client import (
     ControlRejected,
@@ -244,6 +246,83 @@ def test_client_api_parity_guard_matches_current_public_matrix() -> None:
     assert not missing
 
 
+@pytest.mark.parametrize(
+    ("method_name", "command"),
+    [("stop_many", "stop"), ("kill_many", "kill")],
+)
+def test_client_control_sweeps_delegate_to_structured_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    command: str,
+) -> None:
+    client = WeftClient(path=Path.cwd())
+    expected = object()
+    observed: dict[str, object] = {}
+
+    def fake_control(command_arg: str, tid: str | None, **kwargs: object):
+        observed.update(command=command_arg, tid=tid, **kwargs)
+        return expected
+
+    monkeypatch.setattr("weft.commands.tasks._task_control_result", fake_control)
+
+    result = getattr(client.tasks, method_name)(
+        tids=("1777000000000000001",),
+        all_tasks=False,
+        pattern=None,
+    )
+
+    assert result is expected
+    assert observed["command"] == command
+    assert observed["tids"] == ("1777000000000000001",)
+    assert observed["runtime_context"] is client.context
+
+
+@pytest.mark.parametrize(
+    ("method_name", "command"),
+    [("stop_many", "stop"), ("kill_many", "kill")],
+)
+def test_client_control_sweep_without_scope_is_an_empty_noop(
+    method_name: str,
+    command: str,
+) -> None:
+    client = WeftClient(path=Path.cwd())
+
+    result = getattr(client.tasks, method_name)()
+
+    assert result == commands.TaskControlResult(
+        command=command,
+        requested=(),
+        accepted=(),
+        failures=(),
+        snapshots=(),
+    )
+
+
+@pytest.mark.parametrize("method_name", ["stop_many", "kill_many"])
+@pytest.mark.parametrize(
+    "selector",
+    [{"all_tasks": True}, {"pattern": "worker-*"}],
+)
+def test_client_control_sweep_preserves_non_tid_selector(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    selector: dict[str, object],
+) -> None:
+    client = WeftClient(path=Path.cwd())
+    observed: dict[str, object] = {}
+
+    def fake_control(command_arg: str, tid: str | None, **kwargs: object):
+        observed.update(command=command_arg, tid=tid, **kwargs)
+        return object()
+
+    monkeypatch.setattr("weft.commands.tasks._task_control_result", fake_control)
+
+    getattr(client.tasks, method_name)(**selector)
+
+    assert observed["tids"] is None
+    assert all(observed[key] == value for key, value in selector.items())
+
+
 def test_client_api_omissions_are_explicitly_classified() -> None:
     assert CLIENT_API_OMISSIONS
     assert all(reason.strip() for reason in CLIENT_API_OMISSIONS.values())
@@ -441,6 +520,151 @@ def test_submit_spec_and_pipeline_references_return_tasks() -> None:
 
         _assert_task_result_value(spec_task, harness, "stored")
         _assert_task_result_value(pipeline_task, harness, "pipeline")
+
+
+def test_client_prepare_spec_translates_unknown_override() -> None:
+    with WeftTestHarness() as harness:
+        spec_path = harness.root / ".weft" / "tasks" / "stored-echo.json"
+        _write_json(
+            spec_path,
+            {
+                "name": "stored-echo",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            },
+        )
+        client = WeftClient(path=harness.root)
+
+        with pytest.raises(
+            exception_types.SubmissionValidationError,
+            match="Unknown submit override",
+        ):
+            client.prepare_spec(spec_path, unknown_override=True)
+
+
+def test_submitted_task_binds_materialized_runtime_context() -> None:
+    with WeftTestHarness() as client_harness, WeftTestHarness() as runtime_harness:
+        runtime_harness.ensure_foreground_manager()
+        _write_json(
+            client_harness.root / ".weft" / "tasks" / "remote-context.json",
+            {
+                "name": "remote-context",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "weft_context": str(runtime_harness.root),
+                },
+                "metadata": {},
+            },
+        )
+        client = WeftClient(path=client_harness.root)
+
+        task = client.submit_spec("remote-context", payload="remote")
+        result = task.result(timeout=30.0)
+
+        assert result.status == "completed"
+        assert result.value == "remote"
+        assert task.context is not None
+        assert task.context.root == runtime_harness.context.root
+        assert client.tasks.status(task.tid) is None
+
+
+@pytest.mark.parametrize("surface", ["client", "cmd_run"])
+@pytest.mark.parametrize("explicit_context", [False, True])
+def test_spec_submission_uses_declared_runtime_broker_across_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    explicit_context: bool,
+) -> None:
+    with WeftTestHarness() as client_harness, WeftTestHarness() as runtime_harness:
+        runtime_harness.ensure_foreground_manager()
+        spec_path = client_harness.root / ".weft" / "tasks" / "remote-context.json"
+        _write_json(
+            spec_path,
+            {
+                "name": "remote-context",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "weft_context": str(runtime_harness.root),
+                },
+            },
+        )
+        with monkeypatch.context() as cwd_patch:
+            cwd_patch.chdir(client_harness.root)
+
+            if surface == "client":
+                client = (
+                    WeftClient(path=client_harness.root)
+                    if explicit_context
+                    else connect()
+                )
+                task = client.submit_spec(spec_path, payload="remote")
+                task_result = task.result(timeout=30.0)
+                tid = task.tid
+                assert task.context is not None
+                assert task.context.root == runtime_harness.context.root
+            else:
+                outcome = commands.cmd_run(
+                    (),
+                    spec=spec_path,
+                    stdin_text="remote",
+                    context=client_harness.root if explicit_context else None,
+                    wait=True,
+                )
+                session = cast(commands.RunSession, outcome)
+                try:
+                    execution = session.wait()
+                finally:
+                    session.close()
+                tid = execution.tid
+                task_result = TaskResult(
+                    tid=tid,
+                    status=execution.status or "missing",
+                    value=execution.result_value,
+                    stdout=None,
+                    stderr=None,
+                    error=execution.error_message,
+                )
+
+            assert task_result.status == "completed"
+            assert task_result.value == "remote"
+            assert (
+                commands.cmd_task_status(tid, context=runtime_harness.root).tid == tid
+            )
+            with pytest.raises(TaskNotFound):
+                commands.cmd_task_status(tid, context=client_harness.root)
+
+
+def test_task_result_propagates_wait_expiry_and_preserves_terminal_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = WeftClient(path=Path.cwd())
+    task = Task(client, "1777000000000000001")
+    terminal = TaskResult(
+        tid=task.tid,
+        status="timeout",
+        value=None,
+        stdout=None,
+        stderr=None,
+        error="task timed out",
+    )
+    monkeypatch.setattr(
+        "weft.commands.result.await_task_result",
+        lambda *_args, **_kwargs: terminal,
+    )
+    assert task.result(timeout=0.1) is terminal
+
+    monkeypatch.setattr(
+        "weft.commands.result.await_task_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            exception_types.CommandTimeoutError("wait expired")
+        ),
+    )
+    with pytest.raises(exception_types.CommandTimeoutError, match="wait expired"):
+        task.result(timeout=0.1)
 
 
 def test_task_snapshot_and_tasks_namespace_status_agree() -> None:

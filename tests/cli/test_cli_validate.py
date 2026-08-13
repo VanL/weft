@@ -172,7 +172,7 @@ def test_validate_taskspec_missing_explicit_file_preserves_exit_contract(
         env=env,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert out == f"Error: File not found: {missing}"
     assert err == ""
 

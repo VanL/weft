@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 175 plan files in this directory.
+There are currently 176 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 175 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-08-12-public-api-surface-remediation.md`](./2026-08-12-public-api-surface-remediation.md) | Public API Surface Remediation: One Seam, Restored Contracts, Closed Test Floor | `completed` | none |
 | [`2026-08-11-python-api-surfaces-sb-contract.md`](./2026-08-11-python-api-surfaces-sb-contract.md) | Python API Surfaces: Adopt the SimpleBroker Three-Surface Contract | `completed` | none |
 | [`2026-08-11-shared-reactor-test-driver-adoption-plan.md`](./2026-08-11-shared-reactor-test-driver-adoption-plan.md) | Shared Reactor Test Driver Adoption Plan | `completed` | none |
 | [`2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](./2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md) | Canonical Contract and Dead Code Cleanup Plan | `completed` | none |

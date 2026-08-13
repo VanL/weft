@@ -347,7 +347,7 @@ def test_manager_json_projection_formats_only_owned_broker_ids() -> None:
     assert record["_pong_live_at"] == second_id
 
 
-def test_manager_json_commands_use_external_id_projection(
+def test_manager_commands_return_structured_broker_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     message_id = 1_779_300_000_000_000_003
@@ -368,16 +368,11 @@ def test_manager_json_commands_use_external_id_projection(
         lambda *_args, **_kwargs: record,
     )
 
-    list_exit, list_payload = manager_cmd.list_command(json_output=True)
-    status_exit, status_payload = manager_cmd.status_command(
-        tid=record["tid"],
-        json_output=True,
-    )
+    listed = manager_cmd.cmd_manager_list()
+    status = manager_cmd.cmd_manager_status(record["tid"])
 
-    assert list_exit == 0
-    assert status_exit == 0
-    assert json.loads(list_payload or "[]")[0]["timestamp"] == ("1779300000000000003")
-    assert json.loads(status_payload or "{}")["timestamp"] == ("1779300000000000003")
+    assert listed[0].timestamp == message_id
+    assert status.timestamp == message_id
     assert record["timestamp"] == message_id
 
 
@@ -1738,14 +1733,11 @@ def test_list_command_omits_stale_active_manager(tmp_path) -> None:
                 }
             )
         )
-        exit_code, payload = manager_cmd.list_command(
-            json_output=True, context_path=context_root
-        )
+        records = manager_cmd.cmd_manager_list(context=context_root)
     finally:
         process.wait()
 
-    assert exit_code == 0
-    assert tid not in {record["tid"] for record in json.loads(payload)}
+    assert tid not in {record.tid for record in records}
 
 
 def test_list_command_omits_stale_external_supervisor_manager(
@@ -1782,12 +1774,9 @@ def test_list_command_omits_stale_external_supervisor_manager(
         )
     )
 
-    exit_code, payload = manager_cmd.list_command(
-        json_output=True, context_path=context_root
-    )
+    records = manager_cmd.cmd_manager_list(context=context_root)
 
-    assert exit_code == 0
-    assert tid not in {record["tid"] for record in json.loads(payload)}
+    assert tid not in {record.tid for record in records}
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
@@ -1816,19 +1805,16 @@ def test_list_command_diagnostic_includes_stale_active_manager(tmp_path) -> None
     finally:
         process.wait()
 
-    exit_code, payload = manager_cmd.list_command(
-        json_output=True,
+    records = manager_cmd.cmd_manager_list(
         diagnostic=True,
-        context_path=context_root,
+        context=context_root,
     )
 
-    assert exit_code == 0
-    records = json.loads(payload)
-    record = next(record for record in records if record["tid"] == tid)
-    assert record["liveness"] == "stale"
-    assert record["proof_source"] == "host-pid"
-    assert record["canonical"] is False
-    assert record["dispatch_eligible"] is False
+    record = next(record for record in records if record.tid == tid)
+    assert record.liveness == "stale"
+    assert record.proof_source == "host-pid"
+    assert record.canonical is False
+    assert record.dispatch_eligible is False
 
 
 def test_list_command_diagnostic_marks_lowest_live_manager_canonical(
@@ -1854,19 +1840,17 @@ def test_list_command_diagnostic_marks_lowest_live_manager_canonical(
     finally:
         registry_queue.close()
 
-    exit_code, payload = manager_cmd.list_command(
-        json_output=True,
+    snapshots = manager_cmd.cmd_manager_list(
         diagnostic=True,
-        context_path=context_root,
+        context=context_root,
     )
 
-    assert exit_code == 0
-    records = {record["tid"]: record for record in json.loads(payload)}
-    assert records[lower_tid]["liveness"] == "live"
-    assert records[higher_tid]["liveness"] == "live"
-    assert records[lower_tid]["proof_source"] == "host-pid"
-    assert records[lower_tid]["canonical"] is True
-    assert records[higher_tid]["canonical"] is False
+    records = {record.tid: record for record in snapshots}
+    assert records[lower_tid].liveness == "live"
+    assert records[higher_tid].liveness == "live"
+    assert records[lower_tid].proof_source == "host-pid"
+    assert records[lower_tid].canonical is True
+    assert records[higher_tid].canonical is False
 
 
 def test_list_command_rescues_unreachable_host_pid_with_pong(
@@ -1896,14 +1880,9 @@ def test_list_command_rescues_unreachable_host_pid_with_pong(
         lambda *args, **kwargs: True,
     )
 
-    exit_code, payload = manager_cmd.list_command(
-        json_output=True,
-        context_path=context_root,
-    )
+    records = manager_cmd.cmd_manager_list(context=context_root)
 
-    assert exit_code == 0
-    records = json.loads(payload)
-    assert tid in {record["tid"] for record in records}
+    assert tid in {record.tid for record in records}
 
 
 def test_ensure_manager_does_not_start_when_host_pid_incumbent_is_namespace_ambiguous(
@@ -2340,18 +2319,12 @@ def test_list_command_returns_table(tmp_path):
         )
     )
 
-    exit_code, payload = manager_cmd.list_command(
-        json_output=False, context_path=context_root
-    )
-    assert exit_code == 0
-    assert "alpha" in payload
+    records = manager_cmd.cmd_manager_list(context=context_root)
+    assert any(record.name == "alpha" for record in records)
 
 
 def test_status_command_not_found(tmp_path):
     context_root = prepare_project_root(tmp_path / "ctx")
     build_context(context_root)
-    exit_code, payload = manager_cmd.status_command(
-        tid="999", json_output=False, context_path=context_root
-    )
-    assert exit_code == 1
-    assert "not found" in payload.lower()
+    with pytest.raises(ManagerNotRunning, match="not found"):
+        manager_cmd.cmd_manager_status("999", context=context_root)

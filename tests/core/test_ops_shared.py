@@ -123,14 +123,22 @@ def test_client_submit_uses_shared_submission_module(
     def _fake_submit_prepared(context, prepared):
         captured["submit_context"] = context
         captured["prepared"] = prepared
-        return submission_mod.SubmittedTaskReceipt(
-            tid="1776000000000000001",
-            name="demo",
-            submitted_at_ns=1776000000000000001,
+        return submission_mod._SubmittedPreparedOutcome(
+            receipt=submission_mod.SubmittedTaskReceipt(
+                tid="1776000000000000001",
+                name="demo",
+                submitted_at_ns=1776000000000000001,
+                context_root=str(context.root),
+            ),
+            runtime_context=context,
         )
 
     monkeypatch.setattr(submission_mod, "prepare", _fake_prepare)
-    monkeypatch.setattr(submission_mod, "submit_prepared", _fake_submit_prepared)
+    monkeypatch.setattr(
+        submission_mod,
+        "_submit_prepared_outcome",
+        _fake_submit_prepared,
+    )
 
     with WeftTestHarness() as harness:
         client = WeftClient(path=harness.root)
@@ -273,7 +281,7 @@ def test_follow_task_events_uses_visible_result_after_event_timeout(
     assert events[-1].payload["status"] == "completed"
 
 
-def test_follow_task_events_preserves_event_timeout_when_result_not_visible(
+def test_follow_task_events_preserves_terminal_timeout_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _fake_iter(context, tid, *, follow=False, timeout=None):
@@ -295,14 +303,43 @@ def test_follow_task_events_preserves_event_timeout_when_result_not_visible(
     monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
     monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
 
-    with pytest.raises(TimeoutError, match="event wait expired"):
-        list(
-            events_mod.follow_task_events(
-                object(),
-                "1776000000000000001",
-                timeout=0.0,
-            )
+    events = list(
+        events_mod.follow_task_events(
+            object(),
+            "1776000000000000001",
+            timeout=0.0,
         )
+    )
+
+    assert events[-1].event_type == "result"
+    assert events[-1].payload["status"] == "timeout"
+
+
+def test_follow_task_events_reports_original_timeout_after_terminal_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1776000000000000001"
+
+    def _fake_iter(context, tid, *, follow=False, timeout=None):
+        yield TaskEvent(
+            tid=tid,
+            event_type="completed",
+            timestamp=1,
+            payload={"tid": tid, "status": "completed"},
+        )
+
+    def _fake_await(
+        context, tid, *, timeout=None, show_stderr=False, emit_stream=False
+    ):
+        raise events_mod.CommandTimeoutError(
+            f"Timed out after {timeout} seconds waiting for task {tid}"
+        )
+
+    monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
+    monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
+
+    with pytest.raises(TimeoutError, match="Timed out after 5.0 seconds"):
+        list(events_mod.follow_task_events(object(), tid, timeout=5.0))
 
 
 def test_realtime_events_uses_terminal_state_seen_during_materialization(

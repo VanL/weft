@@ -37,6 +37,7 @@ class WeftClient:
     ) -> None:
         if context is not None and path is not None:
             raise ValueError("Pass either context or path, not both")
+        self._context_explicit = context is not None or path is not None
         self.context = context or build_context(spec_context=path)
         self.tasks = TasksNamespace(self)
         self.queues = QueuesNamespace(self)
@@ -51,7 +52,9 @@ class WeftClient:
         *,
         autostart: bool | None = None,
     ) -> WeftClient:
-        return cls(build_context(spec_context=spec_context, autostart=autostart))
+        client = cls(build_context(spec_context=spec_context, autostart=autostart))
+        client._context_explicit = spec_context is not None
+        return client
 
     @classmethod
     def from_weft_context(cls, context: WeftContext) -> WeftClient:
@@ -113,6 +116,7 @@ class WeftClient:
             spec_args=spec_args,
             payload=payload,
             stdin_text=stdin_text,
+            context_explicit=self._context_explicit,
             **overrides,
         )
         return PreparedSubmission(self, request)

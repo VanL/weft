@@ -7,6 +7,11 @@ Spec references:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from weft.commands.types import TaskControlFailure
+
 
 class WeftError(Exception):
     """Base exception for Weft-specific failures."""
@@ -49,7 +54,23 @@ class TaskNotFound(WeftError, LookupError):
 
 
 class ControlRejected(WeftError, RuntimeError):
-    """Raised when a task or manager control request is not accepted."""
+    """Raised when a task or manager control request is not accepted.
+
+    For bulk control sweeps, ``failures`` carries the full
+    ``TaskControlFailure`` tuple when at least one task was requested and
+    none was accepted; single-target rejections leave it empty.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failures: tuple[TaskControlFailure, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.failures = failures
 
 
 class SpecNotFound(WeftError, FileNotFoundError):

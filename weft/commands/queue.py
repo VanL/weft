@@ -13,20 +13,16 @@ Spec references:
 
 from __future__ import annotations
 
-import io
-import json
 import os
-import sys
-from collections.abc import Callable, Iterator
-from contextlib import redirect_stderr, redirect_stdout
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 
-from simplebroker import commands as sb_commands
 from simplebroker import format_message_id
 from simplebroker.ext import TimestampError, TimestampGenerator
 from weft._constants import WEFT_CONTEXT_ENV
-from weft._exceptions import CommandError, CommandExecutionError, CommandUsageError
+from weft._exceptions import CommandExecutionError, CommandUsageError
+from weft.commands._boundary import typed_queue_command_errors
 from weft.commands.types import (
     CommandStream,
     EndpointResolution,
@@ -49,6 +45,7 @@ from weft.core.endpoints import (
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import (
     closing_queue_iterator,
+    resolve_broker_max_message_size,
 )
 from weft.helpers.message_ids import normalize_exact_message_id
 
@@ -143,70 +140,6 @@ def _move_generator_after(
         after_timestamp=after_timestamp,
         before_timestamp=before_timestamp,
     )
-
-
-def _run_simplebroker_command(
-    fn: Callable[..., int], *args: object, **kwargs: object
-) -> tuple[int, str, str]:
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        exit_code = fn(*args, **kwargs)
-    return exit_code, stdout.getvalue(), stderr.getvalue()
-
-
-def _resolve_message_content(
-    ctx: WeftContext,
-    message: str | None,
-) -> str:
-    del ctx
-    if message is None or message == "-":
-        raise ValueError("message content must be supplied by the CLI adapter")
-    return message
-
-
-def _format_resolved_endpoint(record: ResolvedEndpoint) -> str:
-    payload = record.to_dict()
-    lines = [
-        f"name: {payload['name']}",
-        f"tid: {payload['tid']}",
-        f"status: {payload['status']}",
-        f"inbox: {payload['inbox']}",
-        f"outbox: {payload['outbox']}",
-        f"ctrl_in: {payload['ctrl_in']}",
-        f"ctrl_out: {payload['ctrl_out']}",
-        f"registered_at: {payload['registered_at']}",
-        f"last_seen: {payload['last_seen']}",
-        f"live_candidates: {payload['live_candidates']}",
-    ]
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict) and metadata:
-        lines.append(f"metadata: {json.dumps(metadata, ensure_ascii=False)}")
-    return "\n".join(lines)
-
-
-def _format_endpoint_list(records: list[ResolvedEndpoint]) -> str:
-    lines: list[str] = []
-    for record in records:
-        line = f"{record.record.name}\t{record.record.tid}\t{record.record.inbox}"
-        if record.live_candidates > 1:
-            line += f"\t({record.live_candidates} live claims)"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def _invalid_message_id_error(*, json_output: bool = False) -> str:
-    message = "invalid message ID: expected exactly 19 digits within range"
-    if json_output:
-        return json.dumps(
-            {
-                "error": "INVALID_MESSAGE_ID",
-                "message": message,
-                "retryable": False,
-            },
-            ensure_ascii=False,
-        )
-    return message
 
 
 def _queue_entry(queue_name: str, message: QueueMessage) -> QueueEntry:
@@ -881,16 +814,6 @@ def _exact_message_id(value: int | str | None) -> int | None:
         raise CommandUsageError(f"invalid message ID: {exc}") from exc
 
 
-def _command_failure(action: str, exc: Exception) -> CommandError:
-    """Translate an implementation failure at the public command seam."""
-
-    if isinstance(exc, CommandError):
-        raise exc
-    if isinstance(exc, (TypeError, ValueError)):
-        return CommandUsageError(str(exc))
-    return CommandExecutionError(f"queue {action} failed: {exc}")
-
-
 def _canonical_queue_operand(ctx: WeftContext, name: str) -> str:
     """Resolve the SimpleBroker ``@alias`` syntax at the command boundary."""
 
@@ -900,6 +823,15 @@ def _canonical_queue_operand(ctx: WeftContext, name: str) -> str:
         return str(broker.canonicalize_queue(name))
 
 
+def _require_message_within_limit(context: WeftContext, message: str) -> None:
+    """Reject text larger than the resolved broker context accepts."""
+
+    maximum = resolve_broker_max_message_size(context.config)
+    if len(message.encode("utf-8")) > maximum:
+        raise CommandUsageError(f"Message exceeds maximum size of {maximum} bytes")
+
+
+@typed_queue_command_errors
 def cmd_queue_read(
     name: str,
     *,
@@ -929,22 +861,20 @@ def cmd_queue_read(
 
     if message is not None and (all or after is not None or before is not None):
         raise CommandUsageError("message cannot be used with all, after, or before")
-    try:
-        context = _public_command_context()
-        return tuple(
-            read_queue(
-                context,
-                _canonical_queue_operand(context, name),
-                all_messages=all,
-                message_id=_exact_message_id(message),
-                after=_selection_timestamp(after, option="after"),
-                before=_selection_timestamp(before, option="before"),
-            )
+    context = _public_command_context()
+    return tuple(
+        read_queue(
+            context,
+            _canonical_queue_operand(context, name),
+            all_messages=all,
+            message_id=_exact_message_id(message),
+            after=_selection_timestamp(after, option="after"),
+            before=_selection_timestamp(before, option="before"),
         )
-    except Exception as exc:
-        raise _command_failure("read", exc) from exc
+    )
 
 
+@typed_queue_command_errors
 def cmd_queue_write(
     queue_name: str,
     message: str | None = None,
@@ -972,25 +902,26 @@ def cmd_queue_write(
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    try:
+    if endpoint is not None:
+        if message is not None:
+            raise CommandUsageError(
+                "when endpoint is used, provide at most one positional message"
+            )
         context = _public_command_context()
-        if endpoint is not None:
-            if message is not None:
-                raise CommandUsageError(
-                    "when endpoint is used, provide at most one positional message"
-                )
-            return write_endpoint(context, endpoint, queue_name)
-        if message is None:
-            raise CommandUsageError("message is required")
-        return write_queue(
-            context,
-            _canonical_queue_operand(context, queue_name),
-            message,
-        )
-    except Exception as exc:
-        raise _command_failure("write", exc) from exc
+        _require_message_within_limit(context, queue_name)
+        return write_endpoint(context, endpoint, queue_name)
+    if message is None:
+        raise CommandUsageError("message is required")
+    context = _public_command_context()
+    _require_message_within_limit(context, message)
+    return write_queue(
+        context,
+        _canonical_queue_operand(context, queue_name),
+        message,
+    )
 
 
+@typed_queue_command_errors
 def cmd_queue_peek(
     name: str,
     *,
@@ -1015,20 +946,17 @@ def cmd_queue_peek(
 
     if message is not None and (all or after is not None or before is not None):
         raise CommandUsageError("message cannot be used with all, after, or before")
-    try:
-        context = _public_command_context()
-        return tuple(
-            peek_queue(
-                context,
-                _canonical_queue_operand(context, name),
-                all_messages=all,
-                message_id=_exact_message_id(message),
-                after=_selection_timestamp(after, option="after"),
-                before=_selection_timestamp(before, option="before"),
-            )
+    context = _public_command_context()
+    return tuple(
+        peek_queue(
+            context,
+            _canonical_queue_operand(context, name),
+            all_messages=all,
+            message_id=_exact_message_id(message),
+            after=_selection_timestamp(after, option="after"),
+            before=_selection_timestamp(before, option="before"),
         )
-    except Exception as exc:
-        raise _command_failure("peek", exc) from exc
+    )
 
 
 def _move_queue_entries(
@@ -1087,6 +1015,7 @@ def _move_queue_entries(
         queue.close()
 
 
+@typed_queue_command_errors
 def cmd_queue_move(
     source: str,
     destination: str,
@@ -1126,26 +1055,24 @@ def cmd_queue_move(
         raise CommandUsageError(
             "message cannot be used with limit, all, after, or before"
         )
-    try:
-        context = _public_command_context()
-        canonical_source = _canonical_queue_operand(context, source)
-        canonical_destination = _canonical_queue_operand(context, destination)
-        if canonical_source == canonical_destination:
-            raise CommandUsageError("source and destination queues cannot be the same")
-        return _move_queue_entries(
-            context,
-            canonical_source,
-            canonical_destination,
-            limit=limit,
-            all_messages=all,
-            message_id=_exact_message_id(message),
-            after=_selection_timestamp(after, option="after"),
-            before=_selection_timestamp(before, option="before"),
-        )
-    except Exception as exc:
-        raise _command_failure("move", exc) from exc
+    context = _public_command_context()
+    canonical_source = _canonical_queue_operand(context, source)
+    canonical_destination = _canonical_queue_operand(context, destination)
+    if canonical_source == canonical_destination:
+        raise CommandUsageError("source and destination queues cannot be the same")
+    return _move_queue_entries(
+        context,
+        canonical_source,
+        canonical_destination,
+        limit=limit,
+        all_messages=all,
+        message_id=_exact_message_id(message),
+        after=_selection_timestamp(after, option="after"),
+        before=_selection_timestamp(before, option="before"),
+    )
 
 
+@typed_queue_command_errors
 def cmd_queue_list(
     *,
     stats: bool = False,
@@ -1177,25 +1104,23 @@ def cmd_queue_list(
         raise CommandUsageError("stats is not supported with endpoints")
     if endpoints and prefix is not None:
         raise CommandUsageError("prefix is not supported with endpoints")
-    try:
-        context = _public_command_context()
-        if endpoints:
-            return tuple(
-                _endpoint_resolution(record)
-                for record in list_resolved_endpoints(context, pattern=pattern)
-            )
+    context = _public_command_context()
+    if endpoints:
         return tuple(
-            list_queue_infos(
-                context,
-                pattern=pattern,
-                prefix=prefix,
-                include_stats=stats,
-            )
+            _endpoint_resolution(record)
+            for record in list_resolved_endpoints(context, pattern=pattern)
         )
-    except Exception as exc:
-        raise _command_failure("list", exc) from exc
+    return tuple(
+        list_queue_infos(
+            context,
+            pattern=pattern,
+            prefix=prefix,
+            include_stats=stats,
+        )
+    )
 
 
+@typed_queue_command_errors
 def cmd_queue_exists(name: str) -> bool:
     """Return whether ``name`` currently exists.
 
@@ -1206,13 +1131,11 @@ def cmd_queue_exists(name: str) -> bool:
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    try:
-        context = _public_command_context()
-        return queue_exists(context, _canonical_queue_operand(context, name))
-    except Exception as exc:
-        raise _command_failure("exists", exc) from exc
+    context = _public_command_context()
+    return queue_exists(context, _canonical_queue_operand(context, name))
 
 
+@typed_queue_command_errors
 def cmd_queue_stats(name: str) -> QueueInfo:
     """Return one queue's structured counts.
 
@@ -1223,13 +1146,11 @@ def cmd_queue_stats(name: str) -> QueueInfo:
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    try:
-        context = _public_command_context()
-        return queue_info(context, _canonical_queue_operand(context, name))
-    except Exception as exc:
-        raise _command_failure("stats", exc) from exc
+    context = _public_command_context()
+    return queue_info(context, _canonical_queue_operand(context, name))
 
 
+@typed_queue_command_errors
 def cmd_queue_resolve(endpoint_name: str) -> EndpointResolution:
     """Resolve one active named endpoint.
 
@@ -1240,10 +1161,7 @@ def cmd_queue_resolve(endpoint_name: str) -> EndpointResolution:
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    try:
-        resolved = resolve_queue_endpoint(_public_command_context(), endpoint_name)
-    except Exception as exc:
-        raise _command_failure("resolve", exc) from exc
+    resolved = resolve_queue_endpoint(_public_command_context(), endpoint_name)
     if resolved is None:
         try:
             normalized = normalize_endpoint_name(endpoint_name)
@@ -1253,6 +1171,7 @@ def cmd_queue_resolve(endpoint_name: str) -> EndpointResolution:
     return resolved
 
 
+@typed_queue_command_errors
 def cmd_queue_watch(
     name: str,
     *,
@@ -1290,30 +1209,25 @@ def cmd_queue_watch(
         raise CommandUsageError("peek cannot be used with move")
     if move is not None and after is not None:
         raise CommandUsageError("move cannot be used with after")
-    try:
-        context = _public_command_context()
-        after_timestamp = _selection_timestamp(after, option="after")
-        canonical_name = _canonical_queue_operand(context, name)
-        canonical_move = (
-            _canonical_queue_operand(context, move) if move is not None else None
-        )
-        source = watch_queue_entries(
-            context,
-            canonical_name,
-            limit=limit,
-            interval=interval,
-            peek=peek,
-            after=after_timestamp,
-            move_to=canonical_move,
-        )
-    except Exception as exc:
-        raise _command_failure("watch", exc) from exc
+    context = _public_command_context()
+    after_timestamp = _selection_timestamp(after, option="after")
+    canonical_name = _canonical_queue_operand(context, name)
+    canonical_move = (
+        _canonical_queue_operand(context, move) if move is not None else None
+    )
+    source = watch_queue_entries(
+        context,
+        canonical_name,
+        limit=limit,
+        interval=interval,
+        peek=peek,
+        after=after_timestamp,
+        move_to=canonical_move,
+    )
 
     def _stream() -> Iterator[QueueEntry]:
         try:
             yield from source
-        except Exception as exc:
-            raise _command_failure("watch", exc) from exc
         finally:
             close = getattr(source, "close", None)
             if callable(close):
@@ -1322,6 +1236,7 @@ def cmd_queue_watch(
     return cast(CommandStream[QueueEntry], _stream())
 
 
+@typed_queue_command_errors
 def cmd_queue_delete(
     name: str | None = None,
     *,
@@ -1353,42 +1268,40 @@ def cmd_queue_delete(
         raise CommandUsageError("queue name is required when message is used")
     if name is None and not all:
         raise CommandUsageError("queue name is required unless all=True")
-    try:
-        context = _public_command_context()
-        canonical_name = (
-            _canonical_queue_operand(context, name) if name is not None else None
-        )
-        exact_message = _exact_message_id(message)
-        if exact_message is not None:
-            receipt = delete_queue_messages(
-                context,
-                canonical_name,
-                message_id=exact_message,
-            )
-            return QueueDeleteReceipt(
-                queue=receipt.queue,
-                deleted_count=receipt.deleted_count,
-                queues_deleted=0,
-                all_queues=False,
-                exact_message=format_message_id(exact_message),
-            )
-        with context.broker() as db:
-            existing = {str(item.queue) for item in db.list_queue_stats()}
-        receipt = delete_queue_messages(context, canonical_name, all_queues=all)
-        queues_deleted = (
-            len(existing) if all else int(cast(str, canonical_name) in existing)
+    context = _public_command_context()
+    canonical_name = (
+        _canonical_queue_operand(context, name) if name is not None else None
+    )
+    exact_message = _exact_message_id(message)
+    if exact_message is not None:
+        receipt = delete_queue_messages(
+            context,
+            canonical_name,
+            message_id=exact_message,
         )
         return QueueDeleteReceipt(
             queue=receipt.queue,
             deleted_count=receipt.deleted_count,
-            queues_deleted=queues_deleted,
-            all_queues=all,
-            exact_message=None,
+            queues_deleted=0,
+            all_queues=False,
+            exact_message=format_message_id(exact_message),
         )
-    except Exception as exc:
-        raise _command_failure("delete", exc) from exc
+    with context.broker() as db:
+        existing = {str(item.queue) for item in db.list_queue_stats()}
+    receipt = delete_queue_messages(context, canonical_name, all_queues=all)
+    queues_deleted = (
+        len(existing) if all else int(cast(str, canonical_name) in existing)
+    )
+    return QueueDeleteReceipt(
+        queue=receipt.queue,
+        deleted_count=receipt.deleted_count,
+        queues_deleted=queues_deleted,
+        all_queues=all,
+        exact_message=None,
+    )
 
 
+@typed_queue_command_errors
 def cmd_queue_broadcast(
     message: str | None = None,
     *,
@@ -1412,12 +1325,12 @@ def cmd_queue_broadcast(
 
     if message is None:
         raise CommandUsageError("message is required")
-    try:
-        return broadcast(_public_command_context(), message, pattern=pattern)
-    except Exception as exc:
-        raise _command_failure("broadcast", exc) from exc
+    context = _public_command_context()
+    _require_message_within_limit(context, message)
+    return broadcast(context, message, pattern=pattern)
 
 
+@typed_queue_command_errors
 def cmd_queue_alias_add(alias: str, target: str) -> QueueAliasRecord:
     """Create or replace one queue alias and return it.
 
@@ -1428,12 +1341,10 @@ def cmd_queue_alias_add(alias: str, target: str) -> QueueAliasRecord:
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    try:
-        return add_alias(_public_command_context(), alias, target)
-    except Exception as exc:
-        raise _command_failure("alias add", exc) from exc
+    return add_alias(_public_command_context(), alias, target)
 
 
+@typed_queue_command_errors
 def cmd_queue_alias_list(*, target: str | None = None) -> tuple[QueueAliasRecord, ...]:
     """List queue aliases, optionally filtered by target.
 
@@ -1444,12 +1355,10 @@ def cmd_queue_alias_list(*, target: str | None = None) -> tuple[QueueAliasRecord
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    try:
-        return tuple(list_alias_records(_public_command_context(), target=target))
-    except Exception as exc:
-        raise _command_failure("alias list", exc) from exc
+    return tuple(list_alias_records(_public_command_context(), target=target))
 
 
+@typed_queue_command_errors
 def cmd_queue_alias_remove(alias: str) -> QueueAliasRecord:
     """Remove and return one queue alias record.
 
@@ -1460,442 +1369,15 @@ def cmd_queue_alias_remove(alias: str) -> QueueAliasRecord:
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    try:
-        context = _public_command_context()
-        existing = next(
-            (record for record in list_alias_records(context) if record.alias == alias),
-            None,
-        )
-        if existing is None:
-            raise CommandExecutionError(f"Queue alias '{alias}' not found")
-        remove_alias(context, alias)
-        return existing
-    except Exception as exc:
-        raise _command_failure("alias remove", exc) from exc
-
-
-def read_command(
-    queue_name: str,
-    *,
-    all_messages: bool = False,
-    with_timestamps: bool = False,
-    json_output: bool = False,
-    message_id: str | None = None,
-    after: str | None = None,
-    before: str | None = None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    if message_id is not None and (
-        all_messages or after is not None or before is not None
-    ):
-        return 1, "", "--message cannot be used with --all, --after, or --before"
-    return _run_simplebroker_command(
-        sb_commands.cmd_read,
-        ctx.broker_target,
-        queue_name,
-        all_messages=all_messages,
-        json_output=json_output,
-        show_timestamps=with_timestamps,
-        after_str=after,
-        message_id_str=message_id,
-        before_str=before,
+    context = _public_command_context()
+    existing = next(
+        (record for record in list_alias_records(context) if record.alias == alias),
+        None,
     )
-
-
-def write_command(
-    queue_name: str | None,
-    message: str | None,
-    *,
-    endpoint_name: str | None = None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    target_queue = queue_name
-    if endpoint_name is not None:
-        try:
-            resolved = resolve_endpoint(ctx, endpoint_name)
-        except ValueError as exc:
-            return 1, "", str(exc)
-        if resolved is None:
-            normalized = normalize_endpoint_name(endpoint_name)
-            return 2, "", f"No active endpoint named '{normalized}'"
-        target_queue = resolved.record.inbox
-    if not isinstance(target_queue, str) or not target_queue:
-        return 1, "", "Queue name is required unless --endpoint is used"
-    try:
-        content = _resolve_message_content(ctx, message)
-    except ValueError as exc:
-        return 1, "", str(exc)
-    return _run_simplebroker_command(
-        sb_commands.cmd_write, ctx.broker_target, target_queue, content
-    )
-
-
-def peek_command(
-    queue_name: str,
-    *,
-    all_messages: bool = False,
-    with_timestamps: bool = False,
-    json_output: bool = False,
-    message_id: str | None = None,
-    after: str | None = None,
-    before: str | None = None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    if message_id is not None and (
-        all_messages or after is not None or before is not None
-    ):
-        return 1, "", "--message cannot be used with --all, --after, or --before"
-    return _run_simplebroker_command(
-        sb_commands.cmd_peek,
-        ctx.broker_target,
-        queue_name,
-        all_messages=all_messages,
-        json_output=json_output,
-        show_timestamps=with_timestamps,
-        after_str=after,
-        message_id_str=message_id,
-        before_str=before,
-    )
-
-
-def move_command(
-    source_queue: str,
-    destination_queue: str,
-    *,
-    limit: int | None = None,
-    all_messages: bool = False,
-    json_output: bool = False,
-    with_timestamps: bool = False,
-    message_id: str | None = None,
-    after: str | None = None,
-    before: str | None = None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    if source_queue == destination_queue:
-        return 1, "", "Source and destination queues cannot be the same"
-    if message_id is not None and (after is not None or before is not None):
-        return 1, "", "--message cannot be used with --after or --before"
-
-    if limit is not None:
-        try:
-            after_timestamp = (
-                TimestampGenerator.validate(after) if after is not None else None
-            )
-            before_timestamp = (
-                TimestampGenerator.validate(before) if before is not None else None
-            )
-        except (TimestampError, ValueError) as exc:
-            return 1, "", str(exc)
-
-        src_queue = ctx.queue(source_queue, persistent=True)
-        try:
-            moved_items = list(
-                src_queue.move_many(
-                    destination_queue,
-                    limit=limit,
-                    with_timestamps=True,
-                    after_timestamp=after_timestamp,
-                    before_timestamp=before_timestamp,
-                )
-            )
-        finally:
-            src_queue.close()
-
-        if not moved_items:
-            return 2, "", ""
-
-        move_summary = (
-            f"Moved {len(moved_items)} messages from "
-            f"{source_queue} to {destination_queue}"
-        )
-        lines: list[str] = [move_summary]
-
-        if json_output or with_timestamps:
-            payload_lines: list[str] = []
-            for item in moved_items:
-                body, timestamp = cast(tuple[Any, Any], item)
-                if json_output:
-                    payload_lines.append(
-                        json.dumps(
-                            {
-                                "message": body,
-                                "timestamp": format_message_id(timestamp),
-                            },
-                            ensure_ascii=False,
-                        )
-                    )
-                elif with_timestamps:
-                    payload_lines.append(f"{timestamp}\t{body}")
-            lines.append("\n".join(payload_lines))
-
-        return 0, "\n".join(filter(None, lines)), ""
-
-    return _run_simplebroker_command(
-        sb_commands.cmd_move,
-        ctx.broker_target,
-        source_queue,
-        destination_queue,
-        all_messages=all_messages,
-        json_output=json_output,
-        show_timestamps=with_timestamps,
-        message_id_str=message_id,
-        after_str=after,
-        before_str=before,
-    )
-
-
-def list_command(
-    *,
-    json_output: bool = False,
-    stats: bool = False,
-    endpoints: bool = False,
-    pattern: str | None = None,
-    prefix: str | None = None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    if pattern is not None and prefix is not None:
-        return 1, "", "--pattern and --prefix cannot be used together"
-
-    if endpoints:
-        if stats:
-            return 1, "", "--stats is not supported with --endpoints"
-        if prefix:
-            return 1, "", "--prefix is not supported with --endpoints"
-        records = list_resolved_endpoints(ctx, pattern=pattern)
-        if json_output:
-            return (
-                0,
-                json.dumps(
-                    [record.to_dict() for record in records],
-                    ensure_ascii=False,
-                ),
-                "",
-            )
-        return 0, _format_endpoint_list(records), ""
-
-    return _run_simplebroker_command(
-        sb_commands.cmd_list,
-        ctx.broker_target,
-        show_stats=stats,
-        pattern=pattern,
-        prefix=prefix,
-        json_output=json_output,
-    )
-
-
-def exists_command(
-    queue_name: str,
-    *,
-    json_output: bool = False,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    return _run_simplebroker_command(
-        sb_commands.cmd_exists,
-        ctx.broker_target,
-        queue_name,
-        json_output=json_output,
-    )
-
-
-def stats_command(
-    queue_name: str,
-    *,
-    json_output: bool = False,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    return _run_simplebroker_command(
-        sb_commands.cmd_stats,
-        ctx.broker_target,
-        queue_name,
-        json_output=json_output,
-    )
-
-
-def delete_command(
-    queue_name: str | None,
-    *,
-    delete_all: bool,
-    message_id: str | None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    if delete_all and queue_name is not None:
-        return 1, "", "--all cannot be used with a queue name"
-    if message_id is not None:
-        if delete_all:
-            return 1, "", "--message cannot be used with --all"
-        if queue_name is None:
-            return 1, "", "Queue name is required when --message is used"
-        if sb_commands.parse_exact_message_id(message_id) is None:
-            return 1, "", _invalid_message_id_error()
-    if queue_name is None and not delete_all:
-        return 1, "", "Provide a queue name or use --all"
-    target_queue = None if delete_all else queue_name
-    return _run_simplebroker_command(
-        sb_commands.cmd_delete,
-        ctx.broker_target,
-        target_queue,
-        message_id_str=message_id,
-    )
-
-
-def broadcast_command(
-    message: str | None,
-    *,
-    pattern: str | None = None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    try:
-        content = _resolve_message_content(ctx, message)
-    except ValueError as exc:
-        return 1, "", str(exc)
-    return _run_simplebroker_command(
-        sb_commands.cmd_broadcast, ctx.broker_target, content, pattern=pattern
-    )
-
-
-def watch_command(
-    queue_name: str,
-    *,
-    limit: int | None,
-    interval: float,
-    with_timestamps: bool,
-    json_output: bool,
-    peek: bool,
-    after: str | None = None,
-    quiet: bool = False,
-    move_to: str | None = None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    if move_to and after:
-        return (
-            1,
-            "",
-            (
-                "--move drains ALL messages from source queue, "
-                "incompatible with --after filtering"
-            ),
-        )
-
-    if limit is None:
-        exit_code = sb_commands.cmd_watch(
-            ctx.broker_target,
-            queue_name,
-            peek=peek,
-            json_output=json_output,
-            show_timestamps=with_timestamps,
-            after_str=after,
-            quiet=quiet,
-            move_to=move_to,
-        )
-        return exit_code, "", ""
-
-    try:
-        after_timestamp = (
-            TimestampGenerator.validate(after) if after is not None else None
-        )
-    except (TimestampError, ValueError) as exc:
-        return 1, "", str(exc)
-
-    if not quiet:
-        mode = "peek" if peek else "consume"
-        if move_to:
-            mode = f"move to {move_to}"
-        print(
-            f"Watching queue '{queue_name}' ({mode} mode)...",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    for message in watch_queue(
-        ctx,
-        queue_name,
-        interval=interval,
-        max_messages=limit,
-        with_timestamps=with_timestamps,
-        json_output=json_output,
-        peek=peek,
-        after=after_timestamp,
-        move_to=move_to,
-    ):
-        if json_output:
-            payload = json.dumps(message.as_dict(), ensure_ascii=False)
-        else:
-            payload = message.as_text(with_timestamps)
-        print(payload, flush=True)
-
-    return 0, "", ""
-
-
-def resolve_command(
-    endpoint_name: str,
-    *,
-    json_output: bool = False,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    try:
-        resolved = resolve_endpoint(ctx, endpoint_name)
-    except ValueError as exc:
-        return 1, "", str(exc)
-    if resolved is None:
-        normalized = normalize_endpoint_name(endpoint_name)
-        return 2, "", f"No active endpoint named '{normalized}'"
-    if json_output:
-        return 0, json.dumps(resolved.to_dict(), ensure_ascii=False), ""
-    return 0, _format_resolved_endpoint(resolved), ""
-
-
-def alias_add_command(
-    alias: str,
-    target: str,
-    *,
-    quiet: bool = False,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    return _run_simplebroker_command(
-        sb_commands.cmd_alias_add,
-        ctx.broker_target,
-        alias,
-        target,
-        quiet=quiet,
-    )
-
-
-def alias_list_command(
-    *,
-    target: str | None = None,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    return _run_simplebroker_command(
-        sb_commands.cmd_alias_list,
-        ctx.broker_target,
-        target=target,
-    )
-
-
-def alias_remove_command(
-    alias: str,
-    *,
-    spec_context: str | None = None,
-) -> tuple[int, str, str]:
-    ctx = _context(spec_context)
-    return _run_simplebroker_command(
-        sb_commands.cmd_alias_remove,
-        ctx.broker_target,
-        alias,
-    )
+    if existing is None:
+        raise CommandExecutionError(f"Queue alias '{alias}' not found")
+    remove_alias(context, alias)
+    return existing
 
 
 __all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-246] exception
@@ -1906,20 +1388,6 @@ __all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-246] exception
     "move_messages",
     "list_queues",
     "watch_queue",
-    "read_command",
-    "write_command",
-    "peek_command",
-    "move_command",
-    "list_command",
-    "resolve_command",
-    "exists_command",
-    "stats_command",
-    "delete_command",
-    "broadcast_command",
-    "watch_command",
-    "alias_add_command",
-    "alias_list_command",
-    "alias_remove_command",
     "cmd_queue_alias_add",
     "cmd_queue_alias_list",
     "cmd_queue_alias_remove",

@@ -17,7 +17,7 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -48,6 +48,7 @@ from weft._exceptions import (
 from weft._runner_plugins import require_runner_plugin
 from weft.commands.types import (
     CommandStream,
+    TaskControlFailure,
     TaskControlResult,
     TaskEvent,
     TaskPingResult,
@@ -170,13 +171,14 @@ def task_tid(
     tid: str | None = None,
     pid: int | None = None,
     reverse: str | None = None,
+    context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> str | None:
     """TID resolution: short-to-full, PID-to-TID, and reverse lookup.
 
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task tid)
     """
-    ctx = _resolve_context(context_path)
+    ctx = _coerce_context(context=context, context_path=context_path)
     if reverse:
         value = reverse.strip().lstrip("T")
         if value.isdigit() and len(value) == 19:
@@ -400,7 +402,7 @@ def task_terminal_snapshot(
         status_snapshot = task_status(
             full_tid,
             include_terminal=True,
-            context_path=ctx.root,
+            context=ctx,
         )
         terminal_status_snapshot = _terminal_snapshot_from_status_snapshot(
             status_snapshot
@@ -448,9 +450,10 @@ def task_status(
     include_terminal: bool = True,
     ping: bool = False,
     probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
+    context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> system_cmd.TaskSnapshot | None:
-    ctx = _resolve_context(context_path)
+    ctx = _coerce_context(context=context, context_path=context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid)
     if ping and full_tid.isdigit() and len(full_tid) == 19:
@@ -874,7 +877,7 @@ def task_snapshot(
     snapshot = task_status(
         tid,
         include_terminal=include_terminal,
-        context_path=ctx.root,
+        context=ctx,
     )
     if snapshot is None:
         return None
@@ -949,7 +952,7 @@ def resolve_tid(
     """Resolve task id variants through the public TID mapping rules."""
 
     ctx = _coerce_context(context=context, context_path=context_path)
-    return task_tid(tid=tid, pid=pid, reverse=reverse, context_path=ctx.root)
+    return task_tid(tid=tid, pid=pid, reverse=reverse, context=ctx)
 
 
 def _pipeline_snapshot_timestamp(pipeline_status: dict[str, Any]) -> int | None:
@@ -1437,7 +1440,7 @@ def _await_control_surface(
                 )
 
             latest_entry = mapping_for_tid(ctx, tid) or latest_entry
-            snapshot = task_status(tid, context_path=ctx.root)
+            snapshot = task_status(tid, context=ctx)
             if snapshot is not None:
                 latest_snapshot = snapshot
                 if snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
@@ -1704,6 +1707,19 @@ def stop_tasks(
     return count
 
 
+def _require_controllable_task(
+    context: WeftContext,
+    tid: str,
+    full_tid: str,
+) -> system_cmd.TaskSnapshot | None:
+    """Return known task evidence or reject an unknown task before control."""
+
+    snapshot = task_status(full_tid, context=context)
+    if snapshot is None and mapping_for_tid(context, full_tid) is None:
+        raise TaskNotFound(f"Task {tid} not found")
+    return snapshot
+
+
 def stop_task(
     tid: str,
     *,
@@ -1714,11 +1730,9 @@ def stop_task(
 
     ctx = _coerce_context(context=context, context_path=context_path)
     full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
-    if (
-        task_status(full, context_path=ctx.root) is None
-        and mapping_for_tid(ctx, full) is None
-    ):
-        raise TaskNotFound(f"Task {tid} not found")
+    snapshot = _require_controllable_task(ctx, tid, full)
+    if snapshot is not None and snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
+        raise ControlRejected(f"Task {tid} already {snapshot.status}")
     if stop_tasks([full], context=ctx) <= 0:
         raise ControlRejected(f"Failed to stop task {tid}")
 
@@ -1822,12 +1836,16 @@ def kill_task(
 
     ctx = _coerce_context(context=context, context_path=context_path)
     full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
-    if (
-        task_status(full, context_path=ctx.root) is None
-        and mapping_for_tid(ctx, full) is None
-    ):
-        raise TaskNotFound(f"Task {tid} not found")
+    snapshot = _require_controllable_task(ctx, tid, full)
     if kill_tasks([full], context=ctx) <= 0:
+        if (
+            snapshot is not None
+            and snapshot.status in system_cmd.TERMINAL_TASK_STATUSES
+        ):
+            raise ControlRejected(
+                f"Task {tid} already {snapshot.status}; "
+                "no live runtime was found to kill"
+            )
         raise ControlRejected(f"Failed to kill task {tid}")
 
 
@@ -1922,7 +1940,7 @@ def cmd_task_status(
             full_tid,
             include_terminal=True,
             ping=True,
-            context_path=ctx.root,
+            context=ctx,
         )
         snapshot = (
             _public_snapshot(
@@ -2004,22 +2022,61 @@ def _task_control_result(
     command: Literal["stop", "kill"],
     tid: str | None,
     *,
+    tids: Sequence[str] | None = None,
     all_tasks: bool,
     pattern: str | None,
     context_path: Path | None,
+    runtime_context: WeftContext | None = None,
 ) -> TaskControlResult:
-    ctx = _coerce_context(context_path=context_path)
-    requested = _selected_control_tids(
-        tid,
-        all_tasks=all_tasks,
-        pattern=pattern,
-        context=ctx,
-    )
+    ctx = _coerce_context(context=runtime_context, context_path=context_path)
+    if tids is not None and (all_tasks or pattern is not None):
+        raise CommandUsageError(
+            "Explicit task ids cannot be combined with --all or --pattern"
+        )
+    explicit_tids = tids
+    if explicit_tids is None:
+        selected = _selected_control_tids(
+            tid,
+            all_tasks=all_tasks,
+            pattern=pattern,
+            context=ctx,
+        )
+    else:
+        selected = tuple(explicit_tids)
     operation = stop_task if command == "stop" else kill_task
+    requested: list[str] = []
     accepted: list[str] = []
-    for full_tid in requested:
-        operation(full_tid, context=ctx)
-        accepted.append(full_tid)
+    failures: list[TaskControlFailure] = []
+    for selected_tid in selected:
+        failure_tid = selected_tid
+        requested.append(selected_tid)
+        try:
+            full_tid = (
+                _command_tid(selected_tid, context=ctx, allow_unknown_full=True)
+                if explicit_tids is not None
+                else selected_tid
+            )
+            failure_tid = full_tid
+            requested[-1] = full_tid
+            operation(full_tid, context=ctx)
+        except Exception as exc:
+            if explicit_tids is None and not all_tasks and pattern is None:
+                raise
+            failures.append(
+                TaskControlFailure(
+                    tid=failure_tid,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            )
+        else:
+            accepted.append(full_tid)
+    if requested and not accepted:
+        first = failures[0]
+        raise ControlRejected(
+            f"Failed to {command} task {first.tid}: {first.error}",
+            failures=tuple(failures),
+        )
     snapshots = tuple(
         snapshot
         for full_tid in accepted
@@ -2027,8 +2084,9 @@ def _task_control_result(
     )
     return TaskControlResult(
         command=command,
-        requested=requested,
+        requested=tuple(requested),
         accepted=tuple(accepted),
+        failures=tuple(failures),
         snapshots=snapshots,
     )
 
@@ -2049,6 +2107,7 @@ def cmd_task_stop(
     return _task_control_result(
         "stop",
         tid,
+        tids=None,
         all_tasks=all,
         pattern=pattern,
         context_path=context,
@@ -2071,6 +2130,7 @@ def cmd_task_kill(
     return _task_control_result(
         "kill",
         tid,
+        tids=None,
         all_tasks=all,
         pattern=pattern,
         context_path=context,

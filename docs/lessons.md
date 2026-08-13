@@ -1168,3 +1168,17 @@ index is not a dated section and does not count toward the coalescing trigger.
   leaving the trigger in a sibling runbook's read order. See
   [plans/2026-08-11-python-api-surfaces-sb-contract.md](plans/2026-08-11-python-api-surfaces-sb-contract.md)
   Execution Log for the full record.
+
+## 2026-08-13 Boundary Tests Must Straddle The Repaired Guard
+
+- Three consecutive remediation waves failed just outside the exact regression
+  each new test named. An unknown-task guard also rejected known terminal
+  cleanup; a partial-only outbox test missed a completed prefix followed by a
+  partial suffix; ordinary adapter-error tests missed deliberately typed domain
+  errors. This is not a reason to weaken exact tests. It is a reason to add the
+  nearest valid case and nearest invalid case before changing a boundary.
+- For evidence guards, test absent evidence, terminal-known evidence, and live
+  evidence separately. For stream consumption, test incomplete-only,
+  complete-only, and complete-plus-incomplete suffixes. For exception seams,
+  test raw implementation failures and already-typed public failures. A guard
+  is not closed until both sides of its predicate fire.

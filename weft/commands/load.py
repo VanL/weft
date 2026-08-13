@@ -27,6 +27,14 @@ from weft.commands.types import SystemLoadResult
 from weft.context import WeftContext, build_context
 from weft.helpers.message_ids import normalize_exact_message_id
 
+from ._boundary import typed_command_errors
+
+
+class _AliasConflictError(CommandExecutionError):
+    """Alias conflicts have the spec-pinned CLI exit code 3."""
+
+    cli_exit_code = 3
+
 
 @dataclass(frozen=True)
 class AliasImportRecord:
@@ -505,19 +513,6 @@ def _update_message_id_range(
     return (min(start, message_id), max(end, message_id))
 
 
-def _format_alias_conflicts(conflicts: set[str]) -> tuple[int, str]:
-    """Return the standard alias-conflict exit payload."""
-
-    conflict_list = ", ".join(sorted(conflicts))
-    return (
-        3,
-        (
-            "weft load: alias conflicts detected; resolve and rerun\n"
-            f"Conflicting aliases: {conflict_list}"
-        ),
-    )
-
-
 def cmd_load(
     *,
     input_file: str | None = None,
@@ -537,42 +532,19 @@ def cmd_load(
     """
 
     try:
-        context = build_context(spec_context=context_path)
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-331] exception
-        return 1, f"weft load: failed to resolve context: {exc}"
-
-    if input_file is None:
-        input_path = context.weft_dir / "weft_export.jsonl"
-    else:
-        input_path = Path(input_file)
-        if not input_path.is_absolute():
-            input_path = Path.cwd() / input_path
-
-    if not input_path.exists():
-        return 2, f"weft load: input file not found: {input_path}"
-
-    try:
-        with open(input_path, encoding="utf-8") as handle:
-            plan = _build_import_plan(handle, context)
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-331] exception
-        return 1, f"weft load: import failed: {exc}"
-
-    if plan.report.alias_conflicts:
-        return _format_alias_conflicts(plan.report.alias_conflicts)
-
-    if dry_run:
-        return 0, plan.report.format_preview()
-
-    try:
-        report = _execute_import(plan, context)
-    except ImportError as exc:
-        return 1, f"weft load: {exc}"
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-331] exception
-        return 1, f"weft load: import failed: {exc}"
-
-    return 0, report.format_completion()
+        result = cmd_system_load(
+            input=input_file,
+            dry_run=dry_run,
+            context=Path(context_path) if context_path is not None else None,
+        )
+    except CommandUsageError as exc:
+        return 2, str(exc)
+    except CommandExecutionError as exc:
+        return int(getattr(exc, "cli_exit_code", 1)), str(exc)
+    return 0, result.message
 
 
+@typed_command_errors
 def cmd_system_load(
     *,
     input: str | None = None,
@@ -602,7 +574,7 @@ def cmd_system_load(
             plan = _build_import_plan(handle, resolved)
         if plan.report.alias_conflicts:
             conflicts = ", ".join(sorted(plan.report.alias_conflicts))
-            raise CommandExecutionError(
+            raise _AliasConflictError(
                 "weft load: alias conflicts detected: " + conflicts
             )
         report = plan.report if dry_run else _execute_import(plan, resolved)
@@ -628,14 +600,11 @@ def load_system(
 ) -> SystemLoadResult:
     """Load broker state from a dump file."""
 
-    exit_code, message = cmd_load(
-        input_file=str(input_file) if input_file is not None else None,
+    return cmd_system_load(
+        input=str(input_file) if input_file is not None else None,
         dry_run=dry_run,
-        context_path=str(context.root),
+        context=context.root,
     )
-    if exit_code != 0:
-        raise RuntimeError(message or "weft load failed")
-    return SystemLoadResult(imported=not dry_run, message=message or "")
 
 
 __all__ = ["ImportReport", "cmd_load", "cmd_system_load", "load_system"]

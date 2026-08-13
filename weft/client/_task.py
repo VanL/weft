@@ -32,6 +32,7 @@ class Task:
 
     client: ClientContextHandle
     tid: str
+    context: WeftContext | None = None
 
     def snapshot(self) -> TaskSnapshot | None:
         return task_ops.task_snapshot(self.tid, context=self._context)
@@ -100,4 +101,4 @@ class Task:
 
     @property
     def _context(self) -> WeftContext:
-        return self.client.context
+        return self.context or self.client.context

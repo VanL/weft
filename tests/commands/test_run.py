@@ -45,7 +45,8 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft._exceptions import ManagerStartFailed, SubmissionError
+from weft._exceptions import CommandUsageError, ManagerStartFailed, SubmissionError
+from weft.cli.run import render_run_result
 from weft.commands import tasks as task_cmd
 from weft.commands._spawn_submission import (
     SpawnSubmissionReconciliation,
@@ -60,7 +61,6 @@ from weft.commands.run import (
     _execute_pipeline,
     _execute_spec_via_manager,
     _wait_for_task_completion,
-    render_run_execution_result,
 )
 from weft.commands.types import RunExecutionResult
 from weft.context import build_context
@@ -90,7 +90,10 @@ pytestmark = [pytest.mark.shared]
         "Task returned a value that Weft could not serialize: local callable",
     ),
 )
-def test_run_renderer_preserves_terminal_handoff_categories(category: str) -> None:
+def test_run_renderer_preserves_terminal_handoff_categories(
+    category: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Plain and JSON rendering expose categories without private diagnostics."""
 
     execution = RunExecutionResult(
@@ -101,19 +104,25 @@ def test_run_renderer_preserves_terminal_handoff_categories(category: str) -> No
     plain: list[tuple[str, bool]] = []
     json_lines: list[tuple[str, bool]] = []
 
-    plain_exit = render_run_execution_result(
+    monkeypatch.setattr(
+        "weft.cli.run.typer.echo",
+        lambda message="", err=False, **_kwargs: plain.append((message, err)),
+    )
+    plain_exit = render_run_result(
         execution,
         wait=True,
         json_output=False,
         verbose=False,
-        emit=lambda message, err=False: plain.append((message, err)),
     )
-    json_exit = render_run_execution_result(
+    monkeypatch.setattr(
+        "weft.cli.run.typer.echo",
+        lambda message="", err=False, **_kwargs: json_lines.append((message, err)),
+    )
+    json_exit = render_run_result(
         execution,
         wait=True,
         json_output=True,
         verbose=False,
-        emit=lambda message, err=False: json_lines.append((message, err)),
     )
 
     assert plain_exit == 1
@@ -130,11 +139,17 @@ def test_run_renderer_preserves_terminal_handoff_categories(category: str) -> No
     assert json_lines[0][1] is False
 
 
-def test_run_renderer_keeps_timeout_exit_124() -> None:
+def test_run_renderer_keeps_timeout_exit_124(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Terminal handoff rendering does not alter the timeout exit contract."""
 
     emitted: list[tuple[str, bool]] = []
-    exit_code = render_run_execution_result(
+    monkeypatch.setattr(
+        "weft.cli.run.typer.echo",
+        lambda message="", err=False, **_kwargs: emitted.append((message, err)),
+    )
+    exit_code = render_run_result(
         RunExecutionResult(
             tid="1780000000000000001",
             status="timeout",
@@ -143,7 +158,6 @@ def test_run_renderer_keeps_timeout_exit_124() -> None:
         wait=True,
         json_output=False,
         verbose=False,
-        emit=lambda message, err=False: emitted.append((message, err)),
     )
 
     assert exit_code == 124
@@ -3183,7 +3197,9 @@ def test_run_spec_via_manager_rejects_reserved_internal_name_prefix(
         lambda spec_context=None, autostart=True: context,
     )
 
-    with pytest.raises(RunUsageError, match="reserved for internal runtime services"):
+    with pytest.raises(
+        CommandUsageError, match="reserved for internal runtime services"
+    ):
         _execute_spec_via_manager(
             spec_path,
             name="_weft.heartbeat",

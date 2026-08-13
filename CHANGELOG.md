@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Breaking (Python API):** task control sweeps now return structured
+  `TaskControlResult` values with per-task failures, wait-deadline expiry raises
+  `CommandTimeoutError`, and submitted `Task` handles retain the materialized
+  runtime context. Stored-spec submission uses one `stdin_text` input across
+  CLI, client, and Django surfaces.
+- Public `cmd_*` capabilities now share one eager-and-streaming typed-error
+  boundary. The superseded tuple-returning queue and manager list/status
+  helpers, plus commands-layer run rendering, were removed.
+- **Breaking (CLI):** usage errors on queue, manager, and system verbs now
+  exit 2 per the spec 14 exit map (previously several exited 1), and
+  spec-submission rejection messages are unified across the CLI, `cmd_run`,
+  and client surfaces (wording of some errors changed).
+
+### Fixed
+
+- Result-all consumption now reads each outbox once; task-monitor follow mode
+  advances its high-water mark; JSONL monitor writes are atomic per record;
+  control sweeps attempt every selected task; and CLI usage, timeout, Ctrl-C,
+  alias quiet, bounded stdin, and task-watch rendering contracts are restored.
+- Result-all consume mode now leaves incomplete stream chunks untouched;
+  single-task stop rejects unknown tasks before creating a control queue;
+  explicit control TIDs cannot be mixed with sweep selectors; and empty client
+  sweeps remain no-ops. Stored-spec adapter failures retain the submission
+  error taxonomy, all submission surfaces share `~` runtime-root expansion,
+  and one-shot human-readable names no longer use endpoint syntax validation.
+- `system load` again returns its documented exit code 3 for alias conflicts
+  before writes begin. Queue write/broadcast validate message size against the
+  resolved command context, while explicit argv decoding does not build a
+  broker context and implicit stdin resolves context without initializing its
+  database.
+- Result-all consumes only the completed prefix of a mixed stream outbox;
+  stop rejects known terminal tasks without leaving control-queue residue,
+  while kill can still reach cleanup and runtime escalation;
+  adapter-raised typed Weft errors retain their public identity; and follow
+  timeout diagnostics retain the caller's requested timeout.
+
 ## [0.9.95] - 2026-08-10
 
 ### Changed

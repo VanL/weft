@@ -97,9 +97,9 @@ Removed or superseded surfaces:
 through the manager path rather than bypassing the runtime.
 
 _Implementation mapping_: `weft/commands/run.py` owns shared `weft run`
-execution helpers, the structured `execute_run()` result surface, terminal
-rendering, and exit-code selection; `weft/cli/run.py` is the Typer adapter that
-owns option parsing and delegates rendering; shared submission lives in
+execution helpers and the structured `execute_run()` result surface;
+`weft/cli/run.py` is the Typer adapter that owns terminal rendering and
+exit-code selection; shared submission lives in
 `weft/commands/submission.py`; manager bootstrap lives in
 `weft/core/manager_runtime.py` and is surfaced through
 `weft/commands/manager.py`.
@@ -172,10 +172,11 @@ consumes its declared arguments first and materializes the TaskSpec; the
 run-input adapter then consumes remaining declared arguments and explicit
 stdin text to produce the initial work payload. The CLI alone tokenizes
 dynamic long options and reads bounded piped stdin; it passes `spec_args` and
-either `run_input_stdin_text` or `work_input_text` into the shared command
-path. `run_input_stdin_text` is only for declared run-input stdin;
-`work_input_text` preserves ordinary piped initial input when no run-input
-contract exists. No command function reads process stdin.
+one `stdin_text` value into the shared command path. The submission seam routes
+that value to declared run-input stdin when the spec declares it, as the
+initial work payload when no `run_input` contract exists, and rejects it when
+a `run_input` contract exists but declares no stdin. No command function reads
+process stdin.
 - specs that only need declared options copied into the initial work payload
   can use built-in adapters such as
   `weft.builtins.run_input:arguments_payload` for a flat JSON object or
@@ -474,7 +475,9 @@ Current behavior:
 - `weft result TID --stream` follows unread outbox stream chunks for that one
   task while still using the same task-log completion and grace rules
 - `weft result --all` aggregates completed outbox results from non-streaming
-  tasks
+  tasks. Consume mode removes only the observed prefix through the last
+  complete result; a trailing partial stream batch remains unread for later
+  result collection even when the same outbox also contains a completed batch
 - `--peek` inspects `--all` results without consuming them
 - `--error` selects stderr-oriented output where available
 - `--json` includes metadata
@@ -532,7 +535,12 @@ Current behavior:
 - `weft task tid` resolves short TIDs, PID lookups, or reverse lookups via the
   TID-mapping queue
 - `weft task stop` and `weft task kill` can act on one task, all active tasks,
-  or a name-pattern subset
+  or a name-pattern subset. A genuinely unknown TID is rejected before a
+  control queue is created or written. `stop` rejects a known terminal task
+  before writing control and reports its existing terminal status; `kill`
+  remains eligible so it can reap leaked runner or host-process residue. If no
+  live runtime can be proven, `kill` reports the existing terminal status and
+  absence of runtime residue
 
 These commands exist because project-level status and task-level inspection are
 different operator questions.
@@ -713,6 +721,11 @@ Current raw queue filters and metadata helpers mirror current SimpleBroker:
 - `stats` reports pending, claimed, total, and existence counts for one queue
 - `delete --message MESSAGE_ID` is queue-scoped; it requires a concrete queue
   name and must reject `--all`
+- `write` and `broadcast` enforce the message-size limit from the same resolved
+  command context used for the broker write. Explicit argv does not resolve a
+  context merely to decode text; implicit stdin resolves context without
+  initializing the broker database, bounds the read, and is validated again at
+  the command boundary
 - command-local JSON output follows SimpleBroker's newline-delimited JSON shape
   for raw queue commands
 
@@ -746,8 +759,8 @@ Current rules:
 - failed resolution returns an explicit non-zero exit rather than silently
   redirecting work
 
-_Implementation mapping_: `weft/commands/queue.py` `resolve_command()`,
-`list_command()`, `write_command()`; `weft/cli/app.py` `queue_resolve()`,
+_Implementation mapping_: `weft/commands/queue.py` `cmd_queue_resolve()`,
+`cmd_queue_list()`, `cmd_queue_write()`; `weft/cli/app.py` `queue_resolve()`,
 `queue_list()`, `queue_write()`.
 
 ## Configuration [CLI-5]

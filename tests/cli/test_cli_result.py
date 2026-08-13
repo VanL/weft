@@ -9,11 +9,39 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
 
 from simplebroker.ext import OperationalError
 from tests.conftest import run_cli
+from weft.cli.app import app
+from weft.commands import TaskResult
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_result_terminal_timeout_uses_exit_124(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1779600000000000001"
+    monkeypatch.setattr(
+        "weft.cli.app.commands.cmd_result",
+        lambda *_args, **_kwargs: TaskResult(
+            tid=tid,
+            status="timeout",
+            value=None,
+            stdout=None,
+            stderr=None,
+            error="target timed out",
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["result", tid])
+
+    assert result.exit_code == 124
+    assert result.stdout == ""
+    assert result.stderr == "target timed out\n"
+    assert result.exception is not None
+    assert "Traceback" not in result.stderr
 
 
 def _submit_task(workdir, harness, *run_args: str) -> str:

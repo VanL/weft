@@ -8,6 +8,8 @@ Spec references:
 from __future__ import annotations
 
 import json
+import os
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -19,10 +21,13 @@ from weft import commands
 from weft._constants import (
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     PROG_NAME,
+    WEFT_CONTEXT_ENV,
     __version__,
     get_weft_directory_name,
 )
 from weft.cli import validate_taskspec as validate_cli
+from weft.context import build_context
+from weft.helpers import resolve_broker_max_message_size, resolve_cli_message_content
 
 from .run import (
     consume_run_session,
@@ -48,18 +53,27 @@ system_app = typer.Typer(help="System maintenance")
 default_export_path_help = f"{get_weft_directory_name()}/weft_export.jsonl"
 
 
-def _command_exit(exc: Exception, *, usage_code: int = 2) -> None:
-    """Render one typed command failure and exit with the CLI mapping."""
-    typer.echo(str(exc), err=True)
+def _command_error_code(exc: Exception) -> int:
+    """Return the canonical CLI exit code for one typed command failure."""
+
     if isinstance(exc, commands.CommandTimeoutError):
-        raise typer.Exit(code=124) from exc
+        return 124
     if isinstance(exc, commands.CommandUsageError):
-        raise typer.Exit(code=usage_code) from exc
+        return 2
     if isinstance(
         exc, (commands.InvalidTID, commands.TaskNotFound, commands.SpecNotFound)
     ):
-        raise typer.Exit(code=2) from exc
-    raise typer.Exit(code=1) from exc
+        return 2
+    explicit_code = getattr(exc, "cli_exit_code", None)
+    if isinstance(explicit_code, int):
+        return explicit_code
+    return 1
+
+
+def _command_exit(exc: Exception) -> None:
+    """Render one typed command failure and exit with the CLI mapping."""
+    typer.echo(str(exc), err=True)
+    raise typer.Exit(code=_command_error_code(exc)) from exc
 
 
 def _queue_command_exit(exc: Exception, *, json_output: bool = False) -> None:
@@ -79,8 +93,8 @@ def _queue_command_exit(exc: Exception, *, json_output: bool = False) -> None:
             ),
             err=True,
         )
-        raise typer.Exit(code=1) from exc
-    _command_exit(exc, usage_code=1)
+        raise typer.Exit(code=2) from exc
+    _command_exit(exc)
 
 
 def _jsonable(value: Any) -> Any:
@@ -344,10 +358,26 @@ def _render_prune_plain(result: commands.SystemPruneResult, family: str) -> str:
 
 
 def _stdin_message(message: str | None) -> str:
-    """Decode the CLI's implicit-stdin message convention."""
-    if message is None or message == "-":
-        return str(typer.get_text_stream("stdin").read())
-    return message
+    """Decode and bound the CLI's implicit-stdin message convention."""
+    if message is not None and message != "-":
+        return message
+    try:
+        context = build_context(
+            spec_context=os.environ.get(WEFT_CONTEXT_ENV) or os.getcwd(),
+            create_database=False,
+        )
+        maximum = resolve_broker_max_message_size(context.config)
+        return resolve_cli_message_content(
+            message,
+            max_bytes=maximum,
+            stream=typer.get_text_stream("stdin"),
+        )
+    except ValueError as exc:
+        raise commands.CommandUsageError(str(exc)) from exc
+    except Exception as exc:
+        raise commands.CommandExecutionError(
+            f"failed to resolve queue input context: {exc}"
+        ) from exc
 
 
 def _queue_entry_text(
@@ -416,7 +446,7 @@ def queue_read(
             after=after,
             before=before,
         )
-    except (commands.CommandError, commands.InvalidTID, commands.TaskNotFound) as exc:
+    except commands.WeftError as exc:
         _queue_command_exit(exc, json_output=json_output)
     _emit_queue_entries(entries, timestamps=timestamps, json_output=json_output)
 
@@ -435,27 +465,24 @@ def queue_write(
         typer.Option("--endpoint", help="Named endpoint to resolve and write to"),
     ] = None,
 ) -> None:
-    if endpoint is None:
-        if name_or_message is None:
-            raise typer.BadParameter(
-                "Provide a queue name or use --endpoint",
-                param_hint="name_or_message",
-            )
-        queue_name = name_or_message
-        payload = _stdin_message(message)
-    else:
-        if message is not None:
-            raise typer.BadParameter(
-                "When using --endpoint, provide at most one positional message",
-                param_hint="message",
-            )
-        queue_name = _stdin_message(name_or_message)
-        payload = None
-
     try:
+        if endpoint is None:
+            if name_or_message is None:
+                raise commands.CommandUsageError(
+                    "Provide a queue name or use --endpoint"
+                )
+            queue_name = name_or_message
+            payload = _stdin_message(message)
+        else:
+            if message is not None:
+                raise commands.CommandUsageError(
+                    "When using --endpoint, provide at most one positional message"
+                )
+            queue_name = _stdin_message(name_or_message)
+            payload = None
         commands.cmd_queue_write(queue_name, payload, endpoint=endpoint)
-    except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+    except (commands.CommandError, ValueError) as exc:
+        _command_exit(exc)
 
 
 @queue_app.command("peek")
@@ -601,7 +628,7 @@ def queue_list(
             prefix=prefix,
         )
     except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     _render_queue_list(rows, stats=stats, endpoints=endpoints, json_output=json_output)
 
 
@@ -656,7 +683,7 @@ def queue_exists(
     try:
         exists = commands.cmd_queue_exists(name)
     except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     if json_output:
         typer.echo(json.dumps({"queue": name, "exists": exists}))
     if not exists:
@@ -674,7 +701,7 @@ def queue_stats(
     try:
         info = commands.cmd_queue_stats(name)
     except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     payload = {
         "queue": info.name,
         "pending": info.messages,
@@ -711,7 +738,7 @@ def queue_resolve(
         ):
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     if json_output:
         typer.echo(json.dumps(asdict(resolved), ensure_ascii=False))
         return
@@ -773,7 +800,7 @@ def queue_watch(
             move=move_to,
         )
     except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     if not quiet:
         mode = "peek" if peek else "consume"
         if move_to:
@@ -784,8 +811,10 @@ def queue_watch(
             typer.echo(
                 _queue_entry_text(entry, timestamps=timestamps, json_output=json_output)
             )
+    except KeyboardInterrupt:
+        return
     except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     finally:
         stream.close()
 
@@ -814,8 +843,8 @@ def queue_delete(
     except commands.CommandError as exc:
         if all_queues and message_id is not None:
             typer.echo("--message cannot be used with --all", err=True)
-            raise typer.Exit(code=1) from exc
-        _command_exit(exc, usage_code=1)
+            raise typer.Exit(code=2) from exc
+        _command_exit(exc)
 
 
 @queue_app.command("broadcast")
@@ -833,8 +862,8 @@ def queue_broadcast(
 ) -> None:
     try:
         commands.cmd_queue_broadcast(_stdin_message(message), pattern=pattern)
-    except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+    except (commands.CommandError, ValueError) as exc:
+        _command_exit(exc)
 
 
 # Alias commands
@@ -852,9 +881,12 @@ def alias_add(
     ] = False,
 ) -> None:
     try:
-        commands.cmd_queue_alias_add(alias, target)
+        with warnings.catch_warnings():
+            if quiet:
+                warnings.simplefilter("ignore", RuntimeWarning)
+            commands.cmd_queue_alias_add(alias, target)
     except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
 
 
 @alias_app.command("list")
@@ -867,7 +899,7 @@ def alias_list(
     try:
         records = commands.cmd_queue_alias_list(target=target)
     except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     for record in records:
         typer.echo(f"{record.alias} -> {record.target}")
     if target is not None and not records:
@@ -881,7 +913,7 @@ def alias_remove(
     try:
         commands.cmd_queue_alias_remove(alias)
     except commands.CommandError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
 
 
 def version_callback(value: bool) -> None:
@@ -1066,7 +1098,7 @@ def spec_validate(
                     "[red]✗[/red] TaskSpec validation failed\n\n"
                     f"[cyan]_json[/cyan]: {exc}"
                 )
-            raise typer.Exit(code=1) from exc
+            raise typer.Exit(code=_command_error_code(exc)) from exc
         _command_exit(exc)
     _render_spec_validation(
         result,
@@ -1254,6 +1286,44 @@ def _runner_diagnostics_text(diagnostics: dict[str, Any] | None) -> str | None:
     return ", ".join(parts) if parts else None
 
 
+def _task_watch_line(event: commands.TaskEvent, task_name: str) -> tuple[str, str]:
+    """Return the stable plain-text watch row and latest task name."""
+
+    payload = event.payload
+    resolved_name = str(payload.get("name") or task_name)
+    status_value = str(payload.get("status") or "unknown")
+    event_value = str(payload.get("event") or event.event_type)
+    line = (
+        f"{format_message_id(event.timestamp)} {event.tid:<19} "
+        f"{status_value:<10} {event_value:<16} {resolved_name}"
+    )
+    return line, resolved_name
+
+
+def _render_task_watch(
+    stream: commands.CommandStream[commands.TaskEvent],
+    *,
+    tid: str,
+    json_output: bool,
+) -> None:
+    """Render a task-event stream and preserve clean interrupt semantics."""
+
+    task_name = tid
+    try:
+        for event in stream:
+            if json_output:
+                typer.echo(json.dumps(asdict(event), ensure_ascii=False))
+            else:
+                line, task_name = _task_watch_line(event, task_name)
+                typer.echo(line)
+    except KeyboardInterrupt:
+        return
+    except commands.CommandError as exc:
+        _command_exit(exc)
+    finally:
+        stream.close()
+
+
 @task_app.command("status")
 def task_status(
     tid: Annotated[str, typer.Argument(help="Task ID or short ID")],
@@ -1289,25 +1359,14 @@ def task_status(
             ping=ping,
             context=context_dir,
         )
-    except (commands.CommandError, commands.InvalidTID, commands.TaskNotFound) as exc:
+    except commands.WeftError as exc:
         if isinstance(exc, commands.InvalidTID):
             typer.echo(f"Task {tid} not found", err=True)
             raise typer.Exit(code=2) from exc
         _command_exit(exc)
     if watch:
         stream = cast(commands.CommandStream[commands.TaskEvent], snapshot)
-        try:
-            for event in stream:
-                if json_output:
-                    typer.echo(json.dumps(asdict(event), ensure_ascii=False))
-                else:
-                    typer.echo(
-                        f"{event.timestamp}\t{event.event_type}\t{event.payload}"
-                    )
-        except commands.CommandError as exc:
-            _command_exit(exc)
-        finally:
-            stream.close()
+        _render_task_watch(stream, tid=tid, json_output=json_output)
         return
     task_snapshot = cast(commands.TaskSnapshot, snapshot)
     status_payload = _task_snapshot_payload(task_snapshot)
@@ -1343,7 +1402,7 @@ def task_ping(
 ) -> None:
     try:
         result = commands.cmd_task_ping(tid, timeout=timeout, context=context_dir)
-    except (commands.CommandError, commands.InvalidTID, commands.TaskNotFound) as exc:
+    except commands.WeftError as exc:
         _command_exit(exc)
     json_payload = {
         "timed_out": result.timed_out,
@@ -1379,9 +1438,18 @@ def task_stop(
         result = commands.cmd_task_stop(
             tid, all=all_tasks, pattern=pattern, context=context_dir
         )
-    except (commands.CommandError, commands.InvalidTID, commands.TaskNotFound) as exc:
+    except commands.WeftError as exc:
         _command_exit(exc)
-    typer.echo(f"Stopped {len(result.accepted)} task(s)")
+    if result.failures:
+        failure_text = "; ".join(
+            f"{failure.tid}: {failure.error}" for failure in result.failures
+        )
+        typer.echo(
+            f"Stopped {len(result.accepted)} of {len(result.requested)}; "
+            f"{len(result.failures)} failed: {failure_text}"
+        )
+    else:
+        typer.echo(f"Stopped {len(result.accepted)} task(s)")
 
 
 @task_app.command("kill")
@@ -1406,9 +1474,18 @@ def task_kill(
         result = commands.cmd_task_kill(
             tid, all=all_tasks, pattern=pattern, context=context_dir
         )
-    except (commands.CommandError, commands.InvalidTID, commands.TaskNotFound) as exc:
+    except commands.WeftError as exc:
         _command_exit(exc)
-    typer.echo(f"Killed {len(result.accepted)} process(es)")
+    if result.failures:
+        failure_text = "; ".join(
+            f"{failure.tid}: {failure.error}" for failure in result.failures
+        )
+        typer.echo(
+            f"Killed {len(result.accepted)} of {len(result.requested)}; "
+            f"{len(result.failures)} failed: {failure_text}"
+        )
+    else:
+        typer.echo(f"Killed {len(result.accepted)} process(es)")
 
 
 @task_app.command("tid")
@@ -1471,7 +1548,7 @@ def init(
     except commands.CommandError as exc:
         if not quiet:
             typer.echo(f"weft: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=_command_error_code(exc)) from exc
     if not quiet:
         typer.echo(f"Initialized Weft project in {result.root}")
 
@@ -1539,7 +1616,7 @@ def task_monitor(
 
     try:
         if sink == "stdout" and json_output:
-            raise commands.CommandExecutionError(
+            raise commands.CommandUsageError(
                 "--json cannot be combined with --sink stdout"
             )
         result = commands.cmd_system_task_monitor(
@@ -1555,10 +1632,16 @@ def task_monitor(
     except commands.WeftError as exc:
         _command_exit(exc)
     if not once:
-        for summary in result:
-            typer.echo(
-                json.dumps(dict(summary.record), ensure_ascii=False, sort_keys=True)
-            )
+        stream = cast(commands.CommandStream[commands.TaskMonitorSummary], result)
+        try:
+            for summary in stream:
+                typer.echo(
+                    json.dumps(dict(summary.record), ensure_ascii=False, sort_keys=True)
+                )
+        except KeyboardInterrupt:
+            return
+        finally:
+            stream.close()
         return
     if sink == "stdout":
         for record in result.records:
@@ -1703,7 +1786,7 @@ def prune(
             report=report,
         )
     except commands.WeftError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     summary = _prune_summary(result, family)
     errors = (
         [
@@ -2100,23 +2183,23 @@ def run_command(
             continuous=continuous,
             autostart=autostart,
             describe=help_flag,
-            run_input_stdin_text=stdin_text if spec is not None else None,
-            work_input_text=stdin_text if spec is None else None,
+            stdin_text=stdin_text,
         )
     except (commands.WeftError, ValueError) as exc:
-        if type(exc).__name__ == "RunResolutionError":
-            raise typer.Exit(code=2) from exc
         _command_exit(exc)
     if help_flag:
         render_run_description(ctx, cast(commands.RunSpecDescription, outcome))
         raise typer.Exit(code=0)
-    if interactive and wait:
-        drive_interactive_session(cast(commands.RunSession, outcome), stdin_text)
-    execution = (
-        consume_run_session(cast(commands.RunSession, outcome))
-        if wait
-        else cast(commands.RunExecutionResult, outcome)
-    )
+    try:
+        if interactive and wait:
+            drive_interactive_session(cast(commands.RunSession, outcome), stdin_text)
+        execution = (
+            consume_run_session(cast(commands.RunSession, outcome))
+            if wait
+            else cast(commands.RunExecutionResult, outcome)
+        )
+    except (commands.WeftError, ValueError) as exc:
+        _command_exit(exc)
     exit_code = render_run_result(
         execution,
         wait=wait,
@@ -2144,7 +2227,7 @@ def manager_start_command(
     try:
         result = commands.cmd_manager_start(context=context, replace=replace)
     except commands.WeftError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     if result.started_here:
         typer.echo(f"Started manager {result.tid}")
     else:
@@ -2189,7 +2272,7 @@ def manager_serve_command(
             replace=replace,
         )
     except commands.WeftError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
 
 
 @manager_app.command("stop")
@@ -2219,7 +2302,7 @@ def manager_stop_command(
             context=context,
         )
     except commands.WeftError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
 
 
 @manager_app.command("list")
@@ -2251,7 +2334,7 @@ def manager_list_command(
             context=context,
         )
     except commands.WeftError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     if json_output:
         typer.echo(
             json.dumps([_manager_json_record(record) for record in records], indent=2)
@@ -2292,7 +2375,7 @@ def manager_status_command(
     try:
         result = commands.cmd_manager_status(tid, context=context)
     except commands.WeftError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     if json_output:
         typer.echo(json.dumps(_manager_json_record(result), indent=2))
         return
@@ -2328,7 +2411,7 @@ def dump_command(
     try:
         result = commands.cmd_system_dump(output=output, context=context_dir)
     except commands.WeftError as exc:
-        _command_exit(exc, usage_code=1)
+        _command_exit(exc)
     message = f"Exported {result.messages} messages from {result.queues} queues"
     if result.aliases:
         message += f" and {result.aliases} aliases"
@@ -2349,7 +2432,10 @@ def system_builtins_command(
 ) -> None:
     """List the builtin TaskSpecs shipped with Weft."""
 
-    records = commands.cmd_system_builtins()
+    try:
+        records = commands.cmd_system_builtins()
+    except commands.WeftError as exc:
+        _command_exit(exc)
     if json_output:
         typer.echo(
             json.dumps(

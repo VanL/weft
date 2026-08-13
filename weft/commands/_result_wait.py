@@ -16,6 +16,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WRAPPER_LOST_ERROR,
 )
+from weft._exceptions import CommandTimeoutError
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.task_evidence import (
@@ -291,11 +292,9 @@ def await_one_shot_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-106] except
                     result_value = aggregate_public_outputs(result_values)
                     status = "completed"
                     break
-                status = "timeout"
-                error_message = (
+                raise CommandTimeoutError(
                     f"Timed out after {timeout} seconds waiting for task {tid}"
                 )
-                break
 
             wait_timeout: float | None = None
             if deadline is not None:

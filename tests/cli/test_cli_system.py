@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
@@ -14,6 +15,8 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft.cli.app import app
+from weft.commands import TaskMonitorSummary
 from weft.context import build_context
 from weft.helpers import iter_queue_json_entries
 
@@ -271,7 +274,7 @@ def test_system_prune_rejects_invalid_options(workdir) -> None:
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert "unknown runtime-state queue filter" in err
 
     rc, _out, err = run_cli(
@@ -286,8 +289,45 @@ def test_system_prune_rejects_invalid_options(workdir) -> None:
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert "--keep-recent-per-key must be >= 1" in err
+
+
+def test_task_monitor_stdout_json_conflict_is_usage_error(workdir) -> None:
+    rc, _out, err = run_cli(
+        "system",
+        "task-monitor",
+        "--sink",
+        "stdout",
+        "--json",
+        "--once",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 2
+    assert "--json cannot be combined with --sink stdout" in err
+    assert "Traceback" not in err
+
+
+@pytest.mark.parametrize("verb", ["stop", "kill"])
+def test_single_task_control_unknown_tid_is_not_found_without_traceback(
+    workdir,
+    verb: str,
+) -> None:
+    rc, _out, err = run_cli(
+        "task",
+        verb,
+        "1777000000000000999",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 2
+    assert "Task 1777000000000000999 not found" in err
+    assert "Traceback" not in err
 
     rc, _out, err = run_cli(
         "system",
@@ -297,6 +337,55 @@ def test_system_prune_rejects_invalid_options(workdir) -> None:
     )
 
     assert rc == 0
+
+
+def test_task_stop_terminal_task_is_rejected_without_control_queue_residue(
+    workdir,
+) -> None:
+    context = build_context(spec_context=workdir)
+    tid = "1777000000000000998"
+    _write_task_log(
+        context,
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": tid,
+            "taskspec": {
+                "tid": tid,
+                "name": "already-completed",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "runner": {"name": "host", "options": {}},
+                },
+                "io": {
+                    "outputs": {"outbox": f"T{tid}.outbox"},
+                    "control": {
+                        "ctrl_in": f"T{tid}.ctrl_in",
+                        "ctrl_out": f"T{tid}.ctrl_out",
+                    },
+                },
+                "state": {"status": "completed"},
+            },
+        },
+    )
+
+    rc, out, err = run_cli(
+        "task",
+        "stop",
+        tid,
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert out == ""
+    assert f"Task {tid} already completed" in err
+    assert "Traceback" not in err
+    with context.broker() as broker:
+        queue_names = {item.queue for item in broker.list_queue_stats()}
+    assert f"T{tid}.ctrl_in" not in queue_names
 
 
 def test_system_prune_retention_dry_run_json(workdir) -> None:
@@ -380,7 +469,7 @@ def test_system_prune_retention_apply_requires_archive_unless_force(workdir) -> 
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert "--archive is required" in err
 
     rc, out, err = run_cli(
@@ -422,7 +511,7 @@ def test_system_prune_rejects_invalid_retention_options(workdir) -> None:
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert "unknown prune family" in err
 
     rc, _out, err = run_cli(
@@ -436,7 +525,7 @@ def test_system_prune_rejects_invalid_retention_options(workdir) -> None:
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert "--force requires --apply" in err
 
     rc, _out, err = run_cli(
@@ -451,7 +540,7 @@ def test_system_prune_rejects_invalid_retention_options(workdir) -> None:
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert "--force is only supported for retention prune families" in err
 
 
@@ -633,9 +722,87 @@ def test_system_task_monitor_rejects_stdout_json(workdir) -> None:
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert out == ""
     assert "cannot be combined" in err
+
+
+def test_system_load_alias_conflict_uses_exit_3(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    with context.broker() as broker:
+        broker.add_alias("existing_alias", "old.target")
+    dump_path = workdir / "alias-conflict.jsonl"
+    dump_path.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "type": "header",
+                        "format": "simplebroker-dump",
+                        "version": 1,
+                        "backend": "test",
+                        "last_ts": 0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "alias",
+                        "alias": "existing_alias",
+                        "target": "new.target",
+                    }
+                ),
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    rc, out, err = run_cli(
+        "system",
+        "load",
+        "--input",
+        dump_path,
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 3
+    assert out == ""
+    assert "alias conflicts" in err
+
+
+def test_system_task_monitor_follow_closes_stream_on_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptingStream:
+        closed = False
+        yielded = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> TaskMonitorSummary:
+            if not self.yielded:
+                self.yielded = True
+                return TaskMonitorSummary(record={"tid": "1777000000000000001"})
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = InterruptingStream()
+    monkeypatch.setattr(
+        "weft.cli.app.commands.cmd_system_task_monitor",
+        lambda **_kwargs: stream,
+    )
+
+    result = CliRunner().invoke(app, ["system", "task-monitor", "--follow"])
+
+    assert result.exit_code == 0
+    assert stream.closed is True
+    assert "1777000000000000001" in result.stdout
+    assert "Traceback" not in result.stderr
 
 
 def test_system_task_monitor_disk_json_summary(workdir) -> None:

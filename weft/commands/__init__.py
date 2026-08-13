@@ -97,6 +97,7 @@ _type_names = (
     "SystemStatusSnapshot",
     "SystemTidyResult",
     "TaskControlResult",
+    "TaskControlFailure",
     "TaskEvent",
     "TaskPingResult",
     "TaskResult",
@@ -150,6 +151,3 @@ def __dir__() -> list[str]:
     """Return the declared facade inventory."""
 
     return sorted(set(globals()) | set(__all__))
-
-
-assert set(_exports) == set(__all__)

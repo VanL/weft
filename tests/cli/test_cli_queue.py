@@ -3,16 +3,148 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import sys
 import time
+from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
 
 from tests.conftest import run_cli
 from tests.tasks.test_task_execution import make_function_taskspec
+from weft.cli.app import app
 from weft.context import build_context
 from weft.core.tasks import Consumer
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_queue_write_argv_does_not_build_context_to_decode_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        "weft.context.build_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("message decoding must not build a broker context")
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.cli.app.commands.cmd_queue_write",
+        lambda queue, message, **kwargs: observed.update(
+            queue=queue, message=message, **kwargs
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["queue", "write", "jobs", "hello"])
+
+    assert result.exit_code == 0
+    assert observed == {"queue": "jobs", "message": "hello", "endpoint": None}
+
+
+def test_queue_write_oversized_argv_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "weft.commands.queue._context",
+        lambda: SimpleNamespace(config={"BROKER_MAX_MESSAGE_SIZE": 4}),
+    )
+
+    result = CliRunner().invoke(app, ["queue", "write", "jobs", "hello"])
+
+    assert result.exit_code == 2
+    assert "maximum size of 4 bytes" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "facade_name"),
+    [
+        (("queue", "write", "jobs"), "cmd_queue_write"),
+        (("queue", "broadcast"), "cmd_queue_broadcast"),
+    ],
+)
+def test_queue_stdin_uses_read_only_resolved_context_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: tuple[str, ...],
+    facade_name: str,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_context(*args: object, **kwargs: object) -> object:
+        observed.update(context_args=args, context_kwargs=kwargs)
+        return SimpleNamespace(config={"BROKER_MAX_MESSAGE_SIZE": 4})
+
+    monkeypatch.setattr("weft.cli.app.build_context", fake_context)
+    monkeypatch.setattr(
+        f"weft.cli.app.commands.{facade_name}",
+        lambda *args, **kwargs: observed.update(facade_args=args, **kwargs),
+    )
+
+    result = CliRunner().invoke(app, list(arguments), input="hello")
+
+    assert result.exit_code == 2
+    assert "maximum size of 4 bytes" in result.stderr
+    assert observed["context_kwargs"] == {
+        "spec_context": os.getcwd(),
+        "create_database": False,
+    }
+    assert "facade_args" not in observed
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [("queue", "write", "jobs"), ("queue", "broadcast")],
+)
+def test_queue_stdin_context_failure_is_clean_execution_error(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(
+        "weft.cli.app.build_context",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("context unavailable")),
+    )
+
+    result = CliRunner().invoke(app, list(arguments), input="hello")
+
+    assert result.exit_code == 1
+    assert "context unavailable" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT semantics")
+def test_queue_watch_sigint_exits_cleanly(workdir) -> None:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "weft",
+            "queue",
+            "watch",
+            "sigint.queue",
+        ],
+        cwd=workdir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=1,
+    )
+    try:
+        assert process.stderr is not None
+        startup = process.stderr.readline()
+        assert "Watching queue" in startup, startup
+        process.send_signal(signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    assert process.returncode == 0, (stdout, stderr)
+    assert "Traceback" not in startup + stderr
 
 
 def test_queue_write_and_read(workdir):
@@ -395,7 +527,7 @@ def test_queue_invalid_message_id_returns_input_error(workdir):
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert out == ""
     payload = json.loads(err)
     assert payload["error"] == "INVALID_MESSAGE_ID"
@@ -426,7 +558,7 @@ def test_queue_delete_rejects_all_with_message_and_preserves_queues(workdir):
         cwd=workdir,
     )
 
-    assert rc == 1
+    assert rc == 2
     assert out == ""
     assert "--message cannot be used with --all" in err
     assert run_cli("queue", "read", "delete.one", cwd=workdir) == (0, "one", "")

@@ -141,7 +141,7 @@ class TestValidateTaskspecCommand:
         path.write_text("{ invalid json", encoding="utf-8")
 
         rc, out, err = run_cli("spec", "validate", "--type", "task", path, cwd=workdir)
-        assert rc == 1
+        assert rc == 2
         assert "validation failed" in out
         assert "_json" in out
         assert err == ""

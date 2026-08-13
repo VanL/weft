@@ -18,6 +18,7 @@ from weft._constants import (
     load_config,
 )
 from weft._exceptions import CommandExecutionError
+from weft.commands._boundary import typed_command_errors
 from weft.commands.types import InitResult
 from weft.context import (
     build_context,
@@ -52,6 +53,7 @@ def _tighten_existing_project_broker_config(path: Path) -> None:
     os.chmod(path, 0o600)
 
 
+@typed_command_errors
 def cmd_init(
     directory: Path | None = None,
     *,

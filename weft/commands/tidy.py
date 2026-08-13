@@ -13,6 +13,8 @@ from weft._exceptions import CommandExecutionError
 from weft.commands.types import SystemTidyResult
 from weft.context import WeftContext, build_context
 
+from ._boundary import typed_command_errors
+
 
 def cmd_tidy(context_path: Path | None = None) -> tuple[int, str | None]:
     """Run backend-native broker compaction for the active context."""
@@ -33,6 +35,7 @@ def tidy_system(context: WeftContext) -> SystemTidyResult:
     return SystemTidyResult(target=context.broker_display_target)
 
 
+@typed_command_errors
 def cmd_system_tidy(*, context: Path | None = None) -> SystemTidyResult:
     """Compact the active broker and return its display target.
 

@@ -18,6 +18,8 @@ from weft.commands.types import SystemDumpResult
 from weft.context import WeftContext, build_context
 from weft.helpers import open_owner_only_text
 
+from ._boundary import typed_command_errors
+
 
 def _claimed_summary(db: Any) -> tuple[int, int]:
     """Return claimed-message counts for included queues."""
@@ -92,6 +94,7 @@ def cmd_dump(
     return 0, message
 
 
+@typed_command_errors
 def cmd_system_dump(
     *,
     output: str | None = None,

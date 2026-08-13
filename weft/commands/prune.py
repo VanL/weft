@@ -36,6 +36,8 @@ from weft.context import build_context
 from weft.core.pruning import retention as _retention
 from weft.core.pruning import runtime as _runtime
 
+from ._boundary import typed_command_errors
+
 
 def run_runtime_prune(
     config: _runtime.RuntimePruneConfig,
@@ -185,6 +187,55 @@ def cmd_prune(
     )
 
 
+def _validate_public_prune_options(
+    *,
+    family: str,
+    apply: bool,
+    force: bool,
+    min_age: float,
+    keep_recent_per_key: int,
+    keep_recent_per_task: int,
+    limit: int | None,
+    archive: Path | None,
+) -> str:
+    """Validate caller-owned prune options before backend scanning."""
+
+    normalized = family.strip()
+    allowed = {"runtime-state", "task-local", "task-log", "retention", "all"}
+    if normalized not in allowed:
+        raise CommandUsageError(
+            f"unknown prune family: {normalized}; allowed: "
+            "runtime-state, task-local, task-log, retention, all"
+        )
+    if normalized == "runtime-state" and force:
+        raise CommandUsageError(
+            "--force is only supported for retention prune families"
+        )
+    if force and not apply:
+        raise CommandUsageError("--force requires --apply")
+    if min_age < 0:
+        raise CommandUsageError("--min-age must be >= 0")
+    if limit is not None and limit < 1:
+        raise CommandUsageError("--limit must be >= 1")
+    if normalized in {"runtime-state", "all"} and keep_recent_per_key < 1:
+        raise CommandUsageError("--keep-recent-per-key must be >= 1")
+    if normalized in {"task-local", "task-log", "retention", "all"} and (
+        keep_recent_per_task < 1
+    ):
+        raise CommandUsageError("--keep-recent-per-task must be >= 1")
+    if (
+        apply
+        and normalized in {"task-local", "task-log", "retention", "all"}
+        and not force
+        and archive is None
+    ):
+        raise CommandUsageError(
+            "--archive is required with --apply unless --force is used"
+        )
+    return normalized
+
+
+@typed_command_errors
 def cmd_system_prune(
     *,
     family: str,
@@ -206,17 +257,16 @@ def cmd_system_prune(
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
     """
 
-    normalized = family.strip()
-    allowed = {"runtime-state", "task-local", "task-log", "retention", "all"}
-    if normalized not in allowed:
-        raise CommandUsageError(
-            f"unknown prune family: {normalized}; allowed: "
-            "runtime-state, task-local, task-log, retention, all"
-        )
-    if normalized == "runtime-state" and force:
-        raise CommandUsageError(
-            "--force is only supported for retention prune families"
-        )
+    normalized = _validate_public_prune_options(
+        family=family,
+        apply=apply,
+        force=force,
+        min_age=min_age,
+        keep_recent_per_key=keep_recent_per_key,
+        keep_recent_per_task=keep_recent_per_task,
+        limit=limit,
+        archive=archive,
+    )
 
     details: dict[str, Any] = {}
     candidates = deleted = failed = 0

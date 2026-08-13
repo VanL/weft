@@ -40,7 +40,7 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft._exceptions import CommandTimeoutError, CommandUsageError, SubmissionError
+from weft._exceptions import CommandUsageError, SubmissionError
 from weft.commands._boundary import typed_command_errors
 from weft.commands._result_wait import await_one_shot_result
 from weft.commands._streaming import (
@@ -53,8 +53,15 @@ from weft.commands._task_history import is_pipeline_taskspec_payload
 from weft.commands.interactive import InteractiveStreamClient
 from weft.commands.result import await_task_result
 from weft.commands.submission import (
+    _initial_work_payload as _submission_initial_work_payload,
+)
+from weft.commands.submission import (
+    _resolve_submission_runtime_root,
+)
+from weft.commands.submission import (
     ensure_manager_after_submission as _shared_ensure_manager_after_submission,
 )
+from weft.commands.submission import prepare_spec as _prepare_spec_submission
 from weft.commands.types import (
     CommandStream,
     RunExecutionResult,
@@ -78,14 +85,9 @@ from weft.core.task_evidence import terminal_error_message, terminal_status_from
 from weft.core.taskspec import (
     TaskSpec,
     encode_taskspec_transport_payload,
-    invoke_run_input_adapter,
-    materialize_taskspec_template,
     normalize_declared_option_name,
-    parse_declared_parameterization_args,
-    parse_declared_run_input_args,
     validate_taskspec_payload,
 )
-from weft.ext import SpecRunInputRequest
 
 # -----------------------------------------------------------------------------
 # Explicit spec helpers
@@ -370,6 +372,7 @@ class _LiveRunSession:
         context: WeftContext,
     ) -> None:
         self.tid = execution.tid
+        self._execution = execution
         self._context = context
         self._streams: list[CommandStream[TaskEvent]] = []
         self._result: RunExecutionResult | None = None
@@ -419,12 +422,8 @@ class _LiveRunSession:
             timeout=timeout,
             wait_for_materialization=True,
         )
-        if result.status == "timeout" and timeout is not None:
-            raise CommandTimeoutError(
-                result.error or f"timed out waiting for task {self.tid}"
-            )
-        self._result = RunExecutionResult(
-            tid=self.tid,
+        self._result = replace(
+            self._execution,
             status=result.status,
             result_value=result.value,
             error_message=result.error,
@@ -1052,139 +1051,6 @@ def _build_taskspec_dict(
     return taskspec_dict
 
 
-def _initial_work_payload(
-    *,
-    target_type: str,
-    stdin_data: str | None,
-    interactive: bool,
-) -> Any:
-    if target_type == "command":
-        if interactive:
-            if stdin_data:
-                return {"stdin": stdin_data, "close": True}
-            return {}
-        if stdin_data:
-            return {"stdin": stdin_data}
-        return {}
-    if stdin_data:
-        return stdin_data
-    return None
-
-
-def render_run_execution_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-112] exception
-    execution: RunExecutionResult,
-    *,
-    wait: bool,
-    json_output: bool,
-    verbose: bool,
-    emit: Callable[..., None] = _echo,
-) -> int:
-    """Render one structured run result for CLI output."""
-
-    if verbose and execution.manager_started_payload is not None:
-        emit(json.dumps(execution.manager_started_payload, ensure_ascii=False))
-    if verbose and execution.submitted_payload is not None:
-        emit(json.dumps(execution.submitted_payload, indent=2))
-
-    tid = execution.tid
-    if not wait:
-        if json_output:
-            emit(json.dumps({"tid": tid, "status": "queued"}, ensure_ascii=False))
-        else:
-            emit(tid)
-        return 0
-
-    status = execution.status
-    result_value = execution.result_value
-    error_message = execution.error_message
-
-    if status == "completed":
-        if json_output:
-            emit(
-                json.dumps(
-                    {
-                        "tid": tid,
-                        "status": status,
-                        "result": result_value,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        else:
-            if isinstance(result_value, (dict, list)):
-                emit(json.dumps(result_value, ensure_ascii=False))
-            elif result_value not in (None, ""):
-                emit(str(result_value))
-        return 0
-
-    display_error = error_message
-    if status == "cancelled":
-        display_error = "Task cancelled"
-    elif status == "killed":
-        display_error = "Task killed"
-
-    if json_output:
-        emit(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "status": status,
-                    "error": display_error,
-                },
-                ensure_ascii=False,
-            )
-        )
-    else:
-        emit(f"{execution.error_prefix}: {display_error}", err=True)
-    return 124 if status == "timeout" else 1
-
-
-def _build_spec_work_payload(
-    *,
-    taskspec: TaskSpec,
-    context: WeftContext,
-    stdin_data: str | None,
-    run_input_tokens: Sequence[str],
-) -> Any:
-    run_input = taskspec.spec.run_input
-    if run_input is None:
-        if run_input_tokens:
-            raise RunUsageError(
-                "This TaskSpec does not declare spec.run_input; extra "
-                "arguments are not supported with --spec."
-            )
-        return _initial_work_payload(
-            target_type=taskspec.spec.type,
-            stdin_data=stdin_data,
-            interactive=bool(taskspec.spec.interactive),
-        )
-
-    if stdin_data is not None and run_input.stdin is None:
-        raise RunUsageError(
-            "This TaskSpec does not declare stdin input for spec.run_input."
-        )
-    if run_input.stdin is not None and run_input.stdin.required and stdin_data is None:
-        raise RunUsageError("This TaskSpec requires piped stdin for spec.run_input.")
-
-    try:
-        arguments = parse_declared_run_input_args(
-            list(run_input_tokens),
-            run_input.arguments,
-        )
-        return invoke_run_input_adapter(
-            run_input.adapter_ref,
-            request=SpecRunInputRequest(
-                arguments=arguments,
-                stdin_text=stdin_data,
-                context_root=str(context.root),
-                spec_name=taskspec.name,
-            ),
-            bundle_root=taskspec.get_bundle_root(),
-        )
-    except (TypeError, ValueError) as exc:
-        raise RunUsageError(str(exc)) from exc
-
-
 def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> TaskSpec:
     """Apply an explicit CLI name override to a runtime TaskSpec template.
 
@@ -1217,30 +1083,6 @@ def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> T
         bundle_root=taskspec.get_bundle_root(),
         template=taskspec.tid is None,
     )
-
-
-def _materialize_parameterized_spec(
-    *,
-    taskspec: TaskSpec,
-    context_root: str | None,
-    run_input_tokens: Sequence[str],
-) -> tuple[TaskSpec, list[str]]:
-    parameterization = taskspec.spec.parameterization
-    if parameterization is None:
-        return taskspec, list(run_input_tokens)
-    try:
-        arguments, remaining_tokens = parse_declared_parameterization_args(
-            list(run_input_tokens),
-            parameterization.arguments,
-        )
-        materialized = materialize_taskspec_template(
-            taskspec,
-            arguments=arguments,
-            context_root=context_root,
-        )
-    except (TypeError, ValueError) as exc:
-        raise RunUsageError(str(exc)) from exc
-    return materialized, remaining_tokens
 
 
 def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
@@ -1291,9 +1133,9 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
     metadata["source"] = "weft.cli"
 
     stdin_is_terminal = False
-    work_payload = _initial_work_payload(
+    work_payload = _submission_initial_work_payload(
         target_type=target_type,
-        stdin_data=stdin_data,
+        stdin_text=stdin_data,
         interactive=interactive,
     )
     effective_stream_output = (
@@ -1406,36 +1248,35 @@ def _execute_spec_via_manager(
     on_submitted: Callable[[str, WeftContext], None] | None = None,
     session_wait_requested: bool = False,
 ) -> RunExecutionResult:
-    spec = _load_taskspec_reference(spec_ref, context_dir=context_dir)
-    bundle_root = spec.get_bundle_root()
-    spec_payload = spec.model_dump(mode="json")
-    if persistent_override is not None:
-        spec_payload.setdefault("spec", {})
-        spec_payload["spec"]["persistent"] = persistent_override
-    spec = validate_taskspec_payload(
-        spec_payload,
-        bundle_root=bundle_root,
-        template=True,
+    submission_context = build_context(
+        spec_context=context_dir,
+        autostart=autostart_enabled,
     )
-    spec, remaining_tokens = _materialize_parameterized_spec(
-        taskspec=spec,
-        context_root=str(context_dir)
-        if context_dir is not None
-        else spec.spec.weft_context,
-        run_input_tokens=run_input_tokens,
+    prepared = _prepare_spec_submission(
+        submission_context,
+        spec_ref,
+        spec_args=run_input_tokens,
+        stdin_text=stdin_data,
+        context_explicit=context_dir is not None,
+        persistent_override=persistent_override,
+        name=name,
     )
-    spec = _apply_explicit_run_name(spec, name)
+    spec = cast(TaskSpec, prepared.taskspec)
     if spec.spec.persistent and (wait or session_wait_requested):
         raise RunUsageError(
             "--wait is not supported for persistent TaskSpecs; use --no-wait."
         )
-    context = build_context(spec.spec.weft_context, autostart=autostart_enabled)
-    work_payload = _build_spec_work_payload(
-        taskspec=spec,
-        context=context,
-        stdin_data=stdin_data,
-        run_input_tokens=remaining_tokens,
+    runtime_root = _resolve_submission_runtime_root(spec, submission_context)
+    context = (
+        submission_context
+        if runtime_root.resolve() == submission_context.root.resolve()
+        else build_context(
+            runtime_root,
+            config=submission_context.config,
+            autostart=autostart_enabled,
+        )
     )
+    work_payload = prepared.payload
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     def _wait_for_spec_completion(tid: str) -> tuple[str, Any, str | None]:
@@ -1600,8 +1441,7 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
     verbose: bool,
     persistent_override: bool | None,
     autostart_enabled: bool,
-    run_input_stdin_text: str | None = None,
-    work_input_text: str | None = None,
+    stdin_text: str | None = None,
     on_submitted: Callable[[str, WeftContext], None] | None = None,
     session_wait_requested: bool = False,
 ) -> RunExecutionResult:
@@ -1647,7 +1487,7 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             json_output=json_output,
             verbose=verbose,
             autostart_enabled=autostart_enabled,
-            stdin_data=work_input_text,
+            stdin_data=stdin_text,
             on_submitted=on_submitted,
         )
     if spec is not None:
@@ -1669,9 +1509,7 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             json_output=json_output,
             autostart_enabled=autostart_enabled,
             persistent_override=persistent_override,
-            stdin_data=run_input_stdin_text
-            if run_input_stdin_text is not None
-            else work_input_text,
+            stdin_data=stdin_text,
             on_submitted=on_submitted,
             session_wait_requested=session_wait_requested,
         )
@@ -1713,7 +1551,7 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
         json_output=json_output,
         verbose=verbose,
         autostart_enabled=autostart_enabled,
-        stdin_data=work_input_text,
+        stdin_data=stdin_text,
         on_submitted=on_submitted,
     )
 
@@ -1742,13 +1580,12 @@ def cmd_run(
     continuous: bool | None = None,
     autostart: bool = True,
     describe: bool = False,
-    run_input_stdin_text: str | None = None,
-    work_input_text: str | None = None,
+    stdin_text: str | None = None,
 ) -> RunSpecDescription | RunSession | RunExecutionResult:
     """Execute the same semantic operation exposed by ``weft run``.
 
-    Process input and output remain adapter concerns. The two decoded stdin
-    channels are explicit so embedded callers never touch ambient process I/O.
+    Process input and output remain adapter concerns. The decoded stdin value
+    is explicit so embedded callers never touch ambient process I/O.
 
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
     """
@@ -1788,8 +1625,7 @@ def cmd_run(
         verbose=False,
         persistent_override=continuous,
         autostart_enabled=autostart,
-        run_input_stdin_text=run_input_stdin_text,
-        work_input_text=work_input_text,
+        stdin_text=stdin_text,
         on_submitted=_capture_submission,
         session_wait_requested=wait,
     )
@@ -1803,15 +1639,7 @@ def cmd_run(
 __all__ = [
     "RunResolutionError",
     "RunUsageError",
-    "_collect_interactive_queue_output",
-    "_delete_spawn_request",
-    "_enqueue_taskspec",
-    "_execute_inline",
-    "_execute_pipeline",
-    "_execute_spec_via_manager",
-    "_wait_for_task_completion",
     "cmd_run",
     "execute_run",
-    "render_run_execution_result",
     "render_spec_aware_run_help",
 ]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -19,6 +19,7 @@ from weft.commands.task_monitor import (
     _build_summary_record,
     _load_checkpoint,
     _reduce_task_log,
+    cmd_system_task_monitor,
     run_task_monitor,
 )
 from weft.context import build_context
@@ -145,6 +146,74 @@ def test_disk_sink_appends_jsonl(tmp_path: Path) -> None:
     path = tmp_path / "2026-05-07.jsonl"
     lines = path.read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["tid"] for line in lines] == ["1", "2"]
+
+
+def test_disk_sink_writes_each_jsonl_record_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    writes: list[str] = []
+
+    class _Handle:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def write(self, value: str) -> int:
+            writes.append(value)
+            return len(value)
+
+        def flush(self) -> None:
+            return None
+
+    monkeypatch.setattr(Path, "open", lambda *args, **kwargs: _Handle())
+    sink = DiskJsonlTaskMonitorSink(tmp_path, run_date="2026-05-07")
+
+    sink.write_records([{"record_type": "task_summary", "tid": "1"}])
+
+    assert len(writes) == 1
+    assert writes[0].endswith("\n")
+    assert json.loads(writes[0]) == {"record_type": "task_summary", "tid": "1"}
+
+
+def test_follow_stream_advances_an_in_memory_high_water_without_checkpoint(
+    workdir: Path,
+) -> None:
+    ctx = build_context(spec_context=workdir)
+    first_tid = "1778084345905438791"
+    second_tid = "1778084345905438792"
+    _write_log(
+        ctx,
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": first_tid,
+            "taskspec": _taskspec_payload(first_tid),
+        },
+    )
+    stream = cmd_system_task_monitor(
+        context=workdir,
+        follow=True,
+        sink="stdout",
+        no_checkpoint=True,
+        since=0,
+    )
+    try:
+        assert next(stream).record["tid"] == first_tid
+        _write_log(
+            ctx,
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": second_tid,
+                "taskspec": _taskspec_payload(second_tid),
+            },
+        )
+        assert next(stream).record["tid"] == second_tid
+    finally:
+        stream.close()
 
 
 def test_stdout_sink_writes_jsonl() -> None:

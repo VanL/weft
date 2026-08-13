@@ -38,6 +38,7 @@ from weft.core.pipelines import pipeline_public_queues
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import closing_queue_iterator, iter_queue_json_entries
 
+from ._boundary import typed_command_errors
 from ._result_wait import (
     append_public_value,
     await_one_shot_result,
@@ -730,11 +731,9 @@ def _await_single_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-109] excepti
                         result_value = aggregate_public_outputs(result_values)
                         status = "completed"
                         break
-                status = "timeout"
-                error_message = (
+                raise CommandTimeoutError(
                     f"Timed out after {timeout} seconds waiting for task {tid}"
                 )
-                break
 
             wait_timeout: float | None = None
             if deadline is not None:
@@ -812,13 +811,8 @@ def await_task_result(
     )
     if materialized is None:
         if timeout is not None:
-            return TaskResult(
-                tid=normalized_tid,
-                status="timeout",
-                value=None,
-                stdout=None,
-                stderr=None,
-                error=f"Timed out after {timeout} seconds waiting for task {normalized_tid}",
+            raise CommandTimeoutError(
+                f"Timed out after {timeout} seconds waiting for task {normalized_tid}"
             )
         return TaskResult(
             tid=normalized_tid,
@@ -1013,21 +1007,24 @@ def _legacy_cmd_result(
         elapsed = time.monotonic() - start_monotonic
         remaining_timeout = max(0.0, timeout - elapsed)
 
-    status, value, error_message = _await_single_result(
-        context,
-        full_tid,
-        timeout=remaining_timeout,
-        show_stderr=show_stderr,
-        emit_stream=stream,
-        taskspec_payload=materialized.taskspec_payload,
-        outbox_name=materialized.outbox_name,
-        ctrl_out_name=materialized.ctrl_out_name,
-        initial_log_last_timestamp=materialized.log_last_timestamp,
-        initial_terminal_status=materialized.terminal_status,
-        initial_terminal_error_message=materialized.terminal_error_message,
-        initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
-        initial_result_surface_had_activity=materialized.result_surface_had_activity,
-    )
+    try:
+        status, value, error_message = _await_single_result(
+            context,
+            full_tid,
+            timeout=remaining_timeout,
+            show_stderr=show_stderr,
+            emit_stream=stream,
+            taskspec_payload=materialized.taskspec_payload,
+            outbox_name=materialized.outbox_name,
+            ctrl_out_name=materialized.ctrl_out_name,
+            initial_log_last_timestamp=materialized.log_last_timestamp,
+            initial_terminal_status=materialized.terminal_status,
+            initial_terminal_error_message=materialized.terminal_error_message,
+            initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
+            initial_result_surface_had_activity=materialized.result_surface_had_activity,
+        )
+    except CommandTimeoutError as exc:
+        return 124, str(exc)
 
     return _single_result_response(
         full_tid,
@@ -1038,27 +1035,41 @@ def _legacy_cmd_result(
     )
 
 
-def _peek_outbox_task_result(
+def _read_outbox_task_result(
     context: WeftContext,
     *,
     name: str,
     tid: str,
+    peek: bool,
 ) -> TaskResult | None:
-    """Peek one outbox and return its structured aggregate, if any."""
+    """Inspect one outbox once and consume only an observed complete result."""
 
     queue = context.queue(name, persistent=True)
     try:
         stream_buffer: list[str] = []
         values: list[Any] = []
-        for payload in _iter_queue_messages(queue, peek=True):
-            final, decoded = process_outbox_message(
-                payload,
-                stream_buffer,
-                emit_stream=False,
-            )
-            if final and decoded is not None:
-                append_public_value(values, decoded, show_stderr=False)
+        observed_timestamps: list[int] = []
+        complete_prefix_length = 0
+        iterator = queue.peek_generator(with_timestamps=True)
+        with closing_queue_iterator(iterator) as rows:
+            for entry in rows:
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    payload, timestamp = entry
+                    observed_timestamps.append(int(timestamp))
+                else:
+                    payload = entry
+                final, decoded = process_outbox_message(
+                    str(payload),
+                    stream_buffer,
+                    emit_stream=False,
+                )
+                if final and decoded is not None:
+                    append_public_value(values, decoded, show_stderr=False)
+                    complete_prefix_length = len(observed_timestamps)
         value = aggregate_public_outputs(values)
+        if value is not None and not peek:
+            for timestamp in observed_timestamps[:complete_prefix_length]:
+                queue.read_one(exact_timestamp=timestamp)
     except Exception as exc:
         raise CommandExecutionError(
             f"failed to inspect result for task {tid}: {exc}"
@@ -1076,20 +1087,6 @@ def _peek_outbox_task_result(
         stderr=stderr,
         error=None,
     )
-
-
-def _consume_outbox_task_result(context: WeftContext, tid: str) -> TaskResult | None:
-    """Consume one already-enumerated task result when it remains available."""
-
-    try:
-        result = await_task_result(context, tid, timeout=0.0)
-    except Exception as exc:
-        if isinstance(exc, CommandError):
-            raise
-        raise CommandExecutionError(
-            f"failed to collect result for task {tid}: {exc}"
-        ) from exc
-    return result if result.status not in {"missing", "timeout"} else None
 
 
 def _collect_all_task_results(
@@ -1112,18 +1109,12 @@ def _collect_all_task_results(
         if name in streaming:
             continue
         tid = name.split(".", 1)[0][1:]
-        result = _peek_outbox_task_result(context, name=name, tid=tid)
-        if result is not None and not peek:
-            queue = context.queue(name, persistent=True)
-            try:
-                for _payload in _iter_queue_messages(queue, peek=False):
-                    pass
-            except Exception as exc:
-                raise CommandExecutionError(
-                    f"failed to consume result for task {tid}: {exc}"
-                ) from exc
-            finally:
-                queue.close()
+        result = _read_outbox_task_result(
+            context,
+            name=name,
+            tid=tid,
+            peek=peek,
+        )
         if result is not None:
             results.append(result)
     return tuple(results)
@@ -1152,10 +1143,6 @@ def _result_task_event_stream(
         try:
             yield from source
             result = await_task_result(context, tid, timeout=0.0)
-            if result.status == "timeout":
-                raise CommandTimeoutError(
-                    result.error or f"timed out waiting for task {tid} result"
-                )
             if result.status == "missing":
                 raise TaskNotFound(result.error or f"task {tid} not found")
         except (CommandError, TaskNotFound):
@@ -1208,15 +1195,12 @@ def _public_result_tid(tid: str | None) -> str:
 def _require_available_result(result: TaskResult) -> TaskResult:
     """Translate absence/wait statuses while preserving task terminal outcomes."""
 
-    if result.status == "timeout":
-        raise CommandTimeoutError(
-            result.error or f"timed out waiting for task {result.tid}"
-        )
     if result.status == "missing":
         raise TaskNotFound(result.error or f"task {result.tid} not found")
     return result
 
 
+@typed_command_errors
 def cmd_result(
     tid: str | None = None,
     *,

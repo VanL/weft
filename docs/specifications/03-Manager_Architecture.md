@@ -494,7 +494,11 @@ _Implementation mapping_:
   signal in plain in-memory state (signal handlers must not touch broker
   connections); `weft/core/manager.py::Manager._apply_termination_request`
   applies it on the next `process_once` turn (TERM/INT drain, SIGUSR1 kill).
-- CLI management — `weft/commands/manager.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/system.py` :: `_collect_manager_records` reuses the same lifecycle reader for manager views.
+- CLI management — `weft/commands/manager.py` :: `cmd_manager_start`,
+  `cmd_manager_stop`, `cmd_manager_list`, `cmd_manager_status`; these structured
+  commands are thin wrappers over the shared lifecycle helper.
+  `weft/commands/system.py` :: `_collect_manager_records` reuses the same
+  lifecycle reader for manager views.
 - Foreground supervision command and process-log diagnostics — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli/app.py` as `weft manager serve`; structured process-log emission lives in `weft/core/serve_log.py`, `weft/core/manager.py`, and `weft/core/monitor/task_monitor.py`.
 
 ## Scope Boundary [MA-4]

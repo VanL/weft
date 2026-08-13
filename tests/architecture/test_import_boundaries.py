@@ -15,6 +15,7 @@ from typing import Literal
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
 import simplebroker
 import simplebroker.ext as simplebroker_ext
@@ -902,6 +903,7 @@ COMMAND_TYPES = {
     "ServiceSnapshot",
     "TaskPingResult",
     "TaskControlResult",
+    "TaskControlFailure",
     "QueueEntry",
     "QueueInfo",
     "QueueWriteReceipt",
@@ -1023,6 +1025,47 @@ def test_commands_facade_is_lazy_and_resolves_one_export() -> None:
     assert "weft.commands.tasks" not in modules
 
 
+def test_every_command_export_has_the_typed_error_boundary() -> None:
+    from weft import commands
+
+    missing = {
+        name
+        for name in COMMAND_EXPORTS
+        if not getattr(getattr(commands, name), "_weft_typed_command_errors", False)
+    }
+    assert missing == set()
+
+
+def test_deleted_tuple_command_helpers_are_absent() -> None:
+    queue_module = importlib.import_module("weft.commands.queue")
+    manager_module = importlib.import_module("weft.commands.manager")
+    run_module = importlib.import_module("weft.commands.run")
+
+    assert not {
+        "read_command",
+        "write_command",
+        "peek_command",
+        "move_command",
+        "list_command",
+        "exists_command",
+        "stats_command",
+        "delete_command",
+        "broadcast_command",
+        "watch_command",
+        "resolve_command",
+        "alias_add_command",
+        "alias_list_command",
+        "alias_remove_command",
+    }.intersection(vars(queue_module))
+    assert not {"list_command", "status_command"}.intersection(vars(manager_module))
+    assert "render_run_execution_result" not in vars(run_module)
+    assert not {
+        "_initial_work_payload",
+        "_build_spec_work_payload",
+        "_materialize_parameterized_spec",
+    }.intersection(vars(run_module))
+
+
 def _leaf_paths(command: object, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
     children = getattr(command, "commands", None)
     if not children:
@@ -1118,6 +1161,97 @@ def test_cli_callbacks_only_reach_their_matching_command_export() -> None:
                 f"{' '.join(path)}: expected {expected}, found {sorted(calls)}"
             )
     assert violations == []
+
+
+CLI_ERROR_INVOCATIONS = {
+    "cmd_init": ("init", "{root}"),
+    "cmd_status": ("status",),
+    "cmd_result": ("result", "1777000000000000001"),
+    "cmd_run": ("run", "echo"),
+    "cmd_queue_read": ("queue", "read", "q"),
+    "cmd_queue_write": ("queue", "write", "q", "message"),
+    "cmd_queue_peek": ("queue", "peek", "q"),
+    "cmd_queue_move": ("queue", "move", "q", "other"),
+    "cmd_queue_list": ("queue", "list"),
+    "cmd_queue_exists": ("queue", "exists", "q"),
+    "cmd_queue_stats": ("queue", "stats", "q"),
+    "cmd_queue_resolve": ("queue", "resolve", "endpoint"),
+    "cmd_queue_watch": ("queue", "watch", "q", "--limit", "1"),
+    "cmd_queue_delete": ("queue", "delete", "q"),
+    "cmd_queue_broadcast": ("queue", "broadcast", "message"),
+    "cmd_queue_alias_add": ("queue", "alias", "add", "alias", "q"),
+    "cmd_queue_alias_list": ("queue", "alias", "list"),
+    "cmd_queue_alias_remove": ("queue", "alias", "remove", "alias"),
+    "cmd_manager_start": ("manager", "start"),
+    "cmd_manager_serve": ("manager", "serve"),
+    "cmd_manager_stop": ("manager", "stop"),
+    "cmd_manager_list": ("manager", "list"),
+    "cmd_manager_status": ("manager", "status", "1777000000000000001"),
+    "cmd_spec_create": ("spec", "create", "demo", "--file", "{file}"),
+    "cmd_spec_list": ("spec", "list"),
+    "cmd_spec_show": ("spec", "show", "demo"),
+    "cmd_spec_delete": ("spec", "delete", "demo"),
+    "cmd_spec_validate": ("spec", "validate", "{file}"),
+    "cmd_spec_generate": ("spec", "generate"),
+    "cmd_task_list": ("task", "list"),
+    "cmd_task_status": ("task", "status", "1777000000000000001"),
+    "cmd_task_ping": ("task", "ping", "1777000000000000001"),
+    "cmd_task_stop": ("task", "stop", "1777000000000000001"),
+    "cmd_task_kill": ("task", "kill", "1777000000000000001"),
+    "cmd_task_tid": ("task", "tid", "1777000000000000001"),
+    "cmd_system_tidy": ("system", "tidy"),
+    "cmd_system_task_monitor": ("system", "task-monitor", "--once"),
+    "cmd_system_prune": ("system", "prune", "--family", "runtime-state"),
+    "cmd_system_dump": ("system", "dump"),
+    "cmd_system_builtins": ("system", "builtins"),
+    "cmd_system_load": ("system", "load"),
+}
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_exit"),
+    [
+        ("usage", 2),
+        ("timeout", 124),
+        ("execution", 1),
+    ],
+)
+def test_every_cli_adapter_applies_the_public_error_exit_map(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error_type: str,
+    expected_exit: int,
+) -> None:
+    from weft import commands
+    from weft.cli.app import app
+
+    error_classes = {
+        "usage": commands.CommandUsageError,
+        "timeout": commands.CommandTimeoutError,
+        "execution": commands.CommandExecutionError,
+    }
+    fixture = tmp_path / "spec.json"
+    fixture.write_text("{}", encoding="utf-8")
+    runner = CliRunner()
+
+    for export, template in CLI_ERROR_INVOCATIONS.items():
+
+        def fail(
+            *_args: object,
+            _export: str = export,
+            **_kwargs: object,
+        ) -> None:
+            raise error_classes[error_type](f"{_export} failed")
+
+        monkeypatch.setattr(commands, export, fail)
+        invocation = [token.format(root=tmp_path, file=fixture) for token in template]
+        result = runner.invoke(app, invocation)
+        assert result.exit_code == expected_exit, (
+            export,
+            invocation,
+            result.stdout,
+            result.exception,
+        )
 
 
 def test_runtime_import_graph_is_one_way_through_ext() -> None:

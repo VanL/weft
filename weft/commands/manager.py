@@ -7,7 +7,6 @@ Spec references:
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -15,6 +14,7 @@ from typing import Any, Literal, cast
 from simplebroker import format_message_id
 from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
 from weft._exceptions import ControlRejected, ManagerNotRunning, ManagerStartFailed
+from weft.commands._boundary import typed_command_errors
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
@@ -118,6 +118,7 @@ def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
     )
 
 
+@typed_command_errors
 def cmd_manager_list(
     *,
     all: bool = False,
@@ -152,6 +153,7 @@ def start_manager(context: WeftContext) -> ManagerSnapshot:
     return _manager_snapshot(record)
 
 
+@typed_command_errors
 def cmd_manager_start(
     *,
     context: Path | None = None,
@@ -215,6 +217,7 @@ def stop_manager(
         raise ControlRejected(message or f"Manager {tid} did not stop")
 
 
+@typed_command_errors
 def cmd_manager_stop(
     tid: str | None = None,
     *,
@@ -289,6 +292,7 @@ def manager_status(
     return _manager_snapshot(record)
 
 
+@typed_command_errors
 def cmd_manager_status(
     tid: str,
     *,
@@ -362,85 +366,6 @@ def stop_command(
     return 1, message
 
 
-def list_command(
-    *,
-    json_output: bool,
-    include_stopped: bool = False,
-    diagnostic: bool = False,
-    context_path: Path | None = None,
-) -> tuple[int, str | None]:
-    context = build_context(context_path)
-    if diagnostic:
-        records = manager_runtime.manager_diagnostic_records(
-            context,
-            include_stopped=include_stopped,
-        )
-    else:
-        records = manager_runtime.list_manager_records(
-            context,
-            include_stopped=include_stopped,
-            canonical_only=False,
-        )
-
-    if json_output:
-        payload = json.dumps(
-            [_manager_record_to_json(record) for record in records],
-            indent=2,
-        )
-        return 0, payload
-
-    if not records:
-        return 0, "No registered managers"
-
-    if diagnostic:
-        lines = ["TID        STATUS    LIVE      CANONICAL  PROOF               NAME"]
-        for data in sorted(records, key=lambda record: str(record.get("tid", ""))):
-            tid = str(data.get("tid", ""))
-            status = str(data.get("status", "unknown"))
-            liveness = str(data.get("liveness", "unknown"))
-            canonical = "yes" if data.get("canonical") is True else "no"
-            proof = str(data.get("proof_source", ""))
-            name = str(data.get("name", ""))
-            lines.append(
-                f"{tid}  {status:<9} {liveness:<9} {canonical:<10} {proof:<19} {name}"
-            )
-        return 0, "\n".join(lines)
-
-    lines = ["TID        STATUS    NAME"]
-    for data in sorted(records, key=lambda record: str(record.get("tid", ""))):
-        tid = str(data.get("tid", ""))
-        status = data.get("status", "unknown")
-        name = data.get("name", "")
-        lines.append(f"{tid}  {status:<9} {name}")
-    return 0, "\n".join(lines)
-
-
-def status_command(
-    *,
-    tid: str,
-    json_output: bool,
-    context_path: Path | None = None,
-) -> tuple[int, str | None]:
-    context = build_context(context_path)
-    record = manager_runtime.manager_record(context, tid)
-
-    if not record:
-        return 1, f"Manager {tid} not found"
-
-    if json_output:
-        return 0, json.dumps(_manager_record_to_json(record), indent=2)
-
-    parts = [
-        f"Manager {tid}",
-        f"Name: {record.get('name', '')}",
-        f"Status: {record.get('status', 'unknown')}",
-    ]
-    runtime_handle = record.get("runtime_handle")
-    if isinstance(runtime_handle, dict):
-        parts.append(f"Runtime: {json.dumps(runtime_handle, sort_keys=True)}")
-    return 0, "\n".join(parts)
-
-
 __all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-245] exception
     "list_managers",
     "manager_status",
@@ -449,6 +374,4 @@ __all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-245] exception
     "start_command",
     "stop_manager",
     "stop_command",
-    "list_command",
-    "status_command",
 ]

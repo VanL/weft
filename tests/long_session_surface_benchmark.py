@@ -545,8 +545,7 @@ class ApiSurface:
                 wait=wait,
                 continuous=None,
                 autostart=True,
-                run_input_stdin_text=stdin if spec is not None else None,
-                work_input_text=stdin if spec is None else None,
+                stdin_text=stdin,
             )
             if wait:
                 try:

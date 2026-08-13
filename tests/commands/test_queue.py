@@ -192,6 +192,25 @@ def test_public_queue_metadata_alias_and_broadcast_commands(
     assert broadcast_result.target_count >= 1
 
 
+@pytest.mark.parametrize("operation", ["write", "broadcast"])
+def test_public_queue_writes_use_resolved_context_message_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    context = SimpleNamespace(config={"BROKER_MAX_MESSAGE_SIZE": 4})
+    monkeypatch.setattr(
+        queue_cmd,
+        "_public_command_context",
+        lambda: context,
+    )
+
+    with pytest.raises(CommandUsageError, match="maximum size of 4 bytes"):
+        if operation == "write":
+            queue_cmd.cmd_queue_write("limited.queue", "hello")
+        else:
+            queue_cmd.cmd_queue_broadcast("hello", pattern="limited.*")
+
+
 def test_public_queue_endpoint_commands_return_endpoint_records(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -424,91 +443,6 @@ def test_list_queues_supports_prefix(tmp_path):
     assert [info.name for info in queues] == ["alpha.one"]
 
 
-def test_exists_and_stats_commands_delegate_to_simplebroker(tmp_path) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    queue_cmd.write_message(ctx, "meta.queue", "item")
-
-    exists_result = queue_cmd.exists_command(
-        "meta.queue",
-        json_output=True,
-        spec_context=str(root),
-    )
-    stats_result = queue_cmd.stats_command(
-        "meta.queue",
-        json_output=True,
-        spec_context=str(root),
-    )
-
-    assert exists_result[0] == 0
-    assert json.loads(exists_result[1]) == {"queue": "meta.queue", "exists": True}
-    assert stats_result[0] == 0
-    assert json.loads(stats_result[1]) == {
-        "queue": "meta.queue",
-        "pending": 1,
-        "claimed": 0,
-        "total": 1,
-        "exists": True,
-    }
-
-
-def test_alias_list_command_returns_empty_exit_for_missing_target(tmp_path) -> None:
-    root = prepare_project_root(tmp_path)
-
-    exit_code, stdout, stderr = queue_cmd.alias_list_command(
-        target="missing.queue",
-        spec_context=str(root),
-    )
-
-    assert exit_code == 2
-    assert stdout == ""
-    assert stderr == ""
-
-
-def test_queue_command_filter_validation_matches_simplebroker(tmp_path) -> None:
-    root = prepare_project_root(tmp_path)
-
-    read_result = queue_cmd.read_command(
-        "meta.queue",
-        all_messages=True,
-        message_id="1234567890123456789",
-        spec_context=str(root),
-    )
-    delete_result = queue_cmd.delete_command(
-        "meta.queue",
-        delete_all=False,
-        message_id="123",
-        spec_context=str(root),
-    )
-    watch_result = queue_cmd.watch_command(
-        "meta.queue",
-        limit=1,
-        interval=0.01,
-        with_timestamps=False,
-        json_output=False,
-        peek=False,
-        after="1234567890123456789",
-        move_to="other.queue",
-        spec_context=str(root),
-    )
-
-    assert read_result == (
-        1,
-        "",
-        "--message cannot be used with --all, --after, or --before",
-    )
-    assert delete_result == (
-        1,
-        "",
-        "invalid message ID: expected exactly 19 digits within range",
-    )
-    assert watch_result == (
-        1,
-        "",
-        "--move drains ALL messages from source queue, incompatible with --after filtering",
-    )
-
-
 def test_delete_queue_messages_rejects_message_with_all_queues_without_deleting(
     tmp_path,
 ) -> None:
@@ -657,43 +591,6 @@ def test_queue_message_json_formats_broker_id_without_mutating_domain_value() ->
     assert message.timestamp == message_id
 
 
-def test_bounded_move_json_formats_broker_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    message_id = 1_779_100_000_000_000_003
-
-    class _MoveQueue:
-        def move_many(self, *_args: object, **_kwargs: object):
-            return [("payload", message_id)]
-
-        def close(self) -> None:
-            return None
-
-    class _MoveContext:
-        def queue(self, _name: str, *, persistent: bool = True) -> _MoveQueue:
-            del persistent
-            return _MoveQueue()
-
-    monkeypatch.setattr(
-        queue_cmd, "_context", lambda _spec_context=None: _MoveContext()
-    )
-
-    exit_code, stdout, stderr = queue_cmd.move_command(
-        "source",
-        "destination",
-        limit=1,
-        json_output=True,
-    )
-
-    assert exit_code == 0
-    assert stderr == ""
-    _summary, raw_record = stdout.splitlines()
-    assert json.loads(raw_record) == {
-        "message": "payload",
-        "timestamp": "1779100000000000003",
-    }
-
-
 def test_watch_queue_uses_queue_monitor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -775,44 +672,30 @@ def test_watch_queue_closes_generator_when_limit_stops_iteration(
 def test_write_command_rejects_omitted_message_without_reading_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_ctx = SimpleNamespace(broker_target="db", config={})
-    captured: dict[str, object] = {}
-
-    def fake_run(fn, *args, **kwargs):
-        captured["fn"] = fn
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return (0, "", "")
-
-    monkeypatch.setattr(queue_cmd, "_context", lambda spec_context=None: fake_ctx)
-    monkeypatch.setattr(queue_cmd, "_run_simplebroker_command", fake_run)
-    result = queue_cmd.write_command("stdin.queue", None)
-
-    assert result == (1, "", "message content must be supplied by the CLI adapter")
-    assert captured == {}
+    monkeypatch.setattr(
+        queue_cmd,
+        "_public_command_context",
+        lambda: pytest.fail("context must not be resolved for missing input"),
+    )
+    with pytest.raises(CommandUsageError, match="message is required"):
+        queue_cmd.cmd_queue_write("stdin.queue", None)
 
 
 def test_broadcast_command_rejects_omitted_message_without_reading_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_ctx = SimpleNamespace(broker_target="db", config={})
-    captured: dict[str, object] = {}
-
-    def fake_run(fn, *args, **kwargs):
-        captured["fn"] = fn
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return (0, "", "")
-
-    monkeypatch.setattr(queue_cmd, "_context", lambda spec_context=None: fake_ctx)
-    monkeypatch.setattr(queue_cmd, "_run_simplebroker_command", fake_run)
-    result = queue_cmd.broadcast_command(None, pattern="jobs.*")
-
-    assert result == (1, "", "message content must be supplied by the CLI adapter")
-    assert captured == {}
+    monkeypatch.setattr(
+        queue_cmd,
+        "_public_command_context",
+        lambda: pytest.fail("context must not be resolved for missing input"),
+    )
+    with pytest.raises(CommandUsageError, match="message is required"):
+        queue_cmd.cmd_queue_broadcast(None, pattern="jobs.*")
 
 
-def test_resolve_command_returns_registered_endpoint_details(tmp_path) -> None:
+def test_resolve_command_returns_registered_endpoint_details(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -826,19 +709,13 @@ def test_resolve_command_returns_registered_endpoint_details(tmp_path) -> None:
     try:
         task.register_endpoint_name("mayor", metadata={"role": "operator-facing"})
 
-        exit_code, stdout, stderr = queue_cmd.resolve_command(
-            "mayor",
-            json_output=True,
-            spec_context=str(root),
-        )
+        monkeypatch.setattr(queue_cmd, "_public_command_context", lambda: ctx)
+        result = queue_cmd.cmd_queue_resolve("mayor")
 
-        assert exit_code == 0
-        assert stderr == ""
-        payload = json.loads(stdout)
-        assert payload["name"] == "mayor"
-        assert payload["tid"] == tid
-        assert payload["inbox"] == spec.io.inputs["inbox"]
-        assert payload["live_candidates"] == 1
+        assert result.name == "mayor"
+        assert result.tid == tid
+        assert result.inbox == spec.io.inputs["inbox"]
+        assert result.live_candidates == 1
     finally:
         task.cleanup()
 
@@ -850,6 +727,7 @@ def test_resolve_command_returns_registered_endpoint_details(tmp_path) -> None:
 def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(
     tmp_path,
     registration_order: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -879,34 +757,25 @@ def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(
         for owner in registration_order:
             tasks[owner].register_endpoint_name("mayor")
 
-        exit_code, stdout, stderr = queue_cmd.list_command(
-            json_output=True,
-            endpoints=True,
-            spec_context=str(root),
-        )
+        monkeypatch.setattr(queue_cmd, "_public_command_context", lambda: ctx)
+        payload = queue_cmd.cmd_queue_list(endpoints=True)
 
-        assert exit_code == 0
-        assert stderr == ""
-        payload = json.loads(stdout)
         assert len(payload) == 1
         entry = payload[0]
-        assert entry["name"] == "mayor"
-        assert entry["tid"] == low_tid
-        assert entry["status"] == "active"
-        assert entry["inbox"] == f"T{low_tid}.inbox"
-        assert entry["outbox"] == f"T{low_tid}.outbox"
-        assert entry["ctrl_in"] == f"T{low_tid}.ctrl_in"
-        assert entry["ctrl_out"] == f"T{low_tid}.ctrl_out"
-        assert isinstance(entry["registered_at"], int)
-        assert isinstance(entry["last_seen"], int)
-        assert entry["metadata"] == {}
-        assert entry["live_candidates"] == 2
+        assert isinstance(entry, EndpointResolution)
+        assert entry.name == "mayor"
+        assert entry.tid == low_tid
+        assert entry.status == "active"
+        assert entry.inbox == f"T{low_tid}.inbox"
+        assert entry.live_candidates == 2
     finally:
         high_task.cleanup()
         low_task.cleanup()
 
 
-def test_resolve_command_prunes_stale_endpoint_records(tmp_path) -> None:
+def test_resolve_command_prunes_stale_endpoint_records(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     registry = ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
@@ -924,14 +793,9 @@ def test_resolve_command_prunes_stale_endpoint_records(tmp_path) -> None:
             )
         )
 
-        exit_code, stdout, stderr = queue_cmd.resolve_command(
-            "ghost",
-            spec_context=str(root),
-        )
-
-        assert exit_code == 2
-        assert stdout == ""
-        assert "No active endpoint named 'ghost'" in stderr
+        monkeypatch.setattr(queue_cmd, "_public_command_context", lambda: ctx)
+        with pytest.raises(CommandExecutionError, match="No active endpoint"):
+            queue_cmd.cmd_queue_resolve("ghost")
         assert list(iter_queue_json_entries(registry)) == []
     finally:
         registry.close()

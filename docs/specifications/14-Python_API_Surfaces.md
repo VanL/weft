@@ -52,7 +52,7 @@ keyword-only. No command accepts `**kwargs`. Presentation-only `--json`,
 `--stats` is also presentation-only; queue-list `--stats` remains semantic.
 
 The exact signature exceptions are: `cmd_run` has `spec_args=()`,
-`describe=False`, `run_input_stdin_text=None`, and `work_input_text=None`;
+`describe=False`, and `stdin_text=None`;
 `cmd_queue_write(queue_name, message=None, *, endpoint=None)` exposes its
 positional overload; `cmd_system_task_monitor(..., follow=False)` exposes the
 positive side of `--once/--follow`. `cmd_run(describe=True, spec=REF)` returns
@@ -64,6 +64,7 @@ spec-aware help metadata and never submits.
 `InitResult`, `RunSpecDescription`, `RunSession`, `CommandStream`,
 `RunExecutionResult`, `SubmittedTaskReceipt`, `TaskSnapshot`, `TaskResult`,
 `TaskEvent`, `ServiceSnapshot`, `TaskPingResult`, `TaskControlResult`,
+`TaskControlFailure`,
 `QueueEntry`, `QueueInfo`, `QueueWriteReceipt`, `QueueMoveResult`,
 `QueueDeleteReceipt`, `QueueBroadcastReceipt`, `QueueAliasRecord`,
 `EndpointResolution`, `ManagerSnapshot`, `SpecRecord`,
@@ -89,9 +90,26 @@ New/refined exact contracts:
 - `TaskPingResult(tid: str, acknowledged: bool, timed_out: bool,
   error: str | None, observed_at: int | None, pong: Mapping[str, Any] | None,
   snapshot: TaskSnapshot | None)`.
+- `TaskControlFailure(tid: str, error: str, error_type: str)` records a
+  selected task whose control attempt could not be confirmed. `error` is the
+  rendered failure message and `error_type` is the exception class name.
 - `TaskControlResult(command: Literal["stop", "kill"],
   requested: tuple[str, ...], accepted: tuple[str, ...],
-  snapshots: tuple[TaskSnapshot, ...])`.
+  failures: tuple[TaskControlFailure, ...],
+  snapshots: tuple[TaskSnapshot, ...])`. `accepted` and `failures` partition
+  `requested`. An empty selection is a successful zero-count outcome. In a
+  sweep, the command raises only when at least one task was requested and none
+  was accepted; the raised `ControlRejected` carries the full failure tuple on
+  its documented `failures` attribute. A single genuinely unknown TID instead
+  propagates `TaskNotFound`, which the CLI renders with exit code 2. A known
+  terminal task rejects `stop` with `ControlRejected` and an `already
+  <status>` message before a control queue is written. It remains eligible for
+  `kill` so kill escalation can reap runtime residue; when no live runtime can
+  be proven, the rejection states the terminal status and absence of runtime
+  residue. Client
+  `stop_many()`/`kill_many()` with
+  no selector are the empty-selection case. Explicit `tids` cannot be combined
+  with `all_tasks` or `pattern`; mixed scope is a typed usage error.
 - `QueueDeleteReceipt(queue: str | None, deleted_count: int,
   queues_deleted: int, all_queues: bool, exact_message: str | None)`.
 - `SpecMutationResult(action: Literal["create", "delete"], record: SpecRecord)`.
@@ -169,7 +187,11 @@ exported by client and commands are identical objects.
 
 The CLI maps `CommandUsageError`, `InvalidTID`, `TaskNotFound`, and
 `SpecNotFound` to 2; `CommandTimeoutError` to 124; every other `CommandError`
-to 1; success to 0. Ctrl-C remains a shell concern.
+to 1 except the spec-pinned `system load` alias-conflict case, which returns 3
+before writes begin; success maps to 0. When an internal remaining-budget or
+completion-grace wait expires, the public timeout diagnostic retains the
+caller's requested timeout rather than exposing the internal sub-budget.
+Ctrl-C remains a shell concern.
 
 ## Client submission with declared arguments [PY-3]
 
@@ -177,10 +199,23 @@ to 1; success to 0. Ctrl-C remains a shell concern.
 stdin_text=None, **overrides)` and `prepare_spec(...)` share the run pipeline:
 parameterization first, remaining tokens to run-input, before TID commit. For
 a spec declaring run-input, adapter output is the payload and `payload=` is
-rejected. Without run-input, `payload=` is valid. `stdin_text` is valid only
-when declared by run-input. Client code never reads process stdin. Failures
-are typed; a returned `Task` is the committed receipt and uses the materialized
-spec's runtime context.
+rejected. Without run-input, `payload=` is valid. `cmd_run` and client spec
+submission accept a single `stdin_text: str | None`. The submission seam routes
+it to declared run-input stdin when the spec's `run_input` declares stdin, as
+the initial work payload when the spec has no `run_input` contract, and rejects
+it with a typed usage error when a `run_input` contract exists but declares no
+stdin. Client and command surfaces never read process stdin; the CLI adapter
+reads piped stdin once and forwards it as `stdin_text`. Failures are typed; a
+returned `Task` is the committed receipt and uses the materialized spec's
+runtime context. Runtime roots expand `~` and resolve to an absolute path
+through the shared submission seam on every surface. Declared-argument parse
+errors are `CommandUsageError`; malformed/materialization and adapter failures
+are `SubmissionValidationError` with the original exception chained, except
+that an adapter-raised `WeftError` retains its exact public type and mapping. A
+non-persistent human-readable `name` is not an endpoint claim and therefore
+does not use endpoint-name syntax validation; persistent names still do.
+`payload=` and `stdin_text=` are mutually exclusive even when
+the spec has no `run_input` contract, so the initial work payload has one owner.
 
 ## Layering [PY-4]
 
@@ -197,3 +232,4 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 ## Related Plans
 
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
+- [Public API surface remediation plan](../plans/2026-08-12-public-api-surface-remediation.md)

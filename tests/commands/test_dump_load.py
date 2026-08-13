@@ -580,7 +580,7 @@ def test_cmd_load_reports_unexpected_context_failure(
     exit_code, message = cmd_load()
 
     assert exit_code == 1
-    assert message == "weft load: failed to resolve context: private context detail"
+    assert message == "private context detail"
 
 
 def test_cmd_load_reports_unexpected_plan_failure(
@@ -604,7 +604,7 @@ def test_cmd_load_reports_unexpected_plan_failure(
     )
 
     assert exit_code == 1
-    assert message == "weft load: import failed: private plan detail"
+    assert message == "private plan detail"
 
 
 def test_cmd_load_reports_unexpected_apply_failure(

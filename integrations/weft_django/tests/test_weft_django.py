@@ -447,6 +447,33 @@ def test_native_spec_and_pipeline_helpers_accept_payload() -> None:
 
 
 @pytest.mark.shared
+def test_native_spec_helper_executes_declared_spec_args() -> None:
+    spec_reference = _write_json(
+        TEST_ROOT / ".weft" / "tasks" / "declared-args.json",
+        {
+            "name": "declared-args",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "weft_context": str(TEST_ROOT),
+                "run_input": {
+                    "adapter_ref": "weft.builtins.run_input:arguments_payload",
+                    "arguments": {"prompt": {"type": "string"}},
+                },
+            },
+            "metadata": {},
+        },
+    )
+
+    task = submit_spec_reference(
+        spec_reference,
+        spec_args=("--prompt", "hello"),
+    )
+
+    assert task.result(timeout=30.0).value == "{'prompt': 'hello'}"
+
+
+@pytest.mark.shared
 def test_native_helpers_reject_legacy_payload_names() -> None:
     spec_reference = _spec_reference_path("legacy-spec")
     pipeline_reference = _pipeline_reference_path(

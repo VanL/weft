@@ -12,6 +12,8 @@ from typing import Any
 from weft.builtins import builtin_task_catalog
 from weft.commands.types import BuiltinSpecRecord
 
+from ._boundary import typed_command_errors
+
 
 def list_builtins() -> list[dict[str, Any]]:
     """Return the builtin task inventory as serialized rows."""
@@ -35,6 +37,7 @@ def list_builtins() -> list[dict[str, Any]]:
     ]
 
 
+@typed_command_errors
 def cmd_system_builtins() -> tuple[BuiltinSpecRecord, ...]:
     """Return the shipped builtin TaskSpec inventory as typed records.
 

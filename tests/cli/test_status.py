@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import select
+import signal
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -36,6 +40,81 @@ def _host_runtime_handle(pid: int) -> dict[str, Any]:
         "observations": {"host_pids": [pid]},
         "metadata": {},
     }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT semantics")
+def test_task_status_watch_sigint_exits_cleanly(workdir) -> None:
+    tid = "1777000000000000888"
+    context = build_context(spec_context=workdir)
+    started = time.time_ns()
+    _write_log_event(
+        context,
+        {
+            "tid": tid,
+            "tid_short": tid[-10:],
+            "timestamp": started,
+            "status": "running",
+            "event": "task_started",
+            "taskspec": {
+                "name": "sigint-task",
+                "state": {"status": "running", "started_at": started},
+                "io": {
+                    "inputs": {"inbox": f"T{tid}.inbox"},
+                    "outputs": {"outbox": f"T{tid}.outbox"},
+                    "control": {
+                        "ctrl_in": f"T{tid}.ctrl_in",
+                        "ctrl_out": f"T{tid}.ctrl_out",
+                    },
+                },
+            },
+        },
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "weft",
+            "task",
+            "status",
+            tid,
+            "--watch",
+        ],
+        cwd=workdir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=1,
+    )
+    try:
+        assert process.stdout is not None
+        deadline = time.monotonic() + 10
+        watch_line = ""
+        while time.monotonic() < deadline and "heartbeat" not in watch_line:
+            _write_log_event(
+                context,
+                {
+                    "tid": tid,
+                    "name": "sigint-task",
+                    "status": "running",
+                    "event": "heartbeat",
+                    "timestamp": time.time_ns(),
+                },
+            )
+            ready, _, _ = select.select([process.stdout], [], [], 0.2)
+            if ready:
+                watch_line += process.stdout.readline()
+        assert "heartbeat" in watch_line, watch_line
+        process.send_signal(signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    assert process.returncode == 0, (stdout, stderr)
+    assert "Traceback" not in stderr
+    assert tid in watch_line
+    assert "running" in watch_line
 
 
 def _manager_service_payload(

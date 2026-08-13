@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -22,6 +23,7 @@ from tests.fixtures.provider_cli_fixture import (
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures as taskspec_fixtures
+from weft import commands
 from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -29,6 +31,8 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft.cli.run import render_run_result
+from weft.client import WeftClient
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
@@ -48,6 +52,64 @@ and xdist-level parallelism. Windows 3.14 CI has shown that a child can reach
 ``work_started`` and then wait far longer than the generic 30s constrained
 timeout before committing its outbox and terminal event.
 """
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_cli_subprocess_bytes_match_rendered_cmd_run_outcome(
+    workdir: Path,
+    weft_harness: WeftTestHarness,
+    capsys: pytest.CaptureFixture[str],
+    wait: bool,
+) -> None:
+    weft_harness.ensure_foreground_manager()
+    cli_args = [
+        "run",
+        "--function",
+        "tests.tasks.sample_targets:echo_payload",
+        "--arg",
+        "parity",
+    ]
+    if not wait:
+        cli_args.insert(1, "--no-wait")
+    cli_rc, cli_stdout, cli_stderr = run_cli(
+        *cli_args,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    outcome = commands.cmd_run(
+        (),
+        function="tests.tasks.sample_targets:echo_payload",
+        arg=("parity",),
+        context=workdir,
+        wait=wait,
+    )
+    session = cast(commands.RunSession, outcome) if wait else None
+    execution = (
+        session.wait()
+        if session is not None
+        else cast(commands.RunExecutionResult, outcome)
+    )
+    try:
+        direct_rc = render_run_result(
+            execution,
+            wait=wait,
+            json_output=False,
+            verbose=False,
+        )
+    finally:
+        if session is not None:
+            session.close()
+    captured = capsys.readouterr()
+
+    def normalize(value: str) -> str:
+        return re.sub(r"\b\d{19}\b", "<TID>", value.strip())
+
+    assert (cli_rc, normalize(cli_stdout), normalize(cli_stderr)) == (
+        direct_rc,
+        normalize(captured.out),
+        normalize(captured.err),
+    )
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -244,23 +306,14 @@ def _assert_sqlite_integrity(path: Path) -> None:
 
 
 def _parallel_manager_list_snapshot(root: Path) -> Any:
-    exit_code, payload = manager_cmd.list_command(
-        json_output=True,
-        include_stopped=True,
-        context_path=root,
-    )
-    if payload is None:
-        return {"exit_code": exit_code, "payload": None}
-    try:
-        return {
-            "exit_code": exit_code,
-            "payload": json.loads(payload),
-        }
-    except json.JSONDecodeError:
-        return {
-            "exit_code": exit_code,
-            "payload": payload,
-        }
+    records = manager_cmd.cmd_manager_list(all=True, context=root)
+    return {
+        "exit_code": 0,
+        "payload": [
+            {"tid": record.tid, "status": record.status, "name": record.name}
+            for record in records
+        ],
+    }
 
 
 def _raise_parallel_manager_reuse_failure(
@@ -1087,7 +1140,86 @@ def test_cli_run_spec_without_run_input_rejects_extra_declared_args(
 
     assert rc == 2
     assert out == ""
-    assert "does not declare spec.run_input" in err
+    assert "does not declare submission arguments" in err
+
+
+def test_unknown_spec_argument_has_one_cross_surface_error(
+    workdir: Path,
+    weft_harness: WeftTestHarness,
+) -> None:
+    spec_path = workdir / "cross-surface-arguments.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "cross-surface-arguments",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "run_input": {
+                    "adapter_ref": "weft.builtins.run_input:arguments_payload",
+                    "arguments": {"prompt": {"type": "string"}},
+                },
+            },
+        },
+    )
+    arguments = ("--prompt", "hello", "--unknown", "value")
+    client = WeftClient(path=workdir)
+
+    with pytest.raises(commands.CommandUsageError) as client_error:
+        client.prepare_spec(spec_path, spec_args=arguments)
+    with pytest.raises(commands.CommandUsageError) as command_error:
+        commands.cmd_run(
+            (), spec=spec_path, spec_args=arguments, context=workdir, wait=False
+        )
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        *arguments,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    expected = "Option '--unknown' is not declared by this TaskSpec"
+    assert type(client_error.value) is type(command_error.value)
+    assert str(client_error.value) == str(command_error.value) == expected
+    assert (rc, out) == (2, "")
+    assert expected in err
+
+
+def test_run_input_adapter_typed_usage_error_keeps_cli_exit_2(
+    workdir: Path,
+    weft_harness: WeftTestHarness,
+) -> None:
+    spec_path = workdir / "typed-adapter-usage.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "typed-adapter-usage",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "run_input": {
+                    "adapter_ref": (
+                        "tests.commands.test_submission:fail_run_input_with_typed_usage"
+                    ),
+                    "arguments": {},
+                },
+            },
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert (rc, out) == (2, "")
+    assert "adapter usage error" in err
+    assert "Traceback" not in err
 
 
 def test_cli_run_spec_path_reads_piped_stdin_into_function(
@@ -2427,7 +2559,7 @@ def test_cli_run_spec_invalid_json(workdir, weft_harness) -> None:
 
     assert rc == 2
     assert out == ""
-    assert err == ""
+    assert "Failed to read JSON" in err
 
 
 def test_cli_run_no_wait_returns_tid(workdir, weft_harness) -> None:
@@ -2601,7 +2733,7 @@ def test_cli_run_wait_reports_memory_limit(
             "--memory-mb",
             "10",
             "--duration",
-            "2",
+            "60",
         ]
     )
 

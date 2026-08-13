@@ -81,6 +81,7 @@ from weft.helpers import (
     pid_is_live,
 )
 
+from ._boundary import typed_command_errors
 from ._task_snapshot_reducer import (
     CollectedTaskSnapshot,
     FoldedTaskRecord,
@@ -1796,6 +1797,7 @@ def _status_event_stream(
     )
 
 
+@typed_command_errors
 def cmd_status(
     *,
     all: bool = False,

@@ -21,6 +21,8 @@ from weft._exceptions import CommandExecutionError, ManagerStartFailed
 from weft.context import build_context
 from weft.core import manager_runtime
 
+from ._boundary import typed_command_errors
+
 
 def serve_command(
     *,
@@ -47,6 +49,7 @@ def serve_command(
     return manager_runtime.serve_manager_foreground(context)
 
 
+@typed_command_errors
 def cmd_manager_serve(
     *,
     context: Path | None = None,
@@ -82,4 +85,4 @@ def cmd_manager_serve(
         raise CommandExecutionError(message or "Manager foreground runtime failed")
 
 
-__all__ = ["serve_command"]
+__all__ = ["cmd_manager_serve", "serve_command"]

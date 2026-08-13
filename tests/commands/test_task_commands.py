@@ -15,6 +15,7 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import CONTROL_KILL, WEFT_TID_MAPPINGS_QUEUE
+from weft._exceptions import CommandUsageError, ControlRejected, TaskNotFound
 from weft.commands import events as event_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.control_convergence import (
@@ -24,7 +25,12 @@ from weft.commands.control_convergence import (
     control_convergence_machine,
     reduce_control_convergence,
 )
-from weft.commands.types import TaskControlResult, TaskPingResult, TaskSnapshot
+from weft.commands.types import (
+    TaskControlFailure,
+    TaskControlResult,
+    TaskPingResult,
+    TaskSnapshot,
+)
 from weft.context import build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
@@ -129,7 +135,9 @@ def test_canonical_task_status_watch_returns_typed_event_stream(
     monkeypatch.setattr(task_cmd, "task_snapshot", lambda *args, **kwargs: snapshot)
     monkeypatch.setattr(event_cmd, "follow_task_events", lambda *args, **kwargs: events)
 
-    assert task_cmd.cmd_task_status(tid, watch=True) is events
+    stream = task_cmd.cmd_task_status(tid, watch=True)
+    assert stream is not events
+    assert list(stream) == []
 
 
 def test_canonical_task_ping_returns_structured_result(
@@ -190,10 +198,340 @@ def test_canonical_task_control_returns_selected_ids_and_snapshots(
         command=command,
         requested=tids,
         accepted=tids,
+        failures=(),
         snapshots=tuple(
             replace(_public_task_snapshot(tid), status="cancelled") for tid in tids
         ),
     )
+
+
+def test_canonical_task_control_attempts_every_selected_task_and_reports_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tids = ("1777000000000000126", "1777000000000000127")
+    snapshots = tuple(_public_task_snapshot(tid) for tid in tids)
+    calls: list[str] = []
+    monkeypatch.setattr(task_cmd, "list_task_snapshots", lambda **kwargs: snapshots)
+
+    def stop_task(tid: str, **kwargs: object) -> None:
+        calls.append(tid)
+        if tid == tids[0]:
+            raise ControlRejected("control was rejected")
+
+    monkeypatch.setattr(task_cmd, "stop_task", stop_task)
+    monkeypatch.setattr(
+        task_cmd,
+        "task_snapshot",
+        lambda tid, **kwargs: replace(_public_task_snapshot(tid), status="cancelled"),
+    )
+
+    result = task_cmd.cmd_task_stop(all=True)
+
+    assert calls == list(tids)
+    assert result.requested == tids
+    assert result.accepted == (tids[1],)
+    assert result.failures == (
+        TaskControlFailure(
+            tid=tids[0],
+            error="control was rejected",
+            error_type="ControlRejected",
+        ),
+    )
+
+
+def test_canonical_task_control_rejects_mixed_explicit_and_sweep_scope() -> None:
+    with pytest.raises(CommandUsageError, match="cannot be combined"):
+        task_cmd._task_control_result(
+            "stop",
+            None,
+            tids=("1777000000000000126",),
+            all_tasks=True,
+            pattern=None,
+            context_path=None,
+        )
+
+
+def test_stop_task_rejects_unknown_task_before_sending_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[str] = []
+    monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(task_cmd, "task_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        task_cmd,
+        "stop_tasks",
+        lambda tids, **_kwargs: sent.extend(tids) or len(tids),
+    )
+
+    with pytest.raises(TaskNotFound, match="not found"):
+        task_cmd.stop_task("1777000000000000999")
+
+    assert sent == []
+
+
+def test_stop_task_rejects_terminal_task_without_sending_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000999"
+    sent: list[str] = []
+    monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *_args, **_kwargs: replace(
+            _public_task_snapshot(tid), status="completed"
+        ),
+    )
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        task_cmd,
+        "stop_tasks",
+        lambda tids, **_kwargs: sent.extend(tids) or len(tids),
+    )
+
+    with pytest.raises(ControlRejected, match=f"Task {tid} already completed"):
+        task_cmd.stop_task(tid)
+
+    assert sent == []
+
+
+def test_kill_task_allows_terminal_known_task_to_reach_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000999"
+    sent: list[str] = []
+    monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *_args, **_kwargs: replace(
+            _public_task_snapshot(tid), status="completed"
+        ),
+    )
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        task_cmd,
+        "kill_tasks",
+        lambda tids, **_kwargs: sent.extend(tids) or len(tids),
+    )
+
+    task_cmd.kill_task(tid)
+
+    assert sent == [tid]
+
+
+def test_kill_task_reports_terminal_task_without_runtime_residue_honestly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000999"
+    monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *_args, **_kwargs: replace(
+            _public_task_snapshot(tid), status="completed"
+        ),
+    )
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(task_cmd, "kill_tasks", lambda _tids, **_kwargs: 0)
+
+    with pytest.raises(
+        ControlRejected,
+        match=f"Task {tid} already completed; no live runtime was found to kill",
+    ):
+        task_cmd.kill_task(tid)
+
+
+@pytest.mark.parametrize("operation_name", ["stop_task", "kill_task"])
+def test_single_task_control_precheck_preserves_live_context(
+    monkeypatch: pytest.MonkeyPatch,
+    weft_harness,
+    operation_name: str,
+) -> None:
+    tid = "1777000000000000999"
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
+
+    def fake_status(*_args: object, **kwargs: object) -> None:
+        observed.update(kwargs)
+
+    monkeypatch.setattr(task_cmd, "task_status", fake_status)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(TaskNotFound, match="not found"):
+        getattr(task_cmd, operation_name)(tid, context=weft_harness.context)
+
+    assert observed["context"] is weft_harness.context
+
+
+def test_terminal_completion_race_in_stop_sweep_is_reported_as_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000999"
+    selected = replace(_public_task_snapshot(tid), status="running")
+    monkeypatch.setattr(task_cmd, "list_task_snapshots", lambda **_kwargs: [selected])
+    monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *_args, **_kwargs: replace(selected, status="completed"),
+    )
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(task_cmd, "stop_tasks", lambda tids, **_kwargs: len(tids))
+    monkeypatch.setattr(
+        task_cmd,
+        "task_snapshot",
+        lambda *_args, **_kwargs: replace(selected, status="completed"),
+    )
+
+    with pytest.raises(ControlRejected, match=f"Task {tid} already completed") as exc:
+        task_cmd.cmd_task_stop(all=True)
+
+    assert exc.value.failures == (
+        TaskControlFailure(
+            tid=tid,
+            error=f"Task {tid} already completed",
+            error_type="ControlRejected",
+        ),
+    )
+
+
+def test_terminal_snapshot_status_fallback_preserves_live_context(
+    monkeypatch: pytest.MonkeyPatch,
+    weft_harness,
+) -> None:
+    tid = "1777000000000000999"
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        task_cmd.task_evidence,
+        "known_tid_evidence",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_status(*_args: object, **kwargs: object):
+        observed.update(kwargs)
+
+    monkeypatch.setattr(task_cmd, "task_status", fake_status)
+
+    task_cmd.task_terminal_snapshot(tid, context=weft_harness.context)
+
+    assert observed["context"] is weft_harness.context
+
+
+def test_resolve_tid_preserves_live_context(
+    monkeypatch: pytest.MonkeyPatch,
+    weft_harness,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_task_tid(**kwargs: object) -> str:
+        observed.update(kwargs)
+        return "1777000000000000999"
+
+    monkeypatch.setattr(task_cmd, "task_tid", fake_task_tid)
+
+    task_cmd.resolve_tid(tid="00999", context=weft_harness.context)
+
+    assert observed["context"] is weft_harness.context
+
+
+def test_canonical_task_control_raises_with_all_failures_when_none_are_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tids = ("1777000000000000126", "1777000000000000127")
+    monkeypatch.setattr(
+        task_cmd,
+        "stop_task",
+        lambda tid, **kwargs: (_ for _ in ()).throw(ControlRejected(f"no {tid}")),
+    )
+
+    with pytest.raises(ControlRejected, match=tids[0]) as exc_info:
+        task_cmd._task_control_result(
+            "stop",
+            None,
+            tids=tids,
+            all_tasks=False,
+            pattern=None,
+            context_path=None,
+        )
+
+    assert exc_info.value.failures == tuple(
+        TaskControlFailure(tid=tid, error=f"no {tid}", error_type="ControlRejected")
+        for tid in tids
+    )
+
+
+def test_canonical_task_control_empty_explicit_selection_is_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        task_cmd,
+        "stop_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
+    )
+
+    result = task_cmd._task_control_result(
+        "stop",
+        None,
+        tids=(),
+        all_tasks=False,
+        pattern=None,
+        context_path=None,
+    )
+
+    assert result.requested == ()
+    assert result.accepted == ()
+    assert result.failures == ()
+
+
+def test_canonical_task_control_records_invalid_explicit_tid_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempted: list[str] = []
+    valid_tid = "1777000000000000999"
+    monkeypatch.setattr(
+        task_cmd,
+        "stop_task",
+        lambda tid, **_kwargs: attempted.append(tid),
+    )
+    monkeypatch.setattr(task_cmd, "task_snapshot", lambda *_args, **_kwargs: None)
+
+    result = task_cmd._task_control_result(
+        "stop",
+        None,
+        tids=("not-a-tid", valid_tid),
+        all_tasks=False,
+        pattern=None,
+        context_path=None,
+    )
+
+    assert attempted == [valid_tid]
+    assert result.requested == ("not-a-tid", valid_tid)
+    assert result.accepted == (valid_tid,)
+    assert result.failures[0].tid == "not-a-tid"
+    assert result.failures[0].error_type == "InvalidTID"
+
+
+def test_canonical_task_control_preserves_duplicate_invalid_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        task_cmd,
+        "stop_task",
+        lambda *_args, **_kwargs: None,
+    )
+    with pytest.raises(ControlRejected) as exc_info:
+        task_cmd._task_control_result(
+            "stop",
+            None,
+            tids=("bad", "bad"),
+            all_tasks=False,
+            pattern=None,
+            context_path=None,
+        )
+
+    assert [failure.tid for failure in exc_info.value.failures] == ["bad", "bad"]
 
 
 def test_canonical_task_control_pattern_selects_matching_active_tasks(
@@ -934,11 +1272,13 @@ def test_await_control_surface_uses_queue_monitor(
     monkeypatch.setattr(
         task_cmd, "load_latest_taskspec_payload", lambda *_args, **_kwargs: None
     )
-    monkeypatch.setattr(
-        task_cmd,
-        "task_status",
-        lambda *_args, **_kwargs: next(snapshots),
-    )
+    observed_contexts: list[object] = []
+
+    def fake_status(*_args: object, **kwargs: object):
+        observed_contexts.append(kwargs.get("context"))
+        return next(snapshots)
+
+    monkeypatch.setattr(task_cmd, "task_status", fake_status)
 
     # Use the production wait budget: this test still builds real queue handles,
     # and PG-backed setup under xdist can exhaust artificial sub-second budgets.
@@ -956,6 +1296,8 @@ def test_await_control_surface_uses_queue_monitor(
         ]
     )
     assert created_monitors[0].wait_calls
+    assert observed_contexts
+    assert all(observed is ctx for observed in observed_contexts)
 
 
 def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(

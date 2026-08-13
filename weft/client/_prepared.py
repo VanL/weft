@@ -23,5 +23,11 @@ class PreparedSubmission:
         return self._request.name
 
     def submit(self) -> Task:
-        receipt = submission.submit_prepared(self.client.context, self._request)
-        return Task(self.client, receipt.tid)
+        outcome = submission._submit_prepared_outcome(
+            self.client.context, self._request
+        )
+        return Task(
+            self.client,
+            outcome.receipt.tid,
+            context=outcome.runtime_context,
+        )

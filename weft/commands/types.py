@@ -4,6 +4,7 @@ Spec references:
 - docs/specifications/09-Implementation_Plan.md [IP-1.1]
 - docs/specifications/10-CLI_Interface.md [CLI-1], [CLI-4], [CLI-6]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
+- docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
 
 from __future__ import annotations
@@ -38,11 +39,16 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class SubmittedTaskReceipt:
-    """Internal submission receipt shared by ops and tests."""
+    """Public submission receipt: committed TID, spec name, submission
+    time, and the runtime context root the task was submitted into.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
 
     tid: str
     name: str
     submitted_at_ns: int
+    context_root: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,12 +370,22 @@ class TaskPingResult:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskControlFailure:
+    """One selected task whose control attempt was not confirmed."""
+
+    tid: str
+    error: str
+    error_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class TaskControlResult:
     """Structured stop/kill outcome."""
 
     command: Literal["stop", "kill"]
     requested: tuple[str, ...]
     accepted: tuple[str, ...]
+    failures: tuple[TaskControlFailure, ...]
     snapshots: tuple[TaskSnapshot, ...]
 
 
@@ -383,6 +399,8 @@ class SpecMutationResult:
 
 @dataclass(frozen=True, slots=True)
 class SystemDumpResult:
+    """Structured broker dump outcome."""
+
     path: Path
     queues: int
     messages: int
@@ -393,6 +411,8 @@ class SystemDumpResult:
 
 @dataclass(frozen=True, slots=True)
 class SystemPruneResult:
+    """Structured runtime or retention prune outcome."""
+
     families: tuple[str, ...]
     applied: bool
     candidates: int
@@ -403,6 +423,8 @@ class SystemPruneResult:
 
 @dataclass(frozen=True, slots=True)
 class BuiltinSpecRecord:
+    """One builtin TaskSpec inventory record."""
+
     name: str
     description: str | None
     category: str | None

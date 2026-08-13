@@ -34,6 +34,7 @@ from weft.commands.types import (
     SystemLoadResult,
     SystemStatusSnapshot,
     SystemTidyResult,
+    TaskControlResult,
     TaskSnapshot,
     TaskTerminalSnapshot,
 )
@@ -136,17 +137,16 @@ class TasksNamespace:
         tids: Sequence[str] | None = None,
         all_tasks: bool = False,
         pattern: str | None = None,
-    ) -> int:
-        if all_tasks:
-            resolved = [item.tid for item in self.list(include_terminal=True)]
-        elif pattern is not None:
-            resolved = tasks.filter_tids_by_pattern(
-                self.list(include_terminal=True),
-                pattern,
-            )
-        else:
-            resolved = list(tids or [])
-        return tasks.stop_tasks(resolved, context=self.client.context)
+    ) -> TaskControlResult:
+        return tasks._task_control_result(
+            "stop",
+            None,
+            tids=(() if tids is None and not all_tasks and pattern is None else tids),
+            all_tasks=all_tasks,
+            pattern=pattern,
+            context_path=None,
+            runtime_context=self.client.context,
+        )
 
     def kill(self, tid: str) -> None:
         tasks.kill_task(tid, context=self.client.context)
@@ -157,17 +157,16 @@ class TasksNamespace:
         tids: Sequence[str] | None = None,
         all_tasks: bool = False,
         pattern: str | None = None,
-    ) -> int:
-        if all_tasks:
-            resolved = [item.tid for item in self.list(include_terminal=True)]
-        elif pattern is not None:
-            resolved = tasks.filter_tids_by_pattern(
-                self.list(include_terminal=True),
-                pattern,
-            )
-        else:
-            resolved = list(tids or [])
-        return tasks.kill_tasks(resolved, context=self.client.context)
+    ) -> TaskControlResult:
+        return tasks._task_control_result(
+            "kill",
+            None,
+            tids=(() if tids is None and not all_tasks and pattern is None else tids),
+            all_tasks=all_tasks,
+            pattern=pattern,
+            context_path=None,
+            runtime_context=self.client.context,
+        )
 
 
 @dataclass(slots=True)

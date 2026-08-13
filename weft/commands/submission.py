@@ -13,11 +13,15 @@ import shlex
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
+    INTERNAL_ENDPOINT_NAMESPACE_PREFIX,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     SPAWN_RESERVED_CLAIM_RECONCILIATION_TIMEOUT,
     SPEC_TYPE_PIPELINE,
@@ -30,6 +34,7 @@ from weft._exceptions import (
     SpecNotFound,
     SubmissionManagerError,
     SubmissionValidationError,
+    WeftError,
 )
 from weft.commands.types import PreparedSubmissionRequest, SubmittedTaskReceipt
 from weft.context import WeftContext, build_context
@@ -144,7 +149,9 @@ def apply_submit_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-115] excep
     if name is not None:
         payload["name"] = name
         metadata_section.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
-        if bool(spec_section.get("persistent")):
+        if name.strip().startswith(INTERNAL_ENDPOINT_NAMESPACE_PREFIX) or bool(
+            spec_section.get("persistent")
+        ):
             metadata_section[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = (
                 validate_endpoint_claim_name(name)
             )
@@ -184,11 +191,38 @@ def _snapshot_taskspec(taskspec: TaskSpec | Mapping[str, Any]) -> TaskSpec:
     )
 
 
-def _receipt(name: str, tid: str) -> SubmittedTaskReceipt:
+def _initial_work_payload(
+    *,
+    target_type: str,
+    stdin_text: str | None,
+    interactive: bool,
+) -> Any:
+    """Build the canonical initial payload when no run-input adapter exists."""
+
+    if target_type == "command":
+        payload: dict[str, Any] = {}
+        if stdin_text:
+            payload["stdin"] = stdin_text
+            if interactive:
+                payload["close"] = True
+        return payload
+    return stdin_text if stdin_text else None
+
+
+@dataclass(frozen=True, slots=True)
+class _SubmittedPreparedOutcome:
+    """Internal receipt plus the live runtime context used for submission."""
+
+    receipt: SubmittedTaskReceipt
+    runtime_context: WeftContext
+
+
+def _receipt(name: str, tid: str, *, context_root: Path) -> SubmittedTaskReceipt:
     return SubmittedTaskReceipt(
         tid=tid,
         name=name,
         submitted_at_ns=int(tid) if tid.isdigit() else time.time_ns(),
+        context_root=str(context_root),
     )
 
 
@@ -311,14 +345,34 @@ def submit_prepared(
 ) -> SubmittedTaskReceipt:
     """Write a previously prepared submission through the spawn queue."""
 
+    return _submit_prepared_outcome(context, prepared).receipt
+
+
+def _resolve_submission_runtime_root(
+    taskspec: TaskSpec,
+    context: WeftContext,
+) -> Path:
+    """Resolve the one runtime-root rule shared by every submission surface."""
+
+    return Path(taskspec.spec.weft_context or context.root).expanduser().resolve()
+
+
+def _submit_prepared_outcome(
+    context: WeftContext,
+    prepared: PreparedSubmissionRequest,
+) -> _SubmittedPreparedOutcome:
+    """Submit and retain the exact live runtime context for client handles."""
+
     normalized = normalize_taskspec(prepared.taskspec)
-    runtime_root = (
-        Path(normalized.spec.weft_context or context.root).expanduser().resolve()
-    )
+    runtime_root = _resolve_submission_runtime_root(normalized, context)
     runtime_context = (
         context
         if runtime_root == context.root.resolve()
-        else build_context(runtime_root)
+        else build_context(
+            runtime_root,
+            config=context.config,
+            autostart=context.autostart_enabled,
+        )
     )
     submitted_tid = submit_spawn_request(
         runtime_context.broker_target,
@@ -335,7 +389,10 @@ def submit_prepared(
         ensure_manager_after_submission(runtime_context, submitted_tid=task_tid)
     except RuntimeError as exc:
         raise SubmissionManagerError(str(exc)) from exc
-    return _receipt(prepared.name, task_tid)
+    return _SubmittedPreparedOutcome(
+        receipt=_receipt(prepared.name, task_tid, context_root=runtime_context.root),
+        runtime_context=runtime_context,
+    )
 
 
 def submit_taskspec(
@@ -393,11 +450,16 @@ def prepare_spec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-369] exception
     spec_args: Sequence[str] = (),
     payload: Any = None,
     stdin_text: str | None = None,
+    context_explicit: bool = True,
+    persistent_override: bool | None = None,
     **overrides: Any,
 ) -> PreparedSubmissionRequest:
     """Resolve, validate, and snapshot a stored or file-backed task spec."""
 
-    _validate_submit_overrides(overrides)
+    try:
+        _validate_submit_overrides(overrides)
+    except TypeError as exc:
+        raise SubmissionValidationError(str(exc)) from exc
     try:
         resolved = resolve_spec_reference(
             reference,
@@ -407,68 +469,109 @@ def prepare_spec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-369] exception
     except FileNotFoundError as exc:
         raise SpecNotFound(str(exc)) from exc
     try:
+        resolved_payload = dict(resolved.payload)
+        if persistent_override is not None:
+            spec_section = resolved_payload.setdefault("spec", {})
+            if not isinstance(spec_section, dict):
+                raise TypeError("TaskSpec spec section must be a mapping")
+            spec_section["persistent"] = persistent_override
         taskspec = validate_taskspec_payload(
-            resolved.payload,
+            resolved_payload,
             bundle_root=resolved.bundle_root,
             template=True,
         )
-        remaining = list(spec_args)
-        parameterization = taskspec.spec.parameterization
-        if parameterization is not None:
+    except (ValidationError, TypeError, OSError, ValueError) as exc:
+        raise SubmissionValidationError(str(exc)) from exc
+
+    remaining = list(spec_args)
+    parameterization = taskspec.spec.parameterization
+    if parameterization is not None:
+        try:
             arguments, remaining = parse_declared_parameterization_args(
                 remaining,
                 parameterization.arguments,
             )
+        except (TypeError, ValueError) as exc:
+            raise CommandUsageError(str(exc)) from exc
+        try:
             taskspec = materialize_taskspec_template(
                 taskspec,
                 arguments=arguments,
-                context_root=str(context.root),
+                context_root=(
+                    str(context.root)
+                    if context_explicit
+                    else taskspec.spec.weft_context
+                ),
             )
+        except WeftError:
+            raise
+        except Exception as exc:
+            raise SubmissionValidationError(str(exc)) from exc
+
+    try:
         updated = apply_submit_overrides(taskspec, **overrides)
-        run_input = updated.spec.run_input
-        if run_input is None:
-            if remaining:
-                raise CommandUsageError(
-                    "This TaskSpec does not declare submission arguments"
-                )
-            if stdin_text is not None:
-                raise CommandUsageError(
-                    "stdin_text requires a TaskSpec run_input stdin contract"
-                )
+    except ValidationError as exc:
+        raise SubmissionValidationError(str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise CommandUsageError(str(exc)) from exc
+
+    run_input = updated.spec.run_input
+    if run_input is None:
+        if remaining:
+            raise CommandUsageError(
+                "This TaskSpec does not declare submission arguments"
+            )
+        if payload is not None and stdin_text is not None:
+            raise CommandUsageError("payload cannot be combined with stdin_text")
+        if payload is not None:
             work_payload = payload
         else:
-            if payload is not None:
-                raise CommandUsageError(
-                    "payload cannot be combined with a TaskSpec run_input contract"
-                )
-            if stdin_text is not None and run_input.stdin is None:
-                raise CommandUsageError(
-                    "stdin_text requires a TaskSpec run_input stdin contract"
-                )
-            if (
-                run_input.stdin is not None
-                and run_input.stdin.required
-                and stdin_text is None
-            ):
-                raise CommandUsageError("This TaskSpec requires stdin_text")
+            work_payload = _initial_work_payload(
+                target_type=updated.spec.type,
+                stdin_text=stdin_text,
+                interactive=bool(updated.spec.interactive),
+            )
+    else:
+        if payload is not None:
+            raise CommandUsageError(
+                "payload cannot be combined with a TaskSpec run_input contract"
+            )
+        if stdin_text is not None and run_input.stdin is None:
+            raise CommandUsageError(
+                "stdin_text requires a TaskSpec run_input stdin contract"
+            )
+        if (
+            run_input.stdin is not None
+            and run_input.stdin.required
+            and stdin_text is None
+        ):
+            raise CommandUsageError("This TaskSpec requires stdin_text")
+        try:
             arguments = parse_declared_run_input_args(
                 remaining,
                 run_input.arguments,
             )
+        except (TypeError, ValueError) as exc:
+            raise CommandUsageError(str(exc)) from exc
+        runtime_root = _resolve_submission_runtime_root(updated, context)
+        try:
             work_payload = invoke_run_input_adapter(
                 run_input.adapter_ref,
                 request=SpecRunInputRequest(
                     arguments=arguments,
                     stdin_text=stdin_text,
-                    context_root=updated.spec.weft_context,
+                    context_root=str(runtime_root),
                     spec_name=updated.name,
                 ),
                 bundle_root=updated.get_bundle_root(),
             )
+        except WeftError:
+            raise
+        except Exception as exc:
+            raise SubmissionValidationError(str(exc)) from exc
+    try:
         return prepare_taskspec(updated, payload=work_payload)
-    except CommandUsageError:
-        raise
-    except (TypeError, ValueError, OSError) as exc:
+    except (ValidationError, TypeError, OSError, ValueError) as exc:
         raise SubmissionValidationError(str(exc)) from exc
 
 

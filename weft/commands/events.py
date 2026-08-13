@@ -19,6 +19,7 @@ from weft._constants import (
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
 )
+from weft._exceptions import CommandTimeoutError
 from weft.commands.types import TaskEvent
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
@@ -236,19 +237,22 @@ def follow_task_events(
                 timeout=timeout,
             )
         remaining = WEFT_COMPLETED_RESULT_GRACE_SECONDS
-    result = await_task_result(
-        context,
-        normalized_tid,
-        timeout=remaining,
-    )
-    if result.status == "timeout":
-        if event_timeout is not None:
-            raise event_timeout
-        _raise_follow_timeout(
-            tid=normalized_tid,
-            operation="result",
-            timeout=timeout,
+    try:
+        result = await_task_result(
+            context,
+            normalized_tid,
+            timeout=remaining,
         )
+    except CommandTimeoutError as exc:
+        if event_timeout is not None:
+            raise event_timeout from exc
+        if timeout is not None:
+            _raise_follow_timeout(
+                tid=normalized_tid,
+                operation="result",
+                timeout=timeout,
+            )
+        raise
     yield TaskEvent(
         tid=normalized_tid,
         event_type="result",
