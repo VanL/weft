@@ -228,6 +228,7 @@ def test_prepare_spec_expands_home_in_runtime_context(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
     spec_path = weft_harness.root / "home-context.json"

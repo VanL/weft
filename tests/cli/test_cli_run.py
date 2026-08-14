@@ -2611,12 +2611,15 @@ def test_harness_wait_for_completion_reports_cancelled_task(
     workdir, weft_harness
 ) -> None:
     weft_harness.ensure_foreground_manager()
+    release_file = workdir / "harness-cancel-release"
     rc, out, err = run_cli(
         "run",
         "--function",
-        "tests.tasks.sample_targets:simulate_work",
+        "tests.tasks.sample_targets:wait_for_file",
+        "--arg",
+        str(release_file),
         "--kw",
-        "duration=5",
+        "timeout=60",
         "--no-wait",
         cwd=workdir,
         harness=weft_harness,
@@ -2628,7 +2631,7 @@ def test_harness_wait_for_completion_reports_cancelled_task(
     assert tid
     started_tid = _wait_for_started_task_tid(
         weft_harness,
-        task_name="simulate_work",
+        task_name="wait_for_file",
     )
     assert started_tid == tid
 

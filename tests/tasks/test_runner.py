@@ -1592,12 +1592,29 @@ def _wait_for_pid_exit(pid: int, *, timeout: float = 5.0) -> bool:
     while time.time() < deadline:
         try:
             process = psutil.Process(pid)
+            if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+                return True
         except psutil.Error:
-            return True
-        if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
             return True
         time.sleep(0.05)
     return False
+
+
+def test_wait_for_pid_exit_accepts_disappearance_during_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    psutil = pytest.importorskip("psutil")
+
+    class VanishedProcess:
+        def is_running(self) -> bool:
+            return True
+
+        def status(self) -> str:
+            raise psutil.NoSuchProcess(123)
+
+    monkeypatch.setattr(psutil, "Process", lambda _pid: VanishedProcess())
+
+    assert _wait_for_pid_exit(123, timeout=0.1)
 
 
 def test_task_runner_executes_command_successfully(tmp_path):
