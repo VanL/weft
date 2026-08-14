@@ -578,30 +578,67 @@ def _wait_for_started_task_tid(
         deadline = time.time() + timeout
         while time.time() < deadline:
             events = queue.peek_many(limit=200, with_timestamps=False) or []
-            for raw in reversed(events):
-                payload = raw[0] if isinstance(raw, tuple) else raw
-                try:
-                    data = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                event = data.get("event")
-                if event == "work_started":
-                    taskspec = data.get("taskspec") or {}
-                    tid = data.get("tid")
-                elif event == "task_spawned":
-                    taskspec = data.get("child_taskspec") or {}
-                    tid = data.get("child_tid")
-                else:
-                    continue
-                if not isinstance(taskspec, dict) or taskspec.get("name") != task_name:
-                    continue
-                if isinstance(tid, str) and tid:
-                    return tid
+            tid = _started_task_tid_from_events(events, task_name=task_name)
+            if tid is not None:
+                return tid
             time.sleep(0.05)
     finally:
         queue.close()
 
     raise AssertionError(f"Timed out waiting for started task {task_name!r}")
+
+
+def _started_task_tid_from_events(
+    events: list[Any],
+    *,
+    task_name: str,
+) -> str | None:
+    """Return only a child whose own work-start event proves control readiness."""
+
+    for raw in reversed(events):
+        payload = raw[0] if isinstance(raw, tuple) else raw
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if data.get("event") != "work_started":
+            continue
+        taskspec = data.get("taskspec") or {}
+        if not isinstance(taskspec, dict) or taskspec.get("name") != task_name:
+            continue
+        tid = data.get("tid")
+        if isinstance(tid, str) and tid:
+            return tid
+    return None
+
+
+def test_started_task_tid_requires_child_work_start() -> None:
+    """Manager spawn evidence alone cannot make a task controllable."""
+
+    tid = "1779100000000000059"
+    spawned = json.dumps(
+        {
+            "event": "task_spawned",
+            "child_tid": tid,
+            "child_taskspec": {"name": "wait_for_file"},
+        }
+    )
+    started = json.dumps(
+        {
+            "event": "work_started",
+            "tid": tid,
+            "taskspec": {"name": "wait_for_file"},
+        }
+    )
+
+    assert _started_task_tid_from_events([spawned], task_name="wait_for_file") is None
+    assert (
+        _started_task_tid_from_events(
+            [spawned, started],
+            task_name="wait_for_file",
+        )
+        == tid
+    )
 
 
 def _wait_for_task_process_exit(
