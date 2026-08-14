@@ -89,12 +89,12 @@ def wait_for_exit(process: object, timeout: float = 5.0) -> bool:
             return True
         try:
             ps_process = psutil.Process(pid)
+            if (
+                not ps_process.is_running()
+                or ps_process.status() == psutil.STATUS_ZOMBIE
+            ):
+                return True
         except psutil.Error:
-            return True
-        if (
-            not ps_process.is_running()
-            or ps_process.status() == psutil.STATUS_ZOMBIE
-        ):
             return True
         time.sleep(0.05)
     return False
