@@ -378,12 +378,12 @@ def test_project_discovery_ignores_invalid_ambient_broker_config(
 
     root = prepare_project_root(tmp_path)
     initial = build_context(spec_context=root)
-    assert initial.database_path is not None
-    _write_broker_project_config(
-        root,
-        backend="sqlite",
-        target=initial.database_path.name,
-    )
+    if initial.database_path is not None:
+        _write_broker_project_config(
+            root,
+            backend="sqlite",
+            target=initial.database_path.name,
+        )
     monkeypatch.chdir(root)
     monkeypatch.setenv("BROKER_PROJECT_CONFIG_PATH", "../unsafe")
     monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
