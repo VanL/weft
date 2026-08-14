@@ -97,7 +97,9 @@ def main() -> int:
         mutation_errors: list[str] = []
 
         def mutate() -> None:
-            assert waiters[0].wait_entered.wait(timeout=2.0)
+            # The parent subprocess deadline owns liveness for this probe. The
+            # handoff itself is synchronization, not a two-second SLA.
+            waiters[0].wait_entered.wait()
             try:
                 watcher.add_queue("sigint.c", lambda *_args: None)
             except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-359] exception
