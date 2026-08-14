@@ -203,9 +203,7 @@ class BenchmarkSettings:
         if any(surface not in SURFACES for surface in self.surfaces):
             raise ValueError(f"surfaces must be drawn from {SURFACES!r}")
         if POSTGRES_TEST_BACKEND in self.backends and not self.pg_dsn:
-            raise ValueError(
-                "Postgres benchmarks require --pg-dsn or WEFT_PG_TEST_DSN"
-            )
+            raise ValueError("Postgres benchmarks require --pg-dsn or WEFT_PG_TEST_DSN")
 
 
 @dataclass(frozen=True)

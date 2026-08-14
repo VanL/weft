@@ -95,9 +95,7 @@ def postgres_env_overrides_for_root(
 
     dsn = postgres_test_dsn(env)
     if not dsn:
-        raise RuntimeError(
-            "BROKER_TEST_BACKEND=postgres requires WEFT_PG_TEST_DSN"
-        )
+        raise RuntimeError("BROKER_TEST_BACKEND=postgres requires WEFT_PG_TEST_DSN")
 
     return {
         "BROKER_TEST_BACKEND": POSTGRES_TEST_BACKEND,
@@ -172,9 +170,7 @@ def prepare_project_root(
 
     dsn = postgres_test_dsn(env)
     if not dsn:
-        raise RuntimeError(
-            "BROKER_TEST_BACKEND=postgres requires WEFT_PG_TEST_DSN"
-        )
+        raise RuntimeError("BROKER_TEST_BACKEND=postgres requires WEFT_PG_TEST_DSN")
 
     config_path = _project_config_path(resolved_root, env=env)
     schema = _load_postgres_schema(config_path)

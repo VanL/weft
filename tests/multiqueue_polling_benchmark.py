@@ -79,9 +79,7 @@ class BenchmarkSettings:
         if any(count < 1 for count in self.queue_counts):
             raise ValueError("queue counts must be positive")
         if POSTGRES_TEST_BACKEND in self.backends and not self.pg_dsn:
-            raise ValueError(
-                "Postgres benchmarks require --pg-dsn or WEFT_PG_TEST_DSN"
-            )
+            raise ValueError("Postgres benchmarks require --pg-dsn or WEFT_PG_TEST_DSN")
 
 
 @dataclass(frozen=True)
