@@ -1001,6 +1001,9 @@ def test_consumer_live_provider_cli_persistent_smoke(
 
     first_output = outbox.read_one()
     assert isinstance(first_output, str)
+    assert outbox.peek_one() is None, (
+        f"{provider_name} emitted duplicate output for the first persistent turn"
+    )
     assert task.taskspec.state.status == "running"
 
     inbox.write("Reply with exactly the token I asked you to remember earlier.")
@@ -1008,7 +1011,10 @@ def test_consumer_live_provider_cli_persistent_smoke(
 
     second_output = outbox.read_one()
     assert isinstance(second_output, str)
-    assert remember_token in second_output.upper()
+    assert remember_token in second_output.upper(), (
+        f"{provider_name} persistent recall failed: "
+        f"first_output={first_output!r}, second_output={second_output!r}"
+    )
     assert task.taskspec.state.status == "running"
 
     task.cleanup()
