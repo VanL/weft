@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from simplebroker import BrokerTarget
+from simplebroker import BrokerTarget, ResolvedConfig
 from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
@@ -186,7 +186,7 @@ class PipelineCompilationContext:
 
     root: Path
     broker_target: BrokerTarget
-    broker_config: dict[str, Any]
+    broker_config: ResolvedConfig
 
 
 def pipeline_queue_name(pipeline_tid: str, suffix: str) -> str:

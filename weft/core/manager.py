@@ -2290,7 +2290,7 @@ class Manager(ServiceTask):
         queue = Queue(
             queue_name,
             db_path=self._db_path,
-            config=self._config,
+            config=self._broker_config,
         )
         try:
             latest_message_id: int | None = None
@@ -2426,7 +2426,7 @@ class Manager(ServiceTask):
         queue = Queue(
             queue_name,
             db_path=self._db_path,
-            config=self._config,
+            config=self._broker_config,
         )
         try:
             queue.delete(message_id=message_id)
@@ -2456,7 +2456,7 @@ class Manager(ServiceTask):
         queue = Queue(
             ctrl_out_name,
             db_path=self._db_path,
-            config=self._config,
+            config=self._broker_config,
         )
         reply_ids: list[int] = []
         try:
@@ -3174,7 +3174,7 @@ class Manager(ServiceTask):
             ctrl_out_name,
             db_path=self._db_path,
             persistent=False,
-            config=self._config,
+            config=self._broker_config,
         )
         try:
             iterator = ctrl_out.peek_generator(with_timestamps=True)
@@ -3275,7 +3275,7 @@ class Manager(ServiceTask):
             ctrl_out_name,
             db_path=self._db_path,
             persistent=False,
-            config=self._config,
+            config=self._broker_config,
         )
         try:
             ctrl_out.write(json.dumps(payload))
@@ -3670,7 +3670,7 @@ class Manager(ServiceTask):
             queue_name,
             db_path=self._db_path,
             persistent=True,
-            config=self._config,
+            config=self._broker_config,
         )
         try:
             queue.write(encode_control_message(command))
@@ -5726,15 +5726,10 @@ class Manager(ServiceTask):
         context_root = self._autostart_context_root()
         if context_root is None:
             return None
-        broker_config = {
-            key: value
-            for key, value in self._config.items()
-            if key.startswith("BROKER_")
-        }
         return PipelineCompilationContext(
             root=context_root,
             broker_target=cast(BrokerTarget, self._db_path),
-            broker_config=broker_config,
+            broker_config=self._broker_config,
         )
 
     @staticmethod

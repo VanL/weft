@@ -97,6 +97,32 @@ def test_interactive_client_streams_and_completes(broker_env) -> None:
     assert not [chunk for chunk in stderr_chunks if chunk.strip()]
 
 
+def test_interactive_client_ignores_invalid_ambient_broker_config(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The direct interactive Queue edge receives an isolated marker."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
+    client = InteractiveStreamClient(
+        db_path=db_path,
+        config=load_config(),
+        tid="1786675000000000000",
+        inbox="isolated.interactive.inbox",
+        outbox="isolated.interactive.outbox",
+        ctrl_out="isolated.interactive.ctrl_out",
+    )
+    try:
+        client.send_input("works")
+        assert (
+            json.loads(make_queue("isolated.interactive.inbox").peek_one())["stdin"]
+            == "works"
+        )
+    finally:
+        client.stop()
+
+
 def test_interactive_client_observes_terminal_ctrl_out_envelope(broker_env) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())

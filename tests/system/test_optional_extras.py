@@ -72,20 +72,20 @@ def test_typed_package_markers_are_included_in_builds() -> None:
     )
 
 
-def test_simplebroker_floor_is_7_1_0() -> None:
-    """The root floor must include the public JSON message-ID boundary API."""
+def test_simplebroker_floor_is_7_3_1() -> None:
+    """The root floor must include the bounded dump-watermark contract."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
     minimum = _minimum_dependency_version(
         root_pyproject["project"]["dependencies"],
         "simplebroker",
     )
 
-    assert minimum == "7.1.0"
+    assert minimum == "7.3.2"
 
 
 @pytest.mark.parametrize("extra", ["pg", "all", "dev"])
-def test_simplebroker_pg_floor_is_3_6_0(extra: str) -> None:
-    """Every root extra carrying PostgreSQL must use the paired patch floor."""
+def test_simplebroker_pg_floor_is_3_8_0(extra: str) -> None:
+    """Every root extra carrying PostgreSQL must use backend API v7."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
 
     minimum = _minimum_dependency_version(
@@ -93,7 +93,19 @@ def test_simplebroker_pg_floor_is_3_6_0(extra: str) -> None:
         "simplebroker-pg",
     )
 
-    assert minimum == "3.6.0"
+    assert minimum == "3.8.0"
+
+
+def test_httpx_is_direct_for_llm_runtime_import() -> None:
+    """A clean environment must satisfy llm 0.32's undeclared httpx import."""
+
+    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
+    minimum = _minimum_dependency_version(
+        root_pyproject["project"]["dependencies"],
+        "httpx",
+    )
+
+    assert minimum == "0.28"
 
 
 def test_root_extras_do_not_undercut_local_extension_versions() -> None:

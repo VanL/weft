@@ -36,7 +36,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Final
 
-from simplebroker import resolve_config as resolve_broker_config
+from simplebroker import ResolvedConfig, resolve_isolated_config
+from simplebroker.ext import InvalidConfigError
 
 # ==============================================================================
 # VERSION INFORMATION
@@ -2200,6 +2201,7 @@ SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
     "WEFT_MAX_MESSAGE_SIZE": "BROKER_MAX_MESSAGE_SIZE",
     "WEFT_READ_COMMIT_INTERVAL": "BROKER_READ_COMMIT_INTERVAL",
     "WEFT_GENERATOR_BATCH_SIZE": "BROKER_GENERATOR_BATCH_SIZE",
+    "WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS": "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS",
     "WEFT_AUTO_VACUUM": "BROKER_AUTO_VACUUM",
     "WEFT_AUTO_VACUUM_INTERVAL": "BROKER_AUTO_VACUUM_INTERVAL",
     "WEFT_VACUUM_THRESHOLD": "BROKER_VACUUM_THRESHOLD",
@@ -2224,10 +2226,60 @@ SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
     "WEFT_BACKEND_TARGET": "BROKER_BACKEND_TARGET",
 }
 
-# Weft-specific defaults for SimpleBroker integration
-WEFT_SIMPLEBROKER_DEFAULTS: Final[dict[str, Any]] = {
+# Values that directly select or constrain Weft's embedded broker.
+WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS: Final[dict[str, Any]] = {
+    "BROKER_MAX_MESSAGE_SIZE": 10 * 1024 * 1024,
+    "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS": 300,
+    "BROKER_DEFAULT_DB_LOCATION": "",
     "BROKER_PROJECT_SCOPE": True,
+    "BROKER_BACKEND": "sqlite",
+    "BROKER_BACKEND_HOST": "localhost",
+    "BROKER_BACKEND_PORT": 5432,
+    "BROKER_BACKEND_USER": "postgres",
+    "BROKER_BACKEND_PASSWORD": "",
+    "BROKER_BACKEND_DATABASE": "simplebroker",
+    "BROKER_BACKEND_SCHEMA": "simplebroker_pg_v1",
+    "BROKER_BACKEND_TARGET": "",
 }
+
+# These are named SimpleBroker storage/retry constants, not Weft policy knobs.
+# Weft normally has no direct interest in them. Their explicit defaults seal
+# the embedding boundary so ambient BROKER_* tuning cannot affect Weft.
+SIMPLEBROKER_STORAGE_ISOLATION_DEFAULTS: Final[dict[str, Any]] = {
+    "BROKER_BUSY_TIMEOUT": 5000,
+    "BROKER_CACHE_MB": 10,
+    "BROKER_SYNC_MODE": "FULL",
+    "BROKER_WAL_AUTOCHECKPOINT": 1000,
+    "BROKER_READ_COMMIT_INTERVAL": 1,
+    "BROKER_GENERATOR_BATCH_SIZE": 100,
+    "BROKER_AUTO_VACUUM": 1,
+    "BROKER_AUTO_VACUUM_INTERVAL": 100,
+    "BROKER_VACUUM_THRESHOLD": 0.1,
+    "BROKER_VACUUM_BATCH_SIZE": 1000,
+    "BROKER_SKIP_IDLE_CHECK": False,
+    "BROKER_JITTER_FACTOR": 0.15,
+    "BROKER_INITIAL_CHECKS": 100,
+    "BROKER_MAX_INTERVAL": 0.1,
+    "BROKER_BURST_SLEEP": 0.00001,
+}
+
+# Complete defaults owned by the Weft embedding boundary. The three dynamic
+# project-path defaults are applied below from WEFT_DIRECTORY_NAME.
+WEFT_SIMPLEBROKER_DEFAULTS: Final[dict[str, Any]] = {
+    **WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS,
+    **SIMPLEBROKER_STORAGE_ISOLATION_DEFAULTS,
+}
+
+SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR: Final[str] = (
+    "incompatible SimpleBroker configuration schema: "
+    "Weft's complete configuration mapping must be updated"
+)
+_UNKNOWN_BROKER_KEY_EXPECTED: Final[str] = (
+    "a recognized canonical BROKER_* configuration key"
+)
+WEFT_SIMPLEBROKER_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
+    {*SIMPLEBROKER_ENV_MAPPING.values(), "BROKER_DEBUG", "BROKER_LOGGING_ENABLED"}
+)
 
 REMOVED_SIMPLEBROKER_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -2282,7 +2334,7 @@ def _resolve_weft_broker_config(
     *,
     base_broker_config: Mapping[str, Any] | None = None,
     explicit_broker_overrides: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> ResolvedConfig:
     """Return the complete typed SimpleBroker config for the supplied Weft config."""
 
     broker_overrides = dict(base_broker_config or {})
@@ -2296,7 +2348,34 @@ def _resolve_weft_broker_config(
     broker_overrides["BROKER_DEBUG"] = config["WEFT_DEBUG"]
     broker_overrides["BROKER_LOGGING_ENABLED"] = config["WEFT_LOGGING_ENABLED"]
     _validate_postgres_backend_config_shape(broker_overrides)
-    resolved = resolve_broker_config(broker_overrides)
+    try:
+        resolved = resolve_isolated_config(broker_overrides)
+    except InvalidConfigError as exc:
+        if exc.expected == _UNKNOWN_BROKER_KEY_EXPECTED:
+            raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR) from exc
+        raise
+    if set(resolved) != set(broker_overrides):
+        raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR)
+    return resolved
+
+
+def freeze_broker_config(config: Mapping[str, Any]) -> ResolvedConfig:
+    """Recreate a complete ambient-free broker config at an ownership boundary."""
+
+    broker_values = {
+        key: value for key, value in config.items() if key.startswith("BROKER_")
+    }
+    expected = WEFT_SIMPLEBROKER_CONFIG_KEYS
+    if set(broker_values) != expected:
+        raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR)
+    try:
+        resolved = resolve_isolated_config(broker_values)
+    except InvalidConfigError as exc:
+        if exc.expected == _UNKNOWN_BROKER_KEY_EXPECTED:
+            raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR) from exc
+        raise
+    if set(resolved) != expected:
+        raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR)
     return resolved
 
 

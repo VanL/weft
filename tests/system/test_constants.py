@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import weft._constants as constants
+from simplebroker import ResolvedConfig, resolve_config
 from weft._constants import (
     AGENT_SESSION_READY_TIMEOUT_SECONDS,
     COMMAND_SESSION_POST_TERMINATION_WAIT,
@@ -843,6 +844,200 @@ class TestLoadConfig:
             config = compile_config({"WEFT_VACUUM_THRESHOLD": "0.5"})
 
         assert config["BROKER_VACUUM_THRESHOLD"] == 0.005
+
+    def test_simplebroker_embedding_mapping_covers_every_public_config_key(
+        self,
+    ) -> None:
+        """A SimpleBroker release cannot add a silently ambient-backed key."""
+
+        with patch.dict(os.environ, {}, clear=True):
+            broker_defaults = resolve_config()
+            weft_config = load_config()
+
+        mapped_keys = set(constants.SIMPLEBROKER_ENV_MAPPING.values()) | {
+            "BROKER_DEBUG",
+            "BROKER_LOGGING_ENABLED",
+        }
+        assert mapped_keys == set(broker_defaults)
+
+        weft_owned_project_defaults = {
+            "BROKER_DEFAULT_DB_NAME",
+            "BROKER_PROJECT_CONFIG_PATH",
+            "BROKER_PROJECT_CONFIG_NAME",
+            "BROKER_PROJECT_SCOPE",
+        }
+        for key, default in broker_defaults.items():
+            if key not in weft_owned_project_defaults:
+                assert weft_config[key] == default, key
+
+    def test_ambient_simplebroker_values_do_not_change_weft_broker_config(
+        self,
+    ) -> None:
+        """Unset WEFT settings use embedder defaults, not ambient BROKER values."""
+
+        with patch.dict(os.environ, {}, clear=True):
+            expected = {
+                key: value
+                for key, value in load_config().items()
+                if key.startswith("BROKER_")
+            }
+
+        ambient_broker_config = {
+            "BROKER_BUSY_TIMEOUT": "6123",
+            "BROKER_CACHE_MB": "17",
+            "BROKER_SYNC_MODE": "NORMAL",
+            "BROKER_WAL_AUTOCHECKPOINT": "2000",
+            "BROKER_MAX_MESSAGE_SIZE": "999",
+            "BROKER_READ_COMMIT_INTERVAL": "2",
+            "BROKER_GENERATOR_BATCH_SIZE": "7",
+            "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS": "9",
+            "BROKER_AUTO_VACUUM": "0",
+            "BROKER_AUTO_VACUUM_INTERVAL": "8",
+            "BROKER_VACUUM_THRESHOLD": "20",
+            "BROKER_VACUUM_BATCH_SIZE": "12",
+            "BROKER_SKIP_IDLE_CHECK": "1",
+            "BROKER_JITTER_FACTOR": "0.25",
+            "BROKER_INITIAL_CHECKS": "5",
+            "BROKER_MAX_INTERVAL": "0.2",
+            "BROKER_BURST_SLEEP": "0.001",
+            "BROKER_DEBUG": "1",
+            "BROKER_LOGGING_ENABLED": "1",
+            "BROKER_DEFAULT_DB_LOCATION": "/tmp",
+            "BROKER_DEFAULT_DB_NAME": "ambient.db",
+            "BROKER_PROJECT_CONFIG_PATH": "ambient",
+            "BROKER_PROJECT_CONFIG_NAME": "ambient.toml",
+            "BROKER_PROJECT_SCOPE": "0",
+            "BROKER_BACKEND": "sqlite",
+            "BROKER_BACKEND_HOST": "ambient.example",
+            "BROKER_BACKEND_PORT": "6543",
+            "BROKER_BACKEND_USER": "ambient-user",
+            "BROKER_BACKEND_PASSWORD": "ambient-secret",
+            "BROKER_BACKEND_DATABASE": "ambient-db",
+            "BROKER_BACKEND_SCHEMA": "ambient-schema",
+            "BROKER_BACKEND_TARGET": "",
+        }
+        with patch.dict(os.environ, ambient_broker_config, clear=True):
+            actual = {
+                key: value
+                for key, value in load_config().items()
+                if key.startswith("BROKER_")
+            }
+
+        assert actual == expected
+
+    def test_weft_broker_values_do_not_change_standalone_simplebroker_config(
+        self,
+    ) -> None:
+        """Compiling Weft config does not mutate env or SimpleBroker defaults."""
+
+        with patch.dict(os.environ, {"WEFT_CACHE_MB": "17"}, clear=True):
+            before_environment = dict(os.environ)
+            weft_config = load_config()
+            standalone_config = resolve_config()
+
+            assert dict(os.environ) == before_environment
+
+        assert weft_config["BROKER_CACHE_MB"] == 17
+        assert standalone_config["BROKER_CACHE_MB"] == 10
+
+    @pytest.mark.parametrize(
+        "broker_key",
+        [
+            "BROKER_BUSY_TIMEOUT",
+            "BROKER_CACHE_MB",
+            "BROKER_WAL_AUTOCHECKPOINT",
+            "BROKER_MAX_MESSAGE_SIZE",
+            "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS",
+            "BROKER_AUTO_VACUUM_INTERVAL",
+            "BROKER_VACUUM_THRESHOLD",
+            "BROKER_BACKEND_PORT",
+            "BROKER_DEFAULT_DB_LOCATION",
+            "BROKER_DEFAULT_DB_NAME",
+            "BROKER_PROJECT_CONFIG_PATH",
+            "BROKER_PROJECT_CONFIG_NAME",
+        ],
+    )
+    def test_invalid_ambient_simplebroker_values_do_not_affect_weft(
+        self,
+        broker_key: str,
+    ) -> None:
+        """The isolated resolver never parses ambient SimpleBroker values."""
+
+        with patch.dict(os.environ, {}, clear=True):
+            expected = load_config()
+        with patch.dict(os.environ, {broker_key: "../not-a-valid-value"}, clear=True):
+            actual = load_config()
+
+        assert actual == expected
+
+    def test_freeze_broker_config_returns_nominal_ambient_free_mapping(self) -> None:
+        """Lower-layer handoffs retain SimpleBroker's isolation marker."""
+
+        with patch.dict(os.environ, {"BROKER_CACHE_MB": "invalid"}, clear=True):
+            resolved = constants.freeze_broker_config(load_config())
+
+        assert isinstance(resolved, ResolvedConfig)
+        assert resolved["BROKER_CACHE_MB"] == 10
+
+    def test_freeze_broker_config_rejects_incomplete_mapping(self) -> None:
+        """Ownership handoffs cannot silently fill missing keys upstream."""
+
+        with pytest.raises(
+            RuntimeError,
+            match="incompatible SimpleBroker configuration schema",
+        ):
+            constants.freeze_broker_config({"BROKER_CACHE_MB": 17})
+
+    @pytest.mark.parametrize("drift", ("addition", "removal", "rename"))
+    def test_broker_schema_drift_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        drift: str,
+    ) -> None:
+        """A changed upstream key set requires an explicit Weft mapping update."""
+
+        real_resolver = constants.resolve_isolated_config
+
+        def drifted(config: dict[str, object]) -> dict[str, object]:
+            resolved = dict(real_resolver(config))
+            if drift == "addition":
+                resolved["BROKER_NEW_SETTING"] = "new"
+                return resolved
+            value = resolved.pop("BROKER_BUSY_TIMEOUT")
+            if drift == "rename":
+                resolved["BROKER_RENAMED_BUSY_TIMEOUT"] = value
+            return resolved
+
+        monkeypatch.setattr(constants, "resolve_isolated_config", drifted)
+
+        with pytest.raises(
+            RuntimeError,
+            match="incompatible SimpleBroker configuration schema",
+        ):
+            load_config()
+
+    def test_freeze_rejects_upstream_removed_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unknown-key rejection at a handoff is a schema compatibility error."""
+
+        config = load_config()
+        real_resolver = constants.resolve_isolated_config
+
+        def removed_field(values: dict[str, object]) -> ResolvedConfig:
+            altered = dict(values)
+            value = altered.pop("BROKER_BUSY_TIMEOUT")
+            altered["BROKER_REMOVED_BUSY_TIMEOUT"] = value
+            return real_resolver(altered)
+
+        monkeypatch.setattr(constants, "resolve_isolated_config", removed_field)
+
+        with pytest.raises(
+            RuntimeError,
+            match="incompatible SimpleBroker configuration schema",
+        ):
+            constants.freeze_broker_config(config)
 
     def test_removed_simplebroker_vacuum_lock_timeout_env_is_ignored(self) -> None:
         with patch.dict(

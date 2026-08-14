@@ -23,6 +23,8 @@ from weft._constants import (
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WORK_ENVELOPE_START,
+    freeze_broker_config,
+    load_config,
 )
 from weft.core.endpoints import is_reserved_internal_endpoint_name
 from weft.core.taskspec import (
@@ -90,7 +92,7 @@ def generate_spawn_request_timestamp(
 ) -> int:
     """Return a broker-valid task timestamp from the spawn-request queue."""
 
-    queue_config = dict(config) if config is not None else None
+    queue_config = freeze_broker_config(config if config is not None else load_config())
     # Direct Queue ok here: TID allocation happens before a WeftContext or task
     # object is available; see runtime-and-context-patterns.md section 2.
     queue = Queue(
@@ -232,7 +234,7 @@ def submit_spawn_request(
     message_json = json.dumps(message)
     message_timestamp = int(resolved_tid) if resolved_tid is not None else None
 
-    queue_config = dict(config) if config is not None else None
+    queue_config = freeze_broker_config(config if config is not None else load_config())
     # Direct Queue ok here: spawn submission receives only a broker target, before
     # a context-bound queue helper is available; see runtime-and-context-patterns.md section 2.
     queue = Queue(
@@ -265,7 +267,7 @@ def delete_spawn_request(
 ) -> bool:
     """Best-effort removal of a queued spawn request after setup failure."""
 
-    queue_config = dict(config) if config is not None else None
+    queue_config = freeze_broker_config(config if config is not None else load_config())
     # Direct Queue ok here: rollback cleanup receives only a broker target, before
     # a context-bound queue helper is available; see runtime-and-context-patterns.md section 2.
     queue = Queue(

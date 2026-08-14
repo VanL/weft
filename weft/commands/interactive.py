@@ -17,11 +17,12 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
+from weft._constants import freeze_broker_config
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
@@ -50,7 +51,7 @@ class InteractiveStreamClient:
         self,
         *,
         db_path: BrokerTarget | str,
-        config: dict[str, Any],
+        config: Mapping[str, Any],
         tid: str,
         inbox: str,
         outbox: str,
@@ -61,6 +62,7 @@ class InteractiveStreamClient:
     ) -> None:
         self._db_path = db_path
         self._config = dict(config)
+        self._broker_config = freeze_broker_config(config)
         self._tid = tid
         self._inbox_name = inbox
         self._outbox_name = outbox
@@ -78,7 +80,7 @@ class InteractiveStreamClient:
             inbox,
             db_path=db_path,
             persistent=True,
-            config=self._config,
+            config=self._broker_config,
         )
 
         self._watcher: MultiQueueWatcher | None = None

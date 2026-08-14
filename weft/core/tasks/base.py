@@ -534,7 +534,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 name,
                 db_path=self._db_path,
                 persistent=True,
-                config=self._config,
+                config=self._broker_config,
             )
             self._queue_cache[name] = queue_obj
             self._owned_queue_names.add(name)
@@ -569,7 +569,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
 
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
-        config = getattr(self, "_config", {})
+        config = getattr(self, "_config", None) or load_config()
         ctx = build_context(
             spec_context=spec_context,
             config=config,
@@ -581,11 +581,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 ctx,
                 broker_target=broker_target,
                 database_path=broker_target.target_path,
-                broker_config={
-                    key: value
-                    for key, value in config.items()
-                    if key.startswith("BROKER_")
-                },
+                broker_config=self._broker_config,
             )
         return ctx
 

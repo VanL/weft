@@ -213,6 +213,40 @@ def test_missing_env_file_fails_before_cli_import(tmp_path: Path) -> None:
     assert "Weft: the durable task substrate for agent systems" not in result.stderr
 
 
+def test_invalid_broker_config_is_safe_before_cli_import(
+    tmp_path: Path,
+) -> None:
+    """Invalid mapped Weft config renders once without a traceback."""
+
+    env = _clean_subprocess_env()
+    env["WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS"] = "not-an-integer"
+
+    result = _run_module("weft", "system", "dump", cwd=tmp_path, env=env)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.count("\n") == 1
+    assert "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS" in result.stderr
+    assert "non-negative integer" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not (tmp_path / ".weft" / "broker.db").exists()
+
+
+def test_invalid_ambient_broker_config_does_not_affect_cli(
+    tmp_path: Path,
+) -> None:
+    """SimpleBroker's ambient namespace cannot reject an isolated Weft CLI."""
+
+    env = _clean_subprocess_env()
+    env["BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS"] = "not-an-integer"
+
+    result = _run_module("weft", "system", "dump", cwd=tmp_path, env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr
+    assert (tmp_path / ".weft" / "weft_export.jsonl").exists()
+
+
 def test_malformed_env_file_does_not_echo_secret_value(tmp_path: Path) -> None:
     env_file = tmp_path / "weft.env"
     env_file.write_text("WEFT_SECRET='super-secret\n", encoding="utf-8")

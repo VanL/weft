@@ -23,6 +23,7 @@ There are currently 176 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-08-13-simplebroker-7-3-dump-watermark-plan.md`](./2026-08-13-simplebroker-7-3-dump-watermark-plan.md) | SimpleBroker 7.3 Dump Watermark Compatibility Plan | `completed` | none |
 | [`2026-08-12-public-api-surface-remediation.md`](./2026-08-12-public-api-surface-remediation.md) | Public API Surface Remediation: One Seam, Restored Contracts, Closed Test Floor | `completed` | none |
 | [`2026-08-11-python-api-surfaces-sb-contract.md`](./2026-08-11-python-api-surfaces-sb-contract.md) | Python API Surfaces: Adopt the SimpleBroker Three-Surface Contract | `completed` | none |
 | [`2026-08-11-shared-reactor-test-driver-adoption-plan.md`](./2026-08-11-shared-reactor-test-driver-adoption-plan.md) | Shared Reactor Test Driver Adoption Plan | `completed` | none |

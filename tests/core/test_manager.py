@@ -1068,11 +1068,15 @@ def _wait_for_pid_exit(pid: int, *, timeout: float) -> bool:
     return False
 
 
-def test_manager_spawns_child(manager_setup) -> None:
+def test_manager_spawns_child(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain(log_queue)
+    monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
 
     inbox_queue.write(json.dumps(make_child_spec()))
 

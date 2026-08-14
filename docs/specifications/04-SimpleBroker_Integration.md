@@ -7,7 +7,10 @@ targets; Weft adds task semantics, manager lifecycle, and operator-facing
 workflow on top of that.
 
 _Implementation mapping_: `weft/context.py`, `weft/commands/queue.py`,
-`weft/commands/init.py`, `weft/commands/load.py`,
+`weft/commands/init.py`, `weft/commands/dump.py`, `weft/commands/load.py`,
+`weft/commands/interactive.py`, `weft/_constants.py`, `weft/bootstrap.py`,
+`weft/core/manager.py`, `weft/core/pipelines.py`, `weft/core/queue_wait.py`,
+`weft/core/spawn_requests.py`,
 `weft/core/tasks/multiqueue_watcher.py`, `weft/core/tasks/base.py`,
 `weft/core/endpoints.py`, `weft/core/agents/provider_cli/settings.py`.
 
@@ -34,10 +37,9 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 7.0.0 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 3.5.2 or newer. These paired
-floors provide the supported public message-ID formatter and matching backend
-contract.
+Weft requires SimpleBroker 7.3.2 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 3.8.0 or newer. These paired
+floors provide backend API v7 and the bounded dump-watermark contract.
 
 _Implementation mapping_: `weft/commands/queue.py` delegates to
 `simplebroker.commands`; `weft/context.py` injects the resolved broker target;
@@ -471,7 +473,11 @@ Related plan:
 - `docs/plans/2026-04-16-configurable-weft-directory-name-plan.md`
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
-`WeftContext.queue`, `WeftContext.broker`); `weft/bootstrap.py` for
+`WeftContext.queue`, `WeftContext.broker`); `weft/_constants.py`
+(`freeze_broker_config`); `weft/commands/interactive.py`;
+`weft/core/manager.py`; `weft/core/pipelines.py`; `weft/core/queue_wait.py`;
+`weft/core/spawn_requests.py`; `weft/core/tasks/base.py`;
+`weft/core/tasks/multiqueue_watcher.py`; `weft/bootstrap.py` for
 optional pre-import `WEFT_ENV_FILE` loading before CLI callers reach
 `load_config()`.
 
@@ -483,6 +489,26 @@ Current contract:
 - `load_config(overrides=...)` is the canonical way for an embedding app to
   compile explicit `WEFT_*` and `BROKER_*` overrides into the same canonical
   config shape that CLI and env-driven Weft use
+- Weft's SimpleBroker embedding config is complete and enumerable. Every
+  public SimpleBroker config key has a Weft-owned default or a mapped
+  `WEFT_*` value before the config is passed down. Valid ambient `BROKER_*`
+  values therefore do not tune Weft, and compiling Weft config does not mutate
+  process environment or standalone SimpleBroker configuration. Mapping
+  coverage must fail closed when SimpleBroker adds a public config key. The
+  small group that selects or constrains Weft's broker is kept distinct from
+  the larger group of named storage/retry constants. Most of the latter are
+  not directly relevant to Weft; their explicit defaults exist to isolate the
+  embedded broker from standalone SimpleBroker tuning.
+- Weft resolves that complete mapping with SimpleBroker 7.3.2's public
+  `resolve_isolated_config()` and preserves its immutable `ResolvedConfig`
+  marker at each lower-layer ownership boundary. Queue, project discovery,
+  watcher, broker, and dump/load operations therefore never reread ambient
+  `BROKER_*`, including malformed values. Converting the marker to an ordinary
+  dictionary before a SimpleBroker handoff is forbidden because it restores
+  the ordinary environment-base `resolve_config()` behavior.
+- Long-lived task transport state retains the complete ordinary Weft config so
+  it remains picklable across the spawn boundary. The nominal marker is
+  recreated from that exact mapping only when control passes to SimpleBroker.
 - CLI entry points honor `WEFT_ENV_FILE` before importing the full CLI, so env
   values loaded from that file participate in the ordinary `load_config()` and
   `build_context()` path. The env file fills missing process env values only;
@@ -555,6 +581,14 @@ Current implications:
   SimpleBroker apply. Message ID `0` is rejected during validation before
   aliases or messages are written; header `last_ts=0` remains valid. Dump
   version 1 is unchanged and no compatibility-writer branch is added.
+- SimpleBroker dump v1 header `last_ts` is an inclusive export bound and a
+  destination allocation floor. Every message record must satisfy
+  `0 < id <= last_ts`. Load advances the destination high-water to at least
+  `last_ts` after replay, including for a header-only dump, so later generated
+  IDs are greater than the source floor. Weft validates the bound before
+  destination writes, preserves the original header while filtering
+  runtime-only records, and delegates skew enforcement and durable floor
+  advancement to public `load_lines()`.
 - Spawn-request submission writes generated and caller-supplied TIDs through
   SimpleBroker's public `insert_messages()` API rather than rewriting the
   TaskSpec TID.
@@ -572,6 +606,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md`](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
 - [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)

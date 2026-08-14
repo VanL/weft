@@ -16,7 +16,7 @@ import re
 import sys
 from pathlib import Path
 
-from weft._constants import WEFT_ENV_FILE_ENV
+from weft._constants import PROG_NAME, WEFT_ENV_FILE_ENV
 
 _env_key_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -101,9 +101,20 @@ def main() -> int | None:
             sys.stderr.write(f"{exc}\n")
             return 2
 
-    from weft.cli.app import app
+    # Weft's broader import graph resolves mapped WEFT_* broker configuration
+    # while building the CLI. Keep that failure inside this import-light
+    # boundary and render SimpleBroker's public safe diagnostic without a
+    # traceback; isolated resolution ignores ambient BROKER_* entirely.
+    from simplebroker.ext import InvalidConfigError
 
-    app()
+    try:
+        from weft.cli.app import app
+
+        app()
+    except InvalidConfigError as exc:
+        sys.stderr.write(f"{PROG_NAME}: {exc}\n")
+        return 1
+
     return None
 
 

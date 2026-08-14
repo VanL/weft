@@ -57,6 +57,7 @@ from urllib.parse import urlsplit, urlunsplit
 from simplebroker import (
     BrokerTarget,
     Queue,
+    ResolvedConfig,
     open_broker,
     target_for_directory,
 )
@@ -73,6 +74,7 @@ from weft._constants import (
     WEFT_AUTOSTART_TASKS_DEFAULT,
     WEFT_BROKER_PROJECT_CONFIG_FILENAME,
     apply_weft_simplebroker_defaults,
+    freeze_broker_config,
     get_weft_directory_name,
     load_config,
 )
@@ -118,8 +120,8 @@ class WeftContext:
     config: dict[str, Any]
     """Complete configuration dictionary (WEFT_* and BROKER_* keys)."""
 
-    broker_config: dict[str, Any]
-    """Subset of configuration containing only BROKER_* keys."""
+    broker_config: ResolvedConfig
+    """Immutable ambient-free SimpleBroker configuration."""
 
     project_config: dict[str, Any]
     """Project metadata loaded from the Weft project config file (may be empty)."""
@@ -132,6 +134,16 @@ class WeftContext:
 
     autostart_enabled: bool
     """True when auto-start templates should be considered during manager boot."""
+
+    def __post_init__(self) -> None:
+        """Preserve the ambient-free marker for manually constructed contexts."""
+
+        if not isinstance(self.broker_config, ResolvedConfig):
+            object.__setattr__(
+                self,
+                "broker_config",
+                freeze_broker_config(self.broker_config),
+            )
 
     def queue(self, name: str, *, persistent: bool = False) -> Queue:
         """Create a SimpleBroker queue bound to this context's broker target."""
@@ -277,11 +289,7 @@ def build_context(
     resolved_config["WEFT_AUTOSTART_TASKS"] = autostart_enabled
     resolved_config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
 
-    broker_config = {
-        key: value
-        for key, value in resolved_config.items()
-        if key.startswith("BROKER_")
-    }
+    broker_config = freeze_broker_config(resolved_config)
 
     if create_dirs:
         # Weft-owned metadata dirs are owner-only. User-relocatable paths
@@ -328,10 +336,11 @@ def resolve_context_broker_target(
     """
 
     resolved_root = Path(root).expanduser().resolve()
+    broker_config = freeze_broker_config(config)
     _tighten_project_broker_config_path(
-        project_config_path_for_directory(resolved_root, config=dict(config))
+        project_config_path_for_directory(resolved_root, config=broker_config)
     )
-    target = target_for_directory(resolved_root, config=dict(config))
+    target = target_for_directory(resolved_root, config=broker_config)
     return _with_project_root(target, resolved_root)
 
 
@@ -405,7 +414,10 @@ def _resolve_root_and_target(
             raise normalize_backend_resolution_error(exc) from exc
 
     start_dir = Path.cwd().resolve()
-    project_config_path = find_broker_project_config(start_dir, config=config)
+    project_config_path = find_broker_project_config(
+        start_dir,
+        config=freeze_broker_config(config),
+    )
     _tighten_project_broker_config_path(project_config_path)
     if project_config_path is not None:
         root = _root_for_discovered_project_config(
@@ -465,7 +477,7 @@ def _root_for_discovered_project_config(
 
 def _ensure_database(
     broker_target: BrokerTarget,
-    broker_config: dict[str, Any],
+    broker_config: ResolvedConfig,
     *,
     database_path: Path | None,
 ) -> None:

@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from simplebroker import Queue
+from simplebroker import Queue, ResolvedConfig
 from weft.core import queue_wait
 from weft.core.queue_wait import QueueChangeMonitor
 
@@ -75,6 +75,7 @@ def test_queue_change_monitor_falls_back_to_queue_watchers(
     _db_path, make_queue = broker_env
     queues = [make_queue("fallback.monitor.one"), make_queue("fallback.monitor.two")]
     created: list[Queue] = []
+    watcher_configs: list[object] = []
     stopped = 0
 
     class FakeQueueWatcher:
@@ -88,8 +89,9 @@ def test_queue_change_monitor_falls_back_to_queue_watchers(
             after_timestamp: int,
             config,
         ) -> None:
-            del _handler, stop_event, peek, after_timestamp, config
+            del _handler, stop_event, peek, after_timestamp
             created.append(queue)
+            watcher_configs.append(config)
 
         def run_in_thread(self) -> None:
             return None
@@ -105,12 +107,14 @@ def test_queue_change_monitor_falls_back_to_queue_watchers(
         lambda created_queues, *, stop_event: None,
     )
     monkeypatch.setattr(queue_wait, "QueueWatcher", FakeQueueWatcher)
+    monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
 
     monitor = QueueChangeMonitor(queues)
     monitor.close()
     monitor.close()
 
     assert created == queues
+    assert all(isinstance(config, ResolvedConfig) for config in watcher_configs)
     assert stopped == 2
 
 

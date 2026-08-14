@@ -134,18 +134,12 @@ def test_iter_queue_entries_propagates_generator_type_error_after_one_call() -> 
     assert queue.calls == 1
 
 
-def test_resolve_broker_max_message_size_uses_public_config_default(
+def test_resolve_broker_max_message_size_uses_weft_owned_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config: dict[str, object] = {}
+    monkeypatch.setenv("BROKER_MAX_MESSAGE_SIZE", "invalid")
 
-    def fake_resolve_config(candidate: object) -> dict[str, int]:
-        assert candidate is config
-        return {"BROKER_MAX_MESSAGE_SIZE": 1_234}
-
-    monkeypatch.setattr(helpers_module, "resolve_broker_config", fake_resolve_config)
-
-    assert resolve_broker_max_message_size(config) == 1_234
+    assert resolve_broker_max_message_size({}) == 10 * 1024 * 1024
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")

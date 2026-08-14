@@ -6,13 +6,21 @@ import json
 import os
 import stat
 import sys
+import time
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from simplebroker import DumpClockSkewWarning
+from simplebroker.ext import TimestampError
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE
+from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, load_config
 from weft.commands import dump as dump_command
 from weft.commands import load as load_command
 from weft.commands.dump import cmd_dump
@@ -199,7 +207,7 @@ def test_cmd_load_actual_import(tmp_path: Path) -> None:
             "format": "simplebroker-dump",
             "version": 1,
             "backend": "test",
-            "last_ts": 0,
+            "last_ts": 1000,
         },
         {"type": "alias", "alias": "test-alias", "target": "test.queue"},
         {
@@ -226,6 +234,42 @@ def test_cmd_load_actual_import(tmp_path: Path) -> None:
     aliases, queues = _snapshot_broker_state(ctx)
     assert aliases["test-alias"] == "test.queue"
     assert queues["test.queue"] == ["test message"]
+
+
+def test_cmd_load_ignores_invalid_ambient_broker_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The load handoff cannot reread malformed standalone broker settings."""
+
+    root = prepare_project_root(tmp_path)
+    export_path = tmp_path / "isolated-load.jsonl"
+    export_path.write_text(
+        json.dumps(
+            {
+                "type": "header",
+                "format": "simplebroker-dump",
+                "version": 1,
+                "backend": "test",
+                "last_ts": 1000,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "message", "queue": "isolated.load", "id": 1000, "body": "ok"}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
+
+    exit_code, message = cmd_load(
+        input_file=str(export_path), dry_run=False, context_path=str(root)
+    )
+
+    assert exit_code == 0, message
+    context = build_context(spec_context=root)
+    assert _snapshot_broker_state(context)[1]["isolated.load"] == ["ok"]
 
 
 @pytest.mark.parametrize("as_string", [False, True])
@@ -286,6 +330,141 @@ def test_parse_import_accepts_zero_header_checkpoint(last_ts: int | str) -> None
     assert plan.report.metadata["last_ts"] == 0
     assert isinstance(plan.report.metadata["last_ts"], int)
     assert json.loads(plan.header_line or "null")["last_ts"] == ("0000000000000000000")
+
+
+@pytest.mark.parametrize("runtime_only", [False, True])
+def test_cmd_load_rejects_message_newer_than_header_before_writes(
+    tmp_path: Path,
+    runtime_only: bool,
+) -> None:
+    """Every record must respect the dump bound, even when Weft skips its queue."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    before = _snapshot_broker_state(context)
+    header_last_ts = 1_779_400_000_000_000_001
+    export_path = tmp_path / "above-header.jsonl"
+    records = [
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": header_last_ts,
+        },
+        {
+            "type": "message",
+            "queue": "weft.state.hidden" if runtime_only else "visible.queue",
+            "id": header_last_ts + 1,
+            "body": "must not be written",
+        },
+    ]
+    export_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    exit_code, message = cmd_load(
+        input_file=str(export_path),
+        context_path=str(context.root),
+    )
+
+    assert exit_code == 1
+    assert "exceeds header last_ts" in (message or "")
+    assert _snapshot_broker_state(context) == before
+
+
+def test_header_only_load_advances_next_generated_message_id(tmp_path: Path) -> None:
+    """A header-only import restores the source allocation floor."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    header_last_ts = time.time_ns() + 1_000_000_000
+    export_path = tmp_path / "header-only.jsonl"
+    export_path.write_text(
+        json.dumps(
+            {
+                "type": "header",
+                "format": "simplebroker-dump",
+                "version": 1,
+                "backend": "test",
+                "last_ts": header_last_ts,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DumpClockSkewWarning)
+        exit_code, message = cmd_load(
+            input_file=str(export_path),
+            context_path=str(context.root),
+        )
+
+    assert exit_code == 0, message
+    queue = context.queue("after-floor", persistent=True)
+    try:
+        generated = queue.write("after")
+    finally:
+        queue.close()
+    assert generated > header_last_ts
+
+
+def test_weft_skew_setting_changes_load_refusal_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Weft-namespaced skew setting must reach SimpleBroker load policy."""
+
+    root = prepare_project_root(tmp_path)
+    header_last_ts = time.time_ns() + 2_000_000_000
+    export_path = tmp_path / "future-header.jsonl"
+    export_path.write_text(
+        json.dumps(
+            {
+                "type": "header",
+                "format": "simplebroker-dump",
+                "version": 1,
+                "backend": "test",
+                "last_ts": header_last_ts,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "alias",
+                "alias": "future-alias",
+                "target": "future.queue",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS", "0")
+    assert load_config()["BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS"] == 0
+    with pytest.warns(DumpClockSkewWarning):
+        refused_code, refused_message = cmd_load(
+            input_file=str(export_path),
+            context_path=str(root),
+        )
+    assert refused_code == 1
+    assert "future skew exceeds configured maximum" in (refused_message or "")
+    assert "partial import may have occurred" not in (refused_message or "")
+    with build_context(spec_context=root).broker() as broker:
+        assert "future-alias" not in dict(broker.list_aliases())
+
+    monkeypatch.setenv("WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS", "3")
+    assert load_config()["BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS"] == 3
+    with pytest.warns(DumpClockSkewWarning):
+        accepted_code, accepted_message = cmd_load(
+            input_file=str(export_path),
+            context_path=str(root),
+        )
+    assert accepted_code == 0, accepted_message
+    with build_context(spec_context=root).broker() as broker:
+        assert dict(broker.list_aliases())["future-alias"] == "future.queue"
 
 
 def test_dump_load_round_trip_preserves_adjacent_unsafe_message_ids(
@@ -437,7 +616,11 @@ def test_execute_import_propagates_unexpected_snapshot_restore_error(
         lambda _context: snapshot,
     )
 
-    def fail_apply(_broker: object, _lines: list[str]) -> None:
+    def fail_apply(
+        _broker: object,
+        _lines: list[str],
+        **_kwargs: object,
+    ) -> None:
         raise ValueError("apply failed")
 
     def fail_restore(_snapshot: load_command.SQLiteSnapshot) -> None:
@@ -478,7 +661,11 @@ def test_execute_import_reports_operational_snapshot_restore_error(
         lambda _context: snapshot,
     )
 
-    def fail_apply(_broker: object, _lines: list[str]) -> None:
+    def fail_apply(
+        _broker: object,
+        _lines: list[str],
+        **_kwargs: object,
+    ) -> None:
         raise ValueError("apply failed")
 
     def fail_restore(_snapshot: load_command.SQLiteSnapshot) -> None:
@@ -500,6 +687,196 @@ def test_execute_import_reports_operational_snapshot_restore_error(
     assert str(exc_info.value.__cause__) == "apply failed"
 
 
+@pytest.mark.parametrize(
+    ("outcome_ambiguous", "expects_partial_warning"),
+    [(False, False), (True, True)],
+)
+def test_execute_import_classifies_header_floor_failure_mutation_risk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome_ambiguous: bool,
+    expects_partial_warning: bool,
+) -> None:
+    """Header-only floor failures retain SimpleBroker's outcome distinction."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    plan = load_command.ImportPlan(
+        apply_lines=[
+            json.dumps(
+                {
+                    "type": "header",
+                    "format": "simplebroker-dump",
+                    "version": 1,
+                    "backend": "test",
+                    "last_ts": "1779400000000000000",
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        load_command,
+        "_sqlite_snapshot_if_file_backed",
+        lambda _context: None,
+    )
+
+    def fail_floor(
+        _broker: object,
+        _lines: list[str],
+        **_kwargs: object,
+    ) -> None:
+        raise TimestampError(
+            "floor failed",
+            outcome_ambiguous=outcome_ambiguous,
+        )
+
+    monkeypatch.setattr(load_command, "load_lines", fail_floor)
+
+    with pytest.raises(ImportError) as exc_info:
+        load_command._execute_import(plan, context)
+
+    has_partial_warning = "partial import may have occurred" in str(exc_info.value)
+    assert has_partial_warning is expects_partial_warning
+
+
+def test_execute_import_does_not_report_partial_for_pre_mutation_capability_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Input presence alone is not evidence that upstream mutated the broker."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    plan = load_command.ImportPlan(
+        apply_lines=[
+            json.dumps(
+                {
+                    "type": "header",
+                    "format": "simplebroker-dump",
+                    "version": 1,
+                    "backend": "test",
+                    "last_ts": 1000,
+                }
+            ),
+            json.dumps({"type": "alias", "alias": "not-written", "target": "q"}),
+        ]
+    )
+    monkeypatch.setattr(
+        load_command,
+        "_sqlite_snapshot_if_file_backed",
+        lambda _context: None,
+    )
+
+    class CapabilityDeficientBroker:
+        def __init__(self, broker: Any) -> None:
+            self._broker = broker
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "advance_last_timestamp":
+                raise AttributeError(name)
+            return getattr(self._broker, name)
+
+    @contextmanager
+    def deficient_broker() -> Iterator[CapabilityDeficientBroker]:
+        with context.broker() as broker:
+            yield CapabilityDeficientBroker(broker)
+
+    deficient_context = SimpleNamespace(
+        broker=deficient_broker,
+        broker_config=context.broker_config,
+    )
+
+    with pytest.raises(ImportError) as exc_info:
+        load_command._execute_import(plan, deficient_context)
+
+    assert "partial import may have occurred" not in str(exc_info.value)
+    with context.broker() as broker:
+        assert "not-written" not in dict(broker.list_aliases())
+
+
+def test_execute_import_reports_partial_after_successful_alias_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later failure reports partial risk only after a real successful mutation."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    plan = load_command.ImportPlan(apply_lines=["header", "alias"])
+    monkeypatch.setattr(
+        load_command,
+        "_sqlite_snapshot_if_file_backed",
+        lambda _context: None,
+    )
+
+    def write_then_fail(
+        broker: object,
+        _lines: list[str],
+        **_kwargs: object,
+    ) -> None:
+        broker.add_alias("written-alias", "written.queue")
+        raise ValueError("later record failed")
+
+    monkeypatch.setattr(load_command, "load_lines", write_then_fail)
+
+    with pytest.raises(ImportError, match="partial import may have occurred"):
+        load_command._execute_import(plan, context)
+
+    with context.broker() as broker:
+        assert dict(broker.list_aliases())["written-alias"] == "written.queue"
+
+
+def test_execute_import_reports_partial_when_mutation_call_commits_then_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempted write is risky because a backend may raise after commit."""
+
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    plan = load_command.ImportPlan(apply_lines=["header", "message"])
+    monkeypatch.setattr(
+        load_command,
+        "_sqlite_snapshot_if_file_backed",
+        lambda _context: None,
+    )
+
+    def commit_then_raise(
+        broker: object,
+        _lines: list[str],
+        **_kwargs: object,
+    ) -> None:
+        broker.insert_messages([("persisted.queue", "persisted", 1000)])
+
+    class CommitThenRaiseBroker:
+        def __init__(self, broker: Any) -> None:
+            self._broker = broker
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._broker, name)
+
+        def insert_messages(self, messages: Any) -> None:
+            self._broker.insert_messages(messages)
+            raise RuntimeError("refresh failed after commit")
+
+    @contextmanager
+    def commit_then_raise_broker() -> Iterator[CommitThenRaiseBroker]:
+        with context.broker() as broker:
+            yield CommitThenRaiseBroker(broker)
+
+    failing_context = SimpleNamespace(
+        broker=commit_then_raise_broker,
+        broker_config=context.broker_config,
+    )
+    monkeypatch.setattr(load_command, "load_lines", commit_then_raise)
+
+    with pytest.raises(ImportError, match="partial import may have occurred"):
+        load_command._execute_import(plan, failing_context)
+
+    with context.broker() as broker:
+        assert broker.peek_one("persisted.queue", with_timestamps=False) == "persisted"
+
+
 @pytest.mark.parametrize("dry_run", [True, False])
 @pytest.mark.parametrize("reserved_id", [0, "0000000000000000000"])
 def test_cmd_load_rejects_reserved_zero_id_before_writes(
@@ -517,7 +894,7 @@ def test_cmd_load_rejects_reserved_zero_id_before_writes(
             "format": "simplebroker-dump",
             "version": 1,
             "backend": "test",
-            "last_ts": 0,
+            "last_ts": 1000,
         },
         {"type": "alias", "alias": "zero-alias", "target": "zero.queue"},
         {
@@ -874,7 +1251,7 @@ def test_cmd_load_dry_run_reports_alias_conflicts_without_writes(
             "format": "simplebroker-dump",
             "version": 1,
             "backend": "test",
-            "last_ts": 0,
+            "last_ts": 1000,
         },
         {"type": "alias", "alias": "existing_alias", "target": "new_target"},
         {
@@ -921,7 +1298,7 @@ def test_cmd_load_rejects_alias_conflicts_before_any_writes(tmp_path: Path) -> N
             "format": "simplebroker-dump",
             "version": 1,
             "backend": "test",
-            "last_ts": 0,
+            "last_ts": 1000,
         },
         {"type": "alias", "alias": "existing_alias", "target": "new_target"},
         {
@@ -964,7 +1341,7 @@ def test_cmd_load_treats_same_target_existing_alias_as_noop(tmp_path: Path) -> N
             "format": "simplebroker-dump",
             "version": 1,
             "backend": "test",
-            "last_ts": 0,
+            "last_ts": 1000,
         },
         {"type": "alias", "alias": "existing_alias", "target": "same_target"},
         {

@@ -16,6 +16,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    load_config,
 )
 from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.manager import Manager
@@ -473,10 +474,12 @@ def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):
     task = Manager(
         db_path,
         spec,
-        config={
-            "WEFT_AUTOSTART_TASKS": False,
-            "WEFT_TASK_MONITOR_ENABLED": False,
-        },
+        config=load_config(
+            {
+                "WEFT_AUTOSTART_TASKS": False,
+                "WEFT_TASK_MONITOR_ENABLED": False,
+            }
+        ),
     )
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])

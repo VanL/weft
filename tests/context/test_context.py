@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from simplebroker import BrokerTarget
+from simplebroker import BrokerTarget, ResolvedConfig
 from tests.helpers.test_backend import prepare_project_root
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from weft._constants import compile_config  # noqa: E402
+from weft._constants import compile_config, load_config  # noqa: E402
 from weft.context import WeftContext, build_context, service_context_key  # noqa: E402
 
 context_module = sys.modules["weft.context"]
@@ -72,6 +72,7 @@ def test_service_context_key_strips_non_file_backend_password(tmp_path: Path) ->
         target="postgresql://weft:s3cr3t@example.test:5432/weft",
         backend_options={"schema": "weft_state"},
     )
+    config = load_config()
     ctx = WeftContext(
         root=tmp_path,
         weft_dir=tmp_path / ".weft",
@@ -80,8 +81,8 @@ def test_service_context_key_strips_non_file_backend_password(tmp_path: Path) ->
         config_path=tmp_path / ".weft" / "config.json",
         broker_target=target,
         database_path=None,
-        config={},
-        broker_config={},
+        config=config,
+        broker_config=config,
         project_config={},
         discovered=True,
         autostart_dir=tmp_path / ".weft" / "autostart",
@@ -103,6 +104,7 @@ def test_broker_display_target_redacts_non_file_backend_password(
         target="postgresql://weft:s3cr3t@example.test:5432/weft",
         backend_options={"schema": "weft_state"},
     )
+    config = load_config()
     ctx = WeftContext(
         root=tmp_path,
         weft_dir=tmp_path / ".weft",
@@ -111,8 +113,8 @@ def test_broker_display_target_redacts_non_file_backend_password(
         config_path=tmp_path / ".weft" / "config.json",
         broker_target=target,
         database_path=None,
-        config={},
-        broker_config={},
+        config=config,
+        broker_config=config,
         project_config={},
         discovered=True,
         autostart_dir=tmp_path / ".weft" / "autostart",
@@ -343,6 +345,53 @@ def test_environment_translation(
     assert ctx.broker_config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
     assert ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
     assert isinstance(ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"], int)
+    assert isinstance(ctx.broker_config, ResolvedConfig)
+
+
+def test_context_queue_ignores_invalid_ambient_broker_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The nominal config marker survives target, Queue, and broker boundaries."""
+
+    monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
+    monkeypatch.setenv("BROKER_DEFAULT_DB_NAME", "../unsafe.db")
+    root = prepare_project_root(tmp_path)
+
+    ctx = build_context(spec_context=root)
+    queue = ctx.queue("isolated", persistent=True)
+    try:
+        queue.write("works")
+        assert queue.peek_one() == "works"
+    finally:
+        queue.close()
+
+    with ctx.broker() as broker:
+        assert broker.peek_one("isolated", with_timestamps=False) == "works"
+
+
+def test_project_discovery_ignores_invalid_ambient_broker_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Automatic project discovery receives the nominal isolated marker."""
+
+    root = prepare_project_root(tmp_path)
+    initial = build_context(spec_context=root)
+    assert initial.database_path is not None
+    _write_broker_project_config(
+        root,
+        backend="sqlite",
+        target=initial.database_path.name,
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("BROKER_PROJECT_CONFIG_PATH", "../unsafe")
+    monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
+
+    ctx = build_context(create_dirs=False, create_database=False)
+
+    assert ctx.root == root.resolve()
+    assert ctx.discovered is True
 
 
 def test_build_context_uses_configured_weft_dir_when_broker_name_changes(
@@ -672,7 +721,7 @@ def test_build_context_empty_config_ignores_root_simplebroker_config(
 
     monkeypatch.chdir(nested)
     ctx = build_context(
-        config={},
+        config=load_config({}),
         create_dirs=False,
         create_database=False,
     )

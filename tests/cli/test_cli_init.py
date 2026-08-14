@@ -14,6 +14,7 @@ from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
     postgres_env_overrides_for_root,
 )
+from weft._constants import load_config
 from weft._exceptions import CommandExecutionError
 from weft.commands.init import cmd_init
 from weft.commands.types import InitResult
@@ -185,10 +186,12 @@ def test_cmd_init_accepts_in_process_config_overrides(
     monkeypatch.setattr(
         init_cmd,
         "load_config",
-        lambda: {
-            "WEFT_DIRECTORY_NAME": ".engram",
-            "BROKER_DEFAULT_DB_NAME": "broker.db",
-        },
+        lambda: load_config(
+            {
+                "WEFT_DIRECTORY_NAME": ".engram",
+                "BROKER_DEFAULT_DB_NAME": "broker.db",
+            }
+        ),
     )
     result = cmd_init(project_root)
 

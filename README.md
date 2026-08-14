@@ -66,8 +66,8 @@ uv add 'weft[all]'
 Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
 selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
-Weft requires SimpleBroker 7.0.0 or newer; the Postgres extra requires the
-paired `simplebroker-pg` 3.5.2 or newer. Broker message IDs stay integers in
+Weft requires SimpleBroker 7.3.2 or newer; the Postgres extra requires the
+paired `simplebroker-pg` 3.8.0 or newer. Broker message IDs stay integers in
 Python and relational storage, while external JSON and owned exact-ID fields
 inside Monitor table JSON render them as 19-digit strings.
 
@@ -1254,6 +1254,14 @@ Environment variables:
 - `WEFT_MANAGER_LIFETIME_TIMEOUT` - Manager idle timeout (default: 600s)
 - `WEFT_MANAGER_REUSE_ENABLED` - Keep manager running (default: true)
 - `WEFT_AUTOSTART_TASKS` - Enable autostart (default: true)
+
+Weft uses `WEFT_*` names for embedded SimpleBroker settings and passes a
+complete typed broker config to the lower layer. Valid ambient `BROKER_*`
+settings do not tune Weft, and Weft does not change the process environment.
+SimpleBroker 7.3.2's immutable `ResolvedConfig` marker carries that isolation
+through queue, project, watcher, broker, and dump/load boundaries. Invalid
+ambient `BROKER_*` settings are ignored by Weft; invalid mapped `WEFT_*`
+settings still fail with a safe configuration error.
 
 ## License
 

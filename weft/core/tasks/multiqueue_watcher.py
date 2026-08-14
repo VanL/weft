@@ -25,7 +25,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import BrokerTarget, Queue, create_activity_waiter_for_queues
+from simplebroker import (
+    BrokerTarget,
+    Queue,
+    ResolvedConfig,
+    create_activity_waiter_for_queues,
+)
 from simplebroker.ext import (
     BaseWatcher,
     BrokerError,
@@ -35,6 +40,7 @@ from simplebroker.ext import (
 from weft._constants import (
     QUEUE_PRIORITY_NORMAL,
     TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS,
+    freeze_broker_config,
     load_config,
 )
 from weft.context import resolve_context_broker_target
@@ -161,6 +167,7 @@ class MultiQueueWatcher(BaseWatcher):
             dict(config) if config is not None else load_config()
         )
         self._config: dict[str, Any] = config_dict
+        broker_config = freeze_broker_config(config_dict)
 
         self._persistent = persistent
         self._yield_strategy = yield_strategy
@@ -181,15 +188,19 @@ class MultiQueueWatcher(BaseWatcher):
             first_queue_name,
             db_path=shared_target,
             persistent=persistent,
-            config=self._config,
+            config=broker_config,
         )
 
         super().__init__(
             initial_queue,
             stop_event=stop_event,
             polling_strategy=polling_strategy,
-            config=self._config,
+            config=broker_config,
         )
+        # BaseWatcher stores its nominal broker marker in ``_config``. Weft's
+        # task classes own this attribute as their complete, picklable runtime
+        # config, so restore it and recreate the marker only at broker calls.
+        self._config = config_dict
         _detach_queue_stop_event(initial_queue)
 
         self._db_path = initial_queue.db_target
@@ -221,7 +232,7 @@ class MultiQueueWatcher(BaseWatcher):
                     queue_name,
                     db_path=self._db_path,
                     persistent=persistent,
-                    config=self._config,
+                    config=self._broker_config,
                 )
 
             _detach_queue_stop_event(queue_obj)
@@ -299,6 +310,12 @@ class MultiQueueWatcher(BaseWatcher):
             list(self._queues.keys()),
         )
         self._ensure_multi_activity_waiter()
+
+    @property
+    def _broker_config(self) -> ResolvedConfig:
+        """Recreate the nominal marker at each SimpleBroker ownership handoff."""
+
+        return freeze_broker_config(self._config)
 
     # ------------------------------------------------------------------ #
     # Public API                                                         #
@@ -397,7 +414,7 @@ class MultiQueueWatcher(BaseWatcher):
             request.queue_name,
             db_path=self._db_path,
             persistent=self._persistent,
-            config=self._config,
+            config=self._broker_config,
         )
         _detach_queue_stop_event(queue_obj)
         return QueueRuntimeConfig(
@@ -1114,7 +1131,7 @@ class MultiQueueWatcher(BaseWatcher):
         self._error_handler = config.error_handler
 
         try:
-            self._dispatch(body, timestamp, config=self._config)
+            self._dispatch(body, timestamp, config=self._broker_config)
         finally:
             self._handler = original_handler
             self._error_handler = original_error_handler

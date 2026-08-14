@@ -4,6 +4,11 @@
 
 ### Changed
 
+- SimpleBroker now requires 7.3.2, with the paired `simplebroker-pg` 3.8.0
+  backend. System dumps use the bounded v1 watermark and system load restores
+  that allocation floor. `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS` maps to
+  SimpleBroker's load-skew limit. `httpx` is now direct because `llm 0.32`
+  imports it without declaring it.
 - **Breaking (Python API):** task control sweeps now return structured
   `TaskControlResult` values with per-task failures, wait-deadline expiry raises
   `CommandTimeoutError`, and submitted `Task` handles retain the materialized
@@ -19,6 +24,14 @@
 
 ### Fixed
 
+- Invalid recognized SimpleBroker configuration now produces one safe Weft
+  CLI diagnostic instead of an import-time traceback. System load rejects
+  records above the dump header bound even when the record targets filtered
+  runtime-only state. Weft now supplies defaults for the complete embedded
+  SimpleBroker config schema, preventing valid ambient `BROKER_*` tuning from
+  leaking into unset `WEFT_*` settings. The 7.3.2 isolated resolver and
+  immutable marker also prevent invalid ambient broker settings from affecting
+  Weft across lower-layer configuration handoffs.
 - Result-all consumption now reads each outbox once; task-monitor follow mode
   advances its high-water mark; JSONL monitor writes are atomic per record;
   control sweeps attempt every selected task; and CLI usage, timeout, Ctrl-C,

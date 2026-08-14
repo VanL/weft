@@ -887,6 +887,9 @@ Current behavior:
   `weft.state.*` queues
 - `system dump` writes SimpleBroker `simplebroker-dump` v1 NDJSON. Message
   records carry the preserved broker message ID in the `id` field.
+- `system dump` inherits SimpleBroker's bounded live export: the header
+  `last_ts` is sampled once and no emitted message ID exceeds it. This is not
+  a frozen point-in-time snapshot for aliases, claims, moves, or deletes.
 - `system dump` exports visible pending broker messages. If an included queue
   has claimed rows, the command reports the omitted claimed-message count
   instead of pretending the dump is a complete in-flight broker image.
@@ -907,6 +910,15 @@ Current behavior:
   writing rather than silently allocating new message IDs. Load uses
   SimpleBroker's bulk `insert_messages()` API so message-ID high-water handling
   and row import occur inside the broker apply path.
+- `system load` rejects any message ID above header `last_ts` before writes,
+  including records later skipped as runtime-only state. Apply advances the
+  destination high-water to at least the header floor, including for
+  header-only dumps. SimpleBroker's default future-clock-skew warning and
+  refusal apply during import; Weft exposes the limit as
+  `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS`, mapped to
+  `BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS`, but does not expose the upstream
+  `force` override. Invalid recognized broker configuration is rendered as one
+  safe CLI error with no traceback before broker target creation.
 - `system task-monitor` scans `weft.log.tasks` without consuming broker
   messages and emits JSONL log records to stdout or append-only disk files
   under `.weft/logs/task-monitor/YYYY-MM-DD.jsonl`
@@ -972,6 +984,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [SimpleBroker 7.3 dump watermark plan](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)

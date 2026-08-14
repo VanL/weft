@@ -18,7 +18,7 @@ from simplebroker import (
 from simplebroker.ext import PollingStrategy
 from tests.helpers import multiqueue_sigint_probe
 from tests.helpers.test_backend import POSTGRES_TEST_BACKEND, active_test_backend
-from weft._constants import QUEUE_PRIORITY_INTERNAL, QUEUE_PRIORITY_NORMAL
+from weft._constants import QUEUE_PRIORITY_INTERNAL, QUEUE_PRIORITY_NORMAL, load_config
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
     QueueMessageContext,
@@ -2811,3 +2811,30 @@ def test_read_mode_consumes_message_without_ack(broker_env) -> None:
     run_single_drain(watcher)
 
     assert queue.peek_one() is None
+
+
+def test_watcher_ignores_invalid_ambient_broker_config(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watcher-owned Queue and dispatch handoffs retain isolated config."""
+
+    db_path, make_queue = broker_env
+    queue = make_queue("isolated.watcher")
+    queue.write("payload")
+    seen: list[str] = []
+    monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
+
+    watcher = MultiQueueWatcher(
+        queue_configs={
+            queue.name: {
+                "handler": lambda message, *_args: seen.append(message),
+                "mode": QueueMode.READ,
+            }
+        },
+        db=db_path,
+        config=load_config(),
+    )
+    run_single_drain(watcher)
+
+    assert seen == ["payload"]

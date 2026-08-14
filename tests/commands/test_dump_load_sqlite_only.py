@@ -46,7 +46,7 @@ def test_cmd_load_rolls_back_sqlite_snapshot_on_apply_failure(
 ) -> None:
     """File-backed sqlite imports should restore pre-import state after a write failure."""
 
-    monkeypatch.setenv("BROKER_MAX_MESSAGE_SIZE", "32")
+    monkeypatch.setenv("WEFT_MAX_MESSAGE_SIZE", "32")
     ctx = build_context(spec_context=tmp_path)
     before_aliases, before_queues = _snapshot_broker_state(ctx)
 
@@ -57,7 +57,7 @@ def test_cmd_load_rolls_back_sqlite_snapshot_on_apply_failure(
             "format": "simplebroker-dump",
             "version": 1,
             "backend": "test",
-            "last_ts": 0,
+            "last_ts": 1000,
         },
         {"type": "alias", "alias": "restored_alias", "target": "restored.queue"},
         {
@@ -101,7 +101,7 @@ def test_cmd_load_rolls_back_sqlite_snapshot_on_duplicate_message_id(
             "format": "simplebroker-dump",
             "version": 1,
             "backend": "test",
-            "last_ts": 0,
+            "last_ts": 1000,
         },
         {
             "type": "message",

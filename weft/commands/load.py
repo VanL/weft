@@ -12,10 +12,10 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 from simplebroker import format_message_id, load_lines
-from simplebroker.ext import BrokerError, IntegrityError
+from simplebroker.ext import BrokerError, IntegrityError, TimestampError
 from weft._constants import (
     SIMPLEBROKER_DUMP_FORMAT,
     SIMPLEBROKER_DUMP_VERSION,
@@ -174,6 +174,34 @@ class SQLiteSnapshot:
         shutil.rmtree(self.snapshot_dir, ignore_errors=True)
 
 
+@dataclass
+class _ImportMutationTracker:
+    """Record dump-load mutation attempts for conservative failure diagnostics."""
+
+    occurred: bool = False
+
+
+class _TrackedImportBroker:
+    """Delegate broker access while conservatively observing load mutations."""
+
+    def __init__(self, broker: Any, tracker: _ImportMutationTracker) -> None:
+        self._broker = broker
+        self._tracker = tracker
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._broker, name)
+        if name not in {"add_alias", "insert_messages"} or not callable(attribute):
+            return attribute
+
+        def tracked_mutation(*args: Any, **kwargs: Any) -> Any:
+            # A backend may commit and then raise while refreshing local state.
+            # Once a mutation is attempted, non-file rollback is not provable.
+            self._tracker.occurred = True
+            return attribute(*args, **kwargs)
+
+        return tracked_mutation
+
+
 def _dump_error(line_number: int, problem: str) -> ValueError:
     """Return a line-numbered dump parse error."""
 
@@ -206,6 +234,7 @@ def _parse_import_file(input_file: TextIO) -> ImportPlan:  # noqa: C901 approved
     plan = ImportPlan()
     skipped_runtime: set[str] = set()
     header_seen = False
+    header_last_ts: int | None = None
 
     for line_num, raw_line in enumerate(input_file, 1):
         line = raw_line.strip()
@@ -242,6 +271,7 @@ def _parse_import_file(input_file: TextIO) -> ImportPlan:  # noqa: C901 approved
                     "19-digit string 'last_ts' field",
                 ) from exc
             header_seen = True
+            header_last_ts = last_ts
             normalized_metadata = {
                 key: value for key, value in record.items() if key != "type"
             }
@@ -300,6 +330,8 @@ def _parse_import_file(input_file: TextIO) -> ImportPlan:  # noqa: C901 approved
                     "message record requires a positive integer or canonical "
                     "19-digit string 'id' field",
                 )
+            if header_last_ts is None or message_id > header_last_ts:
+                raise _dump_error(line_num, "message id exceeds header last_ts")
 
             if _is_runtime_name(queue_name):
                 if queue_name not in skipped_runtime:
@@ -412,12 +444,16 @@ def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
 
     _ensure_exact_message_id_import_supported(plan, context)
     snapshot = _sqlite_snapshot_if_file_backed(context)
-    writes_started = False
+    mutation_tracker = _ImportMutationTracker()
 
     try:
         with context.broker() as broker:
-            writes_started = bool(plan.apply_lines[1:])
-            load_lines(broker, plan.apply_lines)
+            tracked_broker = _TrackedImportBroker(broker, mutation_tracker)
+            load_lines(
+                cast(Any, tracked_broker),
+                plan.apply_lines,
+                config=context.broker_config,
+            )
 
     except Exception as exc:  # pragma: no cover - rollback must run on any failure
         failure_detail = _format_apply_failure(exc)
@@ -433,7 +469,10 @@ def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
                 f"import failed and restored file-backed snapshot: {failure_detail}"
             ) from exc
 
-        if writes_started:
+        mutation_may_have_occurred = mutation_tracker.occurred or (
+            isinstance(exc, TimestampError) and exc.outcome_ambiguous
+        )
+        if mutation_may_have_occurred:
             raise ImportError(
                 "import failed after writes began; partial import may have occurred: "
                 f"{failure_detail}"

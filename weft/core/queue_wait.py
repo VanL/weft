@@ -17,6 +17,7 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     QUEUE_CHANGE_MONITOR_JOIN_TIMEOUT_SECONDS,
     QUEUE_CHANGE_MONITOR_WAITER_TIMEOUT_SECONDS,
+    freeze_broker_config,
     load_config,
 )
 
@@ -37,7 +38,9 @@ class QueueChangeMonitor:
         self._watchers: list[QueueWatcher] = []
         self._multi_waiter: Any | None = None
         self._monitor_thread: threading.Thread | None = None
-        self._config = dict(config) if config is not None else load_config()
+        self._config = freeze_broker_config(
+            config if config is not None else load_config()
+        )
 
         if self._start_multi_queue_waiter(list(queues)):
             return
