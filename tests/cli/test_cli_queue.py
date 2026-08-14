@@ -147,6 +147,41 @@ def test_queue_watch_sigint_exits_cleanly(workdir) -> None:
     assert "Traceback" not in startup + stderr
 
 
+def test_queue_watch_sigint_during_readiness_closes_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptibleStream:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __iter__(self) -> InterruptibleStream:
+            return self
+
+        def __next__(self) -> object:
+            raise AssertionError("watch iteration must not start after the interrupt")
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = InterruptibleStream()
+    monkeypatch.setattr(
+        "weft.cli.app.commands.cmd_queue_watch",
+        lambda *_args, **_kwargs: stream,
+    )
+
+    def interrupt_readiness(message: object, **_kwargs: object) -> None:
+        if str(message).startswith("Watching queue"):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("weft.cli.app.typer.echo", interrupt_readiness)
+
+    result = CliRunner().invoke(app, ["queue", "watch", "sigint.queue"])
+
+    assert result.exit_code == 0
+    assert result.exception is None
+    assert stream.closed
+
+
 def test_queue_write_and_read(workdir):
     build_context(spec_context=workdir)
 

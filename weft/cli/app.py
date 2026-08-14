@@ -790,6 +790,7 @@ def queue_watch(
         typer.Option("--move", help="Drain messages into another queue"),
     ] = None,
 ) -> None:
+    stream: commands.CommandStream[commands.QueueEntry] | None = None
     try:
         stream = commands.cmd_queue_watch(
             name,
@@ -799,14 +800,11 @@ def queue_watch(
             after=after,
             move=move_to,
         )
-    except commands.CommandError as exc:
-        _command_exit(exc)
-    if not quiet:
-        mode = "peek" if peek else "consume"
-        if move_to:
-            mode = f"move to {move_to}"
-        typer.echo(f"Watching queue '{name}' ({mode} mode)...", err=True)
-    try:
+        if not quiet:
+            mode = "peek" if peek else "consume"
+            if move_to:
+                mode = f"move to {move_to}"
+            typer.echo(f"Watching queue '{name}' ({mode} mode)...", err=True)
         for entry in stream:
             typer.echo(
                 _queue_entry_text(entry, timestamps=timestamps, json_output=json_output)
@@ -816,7 +814,8 @@ def queue_watch(
     except commands.CommandError as exc:
         _command_exit(exc)
     finally:
-        stream.close()
+        if stream is not None:
+            stream.close()
 
 
 @queue_app.command("delete")
