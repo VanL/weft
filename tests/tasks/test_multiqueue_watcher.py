@@ -1888,8 +1888,10 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
             self.delegate = delegate
             self.true_count = 0
             self.close_calls = 0
+            self.wait_entered = threading.Event()
 
         def wait(self, timeout: float | None) -> bool:
+            self.wait_entered.set()
             result = self.delegate.wait(timeout)
             if result:
                 self.true_count += 1
@@ -1949,12 +1951,15 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
     drive = watcher.run_in_thread()
     try:
         watcher.add_queue("pg-dynamic.c", handle_c)
+        added = proxies[("pg-dynamic.a", "pg-dynamic.b", "pg-dynamic.c")]
+        assert added.wait_entered.wait(timeout=3.0)
         writer_c.write("first")
         assert c_first.wait(timeout=3.0)
         assert handler_errors == []
 
         watcher.remove_queue("pg-dynamic.b")
         remaining = proxies[("pg-dynamic.a", "pg-dynamic.c")]
+        assert remaining.wait_entered.wait(timeout=3.0)
         quiet_baseline = remaining.true_count
         writer_b.write("removed")
         time.sleep(0.2)
