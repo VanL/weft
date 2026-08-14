@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import pytest
 
@@ -173,6 +175,216 @@ def test_external_task_log_sinks_share_one_path_writer_but_not_counters(
     assert records == [{"source": "first"}, {"source": "second"}]
 
 
+def test_external_task_log_active_alias_is_not_resolved_again(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Target creation cannot change an active alias into a second writer key."""
+
+    path = tmp_path / "resolution-transition.jsonl"
+    first_resolution = path.resolve(strict=False)
+    later_resolution = tmp_path / "simulated-alternate-spelling.jsonl"
+    resolutions = iter((first_resolution, later_resolution))
+    resolve_calls: list[Path] = []
+
+    def resolve_path(alias: Path) -> Path:
+        resolve_calls.append(alias)
+        return next(resolutions)
+
+    monkeypatch.setattr(external_log_mod, "_resolve_path_writer_path", resolve_path)
+    first = ExternalTaskLogSink(
+        path=path,
+        mode="collated",
+        monitor_tid="1779100000000000050",
+    )
+    second: ExternalTaskLogSink | None = None
+    fresh: ExternalTaskLogSink | None = None
+    alias = external_log_mod._path_writer_alias(path)
+    try:
+        first_handler = first._ensure_handler()
+        second = ExternalTaskLogSink(
+            path=path,
+            mode="collated",
+            monitor_tid="1779100000000000051",
+        )
+
+        assert len(resolve_calls) == 1
+        assert second._writer is first._writer
+        assert second._ensure_handler() is first_handler
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+
+    assert first_resolution not in external_log_mod._PATH_WRITER_REGISTRY
+    assert alias not in external_log_mod._PATH_WRITER_ALIAS_REGISTRY
+
+    try:
+        fresh = ExternalTaskLogSink(
+            path=path,
+            mode="collated",
+            monitor_tid="1779100000000000052",
+        )
+        assert len(resolve_calls) == 2
+        assert fresh._writer.path == later_resolution
+    finally:
+        if fresh is not None:
+            fresh.close()
+
+    assert later_resolution not in external_log_mod._PATH_WRITER_REGISTRY
+    assert alias not in external_log_mod._PATH_WRITER_ALIAS_REGISTRY
+
+
+def test_external_task_log_distinct_aliases_share_resolved_writer(tmp_path) -> None:
+    """Lexically distinct aliases keep coalescing through the resolved registry."""
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    direct_path = tmp_path / "same.jsonl"
+    parent_alias = nested / ".." / "same.jsonl"
+    first = ExternalTaskLogSink(
+        path=parent_alias,
+        mode="collated",
+        monitor_tid="1779100000000000053",
+    )
+    second = ExternalTaskLogSink(
+        path=direct_path,
+        mode="collated",
+        monitor_tid="1779100000000000054",
+    )
+    writer = first._writer
+    aliases = set(writer.aliases)
+
+    try:
+        assert writer is second._writer
+        assert len(aliases) == 2
+    finally:
+        first.close()
+        second.close()
+
+    assert writer.path not in external_log_mod._PATH_WRITER_REGISTRY
+    assert not aliases.intersection(external_log_mod._PATH_WRITER_ALIAS_REGISTRY)
+
+
+def test_external_task_log_concurrent_first_alias_resolution_rechecks_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Concurrent first resolutions cannot admit two keys for one active alias."""
+
+    path = tmp_path / "concurrent-resolution.jsonl"
+    first_resolution = path.resolve(strict=False)
+    alternate_resolution = tmp_path / "simulated-concurrent-spelling.jsonl"
+    resolution_barrier = threading.Barrier(2)
+    resolution_lock = threading.Lock()
+    resolution_calls = 0
+
+    def resolve_path(alias: Path) -> Path:
+        nonlocal resolution_calls
+        with resolution_lock:
+            call_index = resolution_calls
+            resolution_calls += 1
+        resolution_barrier.wait(timeout=5.0)
+        return (first_resolution, alternate_resolution)[call_index]
+
+    monkeypatch.setattr(external_log_mod, "_resolve_path_writer_path", resolve_path)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                ExternalTaskLogSink,
+                path=path,
+                mode="collated",
+                monitor_tid=f"177910000000000005{worker_index + 5}",
+            )
+            for worker_index in range(2)
+        ]
+        sinks = [future.result(timeout=5.0) for future in futures]
+
+    writer = sinks[0]._writer
+    try:
+        assert resolution_calls == 2
+        assert sinks[1]._writer is writer
+        assert writer.refcount == 2
+    finally:
+        for sink in sinks:
+            sink.close()
+
+    alias = external_log_mod._path_writer_alias(path)
+    assert writer.path not in external_log_mod._PATH_WRITER_REGISTRY
+    assert alias not in external_log_mod._PATH_WRITER_ALIAS_REGISTRY
+
+
+def test_external_task_log_final_close_blocks_replacement_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A replacement lease cannot overlap the prior writer's final close."""
+
+    path = tmp_path / "serialized-close.jsonl"
+    first = ExternalTaskLogSink(
+        path=path,
+        mode="collated",
+        monitor_tid="1779100000000000057",
+    )
+    first._ensure_handler()
+    first_writer = first._writer
+    original_close = first_writer.close
+    close_started = threading.Event()
+    allow_close = threading.Event()
+    blocked_acquire = threading.Event()
+
+    class TrackingLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+
+        def __enter__(self) -> None:
+            if self._lock.locked():
+                blocked_acquire.set()
+            self._lock.acquire()
+
+        def __exit__(
+            self,
+            exc_type: object,
+            exc_value: object,
+            traceback: object,
+        ) -> None:
+            self._lock.release()
+
+    def blocking_close() -> None:
+        close_started.set()
+        assert allow_close.wait(timeout=5.0)
+        original_close()
+
+    monkeypatch.setattr(external_log_mod, "_PATH_WRITER_REGISTRY_LOCK", TrackingLock())
+    monkeypatch.setattr(first_writer, "close", blocking_close)
+
+    replacement: ExternalTaskLogSink | None = None
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        close_future = executor.submit(first.close)
+        assert close_started.wait(timeout=5.0)
+        acquire_future = executor.submit(
+            ExternalTaskLogSink,
+            path=path,
+            mode="collated",
+            monitor_tid="1779100000000000058",
+        )
+        assert blocked_acquire.wait(timeout=5.0)
+        assert acquire_future.done() is False
+        allow_close.set()
+        close_future.result(timeout=5.0)
+        replacement = acquire_future.result(timeout=5.0)
+
+    try:
+        assert replacement._writer is not first_writer
+        assert first_writer.handler is None
+    finally:
+        replacement.close()
+
+    alias = external_log_mod._path_writer_alias(path)
+    assert replacement._writer.path not in external_log_mod._PATH_WRITER_REGISTRY
+    assert alias not in external_log_mod._PATH_WRITER_ALIAS_REGISTRY
+
+
 def test_external_task_log_sink_reacquires_writer_after_close_then_probe(
     tmp_path,
 ) -> None:
@@ -329,29 +541,34 @@ def test_external_task_log_same_path_concurrent_facades_rotate_complete_rows(
     path = tmp_path / "concurrent.jsonl"
     barrier = threading.Barrier(3)
     sinks: list[ExternalTaskLogSink] = []
+    errors: list[Exception] = []
     sinks_lock = threading.Lock()
 
     def emit_rows(worker_index: int) -> None:
-        barrier.wait(timeout=5.0)
-        sink = ExternalTaskLogSink(
-            path=path,
-            mode="collated",
-            monitor_tid=f"17791000000000001{worker_index:02d}",
-        )
-        with sinks_lock:
-            sinks.append(sink)
-        for row_index in range(5):
-            sink.emit_json_text(
-                json.dumps(
-                    {
-                        "worker": worker_index,
-                        "row": row_index,
-                        "padding": "x" * 80,
-                    },
-                    sort_keys=True,
-                ),
-                emitted_at_ns=1779100000000000200 + row_index,
+        try:
+            barrier.wait(timeout=5.0)
+            sink = ExternalTaskLogSink(
+                path=path,
+                mode="collated",
+                monitor_tid=f"17791000000000001{worker_index:02d}",
             )
+            with sinks_lock:
+                sinks.append(sink)
+            for row_index in range(5):
+                sink.emit_json_text(
+                    json.dumps(
+                        {
+                            "worker": worker_index,
+                            "row": row_index,
+                            "padding": "x" * 80,
+                        },
+                        sort_keys=True,
+                    ),
+                    emitted_at_ns=1779100000000000200 + row_index,
+                )
+        except (OSError, RuntimeError, ValueError) as exc:
+            with sinks_lock:
+                errors.append(exc)
 
     threads = [
         threading.Thread(target=emit_rows, args=(worker_index,))
@@ -364,8 +581,11 @@ def test_external_task_log_same_path_concurrent_facades_rotate_complete_rows(
 
     try:
         assert all(not thread.is_alive() for thread in threads)
+        assert errors == [], [repr(error) for error in errors]
         assert len(sinks) == 3
-        [writer] = {id(sink._writer): sink._writer for sink in sinks}.values()
+        writers = {id(sink._writer): sink._writer for sink in sinks}
+        assert len(writers) == 1, [str(writer.path) for writer in writers.values()]
+        writer = next(iter(writers.values()))
         assert writer.handler is not None
         assert (
             sum(
@@ -384,6 +604,7 @@ def test_external_task_log_same_path_concurrent_facades_rotate_complete_rows(
             json.loads(line)
             for line in output_path.read_text(encoding="utf-8").splitlines()
         )
+    assert len(records) == 15
     assert {(record["worker"], record["row"]) for record in records} == {
         (worker_index, row_index) for worker_index in range(3) for row_index in range(5)
     }

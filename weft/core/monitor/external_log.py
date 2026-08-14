@@ -55,6 +55,7 @@ class _PathWriter:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self.aliases: set[Path] = set()
         digest = sha256(str(path).encode("utf-8")).hexdigest()[:16]
         self.logger = logging.getLogger(f"weft.monitor.external_task_log.{digest}")
         self.logger.setLevel(logging.DEBUG)
@@ -129,6 +130,19 @@ class _PathWriter:
 
 _PATH_WRITER_REGISTRY_LOCK = threading.Lock()
 _PATH_WRITER_REGISTRY: dict[Path, _PathWriter] = {}
+_PATH_WRITER_ALIAS_REGISTRY: dict[Path, _PathWriter] = {}
+
+
+def _path_writer_alias(path: Path) -> Path:
+    """Return a stable absolute identity without resolving the target."""
+
+    return path.expanduser().absolute()
+
+
+def _resolve_path_writer_path(alias: Path) -> Path:
+    """Resolve a new alias to the canonical writer-registry key."""
+
+    return alias.resolve(strict=False)
 
 
 def _acquire_path_writer(path: Path) -> _PathWriter:
@@ -137,12 +151,25 @@ def _acquire_path_writer(path: Path) -> _PathWriter:
     Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
     """
 
-    resolved_path = path.expanduser().resolve(strict=False)
+    alias = _path_writer_alias(path)
     with _PATH_WRITER_REGISTRY_LOCK:
+        writer = _PATH_WRITER_ALIAS_REGISTRY.get(alias)
+        if writer is not None:
+            writer.refcount += 1
+            return writer
+
+    resolved_path = _resolve_path_writer_path(alias)
+    with _PATH_WRITER_REGISTRY_LOCK:
+        writer = _PATH_WRITER_ALIAS_REGISTRY.get(alias)
+        if writer is not None:
+            writer.refcount += 1
+            return writer
         writer = _PATH_WRITER_REGISTRY.get(resolved_path)
         if writer is None:
             writer = _PathWriter(resolved_path)
             _PATH_WRITER_REGISTRY[resolved_path] = writer
+        writer.aliases.add(alias)
+        _PATH_WRITER_ALIAS_REGISTRY[alias] = writer
         writer.refcount += 1
         return writer
 
@@ -161,6 +188,11 @@ def _release_path_writer(writer: _PathWriter) -> None:
         if writer.refcount > 0:
             return
         _PATH_WRITER_REGISTRY.pop(writer.path, None)
+        for alias in writer.aliases:
+            registered_alias = _PATH_WRITER_ALIAS_REGISTRY.get(alias)
+            if registered_alias is writer:
+                _PATH_WRITER_ALIAS_REGISTRY.pop(alias, None)
+        writer.aliases.clear()
         writer.close()
 
 

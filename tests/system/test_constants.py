@@ -191,6 +191,7 @@ _RUNTIME_OBJECT_ALLOWLIST = {
     "weft/core/agents/runtime.py": {"_RUNTIME_REGISTRY"},
     "weft/core/agents/templates.py": {"_TEMPLATE_PATTERN"},
     "weft/core/monitor/external_log.py": {
+        "_PATH_WRITER_ALIAS_REGISTRY",
         "_PATH_WRITER_REGISTRY",
         "_PATH_WRITER_REGISTRY_LOCK",
     },
