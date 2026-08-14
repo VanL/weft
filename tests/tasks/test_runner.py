@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
+from weft._constants import AGENT_SESSION_READY_TIMEOUT_SECONDS
 from weft.core.resource_monitor import ResourceMetrics
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners import RunnerOutcome
@@ -1008,7 +1009,7 @@ def test_production_agent_worker_post_ready_error_survives_immediate_exit() -> N
         timeout=5.0,
     )
     try:
-        session.wait_ready(timeout=5.0)
+        session.wait_ready(timeout=AGENT_SESSION_READY_TIMEOUT_SECONDS)
         result = session.execute("hello")
 
         assert result.status == "error"
