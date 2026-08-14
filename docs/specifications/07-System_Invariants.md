@@ -554,12 +554,18 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   `weft/core/launcher.py::_task_process_entry` delegates once. Protected
   cleanup hooks in Consumer, ServiceTask, Manager, and TaskMonitor receive the
   absolute deadline; the private BaseTask cleanup phase always runs afterward.
+  A Manager child launch that completes after that deadline receives an
+  immediate best-effort zero-wait process-tree kill before wrapper-only
+  fallback, so already-observed descendants are not abandoned through a late
+  wrapper registration.
   Manager's protected termination-policy hook
   (`weft/core/manager.py::Manager._apply_termination_request`) preserves
   graceful drain and SIGUSR1 priority; Manager launch drain, child-exit
   polling, joins, and process-tree escalation consume the same absolute
   cleanup deadline with within-budget SIGKILL escalation for TERM-resistant
-  descendants. Cleanup diagnostics retain any still-live managed PIDs even
+  descendants; `Manager._run_child_launch_service_worker()` owns the
+  after-deadline zero-wait tree kill for newly completed launches. Cleanup
+  diagnostics retain any still-live managed PIDs even
   after the direct wrapper exits or the deadline expires. Lifecycle, signal,
   managed-survivor, multi-child deadline, wait-owner,
   stop-idempotence, and cleanup-failure tests in

@@ -13,6 +13,7 @@ import json
 import logging
 import multiprocessing
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -892,6 +893,11 @@ def drive_manager_until(
         timeout=timeout,
         wait_slice=0.02,
         pending_work=(manager._has_pending_worker_results,),
+        diagnostics=lambda: {
+            "child_tids": sorted(manager._child_processes),
+            "active_child_launches": sorted(manager._active_child_launches),
+            "worker_snapshot": manager._worker_activity_snapshot(),
+        },
     )
 
 
@@ -4448,33 +4454,77 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
     assert not cleanup_errors
 
 
-def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
+def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    psutil = pytest.importorskip("psutil")
     manager, _make_queue = manager_setup
     child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
     assert child_spec is not None
 
+    locked_dir = tmp_path / "late-launch-tree"
+    locked_dir.mkdir()
+    parent_script, child_script = _write_descendant_process_scripts(locked_dir)
+    child_pidfile = locked_dir / "late-launch-child.pid"
     launch_entered = threading.Event()
     release_launch = threading.Event()
     termination_entered = threading.Event()
     allow_termination = threading.Event()
-    process = FakeLaunchProcess(alive=True)
     stop_errors: list[BaseException] = []
+    tree_kills: list[tuple[int, float]] = []
+    process_start_timeout = 20.0 if os.name == "nt" else 10.0
 
-    def blocked_launch(*args: object, **kwargs: object) -> FakeLaunchProcess:
+    class RealLaunchProcess:
+        def __init__(self, process: subprocess.Popen[bytes]) -> None:
+            self._process = process
+            self.pid = process.pid
+
+        @property
+        def exitcode(self) -> int | None:
+            return self._process.poll()
+
+        def is_alive(self) -> bool:
+            return self._process.poll() is None
+
+        def kill(self) -> None:
+            if self._process.poll() is None:
+                self._process.kill()
+
+    launched: dict[str, RealLaunchProcess] = {}
+
+    def blocked_launch(*args: object, **kwargs: object) -> RealLaunchProcess:
         del args, kwargs
+        process = RealLaunchProcess(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(parent_script),
+                    str(child_script),
+                    str(child_pidfile),
+                ],
+                cwd=locked_dir,
+            )
+        )
+        launched["process"] = process
         launch_entered.set()
-        assert release_launch.wait(timeout=5.0)
+        release_launch.wait()
         return process
 
     monkeypatch.setattr(manager_mod, "launch_task_process", blocked_launch)
     monkeypatch.setattr(manager_mod, "terminate_process_tree", lambda *a, **k: set())
+    real_kill_process_tree = manager_mod.kill_process_tree
+
+    def record_tree_kill(pid: int, *, timeout: float) -> set[int]:
+        tree_kills.append((pid, timeout))
+        return real_kill_process_tree(pid, timeout=timeout)
+
+    monkeypatch.setattr(manager_mod, "kill_process_tree", record_tree_kill)
 
     def block_termination(_deadline: float) -> None:
         termination_entered.set()
-        assert allow_termination.wait(timeout=3.0)
+        allow_termination.wait()
 
     def skip_full_queue_resource_cleanup(deadline: float) -> None:
         del deadline
@@ -4498,7 +4548,7 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
     monkeypatch.setattr(manager, "stop", fail_stop)
     sentinel_thread = threading.Thread(target=run_stop)
     sentinel_thread.start()
-    sentinel_thread.join(timeout=1.0)
+    sentinel_thread.join(timeout=process_start_timeout)
     assert not sentinel_thread.is_alive()
     assert stop_errors == [signal]
     stop_errors.clear()
@@ -4512,22 +4562,51 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
     )
 
     assert manager._launch_child_task(child_spec, None) is True
-    assert launch_entered.wait(timeout=2.0)
+    process: RealLaunchProcess | None = None
+    worker_pid: int | None = None
+    stop_thread: threading.Thread | None = None
+    try:
+        assert launch_entered.wait(timeout=process_start_timeout)
+        process = launched["process"]
+        worker_pid = _wait_for_pidfile(
+            child_pidfile,
+            timeout=process_start_timeout,
+        )
+        assert _process_running(worker_pid)
 
-    stop_thread = threading.Thread(target=run_stop)
-    stop_thread.start()
-    assert termination_entered.wait(timeout=2.0)
-    assert process.is_alive() is True
+        stop_thread = threading.Thread(target=run_stop)
+        stop_thread.start()
+        assert termination_entered.wait(timeout=process_start_timeout)
+        assert process.is_alive() is True
 
-    release_launch.set()
-    deadline = time.monotonic() + 2.0
-    while process.is_alive() and time.monotonic() < deadline:
-        time.sleep(0.01)
+        release_launch.set()
+        deadline = time.monotonic() + (20.0 if os.name == "nt" else 5.0)
+        while time.monotonic() < deadline:
+            if not process.is_alive() and not _process_running(worker_pid):
+                break
+            time.sleep(0.01)
 
-    assert process.is_alive() is False
-    assert child_spec.tid not in manager._child_processes
-    allow_termination.set()
-    stop_thread.join(timeout=2.0)
+        assert process.is_alive() is False
+        assert not _process_running(worker_pid)
+        assert tree_kills == [(process.pid, 0.0)]
+        assert child_spec.tid not in manager._child_processes
+    finally:
+        release_launch.set()
+        allow_termination.set()
+        if stop_thread is not None:
+            stop_thread.join(timeout=process_start_timeout)
+        process = process or launched.get("process")
+        if process is not None and process.is_alive():
+            real_kill_process_tree(process.pid, timeout=2.0)
+        if worker_pid is not None and _process_running(worker_pid):
+            try:
+                psutil.Process(worker_pid).kill()
+            except psutil.Error:
+                pass
+            _wait_for_pid_exit(worker_pid, timeout=2.0)
+        shutil.rmtree(locked_dir)
+
+    assert stop_thread is not None
     if stop_thread.is_alive():
         frame = sys._current_frames().get(stop_thread.ident)
         stack = (
@@ -4537,6 +4616,7 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(
         )
         pytest.fail(f"stop thread did not exit:\n{stack}")
     assert not stop_errors
+    assert not locked_dir.exists()
 
 
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
@@ -5606,10 +5686,11 @@ def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
     )
 
     manager.process_once()
-    start = time.time()
-    while not manager._child_processes and time.time() - start < 5.0:
-        manager.process_once()
-        time.sleep(0.05)
+    drive_manager_until(
+        manager,
+        lambda: bool(manager._child_processes),
+        timeout=20.0 if os.name == "nt" else 10.0,
+    )
 
     assert manager._child_processes, "child process should be running"
     child_tid, child_info = next(iter(manager._child_processes.items()))
@@ -5660,21 +5741,26 @@ def test_manager_cleanup_terminates_worker_descendants(
         )
     )
 
-    start = time.time()
-    while not manager._child_processes and time.time() - start < 5.0:
-        manager.process_once()
-        time.sleep(0.05)
-
-    assert manager._child_processes, "child process should be running"
-    child_tid, child_info = next(iter(manager._child_processes.items()))
-
-    worker_pid = _wait_for_pidfile(
-        child_pidfile,
-        timeout=20.0 if os.name == "nt" else 10.0,
-    )
-    assert _process_running(worker_pid), f"expected worker descendant for {child_tid}"
-
+    child_info: ManagedChild | None = None
+    worker_pid: int | None = None
     try:
+        drive_manager_until(
+            manager,
+            lambda: bool(manager._child_processes),
+            timeout=20.0 if os.name == "nt" else 10.0,
+        )
+
+        assert manager._child_processes, "child process should be running"
+        child_tid, child_info = next(iter(manager._child_processes.items()))
+
+        worker_pid = _wait_for_pidfile(
+            child_pidfile,
+            timeout=20.0 if os.name == "nt" else 10.0,
+        )
+        assert _process_running(worker_pid), (
+            f"expected worker descendant for {child_tid}"
+        )
+
         manager.cleanup()
 
         deadline = time.time() + (20.0 if os.name == "nt" else 5.0)
@@ -5688,12 +5774,19 @@ def test_manager_cleanup_terminates_worker_descendants(
         assert not _process_running(child_info.process.pid)
         assert not _process_running(worker_pid)
     finally:
-        if _process_running(worker_pid):
-            try:
-                psutil.Process(worker_pid).kill()
-            except psutil.Error:
-                pass
-            _wait_for_pid_exit(worker_pid, timeout=2.0)
+        try:
+            manager.cleanup()
+        finally:
+            if child_info is not None:
+                root_pid = child_info.process.pid
+                if isinstance(root_pid, int) and _process_running(root_pid):
+                    manager_mod.kill_process_tree(root_pid, timeout=2.0)
+            if worker_pid is not None and _process_running(worker_pid):
+                try:
+                    psutil.Process(worker_pid).kill()
+                except psutil.Error:
+                    pass
+                _wait_for_pid_exit(worker_pid, timeout=2.0)
 
 
 def _spawn_sigterm_trapping_process(ready_file: Path) -> subprocess.Popen[bytes]:
@@ -5948,11 +6041,14 @@ def test_manager_child_termination_uses_one_deadline_for_multiple_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
+    clock = {"now": 100.0}
     join_timeouts: list[float] = []
 
     class StubbornProcess(FakeLaunchProcess):
         def join(self, timeout: float | None = None) -> None:
-            join_timeouts.append(float(timeout or 0.0))
+            allocated = float(timeout or 0.0)
+            join_timeouts.append(allocated)
+            clock["now"] += allocated
 
     for index in range(3):
         manager._child_processes[f"child-{index}"] = ManagedChild(
@@ -5964,12 +6060,26 @@ def test_manager_child_termination_uses_one_deadline_for_multiple_children(
     monkeypatch.setattr(manager_mod, "pid_is_live", lambda _pid: True)
     monkeypatch.setattr(manager, "_managed_pids_for_child", lambda _tid: set())
     monkeypatch.setattr(manager_mod, "terminate_process_tree", lambda *a, **k: set())
+    real_time = manager_mod.time
 
-    started_at = time.monotonic()
-    manager._terminate_children(started_at + 0.08)
-    elapsed = time.monotonic() - started_at
+    class FakeTimeModule:
+        def monotonic(self) -> float:
+            return clock["now"]
 
-    assert elapsed < 0.25
+        def sleep(self, seconds: float) -> None:
+            clock["now"] += seconds
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(real_time, name)
+
+    fake_time = FakeTimeModule()
+    monkeypatch.setattr(manager_mod, "time", fake_time)
+    monkeypatch.setattr(base_task_mod, "time", fake_time)
+
+    deadline = clock["now"] + 0.08
+    manager._terminate_children(deadline)
+
+    assert clock["now"] <= deadline
     assert manager._child_processes == {}
     assert join_timeouts
     assert sum(join_timeouts) <= 0.12

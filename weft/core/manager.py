@@ -1108,13 +1108,19 @@ class Manager(ServiceTask):
                 deadline = self._active_cleanup_deadline or time.monotonic()
                 remaining = self._remaining_deadline(deadline)
                 pid = process.pid
-                if isinstance(pid, int) and pid > 0 and remaining > 0:
-                    # Split-budget KILL escalation; see _terminate_children.
-                    terminate_process_tree(
-                        pid,
-                        timeout=remaining / 2.0,
-                        kill_after=True,
-                    )
+                if isinstance(pid, int) and pid > 0:
+                    if remaining > 0:
+                        # Split-budget KILL escalation; see _terminate_children.
+                        terminate_process_tree(
+                            pid,
+                            timeout=remaining / 2.0,
+                            kill_after=True,
+                        )
+                    else:
+                        # The shared deadline forbids a new grace period, but
+                        # already-visible descendants must not be abandoned
+                        # with the late wrapper.
+                        kill_process_tree(pid, timeout=0.0)
                 try:
                     if process.is_alive():
                         process.kill()

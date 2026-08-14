@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import types
@@ -185,16 +186,38 @@ def test_tid_mapping_records_runtime_identity_from_start_hooks(
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    drive_task_until(
-        task,
-        lambda: task.taskspec.state.status == "completed",
+    def _runtime_mapping() -> dict[str, object] | None:
+        records = [
+            json.loads(message) for message in mapping_queue.peek_many(limit=10) or []
+        ]
+        return next(
+            (
+                record
+                for record in reversed(records)
+                if record.get("full") == unique_tid
+                and isinstance(record.get("runtime_handle"), dict)
+                and record["runtime_handle"].get("id") != str(task._task_pid)
+                and record["runtime_handle"].get("metadata", {}).get("source")
+                != "weft-task-process"
+            ),
+            None,
+        )
+
+    runtime_record = drive_until(
+        _runtime_mapping,
+        lambda record: record is not None,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=20.0 if os.name == "nt" else 10.0,
+        pending_work=(task._has_pending_worker_results,),
+        diagnostics=lambda: {
+            "status": task.taskspec.state.status,
+            "should_stop": task.should_stop,
+            "worker_snapshot": task._worker_activity_snapshot(),
+        },
     )
 
-    records = [json.loads(msg) for msg in drain_queue(mapping_queue)]
-    assert records, "expected at least one mapping record"
-    runtime_records = [record for record in records if record.get("runtime_handle")]
-    assert runtime_records, "expected runtime handle mapping update"
-    runtime_record = runtime_records[-1]
+    assert runtime_record is not None
     runtime_handle = runtime_record["runtime_handle"]
     assert runtime_record["runner"] == "host"
     assert isinstance(runtime_handle, dict)
