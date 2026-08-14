@@ -787,7 +787,7 @@ No pg code changes — this is green-from-birth conformance (plus the shared CLI
 from Task 5 already exercises pg through `bin/pytest-pg`).
 
 - [ ] **Step 6.1: Write the test** (`pg_core` fixture: real `BrokerCore` on a
-  throwaway schema; skips without `SIMPLEBROKER_PG_TEST_DSN`, which `bin/pytest-pg`
+  throwaway schema; skips without `WEFT_PG_TEST_DSN`, which `bin/pytest-pg`
   provides):
 
 ```python

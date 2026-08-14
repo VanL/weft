@@ -619,7 +619,7 @@ Verification:
 ### 5. Add PostgreSQL-Backed Integration Proofs
 
 Outcome: the new Weft wait seams work against a real PostgreSQL backend when
-`SIMPLEBROKER_PG_TEST_DSN` is available, and they do not degrade SQLite.
+`WEFT_PG_TEST_DSN` is available, and they do not degrade SQLite.
 
 Files to touch:
 
@@ -651,7 +651,7 @@ Tests to add:
   - assert the next `process_once()` drains it.
 - A PG-only test only if needed to observe native waiter selection:
   - skip unless `BROKER_TEST_BACKEND=postgres` and
-    `SIMPLEBROKER_PG_TEST_DSN` are set,
+    `WEFT_PG_TEST_DSN` are set,
   - do not import `simplebroker_pg` from production code,
   - test may inspect `type(waiter).__name__` only inside tests if no public
     SimpleBroker API exposes the selection.
@@ -668,7 +668,7 @@ Manual benchmark, not a merge gate:
 
 ```bash
 ./.venv/bin/python -m tests.multiqueue_polling_benchmark --backends sqlite
-BROKER_TEST_BACKEND=postgres SIMPLEBROKER_PG_TEST_DSN='postgresql://...' \
+BROKER_TEST_BACKEND=postgres WEFT_PG_TEST_DSN='postgresql://...' \
   ./.venv/bin/python -m tests.multiqueue_polling_benchmark --backends postgres
 ```
 
@@ -676,7 +676,7 @@ Verification:
 
 ```bash
 ./.venv/bin/python -m pytest tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py tests/core/test_queue_wait.py -q
-BROKER_TEST_BACKEND=postgres SIMPLEBROKER_PG_TEST_DSN='postgresql://...' \
+BROKER_TEST_BACKEND=postgres WEFT_PG_TEST_DSN='postgresql://...' \
   ./.venv/bin/python -m pytest tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py tests/core/test_queue_wait.py -q
 ```
 
@@ -735,7 +735,7 @@ uv sync --all-extras
 If PostgreSQL is available:
 
 ```bash
-BROKER_TEST_BACKEND=postgres SIMPLEBROKER_PG_TEST_DSN='postgresql://...' \
+BROKER_TEST_BACKEND=postgres WEFT_PG_TEST_DSN='postgresql://...' \
   ./.venv/bin/python -m pytest tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py tests/core/test_queue_wait.py -q
 ```
 

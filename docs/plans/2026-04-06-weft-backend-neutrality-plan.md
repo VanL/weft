@@ -703,7 +703,7 @@ Fallback PG command if the helper is being edited and temporarily unavailable:
 
 ```bash
 BROKER_TEST_BACKEND=postgres \
-SIMPLEBROKER_PG_TEST_DSN='postgresql://postgres:postgres@127.0.0.1:54329/simplebroker_test' \
+WEFT_PG_TEST_DSN='postgresql://postgres:postgres@127.0.0.1:54329/simplebroker_test' \
 uv run --extra dev --with-editable . --with 'simplebroker-pg[dev]' \
 pytest tests -m 'not sqlite_only' -n auto --dist loadgroup -q
 ```

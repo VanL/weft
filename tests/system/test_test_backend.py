@@ -12,11 +12,26 @@ import tests.helpers.test_backend as test_backend_module
 from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
     cleanup_prepared_roots,
+    postgres_test_dsn,
     prepare_project_root,
 )
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_postgres_test_dsn_uses_weft_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standalone SimpleBroker test settings cannot select Weft's test DSN."""
+
+    monkeypatch.delenv("WEFT_PG_TEST_DSN", raising=False)
+    monkeypatch.setenv("SIMPLEBROKER_PG_TEST_DSN", "postgresql://ignored.invalid/db")
+
+    assert postgres_test_dsn() is None
+
+    monkeypatch.setenv("WEFT_PG_TEST_DSN", "postgresql://weft.invalid/db")
+    assert postgres_test_dsn() == "postgresql://weft.invalid/db"
 
 
 def _write_postgres_config(root: Path, schema: str) -> Path:
@@ -62,7 +77,7 @@ def test_cleanup_prepared_roots_logs_failure_and_continues(
     plugin.cleanup_target.side_effect = cleanup_target
     env = {
         "BROKER_TEST_BACKEND": "postgres",
-        "SIMPLEBROKER_PG_TEST_DSN": "postgresql://test.invalid/weft",
+        "WEFT_PG_TEST_DSN": "postgresql://test.invalid/weft",
     }
 
     with (
@@ -105,11 +120,11 @@ def test_cleanup_postgres_schema_for_root_logs_private_failure(
     plugin.cleanup_target.side_effect = RuntimeError(private_error)
     env = {
         "BROKER_TEST_BACKEND": "postgres",
-        "SIMPLEBROKER_PG_TEST_DSN": "postgresql://private.invalid/weft",
+        "WEFT_PG_TEST_DSN": "postgresql://private.invalid/weft",
     }
     resolved_root = project_root.resolve()
     schema = test_backend_module.postgres_schema_for_root(resolved_root)
-    cache_key = (str(resolved_root), env["SIMPLEBROKER_PG_TEST_DSN"], schema)
+    cache_key = (str(resolved_root), env["WEFT_PG_TEST_DSN"], schema)
     prepared_roots = {cache_key}
     monkeypatch.setattr(
         test_backend_module,

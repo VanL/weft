@@ -31,9 +31,9 @@ def active_test_backend(env: Mapping[str, str] | None = None) -> str:
 def postgres_test_dsn(env: Mapping[str, str] | None = None) -> str | None:
     """Return the configured Postgres DSN for PG-backed tests."""
 
-    if env and env.get("SIMPLEBROKER_PG_TEST_DSN"):
-        return env["SIMPLEBROKER_PG_TEST_DSN"]
-    return os.environ.get("SIMPLEBROKER_PG_TEST_DSN")
+    if env and env.get("WEFT_PG_TEST_DSN"):
+        return env["WEFT_PG_TEST_DSN"]
+    return os.environ.get("WEFT_PG_TEST_DSN")
 
 
 def _postgres_schema_name(root: Path) -> str:
@@ -96,12 +96,12 @@ def postgres_env_overrides_for_root(
     dsn = postgres_test_dsn(env)
     if not dsn:
         raise RuntimeError(
-            "BROKER_TEST_BACKEND=postgres requires SIMPLEBROKER_PG_TEST_DSN"
+            "BROKER_TEST_BACKEND=postgres requires WEFT_PG_TEST_DSN"
         )
 
     return {
         "BROKER_TEST_BACKEND": POSTGRES_TEST_BACKEND,
-        "SIMPLEBROKER_PG_TEST_DSN": dsn,
+        "WEFT_PG_TEST_DSN": dsn,
         "WEFT_BACKEND": POSTGRES_TEST_BACKEND,
         "WEFT_BACKEND_TARGET": dsn,
         "WEFT_BACKEND_SCHEMA": postgres_schema_for_root(root),
@@ -173,7 +173,7 @@ def prepare_project_root(
     dsn = postgres_test_dsn(env)
     if not dsn:
         raise RuntimeError(
-            "BROKER_TEST_BACKEND=postgres requires SIMPLEBROKER_PG_TEST_DSN"
+            "BROKER_TEST_BACKEND=postgres requires WEFT_PG_TEST_DSN"
         )
 
     config_path = _project_config_path(resolved_root, env=env)

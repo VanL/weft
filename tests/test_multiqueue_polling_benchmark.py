@@ -9,6 +9,19 @@ from tests import multiqueue_polling_benchmark as benchmark
 pytestmark = pytest.mark.shared
 
 
+def test_parse_args_uses_weft_postgres_test_dsn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The benchmark does not inherit SimpleBroker's standalone test DSN."""
+
+    monkeypatch.setenv("SIMPLEBROKER_PG_TEST_DSN", "postgresql://ignored.invalid/db")
+    monkeypatch.setenv("WEFT_PG_TEST_DSN", "postgresql://weft.invalid/db")
+
+    settings = benchmark._parse_args(["--backends", "postgres"])
+
+    assert settings.pg_dsn == "postgresql://weft.invalid/db"
+
+
 def test_main_converts_benchmark_failure_to_clean_exit(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

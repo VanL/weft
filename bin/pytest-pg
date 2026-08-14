@@ -251,7 +251,7 @@ def _build_test_env(*, dsn: str) -> dict[str, str]:
     for key in BACKEND_ENV_KEYS:
         env.pop(key, None)
     env["BROKER_TEST_BACKEND"] = "postgres"
-    env["SIMPLEBROKER_PG_TEST_DSN"] = dsn
+    env["WEFT_PG_TEST_DSN"] = dsn
     env["BROKER_BACKEND"] = "postgres"
     env["BROKER_BACKEND_TARGET"] = passwordless_dsn
     env["WEFT_BACKEND"] = "postgres"

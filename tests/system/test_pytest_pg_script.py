@@ -404,6 +404,8 @@ def test_build_test_env_sets_worker_count(
 
     assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "17"
     assert env["BROKER_TEST_BACKEND"] == "postgres"
+    assert env["WEFT_PG_TEST_DSN"] == "postgresql://example"
+    assert "SIMPLEBROKER_PG_TEST_DSN" not in env
 
 
 def test_build_test_env_owns_backend_connection_env(

@@ -204,7 +204,7 @@ class BenchmarkSettings:
             raise ValueError(f"surfaces must be drawn from {SURFACES!r}")
         if POSTGRES_TEST_BACKEND in self.backends and not self.pg_dsn:
             raise ValueError(
-                "Postgres benchmarks require --pg-dsn or SIMPLEBROKER_PG_TEST_DSN"
+                "Postgres benchmarks require --pg-dsn or WEFT_PG_TEST_DSN"
             )
 
 
@@ -224,19 +224,19 @@ class BenchmarkResult:
 def _backend_env(backend: str, pg_dsn: str | None) -> dict[str, str]:
     """Provide both process env and helper env for one backend."""
 
-    keys = ("BROKER_TEST_BACKEND", "SIMPLEBROKER_PG_TEST_DSN")
+    keys = ("BROKER_TEST_BACKEND", "WEFT_PG_TEST_DSN")
     previous = {key: os.environ.get(key) for key in keys}
     env = {"BROKER_TEST_BACKEND": backend}
     if backend == POSTGRES_TEST_BACKEND:
         assert pg_dsn is not None
-        env["SIMPLEBROKER_PG_TEST_DSN"] = pg_dsn
+        env["WEFT_PG_TEST_DSN"] = pg_dsn
 
     try:
         os.environ["BROKER_TEST_BACKEND"] = backend
         if backend == POSTGRES_TEST_BACKEND:
-            os.environ["SIMPLEBROKER_PG_TEST_DSN"] = pg_dsn or ""
+            os.environ["WEFT_PG_TEST_DSN"] = pg_dsn or ""
         else:
-            os.environ.pop("SIMPLEBROKER_PG_TEST_DSN", None)
+            os.environ.pop("WEFT_PG_TEST_DSN", None)
         yield env
     finally:
         for key, value in previous.items():
@@ -1177,7 +1177,7 @@ def _parse_args(argv: list[str] | None = None) -> BenchmarkSettings:
     )
     parser.add_argument(
         "--pg-dsn",
-        default=os.environ.get("SIMPLEBROKER_PG_TEST_DSN"),
+        default=os.environ.get("WEFT_PG_TEST_DSN"),
         help="Postgres DSN used when --backends includes postgres",
     )
     parser.add_argument(

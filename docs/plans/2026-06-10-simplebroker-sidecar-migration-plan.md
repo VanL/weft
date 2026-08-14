@@ -1277,7 +1277,7 @@ def test_sidecar_round_trip_on_postgres(pg_core: BrokerCore) -> None:
 
   (`pg_core` is an existing fixture in `extensions/simplebroker_pg/tests/conftest.py`
   yielding a `BrokerCore` on a throwaway schema; it skips automatically when
-  `SIMPLEBROKER_PG_TEST_DSN` is unset. The `?` placeholders are translated to `%s` by
+  `WEFT_PG_TEST_DSN` is unset. The `?` placeholders are translated to `%s` by
   `PostgresRunner` — `simplebroker_pg/runner.py:49–50`.)
 
 - [ ] **Step 13.2: Run; verify green; commit.**

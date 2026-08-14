@@ -322,7 +322,7 @@ def test_cli_init_supports_env_only_postgres_configuration(
         if key.startswith("WEFT_BACKEND") or key in {
             "WEFT_DEFAULT_DB_NAME",
             "BROKER_TEST_BACKEND",
-            "SIMPLEBROKER_PG_TEST_DSN",
+            "WEFT_PG_TEST_DSN",
         }:
             monkeypatch.setenv(key, value)
 

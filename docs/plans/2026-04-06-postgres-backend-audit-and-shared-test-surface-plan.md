@@ -464,7 +464,7 @@ Red tests first:
 
 Implementation notes:
 
-- Reuse `BROKER_TEST_BACKEND` and `SIMPLEBROKER_PG_TEST_DSN` as the test-only
+- Reuse `BROKER_TEST_BACKEND` and `WEFT_PG_TEST_DSN` as the test-only
   backend selection env vars. Do not invent a second naming scheme unless there
   is a concrete collision.
 - For PG, create one schema per Weft project root.
@@ -761,7 +761,7 @@ Files to modify:
 Recommended behavior:
 
 - Start a temporary Docker Postgres container.
-- Export `SIMPLEBROKER_PG_TEST_DSN`.
+- Export `WEFT_PG_TEST_DSN`.
 - Set `BROKER_TEST_BACKEND=postgres`.
 - Run only the audited shared suite:
 

@@ -296,7 +296,7 @@ Extend the system dump/load bullets with:
 ./.venv/bin/python -c "from importlib.metadata import version; from simplebroker.ext import BACKEND_API_VERSION; from simplebroker_pg import get_backend_plugin; assert version('simplebroker') == '7.3.2'; assert version('simplebroker-pg') == '3.8.0'; assert BACKEND_API_VERSION == 7; assert get_backend_plugin().backend_api_version == BACKEND_API_VERSION"
 ```
 
-When `SIMPLEBROKER_PG_TEST_DSN` is configured, also run the repository's
+When `WEFT_PG_TEST_DSN` is configured, also run the repository's
 PG-marked dump/load and context gates against `simplebroker-pg` 3.8.0; absent
 that external service, report PG runtime verification as not run rather than
 inferring it from SQLite.
