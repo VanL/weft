@@ -352,7 +352,7 @@ class Manager(ServiceTask):
         self._idle_timeout: float = float(
             taskspec.metadata.get(
                 "idle_timeout",
-                self._config.get(
+                self._weft_config.get(
                     "WEFT_MANAGER_LIFETIME_TIMEOUT",
                     WEFT_MANAGER_LIFETIME_TIMEOUT,
                 ),
@@ -381,8 +381,10 @@ class Manager(ServiceTask):
         self._serve_log_last_emit_ns: dict[str, int] = {}
         self._serve_log_last_state: dict[str, str] = {}
         self._serve_log_runtime_handle_id = self._resolve_serve_log_runtime_handle_id()
-        self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
-        autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
+        self._autostart_enabled = bool(
+            self._weft_config.get("WEFT_AUTOSTART_TASKS", True)
+        )
+        autostart_dir = self._weft_config.get("WEFT_AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
         self._autostart_sources: set[str] = set()
         self._managed_service_state: dict[str, ManagedServiceState] = {}
@@ -392,11 +394,11 @@ class Manager(ServiceTask):
         self._autostart_last_scan_ns = 0
         self._autostart_scan_interval_ns = 1_000_000_000
         self._task_monitor_enabled = bool(
-            self._config.get("WEFT_TASK_MONITOR_ENABLED", True)
+            self._weft_config.get("WEFT_TASK_MONITOR_ENABLED", True)
         )
         self._task_monitor_restart_backoff_ns = int(
             float(
-                self._config.get(
+                self._weft_config.get(
                     "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
                     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
                 )
@@ -453,12 +455,12 @@ class Manager(ServiceTask):
     def _manager_log_enabled(self) -> bool:
         """Return whether foreground manager operational logging is enabled."""
 
-        return serve_log_level(self._config) != "off"
+        return serve_log_level(self._weft_config) != "off"
 
     def _manager_log_allows(self, required_level: str) -> bool:
         """Return whether a foreground manager operational-log event is allowed."""
 
-        return serve_log_allows(self._config, required_level)
+        return serve_log_allows(self._weft_config, required_level)
 
     def _resolve_serve_log_runtime_handle_id(self) -> str | None:
         """Return a stable runtime handle id for operational-log indexing."""
@@ -487,7 +489,7 @@ class Manager(ServiceTask):
             return
         try:
             record = build_serve_log_record(
-                config=self._config,
+                config=self._weft_config,
                 event=event,
                 component=component,
                 manager_tid=self.tid,
@@ -524,7 +526,7 @@ class Manager(ServiceTask):
         log_key = key or event
         now_ns = time.time_ns()
         interval_seconds = float(
-            self._config.get(
+            self._weft_config.get(
                 WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
                 WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
             )
@@ -1147,7 +1149,7 @@ class Manager(ServiceTask):
                 request.task_cls,
                 self._db_path,
                 request.child_spec,
-                config=self._config,
+                config=self._weft_config,
                 detach_stdio=request.detach_stdio,
             )
         except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-347] exception
@@ -2032,7 +2034,7 @@ class Manager(ServiceTask):
                 self._manager_registry_snapshot[self.tid] = projected
 
     def _manager_runtime_handle(self) -> RunnerHandle:
-        config = getattr(self, "_config", {})
+        config = getattr(self, "_weft_config", {})
         raw_handle = config.get(WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV)
         if isinstance(raw_handle, str) and raw_handle.strip():
             try:
@@ -5717,7 +5719,7 @@ class Manager(ServiceTask):
             return self._autostart_dir.parent
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
         if spec_context:
-            return Path(spec_context) / get_weft_directory_name(self._config)
+            return Path(spec_context) / get_weft_directory_name(self._weft_config)
         return None
 
     def _autostart_context_root(self) -> Path | None:

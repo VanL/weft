@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import weft.commands.init as init_cmd
+from simplebroker import ResolvedConfig
 from tests.conftest import run_cli
 from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
@@ -401,9 +403,10 @@ def test_cmd_init_prefers_project_postgres_target_over_env_target(
 
     captured: dict[str, object] = {}
 
-    def _fake_init(target, quiet=False):  # type: ignore[no-untyped-def]
+    def _fake_init(target, quiet=False, *, config=None):  # type: ignore[no-untyped-def]
         captured["target"] = target
         captured["quiet"] = quiet
+        captured["config"] = config
         return 0
 
     monkeypatch.setattr("weft.commands.init.sb_cmd_init", _fake_init)
@@ -415,6 +418,7 @@ def test_cmd_init_prefers_project_postgres_target_over_env_target(
     assert broker_target.backend_name == "postgres"
     assert broker_target.target == "postgresql://toml-user@toml-host/toml-db"
     assert broker_target.backend_options == {"schema": "toml_schema"}
+    assert isinstance(captured["config"], ResolvedConfig)
 
 
 def test_cmd_init_ignores_root_simplebroker_config(
@@ -439,9 +443,10 @@ def test_cmd_init_ignores_root_simplebroker_config(
 
     captured: dict[str, object] = {}
 
-    def _fake_init(target, quiet=False):  # type: ignore[no-untyped-def]
+    def _fake_init(target, quiet=False, *, config=None):  # type: ignore[no-untyped-def]
         captured["target"] = target
         captured["quiet"] = quiet
+        captured["config"] = config
         return 0
 
     monkeypatch.setattr("weft.commands.init.sb_cmd_init", _fake_init)
@@ -453,3 +458,35 @@ def test_cmd_init_ignores_root_simplebroker_config(
     assert broker_target.backend_name == "sqlite"
     assert broker_target.target_path == (project_root / ".weft" / "broker.db").resolve()
     assert broker_target.config_path is None
+    assert isinstance(captured["config"], ResolvedConfig)
+
+
+@pytest.mark.parametrize("ambient_cache_mb", ["17", "not-an-integer"])
+def test_cmd_init_passes_isolated_config_to_simplebroker(
+    ambient_cache_mb: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ambient SimpleBroker values must not reach the embedded init command."""
+
+    monkeypatch.setenv("BROKER_CACHE_MB", ambient_cache_mb)
+    real_cmd_init = init_cmd.sb_cmd_init
+    captured: dict[str, object] = {}
+
+    def recording_init(
+        target: Any,
+        quiet: bool,
+        *,
+        config: Any = None,
+    ) -> int:
+        captured["config"] = config
+        return real_cmd_init(target, quiet, config=config)
+
+    monkeypatch.setattr(init_cmd, "sb_cmd_init", recording_init)
+
+    result = cmd_init(tmp_path / "project")
+
+    assert isinstance(result, InitResult)
+    broker_config = captured["config"]
+    assert isinstance(broker_config, ResolvedConfig)
+    assert broker_config["BROKER_CACHE_MB"] == 10

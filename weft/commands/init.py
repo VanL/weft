@@ -15,6 +15,7 @@ from typing import Any
 from simplebroker.commands import cmd_init as sb_cmd_init
 from weft._constants import (
     WEFT_BROKER_PROJECT_CONFIG_FILENAME,
+    freeze_broker_config,
     load_config,
 )
 from weft._exceptions import CommandExecutionError
@@ -81,7 +82,13 @@ def cmd_init(
     try:
         _tighten_existing_project_broker_config(project_broker_config_path)
         broker_target = resolve_context_broker_target(root, config=config)
-        result = int(sb_cmd_init(broker_target, quiet=True))
+        result = int(
+            sb_cmd_init(
+                broker_target,
+                quiet=True,
+                config=freeze_broker_config(config),
+            )
+        )
     except Exception as exc:
         friendly_exc = normalize_backend_resolution_error(exc)
         raise CommandExecutionError(

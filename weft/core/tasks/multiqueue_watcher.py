@@ -166,7 +166,7 @@ class MultiQueueWatcher(BaseWatcher):
         config_dict: dict[str, Any] = (
             dict(config) if config is not None else load_config()
         )
-        self._config: dict[str, Any] = config_dict
+        self._weft_config: dict[str, Any] = config_dict
         broker_config = freeze_broker_config(config_dict)
 
         self._persistent = persistent
@@ -180,7 +180,7 @@ class MultiQueueWatcher(BaseWatcher):
         first_queue_name = next(iter(queue_configs.keys()))
         shared_target = _resolve_db_target(
             db,
-            resolve_context_broker_target(Path.cwd(), config=self._config),
+            resolve_context_broker_target(Path.cwd(), config=self._weft_config),
         )
         # Direct Queue ok here: MultiQueueWatcher is creating its owned primary
         # handle; see runtime-and-context-patterns.md section 2.
@@ -197,10 +197,6 @@ class MultiQueueWatcher(BaseWatcher):
             polling_strategy=polling_strategy,
             config=broker_config,
         )
-        # BaseWatcher stores its nominal broker marker in ``_config``. Weft's
-        # task classes own this attribute as their complete, picklable runtime
-        # config, so restore it and recreate the marker only at broker calls.
-        self._config = config_dict
         _detach_queue_stop_event(initial_queue)
 
         self._db_path = initial_queue.db_target
@@ -313,9 +309,9 @@ class MultiQueueWatcher(BaseWatcher):
 
     @property
     def _broker_config(self) -> ResolvedConfig:
-        """Recreate the nominal marker at each SimpleBroker ownership handoff."""
+        """Return the retained SimpleBroker watcher configuration snapshot."""
 
-        return freeze_broker_config(self._config)
+        return self._config
 
     # ------------------------------------------------------------------ #
     # Public API                                                         #
@@ -1053,26 +1049,17 @@ class MultiQueueWatcher(BaseWatcher):
         Spec: [CC-2.1], [SB-0.3]
         """
         if config.mode is QueueMode.READ:
-            return cast(
-                tuple[str, int] | None,
-                config.queue.read_one(with_timestamps=True),
-            )
+            return config.queue.read_one(with_timestamps=True)
         if config.mode is QueueMode.PEEK:
-            return cast(
-                tuple[str, int] | None,
-                config.queue.peek_one(with_timestamps=True),
-            )
+            return config.queue.peek_one(with_timestamps=True)
         if config.mode is QueueMode.RESERVE:
             if not config.reserved_queue_name:
                 raise RuntimeError(
                     f"Queue '{config.name}' configured for reserve mode missing reserved queue"
                 )
-            return cast(
-                tuple[str, int] | None,
-                config.queue.move_one(
-                    config.reserved_queue_name,
-                    with_timestamps=True,
-                ),
+            return config.queue.move_one(
+                config.reserved_queue_name,
+                with_timestamps=True,
             )
         raise ValueError(f"Unsupported queue mode: {config.mode}")
 

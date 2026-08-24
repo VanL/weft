@@ -528,7 +528,7 @@ class PipelineTask(BaseTask):
             self._db_path,
             taskspec=taskspec_payload,
             work_payload=None,
-            config=self._config,
+            config=self._weft_config,
             tid=taskspec_payload.get("tid"),
             seed_start_envelope=False,
             allow_internal_runtime=True,

@@ -238,7 +238,7 @@ def read_queue(
             )
             if item is None:
                 return []
-            body, timestamp = cast(tuple[str, int], item)
+            body, timestamp = item
             return [
                 QueueEntry(
                     queue=queue_name, message=str(body), timestamp=int(timestamp)
@@ -356,7 +356,7 @@ def peek_queue(
             )
             if item is None:
                 return []
-            body, timestamp = cast(tuple[str, int], item)
+            body, timestamp = item
             return [
                 QueueEntry(
                     queue=queue_name, message=str(body), timestamp=int(timestamp)

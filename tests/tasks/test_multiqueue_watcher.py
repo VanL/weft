@@ -13,6 +13,9 @@ from types import SimpleNamespace
 import pytest
 
 from simplebroker import (
+    ResolvedConfig,
+)
+from simplebroker import (
     create_activity_waiter_for_queues as real_create_activity_waiter,
 )
 from simplebroker.ext import PollingStrategy
@@ -89,6 +92,114 @@ class RaisingCloseWaiter(BlockingWaiter):
 
 def test_multi_queue_watcher_uses_base_retry_loop() -> None:
     assert "_run_with_retries" not in MultiQueueWatcher.__dict__
+
+
+def test_watcher_retains_broker_snapshot_separate_from_weft_policy(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The inherited watcher slot must remain an immutable broker snapshot."""
+
+    db_path, _make_queue = broker_env
+    config = load_config({"WEFT_CACHE_MB": 17})
+    watcher = MultiQueueWatcher(
+        queue_configs={"snapshot.queue": {"handler": lambda *_args: None}},
+        db=db_path,
+        config=config,
+    )
+
+    try:
+        assert isinstance(watcher._config, ResolvedConfig)
+        assert type(watcher._weft_config) is dict
+        assert watcher._config["BROKER_CACHE_MB"] == 17
+
+        watcher._weft_config["BROKER_CACHE_MB"] = 23
+        monkeypatch.setenv("BROKER_CACHE_MB", "29")
+
+        assert watcher._config["BROKER_CACHE_MB"] == 17
+        assert watcher._broker_config["BROKER_CACHE_MB"] == 17
+    finally:
+        watcher.stop(join=False)
+
+
+def test_error_handler_failure_is_terminal_after_sync_cleanup(broker_env) -> None:
+    """A sync run re-raises the error-handler failure with the handler cause."""
+
+    class HandlerFailure(Exception):
+        pass
+
+    class ErrorHandlerFailure(Exception):
+        pass
+
+    db_path, make_queue = broker_env
+    queue_name = "terminal.sync"
+    queue = make_queue(queue_name)
+    queue.write("first")
+    queue.write("second")
+    handled: list[str] = []
+
+    def handler(message: str, *_args: object) -> None:
+        handled.append(message)
+        raise HandlerFailure(message)
+
+    def error_handler(*_args: object) -> None:
+        raise ErrorHandlerFailure("error callback failed")
+
+    watcher = MultiQueueWatcher(
+        queue_configs={
+            queue_name: {"handler": handler, "error_handler": error_handler}
+        },
+        db=db_path,
+    )
+
+    with pytest.raises(ErrorHandlerFailure, match="error callback failed") as exc_info:
+        watcher.run_forever()
+
+    assert isinstance(exc_info.value.__cause__, HandlerFailure)
+    assert handled == ["first"]
+    assert queue.read() == "second"
+
+
+def test_error_handler_failure_reaches_background_excepthook(broker_env, monkeypatch) -> None:
+    """A background run exposes the terminal callback failure after cleanup."""
+
+    class HandlerFailure(Exception):
+        pass
+
+    class ErrorHandlerFailure(Exception):
+        pass
+
+    db_path, make_queue = broker_env
+    queue_name = "terminal.background"
+    queue = make_queue(queue_name)
+    queue.write("first")
+    queue.write("second")
+    handled: list[str] = []
+    thread_errors: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+
+    def handler(message: str, *_args: object) -> None:
+        handled.append(message)
+        raise HandlerFailure(message)
+
+    def error_handler(*_args: object) -> None:
+        raise ErrorHandlerFailure("background callback failed")
+
+    watcher = MultiQueueWatcher(
+        queue_configs={
+            queue_name: {"handler": handler, "error_handler": error_handler}
+        },
+        db=db_path,
+    )
+    thread = watcher.run_in_thread()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert len(thread_errors) == 1
+    assert isinstance(thread_errors[0].exc_value, ErrorHandlerFailure)
+    assert isinstance(thread_errors[0].exc_value.__cause__, HandlerFailure)
+    assert handled == ["first"]
+    assert queue.read() == "second"
 
 
 def test_processed_message_stops_without_probing_queue_again(

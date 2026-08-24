@@ -239,7 +239,7 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
         observer=observer,
         config=config,
     )
-    task._config["WORKER_SNAPSHOT_TEST_NESTED"] = {"values": []}
+    task._weft_config["WORKER_SNAPSHOT_TEST_NESTED"] = {"values": []}
     task.taskspec.metadata["worker_snapshot_test_nested"] = {"values": []}
     task.process_once()
     task.wait_for_activity(timeout=0.0)
@@ -310,11 +310,11 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
         )
         assert worker.taskspec.spec is task.taskspec.spec
         assert worker.taskspec.io is task.taskspec.io
-        assert worker._config is not task._config
-        assert worker._config == task._config
+        assert worker._weft_config is not task._weft_config
+        assert worker._weft_config == task._weft_config
         assert (
-            worker._config["WORKER_SNAPSHOT_TEST_NESTED"]
-            is not task._config["WORKER_SNAPSHOT_TEST_NESTED"]
+            worker._weft_config["WORKER_SNAPSHOT_TEST_NESTED"]
+            is not task._weft_config["WORKER_SNAPSHOT_TEST_NESTED"]
         )
         assert worker._monitor_config is not task._monitor_config
         assert worker._external_task_log_sink is not task._external_task_log_sink
@@ -589,7 +589,7 @@ def test_task_monitor_worker_close_attempts_all_resources_and_reports_failure(
     events: list[str] = []
     store = task_monitor_mod.open_monitor_store(
         worker._monitor_context(),
-        config=worker._config,
+        config=worker._weft_config,
     )
     store.ensure_schema()
     assert worker._external_task_log_sink is not None

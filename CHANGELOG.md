@@ -4,7 +4,7 @@
 
 ### Changed
 
-- SimpleBroker now requires 7.3.2, with the paired `simplebroker-pg` 3.8.0
+- SimpleBroker now requires 7.4.1, with the paired `simplebroker-pg` 3.9.1
   backend. System dumps use the bounded v1 watermark and system load restores
   that allocation floor. `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS` maps to
   SimpleBroker's load-skew limit. `httpx` is now direct because `llm 0.32`
@@ -29,9 +29,13 @@
   records above the dump header bound even when the record targets filtered
   runtime-only state. Weft now supplies defaults for the complete embedded
   SimpleBroker config schema, preventing valid ambient `BROKER_*` tuning from
-  leaking into unset `WEFT_*` settings. The 7.3.2 isolated resolver and
-  immutable marker also prevent invalid ambient broker settings from affecting
+  leaking into unset `WEFT_*` settings. The isolated resolver and immutable
+  marker also prevent invalid ambient broker settings from affecting
   Weft across lower-layer configuration handoffs.
+- SimpleBroker watcher snapshots now remain owned `ResolvedConfig` values while
+  Weft task policy uses a separate picklable mapping. `weft init` also passes
+  the isolated snapshot explicitly, and terminal watcher error-handler failures
+  remain observable after upstream cleanup.
 - Result-all consumption now reads each outbox once; task-monitor follow mode
   advances its high-water mark; JSONL monitor writes are atomic per record;
   control sweeps attempt every selected task; and CLI usage, timeout, Ctrl-C,

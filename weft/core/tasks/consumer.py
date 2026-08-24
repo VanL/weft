@@ -797,7 +797,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             persistent=self._task_is_persistent(),
             interactive=interactive,
             db_path=self._db_path if broker_access else None,
-            config=self._config if broker_access else None,
+            config=self._weft_config if broker_access else None,
         )
 
     def _begin_work_item(self, timestamp: int | None) -> bool:
@@ -1327,8 +1327,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
         if not entries:
             return
-        typed_entries = [cast(tuple[str, int], entry) for entry in entries]
-        for body, ts in typed_entries:
+        for body, ts in entries:
             if self._is_start_token(body):
                 try:
                     reserved_queue.delete(message_id=ts)
@@ -1359,8 +1358,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 continue
             if not entries:
                 continue
-            typed_entries = [cast(tuple[str, int], entry) for entry in entries]
-            for body, ts in typed_entries:
+            for body, ts in entries:
                 if self._is_stream_final_marker(body):
                     try:
                         queue.delete(message_id=ts)

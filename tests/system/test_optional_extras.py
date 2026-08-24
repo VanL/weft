@@ -72,19 +72,19 @@ def test_typed_package_markers_are_included_in_builds() -> None:
     )
 
 
-def test_simplebroker_floor_is_7_3_1() -> None:
-    """The root floor must include the bounded dump-watermark contract."""
+def test_simplebroker_floor_is_7_4_1() -> None:
+    """The root floor must include retained config and watcher contracts."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
     minimum = _minimum_dependency_version(
         root_pyproject["project"]["dependencies"],
         "simplebroker",
     )
 
-    assert minimum == "7.3.2"
+    assert minimum == "7.4.1"
 
 
 @pytest.mark.parametrize("extra", ["pg", "all", "dev"])
-def test_simplebroker_pg_floor_is_3_8_0(extra: str) -> None:
+def test_simplebroker_pg_floor_is_3_9_1(extra: str) -> None:
     """Every root extra carrying PostgreSQL must use backend API v7."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
 
@@ -93,7 +93,7 @@ def test_simplebroker_pg_floor_is_3_8_0(extra: str) -> None:
         "simplebroker-pg",
     )
 
-    assert minimum == "3.8.0"
+    assert minimum == "3.9.1"
 
 
 def test_httpx_is_direct_for_llm_runtime_import() -> None:

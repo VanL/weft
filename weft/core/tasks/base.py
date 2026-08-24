@@ -287,7 +287,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         queue_configs = self._build_queue_configs()
 
         config_dict = dict(config) if config is not None else load_config()
-        self._config = dict(config_dict)
+        self._weft_config = dict(config_dict)
         redaction_setting = config_dict.get("WEFT_REDACT_TASKSPEC_FIELDS", "")
         self._taskspec_redaction_paths: tuple[str, ...] = tuple(
             part.strip() for part in str(redaction_setting).split(",") if part.strip()
@@ -569,7 +569,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
 
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
-        config = getattr(self, "_config", None) or load_config()
+        config = getattr(self, "_weft_config", None) or load_config()
         ctx = build_context(
             spec_context=spec_context,
             config=config,
@@ -598,7 +598,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
         if spec_context:
             base = Path(spec_context).expanduser()
-            return base / get_weft_directory_name(self._config) / "outputs"
+            return base / get_weft_directory_name(self._weft_config) / "outputs"
         return Path(tempfile.gettempdir()) / "weft" / "outputs"
 
     def _spill_large_output(self, encoded: bytes) -> dict[str, Any]:

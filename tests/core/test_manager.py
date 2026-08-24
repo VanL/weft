@@ -1428,7 +1428,7 @@ def test_manager_resolves_implicit_spawn_from_committed_message_id(
         manager._db_path,
         taskspec=taskspec,
         work_payload=None,
-        config=manager._config,
+        config=manager._weft_config,
         inherited_weft_context=inherited_context,
     )
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
@@ -2769,8 +2769,8 @@ def test_manager_clears_dispatch_stall_timer_when_backlog_drains(
     now_ns = 2_000_000_000_000
     monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
     _prime_manager_next_wait_baseline(manager, now_ns)
-    manager._config[MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] = True
-    manager._config[WEFT_MANAGER_SERVE_LOG_LEVEL] = "info"
+    manager._weft_config[MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] = True
+    manager._weft_config[WEFT_MANAGER_SERVE_LOG_LEVEL] = "info"
     manager._last_public_dispatch_stall_log_ns = now_ns - int(
         (MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS + 1.0) * 1_000_000_000
     )

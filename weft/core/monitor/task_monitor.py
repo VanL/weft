@@ -757,7 +757,7 @@ class TaskMonitor(ServiceTask):
         self._serve_log_last_state: dict[str, str] = {}
         self._worker_lane_snapshot_only = False
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
-        self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._config)
+        self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._weft_config)
         self._register_task_monitor_service_workers()
         self._configure_external_task_log_sink()
         self.register_pong_extension_provider(self._task_monitor_pong_extension)
@@ -884,8 +884,10 @@ class TaskMonitor(ServiceTask):
             deepcopy(self.taskspec.metadata),
         )
         worker.taskspec = worker_taskspec
-        worker._config = deepcopy(self._config)
-        worker._monitor_config = TaskMonitorRuntimeConfig.from_config(worker._config)
+        worker._weft_config = deepcopy(self._weft_config)
+        worker._monitor_config = TaskMonitorRuntimeConfig.from_config(
+            worker._weft_config
+        )
         worker._monitor_store = None
         worker._handler = None
         worker._error_handler = None
@@ -1224,7 +1226,7 @@ class TaskMonitor(ServiceTask):
                 try:
                     store = open_monitor_store(
                         self._monitor_context(),
-                        config=self._config,
+                        config=self._weft_config,
                     )
                 except (OSError, RuntimeError, ValueError) as exc:
                     self._monitor_store = None
@@ -1273,12 +1275,12 @@ class TaskMonitor(ServiceTask):
         severity: str = "info",
         **fields: Any,
     ) -> None:
-        if not serve_log_allows(self._config, required_level):
+        if not serve_log_allows(self._weft_config, required_level):
             return
         manager_tid = self._manager_tid_for_log()
         try:
             record = build_serve_log_record(
-                config=self._config,
+                config=self._weft_config,
                 event=event,
                 component="task_monitor",
                 manager_tid=manager_tid,
@@ -1328,13 +1330,13 @@ class TaskMonitor(ServiceTask):
         force: bool = False,
         log_fields: Mapping[str, Any] | None = None,
     ) -> None:
-        if not serve_log_allows(self._config, required_level):
+        if not serve_log_allows(self._weft_config, required_level):
             return
         fields = dict(log_fields or {})
         log_key = key or event
         now_ns = time.time_ns()
         interval_seconds = float(
-            self._config.get(
+            self._weft_config.get(
                 WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
                 WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
             )
@@ -1363,7 +1365,10 @@ class TaskMonitor(ServiceTask):
         )
 
     def _emit_task_monitor_config_once(self) -> None:
-        if self._serve_log_config_emitted or serve_log_level(self._config) == "off":
+        if (
+            self._serve_log_config_emitted
+            or serve_log_level(self._weft_config) == "off"
+        ):
             return
         self._serve_log_config_emitted = True
         self._emit_task_monitor_log(
@@ -2273,7 +2278,9 @@ class TaskMonitor(ServiceTask):
             return self._monitor_store
         store: MonitorStore | None = None
         try:
-            store = open_monitor_store(self._monitor_context(), config=self._config)
+            store = open_monitor_store(
+                self._monitor_context(), config=self._weft_config
+            )
             store.ensure_schema()
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
@@ -3658,7 +3665,9 @@ class TaskMonitor(ServiceTask):
         """
 
         try:
-            store = open_monitor_store(self._monitor_context(), config=self._config)
+            store = open_monitor_store(
+                self._monitor_context(), config=self._weft_config
+            )
             self._monitor_store = store
             store.ensure_schema()
             if work.slice_kind == "terminal_control":

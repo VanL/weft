@@ -37,9 +37,11 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 7.3.2 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 3.8.0 or newer. These paired
-floors provide backend API v7 and the bounded dump-watermark contract.
+Weft requires SimpleBroker 7.4.1 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 3.9.1 or newer. These coordinated
+floors provide backend API v7, bounded dump watermarks, immutable
+invocation/handle configuration snapshots, typed queue result overloads, and
+the synchronized watcher lifecycle contract used by Weft.
 
 _Implementation mapping_: `weft/commands/queue.py` delegates to
 `simplebroker.commands`; `weft/context.py` injects the resolved broker target;
@@ -474,7 +476,8 @@ Related plan:
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `WeftContext.queue`, `WeftContext.broker`); `weft/_constants.py`
-(`freeze_broker_config`); `weft/commands/interactive.py`;
+(`freeze_broker_config`); `weft/commands/init.py`;
+`weft/commands/interactive.py`;
 `weft/core/manager.py`; `weft/core/pipelines.py`; `weft/core/queue_wait.py`;
 `weft/core/spawn_requests.py`; `weft/core/tasks/base.py`;
 `weft/core/tasks/multiqueue_watcher.py`; `weft/bootstrap.py` for
@@ -499,16 +502,20 @@ Current contract:
   the larger group of named storage/retry constants. Most of the latter are
   not directly relevant to Weft; their explicit defaults exist to isolate the
   embedded broker from standalone SimpleBroker tuning.
-- Weft resolves that complete mapping with SimpleBroker 7.3.2's public
-  `resolve_isolated_config()` and preserves its immutable `ResolvedConfig`
-  marker at each lower-layer ownership boundary. Queue, project discovery,
-  watcher, broker, and dump/load operations therefore never reread ambient
-  `BROKER_*`, including malformed values. Converting the marker to an ordinary
-  dictionary before a SimpleBroker handoff is forbidden because it restores
-  the ordinary environment-base `resolve_config()` behavior.
-- Long-lived task transport state retains the complete ordinary Weft config so
-  it remains picklable across the spawn boundary. The nominal marker is
-  recreated from that exact mapping only when control passes to SimpleBroker.
+- Weft resolves that complete mapping with SimpleBroker 7.4.1's public
+  `resolve_isolated_config()` and preserves or recreates the immutable
+  `ResolvedConfig` marker at every config-consuming lower-layer handoff. Weft
+  does not opt into opaque extra keys. A SimpleBroker handle or invocation that
+  accepts config retains that snapshot for its lower-layer lifetime and does
+  not reread ambient `BROKER_*`, including malformed values.
+- Weft watcher subclasses retain runtime policy in a distinct complete
+  picklable ordinary mapping while leaving BaseWatcher's inherited config slot
+  as its owned `ResolvedConfig`. Process transport uses only the ordinary
+  mapping and recreates the marker at the child SimpleBroker handoff.
+- SimpleBroker owns serialized watcher startup/stop cleanup and treats an
+  ordinary exception raised by an error handler as terminal after cleanup.
+  Weft does not swallow or replace that terminal callback failure and does not
+  duplicate the upstream watcher lifecycle.
 - CLI entry points honor `WEFT_ENV_FILE` before importing the full CLI, so env
   values loaded from that file participate in the ordinary `load_config()` and
   `build_context()` path. The env file fills missing process env values only;
@@ -606,6 +613,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md`](../plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md)
 - [`docs/plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md`](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
