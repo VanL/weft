@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from tests.fixtures.provider_cli_fixture import (
 )
 from weft.core.agents import register_builtin_agent_runtimes
 from weft.core.agents.provider_cli.registry import (
+    ProviderCLIInvocation,
     get_provider_cli_provider,
     resolve_provider_cli_executable,
 )
@@ -397,6 +399,33 @@ def test_provider_cli_runtime_rejects_opencode_without_run_support_at_first_exec
             ),
             {"task": "hello"},
             tid="123",
+        )
+
+
+def test_opencode_failure_preserves_structured_api_error_detail() -> None:
+    provider = get_provider_cli_provider("opencode")
+    detail = (
+        "Error from provider (Console): "
+        + ("upstream context " * 20)
+        + "Upstream request failed: "
+        "Endpoint is temporarily unavailable"
+    )
+    completed = subprocess.CompletedProcess(
+        args=["opencode", "run"],
+        returncode=1,
+        stdout=json.dumps(
+            {
+                "type": "error",
+                "error": {"name": "APIError", "data": {"message": detail}},
+            }
+        ),
+        stderr="",
+    )
+
+    with pytest.raises(RuntimeError, match="Endpoint is temporarily unavailable"):
+        provider.parse_result(
+            completed=completed,
+            invocation=ProviderCLIInvocation(command=("opencode", "run")),
         )
 
 

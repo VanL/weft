@@ -907,7 +907,9 @@ class OpencodeProvider(_BaseTextProvider):
                     "opencode CLI does not support 'run'; install a version with "
                     "non-interactive run support"
                 )
-            detail = _compact_process_detail(completed)
+            detail = _parse_opencode_error_output(completed.stdout or "")
+            if not detail:
+                detail = _compact_process_detail(completed)
             raise RuntimeError(f"{self.name} execution failed: {detail}")
         output_text = _parse_opencode_json_output(completed.stdout or "").strip()
         if not output_text:
@@ -1147,6 +1149,24 @@ def _parse_opencode_json_output(stdout: str) -> str:
         ):
             text_parts.append(text)
     return "".join(text_parts) if text_parts else stdout
+
+
+def _parse_opencode_error_output(stdout: str) -> str | None:
+    """Return OpenCode's structured API error without truncating its cause."""
+
+    for raw_line in stdout.splitlines():
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "error":
+            continue
+        error = event.get("error")
+        data = error.get("data") if isinstance(error, dict) else None
+        message = data.get("message") if isinstance(data, dict) else None
+        if isinstance(message, str) and message.strip():
+            return message.strip()[:1000]
+    return None
 
 
 def _compact_process_detail(completed: subprocess.CompletedProcess[str]) -> str:
