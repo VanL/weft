@@ -20,7 +20,9 @@ from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_r
 from weft._constants import (
     CONTROL_STOP,
     MANAGER_STARTUP_LOG_DIRNAME,
+    QUEUE_INTERNAL_RESERVED_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    QUEUE_RESERVED_SUFFIX,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
@@ -309,7 +311,7 @@ class WeftTestHarness:
         try:
             matching: list[str] = []
             for data, ts in iter_queue_json_entries(queue):
-                if data.get("tid") != tid:
+                if data.get("tid") != tid and data.get("child_tid") != tid:
                     continue
                 matching.append(f"    ts={ts}: {self._format_debug_payload(data)}")
         finally:
@@ -385,6 +387,15 @@ class WeftTestHarness:
             )
             or ["    <empty>"]
         )
+
+        for manager_tid in sorted(self._registered_manager_tids):
+            for suffix in (QUEUE_RESERVED_SUFFIX, QUEUE_INTERNAL_RESERVED_SUFFIX):
+                queue_name = f"T{manager_tid}.{suffix}"
+                lines.append(f"  {queue_name}_tail:")
+                lines.extend(
+                    self._peek_queue_lines(queue_name, persistent=False, limit=10)
+                    or ["    <empty>"]
+                )
 
         lines.append("  task_log_tail:")
         lines.extend(self._task_log_tail_lines(tid, limit=10) or ["    <empty>"])

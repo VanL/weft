@@ -1363,6 +1363,8 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
     try:
         harness.__enter__()
         tid = "1775630560739303424"
+        manager_tid = "1775630560447778816"
+        harness.register_manager_tid(manager_tid)
         mapping_queue = Queue(
             WEFT_TID_MAPPINGS_QUEUE,
             db_path=harness.context.broker_target,
@@ -1380,6 +1382,33 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
             )
         finally:
             mapping_queue.close()
+
+        log_queue = Queue(
+            WEFT_GLOBAL_LOG_QUEUE,
+            db_path=harness.context.broker_target,
+            persistent=False,
+            config=harness.context.broker_config,
+        )
+        reserved_queue = Queue(
+            f"T{manager_tid}.reserved",
+            db_path=harness.context.broker_target,
+            persistent=False,
+            config=harness.context.broker_config,
+        )
+        try:
+            log_queue.write(
+                json.dumps(
+                    {
+                        "event": "task_spawn_rejected",
+                        "child_tid": tid,
+                        "reason": "launch_worker_failed",
+                    }
+                )
+            )
+            reserved_queue.write(json.dumps({"taskspec": {"tid": tid}}))
+        finally:
+            log_queue.close()
+            reserved_queue.close()
 
         monkeypatch.setattr(harness, "_pid_alive", lambda pid: pid == 424242)
         monkeypatch.setattr(harness, "_should_skip_pid", lambda pid: False)
@@ -1402,6 +1431,9 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
         assert '"host_pids": [424242, 434343]' in message
         assert "  outbox_present=False" in message
         assert "  live_candidate_pids=[424242]" in message
+        assert f"  T{manager_tid}.reserved_tail:" in message
+        assert '"task_spawn_rejected"' in message
+        assert f'"child_tid": "{tid}"' in message
         assert "WeftTestHarness snapshot:" in message
     finally:
         os.chdir(repo_cwd)
