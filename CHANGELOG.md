@@ -7,8 +7,13 @@
 - SimpleBroker now requires 7.4.1, with the paired `simplebroker-pg` 3.9.1
   backend. System dumps use the bounded v1 watermark and system load restores
   that allocation floor. `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS` maps to
-  SimpleBroker's load-skew limit. `httpx` is now direct because `llm 0.32`
-  imports it without declaring it.
+  SimpleBroker's load-skew limit.
+- The built-in agent runtime now requires LLM 0.33, completing its OpenAI
+  Python 3 and `httpx2` migration. The temporary direct `httpx` workaround for
+  LLM 0.32 has been removed; Weft's adapter contract is unchanged.
+- Published development floors and uv-only transitive constraints now match
+  the dependency versions validated by the current lock. Indirect packages
+  remain transitive rather than becoming Weft runtime dependencies.
 - **Breaking (Python API):** task control sweeps now return structured
   `TaskControlResult` values with per-task failures, wait-deadline expiry raises
   `CommandTimeoutError`, and submitted `Task` handles retain the materialized

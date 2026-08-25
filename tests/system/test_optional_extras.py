@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,13 @@ def _dependency_entry(dependencies: list[str], package_name: str) -> str:
         if dependency.startswith(prefix):
             return dependency
     raise AssertionError(f"{package_name} dependency not found in {dependencies!r}")
+
+
+def _normalized_dependency_name(dependency: str) -> str:
+    match = re.match(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)", dependency)
+    if match is None:
+        raise AssertionError(f"Invalid dependency entry: {dependency!r}")
+    return re.sub(r"[-_.]+", "-", match.group(1)).lower()
 
 
 def test_django_channels_extras_are_explicit_opt_ins() -> None:
@@ -96,16 +104,56 @@ def test_simplebroker_pg_floor_is_3_9_1(extra: str) -> None:
     assert minimum == "3.9.1"
 
 
-def test_httpx_is_direct_for_llm_runtime_import() -> None:
-    """A clean environment must satisfy llm 0.32's undeclared httpx import."""
+def test_llm_floor_is_0_33() -> None:
+    """The root floor must include LLM's OpenAI 3 and httpx2 migration."""
 
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
     minimum = _minimum_dependency_version(
         root_pyproject["project"]["dependencies"],
-        "httpx",
+        "llm",
     )
 
-    assert minimum == "0.28"
+    assert minimum == "0.33"
+
+
+@pytest.mark.parametrize("package_name", ["httpx", "httpx2"])
+def test_llm_transport_dependencies_are_transitive(package_name: str) -> None:
+    """LLM 0.33 must own its HTTP transport dependencies."""
+
+    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
+
+    direct_names = {
+        _normalized_dependency_name(dependency)
+        for dependency in root_pyproject["project"]["dependencies"]
+    }
+
+    assert package_name not in direct_names
+
+
+def test_uv_constraints_are_not_direct_dependencies() -> None:
+    """Resolution constraints must not become published dependency ownership."""
+
+    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
+    uv_constraints = root_pyproject["tool"]["uv"].get(
+        "constraint-dependencies",
+        [],
+    )
+    constraint_names = {
+        _normalized_dependency_name(dependency) for dependency in uv_constraints
+    }
+
+    direct_dependencies = root_pyproject["project"]["dependencies"]
+    optional_dependencies = root_pyproject["project"]["optional-dependencies"]
+    direct_names = {
+        _normalized_dependency_name(dependency) for dependency in direct_dependencies
+    }
+    direct_names.update(
+        _normalized_dependency_name(dependency)
+        for dependencies in optional_dependencies.values()
+        for dependency in dependencies
+    )
+
+    assert constraint_names.isdisjoint(direct_names)
 
 
 def test_root_extras_do_not_undercut_local_extension_versions() -> None:

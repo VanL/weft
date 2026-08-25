@@ -160,7 +160,9 @@ def test_error_handler_failure_is_terminal_after_sync_cleanup(broker_env) -> Non
     assert queue.read() == "second"
 
 
-def test_error_handler_failure_reaches_background_excepthook(broker_env, monkeypatch) -> None:
+def test_error_handler_failure_reaches_background_excepthook(
+    broker_env, monkeypatch
+) -> None:
     """A background run exposes the terminal callback failure after cleanup."""
 
     class HandlerFailure(Exception):

@@ -27,8 +27,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "httpx>=0.28",
-    "llm>=0.32",
+    "llm>=0.33",
     "prompt-toolkit>=3.0.52",
     "psutil>=7.0.0",
     "pydantic>=2.0.0",
@@ -70,12 +69,12 @@ dev = [
     "weft-docker>=0.9.72",
     "weft-macos-sandbox>=0.6.1",
     "weft-microsandbox>=0.5.2; platform_system != 'Windows'",
-    "hypothesis>=6",
+    "hypothesis>=6.165.10",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-xdist>=3.0",
-    "mypy>=1.0",
-    "ruff>=0.12",
+    "mypy>=2.3.1",
+    "ruff>=0.16.4",
     "pytest-timeout>=2.4.0",
     "types-psutil>=5.9.5",
 ]
@@ -88,6 +87,18 @@ Homepage = "https://github.com/VanL/weft"
 Documentation = "https://github.com/VanL/weft#readme"
 Repository = "https://github.com/VanL/weft.git"
 Issues = "https://github.com/VanL/weft/issues"
+
+[tool.uv]
+constraint-dependencies = [
+    "charset-normalizer>=3.5.1",
+    "httpcore2>=2.12.0",
+    "httpx2>=2.12.0",
+    "idna>=3.19",
+    "pygments>=2.21.0",
+    "sqlite-utils>=4.2.1",
+    "sqlparse>=0.6.0",
+    "typing-inspection>=0.4.4",
+]
 
 [tool.uv.sources]
 weft-docker = { path = "./extensions/weft_docker", editable = true }

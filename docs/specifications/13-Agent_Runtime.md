@@ -877,6 +877,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-24-llm-0-33-compatibility-plan.md`](../plans/2026-08-24-llm-0-33-compatibility-plan.md)
 - [`docs/plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
