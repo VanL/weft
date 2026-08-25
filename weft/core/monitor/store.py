@@ -30,6 +30,7 @@ Spec references:
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -484,10 +485,34 @@ class _MonitorIndexSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class _MonitorIndexShape:
+    table: str
+    unique: bool
+    method: str
+    partial: bool
+    valid: bool
+    ready: bool
+    columns: tuple[str, ...]
+    comparison_semantics: tuple[tuple[str, str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _MonitorTableSpec:
     name: str
     columns: tuple[str, ...]
     primary_key: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _MonitorColumnInfo:
+    name: str
+    declared_type: str
+    data_type: str
+    max_length: int | None
+    nullable: bool
+    default: str | None
+    generated: bool
+    identity: bool
 
 
 _monitor_tables = _MonitorTableNames()
@@ -573,6 +598,193 @@ _task_message_columns: tuple[str, ...] = (
     "deleted_at_ns",
 )
 
+_monitor_text_columns = frozenset(
+    {
+        "key",
+        "value_json",
+        "context_key",
+        "tid",
+        "name",
+        "runner",
+        "parent_tid",
+        "role",
+        "status",
+        "terminal_event",
+        "terminal_status",
+        "taskspec_summary_json",
+        "state_json",
+        "lifecycle_json",
+        "resources_json",
+        "diagnostics_json",
+        "bookkeeping_json",
+        "suspect_reason",
+        "disposition_reason",
+        "queue_name",
+        "event",
+        "report_id",
+        "record_type",
+        "body_json",
+        "first_external_error",
+        "last_external_error",
+    }
+)
+
+_monitor_bigint_columns = frozenset(
+    {
+        "updated_at_ns",
+        "terminal_message_id",
+        "first_message_id",
+        "last_message_id",
+        "first_seen_at_ns",
+        "last_seen_at_ns",
+        "started_at_ns",
+        "completed_at_ns",
+        "summary_emitted_at_ns",
+        "raw_deleted_at_ns",
+        "suspect_at_ns",
+        "disposition_at_ns",
+        "task_control_deleted_at_ns",
+        "reserved_cleanup_checked_at_ns",
+        "orphan_raw_recovery_checked_at_ns",
+        "message_id",
+        "observed_at_ns",
+        "selected_for_delete_at_ns",
+        "deleted_at_ns",
+        "created_at_ns",
+        "last_attempt_at_ns",
+        "flushed_at_ns",
+    }
+)
+
+_monitor_integer_columns = frozenset(
+    {
+        "terminal_seen",
+        "return_code",
+        "reserved_probe_needed",
+        "attempt_count",
+    }
+)
+
+_monitor_nullable_columns = frozenset(
+    {
+        "name",
+        "runner",
+        "parent_tid",
+        "role",
+        "status",
+        "terminal_event",
+        "terminal_status",
+        "terminal_message_id",
+        "return_code",
+        "first_seen_at_ns",
+        "last_seen_at_ns",
+        "started_at_ns",
+        "completed_at_ns",
+        "summary_emitted_at_ns",
+        "raw_deleted_at_ns",
+        "suspect_reason",
+        "suspect_at_ns",
+        "disposition_reason",
+        "disposition_at_ns",
+        "task_control_deleted_at_ns",
+        "reserved_cleanup_checked_at_ns",
+        "orphan_raw_recovery_checked_at_ns",
+        "event",
+        "observed_at_ns",
+        "selected_for_delete_at_ns",
+        "deleted_at_ns",
+        "first_external_error",
+        "last_external_error",
+        "flushed_at_ns",
+    }
+)
+
+_monitor_required_column_names = frozenset(
+    _meta_columns + _task_columns + _task_message_columns + _deferred_write_columns
+)
+_monitor_typed_column_names = (
+    _monitor_text_columns | _monitor_bigint_columns | _monitor_integer_columns
+)
+if _monitor_typed_column_names != _monitor_required_column_names:
+    missing = sorted(_monitor_required_column_names - _monitor_typed_column_names)
+    extra = sorted(_monitor_typed_column_names - _monitor_required_column_names)
+    raise RuntimeError(
+        f"invalid Monitor column semantic registry: missing={missing}, extra={extra}"
+    )
+
+
+def _sqlite_type_affinity(declared_type: str) -> str:
+    """Return SQLite's documented affinity for a declared type token."""
+
+    normalized = declared_type.upper()
+    if "INT" in normalized:
+        return "integer"
+    if any(token in normalized for token in ("CHAR", "CLOB", "TEXT")):
+        return "text"
+    if not normalized or "BLOB" in normalized:
+        return "blob"
+    if any(token in normalized for token in ("REAL", "FLOA", "DOUB")):
+        return "real"
+    return "numeric"
+
+
+def _monitor_column_type_is_compatible(
+    column_name: str,
+    column_info: _MonitorColumnInfo,
+    *,
+    backend_name: str,
+) -> bool:
+    """Return whether one required column has backend-compatible storage."""
+
+    if backend_name == "sqlite":
+        if column_name in _monitor_text_columns:
+            return column_info.data_type == "text"
+        return column_info.data_type == "integer"
+    if column_name in _monitor_text_columns:
+        return column_info.data_type == "text" or (
+            column_info.data_type == "character varying"
+            and column_info.max_length is None
+        )
+    if column_name in _monitor_bigint_columns:
+        return column_info.data_type == "bigint"
+    return column_info.data_type in {"integer", "bigint"}
+
+
+_monitor_non_null_literal_default = re.compile(
+    r"""(?ix)
+    ^(?:
+        (?:e)?'(?:[^']|'')*'
+        | x'[0-9a-f]*'
+        | [+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?
+        | true
+        | false
+    )
+    (?:\s*::\s*[a-z_][a-z0-9_]*(?:\s+[a-z_][a-z0-9_]*)*(?:\[\])?)*
+    $
+    """
+)
+
+
+def _monitor_default_is_proven_non_null_constant(default: str | None) -> bool:
+    """Return whether a catalog default is a proven non-NULL SQL literal."""
+
+    if default is None:
+        return False
+    normalized = default.strip()
+    while normalized.startswith("(") and normalized.endswith(")"):
+        normalized = normalized[1:-1].strip()
+    return _monitor_non_null_literal_default.fullmatch(normalized) is not None
+
+
+def _monitor_extra_column_is_omittable(column_info: _MonitorColumnInfo) -> bool:
+    """Return whether named Monitor inserts may omit an extra column."""
+
+    return (
+        column_info.nullable
+        or column_info.identity
+        or _monitor_default_is_proven_non_null_constant(column_info.default)
+    )
+
 _monitor_table_specs: tuple[_MonitorTableSpec, ...] = (
     _MonitorTableSpec(
         name=_monitor_tables.meta,
@@ -596,7 +808,8 @@ _monitor_table_specs: tuple[_MonitorTableSpec, ...] = (
     ),
 )
 
-_monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
+# Schema 6 keeps creating all ten names for v0.9.95-v0.9.97 rollback.
+_monitor_schema6_index_specs: tuple[_MonitorIndexSpec, ...] = (
     _MonitorIndexSpec(
         name="idx_weft_monitor_collations_terminal",
         table=_monitor_tables.task_collations,
@@ -676,6 +889,24 @@ _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
     ),
 )
 
+# Current validation requires only indexes with a measured live query owner.
+_monitor_required_index_names = frozenset(
+    {
+        "idx_weft_monitor_collations_reserved_cleanup",
+        "idx_weft_monitor_collations_disposition_terminal",
+        "idx_weft_monitor_collations_control_cleanup",
+        "idx_weft_monitor_collations_orphan_recovery",
+        "idx_weft_monitor_collations_disposition_open",
+        "idx_weft_monitor_deferred_pending",
+    }
+)
+
+_monitor_required_index_specs = tuple(
+    spec
+    for spec in _monitor_schema6_index_specs
+    if spec.name in _monitor_required_index_names
+)
+
 
 def open_monitor_store(
     context: WeftContext,
@@ -733,7 +964,7 @@ class _MonitorTableAccess:
                         definition,
                     )
                 )
-        for spec in _monitor_index_specs:
+        for spec in _monitor_schema6_index_specs:
             self._session.run(
                 monitor_sql.create_index(spec.name, spec.table, spec.columns)
             )
@@ -753,18 +984,45 @@ class _MonitorTableAccess:
         return bool(rows and rows[0][0])
 
     def _table_columns(self, table: str) -> tuple[str, ...]:
+        return tuple(self._table_column_info(table))
+
+    def _table_column_info(self, table: str) -> dict[str, _MonitorColumnInfo]:
         if self._backend_name == "postgres":
             rows = self._session.run(
-                monitor_sql.postgres_table_columns(),
+                monitor_sql.postgres_table_column_info(),
                 (table,),
                 fetch=True,
             )
-            return tuple(str(row[0]) for row in rows)
+            return {
+                str(row[0]): _MonitorColumnInfo(
+                    name=str(row[0]),
+                    declared_type=str(row[2]),
+                    data_type=str(row[1]).lower(),
+                    max_length=(None if row[3] is None else int(row[3])),
+                    nullable=str(row[4]).upper() == "YES",
+                    default=(None if row[5] is None else str(row[5])),
+                    generated=str(row[6]).upper() != "NEVER",
+                    identity=str(row[7]).upper() == "YES",
+                )
+                for row in rows
+            }
         rows = self._session.run(
-            monitor_sql.sqlite_table_info(table),
+            monitor_sql.sqlite_table_xinfo(table),
             fetch=True,
         )
-        return tuple(str(row[1]) for row in sorted(rows, key=lambda row: int(row[0])))
+        return {
+            str(row[1]): _MonitorColumnInfo(
+                name=str(row[1]),
+                declared_type=str(row[2]),
+                data_type=_sqlite_type_affinity(str(row[2])),
+                max_length=None,
+                nullable=not bool(row[3]),
+                default=(None if row[4] is None else str(row[4])),
+                generated=len(row) > 6 and int(row[6]) in (2, 3),
+                identity=False,
+            )
+            for row in rows
+        }
 
     def _primary_key_columns(self, table: str) -> tuple[str, ...]:
         if self._backend_name == "postgres":
@@ -784,7 +1042,7 @@ class _MonitorTableAccess:
     def _index_shape(
         self,
         index_name: str,
-    ) -> tuple[str, bool, tuple[str, ...]] | None:
+    ) -> _MonitorIndexShape | None:
         if self._backend_name == "postgres":
             rows = tuple(
                 self._session.run(
@@ -795,10 +1053,17 @@ class _MonitorTableAccess:
             )
             if not rows:
                 return None
-            return (
-                str(rows[0][0]),
-                bool(rows[0][1]),
-                tuple(str(row[2]) for row in rows),
+            return _MonitorIndexShape(
+                table=str(rows[0][0]),
+                unique=bool(rows[0][1]),
+                method=str(rows[0][2]),
+                partial=bool(rows[0][3]),
+                valid=bool(rows[0][4]),
+                ready=bool(rows[0][5]),
+                columns=tuple(str(row[6]) for row in rows),
+                comparison_semantics=tuple(
+                    (str(row[6]), str(row[7]), str(row[8])) for row in rows
+                ),
             )
         owner_rows = list(
             self._session.run(
@@ -818,55 +1083,200 @@ class _MonitorTableAccess:
         if not matching:
             return None
         column_rows = self._session.run(
-            monitor_sql.sqlite_index_info(index_name),
+            monitor_sql.sqlite_index_xinfo(index_name),
             fetch=True,
         )
-        columns = tuple(
-            str(row[2]) for row in sorted(column_rows, key=lambda row: int(row[0]))
+        key_rows = tuple(
+            row
+            for row in sorted(column_rows, key=lambda row: int(row[0]))
+            if len(row) > 5 and bool(row[5])
         )
-        return table, bool(matching[0][2]), columns
+        partial = len(matching[0]) > 4 and bool(matching[0][4])
+        return _MonitorIndexShape(
+            table=table,
+            unique=bool(matching[0][2]),
+            method="btree",
+            partial=partial,
+            valid=True,
+            ready=True,
+            columns=tuple(str(row[2]) for row in key_rows),
+            comparison_semantics=tuple(
+                (str(row[2]), "", str(row[4])) for row in key_rows
+            ),
+        )
+
+    def _primary_key_index_name(self, table: str) -> str | None:
+        if self._backend_name == "postgres":
+            rows = list(
+                self._session.run(
+                    monitor_sql.postgres_primary_key_index_name(),
+                    (table,),
+                    fetch=True,
+                )
+            )
+            return None if not rows else str(rows[0][0])
+        rows = list(
+            self._session.run(
+                monitor_sql.sqlite_index_list(table),
+                fetch=True,
+            )
+        )
+        primary_names = [
+            str(row[1]) for row in rows if len(row) > 3 and str(row[3]) == "pk"
+        ]
+        return None if not primary_names else primary_names[0]
+
+    def _restrictive_unique_secondary_indexes(self) -> set[str]:
+        restrictive: set[str] = set()
+        unique_indexes_by_table: dict[str, set[str]] = {}
+        if self._backend_name == "postgres":
+            for table_spec in _monitor_table_specs:
+                rows = self._session.run(
+                    monitor_sql.postgres_unique_secondary_index_names(),
+                    (table_spec.name,),
+                    fetch=True,
+                )
+                unique_indexes_by_table[table_spec.name] = {
+                    str(row[0]) for row in rows
+                }
+        else:
+            for table_spec in _monitor_table_specs:
+                rows = self._session.run(
+                    monitor_sql.sqlite_index_list(table_spec.name),
+                    fetch=True,
+                )
+                unique_indexes_by_table[table_spec.name] = {
+                    str(row[1])
+                    for row in rows
+                    if bool(row[2]) and (len(row) < 4 or str(row[3]) != "pk")
+                }
+        specs_by_table = {spec.name: spec for spec in _monitor_table_specs}
+        for table_name, index_names in unique_indexes_by_table.items():
+            primary_key = specs_by_table[table_name].primary_key
+            primary_index_name = self._primary_key_index_name(table_name)
+            primary_shape = (
+                None
+                if primary_index_name is None
+                else self._index_shape(primary_index_name)
+            )
+            for index_name in index_names:
+                shape = self._index_shape(index_name)
+                if shape is None or primary_shape is None:
+                    restrictive.add(index_name)
+                    continue
+                duplicates_primary_key = (
+                    shape.table == table_name
+                    and shape.method == primary_shape.method
+                    and not shape.partial
+                    and shape.columns == primary_key
+                    and shape.comparison_semantics
+                    == primary_shape.comparison_semantics
+                )
+                if not duplicates_primary_key:
+                    restrictive.add(index_name)
+        return restrictive
 
     def verify_schema_structure(self) -> None:
-        """Fail unless the current Monitor tables and indexes are exact."""
+        """Fail unless current Monitor tables and required indexes are usable."""
 
         for table_spec in _monitor_table_specs:
-            if not self.table_exists(table_spec.name):
-                raise MonitorStoreUnavailable(
-                    f"missing required Monitor table {table_spec.name}"
-                )
-            actual_columns = self._table_columns(table_spec.name)
-            if actual_columns != table_spec.columns:
-                raise MonitorStoreUnavailable(
-                    f"invalid Monitor table columns for {table_spec.name}"
-                )
-            if self._primary_key_columns(table_spec.name) != table_spec.primary_key:
-                raise MonitorStoreUnavailable(
-                    f"invalid Monitor primary key for {table_spec.name}"
-                )
-        for index_spec in _monitor_index_specs:
+            self._verify_table_structure(table_spec)
+        for index_spec in _monitor_required_index_specs:
             shape = self._index_shape(index_spec.name)
             if shape is None:
                 raise MonitorStoreUnavailable(
                     f"missing required Monitor index {index_spec.name}"
                 )
-            table, unique, columns = shape
-            if table != index_spec.table or unique or columns != index_spec.columns:
+            if (
+                shape.table != index_spec.table
+                or shape.unique
+                or shape.method != "btree"
+                or shape.partial
+                or not shape.valid
+                or not shape.ready
+                or shape.columns != index_spec.columns
+            ):
                 raise MonitorStoreUnavailable(
                     f"invalid Monitor index {index_spec.name}"
                 )
-        query = (
-            monitor_sql.postgres_monitor_index_names()
-            if self._backend_name == "postgres"
-            else monitor_sql.sqlite_monitor_index_names()
-        )
-        actual_index_names = {
-            str(row[0])
-            for row in self._session.run(query, fetch=True)
-            if str(row[0]).startswith("idx_weft_monitor_")
-        }
-        required_index_names = {spec.name for spec in _monitor_index_specs}
-        if actual_index_names != required_index_names:
-            raise MonitorStoreUnavailable("invalid Monitor index inventory")
+        restrictive_unique_indexes = self._restrictive_unique_secondary_indexes()
+        if restrictive_unique_indexes:
+            raise MonitorStoreUnavailable(
+                "restrictive unique Monitor index "
+                f"{min(restrictive_unique_indexes)}"
+            )
+
+    def verify_v5_migration_inputs(self) -> None:
+        """Read-only verify data-bearing v5 tables before migration DDL."""
+
+        for table_spec in _monitor_table_specs[:3]:
+            self._verify_table_structure(table_spec)
+        deferred_spec = _monitor_table_specs[3]
+        if self.table_exists(deferred_spec.name):
+            self._verify_table_structure(deferred_spec)
+
+    def prepare_v5_migration(self) -> None:
+        """Create only v5-compatible optional objects needed by migration."""
+
+        deferred_spec = _monitor_table_specs[3]
+        if not self.table_exists(deferred_spec.name):
+            self._session.run(
+                monitor_sql.create_deferred_writes_table(deferred_spec.name)
+            )
+        for spec in _monitor_schema6_index_specs:
+            self._session.run(
+                monitor_sql.create_index(spec.name, spec.table, spec.columns)
+            )
+        self.drop_v5_obsolete_indexes()
+
+    def _verify_table_structure(self, table_spec: _MonitorTableSpec) -> None:
+        if not self.table_exists(table_spec.name):
+            raise MonitorStoreUnavailable(
+                f"missing required Monitor table {table_spec.name}"
+            )
+        actual_columns = self._table_column_info(table_spec.name)
+        missing_columns = set(table_spec.columns) - set(actual_columns)
+        if missing_columns:
+            raise MonitorStoreUnavailable(
+                f"invalid Monitor table columns for {table_spec.name}: "
+                f"missing {sorted(missing_columns)}"
+            )
+        for column_name in table_spec.columns:
+            column_info = actual_columns[column_name]
+            if not _monitor_column_type_is_compatible(
+                column_name,
+                column_info,
+                backend_name=self._backend_name,
+            ):
+                raise MonitorStoreUnavailable(
+                    f"invalid Monitor column type for {table_spec.name}."
+                    f"{column_name}: {column_info.declared_type}"
+                )
+            expected_nullable = column_name in _monitor_nullable_columns
+            sqlite_meta_key_exception = (
+                self._backend_name == "sqlite"
+                and table_spec.name == self._tables.meta
+                and column_name == "key"
+            )
+            if (
+                column_info.nullable != expected_nullable
+                and not sqlite_meta_key_exception
+            ):
+                raise MonitorStoreUnavailable(
+                    f"invalid Monitor column nullability for {table_spec.name}."
+                    f"{column_name}"
+                )
+        for column_name in set(actual_columns) - set(table_spec.columns):
+            column_info = actual_columns[column_name]
+            if not _monitor_extra_column_is_omittable(column_info):
+                raise MonitorStoreUnavailable(
+                    f"write-required extra Monitor column for {table_spec.name}."
+                    f"{column_name}"
+                )
+        if self._primary_key_columns(table_spec.name) != table_spec.primary_key:
+            raise MonitorStoreUnavailable(
+                f"invalid Monitor primary key for {table_spec.name}"
+            )
 
     def drop_v5_obsolete_indexes(self) -> None:
         """Drop the one v5-only child-tombstone index."""
@@ -2058,15 +2468,7 @@ class MonitorStore:
             access = self._access(session)
             if access.table_exists(WEFT_MONITOR_META_TABLE):
                 meta_spec = _monitor_table_specs[0]
-                actual_meta_columns = access._table_columns(meta_spec.name)
-                if actual_meta_columns != meta_spec.columns:
-                    raise MonitorStoreUnavailable(
-                        f"invalid Monitor table columns for {meta_spec.name}"
-                    )
-                if access._primary_key_columns(meta_spec.name) != meta_spec.primary_key:
-                    raise MonitorStoreUnavailable(
-                        f"invalid Monitor primary key for {meta_spec.name}"
-                    )
+                access._verify_table_structure(meta_spec)
                 version = self._read_schema_version(access)
             else:
                 version = None
@@ -2082,8 +2484,8 @@ class MonitorStore:
                     {"version": WEFT_MONITOR_SCHEMA_VERSION},
                 )
             elif version == 5:
-                access.ensure_schema()
-                access.drop_v5_obsolete_indexes()
+                access.verify_v5_migration_inputs()
+                access.prepare_v5_migration()
                 access.verify_schema_structure()
                 access.migrate_v5_to_v6(
                     raw_message_is_absent=self._raw_message_is_absent,

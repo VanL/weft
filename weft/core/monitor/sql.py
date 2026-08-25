@@ -163,6 +163,12 @@ def sqlite_table_info(table: str) -> str:
     return f"PRAGMA table_info({identifier(table)})"
 
 
+def sqlite_table_xinfo(table: str) -> str:
+    """Build a SQLite extended table-info pragma for schema validation."""
+
+    return f"PRAGMA table_xinfo({identifier(table)})"
+
+
 def sqlite_table_exists() -> str:
     """Build a SQLite table-existence query."""
 
@@ -189,20 +195,10 @@ def sqlite_index_list(table: str) -> str:
     return f"PRAGMA index_list({identifier(table)})"
 
 
-def sqlite_index_info(index_name: str) -> str:
-    """Build a SQLite index-column pragma."""
+def sqlite_index_xinfo(index_name: str) -> str:
+    """Build a SQLite extended index-column pragma."""
 
-    return f"PRAGMA index_info({identifier(index_name)})"
-
-
-def sqlite_monitor_index_names() -> str:
-    """Build a SQLite index inventory query."""
-
-    return """
-        SELECT name FROM sqlite_master
-        WHERE type = 'index'
-        ORDER BY name
-        """
+    return f"PRAGMA index_xinfo({identifier(index_name)})"
 
 
 def postgres_table_exists() -> str:
@@ -216,14 +212,20 @@ def postgres_table_exists() -> str:
         """
 
 
-def postgres_table_columns() -> str:
-    """Build a Postgres ordered table-column query."""
+def postgres_table_column_info() -> str:
+    """Build a Postgres semantic table-column query."""
 
     return """
-        SELECT column_name
+        SELECT column_name,
+               data_type,
+               udt_name,
+               character_maximum_length,
+               is_nullable,
+               column_default,
+               is_generated,
+               is_identity
         FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name = ?
-        ORDER BY ordinal_position
         """
 
 
@@ -249,13 +251,11 @@ def postgres_primary_key_columns() -> str:
         """
 
 
-def postgres_index_shape() -> str:
-    """Build a Postgres named-index owner, uniqueness, and column query."""
+def postgres_primary_key_index_name() -> str:
+    """Build a Postgres primary-key index-name query."""
 
     return """
-        SELECT table_definition.relname,
-               index_definition.indisunique,
-               attribute.attname
+        SELECT named_index.relname
         FROM pg_index AS index_definition
         JOIN pg_class AS named_index
           ON named_index.oid = index_definition.indexrelid
@@ -263,24 +263,67 @@ def postgres_index_shape() -> str:
           ON table_definition.oid = index_definition.indrelid
         JOIN pg_namespace AS namespace
           ON namespace.oid = table_definition.relnamespace
+        WHERE namespace.nspname = current_schema()
+          AND table_definition.relname = ?
+          AND index_definition.indisprimary
+        """
+
+
+def postgres_index_shape() -> str:
+    """Build a Postgres named-index semantic-shape query."""
+
+    return """
+        SELECT table_definition.relname,
+               index_definition.indisunique,
+               access_method.amname,
+               index_definition.indpred IS NOT NULL,
+               index_definition.indisvalid,
+               index_definition.indisready,
+               attribute.attname,
+               index_definition.indclass[
+                   key_column.ordinal_position::integer - 1
+               ]::text,
+               index_definition.indcollation[
+                   key_column.ordinal_position::integer - 1
+               ]::text
+        FROM pg_index AS index_definition
+        JOIN pg_class AS named_index
+          ON named_index.oid = index_definition.indexrelid
+        JOIN pg_am AS access_method
+          ON access_method.oid = named_index.relam
+        JOIN pg_class AS table_definition
+          ON table_definition.oid = index_definition.indrelid
+        JOIN pg_namespace AS namespace
+          ON namespace.oid = table_definition.relnamespace
         JOIN unnest(index_definition.indkey) WITH ORDINALITY
           AS key_column(attnum, ordinal_position) ON TRUE
-        JOIN pg_attribute AS attribute
+        LEFT JOIN pg_attribute AS attribute
           ON attribute.attrelid = table_definition.oid
          AND attribute.attnum = key_column.attnum
         WHERE namespace.nspname = current_schema()
           AND named_index.relname = ?
+          AND key_column.ordinal_position <= index_definition.indnkeyatts
         ORDER BY key_column.ordinal_position
         """
 
 
-def postgres_monitor_index_names() -> str:
-    """Build a Postgres current-schema index inventory query."""
+def postgres_unique_secondary_index_names() -> str:
+    """Build a Postgres query for non-primary unique indexes on one table."""
 
     return """
-        SELECT indexname FROM pg_indexes
-        WHERE schemaname = current_schema()
-        ORDER BY indexname
+        SELECT named_index.relname
+        FROM pg_index AS index_definition
+        JOIN pg_class AS named_index
+          ON named_index.oid = index_definition.indexrelid
+        JOIN pg_class AS table_definition
+          ON table_definition.oid = index_definition.indrelid
+        JOIN pg_namespace AS namespace
+          ON namespace.oid = table_definition.relnamespace
+        WHERE namespace.nspname = current_schema()
+          AND table_definition.relname = ?
+          AND index_definition.indisunique
+          AND NOT index_definition.indisprimary
+        ORDER BY named_index.relname
         """
 
 

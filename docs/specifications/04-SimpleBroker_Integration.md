@@ -219,7 +219,10 @@ traversed. External Monitor JSONL is projected at the final write or
 durable-deferred handoff boundary, and deterministic lifetime-report identity
 is computed before that projection.
 
-Schema 6 has this exact ordered table structure:
+Schema 6 requires the following named table columns and key structures. The
+displayed column order is descriptive, not a physical-layout contract. Monitor
+SQL names every selected and inserted column; physical column ordinal position
+must not affect schema acceptance, reads, writes, or migration.
 
 - `weft_monitor_meta`: `key`, `value_json`, `updated_at_ns`; primary key
   `key`.
@@ -243,6 +246,58 @@ Schema 6 has this exact ordered table structure:
   `last_external_error`, `attempt_count`, `last_attempt_at_ns`,
   `flushed_at_ns`; primary key `context_key, report_id`.
 
+Startup validates each required column by name and by backend-compatible
+storage family, capacity, and nullability. Equivalent backend type spellings
+are accepted. Raw DDL text, physical column position, default-expression
+spelling for proven literal defaults, and catalog row order are not schema
+contracts.
+
+The required semantic type groups are:
+
+- Text: meta `key`, `value_json`; collation `context_key`, `tid`, `name`,
+  `runner`, `parent_tid`, `role`, `status`, `terminal_event`,
+  `terminal_status`, `taskspec_summary_json`, `state_json`, `lifecycle_json`,
+  `resources_json`, `diagnostics_json`, `bookkeeping_json`, `suspect_reason`,
+  `disposition_reason`; message `context_key`, `tid`, `queue_name`, `event`,
+  `status`; deferred `context_key`, `report_id`, `record_type`, `body_json`,
+  `first_external_error`, `last_external_error`.
+- 64-bit integer: meta `updated_at_ns`; collation `terminal_message_id`,
+  `first_message_id`, `last_message_id`, `first_seen_at_ns`, `last_seen_at_ns`,
+  `started_at_ns`, `completed_at_ns`, `summary_emitted_at_ns`,
+  `raw_deleted_at_ns`, `suspect_at_ns`, `disposition_at_ns`,
+  `task_control_deleted_at_ns`, `reserved_cleanup_checked_at_ns`,
+  `orphan_raw_recovery_checked_at_ns`, `updated_at_ns`; message `message_id`,
+  `observed_at_ns`, `selected_for_delete_at_ns`, `deleted_at_ns`; deferred
+  `created_at_ns`, `updated_at_ns`, `last_attempt_at_ns`, `flushed_at_ns`.
+- Ordinary integer: collation `terminal_seen`, `return_code`,
+  `reserved_probe_needed`; deferred `attempt_count`.
+
+SQLite accepts TEXT affinity for the text group and INTEGER affinity for both
+integer groups. PostgreSQL accepts `text` or unbounded `character varying` for
+text, `bigint` for the 64-bit group, and `integer` or `bigint` for the ordinary
+integer group.
+
+The following columns must accept SQL `NULL` because current writers may pass
+`None`: collation `name`, `runner`, `parent_tid`, `role`, `status`,
+`terminal_event`, `terminal_status`, `terminal_message_id`, `return_code`,
+`first_seen_at_ns`, `last_seen_at_ns`, `started_at_ns`, `completed_at_ns`,
+`summary_emitted_at_ns`, `raw_deleted_at_ns`, `suspect_reason`, `suspect_at_ns`,
+`disposition_reason`, `disposition_at_ns`, `task_control_deleted_at_ns`,
+`reserved_cleanup_checked_at_ns`, and
+`orphan_raw_recovery_checked_at_ns`; message `event`, `status`,
+`observed_at_ns`, `selected_for_delete_at_ns`, and `deleted_at_ns`; deferred
+`first_external_error`, `last_external_error`, and `flushed_at_ns`. Every other
+required column must be `NOT NULL`. SQLite's canonical `key TEXT PRIMARY KEY`
+reports nullable through its catalog; primary-key verification owns that one
+backend-specific exception.
+
+An additional column is accepted only when named Monitor inserts may safely
+omit it because it is nullable, identity-backed, or has a catalog default that
+is provably a non-NULL SQL literal. An unproved default expression, a
+non-nullable generated column, and `NOT NULL DEFAULT NULL` are incompatible;
+each can still make a named insert fail. Operator-added triggers and `CHECK`
+constraints remain outside Weft's schema-repair responsibility.
+
 Schema 6 deliberately retains the two version-5 delete-state columns in the
 task-message table. `selected_for_delete_at_ns` has no current reader or writer;
 retaining it avoids adding a backend-specific column drop or table rebuild to
@@ -252,16 +307,8 @@ version-6 verification rejects any non-null value. Neither column authorizes a
 normal-cycle cleanup or compatibility lane. Physical removal requires a future
 explicit schema version; version-6 startup must not remove or repair them.
 
-The exact schema-6 secondary-index inventory whose names begin
-`idx_weft_monitor_` is:
+The required schema-6 secondary indexes are:
 
-- `idx_weft_monitor_collations_terminal` on `weft_monitor_task_collations`
-  (`context_key`, `terminal_seen`, `raw_deleted_at_ns`, `completed_at_ns`)
-- `idx_weft_monitor_collations_last_seen` on
-  `weft_monitor_task_collations` (`context_key`, `last_seen_at_ns`)
-- `idx_weft_monitor_collations_reserved_probe` on
-  `weft_monitor_task_collations` (`context_key`, `reserved_probe_needed`,
-  `last_seen_at_ns`)
 - `idx_weft_monitor_collations_reserved_cleanup` on
   `weft_monitor_task_collations` (`context_key`, `reserved_probe_needed`,
   `reserved_cleanup_checked_at_ns`, `last_message_id`)
@@ -278,10 +325,35 @@ The exact schema-6 secondary-index inventory whose names begin
 - `idx_weft_monitor_collations_disposition_open` on
   `weft_monitor_task_collations` (`context_key`, `disposition_at_ns`,
   `last_message_id`)
-- `idx_weft_monitor_messages_tid` on `weft_monitor_task_messages`
-  (`context_key`, `tid`)
 - `idx_weft_monitor_deferred_pending` on `weft_monitor_deferred_writes`
   (`context_key`, `flushed_at_ns`, `created_at_ns`)
+
+Each required name must resolve to the listed table, non-unique, non-partial
+B-tree form, and ordered columns. PostgreSQL also requires the index to be
+catalog-valid and ready. Additional non-unique indexes do not invalidate the
+schema solely by existing. A unique secondary index is incompatible when its
+key imposes a stronger constraint than the table primary key. A non-partial
+B-tree copy of the exact ordered primary-key columns is redundant and accepted
+only when its equality semantics also match the primary index: SQLite key
+collations, or PostgreSQL operator classes and collations, must be identical.
+
+Schema-6 creation also continues to create these four non-required legacy
+indexes so a newly created v6 store remains acceptable to v0.9.95-v0.9.97
+during rollback:
+
+- `idx_weft_monitor_collations_terminal` on `weft_monitor_task_collations`
+  (`context_key`, `terminal_seen`, `raw_deleted_at_ns`, `completed_at_ns`)
+- `idx_weft_monitor_collations_last_seen` on
+  `weft_monitor_task_collations` (`context_key`, `last_seen_at_ns`)
+- `idx_weft_monitor_collations_reserved_probe` on
+  `weft_monitor_task_collations` (`context_key`, `reserved_probe_needed`,
+  `last_seen_at_ns`)
+- `idx_weft_monitor_messages_tid` on `weft_monitor_task_messages`
+  (`context_key`, `tid`)
+
+Current validation does not require or reject those four legacy indexes.
+Stopping their creation or removing an existing copy requires a future schema
+version.
 
 These tables are Monitor-owned and versioned. They are derived from
 `weft.log.tasks`; they are not exposed through queue commands and do not
@@ -304,17 +376,25 @@ Monitor schema version 6 has one migration edge. A newly created store writes
 version 6. Existing Monitor tables with no version metadata may be initialized
 as version 6 only when every Monitor-owned table is empty; non-empty
 unversioned stores fail. Version 5 migrates transactionally to version 6.
-Version 6 verifies the exact required table, ordered-column, primary-key, and
-secondary-index structure before reading owned data. It performs no schema
-DDL and does not recreate a missing object. Only the new/empty path and the
-version 5 migration may create or alter Monitor schema objects. Versions below
-5 and above 6 fail as unsupported. There is no generic "lower than current"
-version advance.
+Version 6 verifies the required tables, semantic required-column definitions
+independent of physical order, ordered primary keys, and required named-index
+shapes before reading owned data. It performs no schema DDL and does not
+recreate a missing required object. Only the new/empty path and the version 5
+migration may create or alter Monitor schema objects. Versions below 5 and
+above 6 fail as unsupported. There is no generic "lower than current" version
+advance.
 
 The version 5 to 6 migration rewrites only the explicitly owned JSON
 message-ID fields. It also upgrades pending version 5 deferred external
 envelopes from external schema version 1 to 2 without traversing opaque
-payloads. Obsolete child-message tombstones are physically removed after
+payloads. Before any DDL, version-5 preflight accepts fresh and release-evolved
+physical column orders and read-only verifies the meta, collation, and child
+message tables, their named migration inputs, and their primary keys. An
+already-present deferred-write table is verified at the same point. Migration
+preparation may then create an absent deferred-write table, create missing
+schema-6 indexes, and drop the obsolete delete-state index. It must not create
+a missing data-bearing base table or add a missing base column. Obsolete
+child-message tombstones are physically removed after
 their parent is verified and a public exact-ID queue probe, including claimed
 rows, proves the corresponding raw row absent. A present raw row or probe
 error fails and rolls back the migration; the migration does not delete raw
@@ -613,6 +693,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-25-monitor-schema-semantic-validation-plan.md`](../plans/2026-08-25-monitor-schema-semantic-validation-plan.md)
 - [`docs/plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md`](../plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md)
 - [`docs/plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md`](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)

@@ -1182,3 +1182,16 @@ index is not a dated section and does not count toward the coalescing trigger.
   complete-only, and complete-plus-incomplete suffixes. For exception seams,
   test raw implementation failures and already-typed public failures. A guard
   is not closed until both sides of its predicate fire.
+
+## 2026-08-25 Migration Fixtures Must Come From Release Lineage
+
+- A Monitor v5-to-v6 migration test created the current v6 schema first and
+  changed only its version metadata to 5. It therefore could not reproduce the
+  physical order created by the real sequence of v5 `ALTER TABLE` additions.
+  Build migration fixtures from the prior release's base DDL and actual
+  migration steps. Assert the historical shape before invoking current code.
+- Every strict catalog assertion needs a named runtime or migration consumer.
+  Monitor SQL names its selected and inserted columns, so physical column order
+  was not a contract. Primary-key and query-backed index order still are.
+  Validate semantic dependencies; do not turn incidental DDL text or catalog
+  order into product behavior.

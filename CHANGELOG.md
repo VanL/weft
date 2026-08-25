@@ -29,6 +29,12 @@
 
 ### Fixed
 
+- Monitor startup now accepts the release-produced v5 physical column order
+  and reaches the transactional v5-to-v6 migration. Versions 0.9.95 through
+  0.9.97 aborted before migration when an evolved v5 collation table had the
+  same columns in a different ordinal order. Failed starts did not rewrite the
+  checkpoint or Monitor data. Schema validation now checks semantic column,
+  key, and query-backed index requirements instead of exact catalog order.
 - Invalid recognized SimpleBroker configuration now produces one safe Weft
   CLI diagnostic instead of an import-time traceback. System load rejects
   records above the dump header bound even when the record targets filtered
