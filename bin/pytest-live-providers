@@ -16,6 +16,7 @@ from weft.core.agents.provider_cli.registry import list_provider_cli_providers
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 LIVE_PROVIDER_TARGET_ENV: Final[str] = "WEFT_LIVE_PROVIDER_CLI_TARGETS"
 LIVE_PROVIDER_QWEN_MODEL_ENV: Final[str] = "WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN"
+LIVE_PROVIDER_OPENCODE_MODEL_ENV: Final[str] = "WEFT_LIVE_PROVIDER_CLI_MODEL_OPENCODE"
 RUN_LIVE_PROVIDER_ENV: Final[str] = "WEFT_RUN_LIVE_PROVIDER_CLI_TESTS"
 RUN_LIVE_PROVIDER_MCP_ENV: Final[str] = "WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS"
 OPENROUTER_API_KEY_ENV: Final[str] = "OPENROUTER_API_KEY"
@@ -24,6 +25,7 @@ OPENAI_API_KEY_ENV: Final[str] = "OPENAI_API_KEY"
 OPENAI_BASE_URL_ENV: Final[str] = "OPENAI_BASE_URL"
 OPENROUTER_BASE_URL: Final[str] = "https://openrouter.ai/api/v1"
 OPENROUTER_SMOKE_MODEL: Final[str] = "poolside/laguna-s-2.1:free"
+OPENCODE_OPENROUTER_SMOKE_MODEL: Final[str] = f"openrouter/{OPENROUTER_SMOKE_MODEL}"
 
 
 def build_pytest_command(provider_names: Sequence[str]) -> tuple[str, ...]:
@@ -135,6 +137,11 @@ def build_provider_env(
         env[OPENAI_API_KEY_ENV] = openrouter_api_key
         env[OPENAI_BASE_URL_ENV] = OPENROUTER_BASE_URL
         env.setdefault(LIVE_PROVIDER_QWEN_MODEL_ENV, OPENROUTER_SMOKE_MODEL)
+    if provider_name == "opencode" and openrouter_api_key:
+        env.setdefault(
+            LIVE_PROVIDER_OPENCODE_MODEL_ENV,
+            OPENCODE_OPENROUTER_SMOKE_MODEL,
+        )
 
     return env
 

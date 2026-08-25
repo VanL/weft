@@ -225,6 +225,33 @@ def test_build_provider_env_preserves_explicit_qwen_authentication() -> None:
     assert qwen_env["WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN"] == "operator/model"
 
 
+def test_build_provider_env_pins_opencode_openrouter_canary() -> None:
+    """OpenCode should not rely on its unstable implicit Console endpoint."""
+
+    live_providers = _load_live_provider_module()
+    opencode_env = live_providers.build_provider_env(
+        "opencode",
+        base_env={"OPENROUTER_API_KEY": "openrouter-key"},
+    )
+
+    assert opencode_env["WEFT_LIVE_PROVIDER_CLI_MODEL_OPENCODE"] == (
+        "openrouter/poolside/laguna-s-2.1:free"
+    )
+
+
+def test_build_provider_env_preserves_explicit_opencode_model() -> None:
+    live_providers = _load_live_provider_module()
+    opencode_env = live_providers.build_provider_env(
+        "opencode",
+        base_env={
+            "OPENROUTER_API_KEY": "openrouter-key",
+            "WEFT_LIVE_PROVIDER_CLI_MODEL_OPENCODE": "operator/model",
+        },
+    )
+
+    assert opencode_env["WEFT_LIVE_PROVIDER_CLI_MODEL_OPENCODE"] == "operator/model"
+
+
 def test_main_runs_each_provider_in_its_own_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
