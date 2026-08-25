@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
+from simplebroker import ResolvedConfig, resolve_isolated_config
 from simplebroker.ext import get_backend_plugin
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 PROJECT_CONFIG_FILENAME = "broker.toml"
 POSTGRES_TEST_BACKEND = "postgres"
 _PREPARED_POSTGRES_ROOTS: set[tuple[str, str, str]] = set()
+_TEST_BROKER_CONFIG: ResolvedConfig = resolve_isolated_config({})
+"""Ambient-free defaults for test-only backend provisioning and cleanup."""
 
 
 def active_test_backend(env: Mapping[str, str] | None = None) -> str:
@@ -185,6 +188,7 @@ def prepare_project_root(
     get_backend_plugin(POSTGRES_TEST_BACKEND).initialize_target(
         dsn,
         backend_options={"schema": schema},
+        config=_TEST_BROKER_CONFIG,
     )
     _PREPARED_POSTGRES_ROOTS.add(cache_key)
     return resolved_root
@@ -212,7 +216,11 @@ def cleanup_prepared_roots(
         if schema is None or schema in cleaned_schemas:
             continue
         try:
-            plugin.cleanup_target(dsn, backend_options={"schema": schema})
+            plugin.cleanup_target(
+                dsn,
+                backend_options={"schema": schema},
+                config=_TEST_BROKER_CONFIG,
+            )
         except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-314] exception
             logger.warning(
                 "Failed to clean Postgres test schema",
@@ -251,6 +259,7 @@ def cleanup_postgres_schema_for_root(
         plugin.cleanup_target(
             dsn,
             backend_options={"schema": schema},
+            config=_TEST_BROKER_CONFIG,
         )
     except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-314] exception
         logger.warning(
