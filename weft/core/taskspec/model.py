@@ -56,6 +56,7 @@ from weft.core.task_lifecycle import (
     valid_task_status_targets,
     validate_task_status_transition,
 )
+from weft.helpers.message_ids import normalize_exact_message_id
 
 from .parameterization import validate_parameterization_adapter_ref
 from .run_input import (
@@ -1341,45 +1342,14 @@ class TaskSpec(BaseModel):
     @field_validator("tid")
     @classmethod
     def validate_tid(cls, v: str | None, info: ValidationInfo) -> str | None:
-        """Validate TID is a {TASKSPEC_TID_LENGTH}-digit SimpleBroker timestamp.
-
-        Validates:
-        1. Exactly 19 digits
-        2. Represents a valid nanosecond timestamp
-        3. Within reasonable bounds (not too far in future/past)
-        """
+        """Validate TID as a canonical SimpleBroker exact message ID."""
         if v is None or v == "":
             if info.context and info.context.get("template"):
                 return v
             raise ValueError("tid is required for resolved TaskSpec")
 
-        if not v.isdigit() or len(v) != TASKSPEC_TID_LENGTH:
-            raise ValueError(f"tid must be exactly {TASKSPEC_TID_LENGTH} digits")
-
-        # Convert to integer for timestamp validation
-        try:
-            tid_int = int(v)
-        except ValueError as e:
-            raise ValueError("tid must be a valid integer") from e
-
-        # Validate timestamp is within reasonable bounds.
-        # SimpleBroker uses a hybrid timestamp format compatible with time.time_ns().
-        current_ns = time.time_ns()
-
-        # Allow timestamps from 2020 onwards (reasonable lower bound)
-        min_timestamp_ns = (
-            1577836800_000_000_000  # 2020-01-01 00:00:00 UTC in nanoseconds
-        )
-
-        # Allow timestamps up to 1 year in the future (reasonable upper bound)
-        max_timestamp_ns = current_ns + (365 * 24 * 60 * 60 * 1_000_000_000)
-
-        if tid_int < min_timestamp_ns:
-            raise ValueError(f"tid timestamp too old (before 2020): {v}")
-
-        if tid_int > max_timestamp_ns:
-            raise ValueError(f"tid timestamp too far in future: {v}")
-
+        if normalize_exact_message_id(v) == 0:
+            raise ValueError("tid must be a nonzero SimpleBroker message ID")
         return v
 
     @model_validator(mode="after")

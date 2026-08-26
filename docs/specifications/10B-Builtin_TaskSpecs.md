@@ -123,8 +123,8 @@ Purpose:
 - probe the delegated provider CLIs registered in
   `weft.core.agents.provider_cli.registry.list_provider_cli_providers()`
 - write missing provider executable defaults into `.weft/agents.json`
-- report what was found in ordinary task output, including `opencode` run
-  support when relevant
+- report what was found in ordinary task output, including the mechanics of the
+  explicit `opencode run --help` diagnostic when relevant
 
 What it does:
 
@@ -135,8 +135,9 @@ What it does:
 - preserves existing explicit `.weft/agents.json` entries
 - fills only missing provider executable entries
 - reports probe results per provider, including version output when available
-- reports `opencode` non-interactive `run` support separately from version
-  probing
+- reports whether the explicit `opencode run --help` diagnostic was attempted,
+  timed out, and its exit status, without inferring semantic command support
+  from help prose
 
 What it does not do:
 
@@ -182,7 +183,9 @@ Each provider report currently includes:
 - settings path, when available
 - probe status (`available`, `not_found`, or `probe_failed`)
 - version output or probe error
-- for `opencode`, explicit `run_support` status and error when unsupported
+- for `opencode`, a `run_help` object with `attempted`, `timed_out`,
+  `returncode`, and compact `detail` fields. This describes probe mechanics
+  only and makes no semantic support claim
 
 _Implementation mapping_: builtin TaskSpec asset:
 `weft/builtins/tasks/probe-agents.json`. Runtime function target:
@@ -381,6 +384,7 @@ resolution: `weft/core/imports.py`.
 
 ## Related Plans
 
+- [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
 - [`docs/plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md`](../plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md)
 - [`docs/plans/2026-04-14-system-builtins-command-plan.md`](../plans/2026-04-14-system-builtins-command-plan.md)

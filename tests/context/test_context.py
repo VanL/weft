@@ -563,11 +563,11 @@ def test_project_config_rejects_unreadable_existing_file_without_modifying_it(
     assert ctx.config_path.read_bytes() == original
 
 
-def test_build_context_reports_weft_pg_install_hint_for_missing_plugin(
+def test_build_context_preserves_backend_install_error_for_missing_plugin(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Postgres backend selection should point users at the Weft extra."""
+    """Postgres backend selection should preserve public backend guidance."""
 
     def _raise_missing_plugin(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError(
@@ -576,8 +576,12 @@ def test_build_context_reports_weft_pg_install_hint_for_missing_plugin(
 
     monkeypatch.setattr("weft.context.target_for_directory", _raise_missing_plugin)
 
-    with pytest.raises(RuntimeError, match=r"uv add 'weft\[pg\]'"):
+    with pytest.raises(RuntimeError) as exc_info:
         build_context(spec_context=tmp_path)
+
+    assert "postgres" in str(exc_info.value)
+    assert "simplebroker-pg" in str(exc_info.value)
+    assert "weft[pg]" not in str(exc_info.value)
 
 
 def test_build_context_uses_weft_scoped_project_sqlite_target_when_config_exists(

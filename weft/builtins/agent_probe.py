@@ -14,7 +14,7 @@ from typing import Any
 
 from weft.context import build_context
 from weft.core.agents.provider_cli.probes import (
-    ensure_opencode_run_support,
+    probe_opencode_run_help,
     probe_provider_cli_version,
 )
 from weft.core.agents.provider_cli.registry import (
@@ -110,6 +110,13 @@ def _probe_provider(
         report["probe_error"] = (
             f"Unable to locate executable '{candidate}' for provider '{provider.name}'"
         )
+        if provider.name == "opencode":
+            report["run_help"] = {
+                "attempted": False,
+                "timed_out": False,
+                "returncode": None,
+                "detail": "executable not found",
+            }
         return report
 
     if configured_executable is None and persist_settings:
@@ -142,12 +149,7 @@ def _probe_provider(
         report["probe_error"] = str(exc)
 
     if provider.name == "opencode":
-        try:
-            ensure_opencode_run_support(resolved)
-            report["run_support"] = "supported"
-        except RuntimeError as exc:
-            report["run_support"] = "unsupported"
-            report["run_support_error"] = str(exc)
+        report["run_help"] = probe_opencode_run_help(resolved)
 
     return report
 

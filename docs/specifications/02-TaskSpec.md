@@ -212,7 +212,13 @@ schema validity.
   multiple public outputs, the task writes multiple outbox messages in order.
 
 **TID format**
-- TIDs are SimpleBroker 64-bit hybrid timestamps (microseconds + logical counter). Treat them as opaque, monotonic identifiers that may appear as 19-digit integers in decimal form.
+- A resolved TaskSpec TID is the canonical 19-character ASCII decimal form of a
+  SimpleBroker exact message ID. Validation reuses the shared [SB-0.2] exact-ID
+  normalizer and enforces the nonzero SimpleBroker message-ID storage range.
+  Weft adds no
+  local-wall-clock lower or future-plausibility bound. Allocation, insertion,
+  import high-water, and skew policy belong to the broker operation that writes
+  the ID, not TaskSpec deserialization.
 
 Note: The field is named `keyword_args` (not `kwargs`) due to a technical
 constraint in the model layer.
@@ -274,7 +280,10 @@ _Implementation mapping_:
 - **Agent runtime**: `weft/ext.py` (agent adapter wiring), `weft/core/taskspec/model.py` (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`).
 
 _Per-field implementation status_:
-- `tid`: Implemented. `TaskSpec.validate_tid()` — 19-digit validation, timestamp bounds.
+- `tid`: Implemented. `TaskSpec.validate_tid()` delegates canonical exact-ID
+  and range validation to
+  `weft.helpers.message_ids.normalize_exact_message_id()` and rejects the
+  reserved zero value; templates may omit it and resolved TaskSpecs require it.
 - `version`: Implemented. `TaskSpec.version` field with regex pattern.
 - `name`, `description`: Implemented.
 - `spec.type`: Implemented. `SpecSection.type` — Literal["function", "command", "agent"].
@@ -623,6 +632,7 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 
 ## Related Plans
 
+- [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)

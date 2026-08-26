@@ -16,12 +16,12 @@ pytestmark = [pytest.mark.shared]
 
 
 @pytest.mark.parametrize(
-    ("payload", "message"),
+    ("payload", "message_fragments"),
     [
-        ({"spec": []}, "spec must be an object"),
+        ({"spec": []}, ("spec", "object")),
         (
             {"spec": {"type": "command", "runner": {"name": 1}}},
-            "spec.runner.name must be a string",
+            ("spec.runner.name", "string"),
         ),
     ],
 )
@@ -35,12 +35,13 @@ pytestmark = [pytest.mark.shared]
 def test_runner_payload_shape_errors_are_value_errors(
     validator: Callable[[Mapping[str, Any]], object],
     payload: dict[str, object],
-    message: str,
+    message_fragments: tuple[str, ...],
 ) -> None:
     with pytest.raises(ValueError) as exc_info:
         validator(payload)
     assert type(exc_info.value) is ValueError
-    assert str(exc_info.value) == message
+    for fragment in message_fragments:
+        assert fragment in str(exc_info.value)
 
 
 def test_runner_environment_mapping_type_error_is_normalized_to_value_error() -> None:
@@ -55,4 +56,5 @@ def test_runner_environment_mapping_type_error_is_normalized_to_value_error() ->
     with pytest.raises(ValueError) as exc_info:
         materialize_runner_environment_from_taskspec(payload)
     assert type(exc_info.value) is ValueError
-    assert str(exc_info.value) == "spec.env must be a mapping of strings to strings"
+    assert "spec.env" in str(exc_info.value)
+    assert "mapping of strings" in str(exc_info.value)

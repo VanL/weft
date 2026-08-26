@@ -7,7 +7,6 @@ Spec references:
 from __future__ import annotations
 
 import subprocess
-from functools import cache
 
 from weft._constants import (
     PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS,
@@ -39,18 +38,8 @@ def probe_provider_cli_version(executable: str, *, provider_name: str) -> str:
     return (completed.stdout or completed.stderr or "").strip()
 
 
-def ensure_opencode_run_support(executable: str) -> None:
-    """Raise when the OpenCode CLI lacks non-interactive `run` support."""
-    if _cached_opencode_run_support(executable):
-        return
-    raise RuntimeError(
-        "opencode CLI does not support 'run'; install a version with "
-        "non-interactive run support"
-    )
-
-
-@cache
-def _cached_opencode_run_support(executable: str) -> bool:
+def probe_opencode_run_help(executable: str) -> dict[str, object]:
+    """Return process facts for an explicit OpenCode help diagnostic."""
     try:
         probe = subprocess.run(
             [executable, "run", "--help"],
@@ -61,13 +50,26 @@ def _cached_opencode_run_support(executable: str) -> bool:
             timeout=PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    combined_output = f"{probe.stdout or ''}\n{probe.stderr or ''}".lower()
-    return probe.returncode == 0 and (
-        "opencode run [message" in combined_output
-        or "run opencode with a message" in combined_output
-    )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "attempted": True,
+            "timed_out": True,
+            "returncode": None,
+            "detail": f"timed out after {exc.timeout} seconds",
+        }
+    except OSError as exc:
+        return {
+            "attempted": True,
+            "timed_out": False,
+            "returncode": None,
+            "detail": f"execution failed: {exc}",
+        }
+    return {
+        "attempted": True,
+        "timed_out": False,
+        "returncode": probe.returncode,
+        "detail": _compact_process_detail(probe),
+    }
 
 
 def _compact_process_detail(completed: subprocess.CompletedProcess[str]) -> str:
@@ -82,6 +84,6 @@ def _compact_process_detail(completed: subprocess.CompletedProcess[str]) -> str:
 
 
 __all__ = [
-    "ensure_opencode_run_support",
+    "probe_opencode_run_help",
     "probe_provider_cli_version",
 ]

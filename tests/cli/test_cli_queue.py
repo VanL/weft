@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 from tests.conftest import run_cli
 from tests.tasks.test_task_execution import make_function_taskspec
+from weft import commands
 from weft.cli.app import app
 from weft.context import build_context
 from weft.core.tasks import Consumer
@@ -564,8 +565,30 @@ def test_queue_invalid_message_id_returns_input_error(workdir):
 
     assert rc == 2
     assert out == ""
-    payload = json.loads(err)
-    assert payload["error"] == "INVALID_MESSAGE_ID"
+    assert json.loads(err) == {
+        "error": "INVALID_MESSAGE_ID",
+        "message": "invalid message ID: expected exactly 19 digits within range",
+        "retryable": False,
+    }
+
+
+def test_queue_json_selector_ignores_unrelated_usage_error_prose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_peek(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise commands.CommandUsageError("unrelated message ID guidance")
+
+    monkeypatch.setattr("weft.cli.app.commands.cmd_queue_peek", fail_peek)
+
+    result = CliRunner().invoke(
+        app,
+        ["queue", "peek", "any.queue", "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr == "unrelated message ID guidance\n"
 
 
 def test_queue_delete_rejects_all_with_message_and_preserves_queues(workdir):

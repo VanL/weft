@@ -362,7 +362,8 @@ def test_pipeline_compiler_rejects_stage_without_mapping_spec(tmp_path: Path) ->
             task_loader=lambda _name: {"name": "bad", "spec": []},
         )
     assert type(exc_info.value) is ValueError
-    assert str(exc_info.value) == "stage 'bad' is missing a valid spec section"
+    assert "stage 'bad'" in str(exc_info.value)
+    assert "spec section" in str(exc_info.value)
 
 
 def test_pipeline_compiler_rejects_nested_pipeline_stage_task(tmp_path: Path) -> None:

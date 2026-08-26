@@ -383,14 +383,14 @@ def test_provider_cli_runtime_records_advisory_health_without_gating_execution(
     assert "fixture exec failed" in failed_codex_payload["last_failure"]["detail"]
 
 
-def test_provider_cli_runtime_rejects_opencode_without_run_support_at_first_execution(
+def test_provider_cli_runtime_reports_real_opencode_invocation_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PROVIDER_CLI_FIXTURE_OPENCODE_NO_RUN", "1")
     executable = str(write_provider_cli_wrapper(tmp_path, "opencode"))
 
-    with pytest.raises(RuntimeError, match="does not support 'run'"):
+    with pytest.raises(RuntimeError) as exc_info:
         execute_agent_target(
             make_agent_section(
                 executable=executable,
@@ -400,6 +400,9 @@ def test_provider_cli_runtime_rejects_opencode_without_run_support_at_first_exec
             {"task": "hello"},
             tid="123",
         )
+
+    assert "opencode execution failed" in str(exc_info.value)
+    assert "unsupported opencode command" in str(exc_info.value)
 
 
 def test_opencode_failure_preserves_structured_api_error_detail() -> None:

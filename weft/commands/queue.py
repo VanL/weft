@@ -50,6 +50,10 @@ from weft.helpers import (
 from weft.helpers.message_ids import normalize_exact_message_id
 
 
+class _InvalidMessageIDUsageError(CommandUsageError):
+    """Internal selector for the queue JSON invalid-ID contract."""
+
+
 @dataclass
 class QueueMessage:
     body: str
@@ -811,7 +815,7 @@ def _exact_message_id(value: int | str | None) -> int | None:
     try:
         return normalize_exact_message_id(value)
     except (TypeError, ValueError) as exc:
-        raise CommandUsageError(f"invalid message ID: {exc}") from exc
+        raise _InvalidMessageIDUsageError(f"invalid message ID: {exc}") from exc
 
 
 def _canonical_queue_operand(ctx: WeftContext, name: str) -> str:

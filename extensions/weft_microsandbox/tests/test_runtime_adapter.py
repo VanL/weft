@@ -83,8 +83,8 @@ def test_installed_sdk_exposes_adapter_api_surface() -> None:
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in sandbox_create.parameters.values()
     )
-    assert tuple(sandbox_get.parameters) == ("name",)
-    assert tuple(sandbox_remove.parameters) == ("name",)
+    sandbox_get.bind("probe")
+    sandbox_remove.bind("probe")
     assert "path" in volume_bind.parameters
     assert "readonly" in volume_bind.parameters
     assert "limit" in rlimit_nofile.parameters

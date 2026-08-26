@@ -1195,3 +1195,9 @@ index is not a dated section and does not count toward the coalescing trigger.
   was not a contract. Primary-key and query-backed index order still are.
   Validate semantic dependencies; do not turn incidental DDL text or catalog
   order into product behavior.
+- Apply the same test to non-database compatibility boundaries. SDK checks
+  should bind the call Weft makes, capability collections should compare the
+  members Weft consumes, and diagnostics must not infer semantics from English
+  help or error prose. Add a type only when it protects a demonstrated
+  machine-readable contract; self-owned internal wording alone does not justify
+  an exception taxonomy.

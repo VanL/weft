@@ -351,12 +351,12 @@ def test_cli_init_supports_env_only_postgres_configuration(
         cleanup_postgres_schema_for_root(project_root, env=env)
 
 
-def test_cmd_init_reports_weft_pg_install_hint_for_missing_plugin(
+def test_cmd_init_preserves_backend_install_error_for_missing_plugin(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Init should print a Weft-specific install hint when PG support is absent."""
+    """Init should preserve the public backend plugin guidance."""
 
     def _raise_missing_plugin(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError(
@@ -374,8 +374,9 @@ def test_cmd_init_reports_weft_pg_install_hint_for_missing_plugin(
         cmd_init(tmp_path)
     captured = capsys.readouterr()
 
-    assert "uv add 'weft[pg]'" in str(exc_info.value)
+    assert "postgres" in str(exc_info.value)
     assert "simplebroker-pg" in str(exc_info.value)
+    assert "weft[pg]" not in str(exc_info.value)
     assert captured == ("", "")
 
 

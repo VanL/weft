@@ -35,7 +35,7 @@ def test_get_runner_plugin_exposes_conservative_capabilities() -> None:
     plugin = get_runner_plugin()
 
     assert plugin.name == "microsandbox"
-    assert plugin.capabilities.supported_types == ("command", "agent")
+    assert frozenset(plugin.capabilities.supported_types) == {"command", "agent"}
     assert plugin.capabilities.supports_interactive is False
     assert plugin.capabilities.supports_persistent is False
     assert plugin.capabilities.supports_agent_sessions is False

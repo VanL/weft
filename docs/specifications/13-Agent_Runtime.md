@@ -667,6 +667,14 @@ Backend-specific notes:
   path
 - Weft ships that explicit diagnostics shape as a builtin
   `probe-agents` task helper rather than as hidden startup work
+- external compatibility checks validate only capabilities Weft consumes. SDK
+  checks bind the actual call form; added optional parameters remain compatible
+  while added required parameters or positional-call breakage remain
+  incompatible
+- explicit provider diagnostics may record whether `run --help` executed,
+  timed out, and its exit status. Help prose cannot prove semantic command
+  support. The first real delegated invocation remains authoritative.
+  Provider-authored stderr phrases are not execution classifiers
 - Weft also ships an explicit optional `prepare-agent-images` builtin helper to
   warm the Docker image cache for providers with shipped image recipes; it is a
   cache warmer, not a required setup step, and ordinary Docker-backed runs
@@ -877,6 +885,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
 - [`docs/plans/2026-08-24-llm-0-33-compatibility-plan.md`](../plans/2026-08-24-llm-0-33-compatibility-plan.md)
 - [`docs/plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)

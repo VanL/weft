@@ -5,16 +5,14 @@ from __future__ import annotations
 from hypothesis import strategies as st
 from hypothesis.strategies import SearchStrategy
 
+from simplebroker import format_message_id
 from weft._constants import STANDARD_TASK_QUEUE_SUFFIXES
 
 
 def taskspec_tid_strings() -> SearchStrategy[str]:
     """Return valid 19-digit TaskSpec TID strings."""
 
-    return st.integers(
-        min_value=1_700_000_000_000_000_000,
-        max_value=1_790_000_000_000_000_000,
-    ).map(str)
+    return st.integers(min_value=1, max_value=2**63 - 1).map(format_message_id)
 
 
 def digit_tid_strings() -> SearchStrategy[str]:

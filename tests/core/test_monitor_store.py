@@ -27,6 +27,7 @@ from weft._constants import (
     WEFT_MONITOR_SCHEMA_VERSION,
 )
 from weft.context import build_context
+from weft.core.monitor import store as monitor_store_module
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import (
     MonitorStoreUnavailable,
@@ -479,6 +480,15 @@ def test_store_sidecar_session_rolls_back_on_exception(tmp_path) -> None:
         )
         == 0
     )
+
+
+def test_monitor_store_get_task_signals_completely_uninitialized_catalog(
+    tmp_path,
+) -> None:
+    store = open_monitor_store(_context(tmp_path))
+
+    with pytest.raises(monitor_store_module.MonitorStoreNotInitialized):
+        store.get_task("1779000000000000001")
     store.close()
 
 
@@ -723,8 +733,7 @@ def test_monitor_store_v6_accepts_safely_omittable_extra_column(tmp_path) -> Non
     store.ensure_schema()
     with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
         session.run(
-            "ALTER TABLE weft_monitor_task_messages "
-            "ADD COLUMN operator_note TEXT NULL"
+            "ALTER TABLE weft_monitor_task_messages ADD COLUMN operator_note TEXT NULL"
         )
 
     store.ensure_schema()
@@ -875,7 +884,9 @@ _MONITOR_REQUIRED_INDEX_NAMES = frozenset(
 )
 
 _MONITOR_REQUIRED_INDEX_MUTATIONS = tuple(
-    case for case in _MONITOR_INDEX_MUTATIONS if case[0] in _MONITOR_REQUIRED_INDEX_NAMES
+    case
+    for case in _MONITOR_INDEX_MUTATIONS
+    if case[0] in _MONITOR_REQUIRED_INDEX_NAMES
 )
 
 _MONITOR_LEGACY_INDEX_NAMES = frozenset(
@@ -1554,9 +1565,10 @@ def test_monitor_store_migrates_v5_owned_json_and_obsolete_delete_state(
             ),
         )
 
-    assert _monitor_table_columns(
-        ctx, "weft_monitor_task_collations"
-    ) == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    assert (
+        _monitor_table_columns(ctx, "weft_monitor_task_collations")
+        == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    )
 
     store.ensure_schema()
     store.ensure_schema()
@@ -1659,9 +1671,10 @@ def test_monitor_store_v5_migration_creates_absent_deferred_table(tmp_path) -> N
 
     assert _monitor_table_exists(ctx, "weft_monitor_deferred_writes") is True
     assert _monitor_meta_value(ctx, "schema_version") == {"version": 6}
-    assert _monitor_table_columns(
-        ctx, "weft_monitor_task_collations"
-    ) == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    assert (
+        _monitor_table_columns(ctx, "weft_monitor_task_collations")
+        == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    )
 
 
 def test_monitor_store_v5_migration_rolls_back_all_changes_on_failure(tmp_path) -> None:
@@ -1735,9 +1748,10 @@ def test_monitor_store_v5_migration_rolls_back_all_changes_on_failure(tmp_path) 
         message_id,
     )
     assert _monitor_index_exists(ctx, "idx_weft_monitor_messages_deleted") is True
-    assert _monitor_table_columns(
-        ctx, "weft_monitor_task_collations"
-    ) == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    assert (
+        _monitor_table_columns(ctx, "weft_monitor_task_collations")
+        == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    )
 
 
 def test_monitor_store_v5_migration_rejects_present_tombstoned_raw_row(
@@ -1761,9 +1775,10 @@ def test_monitor_store_v5_migration_rejects_present_tombstoned_raw_row(
     )
     assert _monitor_index_exists(ctx, "idx_weft_monitor_messages_deleted") is True
     assert _monitor_meta_value(ctx, "schema_version") == {"version": 5}
-    assert _monitor_table_columns(
-        ctx, "weft_monitor_task_collations"
-    ) == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    assert (
+        _monitor_table_columns(ctx, "weft_monitor_task_collations")
+        == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    )
     with ctx.broker() as broker:
         assert (
             broker.peek_one(
@@ -1799,9 +1814,10 @@ def test_monitor_store_v5_migration_rolls_back_on_raw_probe_error(
     )
     assert _monitor_index_exists(ctx, "idx_weft_monitor_messages_deleted") is True
     assert _monitor_meta_value(ctx, "schema_version") == {"version": 5}
-    assert _monitor_table_columns(
-        ctx, "weft_monitor_task_collations"
-    ) == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    assert (
+        _monitor_table_columns(ctx, "weft_monitor_task_collations")
+        == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
+    )
 
 
 @pytest.mark.parametrize("version", [4, 7])

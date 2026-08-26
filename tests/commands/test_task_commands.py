@@ -35,6 +35,7 @@ from weft.context import build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.launcher import launch_task_process
+from weft.core.monitor.store import open_monitor_store
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
@@ -614,6 +615,99 @@ def test_monitor_store_snapshot_reports_ordinary_dynamic_store_failure(
         "reason": "store_read_failed",
     }
     assert snapshot.error == "monitor store unavailable: store detail"
+
+
+def test_monitor_store_snapshot_treats_all_tables_absent_as_no_evidence(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+
+    snapshot = task_cmd._monitor_store_task_snapshot(
+        context,
+        "1777000000000000791",
+        include_terminal=True,
+    )
+
+    assert snapshot is None
+
+
+def test_monitor_store_snapshot_treats_partial_schema_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    with context.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "CREATE TABLE weft_monitor_meta ("
+            "key TEXT PRIMARY KEY, value_json TEXT NOT NULL, "
+            "updated_at_ns INTEGER NOT NULL)"
+        )
+
+    snapshot = task_cmd._monitor_store_task_snapshot(
+        context,
+        "1777000000000000792",
+        include_terminal=True,
+    )
+
+    assert snapshot is not None
+    assert snapshot.event == "monitor_store_unavailable"
+    assert snapshot.reconciliation == {
+        "classification": "monitor_store_unavailable",
+        "reason": "store_read_failed",
+    }
+
+
+def test_monitor_store_snapshot_treats_unsupported_schema_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    open_monitor_store(context).ensure_schema()
+    with context.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            ('{"version":999}', "schema_version"),
+        )
+
+    snapshot = task_cmd._monitor_store_task_snapshot(
+        context,
+        "1777000000000000793",
+        include_terminal=True,
+    )
+
+    assert snapshot is not None
+    assert snapshot.event == "monitor_store_unavailable"
+    assert snapshot.reconciliation == {
+        "classification": "monitor_store_unavailable",
+        "reason": "store_read_failed",
+    }
+
+
+def test_monitor_store_snapshot_treats_complete_unversioned_schema_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    open_monitor_store(context).ensure_schema()
+    with context.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "DELETE FROM weft_monitor_meta WHERE key = ?",
+            ("schema_version",),
+        )
+
+    snapshot = task_cmd._monitor_store_task_snapshot(
+        context,
+        "1777000000000000794",
+        include_terminal=True,
+    )
+
+    assert snapshot is not None
+    assert snapshot.event == "monitor_store_unavailable"
+    assert snapshot.reconciliation == {
+        "classification": "monitor_store_unavailable",
+        "reason": "store_read_failed",
+    }
 
 
 def test_monitor_store_snapshot_propagates_fatal_dynamic_store_signal(

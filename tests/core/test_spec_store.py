@@ -38,5 +38,6 @@ def test_read_spec_json_rejects_non_object_payload_as_value_error(tmp_path) -> N
         read_spec_json(path)
 
     assert type(exc_info.value) is ValueError
-    assert str(exc_info.value) == f"Spec file {path} must contain a JSON object"
+    assert str(path) in str(exc_info.value)
+    assert "JSON object" in str(exc_info.value)
     assert exc_info.value.__cause__ is None

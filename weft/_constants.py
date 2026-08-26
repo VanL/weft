@@ -1953,17 +1953,6 @@ VALID_RUNNER_OUTCOME_STATUSES: Final[frozenset[str]] = frozenset(
 )
 """Runner outcome statuses accepted by the core consumer boundary."""
 
-POSTGRES_BACKEND_UNAVAILABLE: Final[str] = (
-    "Requested backend 'postgres' is not available. Install simplebroker-pg."
-)
-"""Operator-facing error when the Postgres backend plugin is unavailable."""
-
-POSTGRES_BACKEND_INSTALL_HINT: Final[str] = (
-    "Requested backend 'postgres' is not available. "
-    "Install with `uv add 'weft[pg]'` or install `simplebroker-pg` directly."
-)
-"""Operator-facing install hint for the Postgres backend plugin."""
-
 SQLITE_SNAPSHOT_SUFFIXES: Final[tuple[str, ...]] = ("", "-wal", "-shm")
 """SQLite database sidecar suffixes that travel with snapshot imports."""
 

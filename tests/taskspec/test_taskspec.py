@@ -167,6 +167,20 @@ class TestCreationDefaults:
 class TestValidation:
     """Validate key schema constraints."""
 
+    def test_tid_accepts_exact_message_id_below_old_clock_floor(self) -> None:
+        taskspec = fixtures.create_minimal_taskspec(tid="1000000000000000000")
+
+        assert taskspec.tid == "1000000000000000000"
+
+    def test_tid_accepts_storage_maximum_without_clock_bound(self) -> None:
+        taskspec = fixtures.create_minimal_taskspec(tid="9223372036854775807")
+
+        assert taskspec.tid == "9223372036854775807"
+
+    def test_tid_rejects_reserved_zero_message_id(self) -> None:
+        with pytest.raises(ValueError, match="nonzero"):
+            fixtures.create_minimal_taskspec(tid="0000000000000000000")
+
     def test_invalid_tid_format(self) -> None:
         with pytest.raises(ValueError):
             fixtures.create_minimal_taskspec(tid="not-a-timestamp")

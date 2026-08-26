@@ -26,6 +26,7 @@ from weft._constants import (
     get_weft_directory_name,
 )
 from weft.cli import validate_taskspec as validate_cli
+from weft.commands.queue import _InvalidMessageIDUsageError
 from weft.context import build_context
 from weft.helpers import resolve_broker_max_message_size, resolve_cli_message_content
 
@@ -78,11 +79,7 @@ def _command_exit(exc: Exception) -> None:
 
 def _queue_command_exit(exc: Exception, *, json_output: bool = False) -> None:
     """Preserve queue-specific input-error rendering."""
-    if (
-        json_output
-        and isinstance(exc, commands.CommandUsageError)
-        and "message ID" in str(exc)
-    ):
+    if json_output and isinstance(exc, _InvalidMessageIDUsageError):
         typer.echo(
             json.dumps(
                 {

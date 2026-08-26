@@ -78,5 +78,6 @@ def test_builtin_catalog_rejects_malformed_packaged_values_as_value_error(
     with pytest.raises(ValueError) as exc_info:
         builtin_task_catalog()
     assert type(exc_info.value) is ValueError
-    assert str(exc_info.value) == f"Builtin TaskSpec {path} {message_suffix}"
+    assert f"Builtin TaskSpec {path}" in str(exc_info.value)
+    assert message_suffix in str(exc_info.value)
     assert exc_info.value.__cause__ is None

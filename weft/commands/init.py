@@ -23,7 +23,6 @@ from weft.commands._boundary import typed_command_errors
 from weft.commands.types import InitResult
 from weft.context import (
     build_context,
-    normalize_backend_resolution_error,
     resolve_context_broker_target,
     update_project_config,
 )
@@ -90,9 +89,8 @@ def cmd_init(
             )
         )
     except Exception as exc:
-        friendly_exc = normalize_backend_resolution_error(exc)
         raise CommandExecutionError(
-            f"failed to initialize SimpleBroker database: {friendly_exc}"
+            f"failed to initialize SimpleBroker database: {exc}"
         ) from exc
 
     if result != 0:

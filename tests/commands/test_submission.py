@@ -493,7 +493,8 @@ def test_apply_submit_overrides_rejects_invalid_model_dump_spec_type(
     with pytest.raises(TypeError) as exc_info:
         submission_mod.apply_submit_overrides(taskspec)
     assert type(exc_info.value) is TypeError
-    assert str(exc_info.value) == "TaskSpec spec section must be a mapping"
+    assert "TaskSpec spec section" in str(exc_info.value)
+    assert "mapping" in str(exc_info.value)
     assert exc_info.value.__cause__ is None
 
 

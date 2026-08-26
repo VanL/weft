@@ -4,6 +4,15 @@
 
 ### Changed
 
+- Resolved TaskSpec TIDs now accept every canonical nonzero SimpleBroker exact
+  message ID through the signed 64-bit storage maximum. They no longer apply a
+  local 2020 lower bound or local-clock-plus-one-year upper bound. Rolling back
+  after persisting an ID outside the older window requires keeping the new
+  reader or forward-fixing; TIDs must not be rewritten.
+- **Breaking (builtin diagnostic JSON):** `probe-agents` now reports an
+  OpenCode `run_help` object containing attempted, timeout, return-code, and
+  compact-detail facts. It no longer infers `run_support` from English help
+  prose. Real delegated invocation remains the compatibility check.
 - SimpleBroker now requires 7.4.1, with the paired `simplebroker-pg` 3.9.1
   backend. System dumps use the bounded v1 watermark and system load restores
   that allocation floor. `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS` maps to
@@ -29,6 +38,14 @@
 
 ### Fixed
 
+- Queue JSON now selects `INVALID_MESSAGE_ID` from the invalid-ID error type
+  rather than exception prose. Task-status fallback distinguishes a wholly
+  absent Monitor store from a partial or unreadable store through read-only
+  catalog state. Missing Postgres plugin errors retain SimpleBroker's public
+  diagnostic instead of depending on exact upstream wording.
+- Microsandbox compatibility tests now bind the positional SDK calls Weft
+  makes and treat supported task types as an unordered capability set, so added
+  optional SDK parameters or tuple reordering do not create false failures.
 - Monitor startup now accepts the release-produced v5 physical column order
   and reaches the transactional v5-to-v6 migration. Versions 0.9.95 through
   0.9.97 aborted before migration when an evolved v5 collation table had the

@@ -519,6 +519,14 @@ Current behavior:
   Monitor-store fallback after raw task-log retirement. This fallback is
   read-only and has no acknowledgement target. Nonterminal Monitor-store rows
   are not returned as live/running terminal snapshots.
+- A completely uninitialized Monitor store supplies no fallback task evidence.
+  A partially present, unsupported, unreadable, or failed store produces the
+  existing degraded `monitor_store_unavailable` snapshot. The distinction uses
+  an explicit store result or exception type, never backend exception prose,
+  and performs no schema mutation.
+- Plain task-status output must contain the required facts. Exact line order,
+  punctuation, spacing, and label spelling are presentation details unless
+  explicitly enumerated here. JSON names and semantic values remain exact.
 - `weft task status TID --ping` sends a structured PING with a
   `request_id`, waits for the matching PONG, and may return a `live_pong`
   reconciliation classification plus best-effort runner-specific `runtime`
@@ -735,6 +743,11 @@ move/watch JSON formats only the broker-row `timestamp` with
 accept `int | str`, normalize immediately through [SB-0.2], and pass only an
 integer to queue operations. Human queue output and Python `QueueEntry`
 timestamps remain unchanged.
+
+An invalid exact message ID under `--json` exits 2, writes no stdout, and
+writes one stderr JSON object with `error="INVALID_MESSAGE_ID"` and
+`retryable=false`. The CLI selects that shape from an internal typed result,
+not from human-readable prose.
 
 ### Named Endpoint Queue Ergonomics [CLI-4.1]
 
@@ -984,6 +997,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
 - [SimpleBroker 7.3 dump watermark plan](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)

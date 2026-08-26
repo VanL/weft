@@ -119,7 +119,7 @@ def test_provider_cli_session_close_cleans_up_tempdir_after_failure(
     assert not tempdir.exists()
 
 
-def test_provider_cli_session_execute_rejects_opencode_without_run_support(
+def test_provider_cli_session_reports_real_opencode_invocation_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -134,12 +134,14 @@ def test_provider_cli_session_execute_rejects_opencode_without_run_support(
         )
     )
     try:
-        with pytest.raises(RuntimeError, match="does not support 'run'"):
+        with pytest.raises(RuntimeError) as exc_info:
             session.execute(
                 normalize_agent_work_item(
                     session._agent,  # Fixture-backed error assertion.
                     {"task": "hello"},
                 )
             )
+        assert "opencode execution failed" in str(exc_info.value)
+        assert "unsupported opencode command" in str(exc_info.value)
     finally:
         session.close()

@@ -59,7 +59,11 @@ from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import send_keyed_ping_probe
-from weft.core.monitor.store import MonitorTaskCollationRecord, open_monitor_store
+from weft.core.monitor.store import (
+    MonitorStoreNotInitialized,
+    MonitorTaskCollationRecord,
+    open_monitor_store,
+)
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.runner_diagnostics import diagnostic_summary
 from weft.helpers import (
@@ -548,17 +552,6 @@ def _task_snapshot_from_monitor_store_record(
     )
 
 
-def _monitor_store_schema_missing(exc: Exception) -> bool:
-    """Return whether a Monitor-store read failed because tables are absent."""
-
-    message = str(exc).lower()
-    return "weft_monitor_" in message and (
-        "no such table" in message
-        or "does not exist" in message
-        or "undefined table" in message
-    )
-
-
 def _monitor_store_task_snapshot(
     ctx: WeftContext,
     tid: str,
@@ -570,9 +563,9 @@ def _monitor_store_task_snapshot(
     try:
         store = open_monitor_store(ctx, config=ctx.config)
         record = store.get_task(tid)
+    except MonitorStoreNotInitialized:
+        return None
     except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-355] exception
-        if _monitor_store_schema_missing(exc):
-            return None
         return system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],

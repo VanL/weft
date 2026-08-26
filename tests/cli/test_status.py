@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import signal
 import subprocess
@@ -408,9 +409,10 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
 ) -> None:
     context = build_context(spec_context=workdir)
     tid = "1844674407370955171"
+    dead_pid = 999_999_993
     started = time.time_ns()
     taskspec = {
-        "name": "live-host-task",
+        "name": "distinct-task-name",
         "state": {"status": "running", "started_at": started},
         "io": {
             "inputs": {"inbox": f"T{tid}.inbox"},
@@ -427,8 +429,8 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
         {
             "event": "work_started",
             "status": "running",
-            "activity": "waiting",
-            "waiting_on": "upstream-result",
+            "activity": "activity-sentinel",
+            "waiting_on": "dependency-sentinel",
             "tid": tid,
             "tid_short": tid[-10:],
             "timestamp": started,
@@ -442,7 +444,14 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
                 "short": tid[-10:],
                 "full": tid,
                 "runner": "host",
-                "runtime_handle": _host_runtime_handle(os.getpid()),
+                "runtime_handle": {
+                    "runner": "host",
+                    "kind": "process",
+                    "id": str(os.getpid()),
+                    "control": {"authority": "host-pid"},
+                    "observations": {"host_pids": [dead_pid, os.getpid()]},
+                    "metadata": {},
+                },
             }
         )
     )
@@ -450,12 +459,20 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
     rc, out, err = run_cli("task", "status", tid, "--process", cwd=workdir)
 
     assert rc == 0
-    assert out.splitlines() == [
-        f"{tid} running host live-host-task (work_started)",
-        "activity: waiting",
-        "waiting_on: upstream-result",
-        f"host_pids: [{os.getpid()}] live_host_pids: [{os.getpid()}]",
-    ]
+    for fact in (
+        tid,
+        "running",
+        "distinct-task-name",
+        "work_started",
+        "activity-sentinel",
+        "dependency-sentinel",
+    ):
+        assert fact in out
+    assert any(
+        tid in line and re.search(r"\bhost\b", line) for line in out.splitlines()
+    )
+    assert len(re.findall(rf"(?<!\d){dead_pid}(?!\d)", out)) == 1
+    assert len(re.findall(rf"(?<!\d){os.getpid()}(?!\d)", out)) == 2
     assert err == ""
 
 

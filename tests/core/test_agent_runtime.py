@@ -70,7 +70,8 @@ def test_start_session_rejects_runtime_without_persistent_capability() -> None:
     with pytest.raises(RuntimeError) as exc_info:
         start_agent_runtime_session(make_agent_section())
     assert type(exc_info.value) is RuntimeError
-    assert str(exc_info.value) == "Runtime does not support persistent sessions: echo"
+    assert "persistent sessions" in str(exc_info.value)
+    assert "echo" in str(exc_info.value)
     assert exc_info.value.__cause__ is None
 
 

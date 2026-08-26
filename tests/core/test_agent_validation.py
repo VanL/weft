@@ -13,6 +13,7 @@ from tests.fixtures.provider_cli_fixture import (
     write_provider_cli_wrapper,
 )
 from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
+from weft._constants import PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS
 from weft.core.agents.provider_cli import probes
 from weft.core.agents.provider_cli.registry import list_provider_cli_providers
 from weft.core.agents.validation import (
@@ -176,22 +177,89 @@ def test_validate_agent_runtime_preflight_does_not_check_opencode_run_support(
     monkeypatch.delenv("PROVIDER_CLI_FIXTURE_OPENCODE_NO_RUN", raising=False)
 
 
-def test_opencode_run_support_probe_timeout_is_reported_as_unsupported(
+def test_opencode_run_help_probe_reports_success_without_parsing_help_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    probes._cached_opencode_run_support.cache_clear()
+    def successful_probe(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        assert command == ["opencode", "run", "--help"]
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        assert kwargs["timeout"] == PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS
+        assert kwargs["check"] is False
+        return subprocess.CompletedProcess(
+            args=["opencode", "run", "--help"],
+            returncode=0,
+            stdout="arbitrary localized help copy",
+            stderr="",
+        )
 
-    def timeout_probe(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+    monkeypatch.setattr(subprocess, "run", successful_probe)
+
+    result = probes.probe_opencode_run_help("opencode")
+
+    assert {key: result[key] for key in ("attempted", "timed_out", "returncode")} == {
+        "attempted": True,
+        "timed_out": False,
+        "returncode": 0,
+    }
+    assert "arbitrary localized help copy" in str(result["detail"])
+
+
+def test_opencode_run_help_probe_reports_nonzero_process_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_probe(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
         del args, kwargs
-        raise subprocess.TimeoutExpired(["opencode", "run", "--help"], 2.0)
+        return subprocess.CompletedProcess(
+            args=["opencode", "run", "--help"],
+            returncode=2,
+            stdout="",
+            stderr="unknown option",
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed_probe)
+
+    result = probes.probe_opencode_run_help("opencode")
+
+    assert {key: result[key] for key in ("attempted", "timed_out", "returncode")} == {
+        "attempted": True,
+        "timed_out": False,
+        "returncode": 2,
+    }
+    assert "unknown option" in str(result["detail"])
+
+
+def test_opencode_run_help_probe_reports_timeout_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+
+    def timeout_probe(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        assert command == ["opencode", "run", "--help"]
+        timeout = kwargs["timeout"]
+        assert timeout == PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(command, timeout)
 
     monkeypatch.setattr(subprocess, "run", timeout_probe)
 
-    try:
-        with pytest.raises(RuntimeError, match="does not support 'run'"):
-            probes.ensure_opencode_run_support("opencode")
-    finally:
-        probes._cached_opencode_run_support.cache_clear()
+    result = probes.probe_opencode_run_help("opencode")
+
+    assert {key: result[key] for key in ("attempted", "timed_out", "returncode")} == {
+        "attempted": True,
+        "timed_out": True,
+        "returncode": None,
+    }
+    assert "timed out" in str(result["detail"])
 
 
 def test_validate_agent_runtime_preflight_uses_project_agent_settings_for_executable(

@@ -87,6 +87,10 @@ class MonitorStoreUnavailable(MonitorStoreError):
     """Raised when the Monitor store cannot be used safely."""
 
 
+class MonitorStoreNotInitialized(MonitorStoreError):
+    """Raised when no Monitor-owned table exists at a read-only boundary."""
+
+
 @dataclass(frozen=True, slots=True)
 class MonitorStoreConfig:
     """Runtime config for the Monitor-owned durable store."""
@@ -785,6 +789,7 @@ def _monitor_extra_column_is_omittable(column_info: _MonitorColumnInfo) -> bool:
         or _monitor_default_is_proven_non_null_constant(column_info.default)
     )
 
+
 _monitor_table_specs: tuple[_MonitorTableSpec, ...] = (
     _MonitorTableSpec(
         name=_monitor_tables.meta,
@@ -1136,9 +1141,7 @@ class _MonitorTableAccess:
                     (table_spec.name,),
                     fetch=True,
                 )
-                unique_indexes_by_table[table_spec.name] = {
-                    str(row[0]) for row in rows
-                }
+                unique_indexes_by_table[table_spec.name] = {str(row[0]) for row in rows}
         else:
             for table_spec in _monitor_table_specs:
                 rows = self._session.run(
@@ -1169,8 +1172,7 @@ class _MonitorTableAccess:
                     and shape.method == primary_shape.method
                     and not shape.partial
                     and shape.columns == primary_key
-                    and shape.comparison_semantics
-                    == primary_shape.comparison_semantics
+                    and shape.comparison_semantics == primary_shape.comparison_semantics
                 )
                 if not duplicates_primary_key:
                     restrictive.add(index_name)
@@ -1202,8 +1204,7 @@ class _MonitorTableAccess:
         restrictive_unique_indexes = self._restrictive_unique_secondary_indexes()
         if restrictive_unique_indexes:
             raise MonitorStoreUnavailable(
-                "restrictive unique Monitor index "
-                f"{min(restrictive_unique_indexes)}"
+                f"restrictive unique Monitor index {min(restrictive_unique_indexes)}"
             )
 
     def verify_v5_migration_inputs(self) -> None:
@@ -2623,8 +2624,28 @@ class MonitorStore:
     def get_task(self, tid: str) -> MonitorTaskCollationRecord | None:
         """Return one durable task collation record."""
 
+        if (
+            self._context.database_path is not None
+            and not self._context.database_path.exists()
+        ):
+            raise MonitorStoreNotInitialized("Monitor store is not initialized")
         with self._sidecar_session() as session:
-            return self._access(session).fetch_task(tid)
+            access = self._access(session)
+            table_presence = tuple(
+                access.table_exists(spec.name) for spec in _monitor_table_specs
+            )
+            if not any(table_presence):
+                raise MonitorStoreNotInitialized("Monitor store is not initialized")
+            if not all(table_presence):
+                raise MonitorStoreUnavailable("Monitor store schema is incomplete")
+            version = self._read_schema_version(access)
+            if version is None:
+                raise MonitorStoreUnavailable("Monitor store schema version is missing")
+            if version != WEFT_MONITOR_SCHEMA_VERSION:
+                raise MonitorStoreUnavailable(
+                    f"Monitor store schema version {version} is unsupported"
+                )
+            return access.fetch_task(tid)
 
     def get_tasks(
         self,

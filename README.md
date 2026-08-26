@@ -539,8 +539,9 @@ root, so an ancestor SQLite file does not claim the child. A root
 `.broker.toml` belongs to standalone SimpleBroker and does not redirect Weft by
 default.
 
-If Postgres is selected without the plugin installed, Weft will fail with an
-install hint for `uv add 'weft[pg]'`.
+If Postgres is selected without the plugin installed, Weft preserves
+SimpleBroker's plugin-specific diagnostic. Install `weft[pg]` or
+`simplebroker-pg` to add that backend.
 
 #### Quick Comparison
 

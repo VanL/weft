@@ -68,8 +68,6 @@ from simplebroker.ext import (
     project_config_path_for_directory,
 )
 from weft._constants import (
-    POSTGRES_BACKEND_INSTALL_HINT,
-    POSTGRES_BACKEND_UNAVAILABLE,
     WEFT_AUTOSTART_DIRECTORY_NAME,
     WEFT_AUTOSTART_TASKS_DEFAULT,
     WEFT_BROKER_PROJECT_CONFIG_FILENAME,
@@ -81,11 +79,9 @@ from weft._constants import (
 from weft.helpers import ensure_owner_only_dir, write_json_atomically
 
 __all__ = [
-    "POSTGRES_BACKEND_INSTALL_HINT",
     "WeftContext",
     "build_context",
     "find_existing_weft_dir",
-    "normalize_backend_resolution_error",
     "resolve_context_broker_target",
     "service_context_key",
     "update_project_config",
@@ -373,18 +369,6 @@ def find_existing_weft_dir(
     return None
 
 
-def normalize_backend_resolution_error(exc: Exception) -> Exception:
-    """Rewrite backend-plugin resolution failures into user-facing Weft guidance."""
-
-    message = str(exc).strip()
-    if message in {
-        "Unknown backend plugin: postgres",
-        POSTGRES_BACKEND_UNAVAILABLE,
-    }:
-        return RuntimeError(POSTGRES_BACKEND_INSTALL_HINT)
-    return exc
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -408,10 +392,7 @@ def _resolve_root_and_target(
     """Determine the project root and broker target."""
     if spec_context is not None:
         root = Path(spec_context).expanduser().resolve()
-        try:
-            return root, resolve_context_broker_target(root, config=config), False
-        except RuntimeError as exc:
-            raise normalize_backend_resolution_error(exc) from exc
+        return root, resolve_context_broker_target(root, config=config), False
 
     start_dir = Path.cwd().resolve()
     project_config_path = find_broker_project_config(
@@ -425,17 +406,11 @@ def _resolve_root_and_target(
             start_dir=start_dir,
             config=config,
         )
-        try:
-            target = resolve_context_broker_target(root, config=config)
-        except RuntimeError as exc:
-            raise normalize_backend_resolution_error(exc) from exc
+        target = resolve_context_broker_target(root, config=config)
         return root, target, True
 
     root = start_dir
-    try:
-        return root, resolve_context_broker_target(root, config=config), False
-    except RuntimeError as exc:
-        raise normalize_backend_resolution_error(exc) from exc
+    return root, resolve_context_broker_target(root, config=config), False
 
 
 def _with_project_root(target: BrokerTarget, root: Path) -> BrokerTarget:

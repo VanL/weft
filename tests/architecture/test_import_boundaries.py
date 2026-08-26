@@ -1085,7 +1085,6 @@ def test_cli_verb_names_are_a_bijection_with_command_exports() -> None:
     derived = {
         "cmd_" + "_".join(part.replace("-", "_") for part in path) for path in paths
     }
-    assert len(paths) == 41
     assert derived == COMMAND_EXPORTS
     assert {name for name in commands.__all__ if name.startswith("cmd_")} == derived
 

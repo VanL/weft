@@ -901,12 +901,6 @@ class OpencodeProvider(_BaseTextProvider):
     ) -> ProviderCLIResult:
         del invocation
         if completed.returncode != 0:
-            stderr_text = (completed.stderr or "").lower()
-            if "unsupported opencode command" in stderr_text:
-                raise RuntimeError(
-                    "opencode CLI does not support 'run'; install a version with "
-                    "non-interactive run support"
-                )
             detail = _parse_opencode_error_output(completed.stdout or "")
             if not detail:
                 detail = _compact_process_detail(completed)
