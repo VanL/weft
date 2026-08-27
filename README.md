@@ -66,8 +66,8 @@ uv add 'weft[all]'
 Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
 selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
-Weft requires SimpleBroker 7.4.1 or newer; the Postgres extra requires the
-paired `simplebroker-pg` 3.9.1 or newer. Broker message IDs stay integers in
+Weft requires SimpleBroker 7.5.1 or newer; the Postgres extra requires the
+paired `simplebroker-pg` 3.10.0 or newer. Broker message IDs stay integers in
 Python and relational storage, while external JSON and owned exact-ID fields
 inside Monitor table JSON render them as 19-digit strings.
 
@@ -577,6 +577,40 @@ from observed peak usage. If you put a pooler such as PgBouncer in front of
 Postgres, make sure its mode preserves the notification behavior required by
 `LISTEN`/`NOTIFY`; transaction-pooling modes that do not preserve listener
 state are not a substitute for listener headroom.
+
+Managers can optionally delay new work before reservation. Set
+`WEFT_ADMISSION_MAX_CONNECTIONS` to a positive integer. Unset or `0` disables
+admission. `WEFT_ADMISSION_RESERVE_FRACTION` controls how much of that maximum
+public work cannot consume and defaults to `0.1`. The effective reserve is the
+greater of the rounded-up fraction and three slots of modeled internal-lane
+room for Manager, TaskMonitor, and Heartbeat. These are not dedicated service
+permits. Public work admits below
+`max(0, maximum - reserve)`; internal work admits below the full maximum. If
+the maximum is no greater than the reserve, public work is disabled while
+internal work can still run below the maximum.
+
+The backend supplies one best-effort usage value. SQLite is context-scoped: it
+takes one latest mapping for each full TID, keeps the ones whose recorded
+runtime evidence probes live or undecidable (the same shared probe cleanup and
+endpoint resolution use), and adds this Manager's in-flight launches, counting
+each TID once. A task whose process has exited leaves the count on the next
+observation, so capacity recycles with task churn; mappings without probeable
+evidence stay counted, favoring overcounting over undercounting live tasks.
+Probe verdicts are memoized, so repeated decisions do not re-probe unchanged
+rows. Admission adds no liveness policy beyond that shared probe.
+Postgres reads raw server-wide `numbackends` through
+`simplebroker_pg.get_connection_stats()` on the Manager's existing persistent
+Queue. The configured maximum, not the server's returned maximum, controls the
+limit. Both observations are non-atomic soft guards rather than connection
+leases, so races can still overshoot and conservative evidence can pause early.
+
+Denied messages remain in their source queue and are retried after one second;
+child or launch-worker progress may wake the Manager earlier. The settings are
+read when the Manager starts, so changes require a restart. Admission assumes
+ordinary task churn and does not preempt persistent work. Pipelines need no
+separate setting or runtime branch; their runnable tasks use the same lanes as
+all other work. Admission adds no PING/STATUS fields; rate-limited transition
+and observation-failure logs are non-normative operational evidence.
 
 ### Task IDs (TIDs)
 
@@ -1253,13 +1287,18 @@ Environment variables:
 
 - `WEFT_ENV_FILE` - Bootstrap dotenv-style file loaded before full CLI import
 - `WEFT_MANAGER_LIFETIME_TIMEOUT` - Manager idle timeout (default: 600s)
+- `WEFT_ADMISSION_MAX_CONNECTIONS` - Optional backend-specific admission
+  maximum; unset or `0` disables it, and enabled values are positive integers
+- `WEFT_ADMISSION_RESERVE_FRACTION` - Fraction withheld from public work;
+  defaults to `0.1` and must be finite with `0 <= value < 1`; the effective
+  reserve is never below three slots for Manager, TaskMonitor, and Heartbeat
 - `WEFT_MANAGER_REUSE_ENABLED` - Keep manager running (default: true)
 - `WEFT_AUTOSTART_TASKS` - Enable autostart (default: true)
 
 Weft uses `WEFT_*` names for embedded SimpleBroker settings and passes a
 complete typed broker config to the lower layer. Valid ambient `BROKER_*`
 settings do not tune Weft, and Weft does not change the process environment.
-SimpleBroker 7.4.1's immutable `ResolvedConfig` snapshots carry that isolation
+SimpleBroker 7.5.1's immutable `ResolvedConfig` snapshots carry that isolation
 through config-consuming queue, project, init, watcher, broker, and load
 boundaries. Invalid ambient `BROKER_*` settings are ignored by Weft; invalid
 mapped `WEFT_*` settings still fail with a safe configuration error.

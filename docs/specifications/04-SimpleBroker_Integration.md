@@ -22,6 +22,8 @@ See also:
   [`10-CLI_Interface.md`](10-CLI_Interface.md)
 - implementation plan:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- SimpleBroker 7.5.1 compatibility plan:
+  [`docs/plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md`](../plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md)
 - cleanup policy convergence plan:
   [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
 - monitor policy progress contract plan:
@@ -37,11 +39,12 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 7.4.1 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 3.9.1 or newer. These coordinated
+Weft requires SimpleBroker 7.5.1 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 3.10.0 or newer. These coordinated
 floors provide backend API v7, bounded dump watermarks, immutable
-invocation/handle configuration snapshots, typed queue result overloads, and
-the synchronized watcher lifecycle contract used by Weft.
+invocation/handle configuration snapshots, typed queue result overloads,
+public closeable queue iterator types, and the synchronized watcher lifecycle
+contract used by Weft.
 
 _Implementation mapping_: `weft/commands/queue.py` delegates to
 `simplebroker.commands`; `weft/context.py` injects the resolved broker target;
@@ -194,6 +197,23 @@ give Weft a separate Postgres connection budget from the application pool, with
 multi-process workloads. If an external pooler is used, it must preserve the
 backend notification semantics required by `LISTEN`/`NOTIFY`; pooling modes
 that discard listener state are outside Weft's broker contract.
+
+For optional Manager admission control, Weft may call the package-root
+`simplebroker_pg.get_connection_stats(queue)` helper with an existing
+persistent Manager queue. The helper returns a dictionary with exactly
+`numbackends`, `max_connections`, `superuser_reserved_connections`, and
+`reserved_connections`; callers use those keys and do not depend on field
+order. `reserved_connections` is zero on Postgres versions that do not expose
+that setting. The helper owns its SQL and result validation inside
+`simplebroker_pg`; Weft does not duplicate backend SQL or open a
+measurement-only connection. `numbackends` is the raw server-wide backend
+count, including the probing connection and unrelated clients. It is therefore
+conservative evidence for a soft admission bound, not an exact count of Weft
+workers and not a connection lease or permit. Admission reads `numbackends` by
+key as its single Postgres usage value. The operator-configured
+`WEFT_ADMISSION_MAX_CONNECTIONS`, not the helper's `max_connections`,
+`superuser_reserved_connections`, or `reserved_connections` values, controls
+the Weft lane limits. Weft adds no prospective per-launch connection charge.
 
 ### Weft-Owned Operational Tables [SB-0.4a]
 
@@ -582,7 +602,7 @@ Current contract:
   the larger group of named storage/retry constants. Most of the latter are
   not directly relevant to Weft; their explicit defaults exist to isolate the
   embedded broker from standalone SimpleBroker tuning.
-- Weft resolves that complete mapping with SimpleBroker 7.4.1's public
+- Weft resolves that complete mapping with SimpleBroker 7.5.1's public
   `resolve_isolated_config()` and preserves or recreates the immutable
   `ResolvedConfig` marker at every config-consuming lower-layer handoff. Weft
   does not opt into opaque extra keys. A SimpleBroker handle or invocation that
@@ -693,6 +713,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)
 - [`docs/plans/2026-08-25-monitor-schema-semantic-validation-plan.md`](../plans/2026-08-25-monitor-schema-semantic-validation-plan.md)
 - [`docs/plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md`](../plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md)
 - [`docs/plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md`](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)

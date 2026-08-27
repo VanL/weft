@@ -56,7 +56,7 @@ class TestTaskSimple:
             target = BrokerTarget(
                 backend_name="sqlite",
                 target=str(db_path.resolve()),
-                backend_options={"sentinel": "retained"},
+                backend_options={},
                 project_root=db_path.parent.resolve(),
             )
             taskspec = fixtures.create_minimal_taskspec()

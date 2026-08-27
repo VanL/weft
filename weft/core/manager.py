@@ -12,6 +12,7 @@ import atexit
 import copy
 import json
 import logging
+import math
 import multiprocessing
 import os
 import signal
@@ -27,8 +28,9 @@ from typing import Any, Literal, cast
 from pydantic import ValidationError
 
 from simplebroker import BrokerTarget, Queue
-from simplebroker.ext import BrokerError
+from simplebroker.ext import BrokerError, DatabaseError
 from weft._constants import (
+    ADMISSION_SERVICE_RESERVE_SLOTS,
     CONTROL_KILL,
     CONTROL_PING,
     CONTROL_STOP,
@@ -53,6 +55,7 @@ from weft._constants import (
     MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
     MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
+    MANAGER_ADMISSION_RECHECK_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_CHILD_INBOX_SEED_ATTEMPTS,
     MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS,
@@ -96,6 +99,8 @@ from weft._constants import (
     TASK_CLEANUP_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_STATUSES,
+    WEFT_ADMISSION_MAX_CONNECTIONS,
+    WEFT_ADMISSION_RESERVE_FRACTION,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
@@ -112,6 +117,8 @@ from weft._constants import (
     get_weft_directory_name,
 )
 from weft.context import WeftContext
+from weft.core.endpoints import latest_tid_mapping_entries_for_endpoint_resolution
+from weft.core.monitor.policies.tid_mapping import mapping_row_is_live
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -200,6 +207,34 @@ logger = logging.getLogger(__name__)
 
 DispatchOwnershipState = Literal["self", "other", "none", "unknown"]
 ManagerLivenessState = Literal["live", "stale", "unknown"]
+AdmissionLane = Literal["public", "internal"]
+
+
+def _admission_capacity(
+    *,
+    used: int,
+    max_connections: int,
+    reserve_fraction: float,
+) -> dict[str, Any]:
+    """Return backend usage limits and lane decisions.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
+    """
+
+    reserve = max(
+        math.ceil(max_connections * reserve_fraction),
+        ADMISSION_SERVICE_RESERVE_SLOTS,
+    )
+    public_limit = max(0, max_connections - reserve)
+    internal_limit = max_connections
+    return {
+        "used": used,
+        "reserve": reserve,
+        "public_limit": public_limit,
+        "internal_limit": internal_limit,
+        "public_allowed": used < public_limit,
+        "internal_allowed": used < internal_limit,
+    }
 
 
 @dataclass
@@ -344,6 +379,16 @@ class Manager(ServiceTask):
         )
         self._child_processes: dict[str, ManagedChild] = {}
         self._active_child_launches: dict[str, _ManagerChildLaunchRequest] = {}
+        self._admission_max_connections = int(
+            self._weft_config.get(WEFT_ADMISSION_MAX_CONNECTIONS, 0)
+        )
+        self._admission_reserve_fraction = float(
+            self._weft_config.get(WEFT_ADMISSION_RESERVE_FRACTION, 0.1)
+        )
+        self._admission_blocked_lanes: set[AdmissionLane] = set()
+        self._admission_retry_after_ns = 0
+        self._admission_last_decision_state = "open"
+        self._admission_probe_memo: dict[str, tuple[str, bool, float]] = {}
         self._child_launch_started_ns: dict[str, int] = {}
         self._child_launch_stale_retries: dict[str, int] = {}
         self._child_launch_started_this_turn = False
@@ -812,6 +857,9 @@ class Manager(ServiceTask):
         }
         if config.name in reserved_names:
             return False
+        lane = self._admission_lane_for_queue(config.name)
+        if lane in getattr(self, "_admission_blocked_lanes", set()):
+            return False
         return super()._queue_counts_as_wait_activity(config)
 
     def _build_tid_mapping_payload(self) -> dict[str, Any]:
@@ -896,6 +944,7 @@ class Manager(ServiceTask):
 
         self._child_launch_started_ns.pop(tid, None)
         self._child_launch_stale_retries.pop(tid, None)
+        self._clear_admission_retry()
         return self._active_child_launches.pop(tid, None)
 
     def _retry_stale_child_launches(self) -> bool:
@@ -1185,6 +1234,7 @@ class Manager(ServiceTask):
             message_timestamp=request.message_timestamp,
             launched_ns=result.launched_ns or time.time_ns(),
         )
+        self._clear_admission_retry()
         self._invalidate_leadership_work_cache()
         if request.service_key is not None:
             self._register_managed_service_owner(
@@ -1242,6 +1292,7 @@ class Manager(ServiceTask):
         request = result.request
         child_spec = request.child_spec
         error = result.error or RuntimeError("child launch failed")
+        self._schedule_admission_retry_for_source(request.source_queue)
         logger.warning("Child launch failed for %s: %s", child_spec.tid, error)
         self._report_state_change(
             event="task_spawn_rejected",
@@ -1576,6 +1627,248 @@ class Manager(ServiceTask):
             for tid, child in self._child_processes.items()
             if not self._child_is_supervision_only(child)
         }
+
+    def _admission_enabled(self) -> bool:
+        """Return whether backend-specific admission is enabled."""
+
+        return self._admission_max_connections > 0
+
+    def _admission_lane_for_queue(self, queue_name: str) -> AdmissionLane | None:
+        """Map one Manager spawn source to its admission lane."""
+
+        if queue_name == self._queue_names.get("internal_inbox"):
+            return "internal"
+        if queue_name == self._queue_names.get("inbox"):
+            return "public"
+        return None
+
+    @staticmethod
+    def _admission_blocked_lanes_for_capacity(
+        capacity: Mapping[str, Any],
+    ) -> set[AdmissionLane]:
+        """Return the monotonic lane blocks encoded by one capacity source."""
+
+        blocked: set[AdmissionLane] = set()
+        if not capacity["public_allowed"]:
+            blocked.add("public")
+        if not capacity["internal_allowed"]:
+            blocked.update(("public", "internal"))
+        return blocked
+
+    @staticmethod
+    def _admission_state(
+        blocked_lanes: set[AdmissionLane],
+        *,
+        unavailable: bool = False,
+    ) -> str:
+        """Return the compact private admission transition state."""
+
+        if unavailable:
+            return "unavailable"
+        if "internal" in blocked_lanes:
+            return "all_paused"
+        if "public" in blocked_lanes:
+            return "public_paused"
+        return "open"
+
+    def _admission_backend_name(self) -> str:
+        """Return the active broker backend used for admission observation."""
+
+        return str(self._get_connected_queue().backend_name)
+
+    def _observe_admission_usage(self) -> int | None:
+        """Return one backend-specific usage observation, or ``None`` on failure.
+
+        SQLite counts the union of live latest TID mappings (the shared
+        ``mapping_row_is_live`` probe, memoized) and this Manager's in-flight
+        child launches, which have no durable evidence yet. Each TID counts
+        once.
+        """
+
+        if self._admission_backend_name() == "postgres":
+            try:
+                return self._read_postgres_connection_stats()["numbackends"]
+            except (DatabaseError, ValueError):
+                return None
+
+        try:
+            mappings = latest_tid_mapping_entries_for_endpoint_resolution(
+                self._task_context()
+            )
+        except (BrokerError, OSError, RuntimeError):
+            return None
+        live_tids = {
+            tid
+            for tid, payload in mappings.items()
+            if self._admission_mapping_is_live(tid, payload)
+        }
+        self._admission_probe_memo = {
+            tid: memo
+            for tid, memo in self._admission_probe_memo.items()
+            if tid in mappings
+        }
+        live_tids.update(self._active_child_launches)
+        return len(live_tids)
+
+    def _admission_mapping_is_live(
+        self,
+        tid: str,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """Return memoized shared-probe liveness for one latest mapping row.
+
+        A dead verdict is permanent while the row's runtime handle is
+        unchanged: a probed ``(pid, create_time)`` identity never becomes live
+        again, so only a newer handle payload can revive the TID. A live
+        verdict expires after ``MANAGER_ADMISSION_RECHECK_SECONDS`` so death
+        is observed promptly without re-probing every decision.
+        """
+
+        fingerprint = json.dumps(
+            payload.get("runtime_handle"), sort_keys=True, default=str
+        )
+        memo = self._admission_probe_memo.get(tid)
+        now = time.monotonic()
+        if memo is not None:
+            memo_fingerprint, memo_live, memo_expires_at = memo
+            if memo_fingerprint == fingerprint and (
+                not memo_live or now < memo_expires_at
+            ):
+                return memo_live
+        is_live = mapping_row_is_live(payload)
+        self._admission_probe_memo[tid] = (
+            fingerprint,
+            is_live,
+            now + MANAGER_ADMISSION_RECHECK_SECONDS,
+        )
+        return is_live
+
+    def _record_admission_decision(
+        self,
+        *,
+        lane: AdmissionLane,
+        blocked_lanes: set[AdmissionLane],
+        backend: str,
+        capacity: Mapping[str, Any] | None,
+        unavailable: bool = False,
+    ) -> None:
+        """Install one admission decision and emit bounded operational evidence."""
+
+        previous_state = self._admission_last_decision_state
+        self._admission_blocked_lanes = blocked_lanes
+        self._admission_retry_after_ns = (
+            time.time_ns() + int(MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000)
+            if blocked_lanes
+            else 0
+        )
+        state = self._admission_state(blocked_lanes, unavailable=unavailable)
+        self._admission_last_decision_state = state
+        if state == previous_state and not unavailable:
+            return
+
+        fields: dict[str, Any] = {
+            "backend": backend,
+            "state": state,
+            "lane": lane,
+        }
+        if capacity is not None:
+            fields.update(
+                used=capacity["used"],
+                reserve=capacity["reserve"],
+                public_limit=capacity["public_limit"],
+                internal_limit=capacity["internal_limit"],
+            )
+        if unavailable:
+            fields["error"] = "admission_usage_unavailable"
+        self._emit_serve_log_rate_limited(
+            "admission_state",
+            component="spawn",
+            required_level="info",
+            severity="warning" if blocked_lanes else "info",
+            key="admission_state",
+            state=fields,
+            log_fields=fields,
+        )
+
+    def _clear_admission_retry(self) -> None:
+        """Make blocked lanes eligible for an immediate fresh observation."""
+
+        self._admission_blocked_lanes.clear()
+        self._admission_retry_after_ns = 0
+
+    def _schedule_admission_retry_for_source(self, source_queue: str | None) -> None:
+        """Backstop a restored launch request with one bounded lane retry."""
+
+        if not self._admission_enabled() or source_queue is None:
+            return
+        lane = self._admission_lane_for_queue(source_queue)
+        if lane is None:
+            return
+        if lane == "internal":
+            self._admission_blocked_lanes.update(("public", "internal"))
+        else:
+            self._admission_blocked_lanes.add(lane)
+        self._admission_retry_after_ns = time.time_ns() + int(
+            MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000
+        )
+
+    def _expire_admission_retry_if_due(self) -> None:
+        """Make a due blocked source eligible for one fresh admission decision."""
+
+        if (
+            self._admission_retry_after_ns > 0
+            and time.time_ns() >= self._admission_retry_after_ns
+        ):
+            self._clear_admission_retry()
+
+    def _read_postgres_connection_stats(self) -> dict[str, int]:
+        """Read connection pressure through the optional PostgreSQL extension."""
+
+        # The backend extension is optional on non-PostgreSQL installations.
+        from simplebroker_pg import get_connection_stats
+
+        return get_connection_stats(self._get_connected_queue())
+
+    def _admission_allows_queue(self, queue_name: str) -> bool:
+        """Evaluate one spawn lane before broker reservation.
+
+        Spec:
+        - docs/specifications/03-Manager_Architecture.md [MA-1.8]
+        - docs/specifications/05-Message_Flow_and_State.md [MF-6]
+        - docs/specifications/07-System_Invariants.md [MANAGER.18]
+        """
+
+        lane = self._admission_lane_for_queue(queue_name)
+        if lane is None or not self._admission_enabled():
+            return True
+        if lane in self._admission_blocked_lanes:
+            return False
+
+        backend = self._admission_backend_name()
+        used = self._observe_admission_usage()
+        if used is None:
+            self._record_admission_decision(
+                lane=lane,
+                blocked_lanes={"public", "internal"},
+                backend=backend,
+                capacity=None,
+                unavailable=True,
+            )
+            return False
+
+        capacity = _admission_capacity(
+            used=used,
+            max_connections=self._admission_max_connections,
+            reserve_fraction=self._admission_reserve_fraction,
+        )
+        blocked_lanes = self._admission_blocked_lanes_for_capacity(capacity)
+        self._record_admission_decision(
+            lane=lane,
+            blocked_lanes=blocked_lanes,
+            backend=backend,
+            capacity=capacity,
+        )
+        return lane not in blocked_lanes
 
     def _register_manager(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         """Publish active manager service ownership (Spec: [MA-1.4], [MF-7])."""
@@ -3378,6 +3671,7 @@ class Manager(ServiceTask):
             # countdown after in-flight work has actually finished.
             self._last_activity_ns = time.time_ns()
             self._invalidate_leadership_work_cache()
+            self._clear_admission_retry()
         return child_exited
 
     def _terminate_children(self, deadline: float) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
@@ -3874,6 +4168,10 @@ class Manager(ServiceTask):
             self._has_active_child_launches() or self._child_launch_started_this_turn
         ):
             inactive_candidates.add(queue_name)
+            return False
+        if queue_name in self._spawn_inbox_queue_names() and not (
+            self._admission_allows_queue(queue_name)
+        ):
             return False
         return super()._process_queue_message(queue_name, inactive_candidates)
 
@@ -6454,6 +6752,18 @@ class Manager(ServiceTask):
         super()._cleanup_task_resources(deadline)
         self._unregister_atexit_callback()
 
+    def _admission_retry_timeouts(self, *, now_ns: int) -> list[float]:
+        """Return the optional admission deadline as a timeout list."""
+
+        if self._admission_retry_after_ns <= 0:
+            return []
+        return [
+            self._timeout_until_ns(
+                self._admission_retry_after_ns,
+                now_ns=now_ns,
+            )
+        ]
+
     def next_wait_timeout(self) -> float | None:
         """Return the next manager due timer for the shared task loop."""
 
@@ -6474,6 +6784,7 @@ class Manager(ServiceTask):
                     now_ns=now_ns,
                 )
             )
+        timeouts.extend(self._admission_retry_timeouts(now_ns=now_ns))
         if self._user_work_children():
             timeouts.append(MANAGER_CHILD_EXIT_POLL_INTERVAL)
 
@@ -6553,6 +6864,7 @@ class Manager(ServiceTask):
         - docs/specifications/05-Message_Flow_and_State.md [MF-6]
         """
         self._loop_iteration += 1
+        self._expire_admission_retry_if_due()
         self._child_launch_started_this_turn = False
         self._leader_probe_used_this_turn = False
         self._leader_actionable_work_cache = None

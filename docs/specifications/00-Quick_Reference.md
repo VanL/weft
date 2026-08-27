@@ -162,6 +162,8 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS` | Throttle interval for repeated foreground manager operational-log events. Defaults to 5 seconds. |
 | `WEFT_REDACT_TASKSPEC_FIELDS` | Comma-separated TaskSpec field paths redacted from task-log events. |
 | `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
+| `WEFT_ADMISSION_MAX_CONNECTIONS` | Backend-specific admission maximum. Unset or `0` disables admission; enabled values are positive integers. SQLite compares this with a context-scoped count of one latest mapping per full TID, including stale or inconclusive mappings that existing cleanup has not retired; Postgres compares it with raw server-wide `numbackends`. See [MA-1.8] and [MANAGER.18]. |
+| `WEFT_ADMISSION_RESERVE_FRACTION` | Fraction withheld from public work. Must be finite with `0 <= value < 1`; defaults to `0.1`. Effective reserve is the greater of `ceil(maximum * fraction)` and three slots of modeled internal-lane room for Manager, TaskMonitor, and Heartbeat; these are not dedicated permits. See [MA-1.8] and [MANAGER.18]. |
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
 | `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `TaskMonitor`. Defaults to true. |
@@ -218,6 +220,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [Manager admission control plan](../plans/2026-08-25-manager-admission-control-plan.md)
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)

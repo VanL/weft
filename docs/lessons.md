@@ -1201,3 +1201,44 @@ index is not a dated section and does not count toward the coalescing trigger.
   help or error prose. Add a type only when it protects a demonstrated
   machine-readable contract; self-owned internal wording alone does not justify
   an exception taxonomy.
+
+## 2026-08-26 The PostgreSQL Test Wrapper Owns DSN Provisioning
+
+- An unset ambient `WEFT_PG_TEST_DSN` does not mean live PostgreSQL evidence is
+  unavailable. Inspect and use `bin/pytest-pg` before reporting a gap. When
+  Docker and uv are available, the wrapper starts a temporary PostgreSQL
+  container, discovers its published port, builds and injects the test DSN,
+  initializes the broker schema, runs pytest, and removes the container.
+- Backend selection is part of that child-process environment boundary. A
+  one-off probe that merely passes the generated target string without the
+  wrapper's backend environment can resolve as SQLite and prove only the
+  non-PostgreSQL rejection path. Prefer running the real test through
+  `bin/pytest-pg`; if a direct probe is necessary, reproduce `_build_test_env()`
+  rather than inventing a second DSN/config path.
+- Report live PostgreSQL as unpassed only when the canonical wrapper cannot run
+  or provision its database, and state that concrete failure.
+
+## 2026-08-26 Admission Belongs Before Reservation
+
+- A capacity check is simplest when denial leaves the spawn row in its source
+  queue. Checking before reservation avoids a new permit lifecycle, does not
+  alter reserved-row recovery, and lets the existing queue remain the durable
+  backlog.
+- A retained row is real queue activity, but it must not wake a blocked Manager
+  continuously. Keep the source visible, suppress it from ordinary wait
+  activity until a bounded retry deadline, and let child or launch-worker
+  progress make that retry immediately due. The deadline applies to every
+  denial and observation failure; event-driven early wakes are an optimization,
+  not the only recovery path. Control, cleanup, reconciliation, and shutdown
+  remain independent of dispatch capacity.
+- Keep the usage model singular. Select one backend-specific observation:
+  live-filtered latest mappings per full TID unioned with the Manager's
+  in-flight launches for SQLite, or raw server-wide `numbackends` for
+  Postgres. Filter mapping rows only through the shared `mapping_row_is_live`
+  probe so admission reads a row exactly the way cleanup and endpoint
+  resolution do — counting unconditionally made `used` track recent task
+  history (rows persist through the age-gated cleanup window after task exit)
+  and rate-limited dispatch. Undecidable rows stay counted; dead rows release
+  immediately. Both observations are best-effort, non-atomic snapshots, so
+  document admission as a soft guard rather than inventing a lease or
+  conjoining a second Manager-local counter.

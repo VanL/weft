@@ -820,6 +820,31 @@ and are drained before public spawn requests whenever both queues are pending.
 Both queues share the same validation, TaskSpec expansion, child launch, initial
 inbox seeding, and acknowledgement path.
 
+When admission control is configured, the Manager checks the lane before it
+reserves a spawn request. A denied public or internal request stays in its
+source queue and does not enter the reserved-message lifecycle. A blocked
+source that is already known active is suppressed as ordinary wait activity
+so retained backlog cannot create a zero-timeout loop. One backend-specific
+observation supplies `used`: SQLite context-scoped observation reduces to the
+latest mapping per full TID, counts the rows the shared payload-only liveness
+probe reports live or undecidable, and unions the Manager's in-flight child
+launches, each TID once; Postgres reads raw server-wide
+`numbackends` through the public helper on the Manager's existing persistent
+Queue. A latest row whose handle probes dead is released from the count
+immediately, without waiting for cleanup retirement; undecidable rows remain
+counted. Probe verdicts are memoized (dead permanent per unchanged handle,
+live for the recheck interval). Admission does not
+add a liveness, cleanup, or freshness policy beyond that shared probe.
+Denial or observation failure remains suppressed until its universal
+one-second retry deadline; child reap or launch-worker progress may wake it
+earlier. A failed child launch cannot leave a restored or retained source
+suppressed past that deadline. PostgreSQL catches only `DatabaseError` and
+`ValueError`; SQLite catches only `BrokerError`, `OSError`, and `RuntimeError`;
+shutdown/control `BaseException` subclasses propagate. While dispatch is blocked, the Manager continues control
+handling, cleanup, child reaping, leadership convergence, service
+reconciliation, and shutdown. Admission does not change launch acknowledgement,
+recovery, or reserved-queue policy because it runs before reservation.
+
 The spawn-request message ID is the submitted task TID. Dump/load paths that
 include spawn queues must preserve broker message IDs on import; in
 SimpleBroker `simplebroker-dump` v1 files, message records carry that value as
@@ -937,6 +962,7 @@ _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_messa
 `tests/core/test_manager.py`.
 
 Implementation plan backlinks:
+[`2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md);
 [`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md);
 [`2026-05-11-internal-service-observability-plan.md`](../plans/2026-05-11-internal-service-observability-plan.md).
 

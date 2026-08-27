@@ -740,6 +740,26 @@ _Implementation mapping_: `weft/core/manager.py`,
   queues. Public spawn work advances only after the shared watcher marks the
   public spawn queue active through native activity, fallback polling evidence,
   or bounded periodic discovery.
+- **MANAGER.18**: configured admission control is a lane-specific,
+  pre-reservation soft guard over one backend-selected usage observation. For
+  maximum `N` and reserve fraction `f`, reserve is
+  `max(ceil(N * f), 3)`, public limit is
+  `max(0, N - reserve)`, and internal limit is `N`. The three-slot floor models
+  internal-lane room for Manager, TaskMonitor, and Heartbeat; it is not a set of
+  dedicated service permits.
+  Public admits only below its limit; internal admits only below `N`. When
+  `N <= reserve`, public work is disabled but internal work remains eligible
+  below `N`. SQLite context-scoped usage counts the latest mapping rows per
+  full TID whose payloads the shared liveness probe reports live or
+  undecidable, unioned with the Manager's in-flight child launches; a latest
+  row whose handle probes dead is released immediately, while undecidable
+  rows remain counted. Postgres uses raw server-wide `numbackends`. Both observations are best effort and non-atomic. Admission
+  owns no separate liveness probe, cache, index, cleanup, or freshness lifecycle. Pipelines
+  receive no special accounting or production branch. A blocked lane must not
+  block control handling, cleanup, child reaping, leadership convergence,
+  service reconciliation, or shutdown. One universal retry deadline must
+  reconsider denied/failed observations and failed-launch restoration without
+  unrelated queue activity. Admission adds no PING/STATUS schema.
 
 ### Context Invariants
 
@@ -925,6 +945,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
 - [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)

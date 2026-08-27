@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 
-from simplebroker import format_message_id
+from simplebroker import CloseableIterator, format_message_id
 from simplebroker.ext import TimestampError, TimestampGenerator
 from weft._constants import WEFT_CONTEXT_ENV
 from weft._exceptions import CommandExecutionError, CommandUsageError
@@ -108,7 +108,7 @@ def _read_generator_after(
     with_timestamps: bool,
     after_timestamp: int | None,
     before_timestamp: int | None = None,
-) -> Iterator[Any]:
+) -> CloseableIterator[Any]:
     yield from queue.read_generator(
         with_timestamps=with_timestamps,
         after_timestamp=after_timestamp,
@@ -122,7 +122,7 @@ def _peek_generator_after(
     with_timestamps: bool,
     after_timestamp: int | None,
     before_timestamp: int | None = None,
-) -> Iterator[Any]:
+) -> CloseableIterator[Any]:
     yield from queue.peek_generator(
         with_timestamps=with_timestamps,
         after_timestamp=after_timestamp,
@@ -137,7 +137,7 @@ def _move_generator_after(
     with_timestamps: bool,
     after_timestamp: int | None,
     before_timestamp: int | None = None,
-) -> Iterator[Any]:
+) -> CloseableIterator[Any]:
     yield from queue.move_generator(
         destination,
         with_timestamps=with_timestamps,

@@ -29,6 +29,7 @@ Spec references:
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -760,6 +761,12 @@ MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_MESSAGE_LIMIT: Final[int] = 64
 
 MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES: Final[int] = 128
 """Maximum public spawn requests drained before yielding a manager turn."""
+
+ADMISSION_SERVICE_RESERVE_SLOTS: Final[int] = 3
+"""Minimum modeled room for Manager, TaskMonitor, and Heartbeat."""
+
+MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
+"""Delay before rechecking a blocked Manager admission source."""
 
 MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS: Final[float] = 5.0
 """Minimum interval between public dispatch stalled operational warnings."""
@@ -1863,6 +1870,18 @@ TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS: Final[float] = (
 WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
 
+WEFT_ADMISSION_MAX_CONNECTIONS: Final[str] = "WEFT_ADMISSION_MAX_CONNECTIONS"
+"""Config key for the optional backend-specific admission maximum."""
+
+WEFT_ADMISSION_MAX_CONNECTIONS_DEFAULT: Final[int] = 0
+"""Default disabled backend-specific admission maximum."""
+
+WEFT_ADMISSION_RESERVE_FRACTION: Final[str] = "WEFT_ADMISSION_RESERVE_FRACTION"
+"""Config key for the public-lane admission reserve fraction."""
+
+WEFT_ADMISSION_RESERVE_FRACTION_DEFAULT: Final[float] = 0.1
+"""Default fraction of the admission maximum reserved from public work."""
+
 WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV: Final[str] = "WEFT_MANAGER_RUNTIME_HANDLE_JSON"
 """Optional JSON RunnerHandle for externally supervised manager processes."""
 
@@ -2437,6 +2456,42 @@ def _parse_manager_lifetime_timeout(value: str) -> float:
     return _parse_non_negative_float(value, name="WEFT_MANAGER_LIFETIME_TIMEOUT")
 
 
+def _parse_admission_max_connections(value: str) -> int:
+    """Parse the optional backend-specific admission maximum."""
+
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{WEFT_ADMISSION_MAX_CONNECTIONS} must be 0 or a positive integer, "
+            f"got {value!r}"
+        ) from exc
+    if parsed < 0:
+        raise ValueError(
+            f"{WEFT_ADMISSION_MAX_CONNECTIONS} must be 0 or a positive integer, "
+            f"got {value!r}"
+        )
+    return parsed
+
+
+def _parse_admission_reserve_fraction(value: str) -> float:
+    """Parse the fraction of admission capacity reserved from public work."""
+
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{WEFT_ADMISSION_RESERVE_FRACTION} must be finite and satisfy "
+            f"0 <= value < 1, got {value!r}"
+        ) from exc
+    if not math.isfinite(parsed) or not 0 <= parsed < 1:
+        raise ValueError(
+            f"{WEFT_ADMISSION_RESERVE_FRACTION} must be finite and satisfy "
+            f"0 <= value < 1, got {value!r}"
+        )
+    return parsed
+
+
 def _parse_task_monitor_interval_seconds(value: str) -> int:
     """Parse the task-monitor heartbeat interval environment variable."""
 
@@ -2817,6 +2872,16 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_MANAGER_REUSE_ENABLED,
             parser=_parse_bool,
         ),
+        WEFT_ADMISSION_MAX_CONNECTIONS: _load_weft_env_value(
+            WEFT_ADMISSION_MAX_CONNECTIONS,
+            default=WEFT_ADMISSION_MAX_CONNECTIONS_DEFAULT,
+            parser=_parse_admission_max_connections,
+        ),
+        WEFT_ADMISSION_RESERVE_FRACTION: _load_weft_env_value(
+            WEFT_ADMISSION_RESERVE_FRACTION,
+            default=WEFT_ADMISSION_RESERVE_FRACTION_DEFAULT,
+            parser=_parse_admission_reserve_fraction,
+        ),
         "WEFT_MANAGER_RUNTIME_HANDLE_JSON": _load_weft_env_value(
             WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
             default=None,
@@ -3123,6 +3188,14 @@ _WEFT_OVERRIDE_RULES: Final[dict[str, _OverrideRule]] = {
     "WEFT_MANAGER_REUSE_ENABLED": _OverrideRule(
         kind=_OverrideKind.BOOLISH,
         parser=_parse_bool,
+    ),
+    WEFT_ADMISSION_MAX_CONNECTIONS: _OverrideRule(
+        kind=_OverrideKind.INTEGER_OR_STRING,
+        parser=_parse_admission_max_connections,
+    ),
+    WEFT_ADMISSION_RESERVE_FRACTION: _OverrideRule(
+        kind=_OverrideKind.NUMBER_OR_STRING,
+        parser=_parse_admission_reserve_fraction,
     ),
     "WEFT_AUTOSTART_TASKS": _OverrideRule(
         kind=_OverrideKind.BOOLISH,

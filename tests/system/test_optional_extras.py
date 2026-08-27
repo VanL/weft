@@ -80,7 +80,7 @@ def test_typed_package_markers_are_included_in_builds() -> None:
     )
 
 
-def test_simplebroker_floor_is_7_4_1() -> None:
+def test_simplebroker_floor_is_7_5_1() -> None:
     """The root floor must include retained config and watcher contracts."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
     minimum = _minimum_dependency_version(
@@ -88,11 +88,11 @@ def test_simplebroker_floor_is_7_4_1() -> None:
         "simplebroker",
     )
 
-    assert minimum == "7.4.1"
+    assert minimum == "7.5.1"
 
 
 @pytest.mark.parametrize("extra", ["pg", "all", "dev"])
-def test_simplebroker_pg_floor_is_3_9_1(extra: str) -> None:
+def test_simplebroker_pg_floor_is_3_10_0(extra: str) -> None:
     """Every root extra carrying PostgreSQL must use backend API v7."""
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
 
@@ -101,7 +101,7 @@ def test_simplebroker_pg_floor_is_3_9_1(extra: str) -> None:
         "simplebroker-pg",
     )
 
-    assert minimum == "3.9.1"
+    assert minimum == "3.10.0"
 
 
 def test_llm_floor_is_0_33() -> None:

@@ -11,6 +11,7 @@ import pytest
 import weft._constants as constants
 from simplebroker import ResolvedConfig, resolve_config
 from weft._constants import (
+    ADMISSION_SERVICE_RESERVE_SLOTS,
     AGENT_SESSION_READY_TIMEOUT_SECONDS,
     COMMAND_SESSION_POST_TERMINATION_WAIT,
     COMMAND_SESSION_TERMINATION_TIMEOUT,
@@ -38,6 +39,7 @@ from weft._constants import (
     INTERACTIVE_STOP_COMPLETION_TIMEOUT,
     INTERACTIVE_STOP_GRACE_SECONDS,
     INTERACTIVE_STOP_POLL_INTERVAL,
+    MANAGER_ADMISSION_RECHECK_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
@@ -77,6 +79,8 @@ from weft._constants import (
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
     TERMINAL_TASK_STATUSES,
+    WEFT_ADMISSION_MAX_CONNECTIONS,
+    WEFT_ADMISSION_RESERVE_FRACTION,
     WEFT_AUTOSTART_TASKS_DEFAULT,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_DIRECTORY_NAME_DEFAULT,
@@ -166,6 +170,18 @@ def test_explicit_override_normalization_preserves_input_contract(
             "1",
             ValueError,
             "was removed",
+        ),
+        (
+            WEFT_ADMISSION_MAX_CONNECTIONS,
+            1.5,
+            TypeError,
+            "must be int or str",
+        ),
+        (
+            WEFT_ADMISSION_RESERVE_FRACTION,
+            object(),
+            TypeError,
+            "must be int, float, or str",
         ),
     ],
 )
@@ -770,6 +786,68 @@ class TestLoadConfig:
         with patch.dict(os.environ, {"WEFT_MANAGER_REUSE_ENABLED": "true"}):
             config = load_config()
             assert config["WEFT_MANAGER_REUSE_ENABLED"] is True
+
+    def test_admission_config_defaults_are_disabled(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+
+        assert config[WEFT_ADMISSION_MAX_CONNECTIONS] == 0
+        assert config[WEFT_ADMISSION_RESERVE_FRACTION] == 0.1
+        assert ADMISSION_SERVICE_RESERVE_SLOTS == 3
+        assert MANAGER_ADMISSION_RECHECK_SECONDS == 1.0
+
+    @pytest.mark.parametrize(
+        ("name", "value", "expected"),
+        [
+            (WEFT_ADMISSION_MAX_CONNECTIONS, "0", 0),
+            (WEFT_ADMISSION_MAX_CONNECTIONS, "1", 1),
+            (WEFT_ADMISSION_RESERVE_FRACTION, "0", 0.0),
+            (WEFT_ADMISSION_RESERVE_FRACTION, "0.25", 0.25),
+        ],
+    )
+    def test_admission_env_values_normalize(
+        self,
+        name: str,
+        value: str,
+        expected: object,
+    ) -> None:
+        with patch.dict(os.environ, {name: value}, clear=True):
+            config = load_config()
+
+        assert config[name] == expected
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            (WEFT_ADMISSION_MAX_CONNECTIONS, "-1"),
+            (WEFT_ADMISSION_MAX_CONNECTIONS, "1.0"),
+            (WEFT_ADMISSION_RESERVE_FRACTION, "-0.1"),
+            (WEFT_ADMISSION_RESERVE_FRACTION, "1"),
+            (WEFT_ADMISSION_RESERVE_FRACTION, "nan"),
+            (WEFT_ADMISSION_RESERVE_FRACTION, "inf"),
+        ],
+    )
+    def test_admission_env_values_reject_invalid_ranges(
+        self,
+        name: str,
+        value: str,
+    ) -> None:
+        with (
+            patch.dict(os.environ, {name: value}, clear=True),
+            pytest.raises(ValueError, match=name),
+        ):
+            load_config()
+
+    def test_admission_explicit_overrides_use_the_same_parsers(self) -> None:
+        config = compile_config(
+            {
+                WEFT_ADMISSION_MAX_CONNECTIONS: 3,
+                WEFT_ADMISSION_RESERVE_FRACTION: 0.2,
+            }
+        )
+
+        assert config[WEFT_ADMISSION_MAX_CONNECTIONS] == 3
+        assert config[WEFT_ADMISSION_RESERVE_FRACTION] == 0.2
 
     def test_weft_directory_name_env(self) -> None:
         with patch.dict(os.environ, {"WEFT_DIRECTORY_NAME": ".engram"}, clear=True):

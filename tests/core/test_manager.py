@@ -24,13 +24,13 @@ from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 
 import weft.core.manager as manager_mod
 import weft.core.tasks.base as base_task_mod
-from simplebroker.ext import BrokerError
+from simplebroker.ext import BrokerError, DatabaseError
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from weft._constants import (
@@ -65,6 +65,8 @@ from weft._constants import (
     SERVICE_STATUS_SUPERSEDED,
     SERVICE_TYPE_MANAGED,
     TERMINAL_ENVELOPE_TYPE,
+    WEFT_ADMISSION_MAX_CONNECTIONS,
+    WEFT_ADMISSION_RESERVE_FRACTION,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
@@ -93,7 +95,13 @@ from weft.core.tasks import (
     PipelineTask,
 )
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
-from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+from weft.core.taskspec import (
+    IOSection,
+    ReservedPolicy,
+    SpecSection,
+    StateSection,
+    TaskSpec,
+)
 from weft.helpers import ContainerRuntimeDetection, process_create_time
 
 AUTOSTART_PIPELINE_RESULT_TIMEOUT = 60.0
@@ -289,6 +297,7 @@ def make_manager_spec(
     idle_timeout: float | None = None,
     role: str | None = None,
     weft_context: str | None = None,
+    reserved_policy_on_error: ReservedPolicy = ReservedPolicy.KEEP,
 ) -> TaskSpec:
     metadata = {"capabilities": ["tests.tasks.sample_targets:large_output"]}
     if idle_timeout is not None:
@@ -303,6 +312,7 @@ def make_manager_spec(
             function_target="weft.core.manager:Manager",
             timeout=None,
             weft_context=weft_context,
+            reserved_policy_on_error=reserved_policy_on_error,
         ),
         io=IOSection(
             inputs={"inbox": inbox},
@@ -1896,6 +1906,643 @@ def test_manager_processes_internal_spawn_before_public_spawn(
         manager.cleanup()
 
     assert launched == ["internal-first", "public-second"]
+
+
+@pytest.mark.parametrize(
+    ("used", "expected"),
+    [
+        (
+            6,
+            {
+                "used": 6,
+                "reserve": 3,
+                "public_limit": 7,
+                "internal_limit": 10,
+                "public_allowed": True,
+                "internal_allowed": True,
+            },
+        ),
+        (
+            7,
+            {
+                "used": 7,
+                "reserve": 3,
+                "public_limit": 7,
+                "internal_limit": 10,
+                "public_allowed": False,
+                "internal_allowed": True,
+            },
+        ),
+        (
+            9,
+            {
+                "used": 9,
+                "reserve": 3,
+                "public_limit": 7,
+                "internal_limit": 10,
+                "public_allowed": False,
+                "internal_allowed": True,
+            },
+        ),
+        (
+            10,
+            {
+                "used": 10,
+                "reserve": 3,
+                "public_limit": 7,
+                "internal_limit": 10,
+                "public_allowed": False,
+                "internal_allowed": False,
+            },
+        ),
+    ],
+)
+def test_admission_capacity_uses_strict_lane_limits(
+    used: int,
+    expected: dict[str, Any],
+) -> None:
+    assert (
+        manager_mod._admission_capacity(
+            used=used,
+            max_connections=10,
+            reserve_fraction=0.1,
+        )
+        == expected
+    )
+
+
+def test_admission_capacity_applies_service_floor_and_fractional_ceiling() -> None:
+    assert manager_mod._admission_capacity(
+        used=0,
+        max_connections=2,
+        reserve_fraction=0.0,
+    ) == {
+        "used": 0,
+        "reserve": 3,
+        "public_limit": 0,
+        "internal_limit": 2,
+        "public_allowed": False,
+        "internal_allowed": True,
+    }
+    assert (
+        manager_mod._admission_capacity(
+            used=15,
+            max_connections=20,
+            reserve_fraction=0.21,
+        )["reserve"]
+        == 5
+    )
+
+
+def test_sqlite_admission_counts_only_live_latest_mappings(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+            }
+        ),
+    )
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain(mappings)
+    mappings.write(
+        json.dumps(
+            {
+                "full": "finished",
+                "short": "finished",
+                "runtime_handle": _host_runtime_handle(os.getpid()),
+            }
+        )
+    )
+    mappings.write(
+        json.dumps(
+            {
+                "full": "finished",
+                "short": "finished",
+                "runtime_handle": _host_runtime_handle(999_991),
+            }
+        )
+    )
+    mappings.write(
+        json.dumps(
+            {
+                "full": "running",
+                "short": "running",
+                "runtime_handle": _host_runtime_handle(os.getpid()),
+            }
+        )
+    )
+    mappings.write(json.dumps({"full": "undecidable", "short": "undecidable"}))
+
+    try:
+        # The latest row per TID decides: "finished" ends on a dead handle
+        # and is released, "running" probes live, and a row with no handle
+        # is undecidable and stays counted (shared cleanup-probe semantics).
+        assert manager._observe_admission_usage() == 2
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_sqlite_admission_unions_in_flight_launches_once(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+            }
+        ),
+    )
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain(mappings)
+    mappings.write(
+        json.dumps(
+            {
+                "full": "overlap",
+                "short": "overlap",
+                "runtime_handle": _host_runtime_handle(os.getpid()),
+            }
+        )
+    )
+    manager._active_child_launches["overlap"] = cast(Any, object())
+    manager._active_child_launches["pending"] = cast(Any, object())
+
+    try:
+        # "overlap" appears as both a live mapping and an in-flight launch
+        # but counts once; "pending" has no durable evidence yet and is
+        # charged prospectively from launch bookkeeping alone.
+        assert manager._observe_admission_usage() == 2
+    finally:
+        manager._active_child_launches.clear()
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_sqlite_admission_memoizes_probe_verdicts(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+            }
+        ),
+    )
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain(mappings)
+    mappings.write(
+        json.dumps(
+            {
+                "full": "dead",
+                "short": "dead",
+                "runtime_handle": _host_runtime_handle(999_991),
+            }
+        )
+    )
+    mappings.write(
+        json.dumps(
+            {
+                "full": "alive",
+                "short": "alive",
+                "runtime_handle": _host_runtime_handle(os.getpid()),
+            }
+        )
+    )
+    probes = 0
+    real_probe = manager_mod.mapping_row_is_live
+
+    def counting_probe(payload: Any) -> bool:
+        nonlocal probes
+        probes += 1
+        return real_probe(payload)
+
+    monkeypatch.setattr(manager_mod, "mapping_row_is_live", counting_probe)
+
+    try:
+        assert manager._observe_admission_usage() == 1
+        assert manager._observe_admission_usage() == 1
+        # One probe per row on the first pass; the dead verdict is permanent
+        # for an unchanged handle and the live verdict is inside its TTL, so
+        # the second observation probes nothing.
+        assert probes == 2
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_manager_admission_retains_public_while_internal_can_launch(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+                WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
+            }
+        ),
+    )
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    internal_reserved = make_queue(manager._queue_names["internal_reserved"])
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    public_reserved = make_queue(manager._queue_names["reserved"])
+    for queue in (internal_queue, internal_reserved, public_queue, public_reserved):
+        drain(queue)
+    internal_queue.write(json.dumps(make_child_spec()))
+    public_queue.write(json.dumps(make_child_spec()))
+    manager._mark_pending_messages_prechecked()
+    launched: list[str] = []
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: 2)
+    monkeypatch.setattr(
+        manager,
+        "_launch_child_task",
+        lambda child_spec, *_args, **_kwargs: launched.append(child_spec.name) or True,
+    )
+
+    try:
+        manager.process_once()
+
+        assert launched == ["child"]
+        assert internal_queue.peek_one() is None
+        assert internal_reserved.peek_one() is None
+        assert public_queue.peek_one() is not None
+        assert public_reserved.peek_one() is None
+        assert manager.next_wait_timeout() > 0.0
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_manager_admission_retains_both_lanes_at_internal_limit(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+            }
+        ),
+    )
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    internal_reserved = make_queue(manager._queue_names["internal_reserved"])
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    public_reserved = make_queue(manager._queue_names["reserved"])
+    for queue in (internal_queue, internal_reserved, public_queue, public_reserved):
+        drain(queue)
+    internal_queue.write(json.dumps(make_child_spec()))
+    public_queue.write(json.dumps(make_child_spec()))
+    manager._mark_pending_messages_prechecked()
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: 5)
+
+    try:
+        manager.process_once()
+
+        assert internal_queue.peek_one() is not None
+        assert internal_reserved.peek_one() is None
+        assert public_queue.peek_one() is not None
+        assert public_reserved.peek_one() is None
+        assert (
+            manager._queue_counts_as_wait_activity(
+                manager._queues[WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE]
+            )
+            is False
+        )
+        assert (
+            manager._queue_counts_as_wait_activity(
+                manager._queues[WEFT_SPAWN_REQUESTS_QUEUE]
+            )
+            is False
+        )
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_manager_admission_rechecks_retained_row_on_deadline_without_activity(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+            }
+        ),
+    )
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    public_reserved = make_queue(manager._queue_names["reserved"])
+    drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    drain(public_queue)
+    drain(public_reserved)
+    public_queue.write(json.dumps(make_child_spec()))
+    manager._mark_pending_messages_prechecked()
+    observations = iter((None, 0))
+    observed: list[int | None] = []
+    launched: list[str] = []
+
+    def observe() -> int | None:
+        value = next(observations)
+        observed.append(value)
+        return value
+
+    monkeypatch.setattr(manager, "_observe_admission_usage", observe)
+    monkeypatch.setattr(
+        manager,
+        "_launch_child_task",
+        lambda child_spec, *_args, **_kwargs: launched.append(child_spec.name) or True,
+    )
+
+    try:
+        manager.process_once()
+        manager.process_once()
+
+        assert observed == [None]
+        assert public_queue.peek_one() is not None
+        assert public_reserved.peek_one() is None
+
+        manager._admission_retry_after_ns = time.time_ns() - 1
+        manager.process_once()
+
+        assert observed == [None, 0]
+        assert launched == ["child"]
+        assert public_queue.peek_one() is None
+        assert public_reserved.peek_one() is None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(
+            unique_tid,
+            idle_timeout=0.0,
+            reserved_policy_on_error=ReservedPolicy.REQUEUE,
+        ),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+                WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
+            }
+        ),
+    )
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    public_reserved = make_queue(manager._queue_names["reserved"])
+    drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    drain(public_queue)
+    drain(public_reserved)
+    public_queue.write(json.dumps(make_child_spec()))
+    manager._mark_pending_messages_prechecked()
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: 0)
+    monkeypatch.setattr(
+        manager,
+        "_start_service_worker",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("launch unavailable")
+        ),
+    )
+
+    try:
+        manager.process_once()
+
+        assert public_queue.peek_one() is not None
+        assert public_reserved.peek_one() is None
+        assert manager.next_wait_timeout() > 0.0
+
+        launched: list[str] = []
+        monkeypatch.setattr(
+            manager,
+            "_launch_child_task",
+            lambda child_spec, *_args, **_kwargs: (
+                launched.append(child_spec.name) or True
+            ),
+        )
+        manager.process_once()
+        assert launched == []
+
+        manager._admission_retry_after_ns = time.time_ns() - 1
+        manager.process_once()
+
+        assert launched == ["child"]
+        assert public_queue.peek_one() is None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [BrokerError("unavailable"), OSError("unavailable"), RuntimeError("unavailable")],
+)
+def test_sqlite_admission_fails_closed_on_expected_observer_errors(
+    broker_env,
+    unique_tid: str,
+    failure: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, _make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config({WEFT_ADMISSION_MAX_CONNECTIONS: 5}),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "latest_tid_mapping_entries_for_endpoint_resolution",
+        lambda _ctx: (_ for _ in ()).throw(failure),
+    )
+
+    try:
+        assert manager._observe_admission_usage() is None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_sqlite_admission_does_not_swallow_base_exception(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, _make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config({WEFT_ADMISSION_MAX_CONNECTIONS: 5}),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "latest_tid_mapping_entries_for_endpoint_resolution",
+        lambda _ctx: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            manager._observe_admission_usage()
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_disabled_admission_dispatches_without_observing_backend(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 0,
+            }
+        ),
+    )
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    drain(public_queue)
+    public_queue.write(json.dumps(make_child_spec()))
+    manager._mark_pending_messages_prechecked()
+    launched: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_observe_admission_usage",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("disabled admission observed backend usage")
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_launch_child_task",
+        lambda child_spec, *_args, **_kwargs: launched.append(child_spec.name) or True,
+    )
+
+    try:
+        manager.process_once()
+        assert launched == ["child"]
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_postgres_admission_uses_real_connection_stats_and_retains_tight_row(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    if active_test_backend() != "postgres":
+        pytest.skip("requires the real PostgreSQL test backend")
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 4,
+                WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
+            }
+        ),
+    )
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    public_reserved = make_queue(manager._queue_names["reserved"])
+    drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    drain(public_queue)
+    drain(public_reserved)
+    public_queue.write(json.dumps(make_child_spec()))
+    manager._mark_pending_messages_prechecked()
+
+    try:
+        manager.process_once()
+
+        assert public_queue.peek_one() is not None
+        assert public_reserved.peek_one() is None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [DatabaseError("unavailable"), ValueError("invalid stats")],
+)
+def test_postgres_admission_fails_closed_on_expected_observer_errors(
+    broker_env,
+    unique_tid: str,
+    failure: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if active_test_backend() != "postgres":
+        pytest.skip("requires the real PostgreSQL test backend")
+    db_path, _make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config({WEFT_ADMISSION_MAX_CONNECTIONS: 5}),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_read_postgres_connection_stats",
+        lambda: (_ for _ in ()).throw(failure),
+    )
+
+    try:
+        assert manager._observe_admission_usage() is None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
 
 
 def test_manager_stops_spawn_drain_after_child_launch_starts(

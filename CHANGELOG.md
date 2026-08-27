@@ -4,6 +4,15 @@
 
 ### Changed
 
+- Managers now support optional pre-reservation admission control. A portable
+  configured maximum and fractional public reserve apply to one
+  backend-specific usage observation: context-scoped live-probed latest TID
+  mappings plus in-flight launches on SQLite, or raw server-wide `numbackends`
+  through `simplebroker_pg.get_connection_stats()` on Postgres. The reserve has
+  a three-slot floor that models internal-lane room for Manager, TaskMonitor,
+  and Heartbeat without creating dedicated permits.
+  Denied work stays in its spawn queue while control, cleanup, child reaping,
+  service convergence, and shutdown continue.
 - Resolved TaskSpec TIDs now accept every canonical nonzero SimpleBroker exact
   message ID through the signed 64-bit storage maximum. They no longer apply a
   local 2020 lower bound or local-clock-plus-one-year upper bound. Rolling back
@@ -13,10 +22,11 @@
   OpenCode `run_help` object containing attempted, timeout, return-code, and
   compact-detail facts. It no longer infers `run_support` from English help
   prose. Real delegated invocation remains the compatibility check.
-- SimpleBroker now requires 7.4.1, with the paired `simplebroker-pg` 3.9.1
-  backend. System dumps use the bounded v1 watermark and system load restores
-  that allocation floor. `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS` maps to
-  SimpleBroker's load-skew limit.
+- SimpleBroker now requires 7.5.1, with the paired `simplebroker-pg` 3.10.0
+  backend. Queue adapters retain the public closeable-iterator contract, while
+  plugin-owned backend-option validation remains explicit. System dumps use
+  the bounded v1 watermark and system load restores that allocation floor.
+  `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS` maps to SimpleBroker's load-skew limit.
 - The built-in agent runtime now requires LLM 0.33, completing its OpenAI
   Python 3 and `httpx2` migration. The temporary direct `httpx` workaround for
   LLM 0.32 has been removed; Weft's adapter contract is unchanged.
