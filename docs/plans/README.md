@@ -25,7 +25,7 @@ There are currently 186 plan files in this directory.
 | --- | --- | --- | --- |
 | [`2026-08-26-simplebroker-7-5-1-compatibility-plan.md`](./2026-08-26-simplebroker-7-5-1-compatibility-plan.md) | SimpleBroker 7.5.1 Compatibility Upgrade Plan | `draft` | none |
 | [`2026-08-25-manager-admission-control-plan.md`](./2026-08-25-manager-admission-control-plan.md) | Manager Admission Control Plan | `draft` | none |
-| [`2026-08-25-bounded-tid-mapping-publication-plan.md`](./2026-08-25-bounded-tid-mapping-publication-plan.md) | Bounded TID Mapping Publication and Retention Plan | `draft` | [`2026-08-25-manager-admission-control-plan.md`](./2026-08-25-manager-admission-control-plan.md) |
+| [`2026-08-25-bounded-tid-mapping-publication-plan.md`](./2026-08-25-bounded-tid-mapping-publication-plan.md) | Bounded TID Mapping Publication and Retention Plan | `draft` | none |
 | [`2026-08-25-compatibility-contract-hardening-plan.md`](./2026-08-25-compatibility-contract-hardening-plan.md) | Compatibility Contract Hardening Release Plan | `completed` | none |
 | [`2026-08-25-monitor-schema-semantic-validation-plan.md`](./2026-08-25-monitor-schema-semantic-validation-plan.md) | Monitor Schema Semantic Validation and v5 Migration Repair Plan | `completed` | none |
 | [`2026-08-24-llm-0-33-compatibility-plan.md`](./2026-08-24-llm-0-33-compatibility-plan.md) | LLM 0.33 Compatibility Upgrade Plan | `completed` | none |
