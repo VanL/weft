@@ -349,11 +349,11 @@ class HeartbeatTask(ServiceTask):
                     continue
                 ownership_state, owner_tid = self._service_ownership()
                 if ownership_state == "other":
+                    self.taskspec.mark_completed(return_code=0)
                     self._report_state_change(
                         event="heartbeat_service_superseded",
                         owner_tid=owner_tid,
                     )
-                    self.taskspec.mark_completed(return_code=0)
                     self._update_process_title("completed")
                     self.should_stop = True
                     return True
@@ -461,11 +461,11 @@ class HeartbeatTask(ServiceTask):
         ownership_state, owner_tid = self._service_ownership()
         if ownership_state != "other":
             return False
+        self.taskspec.mark_completed(return_code=0)
         self._report_state_change(
             event="heartbeat_service_superseded",
             owner_tid=owner_tid,
         )
-        self.taskspec.mark_completed(return_code=0)
         self._update_process_title("completed")
         self.should_stop = True
         return True
@@ -482,12 +482,12 @@ class HeartbeatTask(ServiceTask):
         idle_for = time.monotonic() - self._empty_since_monotonic
         if idle_for < self._idle_timeout_seconds:
             return False
+        self.taskspec.mark_completed(return_code=0)
         self._report_state_change(
             event="heartbeat_service_idle_shutdown",
             idle_for_seconds=idle_for,
             idle_timeout_seconds=self._idle_timeout_seconds,
         )
-        self.taskspec.mark_completed(return_code=0)
         self._update_process_title("completed")
         self.should_stop = True
         return True

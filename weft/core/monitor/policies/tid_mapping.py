@@ -4,9 +4,10 @@ Keep-newest-per-key + payload-liveness gating (Spec: Cleanup Boundary in
 05-Message_Flow_and_State.md; [OBS.13.7]): the newest mapping row for each
 ``full`` key is only a deletion candidate when the payload's own liveness
 probe fails. Superseded (non-newest) rows keep the age-only rule. The probe
-uses only evidence carried in the row payload itself (the runtime handle's
-``(pid, create_time)`` pairs) -- no terminal-evidence lookup and no
-collation-store reach from this policy.
+uses only evidence carried in the row payload itself: positive scoped
+``(pid, create_time)`` liveness wins; otherwise a task-owned ``terminal`` hint
+can prove the row dead. There is no task-log lookup or collation-store reach
+from this policy.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
@@ -83,10 +84,12 @@ def valid_tid_mapping_payload(payload: Mapping[str, Any]) -> bool:
 def mapping_row_is_live(payload: Mapping[str, Any] | None) -> bool:
     """Return whether a mapping payload's own liveness probe finds a live owner.
 
-    Undecidable payloads (no runtime handle, or a handle with no probeable
-    host PIDs -- e.g. external/non-host runtime handles) are treated as
-    live: undecidable means skip, never delete. This is the only liveness
-    evidence this policy consults; it never looks past the row payload.
+    Positive scoped host-process liveness always wins. Without that proof, a
+    valid ``terminal is True`` hint makes the row dead. Other undecidable
+    payloads (no runtime handle, or a handle with no probeable host PIDs --
+    e.g. external/non-host runtime handles) are treated as live: undecidable
+    means skip, never delete. This is the only liveness evidence this policy
+    consults; it never looks past the row payload.
 
     Public because the TaskMonitor's destruction-protection gate
     (``_destruction_protected_runtime_tids``) shares these exact semantics
@@ -99,15 +102,14 @@ def mapping_row_is_live(payload: Mapping[str, Any] | None) -> bool:
     if payload is None:
         return True
     handle_payload = payload.get("runtime_handle")
-    if not isinstance(handle_payload, Mapping):
-        return True
-    try:
-        handle = RunnerHandle.from_dict(handle_payload)
-    except ValueError:
-        return True
-    if not handle.scoped_host_processes():
-        return True
-    return handle_has_live_host_process(handle)
+    if isinstance(handle_payload, Mapping):
+        try:
+            handle = RunnerHandle.from_dict(handle_payload)
+        except ValueError:
+            handle = None
+        if handle is not None and handle.scoped_host_processes():
+            return handle_has_live_host_process(handle)
+    return payload.get("terminal") is not True
 
 
 def _newest_message_id_per_key(

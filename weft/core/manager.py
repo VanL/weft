@@ -1680,8 +1680,8 @@ class Manager(ServiceTask):
         """Return one backend-specific usage observation, or ``None`` on failure.
 
         SQLite counts the union of live latest TID mappings (the shared
-        ``mapping_row_is_live`` probe, memoized) and this Manager's in-flight
-        child launches, which have no durable evidence yet. Each TID counts
+        ``mapping_row_is_live`` probe, memoized), this Manager's in-flight
+        child launches, and its committed child processes. Each TID counts
         once.
         """
 
@@ -1693,22 +1693,24 @@ class Manager(ServiceTask):
 
         try:
             mappings = latest_tid_mapping_entries_for_endpoint_resolution(
-                self._task_context()
+                self._task_context(),
+                strict=True,
             )
+            live_tids = {
+                tid
+                for tid, payload in mappings.items()
+                if self._admission_mapping_is_live(tid, payload)
+            }
+            self._admission_probe_memo = {
+                tid: memo
+                for tid, memo in self._admission_probe_memo.items()
+                if tid in mappings
+            }
+            live_tids.update(self._active_child_launches)
+            live_tids.update(self._child_processes)
+            return len(live_tids)
         except (BrokerError, OSError, RuntimeError):
             return None
-        live_tids = {
-            tid
-            for tid, payload in mappings.items()
-            if self._admission_mapping_is_live(tid, payload)
-        }
-        self._admission_probe_memo = {
-            tid: memo
-            for tid, memo in self._admission_probe_memo.items()
-            if tid in mappings
-        }
-        live_tids.update(self._active_child_launches)
-        return len(live_tids)
 
     def _admission_mapping_is_live(
         self,
@@ -1717,15 +1719,21 @@ class Manager(ServiceTask):
     ) -> bool:
         """Return memoized shared-probe liveness for one latest mapping row.
 
-        A dead verdict is permanent while the row's runtime handle is
-        unchanged: a probed ``(pid, create_time)`` identity never becomes live
-        again, so only a newer handle payload can revive the TID. A live
-        verdict expires after ``MANAGER_ADMISSION_RECHECK_SECONDS`` so death
-        is observed promptly without re-probing every decision.
+        A dead verdict is permanent while the row's runtime handle and
+        normalized terminal hint are unchanged: a probed
+        ``(pid, create_time)`` identity never becomes live again, while a
+        terminal-hint change must take effect immediately. A live verdict
+        expires after ``MANAGER_ADMISSION_RECHECK_SECONDS`` so death is
+        observed promptly without re-probing every decision.
         """
 
         fingerprint = json.dumps(
-            payload.get("runtime_handle"), sort_keys=True, default=str
+            {
+                "runtime_handle": payload.get("runtime_handle"),
+                "terminal": payload.get("terminal") is True,
+            },
+            sort_keys=True,
+            default=str,
         )
         memo = self._admission_probe_memo.get(tid)
         now = time.monotonic()
@@ -3167,9 +3175,9 @@ class Manager(ServiceTask):
 
         Registry leadership is advisory for public dispatch. A non-leader may
         launch public spawn work that it has already reserved, because broker
-        reservation owns exclusivity for that exact message. Pending public
-        backlog is not owned work and must not by itself block duplicate-manager
-        convergence.
+        reservation owns exclusivity for that exact message. Pending public or
+        internal shared backlog is not owned work and must not by itself block
+        duplicate-manager convergence.
 
         Spec: [MA-1.4], [MF-6]
         """
@@ -3177,11 +3185,6 @@ class Manager(ServiceTask):
         if any(child.persistent for child in self._user_work_children().values()):
             return True
         if self._has_active_child_launches():
-            return True
-        if self._managed_internal_spawn_enqueued:
-            return True
-        if self._internal_spawn_pending():
-            self._mark_pending_messages_prechecked()
             return True
         reserved_names = {
             reserved_queue
@@ -4055,16 +4058,20 @@ class Manager(ServiceTask):
         return super()._queue_has_pending(queue)
 
     def _has_pending_messages(self) -> bool:
-        """Return pending work, excluding temporarily stalled manager control.
+        """Return pending work, excluding blocked spawn sources and stalled control.
 
         This is a scheduler precheck as well as a predicate. When it proves
         non-control work exists, the next queue drain must probe all queues so
         pending public work cannot wait behind the periodic active-queue scan.
+        Reserved queues remain actionable while their source lane is blocked.
         """
 
         ctrl_name = self._queue_names.get("ctrl_in")
         for name, config in self._queues.items():
             if name == ctrl_name:
+                continue
+            lane = self._admission_lane_for_queue(name)
+            if lane is not None and lane in self._admission_blocked_lanes:
                 continue
             if self._queue_has_pending(config.queue):
                 self._mark_pending_messages_prechecked()

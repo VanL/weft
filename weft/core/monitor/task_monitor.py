@@ -3375,13 +3375,12 @@ class TaskMonitor(ServiceTask):
         positive evidence; destruction needs the absence of disproof. The
         returned set is a superset of ``_active_runtime_tids`` that also
         protects every TID whose newest ``weft.state.tid_mappings`` row is
-        live-or-undecidable under the tid-mapping cleanup policy's own
-        probe (``mapping_row_is_live``): a newest row with no probeable
-        host PIDs (e.g. an external/container runner handle) is
-        undecidable and therefore protected -- the same
-        undecidable-means-live rule that keeps that row itself from being
-        deleted. A newest row whose probeable host processes are all dead
-        grants no protection.
+        live-or-undecidable under the tid-mapping cleanup policy's own probe
+        (``mapping_row_is_live``). Positive scoped host-process liveness wins.
+        Otherwise a valid task-owned ``terminal`` hint makes the row dead; a
+        non-terminal row with no probeable host PIDs (e.g. an external or
+        container runner handle) remains undecidable and protected. A newest
+        row whose probeable host processes are all dead grants no protection.
 
         Spec: [OBS.13.7]
         """

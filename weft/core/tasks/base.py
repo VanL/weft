@@ -1824,6 +1824,9 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.4], [MF-5]
         """
+        if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
+            self._register_tid_mapping()
+
         taskspec_dump = self.taskspec.model_dump(mode="json")
         payload = {
             "event": event,
@@ -2247,16 +2250,14 @@ class BaseTask(MultiQueueWatcher, ABC):
         Spec: [CC-2.4], [MA-2]
         """
         mapping = self._build_tid_mapping_payload()
-        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
-        latest = self._latest_tid_mapping(queue, mapping["full"])
-        if latest is not None:
-            latest_payload, _ = latest
-            if self._tid_mapping_equivalent(latest_payload, mapping):
-                return
-
-        serialized_mapping = json.dumps(mapping)
         try:
-            queue.write(serialized_mapping)
+            queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
+            latest = self._latest_tid_mapping(queue, mapping["full"])
+            if latest is not None:
+                latest_payload, _ = latest
+                if self._tid_mapping_equivalent(latest_payload, mapping):
+                    return
+            queue.write(json.dumps(mapping))
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to register TID mapping %s", mapping, exc_info=True)
 
@@ -2315,6 +2316,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             "runtime_handle": (
                 runtime_handle.to_dict() if runtime_handle is not None else None
             ),
+            "terminal": self.taskspec.state.status in TERMINAL_TASK_STATUSES,
             "name": self.taskspec.name,
             "role": role if isinstance(role, str) and role else None,
             "started": time.time_ns(),
@@ -2672,21 +2674,24 @@ class BaseTask(MultiQueueWatcher, ABC):
         except (BrokerError, OSError, RuntimeError):
             return None
 
-        with closing_queue_iterator(generator) as rows:
-            for entry in rows:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
-                body, timestamp = entry
-                if not isinstance(timestamp, int):
-                    continue
-                try:
-                    payload = json.loads(body)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                if payload.get("full") == full_tid:
-                    latest = (payload, timestamp)
+        try:
+            with closing_queue_iterator(generator) as rows:
+                for entry in rows:
+                    if not isinstance(entry, tuple) or len(entry) != 2:
+                        continue
+                    body, timestamp = entry
+                    if not isinstance(timestamp, int):
+                        continue
+                    try:
+                        payload = json.loads(body)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if payload.get("full") == full_tid:
+                        latest = (payload, timestamp)
+        except (BrokerError, OSError, RuntimeError):
+            return None
         return latest
 
     @staticmethod
@@ -2699,6 +2704,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             "full",
             "runner",
             "runtime_handle",
+            "terminal",
             "name",
             "role",
             "hostname",

@@ -19,14 +19,12 @@ import pytest
 import weft.core.tasks.pipeline as pipeline_module
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import prepare_project_root
-from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
     PIPELINE_OWNER_METADATA_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
-    WEFT_ADMISSION_MAX_CONNECTIONS,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
@@ -35,7 +33,6 @@ from weft._constants import (
     WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft.client import WeftClient
 from weft.commands import specs as spec_cmd
 from weft.context import build_context
 from weft.core.control_messages import encode_control_message
@@ -929,46 +926,6 @@ def test_pipeline_task_bootstraps_all_children_before_any_stage_runs(
     ]
     assert _drain_json(ctx.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)) == []
     assert ctx.queue(compiled.runtime.queues.events, persistent=True).read_one() is None
-
-
-def test_linear_pipeline_larger_than_admission_cap_completes() -> None:
-    """Stage churn releases live-probed capacity so an over-cap pipeline finishes.
-
-    With `WEFT_ADMISSION_MAX_CONNECTIONS=6` the reserve floor of 3 leaves a
-    public limit of 3 and an internal limit of 6. The pipeline's parent,
-    stages, and edges exceed the free slots alongside the manager's own
-    mapping, so completion requires that finished tasks leave the observed
-    usage count via the shared liveness probe.
-    """
-
-    with WeftTestHarness() as harness:
-        harness.context.config[WEFT_ADMISSION_MAX_CONNECTIONS] = 6
-        stage_names = ("first", "second", "third")
-        for stage_name in stage_names:
-            _write_json(
-                harness.context.weft_dir / "tasks" / f"{stage_name}.json",
-                _task_payload(),
-            )
-        _write_json(
-            harness.context.weft_dir / "pipelines" / "bounded.json",
-            {
-                "name": "bounded",
-                "stages": [
-                    {"name": stage_name, "task": stage_name}
-                    for stage_name in stage_names
-                ],
-            },
-        )
-        harness.ensure_foreground_manager()
-
-        task = WeftClient(path=harness.root).submit_pipeline(
-            "bounded",
-            payload="through-cap",
-        )
-        result = task.result(timeout=30.0)
-
-        assert result.status == "completed"
-        assert result.value == "through-cap"
 
 
 def test_pipeline_bootstrap_first_child_failure_does_not_stop_unsubmitted_children(

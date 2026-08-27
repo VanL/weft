@@ -27,6 +27,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_QUEUE_NAMESPACE_PREFIX,
+    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import build_context
 from weft.core.control_messages import encode_control_message
@@ -347,6 +348,7 @@ def test_duplicate_heartbeat_services_converge_by_loser_exit(workdir: Path) -> N
         context.broker_target,
         make_heartbeat_taskspec(high_tid, workdir),
     )
+    mappings = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
 
     try:
         high_task.process_once()
@@ -354,11 +356,18 @@ def test_duplicate_heartbeat_services_converge_by_loser_exit(workdir: Path) -> N
         assert low_task.should_stop is False
         assert high_task.should_stop is True
         assert high_task.taskspec.state.status == "completed"
+        high_task_mappings = [
+            json.loads(message)
+            for message in mappings.peek_generator()
+            if json.loads(message).get("full") == high_tid
+        ]
+        assert high_task_mappings[-1]["terminal"] is True
     finally:
         low_task.stop(join=False)
         low_task.cleanup()
         high_task.stop(join=False)
         high_task.cleanup()
+        mappings.close()
 
 
 def test_heartbeat_owner_resolution_is_endpoint_registry_version_gated(

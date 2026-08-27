@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import weft.helpers as helpers_module
+from simplebroker.ext import BrokerError
 from tests.conftest import (
     _register_cli_outputs,
     broker_env,
@@ -132,6 +133,18 @@ def test_iter_queue_entries_propagates_generator_type_error_after_one_call() -> 
         iter_queue_entries(queue)  # type: ignore[arg-type]
 
     assert queue.calls == 1
+
+
+def test_iter_queue_entries_strict_mode_preserves_default_and_reraises() -> None:
+    class FailingQueue:
+        def peek_generator(self, **_kwargs: object) -> None:
+            raise BrokerError("mapping history unavailable")
+
+    queue = FailingQueue()
+
+    assert list(iter_queue_entries(queue)) == []  # type: ignore[arg-type]
+    with pytest.raises(BrokerError, match="mapping history unavailable"):
+        iter_queue_entries(queue, strict=True)  # type: ignore[arg-type,call-arg]
 
 
 def test_resolve_broker_max_message_size_uses_weft_owned_default(

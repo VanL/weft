@@ -592,12 +592,15 @@ internal work can still run below the maximum.
 The backend supplies one best-effort usage value. SQLite is context-scoped: it
 takes one latest mapping for each full TID, keeps the ones whose recorded
 runtime evidence probes live or undecidable (the same shared probe cleanup and
-endpoint resolution use), and adds this Manager's in-flight launches, counting
-each TID once. A task whose process has exited leaves the count on the next
-observation, so capacity recycles with task churn; mappings without probeable
+endpoint resolution use), and unions that set with this Manager's in-flight
+launches and committed children, counting each full TID once. Task-owned
+mappings carry a terminal liveness hint: positive scoped host-process liveness
+still wins, but otherwise a terminal mapping is released even when an external
+runner handle cannot be probed. Non-terminal mappings without probeable
 evidence stay counted, favoring overcounting over undercounting live tasks.
-Probe verdicts are memoized, so repeated decisions do not re-probe unchanged
-rows. Admission adds no liveness policy beyond that shared probe.
+Probe verdicts are memoized against both the runtime handle and terminal hint,
+so repeated decisions do not re-probe unchanged rows. Admission adds no
+liveness policy beyond that shared probe.
 Postgres reads raw server-wide `numbackends` through
 `simplebroker_pg.get_connection_stats()` on the Manager's existing persistent
 Queue. The configured maximum, not the server's returned maximum, controls the
@@ -605,12 +608,15 @@ limit. Both observations are non-atomic soft guards rather than connection
 leases, so races can still overshoot and conservative evidence can pause early.
 
 Denied messages remain in their source queue and are retried after one second;
-child or launch-worker progress may wake the Manager earlier. The settings are
-read when the Manager starts, so changes require a restart. Admission assumes
-ordinary task churn and does not preempt persistent work. Pipelines need no
-separate setting or runtime branch; their runnable tasks use the same lanes as
-all other work. Admission adds no PING/STATUS fields; rate-limited transition
-and observation-failure logs are non-normative operational evidence.
+child or launch-worker progress may wake the Manager earlier. Both native and
+fallback waits suppress only a blocked spawn source, not reserved recovery.
+Once another live lower-TID primary is proven, a non-primary Manager reserves
+no new shared public or internal work. The settings are read when the Manager
+starts, so changes require a restart. Admission assumes ordinary task churn and
+does not preempt persistent work. Pipelines need no separate setting or runtime
+branch; their runnable tasks use the same lanes as all other work. Admission
+adds no PING/STATUS fields; rate-limited transition and observation-failure
+logs are non-normative operational evidence.
 
 ### Task IDs (TIDs)
 

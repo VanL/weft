@@ -261,11 +261,15 @@ def latest_task_statuses_for_endpoint_resolution(ctx: WeftContext) -> dict[str, 
     return _latest_task_statuses(ctx)
 
 
-def _latest_tid_mapping_entries(ctx: WeftContext) -> dict[str, dict[str, Any]]:
+def _latest_tid_mapping_entries(
+    ctx: WeftContext,
+    *,
+    strict: bool = False,
+) -> dict[str, dict[str, Any]]:
     queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     try:
         latest: dict[str, tuple[int, dict[str, Any]]] = {}
-        for payload, message_id in iter_queue_json_entries(queue):
+        for payload, message_id in iter_queue_json_entries(queue, strict=strict):
             full = payload.get("full")
             if not isinstance(full, str) or not full:
                 continue
@@ -279,10 +283,12 @@ def _latest_tid_mapping_entries(ctx: WeftContext) -> dict[str, dict[str, Any]]:
 
 def latest_tid_mapping_entries_for_endpoint_resolution(
     ctx: WeftContext,
+    *,
+    strict: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Return latest TID mappings used by endpoint owner liveness checks."""
 
-    return _latest_tid_mapping_entries(ctx)
+    return _latest_tid_mapping_entries(ctx, strict=strict)
 
 
 def _record_owner_is_live(

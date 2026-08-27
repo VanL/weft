@@ -361,11 +361,16 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     payload-liveness gating: the cleanup policy
     (`weft/core/monitor/policies/tid_mapping.py`) keeps the newest row per
     mapping key (`full` TID) regardless of age unless that row's own payload
-    fails a liveness probe against its runtime handle's `(pid, create_time)`
-    pairs; superseded (non-newest) rows for a key keep the age-only rule. The
-    probe consults only the row payload — never a terminal-evidence lookup or
-    a Monitor collation-store reach — and a payload with no probeable host
-    PIDs is undecidable and therefore treated as live (skip, never delete).
+    fails a liveness probe; superseded (non-newest) rows for a key keep the
+    age-only rule. The probe consults only the row payload, never a task-log
+    lookup or Monitor collation-store reach. Positive scoped
+    `(pid, create_time)` host-process liveness always keeps the newest row.
+    Without positive scoped host-process proof, a valid task-owned
+    `terminal: true` hint makes the row dead. Missing, false, or malformed
+    terminal hints preserve the existing conservative runtime-handle policy:
+    a payload with no probeable host PIDs is undecidable and therefore treated
+    as live (skip, never delete). The hint changes no runner control authority
+    and is operational liveness evidence, not public lifecycle truth.
     This preserves the only durable liveness evidence for a plain running
     task, which endpoint resolution, runtime pruning, manager kill-pid
     resolution, and this same destructive-slice safety check all depend on.
@@ -384,13 +389,13 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     of `_active_runtime_tids` (live service-registry owners plus runtime
     handles with live host-PID proof — the same `(pid, create_time)` check
     as `handle_has_live_host_process`) that additionally protects every
-    TID whose newest `weft.state.tid_mappings` row is undecidable under
-    the tid-mapping cleanup policy's own probe (`mapping_row_is_live`): no
-    runtime handle, or a handle with no probeable host PIDs (e.g. an
-    external/container runner), is undecidable and therefore protected —
-    the same undecidable-means-live rule that keeps the row itself from
-    deletion. A newest row whose probeable host processes are all dead, or
-    a family with no mapping row at all, grants no protection. The same
+    TID whose newest `weft.state.tid_mappings` row the tid-mapping cleanup
+    policy's own probe (`mapping_row_is_live`) retains. A non-terminal row
+    with no runtime handle, or a handle with no probeable host PIDs (e.g. an
+    external/container runner), is undecidable and therefore protected. A
+    valid `terminal: true` row without positive scoped host-process proof, a
+    newest row whose probeable host processes are all dead, or a family with
+    no mapping row at all grants no protection. The same
     destruction-protected standard applies at delete time to
     already-disposed families that lack terminal task-log proof; families
     with terminal proof keep the positive-evidence (`_active_runtime_tids`)
@@ -751,15 +756,26 @@ _Implementation mapping_: `weft/core/manager.py`,
   `N <= reserve`, public work is disabled but internal work remains eligible
   below `N`. SQLite context-scoped usage counts the latest mapping rows per
   full TID whose payloads the shared liveness probe reports live or
-  undecidable, unioned with the Manager's in-flight child launches; a latest
-  row whose handle probes dead is released immediately, while undecidable
-  rows remain counted. Postgres uses raw server-wide `numbackends`. Both observations are best effort and non-atomic. Admission
-  owns no separate liveness probe, cache, index, cleanup, or freshness lifecycle. Pipelines
+  undecidable, unioned with the Manager's in-flight child launches and
+  committed child processes, each full TID once. Positive scoped host-process
+  liveness keeps a mapping counted; without it, a task-owned `terminal: true`
+  mapping probes dead. Other dead rows release immediately and undecidable
+  non-terminal rows remain counted. The Manager-local liveness memo
+  fingerprints both the runtime handle and normalized terminal hint. Postgres
+  uses raw server-wide `numbackends`. Both observations are best effort and
+  non-atomic. Admission owns no separate liveness probe, durable/shared cache,
+  index, cleanup, permit, or freshness lifecycle. Existing history callers
+  remain best effort; admission alone requests strict mapping-history failure
+  propagation and fails closed on its listed ordinary exceptions. Pipelines
   receive no special accounting or production branch. A blocked lane must not
   block control handling, cleanup, child reaping, leadership convergence,
-  service reconciliation, or shutdown. One universal retry deadline must
-  reconsider denied/failed observations and failed-launch restoration without
-  unrelated queue activity. Admission adds no PING/STATUS schema.
+  service reconciliation, or shutdown. Native and fallback waits suppress
+  only blocked spawn sources; reserved recovery remains actionable. One
+  universal retry deadline must reconsider denied/failed observations and
+  failed-launch restoration without unrelated queue activity. A proven
+  non-primary Manager does not reserve shared public or internal backlog;
+  shared unreserved internal rows are not owned work. Admission adds no
+  PING/STATUS schema.
 
 ### Context Invariants
 

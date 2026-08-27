@@ -268,6 +268,69 @@ def test_tid_mapping_deduplicates_identical_payloads(
     drain_queue(mapping_queue)
 
 
+def test_terminal_state_report_publishes_terminal_tid_mapping_when_activity_empty(
+    broker_env,
+    task_factory,
+    unique_tid,
+) -> None:
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain_queue(mapping_queue)
+
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    inbox.write(json.dumps({"args": ["payload"]}))
+
+    drive_task_until(task, lambda: task.taskspec.state.status == "completed")
+
+    mappings = [json.loads(message) for message in drain_queue(mapping_queue)]
+    task_mappings = [row for row in mappings if row.get("full") == unique_tid]
+    assert task._activity is None
+    assert task_mappings[0]["terminal"] is False
+    assert task_mappings[-1]["terminal"] is True
+
+
+def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
+    broker_env,
+    task_factory,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    task_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    drain_queue(task_log)
+    drain_queue(ctrl_out)
+    queue_type = type(mapping_queue)
+    real_peek_generator = queue_type.peek_generator
+
+    def fail_during_mapping_scan(queue, *args, **kwargs):
+        if queue.name != WEFT_TID_MAPPINGS_QUEUE:
+            return real_peek_generator(queue, *args, **kwargs)
+
+        def rows():
+            yield ("{}", 1)
+            raise RuntimeError("mapping history iteration failed")
+
+        return rows()
+
+    monkeypatch.setattr(queue_type, "peek_generator", fail_during_mapping_scan)
+    task.taskspec.mark_running(pid=task._task_pid)
+    task.taskspec.mark_completed(return_code=0)
+
+    task._report_state_change(event="work_completed")
+    task._send_terminal_envelope()
+
+    state_events = [json.loads(message) for message in drain_queue(task_log)]
+    assert state_events[-1]["event"] == "work_completed"
+    assert state_events[-1]["status"] == "completed"
+    assert terminal_envelopes(ctrl_out, tid=unique_tid, source="task")
+
+
 def test_process_titles_update(task_factory, unique_tid) -> None:
     calls: list[str] = []
     fake_module = types.SimpleNamespace(setproctitle=lambda title: calls.append(title))

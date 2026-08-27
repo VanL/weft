@@ -248,6 +248,7 @@ def iter_queue_entries(
     *,
     since_timestamp: int | None = None,
     before_timestamp: int | None = None,
+    strict: bool = False,
 ) -> Iterator[tuple[str, int]]:
     """Yield queue entries with timestamps using the broker generator API.
 
@@ -267,6 +268,8 @@ def iter_queue_entries(
         OSError,
         RuntimeError,
     ):  # pragma: no cover - queue history best effort
+        if strict:
+            raise
         logger.debug("Failed to open queue generator for %s", queue, exc_info=True)
         return iter(())
 
@@ -309,12 +312,14 @@ def iter_queue_json_entries(
     queue: Queue,
     *,
     since_timestamp: int | None = None,
+    strict: bool = False,
 ) -> Iterator[tuple[dict[str, Any], int]]:
     """Yield decoded JSON objects from a queue, skipping invalid entries."""
 
     for body, timestamp in iter_queue_entries(
         queue,
         since_timestamp=since_timestamp,
+        strict=strict,
     ):
         try:
             payload = json.loads(body)

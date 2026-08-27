@@ -7,12 +7,15 @@
 - Managers now support optional pre-reservation admission control. A portable
   configured maximum and fractional public reserve apply to one
   backend-specific usage observation: context-scoped live-probed latest TID
-  mappings plus in-flight launches on SQLite, or raw server-wide `numbackends`
-  through `simplebroker_pg.get_connection_stats()` on Postgres. The reserve has
-  a three-slot floor that models internal-lane room for Manager, TaskMonitor,
-  and Heartbeat without creating dedicated permits.
-  Denied work stays in its spawn queue while control, cleanup, child reaping,
-  service convergence, and shutdown continue.
+  mappings plus in-flight launches and committed children on SQLite, or raw
+  server-wide `numbackends` through
+  `simplebroker_pg.get_connection_stats()` on Postgres. Terminal mapping hints
+  release completed external runners while positive host-process liveness
+  remains authoritative. The reserve has a three-slot floor that models
+  internal-lane room for Manager, TaskMonitor, and Heartbeat without creating
+  dedicated permits. Denied work stays in its spawn queue while control,
+  reserved recovery, cleanup, child reaping, service convergence, duplicate-
+  manager convergence, and shutdown continue.
 - Resolved TaskSpec TIDs now accept every canonical nonzero SimpleBroker exact
   message ID through the signed 64-bit storage maximum. They no longer apply a
   local 2020 lower bound or local-clock-plus-one-year upper bound. Rolling back

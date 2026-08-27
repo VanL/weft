@@ -96,6 +96,27 @@ def test_newest_row_of_live_task_survives_past_min_age() -> None:
     )
 
 
+def test_terminal_hint_does_not_override_live_scoped_host_process() -> None:
+    self_pid = os.getpid()
+    self_create_time = psutil.Process(self_pid).create_time()
+    tid = "1778000000000000009"
+    payload = _mapping_payload(
+        full=tid,
+        short="0000000009",
+        host_processes=[{"pid": self_pid, "create_time": self_create_time}],
+    )
+    payload["terminal"] = True
+
+    candidates, _queue_stats, _policy_stats, _progress = tid_mapping_candidates(
+        _decoded([_row("weft.state.tid_mappings", _BASE_NS, payload)]),
+        now_ns=_BASE_NS,
+        min_age_seconds=0.0,
+        exclude_tids=set(),
+    )
+
+    assert candidates == []
+
+
 def test_superseded_rows_of_live_task_are_deleted_past_min_age() -> None:
     """Non-newest rows for a live task's key keep the current age-only rule."""
 
@@ -300,6 +321,23 @@ def test_newest_row_with_undecidable_liveness_is_skipped() -> None:
     )
 
     assert candidates == []
+
+
+def test_newest_terminal_row_without_live_host_process_is_deleted() -> None:
+    tid = "1778000000000000008"
+    message_id = _BASE_NS
+    payload = _mapping_payload(full=tid, short="0000000008", host_processes=None)
+    payload["terminal"] = True
+
+    candidates, _queue_stats, _policy_stats, _progress = tid_mapping_candidates(
+        _decoded([_row("weft.state.tid_mappings", message_id, payload)]),
+        now_ns=message_id,
+        min_age_seconds=0.0,
+        exclude_tids=set(),
+    )
+
+    assert [candidate.message_id for candidate in candidates] == [message_id]
+    assert candidates[0].candidate_class == "old_tid_mapping"
 
 
 def test_newest_row_with_empty_host_processes_is_skipped() -> None:

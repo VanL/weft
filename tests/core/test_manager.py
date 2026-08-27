@@ -2052,7 +2052,7 @@ def test_sqlite_admission_counts_only_live_latest_mappings(
         manager.cleanup()
 
 
-def test_sqlite_admission_unions_in_flight_launches_once(
+def test_sqlite_admission_unions_launches_and_committed_children_once(
     broker_env,
     unique_tid: str,
 ) -> None:
@@ -2082,14 +2082,23 @@ def test_sqlite_admission_unions_in_flight_launches_once(
     )
     manager._active_child_launches["overlap"] = cast(Any, object())
     manager._active_child_launches["pending"] = cast(Any, object())
+    manager._child_processes["overlap"] = ManagedChild(
+        process=FakeLaunchProcess(pid=424210),
+        ctrl_queue=None,
+    )
+    manager._child_processes["committed"] = ManagedChild(
+        process=FakeLaunchProcess(pid=424211),
+        ctrl_queue=None,
+    )
 
     try:
-        # "overlap" appears as both a live mapping and an in-flight launch
-        # but counts once; "pending" has no durable evidence yet and is
-        # charged prospectively from launch bookkeeping alone.
-        assert manager._observe_admission_usage() == 2
+        # "overlap" appears in all three evidence sets but counts once.
+        # "pending" and "committed" cover both sides of the launch handoff
+        # before either has durable mapping evidence.
+        assert manager._observe_admission_usage() == 3
     finally:
         manager._active_child_launches.clear()
+        manager._child_processes.clear()
         manager.stop(join=False)
         manager.cleanup()
 
@@ -2149,6 +2158,108 @@ def test_sqlite_admission_memoizes_probe_verdicts(
         # for an unchanged handle and the live verdict is inside its TTL, so
         # the second observation probes nothing.
         assert probes == 2
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_sqlite_admission_memo_invalidates_when_terminal_hint_changes(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+            }
+        ),
+    )
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain(mappings)
+    payload = {
+        "full": "external",
+        "short": "external",
+        "runtime_handle": {
+            "runner": "external",
+            "kind": "container",
+            "id": "job-1",
+            "control": {"authority": "external-supervisor"},
+            "observations": {},
+            "metadata": {},
+        },
+        "terminal": False,
+    }
+    mappings.write(json.dumps(payload))
+    probes = 0
+    real_probe = manager_mod.mapping_row_is_live
+
+    def counting_probe(mapping: Any) -> bool:
+        nonlocal probes
+        probes += 1
+        return real_probe(mapping)
+
+    monkeypatch.setattr(manager_mod, "mapping_row_is_live", counting_probe)
+
+    try:
+        assert manager._observe_admission_usage() == 1
+        mappings.write(json.dumps({**payload, "terminal": True}))
+        assert manager._observe_admission_usage() == 0
+        assert probes == 2
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_sqlite_admission_reconstructs_terminal_external_release_without_task_log(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, make_queue = broker_env
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    task_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(mappings)
+    drain(task_log)
+    mappings.write(
+        json.dumps(
+            {
+                "full": "completed-external",
+                "short": "external",
+                "runtime_handle": {
+                    "runner": "external",
+                    "kind": "container",
+                    "id": "job-complete",
+                    "control": {"authority": "external-supervisor"},
+                    "observations": {},
+                    "metadata": {},
+                },
+                "terminal": True,
+            }
+        )
+    )
+
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+            }
+        ),
+    )
+    drain(task_log)
+
+    try:
+        assert manager._observe_admission_usage() == 1
     finally:
         manager.stop(join=False)
         manager.cleanup()
@@ -2398,7 +2509,70 @@ def test_sqlite_admission_fails_closed_on_expected_observer_errors(
     monkeypatch.setattr(
         manager_mod,
         "latest_tid_mapping_entries_for_endpoint_resolution",
-        lambda _ctx: (_ for _ in ()).throw(failure),
+        lambda _ctx, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    try:
+        assert manager._observe_admission_usage() is None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_sqlite_admission_fails_closed_when_mapping_generator_cannot_open(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config({WEFT_ADMISSION_MAX_CONNECTIONS: 5}),
+    )
+    queue_type = type(make_queue(WEFT_TID_MAPPINGS_QUEUE))
+    real_peek_generator = queue_type.peek_generator
+
+    def fail_mapping_generator(queue: Any, *args: Any, **kwargs: Any) -> Any:
+        if queue.name == WEFT_TID_MAPPINGS_QUEUE:
+            raise BrokerError("mapping history unavailable")
+        return real_peek_generator(queue, *args, **kwargs)
+
+    monkeypatch.setattr(queue_type, "peek_generator", fail_mapping_generator)
+
+    try:
+        assert manager._observe_admission_usage() is None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_sqlite_admission_fails_closed_when_mapping_filter_raises(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if active_test_backend() != "sqlite":
+        pytest.skip("SQLite-specific usage observation")
+    db_path, _make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config({WEFT_ADMISSION_MAX_CONNECTIONS: 5}),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "latest_tid_mapping_entries_for_endpoint_resolution",
+        lambda _ctx, **_kwargs: {
+            "undecidable": {"full": "undecidable", "short": "undecidable"}
+        },
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "mapping_row_is_live",
+        lambda _payload: (_ for _ in ()).throw(RuntimeError("probe failed")),
     )
 
     try:
@@ -2424,7 +2598,7 @@ def test_sqlite_admission_does_not_swallow_base_exception(
     monkeypatch.setattr(
         manager_mod,
         "latest_tid_mapping_entries_for_endpoint_resolution",
-        lambda _ctx: (_ for _ in ()).throw(KeyboardInterrupt()),
+        lambda _ctx, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
 
     try:
@@ -3142,6 +3316,78 @@ def test_manager_leadership_yield_rate_gate_precedes_actionable_work(
     assert manager._maybe_yield_leadership() is False
 
 
+def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_AUTOSTART_TASKS": "0",
+            WEFT_ADMISSION_MAX_CONNECTIONS: 2,
+            WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
+            "WEFT_TASK_MONITOR_ENABLED": "0",
+        }
+    )
+    primary = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    duplicate: Manager | None = None
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    primary_reserved = make_queue(primary._queue_names["internal_reserved"])
+    launched: list[str] = []
+
+    def record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        launched.append(child_spec.name)
+        return True
+
+    try:
+        drain(internal_queue)
+        drain(primary_reserved)
+        internal_queue.write(
+            json.dumps(
+                {
+                    "name": "retained-internal",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.tasks.sample_targets:echo_payload",
+                    },
+                }
+            )
+        )
+        monkeypatch.setattr(primary, "_observe_admission_usage", lambda: 2)
+
+        assert primary._drain_internal_spawn_requests() == 0
+        assert internal_queue.peek_one() is not None
+        assert primary_reserved.peek_one() is None
+
+        duplicate_tid = str(int(unique_tid) + 1)
+        duplicate = Manager(
+            db_path,
+            make_manager_spec(duplicate_tid),
+            config=config,
+        )
+
+        assert duplicate.should_stop is True
+        assert internal_queue.peek_one() is not None
+        assert make_queue(duplicate._queue_names["internal_reserved"]).peek_one() is None
+
+        monkeypatch.setattr(primary, "_observe_admission_usage", lambda: 1)
+        monkeypatch.setattr(primary, "_launch_child_task", record_launch)
+        primary._admission_retry_after_ns = time.time_ns() - 1
+        primary._expire_admission_retry_if_due()
+
+        assert primary._drain_internal_spawn_requests() == 1
+        assert launched == ["retained-internal"]
+        assert internal_queue.peek_one() is None
+        assert primary_reserved.peek_one() is None
+    finally:
+        if duplicate is not None:
+            duplicate.stop(join=False)
+            duplicate.cleanup()
+        primary.stop(join=False)
+        primary.cleanup()
+
+
 def _prime_manager_next_wait_baseline(manager: Manager, now_ns: int) -> None:
     manager.should_stop = False
     manager._draining = False
@@ -3489,6 +3735,65 @@ def test_manager_wait_for_activity_fallback_honors_timeout(
 
     assert reset_calls == [True]
     assert wait_timeouts == [0.2]
+
+
+def test_manager_fallback_wait_suppresses_only_blocked_spawn_source(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+            }
+        ),
+    )
+    for config in manager._queues.values():
+        drain(config.queue)
+    public = make_queue(manager._queue_names["inbox"])
+    reserved = make_queue(manager._queue_names["reserved"])
+    public.write("{}")
+    manager._admission_blocked_lanes = {"public"}
+    wait_timeouts: list[float | None] = []
+
+    class FailingWaiter:
+        def wait(self, timeout: float | None) -> None:
+            raise RuntimeError(f"wait failed after {timeout}")
+
+    class FakeStopEvent:
+        def wait(self, timeout: float | None) -> bool:
+            wait_timeouts.append(timeout)
+            return False
+
+        def is_set(self) -> bool:
+            return False
+
+        def set(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        manager,
+        "_ensure_multi_activity_waiter",
+        lambda: FailingWaiter(),
+    )
+    monkeypatch.setattr(manager, "_reset_multi_activity_waiter", lambda: None)
+    manager._stop_event = FakeStopEvent()
+
+    try:
+        manager._wait_for_reactor_activity(timeout=0.2)
+        assert wait_timeouts == [0.2]
+
+        reserved.write("reserved recovery")
+        manager._wait_for_reactor_activity(timeout=0.2)
+        assert wait_timeouts == [0.2]
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
 
 
 def test_manager_leadership_self_owner_skips_actionable_scan_per_turn(

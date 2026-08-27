@@ -520,6 +520,12 @@ Current required control behavior:
 - `STOP`, `KILL`, `STATUS`, and `PING` round trips exist for live tasks
 - `PAUSE` and `RESUME` are supported on task types that opt into live pausing
 - durable `state.status` remains the canonical lifecycle state
+- every task-owned TID mapping carries a boolean `terminal` liveness hint.
+  Non-terminal publication writes `false`; the first task-owned terminal state
+  report forces one best-effort mapping publication with `true`, and mapping
+  equivalence includes the field. The hint is operational runtime evidence for
+  payload-only liveness and cleanup. It is not public lifecycle truth, result
+  authority, or a replacement for terminal task-log/control writes
 - user-facing surfaces may expose derived live `activity` without creating a
   second durable state machine
 - process titles stay shell-friendly and reflect durable state plus optional
@@ -547,7 +553,9 @@ _Implementation mapping_: `weft/core/control_messages.py::ControlRequest`,
 shape; `weft/core/tasks/base.py::BaseTask._handle_control_message` and
 `weft/core/tasks/base.py::BaseTask._handle_control_command` own shared task
 policy; specialized policies live on `Manager`, `Consumer`, `PipelineTask`,
-and `Monitor`.
+and `Monitor`. `BaseTask._build_tid_mapping_payload`,
+`BaseTask._tid_mapping_equivalent`, and `BaseTask._report_state_change` own the
+task mapping liveness hint and terminal publication path.
 
 Why this boundary matters:
 
