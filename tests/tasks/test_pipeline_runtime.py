@@ -911,19 +911,21 @@ def test_pipeline_task_bootstraps_all_children_before_any_stage_runs(
     task = PipelineTask(
         ctx.broker_target, compiled.pipeline_taskspec, config=ctx.broker_config
     )
-
-    task.process_once()
-
-    spawn_queue = ctx.queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, persistent=False)
-    spawned = _drain_json(spawn_queue)
-    assert len(spawned) == len(compiled.runtime.stages) + len(compiled.runtime.edges)
-    assert [item["taskspec"]["tid"] for item in spawned] == [
+    expected_tids = [
         compiled.runtime.edges[0].tid,
         compiled.runtime.stages[0].tid,
         compiled.runtime.edges[1].tid,
         compiled.runtime.stages[1].tid,
         compiled.runtime.edges[2].tid,
     ]
+    assert [int(tid) for tid in expected_tids] == sorted(map(int, expected_tids))
+
+    task.process_once()
+
+    spawn_queue = ctx.queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, persistent=False)
+    spawned = _drain_json(spawn_queue)
+    assert len(spawned) == len(compiled.runtime.stages) + len(compiled.runtime.edges)
+    assert [item["taskspec"]["tid"] for item in spawned] == expected_tids
     assert _drain_json(ctx.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)) == []
     assert ctx.queue(compiled.runtime.queues.events, persistent=True).read_one() is None
 

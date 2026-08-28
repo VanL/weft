@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 186 plan files in this directory.
+There are currently 187 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 186 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-08-28-simplebroker-8-upgrade-plan.md`](./2026-08-28-simplebroker-8-upgrade-plan.md) | SimpleBroker 8.0 Upgrade Plan | `completed` | none |
 | [`2026-08-26-simplebroker-7-5-1-compatibility-plan.md`](./2026-08-26-simplebroker-7-5-1-compatibility-plan.md) | SimpleBroker 7.5.1 Compatibility Upgrade Plan | `draft` | none |
 | [`2026-08-25-manager-admission-control-plan.md`](./2026-08-25-manager-admission-control-plan.md) | Manager Admission Control Plan | `draft` | none |
 | [`2026-08-25-bounded-tid-mapping-publication-plan.md`](./2026-08-25-bounded-tid-mapping-publication-plan.md) | Bounded TID Mapping Publication and Retention Plan | `draft` | none |

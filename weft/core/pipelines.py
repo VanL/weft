@@ -419,6 +419,14 @@ def compile_linear_pipeline(
         )
         loaded_payload = loaded_taskspec.model_dump(mode="json")
         merged_payload = _merge_stage_defaults(loaded_payload, stage)
+        # SimpleBroker 8 exposes exact inserts by ascending public message ID.
+        # Allocate edge then stage so IDs match dependency bootstrap order.
+        edge_tid = str(
+            generate_spawn_request_timestamp(
+                context.broker_target,
+                config=context.broker_config,
+            )
+        )
         stage_tid = str(
             generate_spawn_request_timestamp(
                 context.broker_target,
@@ -476,12 +484,6 @@ def compile_linear_pipeline(
             queues.inbox if previous_stage is None else previous_stage.outbox_queue
         )
         source_kind = "pipeline_input" if previous_stage is None else "stage_output"
-        edge_tid = str(
-            generate_spawn_request_timestamp(
-                context.broker_target,
-                config=context.broker_config,
-            )
-        )
         edge_runtime_payload = {
             "pipeline_tid": pipeline_tid,
             "edge_name": edge_name,

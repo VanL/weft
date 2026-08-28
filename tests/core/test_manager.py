@@ -848,6 +848,18 @@ def wait_for_children(manager: Manager, timeout: float = 5.0) -> None:
         time.sleep(0.05)
 
 
+def test_manager_idle_probe_uses_newest_pending_timestamp(manager_setup) -> None:
+    """The manager's idle probe must observe its newest pending input."""
+
+    manager, make_queue = manager_setup
+    inbox = make_queue(manager._queue_names["inbox"])
+    first = inbox.write("first")
+    second = inbox.write("second")
+
+    assert first < second
+    assert manager._read_broker_timestamp(force=True) == second
+
+
 def wait_for_log_event(
     manager: Manager,
     log_queue: Any,

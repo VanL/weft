@@ -4202,7 +4202,10 @@ class Manager(ServiceTask):
         latest = last_known
         for queue_name in self._idle_activity_queue_names():
             try:
-                pending = self._queue(queue_name).peek_one(with_timestamps=True)
+                pending = self._queue(queue_name).peek_one(
+                    with_timestamps=True,
+                    order="newest",
+                )
             except (BrokerError, OSError, RuntimeError):
                 logger.debug(
                     "Manager activity queue %s unavailable for idle tracking",

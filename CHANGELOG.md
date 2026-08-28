@@ -25,11 +25,14 @@
   OpenCode `run_help` object containing attempted, timeout, return-code, and
   compact-detail facts. It no longer infers `run_support` from English help
   prose. Real delegated invocation remains the compatibility check.
-- SimpleBroker now requires 7.5.1, with the paired `simplebroker-pg` 3.10.0
-  backend. Queue adapters retain the public closeable-iterator contract, while
-  plugin-owned backend-option validation remains explicit. System dumps use
-  the bounded v1 watermark and system load restores that allocation floor.
-  `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS` maps to SimpleBroker's load-skew limit.
+- SimpleBroker now requires 8.0.0, with the paired `simplebroker-pg` 4.0.0
+  backend and backend API v8. Pipeline child TIDs now allocate in dependency
+  order so ascending public-message-ID selection preserves edge-before-stage
+  bootstrap, and Manager idle tracking selects its newest pending owned input.
+  Existing SQL targets require a cold schema-v6 cutover with whole-target
+  backup and restore-based rollback. Queue adapters retain the public
+  closeable-iterator contract; system dumps still use the bounded v1 watermark,
+  and system load restores that allocation floor.
 - The built-in agent runtime now requires LLM 0.33, completing its OpenAI
   Python 3 and `httpx2` migration. The temporary direct `httpx` workaround for
   LLM 0.32 has been removed; Weft's adapter contract is unchanged.

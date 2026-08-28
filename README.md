@@ -66,10 +66,15 @@ uv add 'weft[all]'
 Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
 selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
-Weft requires SimpleBroker 7.5.1 or newer; the Postgres extra requires the
-paired `simplebroker-pg` 3.10.0 or newer. Broker message IDs stay integers in
+Weft requires SimpleBroker 8.0.0 or newer; the Postgres extra requires the
+paired `simplebroker-pg` 4.0.0 or newer. Broker message IDs stay integers in
 Python and relational storage, while external JSON and owned exact-ID fields
 inside Monitor table JSON render them as 19-digit strings.
+
+Moving an existing SQLite or PostgreSQL target from SimpleBroker 7 to 8 is a
+cold cutover: stop v7 clients and sidecar transactions, back up the whole
+target, install the package pair, then migrate and restart with v8 only.
+Rollback requires restoring the pre-migration target before reinstalling v7.
 
 Runner extras work the same way: `weft[docker]` adds the Docker runner plugin
 plus the Docker SDK dependency, `weft[macos-sandbox]` adds the macOS sandbox
@@ -1304,7 +1309,7 @@ Environment variables:
 Weft uses `WEFT_*` names for embedded SimpleBroker settings and passes a
 complete typed broker config to the lower layer. Valid ambient `BROKER_*`
 settings do not tune Weft, and Weft does not change the process environment.
-SimpleBroker 7.5.1's immutable `ResolvedConfig` snapshots carry that isolation
+SimpleBroker 8.0.0's immutable `ResolvedConfig` snapshots carry that isolation
 through config-consuming queue, project, init, watcher, broker, and load
 boundaries. Invalid ambient `BROKER_*` settings are ignored by Weft; invalid
 mapped `WEFT_*` settings still fail with a safe configuration error.

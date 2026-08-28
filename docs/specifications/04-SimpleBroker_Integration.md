@@ -24,6 +24,8 @@ See also:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 - SimpleBroker 7.5.1 compatibility plan:
   [`docs/plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md`](../plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md)
+- SimpleBroker 8.0 upgrade plan:
+  [`docs/plans/2026-08-28-simplebroker-8-upgrade-plan.md`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
 - cleanup policy convergence plan:
   [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
 - monitor policy progress contract plan:
@@ -39,12 +41,20 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 7.5.1 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 3.10.0 or newer. These coordinated
-floors provide backend API v7, bounded dump watermarks, immutable
+Weft requires SimpleBroker 8.0.0 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 4.0.0 or newer. These coordinated
+floors provide backend API v8, ascending public-message-ID default selection,
+surrogate-free SQL schema v6, bounded dump watermarks, immutable
 invocation/handle configuration snapshots, typed queue result overloads,
 public closeable queue iterator types, and the synchronized watcher lifecycle
 contract used by Weft.
+
+Upgrading a SQLite or PostgreSQL target from the v7 package line to v8 is a
+coordinated cold cutover. Stop all v7 clients and sidecar transactions, take a
+whole-target backup, install the 8.0.0/4.0.0 package pair, migrate and verify
+once, and then restart only v8 clients. V7 and v8 clients must not share a
+schema-v6 target. Rollback requires restoring the complete pre-migration target
+before reinstalling the prior package pair.
 
 _Implementation mapping_: `weft/commands/queue.py` delegates to
 `simplebroker.commands`; `weft/context.py` injects the resolved broker target;
@@ -602,7 +612,7 @@ Current contract:
   the larger group of named storage/retry constants. Most of the latter are
   not directly relevant to Weft; their explicit defaults exist to isolate the
   embedded broker from standalone SimpleBroker tuning.
-- Weft resolves that complete mapping with SimpleBroker 7.5.1's public
+- Weft resolves that complete mapping with SimpleBroker 8.0.0's public
   `resolve_isolated_config()` and preserves or recreates the immutable
   `ResolvedConfig` marker at every config-consuming lower-layer handoff. Weft
   does not opt into opaque extra keys. A SimpleBroker handle or invocation that
@@ -713,6 +723,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-28-simplebroker-8-upgrade-plan.md`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
 - [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)
 - [`docs/plans/2026-08-25-monitor-schema-semantic-validation-plan.md`](../plans/2026-08-25-monitor-schema-semantic-validation-plan.md)
 - [`docs/plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md`](../plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md)

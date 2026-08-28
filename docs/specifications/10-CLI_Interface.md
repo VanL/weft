@@ -737,7 +737,7 @@ Current raw queue filters and metadata helpers mirror current SimpleBroker:
 - command-local JSON output follows SimpleBroker's newline-delimited JSON shape
   for raw queue commands
 
-Raw delegated queue JSON follows SimpleBroker 7 directly. Weft-owned bounded
+Raw delegated queue JSON follows SimpleBroker 8 directly. Weft-owned bounded
 move/watch JSON formats only the broker-row `timestamp` with
 `simplebroker.format_message_id`. Exact Python/client `message_id` arguments
 accept `int | str`, normalize immediately through [SB-0.2], and pass only an
@@ -997,6 +997,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`SimpleBroker 8.0 Upgrade Plan`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
 - [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
 - [SimpleBroker 7.3 dump watermark plan](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
