@@ -418,7 +418,9 @@ def test_weft_skew_setting_changes_load_refusal_behavior(
     """The Weft-namespaced skew setting must reach SimpleBroker load policy."""
 
     root = prepare_project_root(tmp_path)
-    header_last_ts = time.time_ns() + 2_000_000_000
+    now_ns = time.time_ns()
+    monkeypatch.setattr("simplebroker._dump._time_ns", lambda: now_ns)
+    header_last_ts = now_ns + 2_000_000_000
     export_path = tmp_path / "future-header.jsonl"
     export_path.write_text(
         json.dumps(
