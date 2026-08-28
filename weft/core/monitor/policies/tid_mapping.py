@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from weft._constants import (
@@ -39,6 +39,7 @@ from weft.core.pruning.policies import malformed_row_candidates, older_than_cand
 from weft.core.queue_window import (
     DecodedQueueWindowRow,
     QueueWindowRow,
+    is_old_enough,
     payload_string,
 )
 from weft.ext import RunnerHandle
@@ -181,6 +182,11 @@ def tid_mapping_candidates(
     # the common case of a single row per key). The newest row per key is
     # then pulled back out of the age-only result and re-evaluated under
     # the liveness gate below instead of being deleted outright.
+    # Age-scan WITHOUT the exclusion: exclusion is applied only after
+    # newest/superseded classification so an excluded TID's superseded
+    # history still retires under the age-only rule while its newest row is
+    # protected without a liveness probe (exclusion is a current-row fence,
+    # not a whole-key retention exemption).
     old_rows = older_than_candidates(
         rows,
         policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
@@ -190,7 +196,7 @@ def tid_mapping_candidates(
         reason="older_than_tid_mapping_cleanup_min_age",
         stop_reason="first_tid_mapping_too_young",
         claimed_ids=claimed,
-        exclude_tids=exclude_tids,
+        exclude_tids=set(),
         tid_from_row=lambda payload, _row: payload_string(payload, "full"),
     )
     newest_row_by_id = {row.raw.message_id: row for row in rows}
@@ -202,6 +208,9 @@ def tid_mapping_candidates(
             or merged_newest.get(candidate_tid) != age_candidate.message_id
         ):
             age_selected.append(age_candidate)
+            continue
+        if candidate_tid in exclude_tids:
+            # The excluded TID's newest row is protected outright.
             continue
         # This is the newest row for its key: only a candidate when its
         # payload's own liveness probe fails. Undecidable payloads are
@@ -243,9 +252,11 @@ def tid_mapping_candidates(
         bool(malformed_candidates)
         or (old_rows.stop_reason is None and bool(age_selected))
     )
+    # An untruncated window covers the queue tail, so completing it is base
+    # evidence even when candidates were selected (they are applied this
+    # cycle; nothing eligible can hide beyond the tail).
     base_reached = not waypoint_reached and (
-        old_rows.stop_reason == "first_tid_mapping_too_young"
-        or (not candidates and not scan_limit_reached)
+        old_rows.stop_reason == "first_tid_mapping_too_young" or not scan_limit_reached
     )
     progress = (
         PolicyProgress(
@@ -257,6 +268,112 @@ def tid_mapping_candidates(
             waypoint_reached=waypoint_reached,
             base_reached=base_reached,
             reason_counts=reason_counts,
+        ),
+    )
+    return candidates, queue_stats, policy_stats, progress
+
+
+def tid_mapping_streaming_candidates(
+    rows: Iterable[DecodedQueueWindowRow],
+    *,
+    now_ns: int,
+    min_age_seconds: float,
+    exclude_tids: set[str],
+    newest_ids: Mapping[str, int],
+    batch_size: int,
+) -> tuple[
+    list[CleanupCandidate],
+    CleanupQueueStats,
+    tuple[CleanupPolicyStats, ...],
+    tuple[PolicyProgress, ...],
+]:
+    """Candidate-bounded full-FIFO selection over a streamed decoded queue.
+
+    Pass two of the two-pass reachability scan (Spec: Cleanup Boundary in
+    05-Message_Flow_and_State.md; [OBS.13.7]): candidate memory is bounded by
+    ``batch_size``, a protected newest row is a skip rather than a FIFO stop,
+    superseded rows keep the age-only rule, an excluded TID's newest row is
+    protected outright while its superseded history retires, and malformed
+    rows stay selectable past the valid-row age boundary. ``newest_ids`` must
+    carry full-queue newest-per-key evidence (pass one); the stream is never
+    materialized here, so working memory beyond candidates is the caller's
+    newest-ID map.
+    """
+
+    candidates: list[CleanupCandidate] = []
+    scanned = 0
+    capacity_reached = False
+    for row in rows:
+        scanned += 1
+        if row.malformed_reason is not None:
+            candidates.append(
+                cleanup_candidate_from_row(
+                    row.raw,
+                    policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
+                    candidate_class="malformed_tid_mapping",
+                    reason=row.malformed_reason,
+                    tid=row.tid,
+                    payload=row.payload,
+                )
+            )
+        elif is_old_enough(row.raw.message_id, now_ns, min_age_seconds):
+            key = payload_string(row.payload, "full")
+            if key is None:
+                continue
+            if newest_ids.get(key) == row.raw.message_id:
+                if key in exclude_tids or mapping_row_is_live(row.payload):
+                    continue
+                candidates.append(
+                    cleanup_candidate_from_row(
+                        row.raw,
+                        policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
+                        candidate_class="old_tid_mapping",
+                        reason="older_than_tid_mapping_cleanup_min_age",
+                        tid=key,
+                        payload=row.payload,
+                    )
+                )
+            else:
+                candidates.append(
+                    cleanup_candidate_from_row(
+                        row.raw,
+                        policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
+                        candidate_class=RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
+                        reason="older_than_tid_mapping_cleanup_min_age",
+                        tid=key,
+                        payload=row.payload,
+                    )
+                )
+        if len(candidates) >= batch_size:
+            capacity_reached = True
+            break
+
+    stop_reason = "tid_mapping_candidate_capacity" if capacity_reached else None
+    queue_stats = cleanup_queue_stats(
+        WEFT_TID_MAPPINGS_QUEUE,
+        scanned=scanned,
+        candidates=candidates,
+        stop_reason=stop_reason,
+    )
+    policy_stats = (
+        cleanup_policy_stats(
+            WEFT_TID_MAPPINGS_QUEUE,
+            policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
+            scanned=scanned,
+            candidates=candidates,
+            stop_reason=stop_reason,
+        ),
+    )
+    progress = (
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
+            domain=WEFT_TID_MAPPINGS_QUEUE,
+            scanned=scanned,
+            selected=len(candidates),
+            deferred=len(exclude_tids),
+            waypoint_reached=capacity_reached,
+            base_reached=not capacity_reached,
+            reason_counts=Counter(candidate.reason for candidate in candidates),
         ),
     )
     return candidates, queue_stats, policy_stats, progress

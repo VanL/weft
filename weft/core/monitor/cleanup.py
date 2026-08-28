@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,7 +39,7 @@ from weft.core.monitor.policies.task_log import (
 )
 from weft.core.monitor.policies.tid_mapping import (
     decode_tid_mapping_row,
-    tid_mapping_candidates,
+    tid_mapping_streaming_candidates,
 )
 from weft.core.monitor.progress import PolicyProgress
 from weft.core.monitor.task_log_scanner import (
@@ -58,7 +58,7 @@ from weft.core.queue_window import (
     QueueWindowRow,
     scan_queue_window,
 )
-from weft.helpers import iter_queue_entries
+from weft.helpers import closing_queue_iterator, iter_queue_entries
 
 PreApplyReporter = Callable[
     [Sequence[CleanupCandidate]],
@@ -88,7 +88,7 @@ def _newest_tid_mapping_ids(ctx: WeftContext) -> dict[str, int]:
     queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     newest: dict[str, int] = {}
     try:
-        for body, message_id in iter_queue_entries(queue):
+        for body, message_id in iter_queue_entries(queue, strict=True):
             row_id = int(message_id)
             decoded = decode_tid_mapping_row(
                 QueueWindowRow(
@@ -258,33 +258,45 @@ def run_task_monitor_cleanup(
                 policy_stat_records = policy_run.policy_stats
                 policy_progress_records = policy_run.policy_progress
                 errors.extend(policy_run.errors)
-            else:
-                rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
-                # A window shorter than batch_size reached the queue tail,
-                # so in-window newest-per-key evidence is already complete;
-                # a full window may hide newer sibling rows beyond it and
-                # needs the full-queue newest-per-key pass.
-                newest_tid_mapping_ids = (
-                    _newest_tid_mapping_ids(ctx)
-                    if (
-                        queue_name == WEFT_TID_MAPPINGS_QUEUE
-                        and len(rows) >= config.batch_size
-                    )
-                    else None
-                )
-                (
-                    selected,
-                    queue_stat_records,
-                    policy_stat_records,
-                    policy_progress_records,
-                ) = _select_queue_candidates(
-                    queue_name,
-                    rows,
-                    config=config,
-                    now_ns=current_ns,
-                    exclude_tids=excluded,
-                    newest_tid_mapping_ids=newest_tid_mapping_ids,
-                )
+            elif queue_name == WEFT_TID_MAPPINGS_QUEUE:
+                # Two-pass reachability scan (Spec: Cleanup Boundary;
+                # [OBS.13.7]): pass one is the existing full-queue
+                # newest-per-key evidence; pass two streams the full FIFO
+                # order so protected newest rows are skips, never stops, and
+                # a head window cannot hide eligible superseded tail rows.
+                # Candidate memory stays bounded by batch_size; working
+                # memory beyond that is the O(distinct TIDs) newest-ID map.
+                newest_tid_mapping_ids = _newest_tid_mapping_ids(ctx)
+                stream_queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+                try:
+                    entries = iter_queue_entries(stream_queue, strict=True)
+                    with closing_queue_iterator(entries) as stream:
+                        decoded_stream = (
+                            decode_tid_mapping_row(
+                                QueueWindowRow(
+                                    queue=queue_name,
+                                    body=body,
+                                    message_id=int(message_id),
+                                )
+                            )
+                            for body, message_id in stream
+                        )
+                        (
+                            selected,
+                            tid_mapping_queue_stats,
+                            policy_stat_records,
+                            policy_progress_records,
+                        ) = tid_mapping_streaming_candidates(
+                            decoded_stream,
+                            now_ns=current_ns,
+                            min_age_seconds=config.tid_mapping_min_age_seconds,
+                            exclude_tids=excluded,
+                            newest_ids=newest_tid_mapping_ids,
+                            batch_size=config.batch_size,
+                        )
+                finally:
+                    stream_queue.close()
+                queue_stat_records = (tid_mapping_queue_stats,)
                 applied.extend(
                     _apply_policy_candidates(
                         ctx,
@@ -293,6 +305,19 @@ def run_task_monitor_cleanup(
                         pre_apply_reporter=config.pre_apply_reporter,
                     )
                 )
+            else:
+                rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
+                selected = []
+                queue_stat_records = (
+                    CleanupQueueStats(
+                        queue=queue_name,
+                        scanned=len(rows),
+                        selected=0,
+                        stop_reason="unsupported_queue",
+                    ),
+                )
+                policy_stat_records = ()
+                policy_progress_records = ()
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"failed to scan {queue_name}: {exc}")
             continue
@@ -326,46 +351,6 @@ def run_task_monitor_cleanup(
         policy_stats=final_policy_stats,
         policy_progress=final_policy_progress,
         errors=(*errors, *apply_errors),
-    )
-
-
-def _select_queue_candidates(
-    queue_name: str,
-    rows: Sequence[QueueWindowRow],
-    *,
-    config: TaskMonitorCleanupConfig,
-    now_ns: int,
-    exclude_tids: set[str],
-    newest_tid_mapping_ids: Mapping[str, int] | None = None,
-) -> tuple[
-    list[CleanupCandidate],
-    tuple[CleanupQueueStats, ...],
-    tuple[CleanupPolicyStats, ...],
-    tuple[PolicyProgress, ...],
-]:
-    if queue_name == WEFT_TID_MAPPINGS_QUEUE:
-        decoded = tuple(decode_tid_mapping_row(row) for row in rows)
-        candidates, queue_stats, policy_stats, policy_progress = tid_mapping_candidates(
-            decoded,
-            now_ns=now_ns,
-            min_age_seconds=config.tid_mapping_min_age_seconds,
-            exclude_tids=exclude_tids,
-            scan_limit_reached=len(rows) >= config.batch_size,
-            newest_ids=newest_tid_mapping_ids,
-        )
-        return candidates, (queue_stats,), policy_stats, policy_progress
-    return (
-        [],
-        (
-            CleanupQueueStats(
-                queue=queue_name,
-                scanned=len(rows),
-                selected=0,
-                stop_reason="unsupported_queue",
-            ),
-        ),
-        (),
-        (),
     )
 
 

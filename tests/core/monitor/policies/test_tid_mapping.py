@@ -363,3 +363,43 @@ def test_newest_row_with_empty_host_processes_is_skipped() -> None:
     )
 
     assert candidates == []
+
+
+def test_exclusion_protects_only_the_excluded_tids_newest_row() -> None:
+    """`exclude_tids` is a current-row fence, not a whole-key retention grant.
+
+    The age scan must classify newest versus superseded before applying the
+    exclusion, so the excluded TID's superseded history retires under the
+    age-only rule while its newest row stays protected without a liveness
+    probe.
+    """
+
+    tid = "1778000000000000005"
+    superseded_id = _BASE_NS
+    newest_id = _BASE_NS + 10_000_000_000
+    now_ns = newest_id + 3_600_000_000_000
+
+    rows = [
+        _row(
+            "weft.state.tid_mappings",
+            superseded_id,
+            _mapping_payload(full=tid, short="0000000005"),
+        ),
+        _row(
+            "weft.state.tid_mappings",
+            newest_id,
+            _mapping_payload(full=tid, short="0000000005"),
+        ),
+    ]
+
+    candidates, _queue_stats, _policy_stats, progress = tid_mapping_candidates(
+        _decoded(rows),
+        now_ns=now_ns,
+        min_age_seconds=1.0,
+        exclude_tids={tid},
+    )
+
+    assert [candidate.message_id for candidate in candidates] == [superseded_id]
+    assert candidates[0].candidate_class == "superseded_tid_mapping"
+    assert progress[0].base_reached
+    assert not progress[0].waypoint_reached

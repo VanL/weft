@@ -89,7 +89,6 @@ from weft.core.endpoints import (
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
-    closing_queue_iterator,
     ensure_owner_only_dir,
     iter_queue_json_entries,
     kill_process_tree,
@@ -332,6 +331,12 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         # Cache for optional setproctitle module so we avoid repeated imports.
         self._setproctitle_module: Any | None = None
+
+        # Whether the terminal mapping snapshot has been durably appended
+        # ([OBS.6a]): the terminal row is the task's last event, so its
+        # publication retries across terminal reports until one write
+        # succeeds.
+        self._terminal_tid_mapping_published = False
 
         self.enable_process_title = (
             bool(getattr(taskspec.spec, "enable_process_title", True))
@@ -1824,8 +1829,14 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.4], [MF-5]
         """
-        if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
-            self._register_tid_mapping()
+        if (
+            not self._terminal_tid_mapping_published
+            and self.taskspec.state.status in TERMINAL_TASK_STATUSES
+        ):
+            # The terminal transition publishes exactly once on success; a
+            # failed append retries on the next terminal report because this
+            # row is the task's final liveness evidence ([OBS.6a]).
+            self._terminal_tid_mapping_published = self._register_tid_mapping()
 
         taskspec_dump = self.taskspec.model_dump(mode="json")
         payload = {
@@ -2244,22 +2255,33 @@ class BaseTask(MultiQueueWatcher, ABC):
                 parts.append(safe_details)
         return ":".join(parts)
 
-    def _register_tid_mapping(self) -> None:
-        """Register the task's short ID mapping for external observability tooling.
+    def _register_tid_mapping(self) -> bool:
+        """Append the task's complete mapping snapshot; edge-triggered by design.
 
-        Spec: [CC-2.4], [MA-2]
+        Every write is a new fact — a transition or a report — so this
+        performs exactly one best-effort append with no queue read and no
+        payload comparison. Callers own edge detection: each call site fires
+        only when the owner-local state it governs actually changed
+        (unchanged activity, an equal runtime handle, and a known managed PID
+        are suppressed at their call sites), or when the write is itself a
+        report (construction, restart republish). Equivalent rows are valid
+        ordered history ([OBS.6]); queue-wide read-before-write
+        deduplication and writer-side payload oracles are forbidden
+        ([OBS.6a]).
+
+        Returns:
+            True when the append was written; False on the best-effort
+            broker failure path.
+
+        Spec: [CC-2.2], [CC-2.5], [MF-5], [OBS.6], [OBS.6a]
         """
         mapping = self._build_tid_mapping_payload()
         try:
-            queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
-            latest = self._latest_tid_mapping(queue, mapping["full"])
-            if latest is not None:
-                latest_payload, _ = latest
-                if self._tid_mapping_equivalent(latest_payload, mapping):
-                    return
-            queue.write(json.dumps(mapping))
+            self._queue(WEFT_TID_MAPPINGS_QUEUE).write(json.dumps(mapping))
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to register TID mapping %s", mapping, exc_info=True)
+            return False
+        return True
 
     def register_managed_pid(self, pid: int | None) -> None:
         """Track a subprocess PID owned by this task for cleanup/observability."""
@@ -2663,57 +2685,6 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         self._streaming_session_info = None
         self._streaming_session_message_id = None
-
-    def _latest_tid_mapping(
-        self, queue: Queue, full_tid: str
-    ) -> tuple[dict[str, Any], int] | None:
-        """Return the most recent mapping entry for ``full_tid`` if present."""
-        latest: tuple[dict[str, Any], int] | None = None
-        try:
-            generator = queue.peek_generator(with_timestamps=True)
-        except (BrokerError, OSError, RuntimeError):
-            return None
-
-        try:
-            with closing_queue_iterator(generator) as rows:
-                for entry in rows:
-                    if not isinstance(entry, tuple) or len(entry) != 2:
-                        continue
-                    body, timestamp = entry
-                    if not isinstance(timestamp, int):
-                        continue
-                    try:
-                        payload = json.loads(body)
-                    except (TypeError, json.JSONDecodeError):
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    if payload.get("full") == full_tid:
-                        latest = (payload, timestamp)
-        except (BrokerError, OSError, RuntimeError):
-            return None
-        return latest
-
-    @staticmethod
-    def _tid_mapping_equivalent(
-        current: Mapping[str, Any], incoming: Mapping[str, Any]
-    ) -> bool:
-        """Return True if ``incoming`` does not change any observable fields."""
-        comparable_keys = {
-            "short",
-            "full",
-            "runner",
-            "runtime_handle",
-            "terminal",
-            "name",
-            "role",
-            "hostname",
-            "task_monitor",
-        }
-        for key in comparable_keys:
-            if current.get(key) != incoming.get(key):
-                return False
-        return True
 
     def _all_managed_pids(self) -> list[int]:
         runtime_pids: tuple[int, ...] = ()

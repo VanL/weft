@@ -1228,7 +1228,8 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _stop_lock _strategy _strategy_started _streaming_session_info
     _streaming_session_message_id _task_context_cache _task_lifecycle
     _task_lifecycle_lock _task_observer _task_pid _task_pid_create_time
-    _taskspec_redaction_paths _taskspec_value _thread _thread_local
+    _taskspec_redaction_paths _taskspec_value _terminal_tid_mapping_published
+    _thread _thread_local
     _topology_deferred_sigint _topology_inflight _topology_lock
     _topology_manual_wait_thread _topology_mutations _topology_owner_thread
     _topology_pending

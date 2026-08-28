@@ -83,7 +83,7 @@ def test_mapping_read_failure_closes_queue_once(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        def peek_many(self, **_kwargs: object) -> list[object]:
+        def peek_generator(self, **_kwargs: object) -> list[object]:
             raise RuntimeError("mapping read failure")
 
         def close(self) -> None:
@@ -110,7 +110,7 @@ def test_mapping_read_propagates_unexpected_programming_error(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        def peek_many(self, **_kwargs: object) -> list[object]:
+        def peek_generator(self, **_kwargs: object) -> list[object]:
             raise TypeError("unexpected mapping reader defect")
 
         def close(self) -> None:
@@ -1217,16 +1217,22 @@ def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
 def test_live_task_tids_ignore_manager_role_mappings() -> None:
     harness = WeftTestHarness()
     try:
-        harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
-            {
-                "full": "1775630560739303424",
-                "runtime_handle": _host_runtime_handle(424242),
-            },
-            {
-                "full": "1775630560999999999",
-                "runtime_handle": _host_runtime_handle(424245),
-                "role": "manager",
-            },
+        harness._load_tid_mapping_entries = lambda: [  # type: ignore[method-assign]
+            (
+                {
+                    "full": "1775630560739303424",
+                    "runtime_handle": _host_runtime_handle(424242),
+                },
+                1,
+            ),
+            (
+                {
+                    "full": "1775630560999999999",
+                    "runtime_handle": _host_runtime_handle(424245),
+                    "role": "manager",
+                },
+                2,
+            ),
         ]
         harness._pid_alive = lambda pid: pid == 424242 or pid == 424245  # type: ignore[method-assign]
         harness._should_skip_pid = lambda pid: False  # type: ignore[method-assign]
@@ -1501,3 +1507,48 @@ def test_wait_for_completion_records_polling_stats() -> None:
         assert stats[0]["iterations"] >= 1.0
         assert stats[0]["duration"] >= 0.2
         assert stats[0]["duration"] < 5.0
+
+
+@pytest.mark.shared
+def test_latest_mapping_discovery_reads_past_fixed_prefix() -> None:
+    """Teardown mapping discovery must reduce the full queue, not a 2,048 prefix.
+
+    The live owner's mapping is written after more than 2,048 decoy rows; the
+    harness must still discover the current owner instead of missing it (or
+    targeting a stale mapping) once the queue outgrows any fixed prefix.
+    """
+
+    harness = WeftTestHarness()
+    try:
+        queue = Queue(
+            WEFT_TID_MAPPINGS_QUEUE,
+            db_path=harness.context.broker_target,
+            persistent=True,
+            config=harness.context.broker_config,
+        )
+        try:
+            live_tid = "1778000000000009999"
+            for index in range(2_100):
+                queue.write(
+                    json.dumps(
+                        {
+                            "short": f"{index:010d}",
+                            "full": f"17780000000000{index:05d}",
+                        }
+                    )
+                )
+            queue.write(json.dumps({"short": "0000009999", "full": live_tid}))
+            queue.write(
+                json.dumps(
+                    {"short": "0000009999", "full": live_tid, "role": "live-owner"}
+                )
+            )
+        finally:
+            queue.close()
+
+        latest = harness._latest_tid_mapping_payloads()
+        assert live_tid in latest
+        assert latest[live_tid].get("role") == "live-owner"
+    finally:
+        harness._closed = True
+        harness._tempdir.cleanup()

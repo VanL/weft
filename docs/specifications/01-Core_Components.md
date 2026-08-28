@@ -35,6 +35,7 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-25-bounded-tid-mapping-publication-plan.md`](../plans/2026-08-25-bounded-tid-mapping-publication-plan.md)
 - [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
 - [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
@@ -219,7 +220,8 @@ Current responsibilities:
 - translate `TaskSpec.io` into queue configs
 - manage `ctrl_in` and `ctrl_out`
 - report task lifecycle changes to `weft.log.tasks`
-- maintain TID mappings and process titles
+- append complete best-effort TID mapping snapshots without replaying
+  shared mapping history, and maintain process titles
 - own reserved-queue policy application
 - optionally claim and release one stable runtime endpoint name for the live task
 - expose `process_once()`, `wait_for_activity()`, `run_until_stopped()`,
@@ -241,6 +243,11 @@ Why this exists:
 - state publication should come from one shared path
 - control semantics should not drift between task types
 - reserved-queue policy belongs to task ownership, not to ad hoc helper code
+
+TID mapping registration is the shared [OBS.6]/[OBS.6a] publication path.
+Call sites decide whether their owner-local activity, runtime handle, PID, or
+diagnostic state changed; registration itself performs one append attempt and
+does not inspect global mapping history.
 
 ### 2.2.1 Reactor Ownership and Lifecycle [CC-2.2.1]
 
@@ -623,6 +630,12 @@ Current high-level flow:
 4. dispatch execution through `TaskRunner`
 5. apply control and reserved-policy rules
 6. publish terminal state and cleanup
+
+TID mapping publication follows [OBS.6] and [OBS.6a]. A mapping broker append
+failure is an auxiliary observability failure and cannot abort startup,
+work-started, terminal-state, result, or recognized terminal-event
+publication. Payload construction and serialization defects remain visible
+internal failures under [OBS.6a].
 
 _Implementation mapping_: `weft/core/tasks/base.py` owns the shared task-loop
 entry points and worker-result reactor lane. While worker lanes are active,

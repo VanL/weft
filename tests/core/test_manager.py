@@ -3381,7 +3381,9 @@ def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
 
         assert duplicate.should_stop is True
         assert internal_queue.peek_one() is not None
-        assert make_queue(duplicate._queue_names["internal_reserved"]).peek_one() is None
+        assert (
+            make_queue(duplicate._queue_names["internal_reserved"]).peek_one() is None
+        )
 
         monkeypatch.setattr(primary, "_observe_admission_usage", lambda: 1)
         monkeypatch.setattr(primary, "_launch_child_task", record_launch)

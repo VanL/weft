@@ -255,6 +255,7 @@ interpretation and CLI convergence live in `weft/core/task_evidence.py` and
 The wire module owns shape only, not task or manager policy.
 
 Implementation plan backlinks:
+[`2026-08-25-bounded-tid-mapping-publication-plan.md`](../plans/2026-08-25-bounded-tid-mapping-publication-plan.md);
 
 - `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
 - `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
@@ -724,6 +725,11 @@ a permanent normal-cycle compatibility lane.
   for public `status`; runtime liveness disagreement may be exposed through
   `reconciliation` diagnostics, but it must not rewrite a terminal task back to
   `running`
+- TID mapping publication follows [OBS.6] and [OBS.6a]. Producers append a
+  complete snapshot without first replaying the shared mapping queue, and
+  equivalent consecutive snapshots are valid. Current-state consumers reduce
+  valid rows by greatest broker message ID per full TID. This runtime-state
+  publication remains best-effort and cannot become task lifecycle authority.
 - shared task evidence classification lives in
   `weft/core/task_evidence.py`; status, task inspection, known-TID terminal
   snapshots, and result helpers reuse that interpretation instead of each
@@ -1192,7 +1198,25 @@ self-maintenance, and explicit operator commands for force and compaction:
   row per mapping key (`full` TID) regardless of age unless that row's own
   payload fails a liveness probe (the runtime handle's `(pid, create_time)`
   pairs checked via `pid_matches_create_time`); superseded (non-newest) rows
-  for a key keep the existing age-only rule. The probe consults only
+  for a key keep the existing age-only rule. Semantically equivalent mapping
+  rows remain distinct ordered snapshots. All but the greatest valid
+  message-ID row for a full TID are superseded and follow the existing
+  age-only rule; equivalence does not grant retention or weaken the newest
+  row's liveness gate. A cleanup-cycle exclusion for a TID protects only that
+  TID's greatest valid message-ID mapping row; it does not exempt superseded
+  mapping rows from age-only retention. There is no second liveness gate and
+  no registered-probe destruction rule: crashed external runners that never
+  published a terminal marker remain protected and retained, with
+  accumulation bounded only by crash rate. Candidate and exact-deletion
+  counts remain bounded by the configured cleanup batch size, but a protected
+  newest row is a skip rather than a FIFO stop. When a bounded head window
+  does not reach queue tail, TID-mapping cleanup must continue through the
+  aged queue prefix until it selects one candidate batch, reaches the
+  valid-row age boundary while still scanning for policy-deletable malformed
+  rows, or reaches queue tail. A head window containing only protected
+  newest rows cannot hide eligible superseded rows or be reported as cleanup
+  base. Full-queue newest-ID evidence remains required before any valid row
+  is classified as newest or superseded. The probe consults only
   evidence carried in the row payload itself — no terminal-evidence lookup
   and no Monitor collation-store reach from this policy — and a payload with
   no probeable host PIDs (e.g. an external/non-host runtime handle) is

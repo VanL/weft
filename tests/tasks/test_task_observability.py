@@ -227,25 +227,52 @@ def test_tid_mapping_records_runtime_identity_from_start_hooks(
     assert "managed_pids" not in runtime_record
 
 
-def test_tid_mapping_deduplicates_identical_payloads(
-    broker_env, task_factory, unique_tid
+def _forbid_mapping_history_reads(monkeypatch, queue_type):
+    """Make any mapping-history read fail loudly at the queue seam."""
+
+    real_peek_generator = queue_type.peek_generator
+    real_peek_many = getattr(queue_type, "peek_many", None)
+
+    def poisoned_peek_generator(queue, *args, **kwargs):
+        if queue.name == WEFT_TID_MAPPINGS_QUEUE:
+            raise AssertionError("mapping history read attempted")
+        return real_peek_generator(queue, *args, **kwargs)
+
+    monkeypatch.setattr(queue_type, "peek_generator", poisoned_peek_generator)
+    if real_peek_many is not None:
+
+        def poisoned_peek_many(queue, *args, **kwargs):
+            if queue.name == WEFT_TID_MAPPINGS_QUEUE:
+                raise AssertionError("mapping history read attempted")
+            return real_peek_many(queue, *args, **kwargs)
+
+        monkeypatch.setattr(queue_type, "peek_many", poisoned_peek_many)
+
+
+def test_tid_mapping_registration_appends_without_history_read(
+    broker_env, task_factory, unique_tid, monkeypatch
 ) -> None:
+    """Registration is one edge-triggered append and never replays the queue.
+
+    Verifies [OBS.6a]: every write is a new fact. A direct re-registration
+    appends a valid equivalent row (no writer-side payload oracle), a real
+    change appends a new snapshot, and no path reads mapping history.
+    """
+
     _db_path, make_queue = broker_env
     mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     drain_queue(mapping_queue)
+    _forbid_mapping_history_reads(monkeypatch, type(mapping_queue))
 
     spec = build_function_spec(unique_tid)
     task = task_factory(spec)
 
-    def _peek_payloads() -> list[dict[str, object]]:
-        return [json.loads(msg) for msg in mapping_queue.peek_many(limit=10) or []]
+    rows = [json.loads(message) for message in drain_queue(mapping_queue)]
+    assert rows, "construction must append at least one snapshot"
 
-    initial = _peek_payloads()
-    assert len(initial) == 1
-
-    task._register_tid_mapping()
-    after_duplicate = _peek_payloads()
-    assert len(after_duplicate) == 1
+    assert task._register_tid_mapping() is True
+    equivalent = [json.loads(message) for message in drain_queue(mapping_queue)]
+    assert len(equivalent) == 1
 
     task.register_runtime_handle(
         RunnerHandle(
@@ -256,16 +283,122 @@ def test_tid_mapping_deduplicates_identical_payloads(
             observations={"host_pids": [task._task_pid]},
         )
     )
-    task.register_managed_pid(99999)
-    after_update = _peek_payloads()
-    assert len(after_update) == 3
-    assert any(
-        99999 in payload["runtime_handle"]["observations"].get("host_pids", [])
-        for payload in after_update
-        if isinstance(payload.get("runtime_handle"), dict)
-    )
+    changed = [json.loads(message) for message in drain_queue(mapping_queue)]
+    assert len(changed) == 1
+    for row in rows + equivalent + changed:
+        assert row["full"] == unique_tid
+        assert row["short"] == unique_tid[-len(row["short"]) :]
+        assert "runner" in row and "runtime_handle" in row
+        assert row["name"] == spec.name
+        assert "hostname" in row and "started" in row
+        assert row["terminal"] is False
 
+
+def test_terminal_transition_publishes_mapping_exactly_once(
+    broker_env, task_factory, unique_tid, monkeypatch
+) -> None:
+    """The terminal transition is the edge; repeated terminal reports are not.
+
+    The terminal mapping row publishes once per task on the first terminal
+    report and later terminal reports do not republish it.
+    """
+
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    task_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(mapping_queue)
+    _forbid_mapping_history_reads(monkeypatch, type(mapping_queue))
+
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    drain_queue(mapping_queue)
+    drain_queue(task_log)
+
+    task.taskspec.mark_running(pid=task._task_pid)
+    task.taskspec.mark_completed(return_code=0)
+    task._report_state_change(event="work_completed")
+    task._report_state_change(event="task_completed")
+
+    terminal_rows = [json.loads(message) for message in drain_queue(mapping_queue)]
+    assert len(terminal_rows) == 1
+    assert terminal_rows[0]["terminal"] is True
+
+
+def test_activity_transitions_publish_current_fields(
+    broker_env, task_factory, unique_tid, monkeypatch
+) -> None:
+    """Actual activity changes publish activity/waiting_on; no-ops publish nothing.
+
+    Edge detection lives at the call site: `_set_activity` suppresses an
+    unchanged `(activity, waiting_on)` pair before registration is invoked.
+    """
+
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain_queue(mapping_queue)
+    _forbid_mapping_history_reads(monkeypatch, type(mapping_queue))
+
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    drain_queue(mapping_queue)
+
+    task._set_activity("working")
+    task._set_activity("working")
+    task._set_activity("waiting", waiting_on="T1.inbox")
+
+    rows = [json.loads(message) for message in drain_queue(mapping_queue)]
+    assert [row.get("activity") for row in rows] == ["working", "waiting"]
+    assert rows[0].get("waiting_on") is None
+    assert rows[1].get("waiting_on") == "T1.inbox"
+
+
+def test_terminal_mapping_write_failure_retries_on_next_terminal_report(
+    broker_env, task_factory, unique_tid, monkeypatch
+) -> None:
+    """A faulted terminal append stays best effort and retries until success.
+
+    The terminal row is the task's last liveness evidence, so the
+    once-published flag latches only on a successful write; lifecycle
+    publication is never aborted by the mapping failure.
+    """
+
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    task_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(mapping_queue)
+    _forbid_mapping_history_reads(monkeypatch, type(mapping_queue))
+
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    drain_queue(mapping_queue)
+    drain_queue(task_log)
+
+    queue_type = type(mapping_queue)
+    real_write = queue_type.write
+    fault_state = {"armed": True}
+
+    def faulting_write(queue, message, *args, **kwargs):
+        if queue.name == WEFT_TID_MAPPINGS_QUEUE and fault_state["armed"]:
+            fault_state["armed"] = False
+            raise BrokerError("mapping append failed")
+        return real_write(queue, message, *args, **kwargs)
+
+    monkeypatch.setattr(queue_type, "write", faulting_write)
+
+    task.taskspec.mark_running(pid=task._task_pid)
+    task.taskspec.mark_completed(return_code=0)
+    task._report_state_change(event="work_completed")
+    assert drain_queue(mapping_queue) == []
+    assert task._terminal_tid_mapping_published is False
+
+    state_events = [json.loads(message) for message in drain_queue(task_log)]
+    assert any(event.get("event") == "work_completed" for event in state_events)
+
+    task._report_state_change(event="task_completed")
+    retried = [json.loads(message) for message in drain_queue(mapping_queue)]
+    assert len(retried) == 1
+    assert retried[0]["terminal"] is True
+    assert task._terminal_tid_mapping_published is True
 
 
 def test_terminal_state_report_publishes_terminal_tid_mapping_when_activity_empty(

@@ -15,6 +15,7 @@ import psutil
 import pytest
 
 import weft.core.monitor.cleanup as cleanup_mod
+from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
@@ -737,12 +738,16 @@ def test_malformed_newer_row_beyond_window_does_not_declassify_valid_live_row(
     )
 
     assert result.success
-    assert result.deleted == 0
-    assert result.candidates == ()
+    # The valid live row stays newest (malformed evidence never declassifies
+    # it), and the streaming reachability scan now also retires the malformed
+    # sibling instead of leaving it hidden beyond a head window.
+    assert result.deleted == 1
+    assert [candidate.message_id for candidate in result.candidates] == [malformed_id]
+    assert result.candidates[0].candidate_class == "malformed_tid_mapping"
     remaining_ids = [
         message_id for _body, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
     ]
-    assert valid_id in remaining_ids
+    assert remaining_ids == [valid_id]
 
 
 def test_task_monitor_cleanup_preserves_newest_row_of_live_owner_past_min_age(
@@ -841,14 +846,13 @@ def test_task_monitor_cleanup_preserves_young_tid_mapping(tmp_path: Path) -> Non
 
     assert result.success
     assert result.deleted == 0
-    assert result.queue_stats[0].stop_reason == "first_tid_mapping_too_young"
+    # The streaming reachability scan runs to queue tail (young valid rows
+    # are skips while malformed rows stay reachable), so an all-young queue
+    # completes with no stop reason and base progress.
+    assert result.queue_stats[0].stop_reason is None
     stats = _policy_summary_by_policy(result)
     assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["selected"] == 0
-    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["selected"] == 0
-    assert (
-        stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["stop_reason"]
-        == "first_tid_mapping_too_young"
-    )
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["stop_reason"] is None
     assert len(_read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)) == 1
 
 
@@ -1646,3 +1650,241 @@ def test_live_task_keeps_tid_mapping_row_through_destructive_monitor_cycle() -> 
                 release_file.write_text("go", encoding="utf-8")
             if task is not None:
                 harness.wait_for_completion(task.tid, timeout=30.0)
+
+
+def test_excluded_tid_superseded_rows_retire_while_newest_is_protected(
+    tmp_path: Path,
+) -> None:
+    """A cleanup-cycle exclusion protects only the excluded TID's newest row.
+
+    Per the promoted Cleanup Boundary / [OBS.13.7] wording, superseded rows of
+    an excluded TID (e.g. the running TaskMonitor's own history) keep the
+    age-only rule; the exclusion is a current-row safety fence, not a
+    whole-key retention exemption.
+    """
+    ctx = _context(tmp_path)
+    tid = "1778000000000000031"
+    superseded_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tid, short="0000000031"),
+    )
+    newest_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tid, short="0000000031"),
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=1.0),
+        apply=True,
+        exclude_tids={tid},
+        now_ns=_now_after(newest_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 1
+    assert [candidate.candidate_class for candidate in result.candidates] == [
+        "superseded_tid_mapping"
+    ]
+    assert [candidate.message_id for candidate in result.candidates] == [superseded_id]
+    remaining = _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    assert [row[1] for row in remaining] == [newest_id]
+    progress = [
+        record
+        for record in result.policy_progress
+        if record.domain == WEFT_TID_MAPPINGS_QUEUE
+    ]
+    assert progress and progress[0].base_reached
+    assert not progress[0].waypoint_reached
+
+
+def test_protected_head_does_not_hide_eligible_tail_rows(tmp_path: Path) -> None:
+    """Reachability: protected newest rows at the FIFO head are skips, not stops.
+
+    Baseline red evidence: with ``batch_size=2`` and two protected distinct
+    keys at the head, repeated cycles selected and deleted zero rows while an
+    eligible superseded tail row remained (three zero-deletion cycles).
+    """
+    ctx = _context(tmp_path)
+    head_a = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full="1778000000000000041", short="0000000041"),
+    )
+    head_b = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full="1778000000000000042", short="0000000042"),
+    )
+    tail_tid_one = "1778000000000000043"
+    superseded_one_a = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tail_tid_one, short="0000000043"),
+    )
+    superseded_one_b = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tail_tid_one, short="0000000043"),
+    )
+    newest_one = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tail_tid_one, short="0000000043"),
+    )
+    tail_tid_two = "1778000000000000044"
+    superseded_two = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tail_tid_two, short="0000000044"),
+    )
+    newest_two = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tail_tid_two, short="0000000044"),
+    )
+    config = TaskMonitorCleanupConfig(batch_size=2, tid_mapping_min_age_seconds=1.0)
+    now_ns = _now_after(newest_two, 2.0)
+
+    first = run_task_monitor_cleanup(ctx, config, apply=True, now_ns=now_ns)
+    assert first.success
+    assert first.deleted == 2
+    assert sorted(candidate.message_id for candidate in first.candidates) == sorted(
+        [superseded_one_a, superseded_one_b]
+    )
+    first_progress = [
+        record
+        for record in first.policy_progress
+        if record.domain == WEFT_TID_MAPPINGS_QUEUE
+    ]
+    assert first_progress and first_progress[0].waypoint_reached
+    assert not first_progress[0].base_reached
+
+    second = run_task_monitor_cleanup(ctx, config, apply=True, now_ns=now_ns)
+    assert second.success
+    assert second.deleted == 1
+    assert [candidate.message_id for candidate in second.candidates] == [superseded_two]
+    second_progress = [
+        record
+        for record in second.policy_progress
+        if record.domain == WEFT_TID_MAPPINGS_QUEUE
+    ]
+    assert second_progress and second_progress[0].base_reached
+
+    converged = run_task_monitor_cleanup(ctx, config, apply=True, now_ns=now_ns)
+    assert converged.success
+    assert converged.deleted == 0
+    converged_progress = [
+        record
+        for record in converged.policy_progress
+        if record.domain == WEFT_TID_MAPPINGS_QUEUE
+    ]
+    assert converged_progress and converged_progress[0].base_reached
+
+    remaining_ids = sorted(row[1] for row in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE))
+    assert remaining_ids == sorted([head_a, head_b, newest_one, newest_two])
+
+
+def test_tid_mapping_cleanup_fails_closed_when_newest_scan_cannot_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Missing newest-row evidence must never authorize destructive cleanup."""
+    ctx = _context(tmp_path)
+    tid = "1778000000000000051"
+    newest_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tid, short="0000000051"),
+    )
+    original_iter = cleanup_mod.iter_queue_entries
+    calls = 0
+
+    def _fail_first_scan(queue: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            if kwargs.get("strict"):
+                raise BrokerError("newest-row scan unavailable")
+            return iter(())
+        return original_iter(queue, **kwargs)
+
+    monkeypatch.setattr(cleanup_mod, "iter_queue_entries", _fail_first_scan)
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(newest_id, 2.0),
+    )
+
+    assert not result.success
+    assert result.deleted == 0
+    assert len(result.errors) == 1
+    assert "newest-row scan unavailable" in result.errors[0]
+    assert [
+        message_id for _body, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    ] == [newest_id]
+
+
+def test_tid_mapping_cleanup_closes_stream_when_candidate_cap_stops_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Candidate-bounded cleanup must release its broker iterator on early exit."""
+    ctx = _context(tmp_path)
+    tid = "1778000000000000061"
+    superseded_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tid, short="0000000061"),
+    )
+    newest_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(full=tid, short="0000000061"),
+    )
+    queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    try:
+        rows = list(iter_queue_entries(queue))
+    finally:
+        queue.close()
+
+    class _TrackingIterator:
+        def __init__(self) -> None:
+            self._rows = iter(rows)
+            self.closed = False
+
+        def __iter__(self) -> _TrackingIterator:
+            return self
+
+        def __next__(self) -> tuple[str, int]:
+            return next(self._rows)
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = _TrackingIterator()
+    calls = 0
+
+    def _tracked_entries(_queue: Any, **_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return iter(rows)
+        return stream
+
+    monkeypatch.setattr(cleanup_mod, "iter_queue_entries", _tracked_entries)
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=1, tid_mapping_min_age_seconds=1.0),
+        apply=False,
+        now_ns=_now_after(newest_id, 2.0),
+    )
+
+    assert result.success
+    assert [candidate.message_id for candidate in result.candidates] == [superseded_id]
+    assert stream.closed

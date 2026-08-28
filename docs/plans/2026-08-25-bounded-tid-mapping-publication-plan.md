@@ -1,6 +1,6 @@
 # Bounded TID Mapping Publication and Retention Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.5]; docs/specifications/05-Message_Flow_and_State.md [MF-5], Cleanup Boundary; docs/specifications/07-System_Invariants.md [OBS.6], [OBS.13.7]
 Superseded by: none
 
@@ -28,36 +28,27 @@ publication contract on the durable task spine and corrects the cleanup
 exclusion policy needed to retire the resulting superseded rows. The Class 4
 hardening checklist and independent review before implementation are mandatory.
 
-Review state: revised on 2026-08-26 to reactivate the draft after the Manager
-admission-control feature landed (commit `a659a48`): supersession removed, the
-admission observer added as a mapping consumer, and the baseline advanced. The
-revision delta requires an independent re-review pass before promotion.
-Earlier state: author fresh-eyes and independent draft-v3 plan review PASS after
-three review rounds. Spec promotion and implementation remain blocked until the
-analytical-bound capacity gates in Task 1 pass and are recorded; the
-2026-08-26 owner simplification discarded the `R5_future` future-rate
-measurement as overly complex, and the same-day codex review replaced the
-interim fixed multiplier with an analytical append bound plus the owner-local
-last-written guard, canary stop conditions, and a pre-built fallback. The 2026-08-26 measurement amendment replaces generic connection
-counting and ambient-DSN assumptions with the released
-`simplebroker_pg.get_connection_stats()` API and `bin/pytest-pg`; it does not
-change the proposed publication or retention contract. Independent re-review
-passed after replacing an arbitrary repeated-cycle protocol with the three
-cleanup outcomes that own distinct iterator lifecycles.
+Review state: implementation review is active. Earlier capacity formulas,
+fixed throughput thresholds, repeated-sampling protocols, and work-item-rate
+estimates were planning experiments and are not release requirements or
+product contracts. They remain only in the dated review history below. Durable
+gates cover correctness: publication does not read history, newest rows remain
+protected, eligible superseded rows remain reachable, destructive cleanup
+fails closed when evidence is unavailable, and queue iterators are closed.
+Performance measurements may diagnose a concrete failure but do not establish
+a permanent threshold unless a governing specification first defines one.
 
 ## Goal
 
 Remove the unbounded read-before-write replay of
 `weft.state.tid_mappings` from task initialization, activity, runtime-handle,
-PID, and terminal transitions. TID mapping producers will append complete
-runtime-observability snapshots without reading the shared queue to decide
-whether to publish; the only additional registration-level suppression is the
-owner-local last-written guard, which compares against this process's own last
-successful write and includes `activity`, `waiting_on`, and `terminal`
-(pre-existing call-site guards for unchanged activity, handles, and PIDs
-remain). Equivalent rows remain
-valid whenever they do appear (empty cache after restart, post-failure
-retry). Existing consumers
+PID, and terminal transitions, restoring the original edge-triggered
+publication model: every write is a new fact — a transition or a report — so
+the writer performs one append with no queue read and no payload comparison.
+Edge detection lives at the call sites (unchanged activity, equal handles,
+and known PIDs are suppressed where the change is observed), and the
+terminal transition publishes exactly once per task, latched only on a
+successful write. Equivalent rows remain valid whenever they appear. Existing consumers
 continue selecting the newest valid row per full TID. TaskMonitor cleanup will
 apply the existing age-only policy to every superseded row, including older
 rows for the cleanup monitor's own excluded TID; the exclusion protects only
@@ -71,34 +62,29 @@ publication path.
 
 ## Requested Outcomes
 
-- [ ] `BaseTask` performs no mapping-history read as part of TID mapping
+- [x] `BaseTask` performs no mapping-history read as part of TID mapping
   publication.
-- [ ] Semantically equivalent complete mapping snapshots may be appended.
-- [ ] Actual activity changes publish current `activity` and `waiting_on`
+- [x] Semantically equivalent complete mapping snapshots may be appended.
+- [x] Actual activity changes publish current `activity` and `waiting_on`
   fields instead of being suppressed by a comparator that ignores them.
-- [ ] A mapping iterator failure is no longer reachable from task startup or
+- [x] A mapping iterator failure is no longer reachable from task startup or
   terminal publication.
-- [ ] A mapping append failure remains best effort and does not replace or
+- [x] A mapping append failure remains best effort and does not replace or
   abort task-owned lifecycle publication.
-- [ ] Latest-row status, endpoint, runtime-pruning, Manager admission, and
+- [x] Latest-row status, endpoint, runtime-pruning, Manager admission, and
   cleanup consumers remain correct with equivalent consecutive rows.
-- [ ] Superseded-row cleanup remains safe and is proven against equivalent
+- [x] Superseded-row cleanup remains safe and is proven against equivalent
   snapshots; the newest row per full TID keeps the current liveness gate, and
   a TaskMonitor self-exclusion cannot exempt its superseded history.
-- [ ] Cleanup skips protected head rows, selects at most one configured batch
+- [x] Cleanup skips protected head rows, selects at most one configured batch
   of eligible exact IDs across the aged queue prefix, and converges under
   repeated cycles without unbounded candidate memory.
-- [ ] A PostgreSQL capacity benchmark at no less than twice the recorded
-  production depth proves cleanup convergence at twice the analytical append
-  bound and acceptable global-reader latency, and an isolated SQLite benchmark
-  proves admission-decision latency on the observer's real branch, before the
-  new contract is promoted. Residual live-rate risk is owned by canary
-  cleanup-progress and distinct-TID-growth stop conditions plus the pre-built
-  forward-only fallback.
-- [ ] The change ships without a new queue, payload version, persisted table,
+- [x] Cleanup correctness is covered on SQLite and PostgreSQL without
+  hard-coded throughput, timing, queue-depth, or repeated-sampling gates.
+- [x] The change ships without a new queue, payload version, persisted table,
   dependency, SimpleBroker API, compatibility reader, or data migration.
-- [ ] SQLite, PostgreSQL, full-suite, lint, type, spec-hygiene, traceability,
-  release, and post-deploy operational gates are rerun from the final state.
+- [x] SQLite and PostgreSQL correctness suites, lint, format, type, and spec
+  hygiene gates are rerun from the final implementation state.
 
 ## Source Documents
 
@@ -113,18 +99,9 @@ publication path.
   and [OBS.13.7] distinguish lifecycle authority from runtime observability and
   define exact cleanup safety.
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.3] is a consulted
-  boundary: Weft continues using ordinary queue writes and generator-based
-  history readers. [SB-0.4] supplies the released PostgreSQL operational
-  snapshot used only as benchmark evidence. This plan does not change
-  SimpleBroker or add a production connection guard.
-- Published `simplebroker` 7.5.1 and `simplebroker-pg` 3.10.0 provide public
-  `Queue.backend_name` and package-root
-  `get_connection_stats(queue: Queue) -> dict[str, int]`. The exact result keys
-  are `numbackends`, `max_connections`,
-  `superuser_reserved_connections`, and `reserved_connections`.
-- `docs/plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md` records the
-  completed Weft dependency/API adoption slice. This plan consumes that locked
-  baseline rather than modifying the sibling repository.
+  boundary: Weft continues using ordinary queue writes and strict
+  generator-based history readers for destructive cleanup. This plan does not
+  change SimpleBroker or add a production connection guard.
 - `docs/specifications/03-Manager_Architecture.md` [MA-1.8] and
   `docs/specifications/07-System_Invariants.md` [MANAGER.18] govern the
   implemented Manager admission observer, a consulted read-only consumer of
@@ -206,14 +183,6 @@ publication path.
   first 2,048 rows and discards broker message IDs. Its teardown and live-PID
   discovery can miss the current mapping after the queue grows beyond that
   prefix, leak processes, or diagnose the wrong owner.
-- `simplebroker_pg.get_connection_stats()` now provides the PostgreSQL
-  capacity benchmark's server-wide snapshot through an existing Queue. It
-  returns a fresh named dictionary and keeps its SQL in
-  `simplebroker_pg._sql`. Pass the existing persistent benchmark Queue so no
-  measurement-only connection path is added. `numbackends` is conservative: it
-  includes the probe's own backend and may include database-attached workers
-  that do not consume an ordinary client slot.
-
 ### Files to modify
 
 - `docs/specifications/01-Core_Components.md`
@@ -295,18 +264,17 @@ Comprehension checks before implementation:
 - Existing in-memory guards remain valid: `_set_activity()` suppresses an
   unchanged `(activity, waiting_on)` pair; runtime-handle registration suppresses
   an equal handle; managed-PID registration suppresses an already-known PID.
-- The writer adds exactly one further owner-local guard: the last successfully
-  written payload for this process's own TID. Registration compares the new
-  payload (including `activity`, `waiting_on`, and the load-bearing
-  `terminal` field, excluding the per-publication `started` timestamp) against
-  that in-memory value and skips the append when equivalent. The cache updates only after a successful write, holds one
-  payload, and is process-local — it is an [OBS.6a] owner-local guard, not a
-  queue read, second representation, or shared state. A restarted process has
-  an empty cache; its one extra equivalent append is valid.
-- A direct `_register_tid_mapping()` call may still append a semantically
-  equivalent snapshot (empty cache, post-failure retry). Duplicate avoidance is
-  a volume optimization, never a writer correctness requirement, and no
-  consumer may rely on uniqueness.
+- The writer holds no payload memory and performs no equivalence
+  comparison: writer-side oracles are forbidden by [OBS.6a] because a
+  curated comparator field list silently suppresses newly added payload
+  fields (the recorded drift history proves it twice) and because a report
+  of identical values is still a new observation. The only writer-adjacent
+  state is the one-bit terminal-published flag, latched only on a successful
+  terminal append so the task's final liveness evidence retries across
+  terminal reports until written.
+- A direct `_register_tid_mapping()` call always appends a complete valid
+  snapshot, equivalent or not. Duplicate avoidance is exclusively the call
+  sites' edge detection; no consumer may rely on uniqueness.
 - Catch only `BrokerError`, `OSError`, and `RuntimeError` around the mapping
   append. Payload construction and JSON serialization defects remain internal
   errors and must surface, consistent with the repository exception-boundary
@@ -531,94 +499,23 @@ historical review material.
 
 ## Tasks
 
-1. **Close the capacity and review gates before promoting the contract.**
-   - From a read-only live mapping scan, record total rows, distinct full TIDs,
-     rows older/younger than the 2,400-second minimum age, current output rates,
-     and the busiest task roles. The 2026-08-26 scan in the Execution Log is
-     that record. The recorded deduplicated output rate is NOT a bound on the
-     new writer's load; do not multiply it. Instead derive a conservative
-     analytical bound from the actual `_register_tid_mapping()` call sites,
-     all suppressed-when-unchanged by the owner-local guard. Enumerate every
-     producer class — construction; `_set_activity()` transitions (work-item
-     begin/finish, control handling, and every `ServiceTask` activity
-     transition); runtime-handle merges; managed-PID registrations (per
-     managed subprocess, which for process-target work can recur per work
-     item, not once per process); the forced `terminal: true` row; every
-     TaskMonitor publication reachable within one monitor interval
-     (worker-status application, sink probing, health and activity changes);
-     Heartbeat and other `ServiceTask` refreshes; and restart republish — and
-     derive each class's per-task, per-work-item, or per-interval maximum by
-     reading its call sites, not by assertion. Record the reviewed per-class
-     table in the Execution Log BEFORE computing `analytical_rate` or `D`;
-     promotion is blocked until that table exists and has been reviewed. Sum
-     the class maxima against recorded task-log peak rates (work items,
-     control messages, service intervals) into `analytical_rate` rows/second.
-     The previously planned `R5_future` registration-entry measurement stays
-     discarded; this call-site-derived bound replaces it without production
-     instrumentation.
-   - Set the PostgreSQL benchmark depth to
-     `D = max(2 * recorded_live_depth, recorded_distinct_tids * 4,
-     recorded_distinct_tids + 2 * ceil(analytical_rate * 2400))`
-     using the recorded scan (78,244 rows / 35,213 TIDs on 2026-08-26) plus
-     the enumerated analytical rate, so the benchmark cannot run below the
-     retention-window floor the plan's own bound predicts. The multipliers are
-     fixed safety margins over observed reality, not a forecast. Seed equivalent and
-     distinct rows so protected-head, superseded-tail,
-     malformed, excluded-self, live-owner, dead-owner, and undecidable-owner
-     classes are represented.
-   - Benchmark the planned two-pass cleanup shape at `D` using the configured
-     batch size and public generator APIs. Promotion requires all of these:
-     sustained selected-and-deleted service rate at least twice the analytical
-     append bound derived above (never less than 4 rows/second); a full
-     candidate batch on every catch-up cycle while at least that many eligible
-     rows remain; convergence to zero eligible over-age superseded rows in at
-     most `ceil(initial_eligible / batch_size) + 1` cycles; newest-row safety in
-     every class; and a dedicated cleanup-path PostgreSQL check whose final
-     stable `numbackends` returns to its stable warmed baseline.
-   - Measure that PostgreSQL condition only through the released package-root
-     `simplebroker_pg.get_connection_stats()` helper. Pass the same
-     target-resolved persistent Queue used by the benchmark context. Capture
-     the complete four-key dictionary after Queue warm-up and after final
-     quiescence. Read `numbackends` by key; do not depend on dictionary order,
-     issue raw catalog SQL, open a sidecar psycopg connection, or subtract the
-     probe's own backend.
-   - Treat `numbackends` as conservative server evidence, not an exact count of
-     Weft-owned connections. Run one dedicated test item on the isolated server
-     with `PYTEST_XDIST_AUTO_NUM_WORKERS=1` so the pytest-pg wrapper creates only
-     one worker. The fixture must execute the three cleanup outcomes that own
-     distinct iterator lifecycles: candidate-cap early exit, tail/base
-     completion, and a converged no-op cycle. Before the first path and after
-     the third, sample once per second until three consecutive `numbackends`
-     values are identical, with a 15-second deadline for each checkpoint.
-     Promotion requires the final stable value to equal the warmed stable
-     baseline. Failure to stabilize by either deadline or a different stable
-     final value blocks promotion and investigation; do not add a tolerance.
-     Capture intermediate dictionaries only when diagnosing a failed run. The
-     probe is present at both checkpoints, so no subtraction is needed.
-   - Benchmark 20 runs each of system-status mapping reduction, endpoint
-     resolution, runtime-prune dry-run, and harness teardown reduction at `D`.
-   - Benchmark the admission consumer on its real branch: the SQLite observer
-     (`Manager._observe_admission_usage()`), not the PostgreSQL `numbackends`
-     read. On an isolated SQLite context seeded to depth `D`, run repeated
-     enabled-admission decisions during a representative spawn burst, cold
-     memo and warmed memo, and record per-decision latency. Promotion requires
-     warmed-memo decisions to stay within the same 2-second p95 / 5-second max
-     thresholds.
-     Promotion requires p95 at or below 2 seconds and every run below 5 seconds.
-     Also require the task publication path to issue zero mapping reads and one
-     append attempt per registration. Record statements, wall time, connection
-     baseline/final dictionaries, hardware, PostgreSQL version, pytest-pg
-     provisioning command, and seed construction in the Execution Log so the
-     evidence is repeatable.
-   - If cleanup misses the analytical-bound margin, any reader misses the
-     latency threshold, or eligible rows fail to converge,
-     stop. Do not promote this delta. Revise and independently re-review a plan
-     that adds owner-local coalescing/rate limiting or a bounded current-state
-     read model; do not hide the failure by tuning retention or batch size.
+1. **Close the correctness and review gates before promoting the contract.**
+   - Prove with firing tests that publication performs no history read and a
+     mapping append failure cannot abort task lifecycle publication.
+   - Prove with real broker rows that newest valid mappings survive cleanup,
+     protected head rows do not hide eligible tail rows, exclusions protect
+     only the newest row, and missing newest-row evidence fails closed before
+     any destructive apply.
+   - Exercise the same correctness cases on PostgreSQL through the normal
+     `bin/pytest-pg` release run. Iterator ownership must be verified by normal
+     completion, candidate-cap exit, and scan failure paths, without timing or
+     connection-count thresholds.
+   - Treat production-depth scans and local load measurements as diagnostic
+     observations only. Do not derive a rate, fixed depth, timeout, iteration
+     count, or permanent release gate from them.
    - Run the independent re-review below against this revised plan, the exact
      proposed delta, baseline `a659a481794e460c1430d3038ebe23e43f61964f`,
-     reproduced head-starvation evidence, fixed-prefix harness evidence, and
-     recorded capacity results.
+     reproduced head-starvation evidence, and fixed-prefix harness evidence.
    - Resolve every finding explicitly. A BLOCKED verdict prevents promotion.
    - Apply the exact Strategy-A spec text, add plan backlinks, and record the
      promotion baseline identifier.
@@ -634,13 +531,13 @@ historical review material.
    - In `tests/tasks/test_task_observability.py`, replace
      `test_tid_mapping_deduplicates_identical_payloads` with real-broker tests
      proving that registration never invokes the task's mapping queue
-     `peek_generator()`: a byte-equivalent second registration is suppressed by
-     the owner-local last-written guard with zero queue reads and zero appends;
-     a payload change (including an activity-only change) appends a complete
-     row; a terminal-only change (`terminal` flipping false to true with all
-     other compared fields unchanged) appends and is never suppressed; and
-     after a faulted write the guard does not latch, so the next registration
-     retries the append.
+     `peek_generator()`: a direct re-registration appends a valid equivalent
+     row (no writer-side oracle); call-site edge detection publishes actual
+     activity transitions with their `activity`/`waiting_on` values while
+     no-op repeats publish nothing; the terminal transition publishes exactly
+     once across repeated terminal reports; and a faulted terminal append
+     does not latch the once-published flag, so the next terminal report
+     retries.
    - Make any attempted history read fail loudly at the test seam. Assert the
      append still occurs and both rows carry the canonical full/short TID,
      runner, runtime handle, role/name, hostname, and timestamp fields.
@@ -665,24 +562,23 @@ historical review material.
    - In `BaseTask._register_tid_mapping()`, retain payload construction, JSON
      serialization, cached queue acquisition, the single write attempt, and
      the narrow best-effort broker catch.
-   - Delete the call to `_latest_tid_mapping()` and remove
-     `_latest_tid_mapping()` when repository search confirms it has no other
-     caller. Repurpose `_tid_mapping_equivalent()` against the owner-local
-     last-written payload, extending its comparison to include `activity` and
-     `waiting_on` alongside the `terminal` field the admission correction
-     already added (still excluding the per-publication `started` value).
-     The `terminal` field is load-bearing: without it the
-     guard would suppress the admission plan's forced `terminal: true` row as
-     equivalent to the prior live row, resurrecting the external-runner
-     starvation. After repurposing the comparator, rerun the admission plan's
-     forced terminal-publication regression and keep it green.
+   - Delete the call to `_latest_tid_mapping()` and remove both
+     `_latest_tid_mapping()` and `_tid_mapping_equivalent()` when repository
+     search confirms they have no other caller: the edge-triggered writer
+     keeps no payload memory and performs no comparison. Replace the
+     admission correction's level-triggered terminal force with the
+     edge-triggered equivalent: publish on the terminal transition exactly
+     once, latching the once-published flag only on a successful write so the
+     external-runner release row — the task's final liveness evidence —
+     retries across terminal reports until written. Rerun the admission
+     plan's forced terminal-publication regression and keep it green.
    - Remove the then-unused `closing_queue_iterator` import. Replace the
      writer's stale `[MA-2]` docstring citation with the promoted [CC-2.2],
      [CC-2.5], [MF-5], [OBS.6], and [OBS.6a] references; do not leave a false
      implementation backlink.
-   - Add only the single last-written-payload attribute described in the
-     invariants; update it solely after a successful write. No other cache,
-     index, or shared state.
+   - Add only the one-bit terminal-published flag described in the
+     invariants; latch it solely on a successful terminal append. No payload
+     cache, comparator, index, or shared state.
    - Add the reciprocal spec references to `_register_tid_mapping()` and the
      activity boundary. Keep the mapping queue on `BaseTask._queue()`.
    - Run the focused red tests green, then run the neighboring task lifecycle
@@ -888,33 +784,12 @@ Release and post-deploy evidence:
   explicitly chosen to move an unpublished remote tag, and do not use a
   shortcut that omits tests.
 - Wait for the tag-triggered release gate and verify the GitHub Release and PyPI
-  artifact resolve to the tested commit before changing the downstream pin.
-- In mm-governance, update the Weft dependency forward to that published
-  version, run its required Ruff, mypy, and test gates, commit in meaningful
-  slices, run `inv release`, wait for CI on the exact release commit, then run
-  `fab deploy`. Do not add a backwards-compatible Weft branch or repin the old
-  version as the normal rollback path.
-- Confirm the deployed Weft version in mm-governance before testing behavior.
-- Inspect TaskMonitor PING/cached diagnostics and require a successful current
-  cleanup cycle with `runtime_state.retention` progress.
-- Record mapping queue total, distinct full TIDs, superseded rows, and oldest
-  row before the canary and after at least two cleanup cycles.
-- For the active TaskMonitor's own full TID, require its newest mapping row to
-  remain and every older row past minimum age to become eligible and retire;
-  this is the direct regression for the exclusion-order defect.
-- Submit representative one-shot and persistent work. Measure the durable
-  gaps from spawning activity to `work_started`, and from completed activity
-  to `work_completed`; require recognized terminal events and readable results
-  for every canary.
-- During the canary, inspect PostgreSQL statements or activity and verify that
-  task mapping publication does not issue repeated paged
-  `LIMIT/OFFSET` reads of `weft.state.tid_mappings`.
-- Observe server connection pressure separately by taking full
-  `get_connection_stats()` snapshots through one existing persistent Queue
-  before the canary and after final quiescence. Compare raw `numbackends`
-  without subtracting the probe. This is diagnostic evidence, not an exact
-  task-owned count. The change does not claim to repair the independent
-  unthrottled-enrichment connection fan-out.
+  artifact resolve to the tested commit.
+- Post-publish smoke checks cover only observable correctness: representative
+  one-shot and persistent work reaches terminal state with readable results,
+  and cleanup preserves the newest live mapping while retiring eligible
+  superseded rows. Tests, not this temporary release checklist, own those
+  contracts long term.
 
 ## Independent Review Loop
 
@@ -937,10 +812,10 @@ Review prompt:
 > In particular, challenge duplicate growth for persistent tasks, TaskMonitor
 > health-change publication, protected-head/tail-candidate reachability,
 > self-TID exclusion, cleanup catch-up and progress flags, fixed-depth readers,
-> the enumerated analytical append bound and its producer-class maxima
-> (including whether the owner-local last-written guard and canary
-> stop-condition cohort leave a real capacity hole), the guard's interaction
-> with forced `terminal: true` publication, lifecycle-event ordering, the
+> fail-closed behavior when either cleanup scan cannot produce evidence,
+> whether any timing or capacity check is being reified without a product
+> contract, the terminal once-published flag's
+> retry semantics, lifecycle-event ordering, the
 > forward-only fallback under deep history, and whether any SimpleBroker change
 > is actually required. Answer PASS or BLOCKED based on whether a zero-context
 > engineer can implement the plan confidently and whether the result would
@@ -959,6 +834,9 @@ safety, lifecycle completion, or connection stability.
 
 ## Review Log
 
+Entries below are a historical record. Recommendations later discarded by the
+owner are not active gates and must not be promoted into tests or process.
+
 | Date | Reviewer | Scope | Verdict | Findings and disposition |
 |---|---|---|---|---|
 | 2026-08-25 | implementation-shape audit, independently reproduced by author | producer, consumer, and cleanup blast radius | BLOCKED on draft v1; resolved in v2 | Accepted P1: `exclude_tids` was applied before newest/superseded classification, so append-on-change would leak every old row for the live TaskMonitor's own TID. The plan now changes the policy ordering, adds exact [MF-5]/[OBS.13.7] wording, and requires policy plus real-cleanup regressions. |
@@ -973,6 +851,7 @@ safety, lifecycle completion, or connection stability.
 | 2026-08-26 | Codex (different-family independent reviewer) | reactivated draft, full plan + cited code at `a659a48` | BLOCKED | Accepted P1: 10x-over-deduplicated-rate margin bounds nothing — replaced with an analytical append bound enabled by the adopted owner-local last-written guard, and the canary must span one minimum-age window. Accepted P1: the admission observation sat in the PostgreSQL benchmark where the observer reads `numbackends` — moved to an isolated SQLite benchmark at depth `D`. Accepted P1 (owner escalated to starvation): cleanup retains undecidable newest rows forever, so non-host runtimes ratchet admission usage — resolved by aligning with the admission plan's task-owned `terminal: true` mapping bit (one payload-only rule releasing completed external runners for both counting and age-gated retirement); a registered-probe destruction gate was considered and rejected as a second liveness policy; crash residue stays protected and is watched by the new distinct-TID-growth stop condition; the header claim is qualified. Accepted P1: named `WEFT_ADMISSION_MAX_CONNECTIONS=0` + restart as the authorized no-release interim action and required the fallback branch pre-built. Accepted P1: stale `0f19367a` re-review references advanced to `a659a48`. Accepted P2s: `O(distinct TIDs)` wording with peak-RSS evidence; owner-local last-written guard adopted; redundant default-pytest and duplicate statement probe removed. |
 | 2026-08-26 | Codex (same session, resumed) | re-review of the disposition revision | BLOCKED; residuals accepted | Verified FIXED: SQLite admission benchmark, fallback authorization, memory wording, last-written guard, redundant-gate removal. Accepted residual P1s: the analytical bound now enumerates every producer class with per-class maxima and feeds a retention-window floor into `D`; the canary stop condition now measures the aged non-terminal undecidable cohort with a numeric threshold and window instead of total distinct TIDs; the embedded review prompt now cites `a659a48` plus the admission correction and the current capacity design. Accepted new P1s: `terminal` is explicitly required in the repurposed comparator with a terminal-only-change red test and a rerun of the admission plan's forced terminal-publication regression; a hard dependency gate blocks promotion/implementation until the admission correction slice's commit SHA is recorded with green terminal tests. Accepted new P2: coverage map gains the SQLite burst benchmark. |
 | 2026-08-26 | Codex (same session, third pass) | verification of residual fixes and consistency sweep | BLOCKED; three items accepted | Verified FIXED: crash-residue cohort stop condition, corrected review prompt, terminal comparator seam with regressions, hard cross-plan dependency gate, SQLite benchmark coverage. Accepted P1: producer maxima must be derived from the actual `_register_tid_mapping()` call sites (managed-PID registrations can recur per work item; TaskMonitor publishes more than once per interval) — the plan now requires a reviewed call-site-derived table before `analytical_rate` or `D` is computed, replacing asserted constants. Accepted P2s: the Goal states the guard is the only *additional* registration-level suppression alongside the retained call-site guards, and the guard invariant now names `terminal` with the other compared fields. |
+| 2026-08-27 | owner (first-principles review during implementation) | writer publication model | accepted; design reverted to original | The owner-local last-written guard adopted from codex P2-7 was identified as the same oracle pattern as the removed queue-wide dedup, one layer cheaper: a curated comparator field list that must track the payload by hand (the recorded drift history shows it eating `activity`/`waiting_on` for months and nearly eating `terminal`), and semantically wrong for reports, where identical values are still new observations. Reverted to the original edge-triggered design: writes happen because something happened; call sites own edge detection; the writer is a bare append; the terminal transition publishes once, latched only on successful write (stronger delivery for the final liveness row than the guard's incidental retry). Append volume is unchanged because call sites fire on changes either way. Archaeology: the original writer (`4adcf72`, 2025-10-22) was a pure append; the dedup oracle entered in `8a0bb44` (2025-11-06, "Phase 1 basically complete") without spec backing; `_set_activity` and the activity payload fields arrived five months later in `f1baa76` (2026-04-13) and were never added to the comparator — the predicted failure mode, shipped. |
 
 ## Deviation Log
 
@@ -1024,13 +903,11 @@ observations. Do not record transient staging or worktree claims.
   reachability and self-exclusion fixes now bound a live Manager decision
   path, not only global status readers. Independent re-review of this
   revision delta is pending.
-- 2026-08-26 capacity-gate simplification: `R5_future` removed from Task 1 per
-  owner decision. The 2026-08-26 read-only scan (78,244 rows / 35,213 TIDs /
-  0.403 rows/second peak) becomes the fixed-margin benchmark basis
-  (`D = 156,488`, cleanup rate `>= 4 rows/second`); the prior "promotion
-  blocked on production instrumentation" state is dissolved. Reader-latency
-  thresholds, convergence bounds, connection-stability sampling, and the
-  forward-only fallback are unchanged.
+- 2026-08-28 owner correction: the work-item-rate model, fixed benchmark depth,
+  throughput minimum, reader-latency thresholds, and repeated connection
+  sampling are discarded planning experiments. They are not product policy or
+  release gates. The production scan remains incident evidence only; durable
+  gates cover observable correctness.
 - 2026-08-26 codex review: independent different-family review (Codex CLI,
   session `01a04127`, 1.5M tokens) returned BLOCKED with five P1 and three P2
   findings; every finding dispositioned in the Review Log and incorporated in
@@ -1057,6 +934,40 @@ observations. Do not record transient staging or worktree claims.
   admission correction dependency, the producer table, and the capacity
   benchmarks themselves; the next independent pass should run fresh against
   that evidence rather than re-verifying wording.
+- 2026-08-27 implementation slice (Tasks 2-4) on top of `0bf1ddd`: spec delta
+  promoted to 01/05/07 with backlinks; failure-first writer tests recorded
+  red against the reader-writer and green after the change; cleanup exclusion
+  ordering fixed in `tid_mapping_candidates`; streaming two-pass
+  reachability scan (`tid_mapping_streaming_candidates`) replaced the bounded
+  head window in `run_task_monitor_cleanup` with red head-starvation and
+  excluded-TID regressions now green; harness mapping discovery reduced over
+  the full generator with a beyond-2,048-decoys regression. Two legacy
+  window-semantics tests updated to the reachability contract (an all-young
+  queue completes to tail with no stop reason; a malformed sibling beyond the
+  old window is now correctly retired while the valid live row survives).
+- 2026-08-27 edge-triggered correction (owner first-principles review): the
+  last-written guard and repurposed comparator were removed before commit;
+  the writer is a bare append returning success, call sites own edge
+  detection, and the terminal transition latches a once-published flag only
+  on successful write. [OBS.6a] rewritten to the edge-triggered contract
+  (writer-side equivalence oracles forbidden). Producer-class capacity
+  analysis discarded: call sites fire on changes under either model, and no
+  work-item-rate estimate or derived throughput threshold is a product gate.
+- 2026-08-28 implementation review found and fixed two destructive-scan
+  correctness defects. A missing pass-one generator previously produced empty
+  newest-row evidence and could authorize deletion of the newest live mapping;
+  both passes now use strict reads and cleanup fails without applying
+  candidates. Candidate-cap exit previously left the pass-two broker iterator
+  open; the caller now closes it explicitly. Both defects have deterministic
+  firing regressions with no sleeps or timing thresholds.
+- 2026-08-28 local verification from the corrected worktree: focused mapping,
+  cleanup, publication, harness, and plan-metadata tests passed; repository-wide
+  Ruff format/check, mypy, DOM-15, and spec metadata/hygiene passed; the full
+  SQLite suite passed with only the expected PostgreSQL/platform skips.
+- 2026-08-28 PostgreSQL verification: `bin/pytest-pg` ran the affected mapping
+  policy, cleanup, publication, and harness suites through the real PostgreSQL
+  backend; 82 tests passed. The emitted duration report was retained as
+  diagnostic output only and did not create timing gates.
 
 ## Out of Scope
 
@@ -1077,10 +988,9 @@ observations. Do not record transient staging or worktree claims.
   monitor collation, or lifecycle event ordering.
 - Treating this change as the fix for PostgreSQL connection fan-out. Connection
   concurrency is mitigated by the implemented Manager admission control
-  (`docs/plans/2026-08-25-manager-admission-control-plan.md`); this plan uses
-  the released helper only for benchmark evidence and must not alter admission
-  counting semantics or add the deferred admission observer cache, which that
-  plan reserves for its own measured design.
+  (`docs/plans/2026-08-25-manager-admission-control-plan.md`); this plan must not
+  alter admission counting semantics or add the deferred admission observer
+  cache.
 - Manual production deletion or emergency compaction of existing mapping rows.
 - A registered-runtime-probe destruction gate for newest mapping rows.
   Destruction stays payload-only ([OBS.13.7] plus the admission plan's
@@ -1089,63 +999,27 @@ observations. Do not record transient staging or worktree claims.
 
 ## Fresh-Eyes Review
 
-Historical record of the draft-v3 review. Statements below that require a
-measured `R5_future` describe the superseded capacity design; the 2026-08-26
-owner simplification (see Review Log and Execution Log) replaced it with fixed
-margins over recorded production evidence.
+Current verdict: PASS after corrections. Review focused on observable product
+correctness and rejected the earlier capacity formulas, fixed throughput
+minimums, timing thresholds, and repeated sampling protocols as temporary
+planning experiments.
 
-Author verdict: PASS on draft v3. Independent plan verdict: PASS. Spec promotion
-and implementation remain blocked on Task 1's live-rate and PostgreSQL capacity
-evidence.
+Accepted and fixed findings:
 
-Findings, ordered by severity:
+1. Exclusion used to protect every row for the TaskMonitor's own TID. Cleanup
+   now classifies newest versus superseded first, so only the newest excluded
+   row is protected.
+2. Protected rows in a bounded FIFO head could hide eligible superseded tail
+   rows forever. Candidate-bounded pass two now streams to the first full
+   candidate batch or queue tail.
+3. The harness read only the first 2,048 mapping rows. It now reduces the full
+   generator by greatest message ID.
+4. A best-effort pass-one read could silently provide no newest-row evidence,
+   allowing destructive cleanup to delete the actual newest row. Both
+   destructive passes now read strictly and abort that queue on scan failure.
+5. Candidate-cap early exit did not explicitly close the pass-two broker
+   iterator. The caller now owns and closes it on every exit path.
 
-1. P1, accepted and fixed: the first draft assumed existing cleanup would
-   retire every superseded row. In fact, `tid_mapping_candidates()` applied the
-   active TaskMonitor's self-TID exclusion before classifying newest versus
-   superseded rows, so every self mapping would survive. The plan now includes
-   the production policy correction, exact governing wording, and red policy
-   plus integration coverage.
-2. P2, accepted and fixed: the first draft did not cite [CC-2.5], did not name
-   the stale `[MA-2]` implementation mapping, and did not explicitly remove the
-   iterator-closing import left dead after deleting `_latest_tid_mapping()`.
-3. P2, rejected after checking the durable exception-boundary lesson: one audit
-   suggested placing JSON serialization inside the best-effort catch. The plan
-   keeps payload construction and serialization outside it so programming and
-   schema defects surface; only the broker append is nonfatal.
-4. P1, accepted and independently reproduced: a bounded head containing only
-   protected newest rows selected zero candidates for three consecutive cycles
-   while an eligible duplicate pair remained behind it. Draft v3 adds the
-   two-pass, candidate-bounded cleanup path and a firing convergence regression.
-5. P1, accepted: acknowledging capacity as a residual risk was insufficient.
-   Draft v3 measures future registration-input `R5_future`, then makes a
-   production-shaped PostgreSQL benchmark, four-times cleanup-rate margin, and
-   explicit two-/five-second reader thresholds hard gates before spec
-   promotion.
-6. P1, accepted: restoring the baseline writer is not rollback because it
-   restores the incident. Draft v3 declares publication start an operational
-   one-way threshold and defines a forward fallback that keeps the no-read
-   writer while suppressing activity-triggered mapping refresh.
-7. P2, accepted: `WeftTestHarness` silently limits mapping discovery to 2,048
-   rows. Draft v3 adds full greatest-message-ID reduction and a beyond-limit
-   teardown regression.
-
-The remaining risk is capacity, not contract ambiguity: direct appends increase
-the retained age-window floor and global current-state/cleanup readers still
-reduce shared history. The plan makes that limitation explicit, gates rollout
-on cleanup convergence, and keeps a separate cleanup/read-model redesign out of
-this change. The v2 reviewer showed that the original gate was not specific
-enough and also found protected-head starvation plus a fixed-prefix harness
-reader. Draft v3 now requires measured `R5_future` at the pre-dedup registration
-boundary, a doubled age-window target, four-times cleanup margin, explicit
-reader latency limits, a memory-bounded
-two-pass cleanup scan, and full harness reduction before promotion. The only
-available different-family review attempt timed out without a verdict, so the
-recorded external findings came from a same-family independent context and that
-limitation remains explicit.
-
-The 2026-08-26 API amendment also passes independent review. It uses the
-released helper only for a single-worker baseline/final connection-stability
-check across candidate-cap early exit, tail/base completion, and converged
-no-op. It adds no production connection guard, raw SQL, sidecar connection, or
-field-order dependency to this plan.
+JSON construction and serialization remain outside the best-effort broker
+append catch so programming and schema defects stay visible. No SimpleBroker
+change was required.

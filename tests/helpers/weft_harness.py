@@ -47,6 +47,7 @@ from weft.core.service_convergence import (
 from weft.ext import RunnerHandle
 from weft.helpers import (
     is_canonical_manager_record,
+    iter_queue_entries,
     iter_queue_json_entries,
     pid_is_live,
     pid_matches_create_time,
@@ -723,38 +724,48 @@ class WeftTestHarness:
                 pass
             self._orig_cwd = None
 
-    def _load_tid_mapping_payloads(self) -> list[dict[str, object]]:
+    def _load_tid_mapping_entries(self) -> list[tuple[dict[str, object], int]]:
+        """Read every mapping row with its broker message id, best effort.
+
+        The full lazy generator replaces the old fixed 2,048-row prefix so
+        discovery cannot miss the current owner once the queue outgrows any
+        fixed window. Broker failures stay a defensive harness boundary and
+        yield whatever was read; the queue handle closes on every path.
+        """
+
         queue = Queue(
             WEFT_TID_MAPPINGS_QUEUE,
             db_path=self.context.broker_target,
             persistent=False,
             config=self.context.broker_config,
         )
+        entries: list[tuple[dict[str, object], int]] = []
         try:
-            records = queue.peek_many(limit=2048) or []
+            for raw, message_id in iter_queue_entries(queue):
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict):
+                    entries.append((data, int(message_id)))
         except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
-            return []
+            return entries
         finally:
             queue.close()
+        return entries
 
-        payloads: list[dict[str, object]] = []
-        for raw in records:
-            payload = raw[0] if isinstance(raw, tuple) else raw
-            try:
-                data = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(data, dict):
-                payloads.append(data)
-        return payloads
+    def _load_tid_mapping_payloads(self) -> list[dict[str, object]]:
+        return [payload for payload, _message_id in self._load_tid_mapping_entries()]
 
     def _latest_tid_mapping_payloads(self) -> dict[str, dict[str, object]]:
-        latest: dict[str, dict[str, object]] = {}
-        for data in self._load_tid_mapping_payloads():
+        latest: dict[str, tuple[int, dict[str, object]]] = {}
+        for data, message_id in self._load_tid_mapping_entries():
             full_tid = data.get("full")
             if isinstance(full_tid, str) and full_tid:
-                latest[full_tid] = data
-        return latest
+                previous = latest.get(full_tid)
+                if previous is None or previous[0] <= message_id:
+                    latest[full_tid] = (message_id, data)
+        return {full: data for full, (_message_id, data) in latest.items()}
 
     @staticmethod
     def _mapping_role(data: dict[str, object]) -> str | None:

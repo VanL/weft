@@ -253,7 +253,32 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.4**: process titles follow `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
 - **OBS.5**: TID short form uses the low-order digits from the resolved
   19-digit TID
-- **OBS.6**: TID mappings are written to `weft.state.tid_mappings`
+- **OBS.6**: Each TID mapping row is a complete runtime-observability
+  snapshot written to `weft.state.tid_mappings`. A consumer that requires
+  current state selects the valid row with the greatest broker message ID for
+  each full TID. Multiple rows for one full TID, including rows with
+  equivalent observable fields, are valid ordered history; uniqueness per TID
+  is not a queue invariant.
+- **OBS.6a**: TID mapping publication is edge-triggered: every write is a
+  new fact — a state transition or a report — so a producer appends its
+  complete current snapshot without reading or reducing
+  `weft.state.tid_mappings` and without any writer-side payload comparison.
+  Publication work is therefore independent of mapping-history depth. Edge
+  detection lives at the call sites, each of which fires only when the
+  owner-local state it governs actually changed (unchanged activity, an
+  equal runtime handle, and a known managed PID are suppressed at their call
+  sites) or when the write is itself a report (construction, restart
+  republish). The terminal transition publishes its mapping exactly once per
+  task, latched only on a successful write so a failed terminal append
+  retries on the next terminal report. Queue-wide read-before-write
+  deduplication and writer-side equivalence oracles are forbidden: a curated
+  comparator field list silently suppresses newly added payload fields, and
+  a report of identical values is still a new observation. A broker failure
+  from the mapping append is a best-effort observability failure: it must
+  not mutate lifecycle state, replace task-owned lifecycle evidence, or
+  abort the remaining lifecycle publication path. Payload construction and
+  serialization defects are not broker failures and remain visible internal
+  errors.
 - **OBS.7**: process-title segments are sanitized for shell-safe use
 - **OBS.8**: process titles stay within the allowed character vocabulary
 - **OBS.9**: endpoint names under `_weft.` are reserved for Weft-owned
@@ -362,7 +387,26 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     (`weft/core/monitor/policies/tid_mapping.py`) keeps the newest row per
     mapping key (`full` TID) regardless of age unless that row's own payload
     fails a liveness probe; superseded (non-newest) rows for a key keep the
-    age-only rule. The probe consults only the row payload, never a task-log
+    age-only rule. Semantically equivalent mapping rows remain distinct
+    ordered snapshots. All but the greatest valid message-ID row for a full
+    TID are superseded and follow the existing age-only rule; equivalence
+    does not grant retention or weaken the newest row's liveness gate. A
+    cleanup-cycle exclusion for a TID protects only that TID's greatest valid
+    message-ID mapping row; it does not exempt superseded mapping rows from
+    age-only retention. There is no second liveness gate and no
+    registered-probe destruction rule: crashed external runners that never
+    published a terminal marker remain protected and retained, with
+    accumulation bounded only by crash rate. Candidate and exact-deletion
+    counts remain bounded by the configured cleanup batch size, but a
+    protected newest row is a skip rather than a FIFO stop. When a bounded
+    head window does not reach queue tail, TID-mapping cleanup must continue
+    through the aged queue prefix until it selects one candidate batch,
+    reaches the valid-row age boundary while still scanning for
+    policy-deletable malformed rows, or reaches queue tail. A head window
+    containing only protected newest rows cannot hide eligible superseded
+    rows or be reported as cleanup base. Full-queue newest-ID evidence
+    remains required before any valid row is classified as newest or
+    superseded. The probe consults only the row payload, never a task-log
     lookup or Monitor collation-store reach. Positive scoped
     `(pid, create_time)` host-process liveness always keeps the newest row.
     Without positive scoped host-process proof, a valid task-owned
@@ -961,6 +1005,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-25-bounded-tid-mapping-publication-plan.md`](../plans/2026-08-25-bounded-tid-mapping-publication-plan.md)
 - [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
