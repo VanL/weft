@@ -970,14 +970,10 @@ def _write_descendant_process_scripts(tmp_path: Path) -> tuple[Path, Path]:
         """
 from __future__ import annotations
 
-import os
-import sys
 import time
-from pathlib import Path
 
 
 def main() -> None:
-    Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
     time.sleep(60)
 
 
@@ -1000,12 +996,8 @@ from pathlib import Path
 
 
 def main() -> None:
-    subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
-        if Path(sys.argv[2]).exists():
-            break
-        time.sleep(0.01)
+    child = subprocess.Popen([sys.executable, sys.argv[1]])
+    Path(sys.argv[2]).write_text(str(child.pid), encoding="utf-8")
     time.sleep(60)
 
 

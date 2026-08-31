@@ -67,6 +67,7 @@ def test_task_tid_reverse(workdir, weft_harness) -> None:
 
 
 def test_task_ping_outputs_extended_pong_json(workdir, weft_harness) -> None:
+    weft_harness.ensure_foreground_manager()
     rc, out, err = run_cli(
         "run",
         "--no-wait",
@@ -79,7 +80,7 @@ def test_task_ping_outputs_extended_pong_json(workdir, weft_harness) -> None:
         cwd=workdir,
         harness=weft_harness,
     )
-    assert rc == 0
+    assert rc == 0, err
     assert err == ""
     tid = out.strip()
     assert tid
