@@ -253,7 +253,9 @@ def test_runtime_initial_scan_error_does_not_create_or_truncate_report(
 
     result = run_runtime_prune(config, report_path=report_path)
 
-    assert result.errors == (f"failed to scan {WEFT_SERVICES_REGISTRY_QUEUE}: scan failed",)
+    assert result.errors == (
+        f"failed to scan {WEFT_SERVICES_REGISTRY_QUEUE}: scan failed",
+    )
     assert report_path.read_text(encoding="utf-8") == "sentinel\n"
 
     missing_report = tmp_path / "missing-runtime-report.jsonl"

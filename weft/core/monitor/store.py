@@ -3448,7 +3448,7 @@ def _merge_record(
         task_control_deleted_at_ns=(
             None
             if existing.task_control_deleted_at_ns is not None
-            and update.message_id > existing.task_control_deleted_at_ns
+            and update.message_id > existing.last_message_id
             else existing.task_control_deleted_at_ns
         ),
         reserved_cleanup_checked_at_ns=None,

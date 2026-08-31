@@ -35,6 +35,8 @@ def _json_row(queue: str, message_id: int, payload: object) -> QueueWindowRow:
         message_id=message_id,
         body=json.dumps(payload),
     )
+
+
 def test_reserved_progress_reaches_base_after_too_young_boundary() -> None:
     """Selected reserved rows followed by a too-young row are base-for-now."""
 

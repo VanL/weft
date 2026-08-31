@@ -1549,12 +1549,37 @@ wheels = [
 ]
 
 [[package]]
+name = "types-docker"
+version = "7.2.0.20260827"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "types-requests" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/92/ebed321b5e0d5f6b2efc2fee34e99961d1425600d3b1629f0684176bc204/types_docker-7.2.0.20260827.tar.gz", hash = "sha256:6e1674ec12dd4d09d6437f735dcf6b3c61e730c330623aacf92b492e1444094f", size = 36929, upload-time = "2026-08-27T12:07:36.723Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/62/40a2b11c2be94d7288d7c0c5ca673d2b9d11f2930f58ec9d5d98380092ba/types_docker-7.2.0.20260827-py3-none-any.whl", hash = "sha256:ecc2b403ec086552a298232b92b662fb195d0e749f155c0b707e59fdedb5bfdf", size = 51269, upload-time = "2026-08-27T12:07:35.671Z" },
+]
+
+[[package]]
 name = "types-psutil"
 version = "7.2.2.20260518"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/cb/f1/6901857281d4e8d792492e1495eef6f4f01318a3b6a066486d81000a4511/types_psutil-7.2.2.20260518.tar.gz", hash = "sha256:9f825f631463a5b4d26f19f63aebc9ec25f01140d655026f3ad8a67841f9b331", size = 26660, upload-time = "2026-05-18T06:05:09.389Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cd/eb/f726339668879819599c74c2e1f0cab760912a4159046942bdae2ad37bd6/types_psutil-7.2.2.20260518-py3-none-any.whl", hash = "sha256:6a3d697665754a60d7b5a41d5a2cff12b53f5e0676d77810cd28ba5e14cb4049", size = 32820, upload-time = "2026-05-18T06:05:08.321Z" },
+]
+
+[[package]]
+name = "types-requests"
+version = "2.33.0.20260712"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/51/703318f7b7be8bee126ec13bf615050f932d0179b8784420f3a0199cc769/types_requests-2.33.0.20260712.tar.gz", hash = "sha256:2141b67ab534a5c5cd2dac5034f2a35f42e699c5bf185eee608c5246a069d7fb", size = 25084, upload-time = "2026-07-12T05:14:20.455Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/e7/010c87f559e216d83f9dc51e939633fd0d0ead3377340181ab0e223cd3b5/types_requests-2.33.0.20260712-py3-none-any.whl", hash = "sha256:de027e28c171d3da529689cbfa023b0b4eab188c8dfa22fd834eebd2cee6e7bb", size = 21392, upload-time = "2026-07-12T05:14:19.616Z" },
 ]
 
 [[package]]
@@ -1607,7 +1632,7 @@ wheels = [
 
 [[package]]
 name = "weft"
-version = "0.9.98"
+version = "0.9.99"
 source = { editable = "." }
 dependencies = [
     { name = "llm" },
@@ -1638,6 +1663,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "ruff" },
     { name = "simplebroker-pg" },
+    { name = "types-docker" },
     { name = "types-psutil" },
     { name = "weft-docker" },
     { name = "weft-macos-sandbox" },
@@ -1682,6 +1708,7 @@ requires-dist = [
     { name = "simplebroker-pg", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "simplebroker-pg", marker = "extra == 'pg'", specifier = ">=4.0.0" },
     { name = "typer", specifier = ">=0.16.0" },
+    { name = "types-docker", marker = "extra == 'dev'", specifier = ">=7.2.0.20260827" },
     { name = "types-psutil", marker = "extra == 'dev'", specifier = ">=5.9.5" },
     { name = "typing-extensions", specifier = ">=4.0.0" },
     { name = "weft-django", marker = "extra == 'all'", editable = "integrations/weft_django" },
@@ -1701,7 +1728,7 @@ provides-extras = ["pg", "docker", "django", "django-channels", "macos-sandbox",
 
 [[package]]
 name = "weft-django"
-version = "0.9.32"
+version = "0.9.33"
 source = { editable = "integrations/weft_django" }
 dependencies = [
     { name = "django" },
@@ -1725,7 +1752,7 @@ provides-extras = ["channels", "realtime", "dev"]
 
 [[package]]
 name = "weft-docker"
-version = "0.9.72"
+version = "0.9.73"
 source = { editable = "extensions/weft_docker" }
 dependencies = [
     { name = "docker" },
@@ -1736,13 +1763,13 @@ dependencies = [
 requires-dist = [
     { name = "docker", specifier = ">=7.1.0,<8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.95" },
+    { name = "weft", specifier = ">=0.9.99" },
 ]
 provides-extras = ["dev"]
 
 [[package]]
 name = "weft-macos-sandbox"
-version = "0.6.1"
+version = "0.6.2"
 source = { editable = "extensions/weft_macos_sandbox" }
 dependencies = [
     { name = "weft" },
@@ -1751,13 +1778,13 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.95,<1" },
+    { name = "weft", specifier = ">=0.9.99,<1" },
 ]
 provides-extras = ["dev"]
 
 [[package]]
 name = "weft-microsandbox"
-version = "0.5.2"
+version = "0.5.3"
 source = { editable = "extensions/weft_microsandbox" }
 dependencies = [
     { name = "microsandbox" },
@@ -1768,6 +1795,6 @@ dependencies = [
 requires-dist = [
     { name = "microsandbox", specifier = ">=0.5.7,<0.6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.95" },
+    { name = "weft", specifier = ">=0.9.99" },
 ]
 provides-extras = ["dev"]

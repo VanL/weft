@@ -2463,7 +2463,8 @@ def test_monitor_store_post_disposal_activity_reopens_control_cleanup(
         (first,),
         checkpoint_message_id=None,
     )
-    store.mark_task_control_deleted(tid, first.message_id + 1)
+    deleted_at_ns = first.message_id + 10_000_000_000
+    store.mark_task_control_deleted(tid, deleted_at_ns)
 
     store.record_task_log_updates(
         WEFT_GLOBAL_LOG_QUEUE,
@@ -2472,7 +2473,7 @@ def test_monitor_store_post_disposal_activity_reopens_control_cleanup(
     )
     replayed = store.get_task(tid)
     assert replayed is not None
-    assert replayed.task_control_deleted_at_ns == first.message_id + 1
+    assert replayed.task_control_deleted_at_ns == deleted_at_ns
 
     resumed = _update(tid, first.message_id + 2, event="work_progress")
     store.record_task_log_updates(

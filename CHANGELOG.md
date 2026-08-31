@@ -2,8 +2,16 @@
 
 ## Unreleased
 
+## [0.9.99] - 2026-08-31
+
 ### Changed
 
+- A manager-supervised LivenessMonitor now has sole custody of
+  `weft.state.tid_mappings`. It uses authority-aware host and extension probes,
+  retires stale or persistently undecidable mappings without creating a second
+  lifecycle truth, and preserves ambiguous inbox, reserved, and unread outbox
+  data until terminal proof or an explicit archived prune. Generic runtime
+  pruning and TaskMonitor no longer delete TID mappings.
 - Managers now support optional pre-reservation admission control. A portable
   configured maximum and fractional public reserve apply to one
   backend-specific usage observation: context-scoped live-probed latest TID

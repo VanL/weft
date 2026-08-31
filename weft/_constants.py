@@ -44,7 +44,7 @@ from simplebroker.ext import InvalidConfigError
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.98"
+__version__: Final[str] = "0.9.99"
 """Current version of Weft."""
 
 # ==============================================================================

@@ -739,3 +739,69 @@ def test_same_generation_mapping_appends_replace_due_entry(workdir: Path) -> Non
         monitor.stop(join=False)
         monitor.cleanup()
         queue.close()
+
+
+def test_mapping_update_keeps_probe_lane_owned_until_old_result_finishes(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(spec_context=workdir)
+    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    tid = str(time.time_ns())
+    payload = _mapping(tid)
+    queue.write(json.dumps(payload))
+    monitor = LivenessMonitor(
+        context.broker_target,
+        _taskspec(str(time.time_ns()), workdir),
+        monotonic_clock=lambda: 10.0,
+    )
+    try:
+        monitor._reconcile_mapping_rows(full=True)
+        original = monitor._latest_rows[tid]
+        in_flight = ProbeWork(
+            tid,
+            original.message_id,
+            original.payload,
+            original.generation,
+            "old-token",
+        )
+        monitor._in_flight[tid] = in_flight
+
+        payload["activity"] = "busy"
+        newest_id = queue.write(json.dumps(payload))
+        monitor._reconcile_mapping_rows(full=False)
+        monitor._schedule_due_probes(now=10.0)
+
+        assert monitor._latest_rows[tid].message_id == newest_id
+        assert monitor._in_flight[tid] == in_flight
+
+        observation = LivenessObservation(
+            tid,
+            "live",
+            "host_identity_match",
+            True,
+            original.generation,
+        )
+        monitor._apply_probe_result(ProbeResult(in_flight, observation, True))
+
+        assert tid not in monitor._in_flight
+        assert sum(entry[1] == tid for entry in monitor._due_heap) == 1
+
+        enqueued: list[ProbeWork] = []
+
+        def enqueue(_name: str, item: object, *, block: bool) -> bool:
+            assert block is False
+            assert isinstance(item, ProbeWork)
+            enqueued.append(item)
+            return True
+
+        monkeypatch.setattr(monitor, "_enqueue_service_work", enqueue)
+        monitor._schedule_due_probes(now=10.0)
+
+        assert len(enqueued) == 1
+        assert enqueued[0].message_id == newest_id
+        assert monitor._in_flight[tid] == enqueued[0]
+    finally:
+        monitor.stop(join=False)
+        monitor.cleanup()
+        queue.close()

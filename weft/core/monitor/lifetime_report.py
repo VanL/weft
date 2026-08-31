@@ -338,8 +338,7 @@ def restore_lifetime_report_from_external_json(
             ):
                 raise TypeError("external task_local_salvage rows must be an array")
             restored_salvage["rows"] = [
-                _restore_message_id_mapping(row, ("message_id",)) or row
-                for row in rows
+                _restore_message_id_mapping(row, ("message_id",)) or row for row in rows
             ]
             observations["task_local_salvage"] = restored_salvage
         restored["observations"] = observations

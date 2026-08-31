@@ -127,9 +127,7 @@ def reduce_unknown_deadline(
         state = UnknownDeadlineState(
             generation=generation,
             deadline_monotonic=(
-                state.deadline_monotonic
-                + now_monotonic
-                - state.paused_at_monotonic
+                state.deadline_monotonic + now_monotonic - state.paused_at_monotonic
             ),
             paused_at_monotonic=None,
         )

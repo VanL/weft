@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -272,7 +272,12 @@ def test_describe_reports_optional_configuration_failure(
 
 @pytest.mark.parametrize(
     ("status", "expected"),
-    [("running", "live"), ("stopped", "stale"), ("starting", "unknown")],
+    [
+        ("running", "live"),
+        ("stopped", "stale"),
+        ("crashed", "stale"),
+        ("starting", "unknown"),
+    ],
 )
 def test_liveness_maps_runtime_status_with_cooperative_budget(
     monkeypatch: pytest.MonkeyPatch,
@@ -282,14 +287,13 @@ def test_liveness_maps_runtime_status_with_cooperative_budget(
     observed_budgets: list[float] = []
 
     class Refreshed:
-        pass
-
-    Refreshed.status = status
+        def __init__(self, refreshed_status: str) -> None:
+            self.status = refreshed_status
 
     class Handle:
         @staticmethod
         async def refresh() -> Refreshed:
-            return Refreshed()
+            return Refreshed(status)
 
     class SandboxAPI:
         @staticmethod
@@ -331,11 +335,15 @@ def test_liveness_distinguishes_missing_runtime_from_query_failure(
             assert sandbox_id == "sandbox-id"
             raise cls.failure
 
-    class SDK:
-        Sandbox = SandboxAPI
-
-    SDK.SandboxNotFoundError = SandboxNotFoundError
-    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SDK())
+    sdk = type(
+        "SDK",
+        (),
+        {
+            "Sandbox": SandboxAPI,
+            "SandboxNotFoundError": SandboxNotFoundError,
+        },
+    )()
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: sdk)
 
     runtime = MicrosandboxRuntime()
     assert asyncio.run(runtime._liveness_async("sandbox-id", timeout=0.75)) == "stale"
@@ -357,7 +365,7 @@ def test_liveness_timeout_is_an_incomplete_attempt(
     class SDK:
         Sandbox = SandboxAPI
 
-    async def time_out(awaitable: Awaitable[Any], timeout: float) -> Any:
+    async def time_out(awaitable: Coroutine[Any, Any, Any], timeout: float) -> Any:
         assert timeout == 0.75
         awaitable.close()
         raise TimeoutError("probe budget expired")
@@ -366,9 +374,7 @@ def test_liveness_timeout_is_an_incomplete_attempt(
     monkeypatch.setattr(asyncio, "wait_for", time_out)
 
     with pytest.raises(TimeoutError, match="probe budget expired"):
-        asyncio.run(
-            MicrosandboxRuntime()._liveness_async("sandbox-id", timeout=0.75)
-        )
+        asyncio.run(MicrosandboxRuntime()._liveness_async("sandbox-id", timeout=0.75))
 
 
 def test_runtime_builds_network_volume_and_rlimit_from_real_sdk(tmp_path: Path) -> None:

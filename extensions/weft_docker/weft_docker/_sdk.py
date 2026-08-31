@@ -17,7 +17,7 @@ def load_docker_sdk() -> Any:
     """Import the Docker SDK and raise a stable install hint on failure."""
 
     try:
-        import docker  # type: ignore[import-untyped]
+        import docker
     except ImportError as exc:  # pragma: no cover - import guard
         raise RuntimeError(
             "Docker runner requires the Docker SDK for Python. Install weft[docker]."

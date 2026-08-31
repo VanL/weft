@@ -207,7 +207,6 @@ class LivenessMonitor(ServiceTask):
             self._latest_rows = latest_rows
             for removed_tid in original_latest.keys() - latest_rows.keys():
                 self._deadlines.pop(removed_tid, None)
-                self._in_flight.pop(removed_tid, None)
                 self._drop_due(removed_tid)
             for tid, row in latest_rows.items():
                 self._activate_mapping_row(row, previous=original_latest.get(tid))
@@ -228,7 +227,6 @@ class LivenessMonitor(ServiceTask):
             return
         if previous is None or previous.generation != row.generation:
             self._deadlines.pop(row.tid, None)
-        self._in_flight.pop(row.tid, None)
         self._push_due(row, due_at=self._monotonic())
 
     def _push_due(self, row: MappingRow, *, due_at: float) -> None:
@@ -386,18 +384,25 @@ class LivenessMonitor(ServiceTask):
     def _apply_probe_result(self, result: ProbeResult) -> None:
         """Commit one token/generation-guarded probe result on the reactor."""
 
+        in_flight = self._in_flight.get(result.work.tid)
+        if (
+            in_flight is None
+            or in_flight.token != result.work.token
+            or in_flight.message_id != result.work.message_id
+            or in_flight.generation != result.work.generation
+        ):
+            return
+        self._in_flight.pop(result.work.tid, None)
+        now = self._monotonic()
         current = self._latest_rows.get(result.work.tid)
         if (
             current is None
             or current.message_id != result.work.message_id
             or current.generation != result.work.generation
         ):
+            if current is not None:
+                self._push_due(current, due_at=now)
             return
-        in_flight = self._in_flight.get(result.work.tid)
-        if in_flight is None or in_flight.token != result.work.token:
-            return
-        self._in_flight.pop(result.work.tid, None)
-        now = self._monotonic()
         if not result.attempted or result.observation is None:
             self._apply_not_attempted(
                 current,

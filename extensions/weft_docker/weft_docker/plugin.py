@@ -15,7 +15,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import weft._constants as weft_constants
 from simplebroker import BrokerTarget
@@ -1257,7 +1257,15 @@ def _remove_container(client: Any, runtime_id: str) -> None:
         return
 
 
-def _cleanup_process(process: subprocess.Popen[str]) -> None:
+class _CleanupProcess(Protocol):
+    def poll(self) -> int | None: ...
+
+    def kill(self) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> int: ...
+
+
+def _cleanup_process(process: _CleanupProcess) -> None:
     if process.poll() is not None:
         return
     try:

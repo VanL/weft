@@ -522,12 +522,15 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **LIVENESS.R7**: TaskMonitor destruction protection reads newest-row
   presence (non-terminal) plus live service-registry evidence, with no probing.
   Post-disposal family activity clears `task_control_deleted_at_ns` so
-  recreated queues re-enter terminal cleanup. Without terminal lifecycle
-  proof, plain `delete` may remove stale control queues but preserves pending
-  inbox, reserved, and unread outbox rows; explicit archived forced task-local
-  retention pruning is their later harvest point. In `jsonl_then_delete` mode,
-  ambiguous family disposal salvages bounded copies of those rows into the
-  pre-delete report before whole-family deletion.
+  recreated queues re-enter terminal cleanup. Post-disposal activity means a
+  broker message ID strictly newer than the record's prior
+  `last_message_id`; the wall-clock cleanup timestamp is only a completion
+  marker and is not ordering evidence. Without terminal lifecycle proof,
+  plain `delete` may remove stale control queues but preserves pending inbox,
+  reserved, and unread outbox rows; explicit archived forced task-local
+  retention pruning is their later harvest point. In `jsonl_then_delete`
+  mode, ambiguous family disposal salvages bounded copies of those rows into
+  the pre-delete report before whole-family deletion.
 - **LIVENESS.R8**: Probe concurrency, cadence, retirement timeout,
   reconciliation interval, minimum age, and salvage bounds are named constants
   in `weft/_constants.py`. At most one probe per TID is in flight; late results

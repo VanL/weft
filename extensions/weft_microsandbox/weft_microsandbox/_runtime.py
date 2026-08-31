@@ -294,7 +294,15 @@ class MicrosandboxRuntime:
         state = str(getattr(refreshed, "status", "")).strip().lower()
         if state == "running":
             return "live"
-        if state in {"dead", "exited", "failed", "missing", "stopped", "terminated"}:
+        if state in {
+            "crashed",
+            "dead",
+            "exited",
+            "failed",
+            "missing",
+            "stopped",
+            "terminated",
+        }:
             return "stale"
         return "unknown"
 

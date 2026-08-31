@@ -166,6 +166,7 @@ Shared paths, do not duplicate:
 ```python
 LivenessEvidence = Literal["live", "stale", "unknown"]
 
+
 @dataclass(frozen=True, slots=True)
 class LivenessObservation:
     tid: str
@@ -215,10 +216,12 @@ cooperative budget:
 RuntimeLiveness = Literal["live", "stale", "unknown"]
 RuntimeLivenessProbe = Callable[[RunnerHandle, float], RuntimeLiveness]
 
+
 def register_runtime_liveness_probe(
     key: str,
     probe: RuntimeLivenessProbe,
 ) -> None: ...
+
 
 def runtime_liveness_from_registered_probe(
     handle: RunnerHandle,
@@ -243,6 +246,7 @@ The internal query result is:
 
 ```python
 LivenessState = Literal["alive", "dead", "unknown"]
+
 
 @dataclass(frozen=True, slots=True)
 class LivenessResult:

@@ -6,9 +6,11 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
+from weft.core.agents.provider_cli.execution import ProviderCLIPreparedExecution
 from weft.core.agents.runtime import AgentExecutionResult
 from weft_microsandbox import plugin as plugin_module
 from weft_microsandbox._runtime import (
@@ -79,7 +81,10 @@ def _agent(provider: str) -> dict[str, object]:
 
 def _capture_provider_tempdir(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     captured: list[Path] = []
-    original_prepare = plugin_module.prepare_provider_cli_execution
+    original_prepare = cast(
+        Callable[..., ProviderCLIPreparedExecution],
+        plugin_module.prepare_provider_cli_execution,
+    )
 
     def capture_tempdir(**kwargs: object) -> object:
         tempdir = kwargs["tempdir"]
@@ -174,7 +179,10 @@ def test_agent_runner_converts_provider_parser_failure_to_error_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider_tempdirs: list[Path] = []
-    original_prepare = plugin_module.prepare_provider_cli_execution
+    original_prepare = cast(
+        Callable[..., ProviderCLIPreparedExecution],
+        plugin_module.prepare_provider_cli_execution,
+    )
 
     def prepare_with_failing_parser(**kwargs: object) -> object:
         tempdir = kwargs["tempdir"]

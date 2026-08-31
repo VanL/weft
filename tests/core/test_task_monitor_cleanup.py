@@ -453,6 +453,8 @@ def test_task_monitor_cleanup_skips_claimed_scan_when_queue_has_no_claimed_rows(
     assert result.deleted == 0
     stats = _policy_summary_by_policy(result)
     assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 0
+
+
 def test_task_monitor_cleanup_report_only_keeps_selected_rows(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     _write_raw(ctx, WEFT_GLOBAL_LOG_QUEUE, "[1, 2, 3]")
@@ -472,6 +474,8 @@ def test_task_monitor_cleanup_report_only_keeps_selected_rows(tmp_path: Path) ->
     assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["reported"] == 1
     assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["deleted"] == 0
     assert len(_read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)) == 1
+
+
 def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
     tmp_path: Path,
 ) -> None:

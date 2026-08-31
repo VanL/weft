@@ -2164,9 +2164,7 @@ class TaskMonitor(ServiceTask):
             return
         observations: dict[str, Any] = {"queue_names": list(queue_names)}
         if not record.terminal_seen:
-            observations["task_local_salvage"] = self._task_local_salvage(
-                queue_names
-            )
+            observations["task_local_salvage"] = self._task_local_salvage(queue_names)
         report = build_collation_lifetime_report(
             record,
             monitor_tid=self.tid,
@@ -2205,9 +2203,7 @@ class TaskMonitor(ServiceTask):
             report_kind=report_kind,
             close_reason=close_reason,
             queue_names=queue_names,
-            observations={
-                "task_local_salvage": self._task_local_salvage(queue_names)
-            },
+            observations={"task_local_salvage": self._task_local_salvage(queue_names)},
         )
         self._handoff_lifetime_report(
             report,
@@ -3350,17 +3346,20 @@ class TaskMonitor(ServiceTask):
         existing_inbox_queues = tuple(
             queue_name
             for queue_name in cleanup_plan.inbox_queue_names
-            if queue_name in existing_queue_names and queue_name in queue_names_to_delete
+            if queue_name in existing_queue_names
+            and queue_name in queue_names_to_delete
         )
         existing_outbox_queues = tuple(
             queue_name
             for queue_name in cleanup_plan.outbox_queue_names
-            if queue_name in existing_queue_names and queue_name in queue_names_to_delete
+            if queue_name in existing_queue_names
+            and queue_name in queue_names_to_delete
         )
         existing_reserved_queues = tuple(
             queue_name
             for queue_name in cleanup_plan.reserved_queue_names
-            if queue_name in existing_queue_names and queue_name in queue_names_to_delete
+            if queue_name in existing_queue_names
+            and queue_name in queue_names_to_delete
         )
         control_queues_deleted = 0 if errors else len(existing_control_queues)
         inbox_queues_deleted = 0 if errors else len(existing_inbox_queues)

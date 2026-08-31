@@ -379,6 +379,7 @@ def _macos_sandbox_runtime_liveness(
             unresolved = True
     return "unknown" if unresolved else "stale"
 
+
 def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be an object")  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-272] exception

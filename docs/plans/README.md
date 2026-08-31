@@ -24,7 +24,7 @@ There are currently 191 plan files in this directory.
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
 | [`2026-08-31-guard-and-custody-simplification-plan.md`](./2026-08-31-guard-and-custody-simplification-plan.md) | Guard and Custody Simplification Plan | `draft` | none |
-| [`2026-08-29-liveness-reaper-and-custody-split-plan.md`](./2026-08-29-liveness-reaper-and-custody-split-plan.md) | Liveness Reaper and TID-Mapping Custody Split Plan | `draft` | none |
+| [`2026-08-29-liveness-reaper-and-custody-split-plan.md`](./2026-08-29-liveness-reaper-and-custody-split-plan.md) | Liveness Reaper and TID-Mapping Custody Split Plan | `completed` | none |
 | [`2026-08-29-liveness-monitor-plan.md`](./2026-08-29-liveness-monitor-plan.md) | LivenessMonitor Service and Runtime Probe Package Plan | `draft` | [`2026-08-29-liveness-reaper-and-custody-split-plan.md`](./2026-08-29-liveness-reaper-and-custody-split-plan.md) |
 | [`2026-08-28-simplebroker-8-upgrade-plan.md`](./2026-08-28-simplebroker-8-upgrade-plan.md) | SimpleBroker 8.0 Upgrade Plan | `completed` | none |
 | [`2026-08-27-per-tid-liveness-registry-and-monitor-split-plan.md`](./2026-08-27-per-tid-liveness-registry-and-monitor-split-plan.md) | Per-TID Liveness Registry and Monitor Split Plan | `draft` | [`2026-08-29-liveness-monitor-plan.md`](./2026-08-29-liveness-monitor-plan.md) |

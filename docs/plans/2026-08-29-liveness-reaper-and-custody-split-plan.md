@@ -1,6 +1,6 @@
 # Liveness Reaper and TID-Mapping Custody Split Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.3], [CC-3.2]; docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-1.8]; docs/specifications/05-Message_Flow_and_State.md [MF-3.2], [MF-5], Cleanup Boundary; docs/specifications/07-System_Invariants.md [OBS.4], [OBS.5], [OBS.6], [OBS.6a], [OBS.10], [OBS.11], [OBS.11a], [OBS.13.7], [LIVENESS.R1-R10], [MANAGER.18]; docs/specifications/10-CLI_Interface.md [CLI-6]
 Superseded by: none
 
@@ -1030,8 +1030,7 @@ Spec promotion applied 2026-08-29 on baseline
 [07A-LIVENESS] graduated into canonical specs 01, 03, 05, and 07; [CLI-6]
 records the `tid-mappings` prune-group removal. The graduated planned sections
 were removed. The implementation and independent re-review are complete in the
-working tree. The plan remains `draft` until the change is committed or the
-owner chooses another landing disposition.
+working tree. The implementation landed in commit `a27e7dc7`.
 
 ## 11. Out of Scope
 
@@ -1063,5 +1062,11 @@ verb retired; one prune queue group removed under [CLI-6] with a migration
 note). Open items deliberately left for independent review rather than
 self-resolved: whether the 300-second retirement default is right; whether
 the record-less terminal-row protection nuance in task 7 needs its own
-regression beyond the listed tests. The plan stays `draft` pending the §10
-independent review and owner approval.
+regression beyond the listed tests. The §10 independent review and owner
+approval are complete.
+
+The final implementation review on 2026-08-31 found and fixed two additional
+boundary defects: superseded physical probe work could be removed from the
+in-flight count before completion, violating [LIVENESS.R8], and post-disposal
+activity compared a broker message ID with a wall-clock cleanup timestamp.
+Regression tests now cover both cases.

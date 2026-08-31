@@ -249,9 +249,10 @@ def test_lifetime_salvage_projects_and_restores_nested_message_ids() -> None:
     projected = project_lifetime_report_for_external_json(report)
     restored = restore_lifetime_report_from_external_json(projected)
 
-    assert projected["observations"]["task_local_salvage"]["rows"][0][
-        "message_id"
-    ] == "1779000000000000012"
+    assert (
+        projected["observations"]["task_local_salvage"]["rows"][0]["message_id"]
+        == "1779000000000000012"
+    )
     assert restored["observations"]["task_local_salvage"] == salvage
 
 
