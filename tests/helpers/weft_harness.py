@@ -669,6 +669,7 @@ class WeftTestHarness:
             "WEFT_MANAGER_REUSE_ENABLED": "0",
             "WEFT_MANAGER_LIFETIME_TIMEOUT": str(self._manager_timeout),
             "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "0",
         }
         if os.environ.get("BROKER_TEST_BACKEND", "sqlite") == "sqlite":
             overrides.update(

@@ -35,6 +35,11 @@ from weft.helpers import (
     process_create_time,
     terminate_process_tree,
 )
+from weft.liveness.host import inspect_host_process
+from weft.liveness.registry import (
+    RuntimeLiveness,
+    register_runtime_liveness_probe,
+)
 
 
 class MacOSSandboxRunner:
@@ -333,11 +338,46 @@ class MacOSSandboxRunnerPlugin:
 
 
 _PLUGIN = MacOSSandboxRunnerPlugin()
+_liveness_probe_registered = False
 
 
 def get_runner_plugin() -> RunnerPlugin:
+    _register_liveness_probe()
     return _PLUGIN
 
+
+def _register_liveness_probe() -> None:
+    global _liveness_probe_registered
+    if _liveness_probe_registered:
+        return
+    register_runtime_liveness_probe(
+        "macos-sandbox",
+        _macos_sandbox_runtime_liveness,
+    )
+    _liveness_probe_registered = True
+
+
+def _macos_sandbox_runtime_liveness(
+    handle: RunnerHandle,
+    timeout_seconds: float,
+) -> RuntimeLiveness:
+    """Inspect the exact host-process identities owned by this runtime."""
+
+    del timeout_seconds  # Local psutil calls have no cooperative timeout option.
+    if handle.runner != "macos-sandbox":
+        return "unknown"
+    identities = handle.scoped_host_processes()
+    if not identities or any(create_time is None for _, create_time in identities):
+        return "unknown"
+
+    unresolved = False
+    for pid, expected_create_time in identities:
+        result = inspect_host_process(pid, expected_create_time).evidence
+        if result == "live":
+            return "live"
+        if result == "unknown":
+            unresolved = True
+    return "unknown" if unresolved else "stale"
 
 def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):

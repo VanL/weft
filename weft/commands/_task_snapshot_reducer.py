@@ -19,8 +19,10 @@ from typing import Any
 from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     TASKSPEC_TID_SHORT_LENGTH,
@@ -674,6 +676,7 @@ def service_key_from_taskspec(
     if not isinstance(key, str) or key not in {
         INTERNAL_SERVICE_KEY_HEARTBEAT,
         INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     }:
         return None
     if metadata.get("internal") is True:
@@ -683,13 +686,22 @@ def service_key_from_taskspec(
         return key
     if key == INTERNAL_SERVICE_KEY_TASK_MONITOR and role == "task_monitor":
         return key
+    if key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR and role == "liveness_monitor":
+        return key
     runtime_class = metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
     if (
-        key == INTERNAL_SERVICE_KEY_HEARTBEAT
-        and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
-    ) or (
-        key == INTERNAL_SERVICE_KEY_TASK_MONITOR
-        and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+        (
+            key == INTERNAL_SERVICE_KEY_HEARTBEAT
+            and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+        )
+        or (
+            key == INTERNAL_SERVICE_KEY_TASK_MONITOR
+            and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+        )
+        or (
+            key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
+            and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR
+        )
     ):
         return key
     return None

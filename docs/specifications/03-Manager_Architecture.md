@@ -35,6 +35,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Liveness Reaper And TID-Mapping Custody Split Plan](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md) - adds LivenessMonitor as a third built-in persistent service and moves tid-mapping cleanup custody to it.
 - [Manager Admission Control Plan](../plans/2026-08-25-manager-admission-control-plan.md) - adds a lane-aware pre-reservation admission gate over one backend-specific observed usage value.
 - [Canonical Contract And Dead Code Cleanup Plan](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md) - establish one current service-owner schema, bounded bootstrap discard, and one mutable managed-service state owner.
 - [TaskMonitor Orphan Log And Status Reconciliation Plan](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md) - plan stale internal-service status reconciliation and bounded TaskMonitor recovery for pre-checkpoint raw task-log rows that missed Monitor-store collation.
@@ -229,14 +230,25 @@ Key responsibilities implemented in `weft/core/manager.py`:
    discovery may retain a source identity index, but it must not mirror those
    lifecycle values in parallel maps.
 7. **Managed services** – The manager reconciles autostarts, heartbeat, and
-   `TaskMonitor` through one deterministic manager-owned service path. The
+   `TaskMonitor` through one deterministic manager-owned service path. It also
+   supervises `LivenessMonitor` as a third built-in persistent service through
+   the same internal spawn queue, runtime envelope, service candidate reducer,
+   canonical-owner fence, restart/backoff, and duplicate-convergence path. No
+   separate launcher or reconciler exists. The closed service inventory gains
+   runtime task class `liveness_monitor`, service key
+   `_weft.service.liveness_monitor`, and role `liveness_monitor`; the service
+   claims no endpoint. Its internal payload matches the other internal
+   services and sets `enable_process_title=False`. The
    live public managers may supervise built-in internal singleton services;
    correctness is enforced by manager-owned metadata and the singleton reducer,
    not by a global dispatch-owner fence. Scoped managers may still reconcile
    their own autostart manifests. The built-in heartbeat service is desired
    only when an enabled internal dependent needs it. The internal
    `TaskMonitor` is an `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is
-   true. Draining or stopped managers do not start or restart singleton
+   true. `WEFT_LIVENESS_MONITOR_ENABLED` independently makes LivenessMonitor
+   desired whether or not TaskMonitor is enabled. The liveness flag is launch
+   policy, not active-stop authority. Draining or stopped managers do not start
+   or restart singleton
    services. Live service ownership can be proved by a tracked child, a live
    runtime handle, including the task-process host handle published in TID
    mappings, manager-authored internal runtime envelope/class evidence,
@@ -316,20 +328,21 @@ before reserving a spawn request. A denied request remains in its source queue.
 `WEFT_ADMISSION_MAX_CONNECTIONS` supplies one positive operator maximum; unset
 or `0` disables admission. `WEFT_ADMISSION_RESERVE_FRACTION` is finite in
 `[0, 1)` and defaults to `0.1`. For maximum `N` and fraction `f`, the reserve is
-`max(ceil(N * f), 3)`, the public limit is
+`max(ceil(N * f), 3 + int(liveness_monitor_enabled))`, the public limit is
 `max(0, N - reserve)`, and the internal limit is `N`. The three-slot floor
 models internal-lane room for Manager, TaskMonitor, and Heartbeat, even though
 the Manager is usually already represented in observed usage. It does not
-create dedicated per-service permits. Public work admits exactly when
+create dedicated per-service permits; the fourth modeled slot exists only
+while LivenessMonitor is enabled. Public work admits exactly when
 `used < public_limit`; internal work admits exactly when
 `used < internal_limit`. If `N <= reserve`, public work is disabled while
 internal work remains eligible below `N`.
 
 The active backend supplies the single `used` value. SQLite is context-scoped:
 it reduces the TID-mapping queue to the latest row per full TID, keeps the rows
-whose payloads the shared `mapping_row_is_live` probe (the same payload-only
-policy TaskMonitor cleanup and endpoint resolution apply) reports live or
-undecidable, and unions that set with this Manager's in-flight child launches
+whose payloads the shared `weft/liveness/policy.py::mapping_row_is_live`
+admission probe reports live or undecidable, and unions that set with this
+Manager's in-flight child launches
 and committed child processes; each full TID counts once. A task-owned
 `terminal: true` mapping with no positive scoped host-process proof probes
 dead. Positive scoped `(pid, create_time)` liveness remains stronger than the
@@ -367,9 +380,9 @@ _Implementation mapping_:
 - [MA-1.4] Registry heartbeat and leadership view — `weft/core/service_convergence.py::build_service_owner_payload`, `weft/core/service_convergence.py::build_manager_service_payload`, `weft/core/service_convergence.py::parse_service_owner_row`, `weft/core/service_convergence.py::project_manager_service_record`, and `weft/core/service_convergence.py::discard_v1_service_registry_rows`; Manager bootstrap plus `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._update_manager_registry_snapshot`, `Manager._publish_superseded_manager_record`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._manager_pong_dispatch_proof`, `Manager._advance_manager_pong_probe`, and `Manager._maybe_yield_leadership`; `weft/core/manager_runtime.py::_registry_queue`, `weft/core/manager_runtime.py::_snapshot_registry`, `weft/core/manager_runtime.py::_manager_registry_disposition`, and `weft/core/manager_runtime.py::_retain_latest_included_manager_record`; `weft/commands/system.py::_collect_service_registry_evidence`; and `weft/core/monitor/task_monitor.py::TaskMonitor._latest_service_owner_records`. The one complete PONG dispatch-eligibility gate is `weft/core/control_probe.py::pong_proves_dispatch_eligible`; manager and manager-runtime selection paths delegate to it without adding a second narrowing rule. Registry-record context fallback may help resolve the expected context, but a manager PONG without its own exact matching `weft_context` never proves authority.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`, `Manager._managed_service_convergence_active` (active convergence resets idle activity), `Manager._manager_owned_work_pending`, `Manager._autostart_ensure_obligation_pending`.
 - [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. `weft/core/manager_services.py::ManagedServiceState` is the sole launch/restart/backoff state owner for autostarts and built-ins; `weft/core/manager.py` retains autostart source identity only, while `reduce_managed_service_state` owns transition selection.
-- [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
+- [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._build_liveness_monitor_spawn_payload`, `Manager._liveness_monitor_service_spec`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, LivenessMonitor runtime behavior lives in `weft/core/tasks/liveness_monitor.py` with pure evidence and policy in `weft/liveness/`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
-- [MA-1.8] Admission control — `Manager` configuration loading, backend-specific pre-reservation usage observation, lane decisions, universal retry scheduling, child/launch-worker progress wakes, fallback pending-work suppression, duplicate-manager owned-work checks, and rate-limited operational transition/failure logs in `weft/core/manager.py`; constants and environment keys in `weft/_constants.py`; SQLite latest-per-TID reduction uses strict `weft/core/endpoints.py::latest_tid_mapping_entries_for_endpoint_resolution` filtered through the shared `weft/core/monitor/policies/tid_mapping.py::mapping_row_is_live` probe (memoized in `Manager._admission_mapping_is_live`) and unioned with `Manager._active_child_launches` plus `Manager._child_processes`. `BaseTask` owns the additive terminal mapping publication. Admission adds no Manager PING/STATUS field and no liveness policy beyond the shared probe.
+- [MA-1.8] Admission control — `Manager` configuration loading, backend-specific pre-reservation usage observation, lane decisions, universal retry scheduling, child/launch-worker progress wakes, fallback pending-work suppression, duplicate-manager owned-work checks, and rate-limited operational transition/failure logs in `weft/core/manager.py`; constants and environment keys in `weft/_constants.py`; SQLite latest-per-TID reduction uses strict `weft/core/endpoints.py::latest_tid_mapping_entries_for_endpoint_resolution` filtered through the shared `weft/liveness/policy.py::mapping_row_is_live` probe (memoized in `Manager._admission_mapping_is_live`) and unioned with `Manager._active_child_launches` plus `Manager._child_processes`. `BaseTask` owns the additive terminal mapping publication. Admission adds no Manager PING/STATUS field and no liveness policy beyond the shared probe.
 
 Implementation plan backlink for [MA-1.4]:
 [Registry Selection And Pruning Authority Refactor Plan](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)
@@ -525,7 +538,8 @@ _Implementation mapping_:
   `weft/core/manager_runtime.py::manager_diagnostic_records`,
   `weft/core/manager_runtime.py::manager_record`, and
   `weft/core/manager_runtime.py::stop_manager`;
-  `weft/runtime_liveness.py::runtime_liveness_from_registered_probe`; plus
+  runtime-specific manager liveness dispatch —
+  `weft/liveness/registry.py::runtime_liveness_from_registered_probe`;
   `weft/core/control_probe.py::send_keyed_ping_probe` (owns canonical manager
   bootstrap, explicit replacement, foreground serve, normalized registry
   replay, explicit manager-list diagnostics, extension-provided

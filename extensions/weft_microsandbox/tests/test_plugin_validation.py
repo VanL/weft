@@ -5,6 +5,9 @@ from __future__ import annotations
 import pytest
 
 import weft_microsandbox
+from weft.ext import RunnerHandle
+from weft.liveness import registry as liveness_registry
+from weft_microsandbox import plugin as plugin_module
 from weft_microsandbox.plugin import MicrosandboxRunnerPlugin, get_runner_plugin
 
 pytestmark = [pytest.mark.shared]
@@ -12,6 +15,51 @@ pytestmark = [pytest.mark.shared]
 
 def test_package_root_does_not_export_runner_plugin_factory() -> None:
     assert not hasattr(weft_microsandbox, "get_runner_plugin")
+
+
+def test_microsandbox_plugin_registers_its_entry_point_liveness_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
+    monkeypatch.setattr(plugin_module, "_liveness_probe_registered", False)
+
+    get_runner_plugin()
+
+    assert set(liveness_registry._runtime_liveness_probes) == {"microsandbox"}
+
+
+def test_microsandbox_liveness_maps_runtime_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runtime:
+        def __init__(self) -> None:
+            self.state = "running"
+            self.budgets: list[float] = []
+
+        def liveness(self, sandbox_id: str, *, timeout: float) -> str:
+            assert sandbox_id == "sandbox-123"
+            self.budgets.append(timeout)
+            if self.state == "running":
+                return "live"
+            if self.state == "missing":
+                return "stale"
+            return "unknown"
+
+    runtime = Runtime()
+    monkeypatch.setattr(plugin_module, "MicrosandboxRuntime", lambda: runtime)
+    handle = RunnerHandle(
+        runner="microsandbox",
+        kind="sandboxed-process",
+        id="sandbox-123",
+        control={"authority": "runner"},
+    )
+
+    assert plugin_module._microsandbox_runtime_liveness(handle, 0.75) == "live"
+    runtime.state = "missing"
+    assert plugin_module._microsandbox_runtime_liveness(handle, 0.75) == "stale"
+    runtime.state = "starting"
+    assert plugin_module._microsandbox_runtime_liveness(handle, 0.75) == "unknown"
+    assert runtime.budgets == [0.75, 0.75, 0.75]
 
 
 def _payload(**spec_overrides: object) -> dict[str, object]:

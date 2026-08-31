@@ -39,6 +39,7 @@ from weft._constants import (
     INTERACTIVE_STOP_COMPLETION_TIMEOUT,
     INTERACTIVE_STOP_GRACE_SECONDS,
     INTERACTIVE_STOP_POLL_INTERVAL,
+    LIVENESS_MONITOR_ENABLED_DEFAULT,
     MANAGER_ADMISSION_RECHECK_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
@@ -485,6 +486,9 @@ class TestLoadConfig:
             assert config["WEFT_TASK_MONITOR_ENABLED"] is (
                 WEFT_TASK_MONITOR_ENABLED_DEFAULT
             )
+            assert config["WEFT_LIVENESS_MONITOR_ENABLED"] is (
+                LIVENESS_MONITOR_ENABLED_DEFAULT
+            )
             assert (
                 config["WEFT_TASK_MONITOR_INTERVAL_SECONDS"]
                 == WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT
@@ -786,6 +790,15 @@ class TestLoadConfig:
         with patch.dict(os.environ, {"WEFT_MANAGER_REUSE_ENABLED": "true"}):
             config = load_config()
             assert config["WEFT_MANAGER_REUSE_ENABLED"] is True
+
+    def test_liveness_monitor_enabled_env(self) -> None:
+        with patch.dict(os.environ, {"WEFT_LIVENESS_MONITOR_ENABLED": "0"}):
+            config = load_config()
+            assert config["WEFT_LIVENESS_MONITOR_ENABLED"] is False
+
+        with patch.dict(os.environ, {"WEFT_LIVENESS_MONITOR_ENABLED": "true"}):
+            config = load_config()
+            assert config["WEFT_LIVENESS_MONITOR_ENABLED"] is True
 
     def test_admission_config_defaults_are_disabled(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

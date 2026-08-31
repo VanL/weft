@@ -152,28 +152,12 @@ def test_system_builtins_ignores_local_project_shadow(workdir) -> None:
     assert err == ""
 
 
-def test_system_prune_dry_run_json_deletes_nothing(workdir) -> None:
-    context = build_context(spec_context=workdir)
-    old_id = _write_queue_json(
-        context,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "111", "full": "1770000000000000500"},
-    )
-    new_id = _write_queue_json(
-        context,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "222", "full": "1770000000000000500"},
-    )
-
+def test_system_prune_rejects_retired_tid_mapping_group(workdir) -> None:
     rc, out, err = run_cli(
         "system",
         "prune",
         "--family",
         "runtime-state",
-        "--dry-run",
-        "--json",
-        "--min-age",
-        "0",
         "--queue",
         "tid-mappings",
         "--context",
@@ -181,52 +165,10 @@ def test_system_prune_dry_run_json_deletes_nothing(workdir) -> None:
         cwd=workdir,
     )
 
-    assert rc == 0
-    assert err == ""
-    payload = json.loads(out)
-    assert payload["dry_run"] is True
-    assert payload["candidates"] == 1
-    assert payload["classification_counts"] == {"superseded_tid_mapping": 1}
-    assert _read_queue_ids(context, WEFT_TID_MAPPINGS_QUEUE) >= {old_id, new_id}
-
-
-def test_system_prune_apply_deletes_candidate(workdir) -> None:
-    context = build_context(spec_context=workdir)
-    old_id = _write_queue_json(
-        context,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "111", "full": "1770000000000000501"},
-    )
-    new_id = _write_queue_json(
-        context,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "222", "full": "1770000000000000501"},
-    )
-
-    rc, out, err = run_cli(
-        "system",
-        "prune",
-        "--family",
-        "runtime-state",
-        "--apply",
-        "--json",
-        "--min-age",
-        "0",
-        "--queue",
-        "tid-mappings",
-        "--context",
-        workdir,
-        cwd=workdir,
-    )
-
-    assert rc == 0
-    assert err == ""
-    payload = json.loads(out)
-    assert payload["dry_run"] is False
-    assert payload["deleted"] == 1
-    remaining_ids = _read_queue_ids(context, WEFT_TID_MAPPINGS_QUEUE)
-    assert old_id not in remaining_ids
-    assert new_id in remaining_ids
+    assert rc == 2
+    assert out == ""
+    assert "tid-mappings" in err
+    assert "allowed" in err
 
 
 def test_system_prune_apply_requires_explicit_family_before_mutation(workdir) -> None:

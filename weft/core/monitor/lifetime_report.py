@@ -271,6 +271,18 @@ def project_lifetime_report_for_external_json(
                 format_message_id(message_id) if message_id is not None else None
                 for message_id in message_ids
             ]
+        salvage = observations.get("task_local_salvage")
+        if isinstance(salvage, Mapping):
+            projected_salvage = dict(salvage)
+            rows = salvage.get("rows")
+            if isinstance(rows, Sequence) and not isinstance(
+                rows, (str, bytes, bytearray)
+            ):
+                projected_salvage["rows"] = [
+                    _project_message_id_mapping(row, ("message_id",)) or row
+                    for row in rows
+                ]
+            observations["task_local_salvage"] = projected_salvage
         projected["observations"] = observations
     return projected
 
@@ -317,6 +329,19 @@ def restore_lifetime_report_from_external_json(
             observations["message_ids"] = [
                 normalize_exact_message_id(message_id) for message_id in message_ids
             ]
+        salvage = observations.get("task_local_salvage")
+        if isinstance(salvage, Mapping):
+            restored_salvage = dict(salvage)
+            rows = salvage.get("rows")
+            if not isinstance(rows, Sequence) or isinstance(
+                rows, (str, bytes, bytearray)
+            ):
+                raise TypeError("external task_local_salvage rows must be an array")
+            restored_salvage["rows"] = [
+                _restore_message_id_mapping(row, ("message_id",)) or row
+                for row in rows
+            ]
+            observations["task_local_salvage"] = restored_salvage
         restored["observations"] = observations
     return restored
 
@@ -639,6 +664,7 @@ def _observation_identity(observations: Mapping[str, Any] | None) -> dict[str, A
         "candidate_class",
         "reason",
         "payload_sha256",
+        "task_local_salvage",
     ):
         if key in observations:
             selected[key] = observations[key]

@@ -15,7 +15,6 @@ from weft._constants import (
     RUNTIME_PRUNE_CLASS_STALE_STREAMING,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
-    RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_ACTIVE,
@@ -32,7 +31,6 @@ from weft._constants import (
 )
 from weft.commands import prune as prune_commands
 from weft.commands.prune import (
-    cmd_prune,
     run_runtime_prune,
     write_runtime_prune_report,
 )
@@ -83,11 +81,11 @@ def test_runtime_prune_preserves_exact_run_id_format(
 
 def test_runtime_prune_candidate_json_formats_message_id_only(tmp_path: Path) -> None:
     candidate = RuntimePruneCandidate(
-        queue=WEFT_TID_MAPPINGS_QUEUE,
-        queue_group="tid-mappings",
+        queue=WEFT_ENDPOINTS_REGISTRY_QUEUE,
+        queue_group="endpoints",
         message_id=1779400000000000001,
         key="1779400000000000002",
-        classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
+        classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
         reason="superseded",
         age_seconds=3.0,
         payload_excerpt={"observed_at_ns": 1779400000000000003},
@@ -193,191 +191,18 @@ def _read_rows(ctx, queue_name: str) -> list[tuple[dict[str, object], int]]:
         queue.close()
 
 
-def _run(ctx, **kwargs):
-    config = RuntimePruneConfig(
-        context_path=ctx.root,
-        min_age_seconds=0,
-        queues=("tid-mappings",),
-        **kwargs,
-    )
-    return run_runtime_prune(config)
-
-
-def test_tid_mapping_dry_run_reports_older_duplicate_without_deleting(tmp_path) -> None:
+def test_tid_mapping_runtime_prune_group_is_rejected(tmp_path) -> None:
     ctx = _context(tmp_path)
-    old_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "111", "full": "1770000000000000001", "name": "old"},
-    )
-    new_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "222", "full": "1770000000000000001", "name": "new"},
-    )
-    _write_json(ctx, WEFT_TID_MAPPINGS_QUEUE, {"short": "bad"})
-
-    result = _run(ctx)
-
-    assert result.errors == ()
-    assert result.failed == 0
-    assert [(c.message_id, c.classification) for c in result.candidates] == [
-        (old_id, RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING)
-    ]
-    rows = _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    assert {message_id for _payload, message_id in rows} >= {old_id, new_id}
-
-
-def test_runtime_selector_includes_candidate_at_exact_minimum_age(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ctx = _context(tmp_path)
-    old_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "111", "full": "1770000000000000090", "name": "old"},
-    )
-    _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "222", "full": "1770000000000000090", "name": "new"},
-    )
-    monkeypatch.setattr(
-        runtime_pruning.time,
-        "time_ns",
-        lambda: old_id + 5_000_000_000,
-    )
-
     result = runtime_pruning.run_runtime_prune_for_context(
         ctx,
         RuntimePruneConfig(
             context_path=ctx.root,
-            queues=("tid-mappings",),
-            min_age_seconds=5.0,
+            queues=("tid-mappings",),  # type: ignore[arg-type]
         ),
     )
 
-    assert [
-        (candidate.message_id, candidate.age_seconds) for candidate in result.candidates
-    ] == [(old_id, 5.0)]
-
-
-def test_tid_mapping_apply_deletes_exact_candidate_only(tmp_path) -> None:
-    ctx = _context(tmp_path)
-    old_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "111", "full": "1770000000000000002", "name": "old"},
-    )
-    new_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "222", "full": "1770000000000000002", "name": "new"},
-    )
-
-    result = _run(ctx, apply=True)
-
-    assert result.deleted == 1
-    assert result.applied_candidates[0].message_id == old_id
-    remaining_ids = {
-        message_id for _payload, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    }
-    assert old_id not in remaining_ids
-    assert new_id in remaining_ids
-
-
-def test_runtime_limit_applies_to_dry_run_and_apply_rescan(tmp_path) -> None:
-    ctx = _context(tmp_path)
-    full_tid = "1770000000000000091"
-    oldest_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "111", "full": full_tid, "name": "oldest"},
-    )
-    middle_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "222", "full": full_tid, "name": "middle"},
-    )
-    latest_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "333", "full": full_tid, "name": "latest"},
-    )
-    config = RuntimePruneConfig(
-        context_path=ctx.root,
-        queues=("tid-mappings",),
-        min_age_seconds=0,
-        limit=1,
-    )
-
-    dry_run = runtime_pruning.run_runtime_prune_for_context(ctx, config)
-
-    assert [candidate.message_id for candidate in dry_run.candidates] == [oldest_id]
-    assert {
-        message_id for _payload, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    } >= {
-        oldest_id,
-        middle_id,
-        latest_id,
-    }
-
-    applied = runtime_pruning.run_runtime_prune_for_context(
-        ctx,
-        RuntimePruneConfig(
-            context_path=ctx.root,
-            queues=("tid-mappings",),
-            min_age_seconds=0,
-            limit=1,
-            apply=True,
-        ),
-    )
-
-    assert [candidate.message_id for candidate in applied.candidates] == [oldest_id]
-    assert [candidate.message_id for candidate in applied.applied_candidates] == [
-        oldest_id
-    ]
-    remaining_ids = {
-        message_id for _payload, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    }
-    assert oldest_id not in remaining_ids
-    assert remaining_ids >= {middle_id, latest_id}
-
-
-def test_runtime_apply_report_error_is_classified_after_delete(tmp_path) -> None:
-    ctx = _context(tmp_path)
-    old_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "111", "full": "1770000000000000003", "name": "old"},
-    )
-    new_id = _write_json(
-        ctx,
-        WEFT_TID_MAPPINGS_QUEUE,
-        {"short": "222", "full": "1770000000000000003", "name": "new"},
-    )
-    blocked_parent = tmp_path / "not-a-directory"
-    blocked_parent.write_text("occupied", encoding="utf-8")
-
-    exit_code, stdout, stderr = cmd_prune(
-        family="runtime-state",
-        context=ctx.root,
-        apply=True,
-        queues=("tid-mappings",),
-        min_age_seconds=0,
-        json_output=True,
-        report_path=blocked_parent / "report.jsonl",
-    )
-
-    assert exit_code == 1
-    assert json.loads(stdout)["deleted"] == 1
-    assert stderr.startswith("failed to write report:")
-    remaining_ids = {
-        message_id for _payload, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    }
-    assert old_id not in remaining_ids
-    assert new_id in remaining_ids
+    assert result.halted_at == "validation"
+    assert result.errors == ("unsupported runtime queue group: tid-mappings",)
 
 
 def test_runtime_validation_error_does_not_create_or_truncate_report(
@@ -421,14 +246,14 @@ def test_runtime_initial_scan_error_does_not_create_or_truncate_report(
     monkeypatch.setattr(runtime_pruning, "_read_runtime_queue", fail_scan)
     config = RuntimePruneConfig(
         context_path=ctx.root,
-        queues=("tid-mappings",),
+        queues=("managers",),
     )
     report_path = tmp_path / "runtime-report.jsonl"
     report_path.write_text("sentinel\n", encoding="utf-8")
 
     result = run_runtime_prune(config, report_path=report_path)
 
-    assert result.errors == (f"failed to scan {WEFT_TID_MAPPINGS_QUEUE}: scan failed",)
+    assert result.errors == (f"failed to scan {WEFT_SERVICES_REGISTRY_QUEUE}: scan failed",)
     assert report_path.read_text(encoding="utf-8") == "sentinel\n"
 
     missing_report = tmp_path / "missing-runtime-report.jsonl"
@@ -454,7 +279,7 @@ def test_runtime_apply_rescan_error_writes_optional_report(
     result = run_runtime_prune(
         RuntimePruneConfig(
             context_path=ctx.root,
-            queues=("tid-mappings",),
+            queues=("managers",),
             apply=True,
         ),
         report_path=report_path,

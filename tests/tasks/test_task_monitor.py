@@ -7,14 +7,16 @@ Spec references:
 
 from __future__ import annotations
 
+import base64
+import gc
 import json
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
 import traceback
+import weakref
 from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
@@ -36,9 +38,12 @@ from weft._constants import (
     _WORKER_SNAPSHOT_REPLACED_FIELDS,
     CONTROL_PING,
     CONTROL_STATUS,
+    CONTROL_STOP,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
@@ -50,9 +55,9 @@ from weft._constants import (
     STALE_SERVICE_OWNER_DISPOSITION_REASONS,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_CLEANUP_POLICY_NAMES,
+    TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
-    TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MONITOR_SCHEMA_VERSION,
@@ -87,7 +92,7 @@ from weft.core.service_convergence import (
     build_service_owner_payload,
     manager_service_key,
 )
-from weft.core.taskspec import TaskSpec
+from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
@@ -1454,6 +1459,43 @@ def _task_monitor_taskspec_for_context(tid: str, context_path: str) -> TaskSpec:
     return TaskSpec(**payload)
 
 
+def _persistent_consumer_taskspec(tid: str, context_path: str) -> TaskSpec:
+    return TaskSpec(
+        tid=tid,
+        name="resurrection-worker",
+        spec=SpecSection(
+            type="function",
+            function_target="tests.tasks.sample_targets:echo_payload",
+            persistent=True,
+            weft_context=context_path,
+        ),
+        io=IOSection(
+            inputs={"inbox": f"T{tid}.inbox"},
+            outputs={"outbox": f"T{tid}.outbox"},
+            control={
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        ),
+        state=StateSection(),
+    )
+
+
+def _drive_consumer_until(
+    task: Any,
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task.process_once()
+        if predicate():
+            return
+        task.wait_for_activity(timeout=0.05)
+    assert predicate()
+
+
 def test_task_monitor_uses_cached_base_task_context(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -1641,7 +1683,7 @@ def test_task_monitor_builtin_delete_removes_cleanup_rows(
     assert task._last_processor_success is True
     assert task._last_processed >= 1
     assert task._last_deleted >= 1
-    assert task._last_prune_records_scanned >= 1
+    assert task._last_prune_records_scanned == 0
     assert task._last_cleanup_queue_stats
 
 
@@ -1852,7 +1894,7 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["last_candidate_class_counts"] == {}
     assert pong["last_safe_to_delete_candidates"] == 0
     assert pong["last_cleanup_queue_stats"]
-    assert pong["last_cleanup_policy_stats"]
+    assert pong["last_cleanup_policy_stats"] == []
     assert pong["last_policy_progress"]
     extended = pong[PONG_EXTENSION_KEY]["task_monitor"]
     assert extended["enabled"] is True
@@ -4148,15 +4190,20 @@ def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_dispositi
             store,
             now_ns=time.time_ns(),
         )
+        reserved_cleanup = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
 
         assert cleanup.families_disposed == 1
-        assert cleanup.families_retired == 1
+        assert cleanup.families_retired == 0
+        assert reserved_cleanup.families_retired == 1
         assert store.get_task(tid) is None
     finally:
         task.stop()
 
 
-def test_task_monitor_delete_removes_stale_reserved_queue_without_monitor_record(
+def test_task_monitor_delete_preserves_stale_reserved_queue_without_terminal_proof(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4183,18 +4230,15 @@ def test_task_monitor_delete_removes_stale_reserved_queue_without_monitor_record
         config=config,
     )
     try:
-        drive_task_monitor_until(
-            task,
-            lambda: list(reserved.peek_generator()) == [],
-            timeout=30.0,
-        )
+        task.process_once()
+        drive_task_monitor_until_idle(task)
     finally:
         task.stop()
 
-    assert list(reserved.peek_generator()) == []
+    assert list(reserved.peek_generator()) == ["stale-reserved"]
 
 
-def test_task_monitor_reserved_cleanup_runs_when_task_log_ingest_is_batch_limited(
+def test_task_monitor_preserves_ambiguous_reserved_during_batch_limited_ingest(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4244,15 +4288,10 @@ def test_task_monitor_reserved_cleanup_runs_when_task_log_ingest_is_batch_limite
         task.process_once()
         drive_task_monitor_until_idle(task)
         assert task._last_retained_task_log_ingest.stop_reason == "batch_limit"
-        drive_task_monitor_until(
-            task,
-            lambda: list(reserved.peek_generator()) == [],
-            timeout=30.0,
-        )
     finally:
         task.stop()
 
-    assert list(reserved.peek_generator()) == []
+    assert list(reserved.peek_generator()) == ["stale-reserved"]
 
 
 def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
@@ -4709,7 +4748,7 @@ def test_task_monitor_reserved_cleanup_batches_fallback_record_lookup(
     )
     now_ns = time.time_ns()
     base_tid = now_ns - int(
-        (TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
+        (TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
     )
     tid_count = 75
     for offset in range(tid_count):
@@ -4800,16 +4839,58 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
 
     assert ctrl_in.stats().total == 0
     assert ctrl_out.stats().total == 0
-    assert inbox.stats().total == 0
-    assert outbox.stats().total == 0
-    assert reserved.stats().total == 0
+    assert inbox.stats().total == 1
+    assert outbox.stats().total == 1
+    assert reserved.stats().total == 1
     assert cleanup.dead_tids_processed == 1
-    assert cleanup.dead_tid_queues_deleted == 5
+    assert cleanup.dead_tid_queues_deleted == 2
     assert cleanup.dead_tid_control_queues_deleted == 2
-    assert cleanup.dead_tid_inbox_queues_deleted == 1
-    assert cleanup.dead_tid_outbox_queues_deleted == 1
-    assert cleanup.dead_tid_reserved_queues_deleted == 1
-    assert cleanup.dead_tid_rows_estimated_deleted == 5
+    assert cleanup.dead_tid_inbox_queues_deleted == 0
+    assert cleanup.dead_tid_outbox_queues_deleted == 0
+    assert cleanup.dead_tid_reserved_queues_deleted == 0
+    assert cleanup.dead_tid_rows_estimated_deleted == 2
+
+
+def test_task_monitor_recordless_terminal_mapping_does_not_block_control_cleanup(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal mapping row is not live proof for a record-less family."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438860"
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings.write(json.dumps({"full": tid, "short": tid[-10:], "terminal": True}))
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999860"),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "1",
+                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+                "WEFT_TASK_MONITOR_MODE": "delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            }
+        ),
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_dead_task_cleanup_slice(store, now_ns=time.time_ns())
+
+        assert ctrl_in.stats().total == 0
+        assert ctrl_out.stats().total == 0
+        assert cleanup.dead_tids_processed == 1
+    finally:
+        task.stop()
+        _drain_queue(mappings)
 
 
 def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_retention(
@@ -4830,7 +4911,7 @@ def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_reten
     )
     now_ns = time.time_ns()
     tid = str(
-        now_ns - int((TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
+        now_ns - int((TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
     )
     ctrl_in = make_queue(f"T{tid}.ctrl_in")
     inbox = make_queue(f"T{tid}.inbox")
@@ -4857,12 +4938,12 @@ def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_reten
         task.stop()
 
     assert ctrl_in.stats().total == 0
-    assert inbox.stats().total == 0
+    assert list(inbox.peek_generator()) == ["input"]
     assert list(outbox.peek_generator()) == ["result"]
     assert list(reserved.peek_generator()) == ["reserved"]
     assert cleanup.dead_tids_processed == 1
     assert cleanup.dead_tid_control_queues_deleted == 1
-    assert cleanup.dead_tid_inbox_queues_deleted == 1
+    assert cleanup.dead_tid_inbox_queues_deleted == 0
     assert cleanup.dead_tid_outbox_queues_deleted == 0
     assert cleanup.dead_tid_reserved_queues_deleted == 0
 
@@ -4886,7 +4967,7 @@ def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
     )
     now_ns = time.time_ns()
     tid = str(
-        now_ns - int((TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
+        now_ns - int((TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
     )
     outbox = make_queue(f"T{tid}.outbox")
     reserved = make_queue(f"T{tid}.reserved")
@@ -4950,7 +5031,7 @@ def test_task_monitor_dead_task_cleanup_skips_monitor_lookup_for_deferred_only_q
     )
     now_ns = time.time_ns()
     base_tid = now_ns - int(
-        (TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
+        (TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
     )
     tid_count = 75
     for offset in range(tid_count):
@@ -5431,6 +5512,64 @@ def test_task_monitor_disposes_old_stale_service_owner_collation(
         assert record.summary_emitted_at_ns is not None
         assert record.disposition_reason == "stale_service_owner"
         assert record.suspect_reason == "stale_service_owner"
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize(
+    ("role", "metadata"),
+    [
+        ("liveness_monitor", {"role": "liveness_monitor"}),
+        (
+            None,
+            {
+                INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                    INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR
+                )
+            },
+        ),
+    ],
+)
+def test_stale_service_owner_key_recovers_degraded_liveness_metadata(
+    broker_env,
+    role: str | None,
+    metadata: dict[str, str],
+) -> None:
+    """Either durable liveness identity marker closes the inventory."""
+
+    db_path, _make_queue = broker_env
+    tid = "1778084345905438744"
+    record = MonitorTaskCollationRecord(
+        context_key="test",
+        tid=tid,
+        name="liveness-monitor",
+        runner="host",
+        parent_tid="1778084345905438700",
+        role=role,
+        status="running",
+        terminal_seen=False,
+        terminal_event=None,
+        terminal_status=None,
+        terminal_message_id=None,
+        return_code=None,
+        first_message_id=int(tid),
+        last_message_id=int(tid),
+        first_seen_at_ns=int(tid),
+        last_seen_at_ns=int(tid),
+        started_at_ns=int(tid),
+        completed_at_ns=None,
+        taskspec_summary={"metadata": metadata},
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999966"),
+        observer=lambda _queue, _message, _timestamp: None,
+    )
+    try:
+        assert (
+            task._stale_service_owner_key(record)
+            == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
+        )
     finally:
         task.stop()
 
@@ -6471,7 +6610,7 @@ def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
     assert reserved.stats().total == 0
     assert make_queue(f"T{dead_tid}.ctrl_in").stats().total == 0
     assert make_queue(f"T{dead_tid}.ctrl_out").stats().total == 0
-    assert make_queue(f"T{dead_tid}.inbox").stats().total == 0
+    assert make_queue(f"T{dead_tid}.inbox").stats().total == 1
 
 
 def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
@@ -6597,8 +6736,8 @@ def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budge
             store,
             now_ns=time.time_ns(),
         )
-        assert reserved_cleanup.reserved_families_processed == 1
-        assert list(reserved.peek_generator()) == []
+        assert reserved_cleanup.reserved_families_processed == 0
+        assert list(reserved.peek_generator()) == ["stale-reserved"]
     finally:
         task.stop()
 
@@ -6632,7 +6771,7 @@ def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
     )
     now_ns = time.time_ns()
     tid = str(
-        now_ns - int((TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
+        now_ns - int((TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
     )
     ctrl_in = make_queue(f"T{tid}.ctrl_in")
     ctrl_in.write("stop")
@@ -7771,7 +7910,6 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
         task.process_once()
         drive_task_monitor_until_idle(task)
         cached_policy_stats = list(task._last_cleanup_policy_stats)
-        assert cached_policy_stats
 
         def fail_cleanup(*args: object, **kwargs: object) -> object:
             del args, kwargs
@@ -9854,17 +9992,18 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
         task.stop()
 
 
-def test_task_monitor_stale_open_disposal_still_applies_to_dead_family(
+def test_task_monitor_stale_open_disposal_waits_for_mapping_row_retirement(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A genuinely dead quiet family still disposes as stale_open.
+    """TaskMonitor uses row presence and never probes runtime internals.
 
     Companion to
     ``test_task_monitor_stale_open_disposal_skips_active_runtime_tid``: the
-    liveness gate must not turn stale_open disposal into a no-op. A family
-    whose only mapping row points at an exited process is not "active" and
-    must still be summarized and disposed once past the stale-open window.
+    A quiet family stays protected while its newest non-terminal mapping row
+    exists, even when the row contains no usable process evidence. Once the
+    LivenessMonitor retires that row, stale-open disposal can proceed. Bare
+    delete then removes controls but preserves ambiguous task data.
     """
 
     db_path, make_queue = broker_env
@@ -9889,27 +10028,10 @@ def test_task_monitor_stale_open_disposal_still_applies_to_dead_family(
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     inbox.write("input")
 
-    proc = subprocess.Popen(
-        [sys.executable, "-c", "pass"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    ps_proc = psutil.Process(proc.pid)
-    dead_create_time = ps_proc.create_time()
-    proc.wait(timeout=10)
-    deadline = time.monotonic() + 5.0
-    while psutil.pid_exists(proc.pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
-
     mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    mappings.write(
-        json.dumps(
-            _tid_mapping_row(
-                full=tid,
-                short=tid[-10:],
-                host_processes=[{"pid": proc.pid, "create_time": dead_create_time}],
-            )
-        )
+    mapping_id = _write_json_row(
+        mappings,
+        _tid_mapping_row(full=tid, short=tid[-10:], host_processes=[]),
     )
 
     task = TaskMonitor(
@@ -9937,6 +10059,19 @@ def test_task_monitor_stale_open_disposal_still_applies_to_dead_family(
             checkpoint_message_id=None,
         )
 
+        protected_emitted = task._emit_monitor_store_summaries(
+            store,
+            now_ns=now_ns,
+            apply_disposition=True,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert protected_emitted == 0
+        assert record.summary_emitted_at_ns is None
+        assert record.disposition_reason is None
+
+        assert mapping_id > 0
+        assert mappings.read_one() is not None
         emitted = task._emit_monitor_store_summaries(
             store,
             now_ns=now_ns,
@@ -9951,7 +10086,7 @@ def test_task_monitor_stale_open_disposal_still_applies_to_dead_family(
 
         task._run_terminal_control_cleanup_slice(store, now_ns=now_ns)
 
-        assert list(inbox.peek_generator()) == []
+        assert list(inbox.peek_generator()) == ["input"]
         assert ctrl_in.stats().total == 0
         assert ctrl_out.stats().total == 0
     finally:
@@ -10145,7 +10280,7 @@ def test_task_monitor_stale_open_disposal_applies_without_mapping_row(
 
         task._run_terminal_control_cleanup_slice(store, now_ns=now_ns)
 
-        assert list(inbox.peek_generator()) == []
+        assert list(inbox.peek_generator()) == ["input"]
         assert ctrl_in.stats().total == 0
         assert ctrl_out.stats().total == 0
     finally:
@@ -10295,4 +10430,404 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
         assert list(inbox.peek_generator()) == []
     finally:
         task.stop()
+        _drain_queue(mappings)
+
+
+def test_task_monitor_task_local_salvage_is_bounded_and_exact(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Salvage orders rows, truncates bytes, and counts overflow by role."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(task_monitor_mod, "TASK_MONITOR_SALVAGE_MAX_ROWS", 2)
+    monkeypatch.setattr(task_monitor_mod, "TASK_MONITOR_SALVAGE_MAX_ROW_BYTES", 1)
+    tid = "1778084345905438775"
+    inbox = make_queue(f"T{tid}.inbox")
+    reserved = make_queue(f"T{tid}.reserved")
+    outbox = make_queue(f"T{tid}.outbox")
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox.write("é")
+    reserved.write("reserved")
+    outbox.write("outbox")
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+    expected_ids = {
+        queue_name: int(next(iter_queue_entries(queue))[1])
+        for queue_name, queue in (
+            (f"T{tid}.inbox", inbox),
+            (f"T{tid}.reserved", reserved),
+            (f"T{tid}.outbox", outbox),
+        )
+    }
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999985"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        salvage = task._task_local_salvage(
+            (
+                f"T{tid}.outbox",
+                f"T{tid}.ctrl_out",
+                f"T{tid}.reserved",
+                f"T{tid}.inbox",
+                f"T{tid}.ctrl_in",
+            )
+        )
+
+        ordered = sorted(expected_ids.items(), key=lambda item: item[1])
+        assert salvage == {
+            "schema": "weft.task_local_salvage.v1",
+            "rows": [
+                {
+                    "queue": queue_name,
+                    "role": queue_name.rsplit(".", maxsplit=1)[-1],
+                    "message_id": message_id,
+                    "body_encoding": "utf-8+base64",
+                    "body_b64": base64.b64encode(
+                        (
+                            "é"
+                            if queue_name.endswith(".inbox")
+                            else queue_name.rsplit(".", maxsplit=1)[-1]
+                        ).encode("utf-8")[:1]
+                    ).decode("ascii"),
+                    "original_bytes": len(
+                        (
+                            "é"
+                            if queue_name.endswith(".inbox")
+                            else queue_name.rsplit(".", maxsplit=1)[-1]
+                        ).encode("utf-8")
+                    ),
+                    "retained_bytes": 1,
+                    "truncated": True,
+                }
+                for queue_name, message_id in ordered[:2]
+            ],
+            "total_data_rows": 3,
+            "overflow_count": 1,
+            "overflow_by_role": {
+                role: int(
+                    any(
+                        queue_name.endswith(f".{role}") for queue_name, _ in ordered[2:]
+                    )
+                )
+                for role in ("inbox", "reserved", "outbox")
+            },
+            "control_row_counts": {"ctrl_in": 1, "ctrl_out": 1},
+        }
+        inbox_row = next(row for row in salvage["rows"] if row["role"] == "inbox")
+        assert base64.b64decode(inbox_row["body_b64"]) == "é".encode()[:1]
+    finally:
+        task.stop()
+
+
+def test_task_monitor_task_local_salvage_streams_overflow_rows_with_bounded_memory(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Overflow scanning retains only the report cap plus merge-frontier rows."""
+
+    class TrackedBody:
+        __slots__ = ("__weakref__", "value")
+
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def encode(self, encoding: str) -> bytes:
+            return self.value.encode(encoding)
+
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(task_monitor_mod, "TASK_MONITOR_SALVAGE_MAX_ROWS", 2)
+    live_bodies: weakref.WeakSet[TrackedBody] = weakref.WeakSet()
+    max_live_bodies = 0
+    rows_per_queue = 20
+
+    def tracked_entries(queue: Any, *, strict: bool = False) -> Any:
+        nonlocal max_live_bodies
+        assert strict is True
+        for index in range(rows_per_queue):
+            gc.collect()
+            max_live_bodies = max(max_live_bodies, len(live_bodies))
+            body = TrackedBody(f"{queue.name}-{index}")
+            live_bodies.add(body)
+            yield body, index * 10 + int(queue.name.endswith(".outbox"))
+
+    monkeypatch.setattr(task_monitor_mod, "iter_queue_entries", tracked_entries)
+    tid = "1778084345905438776"
+    queue_names = tuple(
+        f"T{tid}.{suffix}" for suffix in ("inbox", "reserved", "outbox")
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999986"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        salvage = task._task_local_salvage(queue_names)
+
+        assert salvage["total_data_rows"] == rows_per_queue * len(queue_names)
+        assert len(salvage["rows"]) == 2
+        assert salvage["overflow_count"] == rows_per_queue * len(queue_names) - 2
+        assert max_live_bodies <= len(queue_names) + 1
+    finally:
+        task.stop()
+
+
+def test_task_monitor_bare_delete_preserves_ambiguous_data_queues(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No-record cleanup removes controls but leaves all task data intact."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438777"
+    queues = {
+        suffix: make_queue(f"T{tid}.{suffix}")
+        for suffix in ("inbox", "reserved", "outbox", "ctrl_in", "ctrl_out")
+    }
+    for suffix, queue in queues.items():
+        queue.write(f"{suffix}-row")
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999987"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        result = task._delete_dead_task_control_queues(
+            tid,
+            store=store,
+            existing_queue_names={f"T{tid}.{suffix}" for suffix in queues},
+            active_tids=set(),
+            now_ns=int(tid) + 10_000_000_000,
+        )
+
+        assert result.success
+        assert result.dead_tid_control_queues_deleted == 2
+        assert result.dead_tid_inbox_queues_deleted == 0
+        assert result.dead_tid_reserved_queues_deleted == 0
+        assert result.dead_tid_outbox_queues_deleted == 0
+        assert list(queues["inbox"].peek_generator()) == ["inbox-row"]
+        assert list(queues["reserved"].peek_generator()) == ["reserved-row"]
+        assert list(queues["outbox"].peek_generator()) == ["outbox-row"]
+        assert queues["ctrl_in"].stats().total == 0
+        assert queues["ctrl_out"].stats().total == 0
+    finally:
+        task.stop()
+
+
+def test_task_monitor_salvage_failure_blocks_ambiguous_family_delete(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """JSONL mode cannot destroy an ambiguous family if salvage fails."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438779"
+    queues = {
+        suffix: make_queue(f"T{tid}.{suffix}")
+        for suffix in ("inbox", "reserved", "outbox", "ctrl_in", "ctrl_out")
+    }
+    for suffix, queue in queues.items():
+        queue.write(f"{suffix}-row")
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999989"),
+        config=_jsonl_lifecycle_config(tmp_path / "salvage-failure.jsonl"),
+    )
+    monkeypatch.setattr(
+        task,
+        "_task_local_salvage",
+        lambda _queue_names: (_ for _ in ()).throw(ValueError("salvage failed")),
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        with pytest.raises(ValueError, match="salvage failed"):
+            task._delete_dead_task_control_queues(
+                tid,
+                store=store,
+                existing_queue_names={f"T{tid}.{suffix}" for suffix in queues},
+                active_tids=set(),
+                now_ns=int(tid) + 10_000_000_000,
+            )
+
+        for suffix, queue in queues.items():
+            assert list(queue.peek_generator()) == [f"{suffix}-row"]
+    finally:
+        task.stop()
+
+
+def test_task_monitor_jsonl_salvages_before_ambiguous_family_delete(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """JSONL mode exports the nested salvage object before whole-family delete."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438781"
+    external_path = tmp_path / "salvage.jsonl"
+    queues = {
+        suffix: make_queue(f"T{tid}.{suffix}")
+        for suffix in ("inbox", "reserved", "outbox", "ctrl_in", "ctrl_out")
+    }
+    for suffix, queue in queues.items():
+        queue.write(f"{suffix}-row")
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999991"),
+        config=_jsonl_lifecycle_config(external_path, retention_seconds="0.000001"),
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        result = task._delete_dead_task_control_queues(
+            tid,
+            store=store,
+            existing_queue_names={f"T{tid}.{suffix}" for suffix in queues},
+            active_tids=set(),
+            now_ns=int(tid) + 10_000_000_000,
+        )
+
+        assert result.success
+        assert all(queue.stats().total == 0 for queue in queues.values())
+        report = json.loads(external_path.read_text(encoding="utf-8"))
+        salvage = report["observations"]["task_local_salvage"]
+        assert salvage["schema"] == "weft.task_local_salvage.v1"
+        assert [row["role"] for row in salvage["rows"]] == [
+            "inbox",
+            "reserved",
+            "outbox",
+        ]
+        assert all(isinstance(row["message_id"], str) for row in salvage["rows"])
+        assert salvage["control_row_counts"] == {"ctrl_in": 1, "ctrl_out": 1}
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("mode", ["delete", "jsonl_then_delete"])
+def test_persistent_consumer_resurrects_after_ambiguous_family_cleanup(
+    broker_env,
+    task_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """A live persistent task recreates evidence and reaches terminal cleanup."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = str(time.time_ns())
+    consumer = task_factory(_persistent_consumer_taskspec(tid, str(tmp_path)))
+    inbox = make_queue(f"T{tid}.inbox")
+    outbox = make_queue(f"T{tid}.outbox")
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    reserved = make_queue(f"T{tid}.reserved")
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    config = (
+        _stale_open_test_config()
+        if mode == "delete"
+        else _jsonl_lifecycle_config(
+            tmp_path / "resurrection.jsonl",
+            retention_seconds="0.000001",
+        )
+    )
+    monitor = TaskMonitor(
+        db_path,
+        _task_monitor_taskspec_for_context(str(time.time_ns()), str(tmp_path)),
+        config=config,
+    )
+    try:
+        store = monitor._ensure_monitor_store()
+        assert store is not None
+        drive_task_monitor_until(
+            monitor,
+            lambda: store.get_task(tid) is not None,
+        )
+
+        inbox.write("pending-before-retirement")
+        _drain_queue(mappings)
+        disposition_ns = time.time_ns()
+        store.mark_summary_emitted(tid, disposition_ns, suspect_reason="stale_open")
+        store.mark_family_disposed(
+            tid,
+            disposition_ns,
+            disposition_reason="stale_open",
+            suspect_reason="stale_open",
+            suspect_at_ns=disposition_ns,
+        )
+        cleanup = monitor._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=disposition_ns,
+        )
+        assert cleanup.success
+        disposed = store.get_task(tid)
+        assert disposed is not None
+        assert disposed.task_control_deleted_at_ns is not None
+        if mode == "delete":
+            assert list(inbox.peek_generator()) == ["pending-before-retirement"]
+            assert all(
+                queue.stats().total == 0
+                for queue in (reserved, outbox, ctrl_in, ctrl_out)
+            )
+        else:
+            assert all(
+                queue.stats().total == 0
+                for queue in (inbox, reserved, outbox, ctrl_in, ctrl_out)
+            )
+            inbox.write("resurrected")
+
+        _drive_consumer_until(consumer, lambda: outbox.stats().total == 1)
+        drive_task_monitor_until(
+            monitor,
+            lambda: (
+                (record := store.get_task(tid)) is not None
+                and record.task_control_deleted_at_ns is None
+            ),
+        )
+
+        ctrl_in.write(encode_control_message(CONTROL_STOP))
+        _drive_consumer_until(consumer, lambda: consumer.should_stop)
+        mapping_rows = [json.loads(body) for body in mappings.peek_generator()]
+        assert any(
+            row.get("full") == tid and row.get("terminal") is True
+            for row in mapping_rows
+        )
+
+        drive_task_monitor_until(
+            monitor,
+            lambda: all(
+                queue.stats().total == 0
+                for queue in (inbox, reserved, outbox, ctrl_in, ctrl_out)
+            ),
+        )
+        record = store.get_task(tid)
+        assert record is None or (
+            record.terminal_seen and record.task_control_deleted_at_ns is not None
+        )
+    finally:
+        monitor.stop()
         _drain_queue(mappings)

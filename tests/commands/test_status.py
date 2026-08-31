@@ -17,6 +17,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
@@ -413,6 +414,23 @@ def test_system_status_manager_snapshot_includes_internal_spawn_queues(
     manager = snapshot.managers[0]
     assert manager.internal_requests == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
     assert manager.internal_reserved == internal_reserved
+
+
+def test_status_services_include_independent_liveness_monitor_inventory(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+
+    services = {
+        service.key: service for service in status_cmd.system_status(ctx).services
+    }
+
+    liveness = services[INTERNAL_SERVICE_KEY_LIVENESS_MONITOR]
+    assert liveness.name == "liveness-monitor"
+    assert liveness.enabled is True
+    assert liveness.desired is False
+    assert liveness.status == "unknown"
 
 
 def test_status_services_include_manager_spawned_task_monitor_before_child_log(

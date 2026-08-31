@@ -15,6 +15,8 @@ Spec references:
 
 from __future__ import annotations
 
+import base64
+import heapq
 import itertools
 import json
 import logging
@@ -24,7 +26,7 @@ import threading
 import time
 import weakref
 from collections import Counter, deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -43,8 +45,10 @@ from weft._constants import (
     CONTROL_STOP,
     DEFAULT_FUNCTION_TARGET,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+    INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     LIVE_SERVICE_STATUSES,
     QUEUE_CTRL_IN_SUFFIX,
@@ -57,13 +61,13 @@ from weft._constants import (
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
     TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+    TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     TASK_MONITOR_LOG_SUBDIR,
     TASK_MONITOR_MAINTENANCE_PARTIAL_BATCH_ERROR_PREFIX,
     TASK_MONITOR_MAINTENANCE_RUNTIME_PRUNE_QUEUE_GROUPS,
     TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
-    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
     TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
     TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
@@ -71,9 +75,10 @@ from weft._constants import (
     TASK_MONITOR_PROCESSOR_WORKER_LANE,
     TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT,
     TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS,
+    TASK_MONITOR_SALVAGE_MAX_ROW_BYTES,
+    TASK_MONITOR_SALVAGE_MAX_ROWS,
     TASK_MONITOR_SCHEMA_VERSION,
     TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED,
-    TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
@@ -149,9 +154,6 @@ from weft.core.monitor.policies.runtime_control import (
 from weft.core.monitor.policies.runtime_control import (
     terminal_task_runtime_queue_cleanup_plan as _terminal_task_runtime_queue_cleanup_plan,
 )
-from weft.core.monitor.policies.tid_mapping import (
-    mapping_row_is_live as _mapping_row_is_live,
-)
 from weft.core.monitor.progress import (
     PolicyProgress,
     progress_requires_catchup,
@@ -212,8 +214,7 @@ from weft.core.tasks.service import (
     ServiceWorkerSpec,
 )
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.ext import RunnerHandle
-from weft.helpers import handle_has_live_host_process, iter_queue_entries
+from weft.helpers import iter_queue_entries
 
 logger = logging.getLogger(__name__)
 
@@ -548,14 +549,13 @@ _policy_progress_domain_by_policy = {
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE: "monitor_store",
     TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME: "task_runtime_queues",
     TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID: "task_runtime_queues",
-    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION: WEFT_TID_MAPPINGS_QUEUE,
 }
 
 
 def _consolidate_task_monitor_policy_progress(
     progresses: tuple[PolicyProgress, ...],
 ) -> tuple[PolicyProgress, ...]:
-    """Merge private cleanup phases into the five top-level policy rows."""
+    """Merge private cleanup phases into the four top-level policy rows."""
 
     grouped: dict[str, list[PolicyProgress]] = {}
     for progress in progresses:
@@ -2162,6 +2162,11 @@ class TaskMonitor(ServiceTask):
 
         if not self._jsonl_then_delete_enabled():
             return
+        observations: dict[str, Any] = {"queue_names": list(queue_names)}
+        if not record.terminal_seen:
+            observations["task_local_salvage"] = self._task_local_salvage(
+                queue_names
+            )
         report = build_collation_lifetime_report(
             record,
             monitor_tid=self.tid,
@@ -2169,7 +2174,7 @@ class TaskMonitor(ServiceTask):
             source_policy=source_policy,
             report_kind=report_kind,
             close_reason=close_reason,
-            observations={"queue_names": list(queue_names)},
+            observations=observations,
         )
         self._handoff_lifetime_report(
             report,
@@ -2200,12 +2205,106 @@ class TaskMonitor(ServiceTask):
             report_kind=report_kind,
             close_reason=close_reason,
             queue_names=queue_names,
+            observations={
+                "task_local_salvage": self._task_local_salvage(queue_names)
+            },
         )
         self._handoff_lifetime_report(
             report,
             store=store,
             emitted_at_ns=emitted_at_ns,
         )
+
+    def _task_local_salvage(
+        self,
+        queue_names: Sequence[str],
+    ) -> dict[str, Any]:
+        """Capture a bounded copy of visible task-local data rows.
+
+        Control rows are counted but never copied. Data rows retain the exact
+        UTF-8 byte prefix so the report remains bounded even when truncation
+        cuts through a multibyte code point.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        role_by_suffix = {
+            QUEUE_INBOX_SUFFIX: "inbox",
+            QUEUE_RESERVED_SUFFIX: "reserved",
+            QUEUE_OUTBOX_SUFFIX: "outbox",
+            QUEUE_CTRL_IN_SUFFIX: "ctrl_in",
+            QUEUE_CTRL_OUT_SUFFIX: "ctrl_out",
+        }
+
+        def data_rows(
+            queue: Any,
+            role: str,
+            queue_name: str,
+        ) -> Iterator[tuple[int, str, str, str]]:
+            for body, message_id in iter_queue_entries(queue, strict=True):
+                yield int(message_id), role, queue_name, body
+
+        data_queues: list[Any] = []
+        data_sources: list[Iterator[tuple[int, str, str, str]]] = []
+        control_row_counts = {"ctrl_in": 0, "ctrl_out": 0}
+        salvage_rows: list[dict[str, Any]] = []
+        total_data_rows = 0
+        overflow_by_role: Counter[str] = Counter()
+        try:
+            for queue_name in dict.fromkeys(queue_names):
+                suffix = queue_name.rsplit(".", maxsplit=1)[-1]
+                role = role_by_suffix.get(suffix)
+                if role is None:
+                    continue
+                queue = self._monitor_context().queue(queue_name, persistent=False)
+                if role in control_row_counts:
+                    try:
+                        control_row_counts[role] += sum(
+                            1 for _ in iter_queue_entries(queue, strict=True)
+                        )
+                    finally:
+                        queue.close()
+                    continue
+                data_queues.append(queue)
+                data_sources.append(data_rows(queue, role, queue_name))
+
+            ordered_rows = heapq.merge(
+                *data_sources,
+                key=lambda row: (row[0], row[1], row[2]),
+            )
+            for message_id, role, queue_name, body in ordered_rows:
+                total_data_rows += 1
+                if len(salvage_rows) >= TASK_MONITOR_SALVAGE_MAX_ROWS:
+                    overflow_by_role[role] += 1
+                    continue
+                original = body.encode("utf-8")
+                retained_body = original[:TASK_MONITOR_SALVAGE_MAX_ROW_BYTES]
+                salvage_rows.append(
+                    {
+                        "queue": queue_name,
+                        "role": role,
+                        "message_id": message_id,
+                        "body_encoding": "utf-8+base64",
+                        "body_b64": base64.b64encode(retained_body).decode("ascii"),
+                        "original_bytes": len(original),
+                        "retained_bytes": len(retained_body),
+                        "truncated": len(retained_body) < len(original),
+                    }
+                )
+        finally:
+            for queue in data_queues:
+                queue.close()
+
+        return {
+            "schema": "weft.task_local_salvage.v1",
+            "rows": salvage_rows,
+            "total_data_rows": total_data_rows,
+            "overflow_count": total_data_rows - len(salvage_rows),
+            "overflow_by_role": {
+                role: overflow_by_role[role] for role in ("inbox", "reserved", "outbox")
+            },
+            "control_row_counts": control_row_counts,
+        }
 
     def _flush_deferred_lifetime_reports(
         self,
@@ -3135,6 +3234,9 @@ class TaskMonitor(ServiceTask):
                 retention_seconds=(
                     self._monitor_config.task_log_retention_period_seconds
                 ),
+                preserve_data_without_terminal_proof=(
+                    self._monitor_config.mode == "delete"
+                ),
             )
         if cleanup_plan is None:
             return _TaskControlCleanupResult(
@@ -3211,9 +3313,14 @@ class TaskMonitor(ServiceTask):
         errors: list[str] = []
         warnings: list[str] = []
         rows_deleted = 0
+        permitted_queue_names = (
+            cleanup_plan.control_queue_names
+            if self._monitor_config.mode == "delete"
+            else cleanup_plan.queue_names
+        )
         queue_names_to_delete = tuple(
             queue_name
-            for queue_name in cleanup_plan.queue_names
+            for queue_name in permitted_queue_names
             if queue_name in existing_queue_names
         )
 
@@ -3243,17 +3350,17 @@ class TaskMonitor(ServiceTask):
         existing_inbox_queues = tuple(
             queue_name
             for queue_name in cleanup_plan.inbox_queue_names
-            if queue_name in existing_queue_names
+            if queue_name in existing_queue_names and queue_name in queue_names_to_delete
         )
         existing_outbox_queues = tuple(
             queue_name
             for queue_name in cleanup_plan.outbox_queue_names
-            if queue_name in existing_queue_names
+            if queue_name in existing_queue_names and queue_name in queue_names_to_delete
         )
         existing_reserved_queues = tuple(
             queue_name
             for queue_name in cleanup_plan.reserved_queue_names
-            if queue_name in existing_queue_names
+            if queue_name in existing_queue_names and queue_name in queue_names_to_delete
         )
         control_queues_deleted = 0 if errors else len(existing_control_queues)
         inbox_queues_deleted = 0 if errors else len(existing_inbox_queues)
@@ -3329,7 +3436,14 @@ class TaskMonitor(ServiceTask):
         return reduce_latest_by_service_owner(service_read.records)
 
     def _active_runtime_tids(self) -> set[str]:
-        """Return TIDs that have current service or live host-process evidence."""
+        """Return TIDs with current service or non-terminal mapping evidence.
+
+        TaskMonitor does not probe runtime internals. LivenessMonitor owns
+        those probes and retires stale mapping rows; row presence is the
+        conservative handoff boundary.
+
+        Spec: [OBS.13.7]
+        """
 
         active_tids: set[str] = set()
         ctx = self._monitor_context()
@@ -3341,52 +3455,26 @@ class TaskMonitor(ServiceTask):
             if record.status in LIVE_SERVICE_STATUSES
         )
 
-        mappings = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-        try:
-            for body, _timestamp in iter_queue_entries(mappings):
-                try:
-                    payload = json.loads(body)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(payload, Mapping):
-                    continue
-                tid = payload.get("full")
-                handle_payload = payload.get("runtime_handle")
-                if not isinstance(tid, str) or not isinstance(handle_payload, Mapping):
-                    continue
-                try:
-                    handle = RunnerHandle.from_dict(handle_payload)
-                except ValueError:
-                    continue
-                if handle_has_live_host_process(handle):
-                    active_tids.add(tid)
-        finally:
-            mappings.close()
+        active_tids.update(self._nonterminal_mapping_row_tids(ctx))
 
         active_tids.add(self.tid)
         return active_tids
 
     def _destruction_protected_runtime_tids(self) -> set[str]:
-        """Return TIDs that destructive cleanup must treat as live.
+        """Return TIDs protected from destructive runtime cleanup.
 
-        This answers "is it safe to destroy this TID's runtime state?",
-        which is a different question from ``_active_runtime_tids``
-        ("which owners are proven live right now?"). Staleness proof needs
-        positive evidence; destruction needs the absence of disproof. The
-        returned set is a superset of ``_active_runtime_tids`` that also
-        protects every TID whose newest ``weft.state.tid_mappings`` row is
-        live-or-undecidable under the tid-mapping cleanup policy's own probe
-        (``mapping_row_is_live``). Positive scoped host-process liveness wins.
-        Otherwise a valid task-owned ``terminal`` hint makes the row dead; a
-        non-terminal row with no probeable host PIDs (e.g. an external or
-        container runner handle) remains undecidable and protected. A newest
-        row whose probeable host processes are all dead grants no protection.
+        Protection uses the same row-presence evidence as
+        :meth:`_active_runtime_tids`. Probe outcomes never enter TaskMonitor.
 
         Spec: [OBS.13.7]
         """
 
-        protected = self._active_runtime_tids()
-        ctx = self._monitor_context()
+        return self._active_runtime_tids()
+
+    @staticmethod
+    def _nonterminal_mapping_row_tids(ctx: WeftContext) -> set[str]:
+        """Return TIDs whose newest valid mapping row is non-terminal."""
+
         newest_payload_by_tid: dict[str, tuple[int, Mapping[str, Any]]] = {}
         mappings = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
         try:
@@ -3405,12 +3493,11 @@ class TaskMonitor(ServiceTask):
                     newest_payload_by_tid[tid] = (int(timestamp), payload)
         finally:
             mappings.close()
-        protected.update(
+        return {
             tid
             for tid, (_timestamp, payload) in newest_payload_by_tid.items()
-            if tid not in protected and _mapping_row_is_live(payload)
-        )
-        return protected
+            if payload.get("terminal") is not True
+        }
 
     def _stale_service_owner_summary_ready_tasks(
         self,
@@ -3487,6 +3574,12 @@ class TaskMonitor(ServiceTask):
             or classification.runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
         ):
             return INTERNAL_SERVICE_KEY_HEARTBEAT
+        if (
+            classification.role == "liveness_monitor"
+            or classification.runtime_class
+            == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR
+        ):
+            return INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
         return None
 
     @staticmethod
@@ -3782,20 +3875,14 @@ class TaskMonitor(ServiceTask):
         records = ready_records[:control_limit]
         family_limit_hit = len(ready_records) > len(records)
         active_tids = self._active_runtime_tids() if records else set()
-        # Delete-time evidence hierarchy [OBS.13.7]: families WITHOUT
-        # terminal task-log proof (disposed-as-suspect stale_open rows)
-        # get the full destruction-protection standard, including
-        # undecidable-means-live for non-host runner handles. Families
-        # WITH terminal proof keep the positive-evidence check only:
-        # an undecidable newest mapping row is deliberately never deleted
-        # by the tid-mapping policy, so treating it as protection against
-        # terminal cleanup would block control-queue cleanup for every
-        # external-runner task forever.
-        protected_tids = (
-            self._destruction_protected_runtime_tids()
-            if any(not record.terminal_seen for record in records)
-            else active_tids
-        )
+        # Terminal lifecycle proof outranks mapping-row presence. A live
+        # service-registry owner remains protected, but a mapping row alone
+        # cannot block definitive terminal cleanup forever.
+        live_service_tids = {
+            service.owner_tid
+            for service in self._latest_service_owner_records()
+            if service.status in LIVE_SERVICE_STATUSES
+        }
         task_queue_names = (
             self._queue_name_snapshot(
                 patterns=(
@@ -3826,7 +3913,7 @@ class TaskMonitor(ServiceTask):
                 deadline_hit = True
                 unprocessed_selected += 1
                 continue
-            skip_tids = active_tids if record.terminal_seen else protected_tids
+            skip_tids = live_service_tids if record.terminal_seen else active_tids
             if record.tid in skip_tids:
                 cleanup = _TaskControlCleanupResult(
                     warnings=(f"{record.tid}: skipped active runtime owner",),
@@ -3873,18 +3960,9 @@ class TaskMonitor(ServiceTask):
                 families_disposed += len(family_disposition_marks)
             except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"mark_families_disposed: {exc}")
-        if not errors:
-            try:
-                retirement = store.retire_completed_collation_families(
-                    limit=control_limit,
-                    retired_at_ns=now_ns,
-                    retention_seconds=(
-                        self._monitor_config.task_log_retention_period_seconds
-                    ),
-                )
-                families_retired = retirement.families_retired
-            except (OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"retire_completed_collation_families: {exc}")
+        # The reserved slice is the sole collation-retirement owner. Keeping
+        # the row through that slice preserves terminal lifecycle proof for
+        # any queue discovered by the fallback name scan.
 
         terminal_pending = (
             family_limit_hit or deadline_hit or unprocessed_selected > 0 or bool(errors)
@@ -4036,7 +4114,10 @@ class TaskMonitor(ServiceTask):
                 monitor_skipped_active += 1
                 continue
             queue_name = f"T{record.tid}.{QUEUE_RESERVED_SUFFIX}"
-            if queue_name in reserved_queue_name_set:
+            preserve_ambiguous = (
+                self._monitor_config.mode == "delete" and not record.terminal_seen
+            )
+            if queue_name in reserved_queue_name_set and not preserve_ambiguous:
                 try:
                     self._handoff_collation_runtime_report(
                         record,
@@ -4077,6 +4158,13 @@ class TaskMonitor(ServiceTask):
                 continue
             try:
                 tid = _reserved_queue_tid(queue_name)
+                fallback_record = (
+                    fallback_records_by_tid.get(tid) if tid is not None else None
+                )
+                if self._monitor_config.mode == "delete" and (
+                    fallback_record is None or not fallback_record.terminal_seen
+                ):
+                    continue
                 if tid is not None:
                     self._handoff_inferred_runtime_report(
                         tid=tid,
@@ -4194,9 +4282,12 @@ class TaskMonitor(ServiceTask):
         probe_tids = _runtime_dead_task_record_probe_tids(
             task_queue_names,
             now_ns=now_ns,
-            min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
+            min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
             retention_seconds=self._monitor_config.task_log_retention_period_seconds,
             active_tids=active_tids,
+            preserve_data_without_terminal_proof=(
+                self._monitor_config.mode == "delete"
+            ),
         )
         records_by_tid = (
             {record.tid: record for record in store.get_tasks(probe_tids)}
@@ -4213,12 +4304,15 @@ class TaskMonitor(ServiceTask):
         selection = _select_runtime_dead_task_cleanup_candidates(
             task_queue_names,
             now_ns=now_ns,
-            min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
+            min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
             retention_seconds=self._monitor_config.task_log_retention_period_seconds,
             limit=control_limit,
             active_tids=active_tids,
             task_record=records_by_tid.get,
             deadline_reached=selection_deadline_reached,
+            preserve_data_without_terminal_proof=(
+                self._monitor_config.mode == "delete"
+            ),
         )
         job_deadline_monotonic = (
             _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
@@ -5620,7 +5714,7 @@ class TaskMonitor(ServiceTask):
 
         Maintenance is not a queue-scan policy: it must never add a
         ``policy_progress[*].policy`` identity because spec 05 fixes the
-        monitor's reporting at exactly five top-level cleanup policies
+        monitor's reporting at exactly four top-level cleanup policies
         (docs/specifications/05-Message_Flow_and_State.md [MF-5]).
         """
 
@@ -5663,9 +5757,8 @@ class TaskMonitor(ServiceTask):
         The vacuum physically deletes claimed broker rows (compaction stays
         with the operator ``weft system tidy`` command). The runtime-state
         prune reuses the canonical engine with the conservative CLI defaults
-        and an explicit queue-group selection that excludes ``tid-mappings``
-        (already pruned every cycle by the monitor's own policy at a
-        different min-age). Failures are cached for the STATUS
+        and an explicit queue-group selection that excludes ``tid-mappings``;
+        TID mappings are owned solely by LivenessMonitor. Failures are cached for the STATUS
         ``maintenance`` block and never fail the owning cycle. The
         informational partial-batch apply outcome is counted, not treated as
         an error.

@@ -35,7 +35,7 @@ from weft.helpers import (
     handle_has_live_host_process,
     iter_queue_json_entries,
 )
-from weft.runtime_liveness import runtime_liveness_from_registered_probe
+from weft.liveness.registry import runtime_liveness_from_registered_probe
 
 
 def normalize_endpoint_name(name: str) -> str:

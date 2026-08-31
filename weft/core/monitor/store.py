@@ -3445,7 +3445,12 @@ def _merge_record(
         suspect_at_ns=existing.suspect_at_ns,
         disposition_reason=existing.disposition_reason,
         disposition_at_ns=existing.disposition_at_ns,
-        task_control_deleted_at_ns=existing.task_control_deleted_at_ns,
+        task_control_deleted_at_ns=(
+            None
+            if existing.task_control_deleted_at_ns is not None
+            and update.message_id > existing.task_control_deleted_at_ns
+            else existing.task_control_deleted_at_ns
+        ),
         reserved_cleanup_checked_at_ns=None,
         orphan_raw_recovery_checked_at_ns=None,
         updated_at_ns=now_ns,

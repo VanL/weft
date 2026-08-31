@@ -11,11 +11,82 @@ import weft_macos_sandbox
 from weft_macos_sandbox import plugin
 from weft_macos_sandbox.plugin import get_runner_plugin
 
+from weft.liveness import registry as liveness_registry
+from weft.liveness.models import HostProcessObservation
+
 pytestmark = [pytest.mark.shared]
 
 
 def test_package_root_does_not_export_runner_plugin_factory() -> None:
     assert not hasattr(weft_macos_sandbox, "get_runner_plugin")
+
+
+def test_macos_sandbox_plugin_registers_its_entry_point_liveness_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
+    monkeypatch.setattr(plugin, "_liveness_probe_registered", False)
+
+    get_runner_plugin()
+
+    assert set(liveness_registry._runtime_liveness_probes) == {"macos-sandbox"}
+
+
+def test_macos_sandbox_liveness_uses_scoped_pid_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = plugin.RunnerHandle(
+        runner="macos-sandbox",
+        kind="sandboxed-process",
+        id="4321",
+        control={"authority": "runner"},
+        observations={
+            "host_processes": [{"pid": 4321, "create_time": 123.456}],
+        },
+    )
+    monkeypatch.setattr(
+        plugin,
+        "inspect_host_process",
+        lambda pid, create_time: HostProcessObservation(
+            "live" if pid == 4321 and create_time == 123.456 else "stale",
+            "test",
+        ),
+    )
+
+    assert plugin._macos_sandbox_runtime_liveness(handle, 0.75) == "live"
+
+    monkeypatch.setattr(
+        plugin,
+        "inspect_host_process",
+        lambda pid, create_time: HostProcessObservation("stale", "test"),
+    )
+    assert plugin._macos_sandbox_runtime_liveness(handle, 0.75) == "stale"
+
+
+def test_macos_sandbox_liveness_is_unknown_without_scoped_identity() -> None:
+    handle = plugin.RunnerHandle(
+        runner="macos-sandbox",
+        kind="sandboxed-process",
+        id="4321",
+        control={"authority": "runner"},
+        observations={},
+    )
+
+    assert plugin._macos_sandbox_runtime_liveness(handle, 0.75) == "unknown"
+
+
+def test_macos_sandbox_liveness_rejects_non_finite_process_identity() -> None:
+    handle = plugin.RunnerHandle(
+        runner="macos-sandbox",
+        kind="sandboxed-process",
+        id="4321",
+        control={"authority": "runner"},
+        observations={
+            "host_processes": [{"pid": 4321, "create_time": float("nan")}],
+        },
+    )
+
+    assert plugin._macos_sandbox_runtime_liveness(handle, 0.75) == "unknown"
 
 
 def test_runner_constructor_does_not_accept_broker_context() -> None:

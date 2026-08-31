@@ -35,6 +35,7 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md)
 - [`docs/plans/2026-08-25-bounded-tid-mapping-publication-plan.md`](../plans/2026-08-25-bounded-tid-mapping-publication-plan.md)
 - [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
 - [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
@@ -355,10 +356,43 @@ worker-lane bookkeeping may inherit from the internal `ServiceTask` layer; that
 layer does not own queue readiness, service convergence, or a generic service
 turn.
 
+`LivenessMonitor` is a manager-supervised internal persistent `ServiceTask` and
+the sole custodian of `weft.state.tid_mappings`. It periodically probes the
+runtime behind each retained TID and retires mapping rows for dead or
+sustained-undecidable owners. It answers no queries and claims no endpoint.
+
+The private `weft/liveness/` package owns point-in-time liveness evidence: the
+process-local probe registry, generic `psutil` host inspection,
+authority-aware evidence reduction, and the single TID-mapping deletability
+policy. First-party runtime extensions own their runtime-specific probes and
+register them under their entry-point key in the process where analysis runs;
+alias handle producers publish `observations.liveness_provider`. Core never
+imports an extension. This adds no public [PY-1] surface.
+
+Retirement is one pure reduction over per-TID
+`(generation, deadline_monotonic, paused_at_monotonic)` state. The first
+attempted `unknown` sets `deadline = now + timeout`; later attempted unknown
+keeps it. A not-attempted cycle sets `paused_at` once and never retires; the
+next attempted unknown shifts the deadline forward by the full paused duration
+before checking expiry. `live` or generation change clears the record; `stale`
+clears it and authorizes immediate min-age-gated retirement. Late
+token/generation mismatches never enter the reducer. At attempted-unknown
+expiry, and for definitively stale rows past min-age, the monitor deletes the
+row by exact message ID. Probes are read-only; the monitor deletes only
+TID-mapping rows and controls no process.
+
+All deadlines are process-local memory. Restart grants a fresh timeout;
+indefinite postponement under repeated restart is accepted, and no durable
+deadline state may be added to close it. Safety rests on edge-triggered,
+append-only publication: a retired row is recreated by the owner's next
+mapping edge, and the guaranteed terminal republish restores terminal
+accounting.
+
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/observer.py`, `weft/core/tasks/monitor.py`,
 `weft/core/monitor/task_monitor.py`, `weft/core/tasks/pipeline.py`,
 `weft/core/tasks/debugger.py`, `weft/core/tasks/heartbeat.py`,
+`weft/core/tasks/liveness_monitor.py`, `weft/liveness/`,
 `weft/core/tasks/interactive.py`, `weft/core/tasks/service.py`,
 `weft/core/tasks/sessions.py`, `weft/core/manager.py`;
 task primitives are re-exported from `weft/core/tasks/__init__.py` where
@@ -442,10 +476,12 @@ Current task families:
   summaries so PONG can explain whether each cleanup policy reached a bounded
   waypoint, reached base for now, deferred future work, or was blocked by an
   error without performing live scans on the control path. The monitor exposes
-  exactly five top-level cleanup policy identities:
+  exactly four top-level cleanup policy identities:
   `task_log.retention`, `monitor_store.lifecycle`,
-  `task_local.terminal_runtime`, `task_local.dead_tid`, and
-  `runtime_state.retention`. Policy run result values share the internal
+  `task_local.terminal_runtime`, and `task_local.dead_tid`. Runtime-state
+  maintenance and LivenessMonitor mapping retention are separate owners and
+  do not appear as TaskMonitor cleanup-policy identities. Policy run result
+  values share the internal
   result type `weft/core/monitor/policies/task_log.py::CleanupPolicyRun`;
   private helper phases
   must not create additional policy identities. The persistent
@@ -731,7 +767,8 @@ Current rule:
 - the runtime handle JSON contract is exactly:
   `runner`, `kind`, `id`, `control`, `observations`, `metadata`
 - `control.authority` defines who may act on the handle. `host-pid` means
-  `observations.host_pids` are scoped host PIDs; `runner` means the named
+  `observations.host_processes` contains scoped `(pid, create_time)` host
+  identities; `runner` means the named
   runner plugin owns control; `external-supervisor` means Weft records
   identity but does not send direct runtime control.
 - task processes publish a `host-pid` runtime handle for their own process when
@@ -748,6 +785,20 @@ Current rule:
   be given an explicit handle or use `external-supervisor`. Extensions may
   register process-local runtime liveness probes for specific handle runners;
   inconclusive or missing probes do not replace the generic heartbeat boundary.
+
+Point-in-time liveness evidence follows `control.authority`. For `host-pid`,
+any exact live `(pid, create_time)` pair with zombie rejection is `live`;
+`stale` requires every valid scoped identity definitively dead with none
+unresolved. Empty, malformed, permission-denied, or ambiguous identity is
+`unknown`. For `runner` and `external-supervisor`, the selected extension probe
+is authoritative and host wrappers corroborate only. Process titles
+corroborate and never prove a full TID.
+
+The runtime-generation fingerprint is the SHA-256 of canonical JSON containing
+exactly `runner`, `kind`, `id`, `control.authority`, normalized
+`observations.host_processes` pairs, optional
+`observations.liveness_provider`, and the mapping terminal hint. Diagnostic
+metadata and other mutable observations do not reset an unknown deadline.
 
 _Implementation mapping_: `weft/ext.py::RunnerHandle`;
 `weft/core/tasks/runner.py::TaskRunner.run_with_hooks()` owns the live callback

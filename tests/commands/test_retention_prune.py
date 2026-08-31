@@ -14,6 +14,8 @@ from weft._constants import (
     CONTROL_PING,
     RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
     RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK,
+    RETENTION_PRUNE_CLASS_OBSOLETE_RESERVED_WORK,
+    RETENTION_PRUNE_CLASS_RESULT_WITHOUT_TERMINAL_OUTBOX_REPORTED,
     RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_ARCHIVED,
     RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_WITHOUT_LOG_REPORTED,
     RETENTION_PRUNE_CLASS_TERMINAL_RESULT_OUTBOX_ARCHIVED,
@@ -758,16 +760,52 @@ def test_outbox_final_result_with_terminal_log_is_deleted(tmp_path: Path) -> Non
     assert result_id not in _read_ids(ctx, f"T{tid}.outbox", persistent=True)
 
 
-def test_inbox_work_is_report_only_but_force_deletes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("suffix", "payload", "persistent", "terminal_log", "candidate_class"),
+    [
+        (
+            "inbox",
+            {"work": True},
+            False,
+            True,
+            RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK,
+        ),
+        (
+            "reserved",
+            {"work": True},
+            False,
+            True,
+            RETENTION_PRUNE_CLASS_OBSOLETE_RESERVED_WORK,
+        ),
+        (
+            "outbox",
+            {"stdout": "unread", "return_code": 0},
+            True,
+            False,
+            RETENTION_PRUNE_CLASS_RESULT_WITHOUT_TERMINAL_OUTBOX_REPORTED,
+        ),
+    ],
+)
+def test_task_local_data_is_report_only_but_force_archives_and_deletes(
+    tmp_path: Path,
+    suffix: str,
+    payload: dict[str, Any],
+    persistent: bool,
+    terminal_log: bool,
+    candidate_class: str,
+) -> None:
     ctx = _context(tmp_path)
     tid = "1770000000000001006"
-    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"})
-    work_id = _write_json(ctx, f"T{tid}.inbox", {"work": True})
+    if terminal_log:
+        _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"})
+    queue_name = f"T{tid}.{suffix}"
+    work_id = _write_json(ctx, queue_name, payload, persistent=persistent)
 
     ordinary = run_retention_prune(
         RetentionPruneConfig(
             context_path=ctx.root,
             family="task-local",
+            task_filters=(tid,),
             apply=True,
             archive_path=tmp_path / "ordinary.jsonl",
             min_age_seconds=0,
@@ -775,26 +813,37 @@ def test_inbox_work_is_report_only_but_force_deletes(tmp_path: Path) -> None:
     )
 
     assert ordinary.deleted == 0
-    assert ordinary.candidates[0].candidate_class == (
-        RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK
-    )
-    assert work_id in _read_ids(ctx, f"T{tid}.inbox")
+    assert ordinary.candidates[0].candidate_class == candidate_class
+    assert work_id in _read_ids(ctx, queue_name, persistent=persistent)
 
+    forced_archive = tmp_path / "forced.jsonl"
     forced = run_retention_prune(
         RetentionPruneConfig(
             context_path=ctx.root,
             family="task-local",
+            task_filters=(tid,),
             apply=True,
             force=True,
+            archive_path=forced_archive,
             min_age_seconds=0,
         )
     )
 
     assert forced.deleted == 1
-    assert work_id not in _read_ids(ctx, f"T{tid}.inbox")
+    assert work_id not in _read_ids(ctx, queue_name, persistent=persistent)
     assert forced.warnings == ()
     assert forced.archived >= 1
-    assert list((ctx.logs_dir / "retention-prune").glob("*.jsonl"))
+    archived_candidates = [
+        record
+        for record in _read_json_records(forced_archive)
+        if record["record_type"] == "retention_prune_candidate"
+    ]
+    assert any(
+        record["queue"] == queue_name
+        and record["message_id"] == str(work_id)
+        and record["payload"] == payload
+        for record in archived_candidates
+    )
 
 
 def test_force_without_apply_is_rejected(tmp_path: Path) -> None:

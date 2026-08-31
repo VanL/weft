@@ -956,9 +956,11 @@ Current behavior:
   `--apply` is supplied. There is no implicit family.
 - `system prune --family` accepts `runtime-state`, `task-local`, `task-log`,
   `retention`, or `all`. `retention` means task-local plus task-log.
-- `system prune --queue` accepts `tid-mappings`, `managers`,
-  `streaming`, `endpoints`, `pipelines`, or `all` for runtime-state pruning,
-  and rejects unknown values
+- `system prune --queue` accepts `managers`, `streaming`, `endpoints`,
+  `pipelines`, or `all` for runtime-state pruning, and rejects unknown values.
+  Migration: `tid-mappings` is no longer a prune queue group because
+  LivenessMonitor is the sole custodian of `weft.state.tid_mappings`; direct
+  `weft queue` operations remain the manual escape hatch
 - `system prune --task TID` filters retention pruning to one or more task IDs
 - `system prune --retention-class NAME` filters retention pruning to selected
   candidate classes
@@ -987,6 +989,7 @@ Current behavior:
 
 Implementation plan backlink:
 [`2026-05-07-runtime-state-pruning-plan.md`](../plans/2026-05-07-runtime-state-pruning-plan.md).
+[`2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md).
 
 ## Scope Boundary
 

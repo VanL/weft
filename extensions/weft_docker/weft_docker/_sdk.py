@@ -25,7 +25,7 @@ def load_docker_sdk() -> Any:
     return docker
 
 
-def docker_client_from_env(*, timeout: int = 10) -> Any:
+def docker_client_from_env(*, timeout: float = 10) -> Any:
     """Return a Docker SDK client configured from the ambient environment."""
 
     docker = load_docker_sdk()
@@ -33,7 +33,7 @@ def docker_client_from_env(*, timeout: int = 10) -> Any:
 
 
 @contextmanager
-def docker_client(*, timeout: int = 10) -> Iterator[Any]:
+def docker_client(*, timeout: float = 10) -> Iterator[Any]:
     """Yield a Docker SDK client and close it afterwards."""
 
     client = docker_client_from_env(timeout=timeout)

@@ -34,6 +34,10 @@ from weft.ext import (
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
+from weft.liveness.registry import (
+    RuntimeLiveness,
+    register_runtime_liveness_probe,
+)
 
 from ._options import MicrosandboxOptions, parse_options, parse_options_from_payload
 from ._runtime import (
@@ -545,10 +549,37 @@ def _safe_callback(
 
 
 _PLUGIN = MicrosandboxRunnerPlugin()
+_liveness_probe_registered = False
 
 
 def get_runner_plugin() -> RunnerPlugin:
+    _register_liveness_probe()
     return _PLUGIN
+
+
+def _register_liveness_probe() -> None:
+    global _liveness_probe_registered
+    if _liveness_probe_registered:
+        return
+    register_runtime_liveness_probe(
+        "microsandbox",
+        _microsandbox_runtime_liveness,
+    )
+    _liveness_probe_registered = True
+
+
+def _microsandbox_runtime_liveness(
+    handle: RunnerHandle,
+    timeout_seconds: float,
+) -> RuntimeLiveness:
+    if handle.runner != "microsandbox":
+        return "unknown"
+    result = MicrosandboxRuntime().liveness(handle.id, timeout=timeout_seconds)
+    if result == "live":
+        return "live"
+    if result == "stale":
+        return "stale"
+    return "unknown"
 
 
 __all__ = ["MicrosandboxRunner", "MicrosandboxRunnerPlugin", "get_runner_plugin"]

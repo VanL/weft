@@ -69,7 +69,7 @@ from weft.helpers import (
     pid_matches_create_time,
     terminate_process_tree,
 )
-from weft.runtime_liveness import runtime_liveness_from_registered_probe
+from weft.liveness.registry import runtime_liveness_from_registered_probe
 
 from .queue_wait import QueueChangeMonitor
 from .service_convergence import (

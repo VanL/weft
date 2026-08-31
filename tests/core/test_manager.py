@@ -39,13 +39,17 @@ from weft._constants import (
     CONTROL_STOP,
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
     INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
+    INTERNAL_HEARTBEAT_ENDPOINT_NAME,
+    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
@@ -94,6 +98,7 @@ from weft.core.tasks import (
     PipelineEdgeTask,
     PipelineTask,
 )
+from weft.core.tasks.liveness_monitor import LivenessMonitor
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import (
     IOSection,
@@ -836,6 +841,9 @@ def manager_setup(broker_env, unique_tid):
     ctrl_out = f"manager.{unique_tid}.ctrl_out"
     spec = make_manager_spec(unique_tid, inbox, ctrl_in, ctrl_out)
     manager = Manager(db_path, spec)
+    # Most tests using this fixture isolate existing Manager behavior. Tests for
+    # the independently enabled LivenessMonitor construct their own Manager.
+    manager._liveness_monitor_enabled = False
     yield manager, make_queue
     manager.stop(join=False)
     manager.cleanup()
@@ -1543,6 +1551,24 @@ def test_manager_launches_pipeline_task_for_reserved_internal_class(
     )
     assert manager._resolve_child_task_class(monitor_spec) is TaskMonitor
 
+    liveness_spec = TaskSpec.model_validate(
+        {
+            **child_spec.model_dump(mode="json"),
+            "name": "liveness-monitor-child",
+            "spec": {
+                "type": "function",
+                "function_target": "weft.tasks:noop",
+                "persistent": True,
+            },
+            "metadata": {
+                INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                    INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR
+                ),
+            },
+        }
+    )
+    assert manager._resolve_child_task_class(liveness_spec) is LivenessMonitor
+
 
 def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:
     manager, make_queue = manager_setup
@@ -1600,12 +1626,57 @@ def test_manager_enqueues_one_internal_task_monitor_spawn(
     )
 
 
+def test_manager_enqueues_liveness_monitor_when_independently_enabled(
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "1",
+        }
+    )
+    manager = Manager(
+        db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
+    )
+    try:
+        payloads = [
+            json.loads(item)
+            for item in drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+        ]
+    finally:
+        manager.cleanup()
+
+    assert {
+        payload[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY] for payload in payloads
+    } == {
+        INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
+    }
+    payload = next(
+        payload
+        for payload in payloads
+        if payload[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY]
+        == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR
+    )
+    assert payload["taskspec"]["name"] == "liveness-monitor"
+    assert payload["taskspec"]["spec"]["enable_process_title"] is False
+    assert payload["inbox_message"] is None
+    assert (
+        payload["taskspec"]["metadata"][INTERNAL_SERVICE_KEY_METADATA_KEY]
+        == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
+    )
+
+
 def test_manager_service_enqueue_forces_next_internal_queue_probe(
     broker_env,
     unique_tid,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     spec = make_manager_spec(unique_tid, idle_timeout=0.0)
     manager = Manager(db_path, spec, config=config)
     seen: list[str] = []
@@ -1641,7 +1712,9 @@ def test_manager_convergence_drains_pending_internal_spawn_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     spec = make_manager_spec(unique_tid, idle_timeout=0.0)
     manager = Manager(db_path, spec, config=config)
     internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
@@ -1693,6 +1766,7 @@ def test_manager_operational_log_emits_metadata_and_honors_level(
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "0",
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
             "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
             "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 0.1,
@@ -1736,6 +1810,7 @@ def test_manager_operational_log_off_is_silent(
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "0",
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
             "WEFT_MANAGER_SERVE_LOG_LEVEL": "off",
         }
@@ -1762,6 +1837,7 @@ def test_manager_operational_log_env_without_serve_active_is_silent(
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "0",
             "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
         }
     )
@@ -1821,7 +1897,9 @@ def test_manager_does_not_enqueue_task_monitor_when_disabled(
     unique_tid,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     spec = make_manager_spec(unique_tid, idle_timeout=0.0)
 
     manager = Manager(db_path, spec, config=config)
@@ -1840,6 +1918,11 @@ def test_manager_does_not_enqueue_task_monitor_when_disabled(
     assert not any(
         payload.get(INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY)
         == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+        for payload in payloads
+    )
+    assert not any(
+        payload.get(INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY)
+        == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR
         for payload in payloads
     )
 
@@ -1884,7 +1967,9 @@ def test_manager_processes_internal_spawn_before_public_spawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(
         db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
     )
@@ -1978,6 +2063,7 @@ def test_admission_capacity_uses_strict_lane_limits(
             used=used,
             max_connections=10,
             reserve_fraction=0.1,
+            liveness_monitor_enabled=False,
         )
         == expected
     )
@@ -1988,6 +2074,7 @@ def test_admission_capacity_applies_service_floor_and_fractional_ceiling() -> No
         used=0,
         max_connections=2,
         reserve_fraction=0.0,
+        liveness_monitor_enabled=False,
     ) == {
         "used": 0,
         "reserve": 3,
@@ -2001,8 +2088,30 @@ def test_admission_capacity_applies_service_floor_and_fractional_ceiling() -> No
             used=15,
             max_connections=20,
             reserve_fraction=0.21,
+            liveness_monitor_enabled=True,
         )["reserve"]
         == 5
+    )
+
+
+def test_admission_capacity_reserves_four_slots_for_liveness_monitor() -> None:
+    assert (
+        manager_mod._admission_capacity(
+            used=0,
+            max_connections=10,
+            reserve_fraction=0.0,
+            liveness_monitor_enabled=True,
+        )["reserve"]
+        == 4
+    )
+    assert (
+        manager_mod._admission_capacity(
+            used=0,
+            max_connections=10,
+            reserve_fraction=0.0,
+            liveness_monitor_enabled=False,
+        )["reserve"]
+        == 3
     )
 
 
@@ -2019,6 +2128,7 @@ def test_sqlite_admission_counts_only_live_latest_mappings(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
             }
         ),
@@ -2077,6 +2187,7 @@ def test_sqlite_admission_unions_launches_and_committed_children_once(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
             }
         ),
@@ -2129,6 +2240,7 @@ def test_sqlite_admission_memoizes_probe_verdicts(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
             }
         ),
@@ -2189,6 +2301,7 @@ def test_sqlite_admission_memo_invalidates_when_terminal_hint_changes(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
             }
         ),
@@ -2264,6 +2377,7 @@ def test_sqlite_admission_reconstructs_terminal_external_release_without_task_lo
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
             }
         ),
@@ -2289,6 +2403,7 @@ def test_manager_admission_retains_public_while_internal_can_launch(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
@@ -2337,6 +2452,7 @@ def test_manager_admission_retains_both_lanes_at_internal_limit(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
             }
         ),
@@ -2388,6 +2504,7 @@ def test_manager_admission_rechecks_retained_row_on_deadline_without_activity(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
             }
         ),
@@ -2451,6 +2568,7 @@ def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
@@ -2633,6 +2751,7 @@ def test_disabled_admission_dispatches_without_observing_backend(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 0,
             }
         ),
@@ -2677,6 +2796,7 @@ def test_postgres_admission_uses_real_connection_stats_and_retains_tight_row(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 4,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
@@ -2737,7 +2857,9 @@ def test_manager_stops_spawn_drain_after_child_launch_starts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(
         db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
     )
@@ -2784,7 +2906,9 @@ def test_custom_inbox_manager_does_not_consume_internal_spawn_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(
         db_path,
         make_manager_spec(unique_tid, inbox="custom.spawn.requests", idle_timeout=0.0),
@@ -2825,7 +2949,9 @@ def test_internal_spawn_launch_failure_keeps_internal_reserved_until_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(
         db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
     )
@@ -2879,7 +3005,9 @@ def test_internal_reserved_spawn_counts_as_pending_service(
     unique_tid,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(
         db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
     )
@@ -3053,6 +3181,58 @@ def test_manager_restarts_dead_task_monitor_after_backoff(
     manager._tick_internal_services()
 
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR in enqueued
+
+
+def test_manager_restarts_dead_liveness_monitor_after_backoff(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FakeProcess:
+        pid = None
+        exitcode = 1
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    tid = "liveness-monitor-child"
+    manager._task_monitor_enabled = False
+    manager._liveness_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._liveness_monitor_tid = tid
+    manager._task_monitor_restart_backoff_ns = 1_000_000_000
+    manager._child_processes[tid] = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        persistent=True,
+        internal_role=INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._cleanup_children()
+    manager._tick_internal_services()
+
+    assert manager._liveness_monitor_tid is None
+    assert INTERNAL_SERVICE_KEY_LIVENESS_MONITOR not in enqueued
+
+    manager._service_state(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR).next_allowed_ns = 0
+    manager._tick_internal_services()
+
+    assert INTERNAL_SERVICE_KEY_LIVENESS_MONITOR in enqueued
 
 
 def test_task_monitor_terminal_tracked_child_allows_restart(
@@ -3340,6 +3520,7 @@ def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
             WEFT_ADMISSION_MAX_CONNECTIONS: 2,
             WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "0",
         }
     )
     primary = Manager(db_path, make_manager_spec(unique_tid), config=config)
@@ -3525,7 +3706,9 @@ def test_manager_init_skips_initial_broker_probe_when_idle_disabled(
     manager = Manager(
         db_path,
         spec,
-        config=load_config({"WEFT_TASK_MONITOR_ENABLED": "0"}),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        ),
     )
     try:
         assert manager._last_broker_timestamp == 0
@@ -3592,7 +3775,9 @@ def test_manager_autostart_due_bypasses_convergence_throttle(
     db_path, _make_queue = broker_env
     autostart_dir = tmp_path / "autostart"
     autostart_dir.mkdir()
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     config["WEFT_AUTOSTART_TASKS"] = True
     config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
     manager = Manager(
@@ -3763,6 +3948,7 @@ def test_manager_fallback_wait_suppresses_only_blocked_spawn_source(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
             }
         ),
@@ -4589,6 +4775,106 @@ def test_task_monitor_duplicate_live_candidates_get_kill_signal(
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
 
 
+def test_liveness_monitor_duplicate_live_candidates_converge(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = False
+    manager._liveness_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    canonical_tid = "1777000000000000250"
+    duplicate_tid = "1777000000000000350"
+    for tid in (canonical_tid, duplicate_tid):
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+            tid=tid,
+            runtime_handle=_host_runtime_handle(os.getpid()),
+        )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_internal_services(force=True)
+
+    assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
+    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == encode_control_message(
+        CONTROL_KILL
+    )
+    assert INTERNAL_SERVICE_KEY_LIVENESS_MONITOR not in enqueued
+
+
+def test_internal_service_trust_preserves_endpoint_asymmetry() -> None:
+    def metadata(key: str, role: str, endpoint: str | None) -> dict[str, object]:
+        result: dict[str, object] = {
+            "internal": True,
+            "role": role,
+            INTERNAL_SERVICE_KEY_METADATA_KEY: key,
+        }
+        if endpoint is not None:
+            result[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = endpoint
+        return result
+
+    heartbeat = metadata(
+        INTERNAL_SERVICE_KEY_HEARTBEAT,
+        "heartbeat_service",
+        INTERNAL_HEARTBEAT_ENDPOINT_NAME,
+    )
+    assert (
+        Manager._trusted_internal_service_key(
+            heartbeat,
+            runtime_class=INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        )
+        == INTERNAL_SERVICE_KEY_HEARTBEAT
+    )
+    heartbeat[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = "wrong"
+    assert (
+        Manager._trusted_internal_service_key(
+            heartbeat,
+            runtime_class=INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        )
+        is None
+    )
+
+    task_monitor = metadata(
+        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        "task_monitor",
+        "legacy-compatible-endpoint",
+    )
+    assert (
+        Manager._trusted_internal_service_key(
+            task_monitor,
+            runtime_class=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        )
+        == INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+
+    liveness_monitor = metadata(
+        INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+        "liveness_monitor",
+        None,
+    )
+    assert (
+        Manager._trusted_internal_service_key(
+            liveness_monitor,
+            runtime_class=INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
+        )
+        == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
+    )
+    liveness_monitor[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = "forbidden"
+    assert (
+        Manager._trusted_internal_service_key(
+            liveness_monitor,
+            runtime_class=INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
+        )
+        is None
+    )
+
+
 def test_task_monitor_duplicate_manager_spawned_candidates_do_not_force_kill_raw_pid(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -4872,7 +5158,9 @@ def test_process_once_reconciles_internal_services_before_user_spawn_work(
     manager = Manager(
         db_path,
         make_manager_spec(unique_tid, idle_timeout=0.0),
-        config=load_config({"WEFT_TASK_MONITOR_ENABLED": False}),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": False, "WEFT_LIVENESS_MONITOR_ENABLED": False}
+        ),
     )
     try:
 
@@ -4970,7 +5258,9 @@ def test_process_once_launches_service_spawn_in_same_reconcile_turn(
     manager = Manager(
         db_path,
         make_manager_spec(unique_tid, idle_timeout=0.0),
-        config=load_config({"WEFT_TASK_MONITOR_ENABLED": False}),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": False, "WEFT_LIVENESS_MONITOR_ENABLED": False}
+        ),
     )
     drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
     manager._task_monitor_enabled = True
@@ -5247,7 +5537,9 @@ def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
     manager = Manager(
         db_path,
         spec,
-        config=load_config({"WEFT_TASK_MONITOR_ENABLED": False}),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": False, "WEFT_LIVENESS_MONITOR_ENABLED": False}
+        ),
     )
     try:
         now_ns = time.time_ns()
@@ -7568,7 +7860,9 @@ def test_manager_public_dispatch_steals_work_when_registry_ownership_is_unproved
     active_records: dict[str, dict[str, object]] | None,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     reserved_queue = make_queue(manager._queue_names["reserved"])
@@ -7617,7 +7911,9 @@ def test_manager_leadership_yields_when_only_public_backlog_is_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     reserved_queue = make_queue(manager._queue_names["reserved"])
@@ -7678,7 +7974,9 @@ def test_manager_leadership_requeues_reserved_public_work_before_yield(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     reserved_queue = make_queue(manager._queue_names["reserved"])
@@ -7746,7 +8044,9 @@ def test_manager_services_successfully_reserved_public_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     reserved_queue = make_queue(manager._queue_names["reserved"])
@@ -7803,7 +8103,9 @@ def test_manager_does_not_probe_inactive_public_spawn_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     reserved_queue = make_queue(manager._queue_names["reserved"])
@@ -7849,7 +8151,9 @@ def test_manager_pending_precheck_activates_public_spawn_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     reserved_queue = make_queue(manager._queue_names["reserved"])
@@ -7895,7 +8199,9 @@ def test_manager_idle_discovery_skips_reserved_queues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     reserved_names = {
         reserved_queue
@@ -7927,7 +8233,9 @@ def test_manager_spawn_drains_require_pending_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
     internal_reserved = make_queue(manager._queue_names["internal_reserved"])
@@ -7990,7 +8298,9 @@ def test_manager_cleanup_clears_own_internal_reserved_even_without_cleanup_on_ex
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     internal_reserved = make_queue(manager._queue_names["internal_reserved"])
     drain(internal_reserved)
@@ -8015,7 +8325,9 @@ def test_manager_deletes_stale_internal_reserved_for_inactive_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     stale_tid = str(int(unique_tid) - 100)
     active_tid = str(int(unique_tid) + 100)
@@ -8056,7 +8368,9 @@ def test_manager_keeps_internal_reserved_when_manager_liveness_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     stale_tid = str(int(unique_tid) - 100)
     stale_reserved = make_queue(f"T{stale_tid}.internal_reserved")
@@ -8078,7 +8392,9 @@ def test_manager_service_convergence_advances_without_dispatch_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(
         db_path,
         make_manager_spec(unique_tid, idle_timeout=0.0),
@@ -8128,7 +8444,9 @@ def test_manager_self_registry_record_is_live_without_external_liveness_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     monkeypatch.setattr(
         manager_mod,

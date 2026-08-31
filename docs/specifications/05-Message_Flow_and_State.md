@@ -25,6 +25,8 @@ See also:
   [`07-System_Invariants.md`](07-System_Invariants.md)
 - implementation plan:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- liveness cleanup custody plan:
+  [`docs/plans/2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md)
 - related service-health convergence plan:
   [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
 - related manager-service authority hardening plan:
@@ -410,6 +412,24 @@ TaskMonitor heartbeat wake -> T{monitor_tid}.inbox -> bounded processor cycle
 manager serve operational events -> process stderr/stdout only
 ```
 
+LivenessMonitor adds a periodic reaper flow, not a request/reply service:
+
+```text
+periodic due time -> latest tid-mapping row / runtime generation
+                  -> bounded host or extension probe worker
+                  -> reactor commits in-memory observation and deadline
+                  -> policy: retain, or exact-delete the mapping row
+```
+
+Discovery uses one generator-based startup replay, then message-ID-cursor
+incremental reads, with periodic full reconciliation. There is one latest row
+and one due-heap entry per TID/generation. Missed intervals coalesce, and at
+most one probe per TID is in flight with token-plus-generation commit guards.
+Blocking inspection runs in bounded `ServiceTask` worker lanes; the reactor
+alone touches queues. First-slice constants are: enabled by default; 5-second
+interval; 300-second retirement timeout; 2-second cooperative budget;
+600-second reconciliation; eight lanes. Only the enabled flag is configurable.
+
 _Implementation mapping_: status and foreground-monitor projection in
 `weft/commands/system.py` and `weft/commands/task_monitor.py`; durable and
 external Monitor projection/restoration in `weft/core/monitor/store.py`,
@@ -497,8 +517,8 @@ Current rules:
   cleanup candidates. With the default `delete` mode it may delete exact
   rows selected by explicit bounded cleanup policies from supported Weft-owned
   cleanup queues. Those policies may delete malformed rows only from queues
-  whose schema is owned by Weft, such as `weft.log.tasks` and
-  `weft.state.tid_mappings`. With the built-in `report_only` mode it does
+  whose schema is owned by Weft, such as `weft.log.tasks`. TID mappings are
+  owned by LivenessMonitor. With the built-in `report_only` mode it does
   not delete, reserve, move, prune, reap, acknowledge, or unclaim rows. The
   `jsonl_then_delete` mode emits one `task_lifetime_report` JSONL record
   for each destructive policy-selected subject before exact deletion. If the
@@ -512,14 +532,14 @@ Current rules:
   deferred writes.
   Lifetime report records use `record_type=task_lifetime_report`,
   `schema_version=2`, deterministic `report_id`, `source_policy` constrained
-  to the five top-level cleanup policies, a `subject`, a top-level `taskspec`
+  to the four top-level cleanup policies, a `subject`, a top-level `taskspec`
   field, a baseline `lifetime` object, compact `monitor` provenance, and
   policy-specific `observations`. `taskspec` is populated whenever the policy
   has TaskSpec-shaped evidence and is `null` for inferred or state-only
   reports. For normal Monitor-store families, `taskspec` is derived from the
   collation row's TaskSpec summary and `monitor` carries the small Monitor-only
   context such as first/last/terminal message IDs and service classification.
-  For runtime-state and inferred cleanup policies, `monitor` carries the exact
+  For inferred cleanup policies, `monitor` carries the exact
   queue/message or queue-name evidence used by the policy. Records are lifetime
   reports, not delete audit records; they do not carry an `effect=delete`
   field. The external JSONL stream is at-least-once and downstream consumers
@@ -1185,56 +1205,42 @@ self-maintenance, and explicit operator commands for force and compaction:
   pass on a monotonic deadline (hourly by default): backend vacuum of claimed
   rows plus conservative runtime-state pruning of the
   managers/services/streaming/endpoints/pipelines groups with the foreground
-  defaults (`min_age` 3600s, newest row per key retained; tid-mappings stay
-  with the monitor's own per-cycle policy). Maintenance is gated by
+  defaults (`min_age` 3600s, newest row per key retained). TID mappings are
+  outside TaskMonitor maintenance custody. Maintenance is gated by
   `WEFT_TASK_MONITOR_MAINTENANCE` and its interval setting only;
   `WEFT_TASK_MONITOR_MODE` (including `report_only`) does not suppress it
 - there is no built-in age-based output sweeper in the current contract
+- `LivenessMonitor` is the sole deleter of `weft.state.tid_mappings`.
+  TaskMonitor has no per-cycle TID-mapping cleanup, and the `tid-mappings`
+  group of the runtime pruning engine and `weft system prune` does not exist.
+  One policy
+  module owns malformed, superseded, and newest-row deletability. Tasks remain
+  the only writers, and publication remains edge-triggered and append-only.
+  A newest non-terminal mapping row means "live, or not yet proven dead."
+  TaskMonitor's destruction-protection gate reads row presence plus live
+  service-registry evidence and performs no host or runtime probing. If
+  LivenessMonitor is down, rows persist and protection persists.
 - the supervised task monitor exists in the current contract. Its default
-  `delete` mode may delete exact message IDs selected by supported
-  Weft-owned cleanup paths. Runtime-state queues such as
-  `weft.state.tid_mappings` remain policy driven: within
-  `weft.state.tid_mappings`, the monitor's cleanup policy keeps the newest
-  row per mapping key (`full` TID) regardless of age unless that row's own
-  payload fails a liveness probe (the runtime handle's `(pid, create_time)`
-  pairs checked via `pid_matches_create_time`); superseded (non-newest) rows
-  for a key keep the existing age-only rule. Semantically equivalent mapping
-  rows remain distinct ordered snapshots. All but the greatest valid
-  message-ID row for a full TID are superseded and follow the existing
-  age-only rule; equivalence does not grant retention or weaken the newest
-  row's liveness gate. A cleanup-cycle exclusion for a TID protects only that
-  TID's greatest valid message-ID mapping row; it does not exempt superseded
-  mapping rows from age-only retention. There is no second liveness gate and
-  no registered-probe destruction rule: crashed external runners that never
-  published a terminal marker remain protected and retained, with
-  accumulation bounded only by crash rate. Candidate and exact-deletion
-  counts remain bounded by the configured cleanup batch size, but a protected
-  newest row is a skip rather than a FIFO stop. When a bounded head window
-  does not reach queue tail, TID-mapping cleanup must continue through the
-  aged queue prefix until it selects one candidate batch, reaches the
-  valid-row age boundary while still scanning for policy-deletable malformed
-  rows, or reaches queue tail. A head window containing only protected
-  newest rows cannot hide eligible superseded rows or be reported as cleanup
-  base. Full-queue newest-ID evidence remains required before any valid row
-  is classified as newest or superseded. The probe consults only
-  evidence carried in the row payload itself — no terminal-evidence lookup
-  and no Monitor collation-store reach from this policy — and a payload with
-  no probeable host PIDs (e.g. an external/non-host runtime handle) is
-  undecidable and therefore treated as live: undecidable means skip, never
-  delete. "Newest per key" is decided from full-queue evidence, never from
-  the bounded `WEFT_TASK_MONITOR_BATCH_SIZE` scan window alone: when the
-  window is truncated, the monitor runs a lightweight full-queue
-  newest-per-key pass so a superseded row whose newer sibling lies beyond
-  the window still gets age-only deletion instead of being misclassified as
-  a protected newest row (which would stall cleanup on that row
-  indefinitely). Catch-up waypoints for this policy are claimed only from
-  rows actually selected after the liveness gate, so a full window of
-  correctly protected rows converges at normal cadence rather than
-  hot-looping catch-up cycles with zero forward progress. This keeps a
-  plain task's liveness evidence intact for as long as
-  it runs, so endpoint resolution, runtime pruning, manager kill-pid
-  resolution, and the monitor's own destructive-slice safety checks (see
-  [OBS.13.7]) continue to see a live owner. `weft.log.tasks` is now
+  `delete` mode may delete exact message IDs selected by supported Weft-owned
+  cleanup paths. A task whose mapping row was retired republishes on its next
+  mapping edge. Post-disposal events clear the family's
+  `task_control_deleted_at_ns` so recreated queues re-enter normal terminal
+  cleanup. Without terminal lifecycle proof, plain `delete` mode
+  automatically removes only stale control queues and preserves pending
+  inbox, reserved, and unread outbox rows. Operators may later harvest those
+  rows through explicit task-local retention pruning with `--apply --force`
+  and its required archive. In `jsonl_then_delete` mode the pre-delete family
+  report adds `observations.task_local_salvage` with nested schema
+  `weft.task_local_salvage.v1`. Its `rows` are the first capped visible inbox,
+  reserved, and unread outbox rows ordered by `(message_id, role, queue)`;
+  each row carries queue, role, message ID, `utf-8+base64` body bytes,
+  original/retained byte counts, and a truncation boolean. The object also
+  carries total data-row count, total and per-role overflow counts, and
+  ctrl-in/ctrl-out visible row counts. Nested message IDs use integers in the
+  internal report and [SB-0.2] strings in external JSON. The complete object
+  participates in the existing report ID; the nested schema versions this
+  addition without changing the surrounding lifetime-report schema. Nothing
+  is ever auto-requeued. `weft.log.tasks` is now
   table driven when Monitor collation is enabled: the monitor scans visible
   rows in FIFO order up to `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT`, deletes
   malformed rows, folds valid rows into the Monitor table, and then deletes
@@ -1271,9 +1277,11 @@ self-maintenance, and explicit operator commands for force and compaction:
   selection, deferred-only detection, and Monitor-record probe gating): it
   schedules a dead-TID cleanup
   job only when at least one currently existing standard task-local queue is
-  eligible now. It selects standard stale `T{tid}.ctrl_in`,
-  `T{tid}.ctrl_out`, and `T{tid}.inbox` immediately, and selects standard
-  `T{tid}.outbox` and `T{tid}.reserved` only after the retention period.
+  eligible now. Without terminal lifecycle proof it selects only standard
+  stale `T{tid}.ctrl_in` and `T{tid}.ctrl_out`; inbox, reserved, and unread
+  outbox rows remain preserved for explicit archived forced pruning. With
+  terminal proof, existing retention and cleanup gates continue to govern the
+  standard task-local family.
   Manager-owned `T{manager_tid}.internal_reserved` queues are not standard
   task-local queues and are not selected by `task_local.dead_tid`. The active
   Manager owns those internal spawn reservations: it deletes its own
@@ -1290,13 +1298,14 @@ self-maintenance, and explicit operator commands for force and compaction:
   cached policy/store stats and `policy_progress` summaries so PONG can
   distinguish "ran and selected zero", "reached a bounded waypoint", "reached
   a base case for now", "deferred future work", and "blocked by an error".
-  The supervised monitor reports exactly five top-level cleanup policies:
+  The supervised monitor reports exactly four top-level cleanup policies:
   `task_log.retention` for retained raw task-log ingestion/deletion,
   `monitor_store.lifecycle` for durable store summary, repair, retirement, and
   orphan recovery work, `task_local.terminal_runtime` for terminal task-local
-  queue cleanup, `task_local.dead_tid` for name-derived dead-TID fallback
-  cleanup, and `runtime_state.retention` for monitor-owned runtime state
-  queues. Private cleanup phases may remain in reason counts or details, but
+  queue cleanup, and `task_local.dead_tid` for name-derived dead-TID fallback
+  cleanup. Runtime-state maintenance is reported only in the non-policy
+  `maintenance` block; LivenessMonitor mapping retention is reported by its
+  own service. Private cleanup phases may remain in reason counts or details, but
   they must not create additional `policy_progress[*].policy` identities.
   PONG must expose only cached progress and must not perform live cleanup
   scans or Monitor-store reads. The monitor must not delete active work,
@@ -1331,12 +1340,10 @@ live in `weft/core/pruning/`; Monitor durable collation lives in
 `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`, and
 `weft/core/monitor/collation.py`; monitor cycle wiring lives in
 `weft/core/monitor/task_monitor.py`; command rendering and CLI adaptation live in
-`weft/commands/prune.py`. The `weft.state.tid_mappings` cleanup
-policy (keep-newest-per-key + payload-liveness gating) lives in
-`weft/core/monitor/policies/tid_mapping.py`; the foreground self-maintenance
-mirror with the same keep-newest-per-key semantic (but no liveness gate,
-since it runs against managers/services/streaming/endpoints/pipelines
-groups, not tid-mappings) lives in `weft/core/pruning/runtime.py`.
+`weft/commands/prune.py`. The single `weft.state.tid_mappings` cleanup policy
+lives under `weft/liveness/`; its broker-aware executor is the peer task
+`weft/core/tasks/liveness_monitor.py`. TaskMonitor and the foreground pruning
+engine do not classify or delete that queue.
 
 ## Queue Management Patterns
 

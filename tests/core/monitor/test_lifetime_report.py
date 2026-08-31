@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
 from weft._constants import (
     TASK_MONITOR_CLEANUP_POLICY_NAMES,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
-    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
     TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
     TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
@@ -216,6 +216,78 @@ def test_lifetime_external_projection_is_non_mutating_and_preserves_identity() -
     assert restored["taskspec"]["opaque_message_id"] == 1779000000000000011
 
 
+def test_lifetime_salvage_projects_and_restores_nested_message_ids() -> None:
+    salvage = {
+        "schema": "weft.task_local_salvage.v1",
+        "rows": [
+            {
+                "queue": "T1779000000000000002.inbox",
+                "role": "inbox",
+                "message_id": 1779000000000000012,
+                "body_encoding": "utf-8+base64",
+                "body_b64": "eA==",
+                "original_bytes": 1,
+                "retained_bytes": 1,
+                "truncated": False,
+            }
+        ],
+        "total_data_rows": 1,
+        "overflow_count": 0,
+        "overflow_by_role": {"inbox": 0, "reserved": 0, "outbox": 0},
+        "control_row_counts": {"ctrl_in": 0, "ctrl_out": 0},
+    }
+    report = build_inferred_tid_lifetime_report(
+        tid="1779000000000000002",
+        monitor_tid="1779000000000000999",
+        emitted_at_ns=1779000000000000100,
+        source_policy=TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
+        report_kind="dead_tid_runtime_cleanup",
+        close_reason="dead_tid_runtime_cleanup",
+        observations={"task_local_salvage": salvage},
+    )
+
+    projected = project_lifetime_report_for_external_json(report)
+    restored = restore_lifetime_report_from_external_json(projected)
+
+    assert projected["observations"]["task_local_salvage"]["rows"][0][
+        "message_id"
+    ] == "1779000000000000012"
+    assert restored["observations"]["task_local_salvage"] == salvage
+
+
+def test_lifetime_salvage_row_set_participates_in_report_identity() -> None:
+    def report(message_id: int) -> dict[str, Any]:
+        return build_inferred_tid_lifetime_report(
+            tid="1779000000000000002",
+            monitor_tid="1779000000000000999",
+            emitted_at_ns=1779000000000000100,
+            source_policy=TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
+            report_kind="dead_tid_runtime_cleanup",
+            close_reason="dead_tid_runtime_cleanup",
+            observations={
+                "task_local_salvage": {
+                    "schema": "weft.task_local_salvage.v1",
+                    "rows": [{"message_id": message_id}],
+                    "total_data_rows": 1,
+                    "overflow_count": 0,
+                    "overflow_by_role": {
+                        "inbox": 0,
+                        "reserved": 0,
+                        "outbox": 0,
+                    },
+                    "control_row_counts": {"ctrl_in": 0, "ctrl_out": 0},
+                }
+            },
+        )
+
+    first = report(1779000000000000012)
+    retry = report(1779000000000000012)
+    changed = report(1779000000000000013)
+
+    assert first["report_id"] == retry["report_id"]
+    assert first["report_id"] != changed["report_id"]
+
+
 @pytest.mark.parametrize(
     "source_policy",
     [
@@ -223,7 +295,6 @@ def test_lifetime_external_projection_is_non_mutating_and_preserves_identity() -
         TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
         TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
         TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
-        TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
     ],
 )
 def test_candidate_lifetime_report_uses_common_policy_shape(

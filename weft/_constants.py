@@ -590,6 +590,24 @@ TASK_CLEANUP_TIMEOUT_SECONDS: Final[float] = 2.0
 TASK_REACTOR_WAKEUP_MAX_SECONDS: Final[float] = 0.05
 """Maximum wait chunk while task worker lanes may produce local reactor results."""
 
+LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
+"""Cooperative budget passed to runtime-specific liveness probes."""
+
+LIVENESS_PROBE_INTERVAL_SECONDS: Final[float] = 5.0
+"""Periodic cadence for retained TID runtime probes."""
+
+LIVENESS_UNKNOWN_TIMEOUT_SECONDS: Final[float] = 300.0
+"""Attempted-unknown duration before a retained mapping may be retired."""
+
+LIVENESS_MONITOR_MAX_IN_FLIGHT_PROBES: Final[int] = 8
+"""Maximum concurrent broker-free liveness probe workers."""
+
+LIVENESS_PROBE_WORKER_NAME: Final[str] = "liveness.probes"
+"""ServiceTask worker-lane name for broker-free liveness probes."""
+
+LIVENESS_FULL_RECONCILE_INTERVAL_SECONDS: Final[float] = 600.0
+"""Cadence for a full retained TID mapping index reconciliation."""
+
 TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS: Final[float] = 1.0
 """Minimum interval between broad inactive-queue discovery probes."""
 
@@ -763,7 +781,7 @@ MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES: Final[int] = 128
 """Maximum public spawn requests drained before yielding a manager turn."""
 
 ADMISSION_SERVICE_RESERVE_SLOTS: Final[int] = 3
-"""Minimum modeled room for Manager, TaskMonitor, and Heartbeat."""
+"""Base modeled room for Manager, TaskMonitor, and Heartbeat."""
 
 MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
 """Delay before rechecking a blocked Manager admission source."""
@@ -970,20 +988,22 @@ TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME: Final[str] = (
 TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID: Final[str] = "task_local.dead_tid"
 """TaskMonitor cleanup policy for proven-dead task-local TIDs."""
 
-TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION: Final[str] = "runtime_state.retention"
-"""TaskMonitor cleanup policy for monitor-owned runtime state retention."""
-
 TASK_MONITOR_CLEANUP_POLICY_NAMES: Final[tuple[str, ...]] = (
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
     TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
-    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
 )
 """The complete set of TaskMonitor top-level cleanup policy names."""
 
 TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT: Final[int] = 1000
 """Newest manager-authored task_spawned refs retained per manager TID."""
+
+TASK_MONITOR_SALVAGE_MAX_ROW_BYTES: Final[int] = 65_536
+"""Maximum body bytes retained for one task-local salvage row."""
+
+TASK_MONITOR_SALVAGE_MAX_ROWS: Final[int] = 256
+"""Maximum task-local data rows retained in one family salvage report."""
 
 TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED: Final[str] = "task_log_scan_limit_reached"
 """TaskMonitor task-log cleanup stop reason for scan limit exhaustion."""
@@ -994,7 +1014,10 @@ TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED: Final[str] = (
 """TaskMonitor task-log cleanup stop reason for selection limit exhaustion."""
 
 WEFT_TASK_MONITOR_ENABLED_DEFAULT: Final[bool] = True
-"""Default for manager supervision of the internal task monitor."""
+"""Default for manager supervision of the TaskMonitor service."""
+
+LIVENESS_MONITOR_ENABLED_DEFAULT: Final[bool] = True
+"""Default for independent manager supervision of LivenessMonitor."""
 
 WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT: Final[int] = 300
 """Default heartbeat wake interval for the supervised task monitor."""
@@ -1140,9 +1163,8 @@ TASK_MONITOR_MAINTENANCE_RUNTIME_PRUNE_QUEUE_GROUPS: Final[tuple[str, ...]] = (
 )
 """Runtime-state queue groups pruned by the monitor maintenance slice.
 
-Explicitly excludes ``tid-mappings``: the monitor's own per-cycle
-runtime-state policy already prunes that queue at a different min-age
-(weft/core/monitor/cleanup.py), and running both would double-scan it.
+Explicitly excludes ``tid-mappings`` because LivenessMonitor is that queue's
+sole cleanup custodian. TaskMonitor maintenance must not classify or delete it.
 """
 
 TASK_MONITOR_MAINTENANCE_PARTIAL_BATCH_ERROR_PREFIX: Final[str] = "batch delete removed"
@@ -1407,9 +1429,6 @@ RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS: Final[float] = 3600.0
 RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY: Final[int] = 1
 """Default newest runtime-state rows to preserve for each logical key."""
 
-RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING: Final[str] = "superseded_tid_mapping"
-"""Runtime-prune classification for older duplicate TID mapping rows."""
-
 RUNTIME_PRUNE_CLASS_STALE_MANAGER: Final[str] = "stale_manager_registry"
 """Runtime-prune classification for stale active manager registry rows."""
 
@@ -1475,7 +1494,6 @@ WEFT_STATE_QUEUE_PREFIX: Final[str] = "weft.state."
 """Prefix for runtime-only state queues excluded from system dumps."""
 
 RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS: Final[Mapping[str, str]] = {
-    "tid-mappings": WEFT_TID_MAPPINGS_QUEUE,
     "managers": WEFT_SERVICES_REGISTRY_QUEUE,
     "services": WEFT_SERVICES_REGISTRY_QUEUE,
     "streaming": WEFT_STREAMING_SESSIONS_QUEUE,
@@ -1627,6 +1645,9 @@ INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT: Final[str] = "heartbeat"
 INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR: Final[str] = "task_monitor"
 """Reserved internal runtime-owned class selector for TaskMonitor."""
 
+INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR: Final[str] = "liveness_monitor"
+"""Reserved internal runtime-owned class selector for LivenessMonitor."""
+
 INTERNAL_HEARTBEAT_ENDPOINT_NAME: Final[str] = "_weft.heartbeat"
 """Reserved runtime endpoint claimed by the built-in heartbeat service."""
 
@@ -1663,18 +1684,29 @@ INTERNAL_SERVICE_KEY_HEARTBEAT: Final[str] = "_weft.service.heartbeat"
 INTERNAL_SERVICE_KEY_TASK_MONITOR: Final[str] = "_weft.service.task_monitor"
 """Manager-supervised singleton key for the built-in task monitor service."""
 
+INTERNAL_SERVICE_KEY_LIVENESS_MONITOR: Final[str] = "_weft.service.liveness_monitor"
+"""Manager-supervised singleton key for the built-in liveness monitor service."""
+
 INTERNAL_SERVICE_ROLES: Final[frozenset[str]] = frozenset(
-    ("heartbeat_service", "task_monitor")
+    ("heartbeat_service", "task_monitor", "liveness_monitor")
 )
 """Task roles classified as internal service lifecycle rows."""
 
 INTERNAL_SERVICE_KEYS: Final[frozenset[str]] = frozenset(
-    (INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR)
+    (
+        INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+    )
 )
 """Manager-supervised singleton service keys for built-in internal services."""
 
 INTERNAL_SERVICE_RUNTIME_CLASSES: Final[frozenset[str]] = frozenset(
-    (INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT, INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR)
+    (
+        INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
+    )
 )
 """Runtime task classes classified as internal service lifecycle rows."""
 
@@ -1863,10 +1895,15 @@ WEFT_MANAGER_LIFETIME_TIMEOUT: Final[float] = 600.0
 STATUS_RUNTIMELESS_STALE_AFTER_SECONDS: Final[float] = WEFT_MANAGER_LIFETIME_TIMEOUT * 2
 """Age after which a running host task with no runtime proof is treated as stale."""
 
-TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS: Final[float] = (
+TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS: Final[float] = (
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 2
 )
-"""Default minimum age before TaskMonitor deletes stale TID mapping rows."""
+"""Minimum age before TaskMonitor considers record-less task-local cleanup."""
+
+LIVENESS_MAPPING_MIN_AGE_SECONDS: Final[float] = (
+    STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 2
+)
+"""Minimum age before LivenessMonitor may retire a TID mapping row."""
 
 WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
@@ -2898,6 +2935,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_TASK_MONITOR_ENABLED_DEFAULT,
             parser=_parse_bool,
         ),
+        "WEFT_LIVENESS_MONITOR_ENABLED": _load_weft_env_value(
+            "WEFT_LIVENESS_MONITOR_ENABLED",
+            default=LIVENESS_MONITOR_ENABLED_DEFAULT,
+            parser=_parse_bool,
+        ),
         "WEFT_TASK_MONITOR_INTERVAL_SECONDS": _load_weft_env_value(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS",
             default=WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
@@ -3203,6 +3245,10 @@ _WEFT_OVERRIDE_RULES: Final[dict[str, _OverrideRule]] = {
         parser=_parse_bool,
     ),
     "WEFT_TASK_MONITOR_ENABLED": _OverrideRule(
+        kind=_OverrideKind.BOOLISH,
+        parser=_parse_bool,
+    ),
+    "WEFT_LIVENESS_MONITOR_ENABLED": _OverrideRule(
         kind=_OverrideKind.BOOLISH,
         parser=_parse_bool,
     ),

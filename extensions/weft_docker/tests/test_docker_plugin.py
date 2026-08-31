@@ -18,8 +18,8 @@ from weft_docker import _sdk as docker_sdk
 from weft_docker import plugin
 from weft_docker.plugin import get_runner_plugin
 
-from weft import runtime_liveness
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
+from weft.liveness import registry as liveness_registry
 
 pytestmark = [pytest.mark.shared]
 
@@ -230,13 +230,12 @@ def _fake_docker_client() -> Iterator[object]:
 def test_docker_plugin_registers_runtime_liveness_probes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_liveness, "_runtime_liveness_probes", {})
+    monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
     monkeypatch.setattr(plugin, "_liveness_probes_registered", False)
 
     get_runner_plugin()
 
-    assert "docker" in runtime_liveness._runtime_liveness_probes
-    assert "manager-supervisor" in runtime_liveness._runtime_liveness_probes
+    assert set(liveness_registry._runtime_liveness_probes) == {"docker"}
 
 
 def test_docker_runtime_liveness_reports_running_container(
@@ -251,7 +250,7 @@ def test_docker_runtime_liveness_reports_running_container(
         lambda client, runtime_id, *, fallback_id=None: _FakeContainer(running=True),
     )
 
-    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "live"
+    assert plugin._docker_runtime_liveness(_docker_manager_handle(), 1.25) == "live"
 
 
 def test_docker_runtime_liveness_reports_missing_container(
@@ -266,7 +265,7 @@ def test_docker_runtime_liveness_reports_missing_container(
         lambda client, runtime_id, *, fallback_id=None: None,
     )
 
-    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "stale"
+    assert plugin._docker_runtime_liveness(_docker_manager_handle(), 1.25) == "stale"
 
 
 def test_docker_runtime_liveness_reports_stopped_container(
@@ -281,10 +280,10 @@ def test_docker_runtime_liveness_reports_stopped_container(
         lambda client, runtime_id, *, fallback_id=None: _FakeContainer(running=False),
     )
 
-    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "stale"
+    assert plugin._docker_runtime_liveness(_docker_manager_handle(), 1.25) == "stale"
 
 
-def test_docker_runtime_liveness_reports_unknown_when_docker_unavailable(
+def test_docker_runtime_liveness_does_not_complete_when_sdk_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -293,10 +292,11 @@ def test_docker_runtime_liveness_reports_unknown_when_docker_unavailable(
         lambda: (_ for _ in ()).throw(RuntimeError("docker unavailable")),
     )
 
-    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "unknown"
+    with pytest.raises(RuntimeError, match="docker unavailable"):
+        plugin._docker_runtime_liveness(_docker_manager_handle(), 1.25)
 
 
-def test_docker_runtime_liveness_reports_unknown_on_docker_api_failure(
+def test_docker_runtime_liveness_does_not_complete_on_docker_api_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     @contextmanager
@@ -307,7 +307,8 @@ def test_docker_runtime_liveness_reports_unknown_on_docker_api_failure(
 
     monkeypatch.setattr(plugin, "_docker_client", failing_client)
 
-    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "unknown"
+    with pytest.raises(APIError, match="docker unavailable"):
+        plugin._docker_runtime_liveness(_docker_manager_handle(), 1.25)
 
 
 def test_docker_runtime_liveness_propagates_unexpected_client_defect(
@@ -322,7 +323,7 @@ def test_docker_runtime_liveness_propagates_unexpected_client_defect(
     monkeypatch.setattr(plugin, "_docker_client", failing_client)
 
     with pytest.raises(RuntimeError, match="client defect"):
-        plugin._docker_runtime_liveness(_docker_manager_handle())
+        plugin._docker_runtime_liveness(_docker_manager_handle(), 1.25)
 
 
 def test_docker_runtime_liveness_ignores_non_docker_handle() -> None:
@@ -335,7 +336,28 @@ def test_docker_runtime_liveness_ignores_non_docker_handle() -> None:
         metadata={},
     )
 
-    assert plugin._docker_runtime_liveness(handle) == "unknown"
+    assert plugin._docker_runtime_liveness(handle, 1.25) == "unknown"
+
+
+def test_docker_runtime_liveness_passes_cooperative_budget_to_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[float] = []
+
+    @contextmanager
+    def fake_client(*, timeout: float) -> Iterator[object]:
+        observed.append(timeout)
+        yield object()
+
+    monkeypatch.setattr(plugin, "_docker_client", fake_client)
+    monkeypatch.setattr(
+        plugin,
+        "_lookup_container",
+        lambda client, runtime_id, *, fallback_id=None: _FakeContainer(running=True),
+    )
+
+    assert plugin._docker_runtime_liveness(_docker_manager_handle(), 0.75) == "live"
+    assert observed == [0.75]
 
 
 def test_docker_runner_accepts_docker_enforced_limits_and_rejects_unsupported_ones() -> (
@@ -1235,7 +1257,7 @@ def test_wait_for_container_runtime_start_propagates_unexpected_reload_defect() 
         )
 
 
-def test_lookup_container_treats_docker_list_failure_as_missing() -> None:
+def test_lookup_container_does_not_treat_docker_list_failure_as_missing() -> None:
     class FakeContainers:
         def get(self, runtime_id: str) -> object:
             del runtime_id
@@ -1247,7 +1269,8 @@ def test_lookup_container_treats_docker_list_failure_as_missing() -> None:
 
     client = type("FakeClient", (), {"containers": FakeContainers()})()
 
-    assert plugin._lookup_container(client, "container-789") is None
+    with pytest.raises(APIError, match="list unavailable"):
+        plugin._lookup_container(client, "container-789")
 
 
 def test_lookup_container_propagates_unexpected_list_defect() -> None:
@@ -1330,12 +1353,13 @@ def test_docker_control_operations_propagate_unexpected_defects(
         operation(object())
 
 
-def test_docker_container_liveness_preserves_sdk_failure_fallback() -> None:
+def test_docker_container_liveness_does_not_complete_on_sdk_failure() -> None:
     class FakeContainer:
         def reload(self) -> None:
             raise APIError("reload unavailable")
 
-    assert plugin._docker_container_liveness(FakeContainer()) == "unknown"
+    with pytest.raises(APIError, match="reload unavailable"):
+        plugin._docker_container_liveness(FakeContainer())
 
 
 def test_docker_container_liveness_propagates_unexpected_reload_defect() -> None:

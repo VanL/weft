@@ -26,8 +26,10 @@ from weft._constants import (
     BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+    INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     LIVE_SERVICE_STATUSES,
     NON_LIVE_RUNTIME_STATES,
@@ -531,7 +533,7 @@ def _is_internal_service_record(record: Mapping[str, Any]) -> bool:
     if metadata.get("internal") is True:
         return True
     role = metadata.get("role")
-    if role in {"task_monitor", "heartbeat_service"}:
+    if role in {"task_monitor", "heartbeat_service", "liveness_monitor"}:
         return True
     service_key = metadata.get("_weft_service_key")
     return isinstance(service_key, str) and service_key.startswith("_weft.service.")
@@ -542,11 +544,17 @@ def _service_display_name(key: str) -> str:
         return "heartbeat-service"
     if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
         return "task-monitor"
+    if key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR:
+        return "liveness-monitor"
     return key.rsplit(".", 1)[-1] or key
 
 
-def _known_internal_service_keys() -> tuple[str, str]:
-    return (INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR)
+def _known_internal_service_keys() -> tuple[str, ...]:
+    return (
+        INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+    )
 
 
 def _service_key_from_spawn_payload(payload: Mapping[str, Any]) -> str | None:
@@ -561,6 +569,8 @@ def _service_key_from_spawn_payload(payload: Mapping[str, Any]) -> str | None:
         return INTERNAL_SERVICE_KEY_HEARTBEAT
     if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
         return INTERNAL_SERVICE_KEY_TASK_MONITOR
+    if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR:
+        return INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
     return None
 
 
@@ -1166,10 +1176,15 @@ def _collect_internal_spawn_queue_evidence(
 
 def _service_enabled(ctx: WeftContext, key: str) -> bool:
     task_monitor_enabled = bool(ctx.config.get("WEFT_TASK_MONITOR_ENABLED", True))
+    liveness_monitor_enabled = bool(
+        ctx.config.get("WEFT_LIVENESS_MONITOR_ENABLED", True)
+    )
     if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
         return task_monitor_enabled
     if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
-        return task_monitor_enabled
+        return task_monitor_enabled or liveness_monitor_enabled
+    if key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR:
+        return liveness_monitor_enabled
     return False
 
 

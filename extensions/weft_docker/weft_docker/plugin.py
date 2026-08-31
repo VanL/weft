@@ -38,7 +38,7 @@ from weft.ext import (
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
-from weft.runtime_liveness import (
+from weft.liveness.registry import (
     RuntimeLiveness,
     register_runtime_liveness_probe,
 )
@@ -726,32 +726,28 @@ def _register_liveness_probes() -> None:
     if _liveness_probes_registered:
         return
     register_runtime_liveness_probe("docker", _docker_runtime_liveness)
-    register_runtime_liveness_probe("manager-supervisor", _docker_runtime_liveness)
     _liveness_probes_registered = True
 
 
-def _docker_runtime_liveness(handle: RunnerHandle) -> RuntimeLiveness:
+def _docker_runtime_liveness(
+    handle: RunnerHandle,
+    timeout_seconds: float,
+) -> RuntimeLiveness:
     if not _handle_is_docker_backed(handle):
         return "unknown"
     runtime_id, fallback_id = _docker_liveness_identifiers(handle)
     if runtime_id is None:
         return "unknown"
-    try:
-        docker = _load_docker_sdk()
-    except RuntimeError:  # pragma: no cover - optional extension availability
-        return "unknown"
-    try:
-        with _docker_client(timeout=2) as client:
-            container = _lookup_container(
-                client,
-                runtime_id,
-                fallback_id=fallback_id,
-            )
-            if container is None:
-                return "stale"
-            return _docker_container_liveness(container)
-    except docker.errors.DockerException:  # pragma: no cover - Docker availability
-        return "unknown"
+    _load_docker_sdk()
+    with _docker_client(timeout=timeout_seconds) as client:
+        container = _lookup_container(
+            client,
+            runtime_id,
+            fallback_id=fallback_id,
+        )
+        if container is None:
+            return "stale"
+        return _docker_container_liveness(container)
 
 
 def _handle_is_docker_backed(handle: RunnerHandle) -> bool:
@@ -788,11 +784,7 @@ def _docker_liveness_identifiers(handle: RunnerHandle) -> tuple[str | None, str 
 
 
 def _docker_container_liveness(container: Any) -> RuntimeLiveness:
-    docker = _load_docker_sdk()
-    try:
-        container.reload()
-    except docker.errors.DockerException:
-        return "unknown"
+    container.reload()
     attrs = getattr(container, "attrs", None)
     state = attrs.get("State") if isinstance(attrs, Mapping) else None
     if not isinstance(state, Mapping):
@@ -1199,10 +1191,7 @@ def _lookup_container(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-206] exception
     list_method = getattr(client.containers, "list", None)
     if not callable(list_method):
         return None
-    try:
-        candidates = list_method(all=True, filters={"name": runtime_id})
-    except docker.errors.DockerException:  # pragma: no cover - Docker API fallback
-        return None
+    candidates = list_method(all=True, filters={"name": runtime_id})
     for candidate in candidates:
         attrs = getattr(candidate, "attrs", None)
         if isinstance(attrs, Mapping):
@@ -1282,7 +1271,7 @@ def _cleanup_process(process: subprocess.Popen[str]) -> None:
 
 
 @contextmanager
-def _docker_client(*, timeout: int = 10) -> Iterator[Any]:
+def _docker_client(*, timeout: float = 10) -> Iterator[Any]:
     with shared_docker_client(timeout=timeout) as client:
         yield client
 

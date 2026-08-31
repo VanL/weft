@@ -224,6 +224,7 @@ def terminal_task_runtime_queue_cleanup_plan(
     *,
     now_ns: int,
     retention_seconds: float,
+    preserve_data_without_terminal_proof: bool = False,
 ) -> TerminalTaskRuntimeQueueCleanupPlan | None:
     """Return standard task-local queues eligible for terminal cleanup.
 
@@ -239,6 +240,14 @@ def terminal_task_runtime_queue_cleanup_plan(
     control_queue_names = standard_task_control_queue_names(record)
     if control_queue_names is None:
         return None
+    if preserve_data_without_terminal_proof and not record.terminal_seen:
+        return TerminalTaskRuntimeQueueCleanupPlan(
+            queue_names=control_queue_names,
+            control_queue_names=control_queue_names,
+            inbox_queue_names=(),
+            outbox_queue_names=(),
+            retention_eligible=False,
+        )
     retention_message_id = (
         record.terminal_message_id
         if record.terminal_message_id is not None
@@ -395,6 +404,7 @@ def runtime_dead_task_record_probe_tids(
     min_age_seconds: float,
     retention_seconds: float,
     active_tids: set[str],
+    preserve_data_without_terminal_proof: bool = False,
 ) -> tuple[str, ...]:
     """Return actionable queue-derived dead TIDs needing Monitor-record probes."""
 
@@ -406,8 +416,13 @@ def runtime_dead_task_record_probe_tids(
         min_age_seconds=min_age_seconds,
     )
     queue_name_set = set(queue_name_tuple)
+    suffixes_by_tid = _task_queue_suffixes_by_tid(queue_name_tuple)
     probe_tids: list[str] = []
     for tid in dead_selection.selected_tids:
+        if preserve_data_without_terminal_proof and _has_data_bearing_only_work(
+            suffixes_by_tid.get(tid, set())
+        ):
+            continue
         plan = dead_task_queue_cleanup_plan(
             tid,
             now_ns=now_ns,
@@ -444,9 +459,24 @@ def _has_retention_deferred_only_work(
 
     if is_old_enough(int(tid), now_ns, retention_seconds):
         return False
-    retention_suffixes = {QUEUE_OUTBOX_SUFFIX, QUEUE_RESERVED_SUFFIX}
-    stale_suffixes = {QUEUE_CTRL_IN_SUFFIX, QUEUE_CTRL_OUT_SUFFIX, QUEUE_INBOX_SUFFIX}
+    retention_suffixes = {
+        QUEUE_INBOX_SUFFIX,
+        QUEUE_OUTBOX_SUFFIX,
+        QUEUE_RESERVED_SUFFIX,
+    }
+    stale_suffixes = {QUEUE_CTRL_IN_SUFFIX, QUEUE_CTRL_OUT_SUFFIX}
     return bool(suffixes & retention_suffixes) and not bool(suffixes & stale_suffixes)
+
+
+def _has_data_bearing_only_work(suffixes: set[str]) -> bool:
+    """Return whether only queues preserved without terminal proof remain."""
+
+    data_bearing_suffixes = {
+        QUEUE_INBOX_SUFFIX,
+        QUEUE_OUTBOX_SUFFIX,
+        QUEUE_RESERVED_SUFFIX,
+    }
+    return bool(suffixes) and suffixes <= data_bearing_suffixes
 
 
 def select_runtime_dead_task_cleanup_candidates(
@@ -459,6 +489,7 @@ def select_runtime_dead_task_cleanup_candidates(
     active_tids: set[str],
     task_record: Callable[[str], MonitorTaskCollationRecord | None],
     deadline_reached: Callable[[], bool],
+    preserve_data_without_terminal_proof: bool = False,
 ) -> RuntimeDeadTaskCleanupSelection:
     """Select actionable dead-task queue cleanup candidates.
 
@@ -484,6 +515,11 @@ def select_runtime_dead_task_cleanup_candidates(
 
     for tid in dead_selection.selected_tids:
         suffixes = suffixes_by_tid.get(tid, set())
+        if preserve_data_without_terminal_proof and _has_data_bearing_only_work(
+            suffixes
+        ):
+            deferred_retention += 1
+            continue
         if _has_retention_deferred_only_work(
             tid=tid,
             suffixes=suffixes,

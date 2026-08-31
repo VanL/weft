@@ -2,7 +2,7 @@
 
 Status: draft
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-5], Cleanup Boundary; docs/specifications/07-System_Invariants.md [OBS.6], [OBS.6a], [OBS.13.7]; docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.4]; docs/specifications/00-Quick_Reference.md (queue table)
-Superseded by: none
+Superseded by: [2026-08-29-liveness-monitor-plan.md](./2026-08-29-liveness-monitor-plan.md)
 
 Class: 5 — spec-changing, with risky triggers (queue-name contract change,
 cleanup-lifecycle change, destructive-cleanup custody move, durable-spine

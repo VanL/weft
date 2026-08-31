@@ -270,6 +270,107 @@ def test_describe_reports_optional_configuration_failure(
     assert "sensitive" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("running", "live"), ("stopped", "stale"), ("starting", "unknown")],
+)
+def test_liveness_maps_runtime_status_with_cooperative_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    expected: str,
+) -> None:
+    observed_budgets: list[float] = []
+
+    class Refreshed:
+        pass
+
+    Refreshed.status = status
+
+    class Handle:
+        @staticmethod
+        async def refresh() -> Refreshed:
+            return Refreshed()
+
+    class SandboxAPI:
+        @staticmethod
+        async def get(sandbox_id: str) -> Handle:
+            assert sandbox_id == "sandbox-id"
+            return Handle()
+
+    class SDK:
+        Sandbox = SandboxAPI
+
+    original_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable: Awaitable[Any], timeout: float) -> Any:
+        observed_budgets.append(timeout)
+        return await original_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SDK())
+    monkeypatch.setattr(asyncio, "wait_for", recording_wait_for)
+
+    result = asyncio.run(
+        MicrosandboxRuntime()._liveness_async("sandbox-id", timeout=0.75)
+    )
+
+    assert result == expected
+    assert observed_budgets == [0.75]
+
+
+def test_liveness_distinguishes_missing_runtime_from_query_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SandboxNotFoundError(Exception):
+        pass
+
+    class SandboxAPI:
+        failure: Exception = SandboxNotFoundError("missing")
+
+        @classmethod
+        async def get(cls, sandbox_id: str) -> object:
+            assert sandbox_id == "sandbox-id"
+            raise cls.failure
+
+    class SDK:
+        Sandbox = SandboxAPI
+
+    SDK.SandboxNotFoundError = SandboxNotFoundError
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SDK())
+
+    runtime = MicrosandboxRuntime()
+    assert asyncio.run(runtime._liveness_async("sandbox-id", timeout=0.75)) == "stale"
+
+    SandboxAPI.failure = OSError("runtime unavailable")
+    with pytest.raises(OSError, match="runtime unavailable"):
+        asyncio.run(runtime._liveness_async("sandbox-id", timeout=0.75))
+
+
+def test_liveness_timeout_is_an_incomplete_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SandboxAPI:
+        @staticmethod
+        async def get(sandbox_id: str) -> object:
+            assert sandbox_id == "sandbox-id"
+            return object()
+
+    class SDK:
+        Sandbox = SandboxAPI
+
+    async def time_out(awaitable: Awaitable[Any], timeout: float) -> Any:
+        assert timeout == 0.75
+        awaitable.close()
+        raise TimeoutError("probe budget expired")
+
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SDK())
+    monkeypatch.setattr(asyncio, "wait_for", time_out)
+
+    with pytest.raises(TimeoutError, match="probe budget expired"):
+        asyncio.run(
+            MicrosandboxRuntime()._liveness_async("sandbox-id", timeout=0.75)
+        )
+
+
 def test_runtime_builds_network_volume_and_rlimit_from_real_sdk(tmp_path: Path) -> None:
     sdk = _sdk()
     source = tmp_path / "input"

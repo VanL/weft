@@ -132,6 +132,11 @@ class MicrosandboxRuntime:
     def describe(self, sandbox_id: str) -> MicrosandboxDescription | None:
         return asyncio.run(self._describe_async(sandbox_id))
 
+    def liveness(self, sandbox_id: str, *, timeout: float) -> str:
+        """Return point-in-time runtime liveness within a cooperative budget."""
+
+        return asyncio.run(self._liveness_async(sandbox_id, timeout=timeout))
+
     def check_importable(self) -> None:
         _load_sdk()
 
@@ -270,6 +275,28 @@ class MicrosandboxRuntime:
             state=str(getattr(refreshed, "status", "")) or None,
             metadata=metadata,
         )
+
+    async def _liveness_async(self, sandbox_id: str, *, timeout: float) -> str:
+        sdk = _load_sdk()
+
+        async def _refresh() -> Any:
+            handle = await sdk.Sandbox.get(sandbox_id)
+            return await handle.refresh()
+
+        try:
+            refreshed = await asyncio.wait_for(_refresh(), timeout=timeout)
+        except Exception as exc:
+            not_found_error = getattr(sdk, "SandboxNotFoundError", None)
+            if isinstance(not_found_error, type) and isinstance(exc, not_found_error):
+                return "stale"
+            raise
+
+        state = str(getattr(refreshed, "status", "")).strip().lower()
+        if state == "running":
+            return "live"
+        if state in {"dead", "exited", "failed", "missing", "stopped", "terminated"}:
+            return "stale"
+        return "unknown"
 
 
 def _load_sdk() -> Any:

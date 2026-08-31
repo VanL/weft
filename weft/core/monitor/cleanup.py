@@ -23,12 +23,10 @@ from typing import Any
 from simplebroker.ext import BrokerError
 from weft._constants import (
     TASK_MONITOR_TASK_LOG_CLEANUP_SKIPPED_OWNER,
-    TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
 from weft.core.monitor.policies.task_log import (
@@ -36,10 +34,6 @@ from weft.core.monitor.policies.task_log import (
 )
 from weft.core.monitor.policies.task_log import (
     task_log_candidates,
-)
-from weft.core.monitor.policies.tid_mapping import (
-    decode_tid_mapping_row,
-    tid_mapping_streaming_candidates,
 )
 from weft.core.monitor.progress import PolicyProgress
 from weft.core.monitor.task_log_scanner import (
@@ -54,59 +48,12 @@ from weft.core.pruning.models import (
     CleanupQueueStats,
     applied_cleanup_candidate,
 )
-from weft.core.queue_window import (
-    QueueWindowRow,
-    scan_queue_window,
-)
-from weft.helpers import closing_queue_iterator, iter_queue_entries
+from weft.core.queue_window import scan_queue_window
 
 PreApplyReporter = Callable[
     [Sequence[CleanupCandidate]],
     tuple[AppliedCleanupCandidate, ...],
 ]
-
-
-def _newest_tid_mapping_ids(ctx: WeftContext) -> dict[str, int]:
-    """Return the newest message id per mapping key across the FULL queue.
-
-    The tid-mapping cleanup window is bounded by ``batch_size`` and always
-    scans from the queue head, so "newest per key" cannot be decided from
-    the window alone: a superseded row's newer sibling may lie beyond the
-    window, and misclassifying it as newest would liveness-protect it
-    forever, stalling age-only cleanup (Spec: Cleanup Boundary in
-    05-Message_Flow_and_State.md; [OBS.13.7]). Only VALID mapping rows
-    count as evidence, using the same `decode_tid_mapping_row` validity
-    semantics as the in-window path: a newer malformed sibling must not
-    declassify a valid live row as superseded (it would be deleted, and
-    the malformed row deleted later, leaving no live mapping at all).
-    Candidate selection stays bounded by the window. A full read of this
-    runtime-state queue mirrors the foreground prune
-    (`weft/core/pruning/runtime.py`) and the monitor's own
-    `_active_runtime_tids`, both of which already read it whole.
-    """
-
-    queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-    newest: dict[str, int] = {}
-    try:
-        for body, message_id in iter_queue_entries(queue, strict=True):
-            row_id = int(message_id)
-            decoded = decode_tid_mapping_row(
-                QueueWindowRow(
-                    queue=WEFT_TID_MAPPINGS_QUEUE,
-                    body=body,
-                    message_id=row_id,
-                )
-            )
-            if decoded.malformed_reason is not None or decoded.payload is None:
-                continue
-            full = decoded.payload.get("full")
-            if not isinstance(full, str) or not full:
-                continue
-            if row_id > newest.get(full, 0):
-                newest[full] = row_id
-    finally:
-        queue.close()
-    return newest
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,13 +62,10 @@ class TaskMonitorCleanupConfig:
 
     batch_size: int = WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT
     task_log_scan_limit: int = WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT
-    tid_mapping_min_age_seconds: float = (
-        TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS
-    )
     task_log_min_age_seconds: float = WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
     task_log_cleanup_enabled: bool = True
     reserved_cleanup_enabled: bool = False
-    queues: tuple[str, ...] = (WEFT_TID_MAPPINGS_QUEUE, WEFT_GLOBAL_LOG_QUEUE)
+    queues: tuple[str, ...] = (WEFT_GLOBAL_LOG_QUEUE,)
     task_log_scan_backend: TaskLogScanBackend | None = None
     pre_apply_reporter: PreApplyReporter | None = None
 
@@ -258,53 +202,6 @@ def run_task_monitor_cleanup(
                 policy_stat_records = policy_run.policy_stats
                 policy_progress_records = policy_run.policy_progress
                 errors.extend(policy_run.errors)
-            elif queue_name == WEFT_TID_MAPPINGS_QUEUE:
-                # Two-pass reachability scan (Spec: Cleanup Boundary;
-                # [OBS.13.7]): pass one is the existing full-queue
-                # newest-per-key evidence; pass two streams the full FIFO
-                # order so protected newest rows are skips, never stops, and
-                # a head window cannot hide eligible superseded tail rows.
-                # Candidate memory stays bounded by batch_size; working
-                # memory beyond that is the O(distinct TIDs) newest-ID map.
-                newest_tid_mapping_ids = _newest_tid_mapping_ids(ctx)
-                stream_queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-                try:
-                    entries = iter_queue_entries(stream_queue, strict=True)
-                    with closing_queue_iterator(entries) as stream:
-                        decoded_stream = (
-                            decode_tid_mapping_row(
-                                QueueWindowRow(
-                                    queue=queue_name,
-                                    body=body,
-                                    message_id=int(message_id),
-                                )
-                            )
-                            for body, message_id in stream
-                        )
-                        (
-                            selected,
-                            tid_mapping_queue_stats,
-                            policy_stat_records,
-                            policy_progress_records,
-                        ) = tid_mapping_streaming_candidates(
-                            decoded_stream,
-                            now_ns=current_ns,
-                            min_age_seconds=config.tid_mapping_min_age_seconds,
-                            exclude_tids=excluded,
-                            newest_ids=newest_tid_mapping_ids,
-                            batch_size=config.batch_size,
-                        )
-                finally:
-                    stream_queue.close()
-                queue_stat_records = (tid_mapping_queue_stats,)
-                applied.extend(
-                    _apply_policy_candidates(
-                        ctx,
-                        selected,
-                        apply=apply,
-                        pre_apply_reporter=config.pre_apply_reporter,
-                    )
-                )
             else:
                 rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
                 selected = []

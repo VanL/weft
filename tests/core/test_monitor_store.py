@@ -2448,6 +2448,44 @@ def test_monitor_store_disposition_tombstone_removes_family_from_ready_list(
     assert ready == ()
 
 
+def test_monitor_store_post_disposal_activity_reopens_control_cleanup(
+    tmp_path,
+) -> None:
+    """A resurrected family must clean recreated queues at real terminal."""
+
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000097"
+    first = _update(tid, 1779000000000014000)
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (first,),
+        checkpoint_message_id=None,
+    )
+    store.mark_task_control_deleted(tid, first.message_id + 1)
+
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (first,),
+        checkpoint_message_id=None,
+    )
+    replayed = store.get_task(tid)
+    assert replayed is not None
+    assert replayed.task_control_deleted_at_ns == first.message_id + 1
+
+    resumed = _update(tid, first.message_id + 2, event="work_progress")
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (resumed,),
+        checkpoint_message_id=None,
+    )
+
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.task_control_deleted_at_ns is None
+
+
 def test_monitor_store_lists_control_deleted_terminal_disposition_backfill(
     tmp_path,
 ) -> None:

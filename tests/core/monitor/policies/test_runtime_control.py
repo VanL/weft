@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from weft._constants import TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS
+from weft._constants import TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS
 from weft.core.monitor.policies.runtime_control import (
     runtime_dead_task_record_probe_tids,
     select_runtime_dead_task_cleanup_candidates,
@@ -87,6 +87,36 @@ def test_terminal_runtime_cleanup_plan_adds_outbox_after_retention() -> None:
     )
     assert plan.outbox_queue_names == (f"T{tid}.outbox",)
     assert plan.retention_eligible
+
+
+def test_runtime_cleanup_plan_preserves_data_without_terminal_proof() -> None:
+    """Bare delete may clean controls but not ambiguous task data."""
+
+    tid = "1778084345905438802"
+    record = replace(
+        _record(tid),
+        status="running",
+        terminal_seen=False,
+        terminal_event=None,
+        terminal_status=None,
+        terminal_message_id=None,
+        completed_at_ns=None,
+        disposition_reason="stale_open",
+        disposition_at_ns=int(tid) + 2,
+    )
+
+    plan = terminal_task_runtime_queue_cleanup_plan(
+        record,
+        now_ns=int(tid) + 10_000_000_000,
+        retention_seconds=1.0,
+        preserve_data_without_terminal_proof=True,
+    )
+
+    assert plan is not None
+    assert plan.queue_names == (f"T{tid}.ctrl_in", f"T{tid}.ctrl_out")
+    assert plan.inbox_queue_names == ()
+    assert plan.outbox_queue_names == ()
+    assert not plan.retention_eligible
 
 
 def test_terminal_runtime_cleanup_plan_retention_uses_terminal_evidence_not_creation() -> (
@@ -216,7 +246,7 @@ def test_stale_service_owner_cleanup_plan_rejects_nonstandard_controls() -> None
 def test_dead_task_selection_treats_deferred_outbox_only_as_base_for_now() -> None:
     now_ns = 1_778_100_000_000_000_000
     base_tid = now_ns - int(
-        (TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
+        (TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
     )
     queue_names = tuple(f"T{base_tid - offset}.outbox" for offset in range(25))
 
@@ -229,7 +259,7 @@ def test_dead_task_selection_treats_deferred_outbox_only_as_base_for_now() -> No
     selection = select_runtime_dead_task_cleanup_candidates(
         queue_names,
         now_ns=now_ns,
-        min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
+        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
         retention_seconds=172800.0,
         limit=1,
         active_tids=set(),
@@ -246,10 +276,10 @@ def test_dead_task_selection_treats_deferred_outbox_only_as_base_for_now() -> No
 def test_dead_task_record_probe_tids_ignores_retention_deferred_only_queues() -> None:
     now_ns = 1_778_100_000_000_000_000
     deferred_tid = str(
-        now_ns - int((TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
+        now_ns - int((TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
     )
     actionable_tid = str(
-        now_ns - int((TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 120.0) * 1e9)
+        now_ns - int((TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 120.0) * 1e9)
     )
 
     probe_tids = runtime_dead_task_record_probe_tids(
@@ -259,7 +289,7 @@ def test_dead_task_record_probe_tids_ignores_retention_deferred_only_queues() ->
             f"T{actionable_tid}.ctrl_in",
         ),
         now_ns=now_ns,
-        min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
+        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
         retention_seconds=172800.0,
         active_tids=set(),
     )
@@ -270,14 +300,14 @@ def test_dead_task_record_probe_tids_ignores_retention_deferred_only_queues() ->
 def test_dead_task_selection_preserves_actionable_limit_waypoint() -> None:
     now_ns = 1_778_100_000_000_000_000
     base_tid = now_ns - int(
-        (TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
+        (TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
     )
     queue_names = tuple(f"T{base_tid - offset}.ctrl_in" for offset in range(3))
 
     selection = select_runtime_dead_task_cleanup_candidates(
         queue_names,
         now_ns=now_ns,
-        min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
+        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
         retention_seconds=172800.0,
         limit=1,
         active_tids=set(),
@@ -288,3 +318,34 @@ def test_dead_task_selection_preserves_actionable_limit_waypoint() -> None:
     assert selection.tids == (str(base_tid - 2),)
     assert selection.pending is True
     assert selection.deferred_retention == 0
+
+
+def test_dead_task_selection_skips_preserved_data_only_families_before_limit() -> None:
+    """Ambiguous data-only families cannot starve later control cleanup."""
+
+    now_ns = 1_778_100_000_000_000_000
+    base_tid = now_ns - int(200_000.0 * 1e9)
+    preserved_tids = tuple(str(base_tid + offset) for offset in range(3))
+    actionable_tid = str(base_tid + 10)
+    queue_names = (
+        *(f"T{tid}.inbox" for tid in preserved_tids),
+        *(f"T{tid}.reserved" for tid in preserved_tids),
+        *(f"T{tid}.outbox" for tid in preserved_tids),
+        f"T{actionable_tid}.ctrl_in",
+    )
+
+    selection = select_runtime_dead_task_cleanup_candidates(
+        queue_names,
+        now_ns=now_ns,
+        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
+        retention_seconds=172800.0,
+        limit=1,
+        active_tids=set(),
+        task_record=lambda _tid: None,
+        deadline_reached=lambda: False,
+        preserve_data_without_terminal_proof=True,
+    )
+
+    assert selection.tids == (actionable_tid,)
+    assert selection.deferred_retention == len(preserved_tids)
+    assert selection.pending is False

@@ -43,12 +43,14 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_AUTHORITY_MANAGER,
     INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
@@ -118,7 +120,6 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.endpoints import latest_tid_mapping_entries_for_endpoint_resolution
-from weft.core.monitor.policies.tid_mapping import mapping_row_is_live
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -135,7 +136,8 @@ from weft.helpers import (
     redact_taskspec_dump,
     terminate_process_tree,
 )
-from weft.runtime_liveness import runtime_liveness_from_registered_probe
+from weft.liveness.policy import mapping_row_is_live
+from weft.liveness.registry import runtime_liveness_from_registered_probe
 
 from .control_messages import ControlRequest, encode_control_message
 from .control_probe import (
@@ -215,6 +217,7 @@ def _admission_capacity(
     used: int,
     max_connections: int,
     reserve_fraction: float,
+    liveness_monitor_enabled: bool,
 ) -> dict[str, Any]:
     """Return backend usage limits and lane decisions.
 
@@ -223,7 +226,7 @@ def _admission_capacity(
 
     reserve = max(
         math.ceil(max_connections * reserve_fraction),
-        ADMISSION_SERVICE_RESERVE_SLOTS,
+        ADMISSION_SERVICE_RESERVE_SLOTS + int(liveness_monitor_enabled),
     )
     public_limit = max(0, max_connections - reserve)
     internal_limit = max_connections
@@ -440,6 +443,9 @@ class Manager(ServiceTask):
         self._autostart_scan_interval_ns = 1_000_000_000
         self._task_monitor_enabled = bool(
             self._weft_config.get("WEFT_TASK_MONITOR_ENABLED", True)
+        )
+        self._liveness_monitor_enabled = bool(
+            self._weft_config.get("WEFT_LIVENESS_MONITOR_ENABLED", True)
         )
         self._task_monitor_restart_backoff_ns = int(
             float(
@@ -709,6 +715,22 @@ class Manager(ServiceTask):
     @_task_monitor_next_start_allowed_ns.setter
     def _task_monitor_next_start_allowed_ns(self, value: int) -> None:
         self._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR).next_allowed_ns = value
+
+    @property
+    def _liveness_monitor_tid(self) -> str | None:
+        return self._service_state(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR).active_tid
+
+    @_liveness_monitor_tid.setter
+    def _liveness_monitor_tid(self, value: str | None) -> None:
+        self._service_state(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR).active_tid = value
+
+    @property
+    def _liveness_monitor_spawn_pending(self) -> bool:
+        return self._service_state(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR).spawn_pending
+
+    @_liveness_monitor_spawn_pending.setter
+    def _liveness_monitor_spawn_pending(self, value: bool) -> None:
+        self._service_state(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR).spawn_pending = value
 
     # ------------------------------------------------------------------
     # Queue configuration
@@ -1605,6 +1627,10 @@ class Manager(ServiceTask):
             from .monitor.task_monitor import TaskMonitor
 
             return TaskMonitor
+        if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR:
+            from .tasks.liveness_monitor import LivenessMonitor
+
+            return LivenessMonitor
         raise ValueError(f"unknown internal runtime task class '{runtime_class}'")
 
     # ------------------------------------------------------------------
@@ -1617,6 +1643,7 @@ class Manager(ServiceTask):
         return child.internal_role in {
             INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
             INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
         }
 
     def _user_work_children(self) -> dict[str, ManagedChild]:
@@ -1868,6 +1895,7 @@ class Manager(ServiceTask):
             used=used,
             max_connections=self._admission_max_connections,
             reserve_fraction=self._admission_reserve_fraction,
+            liveness_monitor_enabled=self._liveness_monitor_enabled,
         )
         blocked_lanes = self._admission_blocked_lanes_for_capacity(capacity)
         self._record_admission_decision(
@@ -2355,12 +2383,15 @@ class Manager(ServiceTask):
             raise RuntimeError("Manager process has no PID")
         container = detect_container_runtime()
         if container is not None:
+            observations = container.observations(container_pid=pid)
+            if container.runtime == "docker":
+                observations["liveness_provider"] = "docker"
             return RunnerHandle(
                 runner="manager-supervisor",
                 kind="supervised-process",
                 id=f"{container.runtime}:{container.identifier or 'unknown'}",
                 control={"authority": "external-supervisor"},
-                observations=container.observations(container_pid=pid),
+                observations=observations,
                 metadata={
                     "foreground_serve": True,
                 }
@@ -3660,7 +3691,10 @@ class Manager(ServiceTask):
                     if state.active_tid == tid:
                         state.active_tid = None
                     state.spawn_pending = False
-                    if service_key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
+                    if service_key in {
+                        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                        INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+                    }:
                         state.next_allowed_ns = (
                             time.time_ns() + self._task_monitor_restart_backoff_ns
                         )
@@ -4775,6 +4809,11 @@ class Manager(ServiceTask):
 
         return self._task_monitor_enabled and self._service_supervision_allowed()
 
+    def _liveness_monitor_supervision_allowed(self) -> bool:
+        """Return whether this manager may supervise a liveness monitor."""
+
+        return self._liveness_monitor_enabled and self._service_supervision_allowed()
+
     def _build_heartbeat_spawn_payload(self) -> dict[str, Any]:
         """Build the manager-owned spawn envelope for the heartbeat service."""
 
@@ -4846,6 +4885,38 @@ class Manager(ServiceTask):
             ),
         }
 
+    def _build_liveness_monitor_spawn_payload(self) -> dict[str, Any]:
+        """Build the manager-owned spawn envelope for the liveness monitor."""
+
+        spec_section: dict[str, Any] = {
+            "type": "function",
+            "function_target": DEFAULT_FUNCTION_TARGET,
+            "persistent": True,
+            "enable_process_title": False,
+        }
+        weft_context = getattr(self.taskspec.spec, "weft_context", None)
+        if weft_context is not None:
+            spec_section["weft_context"] = str(weft_context)
+
+        return {
+            "taskspec": {
+                "name": "liveness-monitor",
+                "spec": spec_section,
+                "metadata": service_metadata(
+                    key=INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+                    lifecycle="ensure",
+                    extra={
+                        "internal": True,
+                        "role": "liveness_monitor",
+                    },
+                ),
+            },
+            "inbox_message": None,
+            INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY: (
+                INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR
+            ),
+        }
+
     def _heartbeat_service_spec(self) -> ManagedServiceSpec:
         return ManagedServiceSpec(
             key=INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -4861,12 +4932,24 @@ class Manager(ServiceTask):
             restart_backoff_ns=self._task_monitor_restart_backoff_ns,
         )
 
+    def _liveness_monitor_service_spec(self) -> ManagedServiceSpec:
+        return ManagedServiceSpec(
+            key=INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+            lifecycle="ensure",
+            spawn_payload=self._build_liveness_monitor_spawn_payload(),
+            restart_backoff_ns=self._task_monitor_restart_backoff_ns,
+        )
+
     def _managed_service_spawn_queue_name(self, service: ManagedServiceSpec) -> str:
         """Return the spawn queue for one manager-owned service request."""
 
         if (
             service.key
-            in {INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR}
+            in {
+                INTERNAL_SERVICE_KEY_HEARTBEAT,
+                INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+            }
             and self._internal_spawn_queue_attached()
         ):
             return self._queue_names["internal_inbox"]
@@ -4916,6 +4999,13 @@ class Manager(ServiceTask):
 
         return self._enqueue_managed_service_request(self._task_monitor_service_spec())
 
+    def _enqueue_liveness_monitor_request(self) -> bool:
+        """Enqueue one internal liveness monitor spawn request."""
+
+        return self._enqueue_managed_service_request(
+            self._liveness_monitor_service_spec()
+        )
+
     @staticmethod
     def _service_key_for_child(child: ManagedChild) -> str | None:
         """Return the manager-supervised service key for a tracked child."""
@@ -4926,6 +5016,8 @@ class Manager(ServiceTask):
             return INTERNAL_SERVICE_KEY_TASK_MONITOR
         if child.internal_role == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT:
             return INTERNAL_SERVICE_KEY_HEARTBEAT
+        if child.internal_role == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR:
+            return INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
         if child.autostart_source:
             return child.autostart_source
         return None
@@ -5465,27 +5557,38 @@ class Manager(ServiceTask):
         runtime_class: str | None = None,
     ) -> str | None:
         key = service_key_from_metadata(metadata)
+        if key is None:
+            return None
+        expected_identity = {
+            INTERNAL_SERVICE_KEY_HEARTBEAT: (
+                "heartbeat_service",
+                INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+            ),
+            INTERNAL_SERVICE_KEY_TASK_MONITOR: (
+                "task_monitor",
+                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            ),
+            INTERNAL_SERVICE_KEY_LIVENESS_MONITOR: (
+                "liveness_monitor",
+                INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
+            ),
+        }.get(key)
+        if expected_identity is None or metadata.get("internal") is not True:
+            return None
+        expected_role, expected_runtime_class = expected_identity
+        if (
+            metadata.get("role") != expected_role
+            or runtime_class != expected_runtime_class
+        ):
+            return None
+
+        endpoint = metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
         if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
-            if metadata.get("internal") is not True:
-                return None
-            if metadata.get("role") != "heartbeat_service":
-                return None
-            if runtime_class != INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT:
-                return None
-            endpoint = metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
             if endpoint is not None and endpoint != INTERNAL_HEARTBEAT_ENDPOINT_NAME:
                 return None
-            return key
-
-        if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
-            if metadata.get("internal") is not True:
-                return None
-            if metadata.get("role") != "task_monitor":
-                return None
-            if runtime_class != INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
-                return None
-            return key
-        return None
+        elif key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR and endpoint is not None:
+            return None
+        return key
 
     def _trusted_service_key_from_metadata(
         self,
@@ -5518,7 +5621,11 @@ class Manager(ServiceTask):
             key = source
         if not isinstance(key, str) or key not in desired_keys:
             return None
-        if key in {INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR}:
+        if key in {
+            INTERNAL_SERVICE_KEY_HEARTBEAT,
+            INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+        }:
             return None
         if metadata.get("internal") is True:
             return None
@@ -5901,16 +6008,16 @@ class Manager(ServiceTask):
         services: list[ManagedServiceSpec] = []
         internal_services: list[ManagedServiceSpec] = []
         autostart_services: list[ManagedServiceSpec] = []
-        if (
-            include_internal
-            and self._task_monitor_enabled
-            and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
-        ):
+        if include_internal and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
             # The heartbeat is a dependency of internal periodic services. Do not
             # run it as standalone background work when there is no dependent
             # service enabled.
-            internal_services.append(self._heartbeat_service_spec())
-            internal_services.append(self._task_monitor_service_spec())
+            if self._task_monitor_enabled or self._liveness_monitor_enabled:
+                internal_services.append(self._heartbeat_service_spec())
+            if self._task_monitor_enabled:
+                internal_services.append(self._task_monitor_service_spec())
+            if self._liveness_monitor_enabled:
+                internal_services.append(self._liveness_monitor_service_spec())
         if include_autostart:
             autostart_services.extend(self._desired_autostart_services(force=force))
         services.extend(internal_services)
@@ -6498,6 +6605,7 @@ class Manager(ServiceTask):
         internal_keys = {
             INTERNAL_SERVICE_KEY_HEARTBEAT,
             INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
         }
         for service_key, state in self._managed_service_state.items():
             service_unsettled = state.spawn_pending or state.active_tid is None
@@ -6506,7 +6614,14 @@ class Manager(ServiceTask):
             if (
                 service_unsettled
                 and service_key in internal_keys
-                and self._task_monitor_enabled
+                and (
+                    service_key == INTERNAL_SERVICE_KEY_TASK_MONITOR
+                    and self._task_monitor_enabled
+                    or service_key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
+                    and self._liveness_monitor_enabled
+                    or service_key == INTERNAL_SERVICE_KEY_HEARTBEAT
+                    and (self._task_monitor_enabled or self._liveness_monitor_enabled)
+                )
                 and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
             ):
                 reasons.append("missing_active_tid")

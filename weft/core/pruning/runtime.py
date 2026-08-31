@@ -3,8 +3,8 @@
 This module implements runtime-state candidate selection for `weft.state.*`
 operational queues. Command wrappers use this foreground maintenance path, and
 the manager-supervised TaskMonitor reuses the same engine for its default-on
-background maintenance pass; the monitor keeps its own per-cycle cleanup
-runner for tid-mappings and the task log.
+background maintenance pass. TID mappings are outside this engine and are
+owned solely by LivenessMonitor.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-5]
@@ -30,7 +30,6 @@ from weft._constants import (
     RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_SERVICE,
-    RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
     RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
@@ -43,7 +42,6 @@ from weft._constants import (
     WEFT_PIPELINES_STATE_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
 from weft.core.endpoints import (
@@ -65,7 +63,6 @@ from weft.core.service_convergence import (
 from weft.helpers import iter_queue_json_entries
 
 RuntimeQueueName = Literal[
-    "tid-mappings",
     "managers",
     "services",
     "streaming",
@@ -81,7 +78,6 @@ class RuntimePruneConfig:
     context_path: Path | None = None
     apply: bool = False
     queues: tuple[RuntimeQueueName, ...] = (
-        "tid-mappings",
         "managers",
         "services",
         "streaming",
@@ -235,6 +231,13 @@ def run_runtime_prune_for_context(
 
 
 def _validate_config(config: RuntimePruneConfig) -> str | None:
+    unsupported = [
+        queue_group
+        for queue_group in config.queues
+        if queue_group not in RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS
+    ]
+    if unsupported:
+        return f"unsupported runtime queue group: {unsupported[0]}"
     if config.min_age_seconds < 0:
         return "--min-age must be >= 0"
     if config.keep_recent_per_key < 1:
@@ -250,7 +253,6 @@ def _build_candidates(
 ) -> tuple[list[RuntimePruneCandidate], list[RuntimeQueueScanStats], list[str]]:
     now_ns = time.time_ns()
     builders = {
-        "tid-mappings": _tid_mapping_candidates,
         "managers": _manager_candidates,
         "services": _service_candidates,
         "streaming": _streaming_candidates,
@@ -337,44 +339,6 @@ def _candidate(
         report_only=report_only
         or classification in RUNTIME_PRUNE_REPORT_ONLY_CLASSIFICATIONS,
     )
-
-
-def _tid_mapping_candidates(
-    ctx: WeftContext,
-    config: RuntimePruneConfig,
-    now_ns: int,
-) -> tuple[list[RuntimePruneCandidate], int]:
-    entries, scanned = _read_runtime_queue(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    grouped: dict[str, list[tuple[dict[str, Any], int]]] = defaultdict(list)
-    for payload, message_id in entries:
-        full = payload.get("full")
-        if isinstance(full, str) and full:
-            grouped[full].append((payload, message_id))
-
-    candidates: list[RuntimePruneCandidate] = []
-    for full, records in grouped.items():
-        ordered = sorted(records, key=lambda item: item[1], reverse=True)
-        protected_ids = {
-            message_id for _payload, message_id in ordered[: config.keep_recent_per_key]
-        }
-        for payload, message_id in ordered[config.keep_recent_per_key :]:
-            if message_id in protected_ids:
-                continue
-            if not is_old_enough(message_id, now_ns, config.min_age_seconds):
-                continue
-            candidates.append(
-                _candidate(
-                    queue=WEFT_TID_MAPPINGS_QUEUE,
-                    queue_group="tid-mappings",
-                    message_id=message_id,
-                    key=full,
-                    classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
-                    reason="older_than_min_age_and_not_latest_for_tid",
-                    now_ns=now_ns,
-                    payload=payload,
-                )
-            )
-    return candidates, scanned
 
 
 def _manager_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-033] exception

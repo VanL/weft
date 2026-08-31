@@ -48,10 +48,11 @@ Notes:
   as live convergence evidence. `stopped`, `superseded`, and `terminal` are
   non-live evidence; a latest `superseded` row excludes that owner TID from
   manager leadership.
-- Task-owned `weft.state.tid_mappings` payloads include additive
-  `terminal: bool` runtime-liveness evidence. Positive scoped host-process
-  liveness wins; otherwise `terminal: true` lets the shared payload-only probe
-  release the row. See [CC-2.4] and [OBS.13.7].
+- Task-owned `weft.state.tid_mappings` payloads include additive runtime
+  evidence. The manager-supervised `LivenessMonitor` reduces exact host
+  identity or extension-owned probe evidence and is the sole row deleter.
+  Unknown deadlines are process-local and reset after restart. See [CC-2.4],
+  [OBS.13.7], and [LIVENESS.R1]-[LIVENESS.R5].
 - `weft.log.tasks` is runtime evidence used by Weft status, result, and
   debugging surfaces while retained. It is not legal, forensic, or audit
   evidence; retention is an operational policy.
@@ -81,7 +82,9 @@ _Implementation mapping_: `weft/_constants.py` (global queue constants),
 (pipeline runtime queues), `weft/commands/prune.py` (explicit runtime-state,
 task-local, and task-log pruning), `weft/core/monitor/store.py`
 (Monitor-owned operational tables), `weft/core/monitor/sql.py`
-(Monitor table SQL builders).
+(Monitor table SQL builders), `weft/liveness/` (broker-free liveness evidence,
+registry, and mapping policy), and `weft/core/tasks/liveness_monitor.py`
+(persistent scheduling and exact mapping deletion).
 
 ## CLI Surface
 
@@ -167,10 +170,11 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_REDACT_TASKSPEC_FIELDS` | Comma-separated TaskSpec field paths redacted from task-log events. |
 | `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
 | `WEFT_ADMISSION_MAX_CONNECTIONS` | Backend-specific admission maximum. Unset or `0` disables admission; enabled values are positive integers. SQLite compares this with the set of live-or-undecidable latest mappings per full TID (a terminal hint without positive scoped host-process proof is dead), unioned with the Manager's active launches and committed children. Postgres compares it with raw server-wide `numbackends`. See [CC-2.4], [MA-1.8], [OBS.13.7], and [MANAGER.18]. |
-| `WEFT_ADMISSION_RESERVE_FRACTION` | Fraction withheld from public work. Must be finite with `0 <= value < 1`; defaults to `0.1`. Effective reserve is the greater of `ceil(maximum * fraction)` and three slots of modeled internal-lane room for Manager, TaskMonitor, and Heartbeat; these are not dedicated permits. See [MA-1.8] and [MANAGER.18]. |
+| `WEFT_ADMISSION_RESERVE_FRACTION` | Fraction withheld from public work. Must be finite with `0 <= value < 1`; defaults to `0.1`. Effective reserve is the greater of `ceil(maximum * fraction)` and four slots of modeled internal-lane room for Manager, TaskMonitor, LivenessMonitor, and Heartbeat while LivenessMonitor is enabled (three when disabled); these are not dedicated permits. See [MA-1.8] and [MANAGER.18]. |
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
 | `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `TaskMonitor`. Defaults to true. |
+| `WEFT_LIVENESS_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `LivenessMonitor`. Defaults to true. Disabling it also removes its modeled admission-reserve slot; TID mappings then persist because no other component may delete them. |
 | `WEFT_TASK_MONITOR_INTERVAL_SECONDS` | Heartbeat wake interval for the supervised task monitor. Must be at least the heartbeat minimum. |
 | `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` | Short wake interval used while retained task-log backlog remains after a batch-limited cycle. Defaults to 2 seconds. |
 | `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum retained task-log rows or cleanup candidates processed by one supervised monitor cycle. Defaults to 5000. |

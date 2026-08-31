@@ -26,6 +26,7 @@ See also:
   - [Resource Invariants](#resource-invariants)
   - [Execution Invariants](#execution-invariants)
   - [Observability Invariants](#observability-invariants)
+  - [Liveness Invariants](#liveness-invariants)
   - [Implementation Invariants](#implementation-invariants)
   - [Manager Invariants](#manager-invariants)
   - [Context Invariants](#context-invariants)
@@ -381,75 +382,31 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     rows outside an explicit cleanup policy, inbox/reserved work without
     terminal task-log proof for the same TID in the cleanup pass, or non-exact
     lifecycle evidence. Manager/global/custom control queues and custom
-    task-local queues are excluded from default monitor cleanup. For
-    `weft.state.tid_mappings`, this is enforced by keep-newest-per-key +
-    payload-liveness gating: the cleanup policy
-    (`weft/core/monitor/policies/tid_mapping.py`) keeps the newest row per
-    mapping key (`full` TID) regardless of age unless that row's own payload
-    fails a liveness probe; superseded (non-newest) rows for a key keep the
-    age-only rule. Semantically equivalent mapping rows remain distinct
-    ordered snapshots. All but the greatest valid message-ID row for a full
-    TID are superseded and follow the existing age-only rule; equivalence
-    does not grant retention or weaken the newest row's liveness gate. A
-    cleanup-cycle exclusion for a TID protects only that TID's greatest valid
-    message-ID mapping row; it does not exempt superseded mapping rows from
-    age-only retention. There is no second liveness gate and no
-    registered-probe destruction rule: crashed external runners that never
-    published a terminal marker remain protected and retained, with
-    accumulation bounded only by crash rate. Candidate and exact-deletion
-    counts remain bounded by the configured cleanup batch size, but a
-    protected newest row is a skip rather than a FIFO stop. When a bounded
-    head window does not reach queue tail, TID-mapping cleanup must continue
-    through the aged queue prefix until it selects one candidate batch,
-    reaches the valid-row age boundary while still scanning for
-    policy-deletable malformed rows, or reaches queue tail. A head window
-    containing only protected newest rows cannot hide eligible superseded
-    rows or be reported as cleanup base. Full-queue newest-ID evidence
-    remains required before any valid row is classified as newest or
-    superseded. The probe consults only the row payload, never a task-log
-    lookup or Monitor collation-store reach. Positive scoped
-    `(pid, create_time)` host-process liveness always keeps the newest row.
-    Without positive scoped host-process proof, a valid task-owned
-    `terminal: true` hint makes the row dead. Missing, false, or malformed
-    terminal hints preserve the existing conservative runtime-handle policy:
-    a payload with no probeable host PIDs is undecidable and therefore treated
-    as live (skip, never delete). The hint changes no runner control authority
-    and is operational liveness evidence, not public lifecycle truth.
-    This preserves the only durable liveness evidence for a plain running
-    task, which endpoint resolution, runtime pruning, manager kill-pid
-    resolution, and this same destructive-slice safety check all depend on.
+    task-local queues are excluded from default monitor cleanup.
+    `LivenessMonitor` is the sole deleter of `weft.state.tid_mappings`; its
+    one policy module owns malformed, superseded, and newest-row
+    classification and exact deletion. TaskMonitor and explicit runtime-state
+    pruning neither classify nor delete that queue. A newest non-terminal
+    mapping row means "live, or not yet proven dead" and protects the TID from
+    TaskMonitor destruction. If LivenessMonitor is down, the row and its
+    protection persist.
     `stale_open` classification (a non-service open family with no usable
     reporting interval, aged past `stale_open_family_seconds`) is gated on
     destruction protection at disposal time: a candidate whose TID is in
-    the Monitor's destruction-protected set
-    (`_destruction_protected_runtime_tids`) is excluded from summary
-    emission and family disposition, not just from later queue deletion. A
-    quiet running task (state events are transition-only; a running task
-    with no reporting interval emits nothing after `work_started`) is
-    otherwise indistinguishable in the task log from an abandoned family,
-    so gating only at delete time would still let the family be marked
-    disposed — and therefore control-cleanup eligible — while the process
-    is alive. Evidence model: the destruction-protected set is a superset
-    of `_active_runtime_tids` (live service-registry owners plus runtime
-    handles with live host-PID proof — the same `(pid, create_time)` check
-    as `handle_has_live_host_process`) that additionally protects every
-    TID whose newest `weft.state.tid_mappings` row the tid-mapping cleanup
-    policy's own probe (`mapping_row_is_live`) retains. A non-terminal row
-    with no runtime handle, or a handle with no probeable host PIDs (e.g. an
-    external/container runner), is undecidable and therefore protected. A
-    valid `terminal: true` row without positive scoped host-process proof, a
-    newest row whose probeable host processes are all dead, or a family with
-    no mapping row at all grants no protection. The same
-    destruction-protected standard applies at delete time to
-    already-disposed families that lack terminal task-log proof; families
-    with terminal proof keep the positive-evidence (`_active_runtime_tids`)
-    recheck only, because an undecidable newest mapping row is never
-    deleted by the tid-mapping policy and would otherwise block terminal
-    control-queue cleanup for every external-runner task indefinitely.
-    `_active_runtime_tids` itself is unchanged: it answers "which owners
-    are proven live?" for staleness proof; the destruction-protected set
-    answers "which TIDs are safe to destroy?" — the two questions are
-    deliberately separate.
+    TaskMonitor's destruction-protected set is excluded from summary emission
+    and family disposition, not just later queue deletion. That set is newest
+    non-terminal mapping-row presence plus live service-registry evidence;
+    TaskMonitor performs no host or runtime liveness probe. A terminal mapping
+    row, or a family with no mapping row and no live service-registry owner,
+    grants no protection. The same standard applies at delete time to an
+    already-disposed family lacking terminal task-log proof; a family with
+    terminal proof keeps only the positive live-service recheck.
+    Without terminal lifecycle proof, plain `delete` may remove stale control
+    queues but preserves pending inbox, reserved, and unread outbox rows. The
+    existing explicit archived `--apply --force` task-local retention-prune
+    path is their later harvest point. In `jsonl_then_delete` mode, ambiguous
+    family disposal first salvages bounded copies of those data-bearing rows
+    into the pre-delete report. No cleanup path automatically requeues them.
   - **OBS.13.8**: Task-log collation summaries are operational evidence about
     cleanup work performed, not durable lifecycle truth or archival records.
     User-task rows use `collation_kind=user_task`; manager, built-in service,
@@ -502,10 +459,11 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     must not perform queue scans, open or validate external log files, query
     the Monitor store, recompute cleanup candidates, or delete/report rows
     while answering a liveness request.
-  - **OBS.13.12**: The top-level cleanup policy identities are exactly
+  - **OBS.13.12**: The top-level cleanup policy identities are exactly four:
     `task_log.retention`, `monitor_store.lifecycle`,
-    `task_local.terminal_runtime`, `task_local.dead_tid`, and
-    `runtime_state.retention`. Each policy run must remain bounded, report
+    `task_local.terminal_runtime`, and `task_local.dead_tid`. Runtime-state
+    maintenance and LivenessMonitor mapping retention remain outside this
+    TaskMonitor policy namespace. Each policy run must remain bounded, report
     base/waypoint/blocked status, and avoid spinning when only future-eligible
     or blocked work remains. Private cleanup phases belong in reason counts or
     cached details, not new policy identities. Manager `task_spawned` row
@@ -531,7 +489,60 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   protections, but it does not override explicit scope, dry-run/apply mode,
   exact-message identity, or backend deletion capability.
 
+### Liveness Invariants
+
+- **LIVENESS.R1**: Liveness observations and retirement deadlines are
+  ephemeral process-local state. No verdict queue, table, replay log, or
+  persisted deadline exists. Monitor restart resets every timeout; indefinite
+  postponement under repeated restart is accepted.
+- **LIVENESS.R2**: Liveness evidence never synthesizes, reverses, or authorizes
+  a TaskSpec transition, task-log verdict, Manager ownership decision,
+  admission change, process signal, or any deletion other than
+  `weft.state.tid_mappings` rows.
+- **LIVENESS.R3**: `LivenessMonitor` is the sole deleter of
+  `weft.state.tid_mappings`, and exactly one policy module defines row
+  deletability. No second implementation of malformed, superseded, or
+  newest-row rules may exist.
+- **LIVENESS.R4**: Newest-row retirement requires minimum age plus either
+  definitive staleness or a consecutively attempted-`unknown` generation whose
+  in-memory deadline expired. The reducer stores generation, deadline, and an
+  optional pause time. Not-attempted degradation starts one pause and never
+  retires; the next attempted unknown shifts the deadline by the paused
+  duration before testing it. Only an attempted, completed probe can produce
+  timeout retirement.
+- **LIVENESS.R5**: Evidence authority follows
+  `RunnerHandle.control.authority`; host identity requires `(pid, create_time)`
+  with zombie rejection; extension probes are authoritative for `runner` and
+  `external-supervisor`; titles corroborate and never prove a full TID. Probes
+  are read-only and registration grants no control authority.
+- **LIVENESS.R6**: Mapping publication stays edge-triggered and append-only. No
+  component adds read-before-write, periodic republish, or automatic requeue
+  of salvaged rows. Self-healing rests on the owner's next append and the
+  guaranteed terminal republish.
+- **LIVENESS.R7**: TaskMonitor destruction protection reads newest-row
+  presence (non-terminal) plus live service-registry evidence, with no probing.
+  Post-disposal family activity clears `task_control_deleted_at_ns` so
+  recreated queues re-enter terminal cleanup. Without terminal lifecycle
+  proof, plain `delete` may remove stale control queues but preserves pending
+  inbox, reserved, and unread outbox rows; explicit archived forced task-local
+  retention pruning is their later harvest point. In `jsonl_then_delete` mode,
+  ambiguous family disposal salvages bounded copies of those rows into the
+  pre-delete report before whole-family deletion.
+- **LIVENESS.R8**: Probe concurrency, cadence, retirement timeout,
+  reconciliation interval, minimum age, and salvage bounds are named constants
+  in `weft/_constants.py`. At most one probe per TID is in flight; late results
+  are discarded by token-plus-generation match; intervals coalesce.
+- **LIVENESS.R9**: For maximum `N` and reserve fraction `f`, the common modeled
+  internal-lane reserve is
+  `max(ceil(N * f), 3 + int(liveness_monitor_enabled))`; it models room, not
+  permits.
+- **LIVENESS.R10**: Monitor memory is `O(current retained TIDs)`; capacity
+  eviction of deadline state is forbidden. Startup and reconciliation use
+  generator reads; ordinary cycles consume only rows after the in-memory
+  cursor.
+
 _Plan backlinks_:
+- [`docs/plans/2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md)
 - [`docs/plans/2026-05-07-task-local-reaper-retention-policy-plan.md`](../plans/2026-05-07-task-local-reaper-retention-policy-plan.md)
 - [`docs/plans/2026-05-30-cleanup-progress-fifo-boundary-plan.md`](../plans/2026-05-30-cleanup-progress-fifo-boundary-plan.md)
 
@@ -539,6 +550,9 @@ _Plan backlinks_:
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/core/launcher.py`,
+`weft/liveness/` (broker-free evidence, registry, deadline, and mapping-policy
+reducers), `weft/core/tasks/liveness_monitor.py` (persistent scheduling and
+the sole exact-delete executor for TID mappings),
 `weft/core/manager.py`, `weft/core/monitor/task_monitor.py`,
 `weft/core/tasks/heartbeat.py`, `weft/core/runners/host.py`,
 `weft/_constants.py`.
@@ -792,10 +806,11 @@ _Implementation mapping_: `weft/core/manager.py`,
 - **MANAGER.18**: configured admission control is a lane-specific,
   pre-reservation soft guard over one backend-selected usage observation. For
   maximum `N` and reserve fraction `f`, reserve is
-  `max(ceil(N * f), 3)`, public limit is
+  `max(ceil(N * f), 3 + int(liveness_monitor_enabled))`, public limit is
   `max(0, N - reserve)`, and internal limit is `N`. The three-slot floor models
-  internal-lane room for Manager, TaskMonitor, and Heartbeat; it is not a set of
-  dedicated service permits.
+  internal-lane room for Manager, TaskMonitor, and Heartbeat, with one
+  additional modeled slot while LivenessMonitor is enabled; it is not a set
+  of dedicated service permits.
   Public admits only below its limit; internal admits only below `N`. When
   `N <= reserve`, public work is disabled but internal work remains eligible
   below `N`. SQLite context-scoped usage counts the latest mapping rows per
@@ -944,10 +959,11 @@ add a redundant compatibility discriminator. Service classification must be
 derived from Weft-owned role, reserved service/autostart metadata, or internal
 runtime class markers; domain-specific metadata alone must not remove failed
 work from the generic task bucket.
-The monitor has exactly five top-level cleanup policy identities:
+The monitor has exactly four top-level cleanup policy identities:
 `task_log.retention`, `monitor_store.lifecycle`,
-`task_local.terminal_runtime`, `task_local.dead_tid`, and
-`runtime_state.retention`. Each policy run must remain bounded, must report
+`task_local.terminal_runtime`, and `task_local.dead_tid`. Runtime-state
+maintenance and LivenessMonitor mapping retention are separate owners and do
+not create TaskMonitor policy identities. Each policy run must remain bounded, must report
 whether it reached base, reached a bounded waypoint, or blocked, and must not
 spin when only future-eligible or blocked work remains. Private cleanup phases
 must be represented through reason counts or cached details rather than new

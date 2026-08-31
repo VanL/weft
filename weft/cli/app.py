@@ -1704,7 +1704,7 @@ def prune(
         typer.Option(
             "--queue",
             help=(
-                "Runtime queue group to scan: tid-mappings, managers, streaming, "
+                "Runtime queue group to scan: managers, streaming, "
                 "endpoints, pipelines, or all. Repeatable."
             ),
         ),

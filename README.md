@@ -587,9 +587,10 @@ Managers can optionally delay new work before reservation. Set
 `WEFT_ADMISSION_MAX_CONNECTIONS` to a positive integer. Unset or `0` disables
 admission. `WEFT_ADMISSION_RESERVE_FRACTION` controls how much of that maximum
 public work cannot consume and defaults to `0.1`. The effective reserve is the
-greater of the rounded-up fraction and three slots of modeled internal-lane
-room for Manager, TaskMonitor, and Heartbeat. These are not dedicated service
-permits. Public work admits below
+greater of the rounded-up fraction and four slots of modeled internal-lane
+room for Manager, TaskMonitor, LivenessMonitor, and Heartbeat while
+LivenessMonitor is enabled (three when it is disabled). These are not
+dedicated service permits. Public work admits below
 `max(0, maximum - reserve)`; internal work admits below the full maximum. If
 the maximum is no greater than the reserve, public work is disabled while
 internal work can still run below the maximum.
@@ -668,6 +669,14 @@ Queues under `weft.state.*` are runtime-only and excluded from dumps by default.
 `weft.log.tasks` is runtime lifecycle evidence while retained. It is not the
 audit record; use TaskMonitor `jsonl_then_delete` when you want Weft's built-in
 task-lifetime JSONL handoff before cleanup.
+
+The manager also supervises a default-on `LivenessMonitor`. It periodically
+reduces task-owned runtime evidence through the broker-free `weft.liveness`
+package and is the sole deleter of `weft.state.tid_mappings`. Unknown results
+remain in memory for five minutes before proving a mapping dead; a process
+restart resets that deadline. Runtime extensions own their probes through the
+process-local liveness registry. Disable this service with
+`WEFT_LIVENESS_MONITOR_ENABLED=0`.
 
 The supervised TaskMonitor also performs default-on self-maintenance on an
 hourly monotonic deadline: it vacuums claimed broker rows and conservatively
@@ -1302,7 +1311,11 @@ Environment variables:
   maximum; unset or `0` disables it, and enabled values are positive integers
 - `WEFT_ADMISSION_RESERVE_FRACTION` - Fraction withheld from public work;
   defaults to `0.1` and must be finite with `0 <= value < 1`; the effective
-  reserve is never below three slots for Manager, TaskMonitor, and Heartbeat
+  reserve is never below four slots for Manager, TaskMonitor,
+  LivenessMonitor, and Heartbeat while LivenessMonitor is enabled (three when
+  disabled)
+- `WEFT_LIVENESS_MONITOR_ENABLED` - Supervise the internal LivenessMonitor
+  (default: true)
 - `WEFT_MANAGER_REUSE_ENABLED` - Keep manager running (default: true)
 - `WEFT_AUTOSTART_TASKS` - Enable autostart (default: true)
 
