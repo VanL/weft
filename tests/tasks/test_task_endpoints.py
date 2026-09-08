@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 import pytest
 
+import weft.core.endpoints as endpoints_module
 from simplebroker import Queue
 from tests.helpers.test_backend import prepare_project_root
 from tests.tasks.test_task_execution import make_function_taskspec
@@ -30,7 +32,7 @@ from weft.core.endpoints import (
 )
 from weft.core.tasks import Consumer, HeartbeatTask
 from weft.core.taskspec import TaskSpec
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, tid_short_form
 
 
 def _entries(queue) -> list[dict[str, object]]:
@@ -59,7 +61,7 @@ def _endpoint_record(
 def _mark_endpoint_owner_live(ctx: WeftContext, tid: str) -> None:
     queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     try:
-        queue.write(json.dumps({"full": tid, "short": tid[-10:]}))
+        queue.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
     finally:
         queue.close()
 
@@ -94,9 +96,11 @@ def unique_tid() -> str:
     return str(time.time_ns())
 
 
+@pytest.mark.parametrize("already_absent", [False, True])
 def test_task_can_register_and_unregister_named_endpoint(
     broker_env,
     unique_tid: str,
+    already_absent: bool,
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
@@ -116,16 +120,22 @@ def test_task_can_register_and_unregister_named_endpoint(
         assert records[0]["ctrl_in"] == spec.io.control["ctrl_in"]
         assert records[0]["metadata"] == {"role": "operator-facing"}
 
+        if already_absent:
+            registry.delete(message_id=task._endpoint_registration_message_id)
         task.unregister_endpoint_name()
         assert _entries(registry) == []
+        assert task._endpoint_registration_message_id is None
+        assert task._endpoint_registration_name is None
     finally:
         task.cleanup()
         registry.close()
 
 
-def test_task_reregistration_replaces_prior_endpoint_claim(
+@pytest.mark.parametrize("second_name", ["mayor", "supervisor.daily"])
+def test_task_second_registration_is_rejected_until_unregister(
     broker_env,
     unique_tid: str,
+    second_name: str,
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
@@ -134,8 +144,11 @@ def test_task_reregistration_replaces_prior_endpoint_claim(
 
     try:
         task.register_endpoint_name("mayor")
+        with pytest.raises(RuntimeError, match="claim"):
+            task.register_endpoint_name(second_name)
+        assert [row["name"] for row in _entries(registry)] == ["mayor"]
+        task.unregister_endpoint_name()
         task.register_endpoint_name("supervisor.daily")
-
         records = _entries(registry)
         assert len(records) == 1
         assert records[0]["name"] == "supervisor.daily"
@@ -216,7 +229,7 @@ def test_internal_runtime_task_can_claim_reserved_internal_endpoint_name(
         registry.close()
 
 
-def test_endpoint_resolution_uses_latest_owner_row_for_view_and_stale_delete(
+def test_endpoint_resolution_uses_latest_owner_row_without_deleting_history(
     tmp_path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -242,8 +255,8 @@ def test_endpoint_resolution_uses_latest_owner_row_for_view_and_stale_delete(
             older_stale_id,
             older_live_id,
             newest_inactive_id,
+            newest_stale_id,
         }
-        assert newest_stale_id not in _registry_message_ids(registry)
     finally:
         registry.close()
 
@@ -292,12 +305,13 @@ def test_endpoint_resolution_is_order_independent_and_preserves_live_claimants(
             message_ids["alpha"],
             message_ids["high"],
             message_ids["low"],
+            message_ids["stale"],
         }
     finally:
         registry.close()
 
 
-def test_endpoint_resolution_continues_after_operational_delete_failure(
+def test_endpoint_resolution_never_attempts_stale_row_deletion(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,48 +358,13 @@ def test_endpoint_resolution_continues_after_operational_delete_failure(
         assert [(item.record.name, item.record.tid) for item in resolved] == [
             ("live", live_tid)
         ]
-        assert set(delete_calls) == stale_ids
-        assert len(delete_calls) == 2
-        assert _registry_message_ids(registry) == {live_id, delete_calls[0]}
+        assert delete_calls == []
+        assert _registry_message_ids(registry) == stale_ids | {live_id}
     finally:
         registry.close()
 
 
-def test_endpoint_resolution_propagates_unexpected_delete_defect(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    registry = ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
-    stale_id = _endpoint_record(
-        registry,
-        name="ghost",
-        tid="1770000000000000090",
-    )
-    queue_type = type(registry)
-    original_delete = queue_type.delete
-
-    def defective_delete(
-        queue: Queue,
-        *,
-        message_id: int | str | None = None,
-    ) -> bool:
-        if queue.name == WEFT_ENDPOINTS_REGISTRY_QUEUE:
-            raise AssertionError("unexpected delete defect")
-        return original_delete(queue, message_id=message_id)
-
-    monkeypatch.setattr(queue_type, "delete", defective_delete)
-
-    try:
-        with pytest.raises(AssertionError, match="unexpected delete defect"):
-            list_resolved_endpoints(ctx)
-        assert _registry_message_ids(registry) == {stale_id}
-    finally:
-        registry.close()
-
-
-def test_endpoint_resolution_deletes_stale_rows_before_selection_defect(
+def test_endpoint_resolution_keeps_rows_and_closes_queue_after_liveness_defect(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -416,28 +395,27 @@ def test_endpoint_resolution_deletes_stale_rows_before_selection_defect(
             return tracked
         return queue
 
-    def selection_defect(_tids: object) -> str | None:
-        raise AssertionError("unexpected selection defect")
+    def liveness_defect(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("unexpected liveness defect")
 
     monkeypatch.setattr(WeftContext, "queue", tracking_queue)
     monkeypatch.setattr(
-        "weft.core.endpoints.canonical_owner_tid",
-        selection_defect,
+        "weft.core.endpoints._record_owner_is_live",
+        liveness_defect,
     )
 
     try:
-        with pytest.raises(AssertionError, match="unexpected selection defect"):
+        with pytest.raises(AssertionError, match="unexpected liveness defect"):
             list_resolved_endpoints(ctx)
 
-        assert _registry_message_ids(registry) == {live_id}
-        assert stale_id not in _registry_message_ids(registry)
+        assert _registry_message_ids(registry) == {live_id, stale_id}
         assert len(acquired) == 1
         assert acquired[0].closed is True
     finally:
         registry.close()
 
 
-def test_endpoint_resolution_pattern_does_not_delete_nonmatching_stale_row(
+def test_endpoint_resolution_pattern_preserves_all_stale_rows(
     tmp_path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -457,8 +435,7 @@ def test_endpoint_resolution_pattern_does_not_delete_nonmatching_stale_row(
         )
 
         assert list_resolved_endpoints(ctx, pattern="wanted.*") == []
-        assert _registry_message_ids(registry) == {outside_id}
-        assert matching_id not in _registry_message_ids(registry)
+        assert _registry_message_ids(registry) == {outside_id, matching_id}
     finally:
         registry.close()
 
@@ -501,16 +478,242 @@ def test_endpoint_resolution_closes_acquired_registry_queue(
     monkeypatch.setattr(WeftContext, "queue", tracking_queue)
 
     try:
-        if delete_defect:
-            with pytest.raises(AssertionError, match="unexpected delete defect"):
-                list_resolved_endpoints(ctx)
-        else:
-            resolved = list_resolved_endpoints(ctx)
-            assert [(item.record.name, item.record.tid) for item in resolved] == [
-                ("close-proof", tid)
-            ]
+        resolved = list_resolved_endpoints(ctx)
+        expected = [] if delete_defect else [("close-proof", tid)]
+        assert [(item.record.name, item.record.tid) for item in resolved] == expected
 
         assert len(acquired) == 1
         assert acquired[0].closed is True
     finally:
         registry.close()
+
+
+def test_endpoint_claim_survives_resolution_before_mapping_publication(
+    tmp_path,
+) -> None:
+    context = build_context(spec_context=prepare_project_root(tmp_path))
+    registry = context.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
+    tid = "1770000000000000200"
+    try:
+        message_id = _endpoint_record(registry, name="starting", tid=tid)
+        assert list_resolved_endpoints(context) == []
+        assert _registry_message_ids(registry) == {message_id}
+        _mark_endpoint_owner_live(context, tid)
+        assert [row.record.tid for row in list_resolved_endpoints(context)] == [tid]
+        assert _registry_message_ids(registry) == {message_id}
+    finally:
+        registry.close()
+
+
+def test_endpoint_claim_retains_append_id_across_interleaved_peer_append(
+    broker_env, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path, make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload"),
+    )
+    registry = make_queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+    original_queue = task._queue
+    written_ids = []
+    scans = []
+
+    class InterleavedQueue:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(registry, name)
+
+        def write(self, body: str) -> int:
+            own_id = registry.write(body)
+            peer = json.loads(body)
+            peer["metadata"] = {"writer": "peer"}
+            peer_id = registry.write(json.dumps(peer))
+            written_ids.extend((own_id, peer_id))
+            return own_id
+
+        def peek_generator(self, **kwargs: Any) -> Any:
+            scans.append(True)
+            return registry.peek_generator(**kwargs)
+
+    monkeypatch.setattr(
+        task,
+        "_queue",
+        lambda name: (
+            InterleavedQueue()
+            if name == WEFT_ENDPOINTS_REGISTRY_QUEUE
+            else original_queue(name)
+        ),
+    )
+    try:
+        task.register_endpoint_name("mayor")
+        assert task._endpoint_registration_message_id == written_ids[0]
+        assert scans == []
+        task.unregister_endpoint_name()
+        assert _registry_message_ids(registry) == {written_ids[1]}
+        assert scans == []
+    finally:
+        task.cleanup()
+
+
+def test_failed_endpoint_append_holds_no_claim_and_can_retry(
+    broker_env, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path, make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload"),
+    )
+    registry = make_queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+    original_queue = task._queue
+    attempts = []
+
+    class FailedAppendQueue:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(registry, name)
+
+        def write(self, body: str) -> int:
+            attempts.append(body)
+            if len(attempts) == 1:
+                raise RuntimeError("injected endpoint append failure")
+            return registry.write(body)
+
+    monkeypatch.setattr(
+        task,
+        "_queue",
+        lambda name: (
+            FailedAppendQueue()
+            if name == WEFT_ENDPOINTS_REGISTRY_QUEUE
+            else original_queue(name)
+        ),
+    )
+    try:
+        task.register_endpoint_name("mayor")
+        assert task._endpoint_registration_name is None
+        assert task._endpoint_registration_message_id is None
+        assert _entries(registry) == []
+        task.register_endpoint_name("mayor")
+        assert len(_entries(registry)) == 1
+        task.unregister_endpoint_name()
+        assert _entries(registry) == []
+    finally:
+        task.cleanup()
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "{broken-json",
+        "[]",
+        "null",
+        {"full": "1770000000000000300"},
+        {"full": "1770000000000000300", "short": "", "terminal": True},
+        {"full": "1770000000000000300", "short": 1, "terminal": True},
+        {"full": "", "short": "valid"},
+        {"full": 3, "short": "valid"},
+    ],
+)
+def test_latest_mapping_fold_skips_malformed_newer_rows_and_keeps_valid_neighbors(
+    tmp_path, invalid
+) -> None:
+    context = build_context(spec_context=prepare_project_root(tmp_path))
+    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    valid = {"full": "1770000000000000300", "short": "0000000300", "terminal": False}
+    neighbor = {"full": "undecidable", "short": "required-display-field"}
+    try:
+        queue.write(json.dumps({**valid, "terminal": True}))
+        valid_id = queue.write(json.dumps(valid))
+        queue.write(invalid if isinstance(invalid, str) else json.dumps(invalid))
+        neighbor_id = queue.write(json.dumps(neighbor))
+        expected = {
+            valid["full"]: (valid_id, valid),
+            neighbor["full"]: (neighbor_id, neighbor),
+        }
+        assert (
+            endpoints_module.latest_tid_mapping_rows(context, strict=True) == expected
+        )
+        assert endpoints_module.latest_tid_mapping_entries_for_endpoint_resolution(
+            context
+        ) == {full: row for full, (_timestamp, row) in expected.items()}
+    finally:
+        queue.close()
+
+
+def test_failed_endpoint_unregister_retains_claim_for_exact_retry(
+    broker_env, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path, make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload"),
+    )
+    registry = make_queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+    task.register_endpoint_name("mayor")
+    held_id = task._endpoint_registration_message_id
+    original_queue = task._queue
+    deletes = []
+
+    class FailedDeleteQueue:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(registry, name)
+
+        def delete(self, *, message_id: int) -> bool:
+            deletes.append(message_id)
+            if len(deletes) == 1:
+                raise RuntimeError("injected endpoint release failure")
+            return registry.delete(message_id=message_id)
+
+    monkeypatch.setattr(
+        task,
+        "_queue",
+        lambda name: (
+            FailedDeleteQueue()
+            if name == WEFT_ENDPOINTS_REGISTRY_QUEUE
+            else original_queue(name)
+        ),
+    )
+    try:
+        task.unregister_endpoint_name()
+        assert task._endpoint_registration_message_id == held_id
+        assert _registry_message_ids(registry) == {held_id}
+        with pytest.raises(RuntimeError, match="claim"):
+            task.register_endpoint_name("replacement")
+        task.unregister_endpoint_name()
+        assert deletes == [held_id, held_id]
+        assert _registry_message_ids(registry) == set()
+        task.register_endpoint_name("replacement")
+        assert [row["name"] for row in _entries(registry)] == ["replacement"]
+    finally:
+        task.cleanup()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_latest_mapping_fold_preserves_explicit_read_error_contract(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, strict: bool
+) -> None:
+    context = build_context(spec_context=prepare_project_root(tmp_path))
+    original_queue = WeftContext.queue
+    closed = []
+
+    class ReadFailureQueue:
+        def __init__(self, delegate: Queue) -> None:
+            self.delegate = delegate
+
+        def peek_generator(self, **_kwargs: Any) -> Any:
+            raise RuntimeError("injected mapping read failure")
+
+        def close(self) -> None:
+            closed.append(True)
+            self.delegate.close()
+
+    def failed_queue(ctx: WeftContext, name: str, *, persistent: bool = False) -> Any:
+        queue = original_queue(ctx, name, persistent=persistent)
+        if ctx is context and name == WEFT_TID_MAPPINGS_QUEUE:
+            return ReadFailureQueue(queue)
+        return queue
+
+    monkeypatch.setattr(WeftContext, "queue", failed_queue)
+    if strict:
+        with pytest.raises(RuntimeError, match="injected mapping read failure"):
+            endpoints_module.latest_tid_mapping_rows(context, strict=True)
+    else:
+        assert endpoints_module.latest_tid_mapping_rows(context) == {}
+    assert closed == [True]

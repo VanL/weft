@@ -32,7 +32,6 @@ from weft._constants import (
     TASK_MONITOR_LOG_SUBDIR,
     TASK_MONITOR_SCHEMA_VERSION,
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
-    TASKSPEC_TID_SHORT_LENGTH,
     WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
 )
 from weft._exceptions import CommandExecutionError, CommandUsageError
@@ -42,6 +41,7 @@ from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,
 )
+from weft.helpers import tid_short_form
 
 from ._boundary import typed_command_errors
 
@@ -281,8 +281,10 @@ def _reduce_task_log(
 ) -> ScanResult:
     result = ScanResult()
     for payload, timestamp in queue_entries:
-        tid = payload.get("tid")
-        if not isinstance(tid, str) or not tid:
+        tid = payload.get("tid", "")
+        try:
+            tid_short_form(tid)
+        except ValueError:
             continue
         result.events_scanned += 1
         result.last_task_log_timestamp = max(
@@ -421,7 +423,7 @@ def _build_summary_record(
         {
             "summary_id": summary_id,
             "tid": reduced.tid,
-            "tid_short": reduced.tid[-TASKSPEC_TID_SHORT_LENGTH:],
+            "tid_short": tid_short_form(reduced.tid),
             "name": task_evidence.task_name_from_taskspec(
                 snapshot.taskspec_payload or reduced.taskspec_payload
             ),

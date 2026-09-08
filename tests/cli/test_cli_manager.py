@@ -23,18 +23,25 @@ from weft._constants import (
 )
 from weft.context import build_context
 from weft.core.service_convergence import build_manager_service_payload
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, process_create_time
 
 pytestmark = [pytest.mark.shared]
 
 
-def _host_runtime_handle(pid: int) -> dict[str, Any]:
+def _host_runtime_handle(pid: int, create_time: float | None = None) -> dict[str, Any]:
     return {
         "runner": "host",
         "kind": "process",
         "id": str(pid),
         "control": {"authority": "host-pid"},
-        "observations": {"host_pids": [pid]},
+        "observations": {
+            "host_pids": [pid],
+            **(
+                {"host_processes": [{"pid": pid, "create_time": create_time}]}
+                if create_time is not None
+                else {}
+            ),
+        },
         "metadata": {},
     }
 
@@ -366,9 +373,13 @@ def test_manager_list_diagnostic_shows_stale_active_manager(workdir):
     context = build_context(spec_context=context_root)
     tid = "1761000000000000021"
 
-    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE
+    )
     try:
-        process.wait(timeout=2.0)
+        create_time = process_create_time(process.pid)
+        assert create_time is not None
+        process.communicate(timeout=2.0)
         registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
         try:
             registry_queue.write(
@@ -377,7 +388,7 @@ def test_manager_list_diagnostic_shows_stale_active_manager(workdir):
                         context,
                         tid=tid,
                         name="stale-manager",
-                        runtime_handle=_host_runtime_handle(process.pid),
+                        runtime_handle=_host_runtime_handle(process.pid, create_time),
                     )
                 )
             )
@@ -406,15 +417,19 @@ def test_manager_list_diagnostic_shows_stale_active_manager(workdir):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_manager_start_replaces_stale_active_manager(workdir):
+def test_manager_start_skips_stale_manager_and_preserves_history(workdir):
     context_root = prepare_project_root(workdir / "stale-manager-start")
     context = build_context(spec_context=context_root)
     stale_tid = "1761000000000000008"
     started_tid: str | None = None
 
-    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE
+    )
     try:
-        process.wait(timeout=2.0)
+        create_time = process_create_time(process.pid)
+        assert create_time is not None
+        process.communicate(timeout=2.0)
         registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
         registry_queue.write(
             json.dumps(
@@ -422,7 +437,7 @@ def test_manager_start_replaces_stale_active_manager(workdir):
                     context,
                     tid=stale_tid,
                     name="stale-manager",
-                    runtime_handle=_host_runtime_handle(process.pid),
+                    runtime_handle=_host_runtime_handle(process.pid, create_time),
                 )
             )
         )
@@ -470,7 +485,11 @@ def test_manager_start_replaces_stale_active_manager(workdir):
         finally:
             registry_reader.close()
 
-        assert all(_host_pid_from_handle(record) != process.pid for record in payloads)
+        assert any(
+            record.get("owner_tid") == stale_tid
+            and _host_pid_from_handle(record) == process.pid
+            for record in payloads
+        )  # Registry readers filter stale rows; they do not delete foreign history.
     finally:
         if started_tid is not None:
             run_cli(
@@ -500,14 +519,20 @@ def test_manager_status_missing(workdir):
     assert "not found" in combined.lower()
 
 
-def test_manager_force_stop_missing_pid_record(workdir):
+def test_manager_force_stop_without_identity_remains_unconfirmed(workdir):
     context_root = prepare_project_root(workdir / "force-manager")
     context = build_context(spec_context=context_root)
     tid = "1761000000000000001"
 
     mapping_queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     mapping_queue.write(
-        json.dumps({"full": tid, "runtime_handle": _host_runtime_handle(999_999)})
+        json.dumps(
+            {
+                "full": tid,
+                "short": tid[-10:],
+                "runtime_handle": _host_runtime_handle(999_999),
+            }
+        )
     )
 
     rc, out, err = run_cli(
@@ -521,6 +546,10 @@ def test_manager_force_stop_missing_pid_record(workdir):
         context_root,
         cwd=workdir,
     )
-    assert rc == 0
+    assert rc == 1
     assert out == ""
-    assert err == ""
+    assert err.strip() == (
+        f"Manager {tid} stop is unconfirmed; no host PID is available for --force"
+    )
+    assert mapping_queue.peek_one() is not None
+    mapping_queue.close()

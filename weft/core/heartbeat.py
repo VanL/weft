@@ -25,11 +25,14 @@ from weft._constants import (
     MANAGER_STARTUP_TIMEOUT_SECONDS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
 from weft.core.control_probe import send_keyed_ping_probe
-from weft.core.endpoints import ResolvedEndpoint, resolve_endpoint
+from weft.core.endpoints import (
+    ResolvedEndpoint,
+    latest_tid_mapping_rows,
+    resolve_endpoint,
+)
 from weft.core.manager_services import ServiceCandidate, summarize_service_candidates
 from weft.ext import RunnerHandle
 from weft.helpers import (
@@ -94,20 +97,10 @@ def _heartbeat_runtime_handle_is_live(
     *,
     tid: str,
 ) -> bool:
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-    latest_payload: dict[str, Any] | None = None
-    latest_timestamp = -1
-    try:
-        for payload, timestamp in iter_queue_json_entries(queue):
-            if payload.get("full") != tid or timestamp < latest_timestamp:
-                continue
-            latest_payload = payload
-            latest_timestamp = timestamp
-    finally:
-        queue.close()
-    if latest_payload is None:
+    row = latest_tid_mapping_rows(context).get(tid)
+    if row is None:
         return False
-    handle_payload = latest_payload.get("runtime_handle")
+    handle_payload = row[1].get("runtime_handle")
     if not isinstance(handle_payload, Mapping):
         return False
     try:

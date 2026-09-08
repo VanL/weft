@@ -620,7 +620,8 @@ Implementation plan backlinks:
 a stable project-local name.
 
 _Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
-`ResolvedEndpoint`,
+`ResolvedEndpoint`, `latest_tid_mapping_rows()` (newest-valid owner mapping
+with exact message IDs),
 `weft/core/endpoints.py::_classify_latest_endpoint_records()`,
 `list_resolved_endpoints()`, `resolve_endpoint()`;
 `weft/core/tasks/base.py` — `register_endpoint_name()`,
@@ -634,8 +635,16 @@ Implementation plan backlink:
 Current rules:
 
 - registration is explicit and opt-in; unnamed tasks remain the default
-- one live task currently owns at most one active named-endpoint claim at a
-  time
+- one live task holds at most one named-endpoint claim, registered once per
+  claim
+- custody: registration is a single append whose returned message id the task
+  retains and exact-deletes in `unregister_endpoint_name()`. Registering while
+  a claim is held is an error; failed append may retry, and register →
+  unregister → register is legal. Failed unregister retains the held claim;
+  successful or confirmed-absent exact deletion releases it, and a later
+  unregister may retry the same id. Readers filter stale owners and never
+  delete. The runtime pruning engine is the only other endpoint-row deleter.
+  Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
 - endpoint records point at ordinary task-local queues (`inbox`, `outbox`,
   `ctrl_in`, `ctrl_out`)
 - when duplicate live claimants exist for the same endpoint name, discovery

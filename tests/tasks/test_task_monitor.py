@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import gc
 import json
-import os
 import signal
 import sys
 import threading
@@ -23,7 +22,6 @@ from pathlib import Path
 from types import BuiltinFunctionType, FunctionType, SimpleNamespace
 from typing import Any
 
-import psutil
 import pytest
 
 import weft.core.monitor.task_monitor as task_monitor_mod
@@ -10141,9 +10139,11 @@ def _tid_mapping_row(
     }
 
 
+@pytest.mark.parametrize("malformed_newest", [False, True])
 def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
+    malformed_newest: bool,
 ) -> None:
     """A live quiet task's family must not be disposed as stale_open.
 
@@ -10151,9 +10151,8 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
     older than ``stale_open_family_seconds`` with no usable reporting
     interval (a "quiet" running task that emits nothing after
     ``work_started``) must not have its Monitor-store family summarized and
-    disposed while its TID is present in ``_active_runtime_tids`` -- the same
-    liveness evidence (``weft.state.tid_mappings`` host-PID proof) the
-    ``stale_service_owner`` branch already consults before disposal.
+    disposed while its newest valid mapping is nonterminal. TaskMonitor uses
+    this row-presence proof; LivenessMonitor owns runtime probing/retirement.
 
     Spec: [OBS.13.7]
     """
@@ -10181,19 +10180,19 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     inbox.write("input")
 
-    self_process = psutil.Process(os.getpid())
     mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     mappings.write(
         json.dumps(
             _tid_mapping_row(
                 full=tid,
                 short=tid[-10:],
-                host_processes=[
-                    {"pid": os.getpid(), "create_time": self_process.create_time()}
-                ],
+                host_processes=[],
             )
         )
     )
+
+    if malformed_newest:
+        mappings.write(json.dumps({"full": tid, "terminal": True}))
 
     task = TaskMonitor(
         db_path,
@@ -10203,7 +10202,7 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
     try:
         # Age the family well past the stale-open window before running any
         # cycle: the only thing that should keep it un-disposed is the live
-        # host-PID evidence, not batching/timing headroom.
+        # nonterminal mapping, not batching/timing headroom.
         now_ns = int(tid) + 6_000_000_000
         store = task._ensure_monitor_store()
         assert store is not None

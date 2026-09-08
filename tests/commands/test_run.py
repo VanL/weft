@@ -77,7 +77,8 @@ from weft.core.taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
 )
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, process_create_time
+from weft.liveness.models import HostProcessObservation
 
 pytestmark = [pytest.mark.shared]
 
@@ -184,9 +185,25 @@ def _host_runtime_handle(pid: int) -> dict[str, Any]:
         "kind": "process",
         "id": str(pid),
         "control": {"authority": "host-pid"},
-        "observations": {"host_pids": [pid]},
+        "observations": {
+            "host_processes": [{"pid": pid, "create_time": process_create_time(pid)}]
+        },
         "metadata": {},
     }
+
+
+def _mock_live_host_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give synthetic launcher PIDs exact matching process evidence."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "process_create_time", lambda pid: 1234.0
+    )
+
+    def observe(pid: int, create_time: float | None) -> HostProcessObservation:
+        assert pid > 0
+        assert create_time == 1234.0
+        return HostProcessObservation("live", "identity_match")
+
+    monkeypatch.setattr(core_manager_runtime, "inspect_host_process", observe)
 
 
 def _external_supervisor_runtime_handle() -> dict[str, Any]:
@@ -1592,6 +1609,7 @@ def test_start_manager_detaches_registered_startup_manager_after_losing_selectio
     monkeypatch: pytest.MonkeyPatch,
     launched_status: str,
 ) -> None:
+    _mock_live_host_identity(monkeypatch)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     fake_process = _FakePopen(poll_results=[None, None])
@@ -1828,6 +1846,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_live_host_identity(monkeypatch)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     fake_process = _FakePopen(poll_results=[None, None])
@@ -1911,6 +1930,7 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_live_host_identity(monkeypatch)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     fake_process = _FakePopen(poll_results=[None, None, 0])
@@ -1993,6 +2013,7 @@ def test_start_manager_rejects_ack_failure_before_success_signal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_live_host_identity(monkeypatch)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     fake_process = _FakePopen(poll_results=[None, None, 0])
@@ -2055,24 +2076,41 @@ def test_start_manager_rejects_ack_failure_before_success_signal(
         core_manager_runtime.start_manager(ctx)
 
 
+@pytest.mark.parametrize("liveness", ["live", "stale", "unknown"])
+@pytest.mark.parametrize("age_seconds", [30, 120])
 def test_manager_start_record_matches_external_supervisor_launch_pid(
     monkeypatch: pytest.MonkeyPatch,
+    liveness: str,
+    age_seconds: int,
 ) -> None:
     monkeypatch.setattr("weft.core.manager_runtime.pid_is_live", lambda pid: True)
     monkeypatch.setattr(
-        "weft.core.manager_runtime.runtime_liveness_from_registered_probe",
-        lambda handle: "unknown",
+        core_manager_runtime, "MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS", 60.0
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "runtime_liveness_from_registered_probe",
+        lambda handle: liveness,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_has_matched_pong",
+        lambda *args, **kwargs: pytest.fail("owned startup proof must not need PING"),
     )
 
-    assert core_manager_runtime._manager_start_record_matches_launch(
+    matches = core_manager_runtime._manager_start_record_matches_launch(
         {
             "tid": "1775622400000000000",
             "status": "active",
+            "timestamp": time.time_ns() - age_seconds * 1_000_000_000,
             "runtime_handle": _external_supervisor_runtime_handle(),
             "requests": WEFT_SPAWN_REQUESTS_QUEUE,
             "role": "manager",
         },
         launch_pid=4321,
+    )
+    assert matches is (
+        liveness == "live" or (liveness == "unknown" and age_seconds < 60)
     )
 
 
@@ -3503,7 +3541,7 @@ def test_select_active_manager_uses_matched_pong_for_fresh_unobservable_host_rec
         assert record["_pong_live_at"] > 0
 
 
-def test_select_active_manager_omits_expired_supervised_record_despite_matched_pong(
+def test_select_active_manager_omits_expired_supervised_record_without_ping(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3529,7 +3567,7 @@ def test_select_active_manager_omits_expired_supervised_record_despite_matched_p
         probed_tids=probed_tids,
     )
 
-    assert probed_tids == [tid]
+    assert probed_tids == []
     assert record is None
 
 
@@ -3589,7 +3627,7 @@ def test_select_active_manager_rejects_draining_pong_for_stale_record(
     assert record is None
 
 
-def test_select_active_manager_prunes_stale_record_without_pong(
+def test_select_active_manager_preserves_expired_unknown_row_without_ping(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3618,10 +3656,18 @@ def test_select_active_manager_prunes_stale_record_without_pong(
     record = core_manager_runtime.select_active_manager(ctx, probe_stale=True)
 
     assert record is None
-    assert len(_read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True)) == 1
+    assert _read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True) == []
+    assert (
+        len(
+            _read_all_queue_messages(
+                ctx, WEFT_SERVICES_REGISTRY_QUEUE, persistent=False
+            )
+        )
+        == 1
+    )
 
 
-def test_select_active_manager_fresh_hard_live_beats_expired_lower_tid_pong(
+def test_select_active_manager_fresh_hard_live_beats_expired_lower_tid_without_ping(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3654,7 +3700,7 @@ def test_select_active_manager_fresh_hard_live_beats_expired_lower_tid_pong(
     )
 
     assert record is not None
-    assert probed_tids == [lower_tid]
+    assert probed_tids == []
     assert record["tid"] == higher_tid
 
 
@@ -3692,7 +3738,7 @@ def test_select_active_manager_lower_hard_live_record_beats_higher_pong(
     assert record["tid"] == lower_tid
 
 
-def test_select_active_manager_does_not_probe_fresh_supervised_record(
+def test_select_active_manager_rescues_fresh_unknown_supervisor_with_matched_pong(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3713,11 +3759,14 @@ def test_select_active_manager_does_not_probe_fresh_supervised_record(
         runtime_handle=_external_supervisor_runtime_handle(),
     )
 
-    record = core_manager_runtime.select_active_manager(ctx, probe_stale=True)
+    probed_tids: list[str] = []
+    record = _select_active_manager_while_answering_probe(
+        ctx, tid=tid, monkeypatch=monkeypatch, probed_tids=probed_tids
+    )
 
     assert record is not None
     assert record["tid"] == tid
-    assert _read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True) == []
+    assert probed_tids == [tid]
 
 
 def test_select_active_manager_prunes_missing_docker_supervised_record_immediately(
@@ -3764,8 +3813,8 @@ def test_select_active_manager_uses_supervisor_liveness_before_host_pid_identity
         lambda runtime_handle: "live",
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime._manager_handle_has_live_host_process",
-        lambda runtime_handle: (_ for _ in ()).throw(
+        "weft.core.manager_runtime.inspect_host_process",
+        lambda *args: (_ for _ in ()).throw(
             AssertionError("supervised manager used host PID identity")
         ),
     )
@@ -3777,7 +3826,7 @@ def test_select_active_manager_uses_supervisor_liveness_before_host_pid_identity
     assert record["tid"] == tid
 
 
-def test_await_manager_start_settlement_probes_stale_record_once(
+def test_await_manager_start_settlement_never_probes_expired_unknown_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3820,13 +3869,13 @@ def test_await_manager_start_settlement_probes_stale_record_once(
         persistent=True,
     )
     assert record is None
-    assert len(ping_messages) == 1
+    assert ping_messages == []
 
 
 # This test validates pruning of active records whose PID has exited while keeping
 # stopped history. The dead-PID probe is POSIX-specific.
 @pytest.mark.skipif(os.name == "nt", reason="POSIX dead-PID semantics only")
-def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
+def test_list_manager_records_omits_dead_active_and_preserves_all_history(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -3885,10 +3934,10 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
     finally:
         registry_reader.close()
 
-    assert [entry["owner_tid"] for entry in entries] == [stopped_tid]
+    assert [entry["owner_tid"] for entry in entries] == [dead_tid, stopped_tid]
 
 
-def test_list_manager_records_prunes_host_pid_identity_mismatch(
+def test_list_manager_records_omits_host_pid_identity_mismatch_without_deletion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3897,7 +3946,18 @@ def test_list_manager_records_prunes_host_pid_identity_mismatch(
     registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     stale_tid = "17756224000000000045"
 
-    monkeypatch.setattr("weft.helpers.process_create_time", lambda pid: 222.0)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "inspect_host_process",
+        lambda pid, create_time: HostProcessObservation("stale", "identity_mismatch"),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_has_matched_pong",
+        lambda *args, **kwargs: pytest.fail(
+            "definitive mismatch must not be PING-probed"
+        ),
+    )
     try:
         registry.write(
             json.dumps(
@@ -3940,7 +4000,8 @@ def test_list_manager_records_prunes_host_pid_identity_mismatch(
     finally:
         registry_reader.close()
 
-    assert entries == []
+    assert len(entries) == 1
+    assert entries[0]["owner_tid"] == stale_tid
 
 
 def test_stop_manager_waits_for_pid_exit_after_stopped_status(
@@ -3979,6 +4040,12 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
         ]
     )
     pid_states = iter([True, True, False, False])
+    monkeypatch.setattr(core_manager_runtime, "_record_pid", lambda record: 4321)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "manager_registry_record_liveness",
+        lambda record: "stale" if record.get("status") == "stopped" else "live",
+    )
 
     monkeypatch.setattr(
         "weft.core.manager_runtime._send_stop", lambda *args, **kwargs: None
@@ -4024,6 +4091,15 @@ def test_stop_manager_confirms_observed_absence_in_evidence_order(
         "runtime_handle": _host_runtime_handle(4321),
     }
     evidence: list[str] = []
+
+    def runtime_stale(record: dict[str, Any] | None) -> str:
+        assert record == initial_record
+        evidence.append("runtime-stale")
+        return "stale"
+
+    monkeypatch.setattr(
+        core_manager_runtime, "manager_registry_record_liveness", runtime_stale
+    )
 
     def absent_registry_view(*args: Any, **kwargs: Any) -> Any:
         del args, kwargs
@@ -4089,6 +4165,7 @@ def test_stop_manager_confirms_observed_absence_in_evidence_order(
     assert record == initial_record
     assert evidence == [
         "registry-absent",
+        "runtime-stale",
         "recorded-pid",
         "recorded-pid-dead",
         "local-process-gate",

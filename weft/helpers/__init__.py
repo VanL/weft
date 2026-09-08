@@ -8,7 +8,8 @@ Spec references:
 - docs/specifications/01-Core_Components.md [CC-3.2]
 - docs/specifications/03-Manager_Architecture.md [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-6]
-- docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
+- docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-1.2.3]
+- docs/specifications/07-System_Invariants.md [OBS.5]
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ from weft._constants import (
     ATOMIC_WRITE_RETRY_ATTEMPTS,
     ATOMIC_WRITE_RETRY_INTERVAL,
     SUBPROCESS_POLL_INTERVAL_FLOOR,
+    TASKSPEC_TID_LENGTH,
+    TASKSPEC_TID_SHORT_LENGTH,
     WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS,
     WEFT_SPAWN_REQUESTS_QUEUE,
     load_config,
@@ -112,6 +115,25 @@ def pid_matches_create_time(pid: int, create_time: float | None) -> bool:
     if current_create_time is None:
         return False
     return math.isclose(current_create_time, create_time, rel_tol=0.0, abs_tol=0.001)
+
+
+def tid_short_form(tid: str) -> str:
+    """Derive the display short form from a full 19-digit task ID.
+
+    Raises:
+        ValueError: The input is not a 19-digit decimal task ID.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.5];
+        docs/specifications/10-CLI_Interface.md [CLI-1.2.3].
+    """
+    if (
+        not isinstance(tid, str)
+        or len(tid) != TASKSPEC_TID_LENGTH
+        or not tid.isascii()
+        or not tid.isdecimal()
+    ):
+        raise ValueError("tid must be a 19-digit decimal task ID")
+    return tid[len(tid) - TASKSPEC_TID_SHORT_LENGTH :]
 
 
 def live_host_processes_from_handle(

@@ -2861,19 +2861,25 @@ def test_cli_run_wait_returns_timeout_exit_code(
     _assert_no_terminal_handoff_details(err)
 
 
-def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
+def test_cli_run_skips_stale_manager_and_preserves_history(
+    workdir, weft_harness
+) -> None:
     weft_harness.ensure_foreground_manager()
     context = weft_harness.context
     registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         stale_pid = 999_999
+        stale_handle = _host_runtime_handle(stale_pid)
+        stale_handle["observations"]["host_processes"] = [
+            {"pid": stale_pid, "create_time": 1.0}
+        ]
         registry.write(
             json.dumps(
                 _manager_service_payload(
                     context,
                     tid="1762000000000000000",
                     name="stale-manager",
-                    runtime_handle=_host_runtime_handle(stale_pid),
+                    runtime_handle=stale_handle,
                 )
             )
         )
@@ -2893,9 +2899,9 @@ def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
             json.loads(item)
             for item, _ in registry.peek_many(limit=100, with_timestamps=True)
         ]
-        assert all(
+        assert any(
             stale_pid
-            not in record.get("runtime_handle", {})
+            in record.get("runtime_handle", {})
             .get("observations", {})
             .get("host_pids", [])
             for record in payloads

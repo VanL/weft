@@ -9,7 +9,8 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -22,6 +23,7 @@ from weft._constants import (
     SERVICE_STATUS_SUPERSEDED,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft._exceptions import ManagerNotRunning
 from weft.commands import manager as manager_cmd
@@ -30,12 +32,14 @@ from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
+from weft.core.manager import Manager
 from weft.core.service_convergence import (
     build_manager_service_payload,
     manager_service_key,
     project_manager_service_record,
 )
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, process_create_time
+from weft.liveness.models import HostProcessObservation, RuntimeLiveness
 
 pytestmark = [pytest.mark.shared]
 
@@ -54,6 +58,7 @@ def test_manager_runtime_exposes_only_canonical_lifecycle_names() -> None:
         "manager_diagnostic_records",
         "manager_record",
         "manager_registry_record_is_stale",
+        "manager_registry_record_liveness",
         "normalize_manager_registry_record",
         "replace_active_manager",
         "select_active_manager",
@@ -383,7 +388,9 @@ def _host_runtime_handle(pid: int) -> dict[str, object]:
         "kind": "process",
         "id": str(pid),
         "control": {"authority": "host-pid"},
-        "observations": {"host_pids": [pid]},
+        "observations": {
+            "host_processes": [{"pid": pid, "create_time": process_create_time(pid)}]
+        },
         "metadata": {},
     }
 
@@ -472,11 +479,10 @@ class _ManagerSnapshotCase:
     canonical: bool = True
     prune_stale: bool = True
     probe_stale: bool = False
-    stale_result: tuple[bool, bool] | None = (True, False)
+    stale_result: str | None = "unknown"
     pong_result: bool | None = False
     namespace_ambiguous: bool = False
     expected_in_view: bool = False
-    expected_deleted: bool = False
     expected_pong_calls: int = 1
 
 
@@ -493,24 +499,22 @@ _MANAGER_SNAPSHOT_CASES = (
     _ManagerSnapshotCase(
         "active-live",
         probe_stale=True,
-        stale_result=(False, False),
+        stale_result="live",
         pong_result=None,
         expected_in_view=True,
         expected_pong_calls=0,
     ),
     _ManagerSnapshotCase(
         "definitive-stale-probe-disabled",
-        stale_result=(True, True),
+        stale_result="stale",
         pong_result=None,
-        expected_deleted=True,
         expected_pong_calls=0,
     ),
     _ManagerSnapshotCase(
         "definitive-stale-probe-enabled",
         probe_stale=True,
-        stale_result=(True, True),
+        stale_result="stale",
         pong_result=None,
-        expected_deleted=True,
         expected_pong_calls=0,
     ),
     _ManagerSnapshotCase(
@@ -528,7 +532,6 @@ _MANAGER_SNAPSHOT_CASES = (
     _ManagerSnapshotCase(
         "canonical-unmatched-pong-prune",
         probe_stale=True,
-        expected_deleted=True,
     ),
     _ManagerSnapshotCase(
         "noncanonical-omit-only-without-pong",
@@ -541,7 +544,6 @@ _MANAGER_SNAPSHOT_CASES = (
         canonical=False,
         probe_stale=True,
         pong_result=None,
-        expected_deleted=True,
         expected_pong_calls=0,
     ),
     _ManagerSnapshotCase(
@@ -600,7 +602,7 @@ def test_snapshot_registry_decision_table_uses_one_record_evidence_frame(
     stale_calls: list[str] = []
     pong_calls: list[str] = []
 
-    def stale_status(record: dict[str, Any]) -> tuple[bool, bool]:
+    def stale_status(record: dict[str, Any]) -> str:
         stale_calls.append(str(record["tid"]))
         if case.stale_result is None:
             pytest.fail("stale classification must be skipped for this row")
@@ -624,7 +626,7 @@ def test_snapshot_registry_decision_table_uses_one_record_evidence_frame(
 
     monkeypatch.setattr(
         core_manager_runtime,
-        "_manager_record_stale_status",
+        "manager_registry_record_liveness",
         stale_status,
     )
     monkeypatch.setattr(
@@ -668,7 +670,7 @@ def test_snapshot_registry_decision_table_uses_one_record_evidence_frame(
     assert (tid in snapshot) is case.expected_in_view
     if case.expected_in_view:
         assert snapshot[tid]["timestamp"] == message_id
-    assert remaining_ids == ([] if case.expected_deleted else [message_id])
+    assert remaining_ids == [message_id]
     assert len(stale_calls) == (1 if case.stale_result is not None else 0)
     assert pong_calls == [tid] * case.expected_pong_calls
 
@@ -689,8 +691,8 @@ def test_snapshot_registry_latest_included_timestamp_wins(
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     monkeypatch.setattr(
         core_manager_runtime,
-        "_manager_record_stale_status",
-        lambda _record: (False, False),
+        "manager_registry_record_liveness",
+        lambda _record: "live",
     )
     monkeypatch.setattr(
         core_manager_runtime,
@@ -742,8 +744,8 @@ def test_snapshot_registry_latest_included_timestamp_wins(
 
 @pytest.mark.parametrize(
     ("probe_stale", "newer_deleted"),
-    [(False, False), (True, True)],
-    ids=["newer-omitted", "newer-pruned"],
+    [(False, False), (True, False)],
+    ids=["probe-disabled", "probe-enabled"],
 )
 def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
     tmp_path,
@@ -756,8 +758,8 @@ def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     pong_calls: list[str] = []
 
-    def stale_status(record: dict[str, Any]) -> tuple[bool, bool]:
-        return record["name"] == "newer", False
+    def stale_status(record: dict[str, Any]) -> str:
+        return "unknown" if record["name"] == "newer" else "live"
 
     def no_matched_pong(
         _context: Any,
@@ -771,7 +773,7 @@ def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
 
     monkeypatch.setattr(
         core_manager_runtime,
-        "_manager_record_stale_status",
+        "manager_registry_record_liveness",
         stale_status,
     )
     monkeypatch.setattr(
@@ -899,7 +901,7 @@ def test_snapshot_registry_closes_locally_acquired_queue(
     ],
     ids=["broker-error", "os-error", "runtime-error"],
 )
-def test_snapshot_registry_operational_delete_failure_continues_later_deletes(
+def test_snapshot_registry_never_attempts_operational_peer_deletes(
     tmp_path,
     monkeypatch,
     error: Exception,
@@ -912,8 +914,8 @@ def test_snapshot_registry_operational_delete_failure_continues_later_deletes(
 
     monkeypatch.setattr(
         core_manager_runtime,
-        "_manager_record_stale_status",
-        lambda _record: (True, True),
+        "manager_registry_record_liveness",
+        lambda _record: "stale",
     )
     monkeypatch.setattr(
         core_manager_runtime,
@@ -953,11 +955,11 @@ def test_snapshot_registry_operational_delete_failure_continues_later_deletes(
         original_close()
 
     assert snapshot == {}
-    assert delete_attempts == [first_id, second_id]
-    assert remaining_ids == [first_id]
+    assert delete_attempts == []
+    assert remaining_ids == [first_id, second_id]
 
 
-def test_snapshot_registry_propagates_unexpected_delete_defect(
+def test_snapshot_registry_never_calls_peer_delete(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -967,8 +969,8 @@ def test_snapshot_registry_propagates_unexpected_delete_defect(
     original_close: Callable[[], None] = queue.close
     monkeypatch.setattr(
         core_manager_runtime,
-        "_manager_record_stale_status",
-        lambda _record: (True, True),
+        "manager_registry_record_liveness",
+        lambda _record: "stale",
     )
     monkeypatch.setattr(
         core_manager_runtime,
@@ -990,8 +992,7 @@ def test_snapshot_registry_propagates_unexpected_delete_defect(
 
         monkeypatch.setattr(queue, "delete", defective_delete)
 
-        with pytest.raises(ValueError, match="unexpected delete defect"):
-            core_manager_runtime._snapshot_registry(context, queue=queue)
+        assert core_manager_runtime._snapshot_registry(context, queue=queue) == {}
         remaining_ids = [
             timestamp for _payload, timestamp in _manager_registry_rows(queue)
         ]
@@ -1025,8 +1026,8 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
 
     monkeypatch.setattr(
         core_manager_runtime,
-        "_manager_record_stale_status",
-        lambda _record: (True, False),
+        "manager_registry_record_liveness",
+        lambda _record: "unknown",
     )
     monkeypatch.setattr(
         core_manager_runtime,
@@ -1800,7 +1801,14 @@ def test_list_command_diagnostic_includes_stale_active_manager(tmp_path) -> None
                         context,
                         tid,
                         name="stale-manager",
-                        runtime_handle=_host_runtime_handle(process.pid),
+                        runtime_handle={
+                            **_host_runtime_handle(process.pid),
+                            "observations": {
+                                "host_processes": [
+                                    {"pid": process.pid, "create_time": 1.0}
+                                ]
+                            },
+                        },
                     )
                 )
             )
@@ -2078,7 +2086,7 @@ def test_stop_command_force_ignores_registry_only_pid_without_mapping(
     assert message is None
 
 
-def test_stop_command_force_replaces_active_registry_record(
+def test_stop_command_force_appends_terminal_registry_record(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -2154,9 +2162,8 @@ def test_stop_command_force_replaces_active_registry_record(
     finally:
         reader.close()
 
-    assert len(records) == 1
-    assert records[0]["owner_tid"] == tid
-    assert records[0]["status"] == "stopped"
+    assert [row["owner_tid"] for row in records] == [tid, tid]
+    assert [row["status"] for row in records] == ["active", "stopped"]
 
 
 @pytest.mark.parametrize(
@@ -2332,3 +2339,151 @@ def test_status_command_not_found(tmp_path):
     build_context(context_root)
     with pytest.raises(ManagerNotRunning, match="not found"):
         manager_cmd.cmd_manager_status("999", context=context_root)
+
+
+@pytest.mark.parametrize(
+    ("observations", "containerized", "expected"),
+    [
+        ([("live", "identity_match")], False, "live"),
+        ([("stale", "identity_mismatch")], False, "stale"),
+        ([("stale", "identity_mismatch")], True, "stale"),
+        ([("stale", "process_zombie")], True, "stale"),
+        ([("stale", "process_absent")], False, "stale"),
+        ([("stale", "process_absent")], True, "unknown"),
+        ([("unknown", "missing_exact_identity")], False, "unknown"),
+        ([("unknown", "process_unresolved")], False, "unknown"),
+        (
+            [("stale", "identity_mismatch"), ("unknown", "missing_exact_identity")],
+            False,
+            "unknown",
+        ),
+        (
+            [("unknown", "process_unresolved"), ("live", "identity_match")],
+            False,
+            "live",
+        ),
+        ([], False, "unknown"),
+    ],
+)
+def test_manager_registry_host_evidence_reduction_is_shared(
+    monkeypatch: pytest.MonkeyPatch,
+    observations: list[tuple[str, str]],
+    containerized: bool,
+    expected: str,
+) -> None:
+    """Exact host evidence has the same meaning to CLI, Manager, and pruning."""
+    evidence = {
+        index + 1: HostProcessObservation(cast(RuntimeLiveness, value), reason)
+        for index, (value, reason) in enumerate(observations)
+    }
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "inspect_host_process",
+        lambda pid, create_time: evidence[pid],
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "detect_container_runtime",
+        lambda: "docker" if containerized else None,
+    )
+    record = {
+        "runtime_handle": {
+            "runner": "host",
+            "kind": "process",
+            "id": "1",
+            "control": {"authority": "host-pid"},
+            "observations": {
+                "host_processes": [{"pid": pid, "create_time": 1.0} for pid in evidence]
+            },
+            "metadata": {},
+        }
+    }
+    assert core_manager_runtime.manager_registry_record_liveness(record) == expected
+    assert Manager._manager_record_liveness(record) == expected
+
+
+@pytest.mark.parametrize("latest_kind", ["stale", "malformed-neighbor", "unknown"])
+def test_manager_pid_lookup_uses_newest_valid_mapping_only(
+    tmp_path: Path,
+    latest_kind: str,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000991"
+    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    try:
+        queue.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": tid[-8:],
+                    "runtime_handle": _host_runtime_handle(os.getpid()),
+                }
+            )
+        )
+        handle = _host_runtime_handle(os.getpid())
+        if latest_kind == "stale":
+            handle["observations"] = {
+                "host_processes": [{"pid": os.getpid(), "create_time": 1.0}]
+            }
+        elif latest_kind == "unknown":
+            handle["observations"] = {"host_pids": [os.getpid()]}
+        queue.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": "" if latest_kind == "malformed-neighbor" else tid[-8:],
+                    "runtime_handle": handle,
+                }
+            )
+        )
+        assert core_manager_runtime._lookup_manager_pid(context, tid) == (
+            os.getpid() if latest_kind == "malformed-neighbor" else None
+        )
+    finally:
+        queue.close()
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("valid_handle", [False, True])
+def test_stop_manager_unobservable_active_owner_requires_exit_or_terminal_proof(
+    tmp_path: Path,
+    force: bool,
+    valid_handle: bool,
+) -> None:
+    """Filtered registry absence and no PID cannot confirm stop ([MA-3])."""
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000992"
+    handle = _host_runtime_handle(os.getpid())
+    handle["observations"] = {"host_pids": [os.getpid()]}
+    payload = _manager_service_payload(
+        context, tid, runtime_handle=handle if valid_handle else {}
+    )
+    timestamp = time.time_ns() - 600_000_000_000
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    try:
+        queue.insert_messages([(json.dumps(payload), timestamp)])
+        record = project_manager_service_record(payload, timestamp=timestamp)
+        assert record is not None
+        stopped, error = core_manager_runtime.stop_manager(
+            context, record, timeout=0.01, force=force, stop_if_absent=True
+        )
+        assert stopped is False
+        assert error is not None
+        assert "unconfirmed" in error if force else "did not stop" in error
+        assert [
+            (row["status"], message_id)
+            for row, message_id in _manager_registry_rows(queue)
+        ] == [("active", timestamp)]
+    finally:
+        queue.close()
+
+
+@pytest.mark.parametrize(
+    "record", [None, {}, {"runtime_handle": {}}, {"runtime_handle": "invalid"}]
+)
+def test_manager_registry_missing_identity_is_unknown(
+    record: dict[str, Any] | None,
+) -> None:
+    assert core_manager_runtime.manager_registry_record_liveness(record) == "unknown"
+    if record is not None:
+        assert Manager._manager_record_liveness(record) == "unknown"

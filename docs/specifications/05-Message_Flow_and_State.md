@@ -303,8 +303,11 @@ Current rules:
 - current claim paths are explicit task-side registration helpers and explicit
   `weft run --name TEXT` on persistent top-level runs
 - clean shutdown deletes the task's active claim
-- resolve and list surfaces opportunistically prune stale claims whose owner is
-  terminal or no longer live
+- resolve and list surfaces classify claims whose owner is terminal or
+  no longer live out of their results; they never delete registry rows.
+  The owning task exact-deletes its own claim on clean shutdown; the
+  runtime pruning engine is the sole deleter of stale claims written by
+  other processes, behind its minimum-age gate
 - current liveness checks use `weft.log.tasks` plus `weft.state.tid_mappings`;
   task processes publish host-PID liveness through `runtime_handle` when no
   runner-specific handle exists, and there is no separate endpoint lease or
@@ -1390,10 +1393,14 @@ Current rules:
   durable application history
 - `weft system prune` defaults to dry-run and applies only with
   `--apply`; apply mode deletes exact candidate message IDs only
-- foreground runtime pruning must preserve recent rows, malformed or
-  unknown-shape rows,
-  and rows whose live owner remains active or ambiguous under existing
-  liveness rules
+- foreground runtime pruning must preserve recent rows, unknown-shape
+  rows (no recognized Weft schema tag), and rows whose live owner
+remains active or ambiguous under existing liveness rules and within
+the runtime pruner's minimum age and the external-supervisor staleness
+window; a `weft.state.services` row that carries the current
+service-owner schema tag but fails that schema's field validation is
+disposable once older than the minimum age ([OBS.13.6]), and each such
+deletion is logged at error level when Weft logging is enabled
 - runtime-state pruning must not delete from `weft.log.tasks`,
   `weft.spawn.requests`, manager control queues, or task-local `T{tid}.*`
   queues
@@ -1499,6 +1506,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md)
 
 - [Monitor and task correctness fixes](../plans/2026-08-31-monitor-and-task-correctness-fixes-plan.md)
 

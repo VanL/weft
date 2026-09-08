@@ -29,6 +29,7 @@ from typing import Any, ClassVar, cast
 import pytest
 
 import weft.core.manager as manager_mod
+import weft.core.manager_runtime as manager_runtime_mod
 import weft.core.tasks.base as base_task_mod
 from simplebroker.ext import BrokerError, DatabaseError
 from tests.helpers.reactor_driver import drive_until
@@ -108,6 +109,7 @@ from weft.core.taskspec import (
     TaskSpec,
 )
 from weft.helpers import ContainerRuntimeDetection, process_create_time
+from weft.liveness.models import HostProcessObservation
 
 AUTOSTART_PIPELINE_RESULT_TIMEOUT = 60.0
 """Wait budget for full autostart pipeline completion under Windows CI load."""
@@ -153,7 +155,9 @@ def _host_runtime_handle(pid: int) -> dict[str, object]:
         "kind": "process",
         "id": str(pid),
         "control": {"authority": "host-pid"},
-        "observations": {"host_pids": [pid]},
+        "observations": {
+            "host_processes": [{"pid": pid, "create_time": process_create_time(pid)}]
+        },
         "metadata": {},
     }
 
@@ -232,7 +236,7 @@ def _manager_service_record(
     **kwargs: Any,
 ) -> dict[str, Any]:
     payload = _manager_service_payload(manager, **kwargs)
-    record = project_manager_service_record(payload, timestamp=1)
+    record = project_manager_service_record(payload, timestamp=time.time_ns())
     assert record is not None
     return record
 
@@ -4661,7 +4665,7 @@ def test_managed_service_pong_probe_timeout_sweeps_own_keyed_reply(
     assert probe.key not in manager._service_probe_pending
 
 
-def test_managed_service_observation_prunes_superseded_service_history(
+def test_managed_service_observation_preserves_other_owner_history(
     manager_setup,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4692,7 +4696,9 @@ def test_managed_service_observation_prunes_superseded_service_history(
         if payload.get("service_key") == INTERNAL_SERVICE_KEY_HEARTBEAT
     ]
     assert [(row.get("owner_tid"), row.get("status")) for row in rows] == [
-        (second_tid, "active")
+        (first_tid, "active"),
+        (first_tid, "terminal"),
+        (second_tid, "active"),
     ]
 
 
@@ -6139,7 +6145,7 @@ def test_manager_supersedes_fresh_higher_tid_active_refresh(
     )
 
 
-def test_manager_registry_prunes_expired_rows_on_refresh(
+def test_manager_registry_refresh_preserves_expired_peer_and_malformed_rows(
     manager_setup,
     monkeypatch,
 ) -> None:
@@ -6187,9 +6193,9 @@ def test_manager_registry_prunes_expired_rows_on_refresh(
     manager._refresh_manager_registration()
 
     entries = [json.loads(item) for item in drain(registry_queue)]
-    assert all(entry.get("name") != "old-manager" for entry in entries)
+    assert any(entry.get("name") == "old-manager" for entry in entries)
     assert any(entry.get("name") == "task-monitor" for entry in entries)
-    assert all(entry.get("owner_tid") != "not-a-tid" for entry in entries)
+    assert any(entry.get("owner_tid") == "not-a-tid" for entry in entries)
     assert [
         entry["owner_tid"] for entry in entries if entry.get("owner_tid") == manager.tid
     ] == [manager.tid]
@@ -6257,7 +6263,7 @@ def test_manager_registers_when_lower_canonical_manager_is_stale(
 
     entries = [json.loads(item) for item in drain(registry_queue)]
     tids = {entry["owner_tid"] for entry in entries}
-    assert lower_tid not in tids
+    assert lower_tid in tids
     assert manager.tid in tids
 
 
@@ -6523,7 +6529,7 @@ def test_manager_leadership_keeps_namespace_ambiguous_host_row_after_ping_timeou
         )
     )
     monkeypatch.setattr(
-        manager_mod,
+        manager_runtime_mod,
         "detect_container_runtime",
         lambda: ContainerRuntimeDetection(
             runtime="docker",
@@ -6532,9 +6538,9 @@ def test_manager_leadership_keeps_namespace_ambiguous_host_row_after_ping_timeou
         ),
     )
     monkeypatch.setattr(
-        manager_mod,
-        "handle_has_live_host_process",
-        lambda _handle: False,
+        manager_runtime_mod,
+        "inspect_host_process",
+        lambda pid, create_time: HostProcessObservation("stale", "process_absent"),
     )
 
     assert manager._maybe_yield_leadership(force=True) is False
@@ -6574,7 +6580,7 @@ def test_manager_unknown_lower_owner_does_not_suppress_or_yield(
     lower_timestamp = pending_timestamps(registry_queue)[0]
 
     monkeypatch.setattr(
-        manager_mod,
+        manager_runtime_mod,
         "runtime_liveness_from_registered_probe",
         lambda handle: "unknown",
     )
@@ -6610,7 +6616,7 @@ def test_manager_strong_live_lower_owner_can_trigger_immediate_yield(
     )
 
     monkeypatch.setattr(
-        manager_mod,
+        manager_runtime_mod,
         "runtime_liveness_from_registered_probe",
         lambda handle: "live",
     )
@@ -6663,7 +6669,7 @@ def test_manager_leadership_drain_resumes_when_leader_proof_disappears(
     assert manager._unregistered is False
 
 
-def test_manager_liveness_rejects_stale_external_supervisor_record(
+def test_manager_liveness_keeps_expired_external_supervisor_unknown(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -6680,7 +6686,7 @@ def test_manager_liveness_rejects_stale_external_supervisor_record(
         "requests": WEFT_SPAWN_REQUESTS_QUEUE,
     }
 
-    assert Manager._manager_record_liveness(record) == "stale"
+    assert Manager._manager_record_liveness(record) == "unknown"
     assert Manager._manager_record_is_live(record) is False
 
 
@@ -6688,7 +6694,7 @@ def test_manager_liveness_rejects_missing_docker_supervisor_record(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        manager_mod,
+        manager_runtime_mod,
         "runtime_liveness_from_registered_probe",
         lambda handle: "stale",
     )
@@ -6719,7 +6725,7 @@ def test_manager_liveness_uses_supervisor_probe_before_host_pid_identity(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        manager_mod,
+        manager_runtime_mod,
         "runtime_liveness_from_registered_probe",
         lambda handle: "live",
     )
@@ -6756,7 +6762,11 @@ def test_manager_liveness_uses_supervisor_probe_before_host_pid_identity(
 def test_manager_liveness_rejects_host_pid_identity_mismatch(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("weft.helpers.process_create_time", lambda pid: 222.0)
+    monkeypatch.setattr(
+        manager_runtime_mod,
+        "inspect_host_process",
+        lambda pid, create_time: HostProcessObservation("stale", "identity_mismatch"),
+    )
     record = {
         "tid": "1761000000000000011",
         "status": "active",
@@ -6776,6 +6786,7 @@ def test_manager_liveness_rejects_host_pid_identity_mismatch(
         "requests": WEFT_SPAWN_REQUESTS_QUEUE,
     }
 
+    assert Manager._manager_record_liveness(record) == "stale"
     assert Manager._manager_record_is_live(record) is False
 
 
@@ -6783,7 +6794,7 @@ def test_manager_liveness_treats_host_pid_miss_as_unknown_inside_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        manager_mod,
+        manager_runtime_mod,
         "detect_container_runtime",
         lambda: ContainerRuntimeDetection(
             runtime="docker",
@@ -6792,9 +6803,9 @@ def test_manager_liveness_treats_host_pid_miss_as_unknown_inside_container(
         ),
     )
     monkeypatch.setattr(
-        manager_mod,
-        "handle_has_live_host_process",
-        lambda _handle: False,
+        manager_runtime_mod,
+        "inspect_host_process",
+        lambda pid, create_time: HostProcessObservation("stale", "process_absent"),
     )
     record = {
         "tid": "1761000000000000011",
@@ -10465,6 +10476,7 @@ def test_managed_pids_for_child_excludes_create_time_mismatch(
             json.dumps(
                 {
                     "full": stale_tid,
+                    "short": stale_tid[-8:],
                     "runtime_handle": _host_runtime_handle_with_create_time(
                         live_pid, actual_create_time - 100.0
                     ),
@@ -10479,6 +10491,7 @@ def test_managed_pids_for_child_excludes_create_time_mismatch(
             json.dumps(
                 {
                     "full": match_tid,
+                    "short": match_tid[-8:],
                     "runtime_handle": _host_runtime_handle_with_create_time(
                         live_pid, actual_create_time
                     ),
@@ -10543,3 +10556,47 @@ def test_failed_launch_clear_policy_preserves_failed_delete_residue(
     finally:
         manager.stop(join=False)
         manager.cleanup()
+
+
+@pytest.mark.parametrize("age_seconds", [30, 120])
+def test_manager_leadership_unknown_expiry_controls_ping_without_changing_evidence(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    age_seconds: int,
+) -> None:
+    manager, make_queue = manager_setup
+    tid = str(int(manager.tid) - 1)
+    now_ns = time.time_ns()
+    monkeypatch.setattr(
+        manager_mod, "MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS", 60.0
+    )
+    monkeypatch.setattr(
+        manager_runtime_mod,
+        "runtime_liveness_from_registered_probe",
+        lambda handle: "unknown",
+    )
+    record = _manager_service_record(
+        manager,
+        tid=tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+        ctrl_in=f"T{tid}.ctrl_in",
+        ctrl_out=f"T{tid}.ctrl_out",
+    )
+    record["_timestamp"] = now_ns - age_seconds * 1_000_000_000
+    assert manager._manager_record_liveness(record) == "unknown"
+    proof = manager._manager_leadership_proof(record, now_ns=now_ns, allow_ping=True)
+    pings = [json.loads(message) for message in drain(make_queue(f"T{tid}.ctrl_in"))]
+    if age_seconds > 60:
+        assert proof.liveness == "stale"
+        assert proof.reason == "expired"
+        assert pings == []
+        assert tid not in manager._leader_probe_pending
+    else:
+        assert proof.liveness == "unknown"
+        assert proof.reason == "ping_pending"
+        assert pings == [
+            {
+                "command": CONTROL_PING,
+                "request_id": manager._leader_probe_pending[tid].request_id,
+            }
+        ]

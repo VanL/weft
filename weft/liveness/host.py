@@ -12,6 +12,8 @@ import re
 
 import psutil
 
+from weft.helpers import tid_short_form
+
 from .models import HostProcessObservation
 
 
@@ -44,7 +46,10 @@ def inspect_host_process(
     except (psutil.AccessDenied, psutil.Error, AttributeError, OSError):
         cmdline = []
     title = cmdline[0] if cmdline and isinstance(cmdline[0], str) else ""
-    short_tid = re.escape(expected_tid[-10:])
+    try:
+        short_tid = re.escape(tid_short_form(expected_tid))
+    except ValueError:
+        return HostProcessObservation("live", "identity_match_title_unconfirmed")
     if re.match(
         rf"^weft-[A-Za-z0-9_-]+-{short_tid}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+",
         title,

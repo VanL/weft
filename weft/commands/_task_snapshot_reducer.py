@@ -25,12 +25,12 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
-    TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
 )
 from weft.core.task_evidence import TaskEvidenceSnapshot
 from weft.ext import RunnerHandle
+from weft.helpers import tid_short_form
 
 
 @dataclass(frozen=True)
@@ -187,19 +187,17 @@ def reduce_task_event(
 ) -> FoldedTaskRecord | None:
     """Apply one already-read event without I/O or shared mutation."""
 
-    tid = payload.get("tid")
-    if not isinstance(tid, str):
+    tid = payload.get("tid", "")
+    try:
+        short = tid_short_form(tid)
+    except ValueError:
         return current
-    if (
-        tid_filters is not None
-        and tid not in tid_filters
-        and tid[-TASKSPEC_TID_SHORT_LENGTH:] not in tid_filters
-    ):
+    if tid_filters is not None and tid not in tid_filters and short not in tid_filters:
         return current
 
     record = current or FoldedTaskRecord(
         tid=tid,
-        tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        tid_short=short,
         name=tid,
         status="created",
         event="unknown",
@@ -266,7 +264,7 @@ def reduce_task_event(
 
     return FoldedTaskRecord(
         tid=tid,
-        tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        tid_short=short,
         name=str(taskspec.get("name") or payload.get("name") or tid),
         status=status,
         event=event if isinstance(event, str) else record.event,

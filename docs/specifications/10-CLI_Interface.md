@@ -542,6 +542,27 @@ Current behavior:
   as `int | None`
 - `weft task tid` resolves short TIDs, PID lookups, or reverse lookups via the
   TID-mapping queue
+
+A short TID that matches more than one full TID among the valid newest
+mapping rows in `weft.state.tid_mappings` (valid per the mapping-row shape rule — a JSON object whose `full` and `short` are non-empty strings, the shape `LivenessMonitor` enforces under [LIVENESS.R3] — and with a `full` value that is a 19-digit TID — rows whose
+`full` is not derivable are skipped, never fatal; live or terminal) is
+ambiguous: resolution fails with an
+error naming the candidate full TIDs; no command selects one silently,
+and every batch control path — the CLI loops and the Python client's
+`stop_many`/`kill_many` — resolves all requested TIDs before writing any
+control message. Resolution derives each row's short form from its
+`full` TID per [OBS.5]; the stored `short` field remains required
+row shape but is not resolution authority.
+
+Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
+
+_Implementation mapping_: `weft/helpers/__init__.py::tid_short_form` owns
+short-form derivation; `weft/core/endpoints.py::latest_tid_mapping_rows` owns
+the newest-valid mapping fold; `weft/commands/tasks.py::resolve_full_tid` and
+`weft/commands/system.py::_resolve_tid_filters` reject collisions. Task
+batch controls preflight resolution in `stop_tasks`, `kill_tasks`, and
+`_task_control_result`.
+
 - `weft task stop` and `weft task kill` can act on one task, all active tasks,
   or a name-pattern subset. A genuinely unknown TID is rejected before a
   control queue is created or written. `stop` rejects a known terminal task

@@ -18,8 +18,6 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Any, cast
 
-from simplebroker import Queue
-from simplebroker.ext import BrokerError
 from weft._constants import (
     ENDPOINT_NAME_PATTERN,
     INTERNAL_ENDPOINT_NAMESPACE_PREFIX,
@@ -29,12 +27,14 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.queue_window import QueueWindowRow
 from weft.ext import RunnerHandle
 from weft.helpers import (
-    canonical_owner_tid,
     handle_has_live_host_process,
+    iter_queue_entries,
     iter_queue_json_entries,
 )
+from weft.liveness.policy import decode_tid_mapping_row
 from weft.liveness.registry import runtime_liveness_from_registered_probe
 
 
@@ -214,18 +214,6 @@ def endpoint_record_from_payload(
     )
 
 
-def find_endpoint_registry_message(queue: Queue, *, name: str, tid: str) -> int | None:
-    """Return the latest registry message id for one endpoint owner."""
-
-    latest_message_id: int | None = None
-    normalized_name = normalize_endpoint_name(name)
-    for payload, message_id in iter_queue_json_entries(queue):
-        if payload.get("name") != normalized_name or payload.get("tid") != tid:
-            continue
-        latest_message_id = int(message_id)
-    return latest_message_id
-
-
 def _latest_task_statuses(ctx: WeftContext) -> dict[str, str]:
     queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     try:
@@ -261,22 +249,40 @@ def latest_task_statuses_for_endpoint_resolution(ctx: WeftContext) -> dict[str, 
     return _latest_task_statuses(ctx)
 
 
-def _latest_tid_mapping_entries(
+def latest_tid_mapping_rows(
     ctx: WeftContext,
     *,
     strict: bool = False,
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, tuple[int, dict[str, Any]]]:
+    """Fold the newest valid mapping per full TID, retaining exact row IDs.
+
+    Row validity is owned by the same decoder as LivenessMonitor. Malformed
+    rows never shadow valid history, even for strict readers. Strict mode
+    propagates generator-open failures that the shared iterator otherwise
+    treats as an empty view; failures during iteration propagate in either mode.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.6];
+        docs/specifications/10-CLI_Interface.md [CLI-1.2.3]
+    """
     queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     try:
         latest: dict[str, tuple[int, dict[str, Any]]] = {}
-        for payload, message_id in iter_queue_json_entries(queue, strict=strict):
-            full = payload.get("full")
-            if not isinstance(full, str) or not full:
+        for body, message_id in iter_queue_entries(queue, strict=strict):
+            decoded = decode_tid_mapping_row(
+                QueueWindowRow(
+                    queue=WEFT_TID_MAPPINGS_QUEUE,
+                    body=body,
+                    message_id=message_id,
+                )
+            )
+            if decoded.malformed_reason is not None or decoded.payload is None:
                 continue
+            payload = decoded.payload
+            full = cast(str, payload["full"])
             previous = latest.get(full)
             if previous is None or previous[0] <= message_id:
-                latest[full] = (int(message_id), payload)
-        return {full: payload for full, (_message_id, payload) in latest.items()}
+                latest[full] = (message_id, payload)
+        return latest
     finally:
         queue.close()
 
@@ -286,9 +292,13 @@ def latest_tid_mapping_entries_for_endpoint_resolution(
     *,
     strict: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Return latest TID mappings used by endpoint owner liveness checks."""
-
-    return _latest_tid_mapping_entries(ctx, strict=strict)
+    """Return the canonical newest mapping payloads for owner liveness."""
+    return {
+        full: payload
+        for full, (_message_id, payload) in latest_tid_mapping_rows(
+            ctx, strict=strict
+        ).items()
+    }
 
 
 def _record_owner_is_live(
@@ -340,11 +350,10 @@ def _classify_latest_endpoint_records(
     *,
     task_statuses: Mapping[str, str],
     tid_mappings: Mapping[str, Mapping[str, Any]],
-) -> tuple[dict[str, list[EndpointRecord]], list[int]]:
-    """Classify latest pattern-filtered owner rows as live or exactly stale."""
+) -> dict[str, list[EndpointRecord]]:
+    """Group latest live claims without acquiring deletion authority."""
 
     grouped: dict[str, list[EndpointRecord]] = {}
-    stale_message_ids: list[int] = []
     for record in records:
         if record.status != "active":
             continue
@@ -354,11 +363,8 @@ def _classify_latest_endpoint_records(
             tid_mappings=tid_mappings,
         ):
             grouped.setdefault(record.name, []).append(record)
-            continue
-        if record.message_id is not None:
-            stale_message_ids.append(record.message_id)
 
-    return grouped, stale_message_ids
+    return grouped
 
 
 def list_resolved_endpoints(
@@ -366,7 +372,10 @@ def list_resolved_endpoints(
     *,
     pattern: str | None = None,
 ) -> list[ResolvedEndpoint]:
-    """Return canonical live endpoint records after stale-owner pruning."""
+    """Return canonical live endpoint records without deleting registry rows.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3.1]
+    """
 
     registry_queue = ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
     try:
@@ -382,31 +391,18 @@ def list_resolved_endpoints(
                 latest_by_owner[(record.name, record.tid)] = record
 
         task_statuses = _latest_task_statuses(ctx)
-        tid_mappings = _latest_tid_mapping_entries(ctx)
-        grouped, stale_message_ids = _classify_latest_endpoint_records(
+        tid_mappings = latest_tid_mapping_entries_for_endpoint_resolution(ctx)
+        grouped = _classify_latest_endpoint_records(
             latest_by_owner.values(),
             task_statuses=task_statuses,
             tid_mappings=tid_mappings,
         )
 
-        for message_id in stale_message_ids:
-            try:
-                registry_queue.delete(message_id=message_id)
-            except (BrokerError, OSError, RuntimeError):
-                continue
-
         resolved: list[ResolvedEndpoint] = []
         for candidates in grouped.values():
             ordered = sorted(candidates, key=lambda item: int(item.tid))
-            canonical_tid = canonical_owner_tid(record.tid for record in ordered)
-            if canonical_tid is None:
-                continue
-            canonical_record = next(
-                (record for record in ordered if record.tid == canonical_tid),
-                ordered[0],
-            )
             resolved.append(
-                ResolvedEndpoint(record=canonical_record, live_candidates=len(ordered))
+                ResolvedEndpoint(record=ordered[0], live_candidates=len(ordered))
             )
         resolved.sort(key=lambda item: (item.record.name, int(item.record.tid)))
         return resolved
@@ -431,10 +427,10 @@ __all__ = [
     "build_endpoint_record_payload",
     "endpoint_record_from_payload",
     "endpoint_record_owner_is_live",
-    "find_endpoint_registry_message",
     "is_reserved_internal_endpoint_name",
     "latest_task_statuses_for_endpoint_resolution",
     "latest_tid_mapping_entries_for_endpoint_resolution",
+    "latest_tid_mapping_rows",
     "list_resolved_endpoints",
     "normalize_endpoint_name",
     "resolve_endpoint",

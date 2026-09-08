@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
+import psutil
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
@@ -14,7 +16,6 @@ from weft._constants import (
     RUNTIME_PRUNE_CLASS_STALE_MANAGER,
     RUNTIME_PRUNE_CLASS_STALE_STREAMING,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
-    RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_ACTIVE,
@@ -48,7 +49,8 @@ from weft.core.service_convergence import (
     build_service_owner_payload,
 )
 from weft.ext import RunnerHandle
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, reload_config
+from weft.liveness import registry
 
 pytestmark = [pytest.mark.shared]
 
@@ -296,97 +298,110 @@ def test_runtime_apply_rescan_error_writes_optional_report(
     assert records[-1]["errors"] == ["rescan failed"]
 
 
-def test_manager_prune_reports_superseded_and_stale_active_rows(tmp_path) -> None:
+@pytest.mark.parametrize("status", ["active", "draining", "stopped", "superseded"])
+@pytest.mark.parametrize(
+    "liveness,age,min_age,deleted",
+    [
+        ("live", 600, 0, False),
+        ("live", 0, 0, False),
+        ("stale", 60, 0, True),
+        ("stale", 60, 120, False),
+        ("unknown", 600, 0, True),
+        ("unknown", 60, 0, False),
+        ("unknown", 600, 900, False),
+    ],
+)
+def test_manager_prune_requires_owner_evidence_and_both_age_windows(
+    tmp_path, monkeypatch, status, liveness, age, min_age, deleted
+) -> None:
+    """Every status and history position obeys the same custody predicate."""
     ctx = _context(tmp_path)
-    old_stopped = _write_json(
-        ctx,
-        WEFT_SERVICES_REGISTRY_QUEUE,
-        _manager_service_payload(
+    monkeypatch.setattr(registry, "_runtime_liveness_probes", {})
+    observations = []
+
+    def probe(handle, budget):
+        observations.append(handle.id)
+        return liveness
+
+    registry.register_runtime_liveness_probe("prune-test", probe)
+    handle = RunnerHandle(
+        runner="prune-test",
+        kind="supervised-process",
+        id="owner",
+        control={"authority": "external-supervisor"},
+    )
+    row_ids = [
+        _write_json(
             ctx,
-            tid="1770000000000000010",
-            status="stopped",
-        ),
+            WEFT_SERVICES_REGISTRY_QUEUE,
+            _manager_service_payload(
+                ctx,
+                tid="1770000000000000020",
+                status=status,
+                runtime_handle=handle.to_dict(),
+            ),
+        )
+        for _ in range(3)
+    ]
+    monkeypatch.setattr(
+        runtime_pruning.time, "time_ns", lambda: max(row_ids) + age * 10**9
     )
-    _write_json(
-        ctx,
-        WEFT_SERVICES_REGISTRY_QUEUE,
-        _manager_service_payload(
-            ctx,
-            tid="1770000000000000010",
-            status="stopped",
-        ),
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("managers",),
+            min_age_seconds=min_age,
+            keep_recent_per_key=2,
+            apply=True,
+        )
     )
-    stale_active = _write_json(
-        ctx,
-        WEFT_SERVICES_REGISTRY_QUEUE,
-        _manager_service_payload(ctx, tid="1770000000000000011"),
+    assert result.errors == ()
+    assert result.deleted == (3 if deleted else 0)
+    assert {mid for _, mid in _read_rows(ctx, WEFT_SERVICES_REGISTRY_QUEUE)} == (
+        set() if deleted else set(row_ids)
     )
-    live_handle = RunnerHandle(
+    assert observations or age < min_age
+    assert _read_rows(ctx, "T1770000000000000020.ctrl_in") == []
+
+
+def test_manager_prune_preserves_live_host_identity_history(
+    tmp_path, monkeypatch
+) -> None:
+    ctx = _context(tmp_path)
+    handle = RunnerHandle(
         runner="host",
         kind="process",
         id=str(os.getpid()),
         control={"authority": "host-pid"},
-        observations={"host_pids": [os.getpid()]},
+        observations={
+            "host_processes": [
+                {"pid": os.getpid(), "create_time": psutil.Process().create_time()}
+            ]
+        },
     )
-    live_active = _write_json(
-        ctx,
-        WEFT_SERVICES_REGISTRY_QUEUE,
-        _manager_service_payload(
+    row_ids = [
+        _write_json(
             ctx,
-            tid="1770000000000000012",
-            runtime_handle=live_handle.to_dict(),
-        ),
+            WEFT_SERVICES_REGISTRY_QUEUE,
+            _manager_service_payload(
+                ctx,
+                tid="1770000000000000020",
+                status="superseded",
+                runtime_handle=handle.to_dict(),
+            ),
+        )
+        for _ in range(3)
+    ]
+    monkeypatch.setattr(
+        runtime_pruning.time, "time_ns", lambda: max(row_ids) + 600 * 10**9
     )
-
     result = run_runtime_prune(
         RuntimePruneConfig(
-            context_path=ctx.root,
-            queues=("managers",),
-            min_age_seconds=0,
+            context_path=ctx.root, queues=("managers",), min_age_seconds=0, apply=True
         )
     )
-
-    classifications = {
-        (candidate.message_id, candidate.classification)
-        for candidate in result.candidates
-    }
-    assert (old_stopped, RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER) in classifications
-    assert (stale_active, RUNTIME_PRUNE_CLASS_STALE_MANAGER) in classifications
-    assert all(candidate.message_id != live_active for candidate in result.candidates)
-
-
-def test_manager_prune_honors_keep_recent_per_key(tmp_path) -> None:
-    ctx = _context(tmp_path)
-    tid = "1770000000000000020"
-    old_id = _write_json(
-        ctx,
-        WEFT_SERVICES_REGISTRY_QUEUE,
-        _manager_service_payload(ctx, tid=tid, status="stopped"),
-    )
-    middle_id = _write_json(
-        ctx,
-        WEFT_SERVICES_REGISTRY_QUEUE,
-        _manager_service_payload(ctx, tid=tid, status="stopped"),
-    )
-    latest_id = _write_json(
-        ctx,
-        WEFT_SERVICES_REGISTRY_QUEUE,
-        _manager_service_payload(ctx, tid=tid, status="stopped"),
-    )
-
-    result = run_runtime_prune(
-        RuntimePruneConfig(
-            context_path=ctx.root,
-            queues=("managers",),
-            min_age_seconds=0,
-            keep_recent_per_key=2,
-        )
-    )
-
-    candidate_ids = {candidate.message_id for candidate in result.candidates}
-    assert old_id in candidate_ids
-    assert middle_id not in candidate_ids
-    assert latest_id not in candidate_ids
+    assert result.deleted == 0
+    assert len(_read_rows(ctx, WEFT_SERVICES_REGISTRY_QUEUE)) == 3
 
 
 def test_manager_prune_reports_malformed_service_owner_rows(tmp_path) -> None:
@@ -669,3 +684,105 @@ def test_pipeline_rows_are_report_only_in_first_slice(tmp_path) -> None:
         for _payload, message_id in _read_rows(ctx, WEFT_PIPELINES_STATE_QUEUE)
     }
     assert pipeline_id in remaining_ids
+
+
+@pytest.mark.parametrize(
+    "age,min_age,deleted", [(60, 0, False), (600, 0, True), (600, 900, False)]
+)
+def test_managed_service_prune_uses_nanosecond_ttl(
+    tmp_path, monkeypatch, age, min_age, deleted
+) -> None:
+    ctx = _context(tmp_path)
+    mid = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _managed_service_payload(
+            service_key="_weft.service.heartbeat", tid="1770000000000000100"
+        ),
+    )
+    monkeypatch.setattr(runtime_pruning.time, "time_ns", lambda: mid + age * 10**9)
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("services",),
+            min_age_seconds=min_age,
+            apply=True,
+        )
+    )
+    assert result.errors == ()
+    assert result.deleted == int(deleted)
+    assert len(_read_rows(ctx, WEFT_SERVICES_REGISTRY_QUEUE)) == int(not deleted)
+
+
+@pytest.mark.parametrize("logging_enabled", [False, True])
+@pytest.mark.parametrize("already_missing", [False, True])
+def test_malformed_service_prune_logs_only_actual_deletions(
+    tmp_path, monkeypatch, caplog, logging_enabled, already_missing
+) -> None:
+    ctx = _context(tmp_path)
+    try:
+        with monkeypatch.context() as config_patch:
+            config_patch.setenv("WEFT_LOGGING_ENABLED", "1" if logging_enabled else "0")
+            reload_config()
+            caplog.set_level(logging.ERROR)
+            row_ids = [
+                _write_json(
+                    ctx,
+                    WEFT_SERVICES_REGISTRY_QUEUE,
+                    {
+                        "schema": SERVICE_OWNER_SCHEMA,
+                        "owner_tid": f"invalid-{index}",
+                    },
+                )
+                for index in range(2)
+            ]
+            unknown_id = _write_json(
+                ctx, WEFT_SERVICES_REGISTRY_QUEUE, {"schema": "weft.future-service.v99"}
+            )
+            config = RuntimePruneConfig(
+                context_path=ctx.root, queues=("managers",), min_age_seconds=0
+            )
+            selected = run_runtime_prune(config).candidates
+            if already_missing:
+                queue = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+                try:
+                    assert queue.delete(message_id=row_ids[0])
+                finally:
+                    queue.close()
+            if already_missing:
+                applied = runtime_pruning._apply_candidates(ctx, selected)
+            else:
+                result = run_runtime_prune(
+                    RuntimePruneConfig(
+                        context_path=ctx.root,
+                        queues=("managers",),
+                        min_age_seconds=0,
+                        apply=True,
+                    )
+                )
+                assert result.errors == ()
+                assert result.failed == 0
+                assert result.deleted == 2
+                applied = result.applied_candidates
+            expected_ids = set(row_ids[1:] if already_missing else row_ids)
+            assert {c.message_id for c in applied if c.applied} == expected_ids
+            assert all(c.error is None for c in applied)
+            records = [
+                r
+                for r in caplog.records
+                if r.getMessage() == "Pruned malformed service-owner row"
+            ]
+            assert {r.message_id for r in records} == (
+                expected_ids if logging_enabled else set()
+            )
+            assert all(
+                r.levelno == logging.ERROR
+                and r.queue == WEFT_SERVICES_REGISTRY_QUEUE
+                and r.owner_tid.startswith("invalid-")
+                for r in records
+            )
+            assert {
+                mid for _, mid in _read_rows(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+            } == {unknown_id}
+    finally:
+        reload_config()

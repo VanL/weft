@@ -14,6 +14,7 @@ Spec references:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import defaultdict
@@ -24,11 +25,11 @@ from typing import Any, Literal
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     RUNTIME_PRUNE_CLASS_STALE_ENDPOINT,
     RUNTIME_PRUNE_CLASS_STALE_MANAGER,
     RUNTIME_PRUNE_CLASS_STALE_STREAMING,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
-    RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_SERVICE,
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
@@ -51,7 +52,7 @@ from weft.core.endpoints import (
     latest_tid_mapping_entries_for_endpoint_resolution,
 )
 from weft.core.manager_runtime import (
-    manager_registry_record_is_stale,
+    manager_registry_record_liveness,
     normalize_manager_registry_record,
 )
 from weft.core.pruning.apply import apply_exact_prune_candidates
@@ -60,7 +61,7 @@ from weft.core.service_convergence import (
     parse_service_owner_row,
     plan_service_owner_history_prune,
 )
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, send_log
 
 RuntimeQueueName = Literal[
     "managers",
@@ -341,86 +342,58 @@ def _candidate(
     )
 
 
-def _manager_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-033] exception
+def _manager_candidates(
     ctx: WeftContext,
     config: RuntimePruneConfig,
     now_ns: int,
 ) -> tuple[list[RuntimePruneCandidate], int]:
+    """Retire aged stale owners or unknown owners past both windows.
+
+    All manager statuses and history positions share this predicate. Live
+    drain/supersession authority remains owned by the manager. Classification
+    uses registered runtime evidence, never a keyed control PING.
+
+    Spec: [MA-1], [MF-5], [OBS.13.6]
+    """
     entries, scanned = _read_runtime_queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
-    payload_by_id = {message_id: payload for payload, message_id in entries}
-    record_by_id: dict[int, dict[str, Any]] = {}
-    grouped: dict[str, list[int]] = defaultdict(list)
     candidates: list[RuntimePruneCandidate] = []
     for payload, message_id in entries:
+        if not is_old_enough(message_id, now_ns, config.min_age_seconds):
+            continue
         parse_result = parse_service_owner_row(payload, timestamp=message_id)
         if parse_result.disposition == "malformed":
-            if is_old_enough(message_id, now_ns, config.min_age_seconds):
-                candidates.append(
-                    _candidate(
-                        queue=WEFT_SERVICES_REGISTRY_QUEUE,
-                        queue_group="managers",
-                        message_id=message_id,
-                        key=str(payload.get("owner_tid") or payload.get("tid") or ""),
-                        classification=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-                        reason="malformed_service_owner_row",
-                        now_ns=now_ns,
-                        payload=payload,
-                    )
-                )
-            continue
-        record = normalize_manager_registry_record(
-            ctx,
-            payload,
-            timestamp=message_id,
-        )
-        if record is None:
-            continue
-        tid = record.get("tid")
-        if not isinstance(tid, str) or not tid:
-            continue
-        record_by_id[message_id] = record
-        grouped[tid].append(message_id)
-
-    for tid, message_ids in grouped.items():
-        ordered = sorted(message_ids, reverse=True)
-        protected_ids = set(ordered[: config.keep_recent_per_key])
-        for message_id in ordered:
-            record = record_by_id.get(message_id)
-            candidate_payload = payload_by_id.get(message_id)
-            if record is None or candidate_payload is None:
-                continue
-            if not is_old_enough(message_id, now_ns, config.min_age_seconds):
-                continue
-            if record.get("status") == "active" and manager_registry_record_is_stale(
-                record
-            ):
-                candidates.append(
-                    _candidate(
-                        queue=WEFT_SERVICES_REGISTRY_QUEUE,
-                        queue_group="managers",
-                        message_id=message_id,
-                        key=tid,
-                        classification=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-                        reason="active_manager_runtime_handle_not_live",
-                        now_ns=now_ns,
-                        payload=candidate_payload,
-                    )
-                )
-                continue
-            if message_id in protected_ids:
-                continue
-            candidates.append(
-                _candidate(
-                    queue=WEFT_SERVICES_REGISTRY_QUEUE,
-                    queue_group="managers",
-                    message_id=message_id,
-                    key=tid,
-                    classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
-                    reason="older_than_min_age_and_not_latest_for_manager_tid",
-                    now_ns=now_ns,
-                    payload=candidate_payload,
-                )
+            reason = "malformed_service_owner_row"
+            tid = str(payload.get("owner_tid") or payload.get("tid") or "")
+        else:
+            record = normalize_manager_registry_record(
+                ctx, payload, timestamp=message_id
             )
+            if record is None:
+                continue
+            tid = record["tid"]
+            liveness = manager_registry_record_liveness(record)
+            if liveness == "live":
+                continue
+            if liveness == "unknown":
+                if not is_old_enough(
+                    message_id, now_ns, MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS
+                ):
+                    continue
+                reason = "unknown_manager_owner_past_staleness_window"
+            else:
+                reason = "manager_runtime_handle_definitively_stale"
+        candidates.append(
+            _candidate(
+                queue=WEFT_SERVICES_REGISTRY_QUEUE,
+                queue_group="managers",
+                message_id=message_id,
+                key=tid,
+                classification=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
+                reason=reason,
+                now_ns=now_ns,
+                payload=payload,
+            )
+        )
     return candidates, scanned
 
 
@@ -448,7 +421,9 @@ def _service_candidates(
                 managed_records,
                 service_key=service_key,
                 now_ns=now_ns,
-                ttl_ns=-1,
+                ttl_ns=int(
+                    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
+                ),
                 keep_recent_per_key=config.keep_recent_per_key,
             )
         )
@@ -465,7 +440,7 @@ def _service_candidates(
                     message_id=message_id,
                     key=service_key,
                     classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_SERVICE,
-                    reason="older_than_min_age_and_not_latest_for_service_key",
+                    reason="expired_or_surplus_service_owner_history",
                     now_ns=now_ns,
                     payload=candidate_payload,
                 )
@@ -658,11 +633,31 @@ def _apply_candidates(
     ctx: WeftContext,
     candidates: Sequence[RuntimePruneCandidate],
 ) -> list[RuntimePruneCandidate]:
-    return apply_exact_prune_candidates(
+    """Apply exact rows and log only confirmed malformed-row deletions.
+
+    Spec: [MF-5], [OBS.13.6]
+    """
+    applied = apply_exact_prune_candidates(
         ctx,
         candidates,
+        exact_status=any(
+            candidate.reason == "malformed_service_owner_row"
+            for candidate in candidates
+        ),
         apply_result=lambda candidate, applied, error: candidate.for_apply_result(
             applied=applied,
             error=error,
         ),
     )
+    for candidate in applied:
+        if candidate.applied and candidate.reason == "malformed_service_owner_row":
+            send_log(
+                "Pruned malformed service-owner row",
+                level=logging.ERROR,
+                extra={
+                    "queue": candidate.queue,
+                    "message_id": candidate.message_id,
+                    "owner_tid": candidate.payload_excerpt.get("owner_tid"),
+                },
+            )
+    return applied

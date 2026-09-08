@@ -288,6 +288,7 @@ def test_heartbeat_endpoint_liveness_uses_task_process_runtime_handle(
             json.dumps(
                 {
                     "full": tid,
+                    "short": tid[-10:],
                     "runtime_handle": _host_runtime_handle(4242, 1.5),
                 }
             )

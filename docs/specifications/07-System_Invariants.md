@@ -277,7 +277,8 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   global task log
 - **OBS.4**: process titles follow `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
 - **OBS.5**: TID short form uses the low-order digits from the resolved
-  19-digit TID
+  19-digit TID. A short form matching more than one full TID is an ambiguity
+  error per [CLI-1.2.3]. Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
 - **OBS.6**: Each TID mapping row is a complete runtime-observability
   snapshot written to `weft.state.tid_mappings`. A consumer that requires
   current state selects the valid row with the greatest broker message ID for
@@ -398,8 +399,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     being deleted as soon as cleanup proof exists [QUEUE.6].
   - **OBS.13.6**: Runtime-state queue cleanup is policy driven. Malformed rows
     are deletable only from Weft-owned schema queues whose policy says
-    malformed rows are disposable, such as `weft.log.tasks` and
-    `weft.state.tid_mappings`. Runtime cleanup does not create new lifecycle
+    malformed rows are disposable, such as `weft.log.tasks`,
+    `weft.state.tid_mappings`, and schema-tagged `weft.state.services` rows
+    that fail service-owner validation ([MF-5]). Runtime cleanup does not create new lifecycle
     evidence and remains bounded by the selected cleanup policy.
   - **OBS.13.7**: Monitor cleanup must not delete active work, ambiguous
     task-local evidence, claimed outbox residue, user payload rows, unknown

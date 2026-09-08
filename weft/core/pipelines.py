@@ -34,6 +34,7 @@ from weft.core.taskspec import (
     encode_taskspec_transport_payload,
     validate_taskspec_payload,
 )
+from weft.helpers import tid_short_form
 
 
 class PipelineStageDefaults(BaseModel):
@@ -402,7 +403,7 @@ def compile_linear_pipeline(
     stage_specs_for_runtime: list[dict[str, Any]] = []
     edge_specs_for_runtime: list[dict[str, Any]] = []
 
-    pipeline_name = pipeline.name or f"pipeline-{pipeline_tid[-10:]}"
+    pipeline_name = pipeline.name or f"pipeline-{tid_short_form(pipeline_tid)}"
     previous_stage: CompiledPipelineStage | None = None
     bootstrap_input_fallback = (
         pipeline.stages[0].defaults.input

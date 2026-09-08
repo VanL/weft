@@ -160,9 +160,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
    `weft.state.services` as shutdown authority without consulting spawn queues.
    The active record is pruned when the manager exits cleanly. The registry is
    read as a live queue: callers reduce to the latest relevant record per
-   service key and owner TID, prune dead or expired active records, and then filter to
-   canonical non-superseded live managers before treating the result as the
-   active-manager view. Host-managed records use scoped host
+   service key and owner TID, filter out dead or expired active records, and
+   then filter to canonical non-superseded live managers before treating the
+   result as the active-manager view. Readers do not delete registry rows. Host-managed records use scoped host
    process identity: a PID is live only when it still matches the recorded
    process creation time when that identity is available. Externally supervised
    records use the process-local runtime liveness probe registry when an
@@ -408,6 +408,48 @@ alias `requests` as `inbox`, and does not carry `legacy_role`. Manager/status
 read models may project documented convenience fields from this canonical
 object, but they are not alternate persisted schemas.
 
+`weft.state.services` custody: a row's logical owner may exact-delete
+its rows at any time; the runtime pruning engine may delete any row
+only under a named predicate; readers otherwise never delete. Owner
+classes: (1) rows whose `owner_tid` is a manager's own TID — its
+registration history, heartbeat supersession, unregistration, and a
+`superseded` row an operator wrote for it — are owned by that manager.
+(2) Managed-service rows a manager writes for the singleton services it
+supervises carry the service's `owner_tid`; managers do not delete them.
+They are read through the service-owner TTL and are deleted only by the
+runtime pruning engine once older than both that TTL and the pruner's
+minimum age, together with superseded and surplus history rows.
+(3) Rows of the retired v1 service-owner schema are removed by every
+reader's mandatory migration sweep ([MANAGER.3]); this is a migration
+rule, not custody. (4) Rows carrying the current service-owner schema
+tag that fail its field validation are disposable by the runtime
+pruning engine once older than its minimum age ([MF-5], [OBS.13.6]);
+rows with no recognized schema tag are preserved. Appending records for other TIDs (proactive
+supersession per [MA-3], operator replacement) is unaffected. The
+pruner's predicate for manager rows is: the owner is stale — a
+host-managed identity that is definitively stale, or an externally
+supervised handle whose registered probe reports `stale` — and the row
+is older than the pruner's minimum age —
+applied alike to `active`, `draining`, `stopped`, and `superseded` rows,
+including the newest row for every status; a row whose owner's liveness is `unknown` (an inconclusive or
+missing probe, or a host identity that cannot be evaluated) is pruned
+once it is older than both the minimum age and the external-supervisor
+staleness window, without a probe at prune time; a `draining` or
+`superseded` row whose owner is live is drain or supersession authority
+and is never pruned.
+Host-managed identity is tri-state: an observable identity with a
+different creation time, or a PID absent from a host-namespace reader,
+is definitively stale and is not probed; a PID absent from a
+containerized reader, or a recorded identity without a creation time,
+is `unknown`; a handle is live if any of its recorded processes is live.
+Readers and manager leadership checks omit unknown rows older than
+`MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS` without keyed PING.
+Younger unknown rows keep the bounded keyed-PING rescue described above;
+both the definite-stale and expired-unknown pruning predicates override
+keep-newest for every manager status.
+
+Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
+
 Before an existing `weft.state.services` queue is passed to manager, status,
 or Monitor logic, the shared
 `discard_v1_service_registry_rows(queue)` bootstrap helper scans it and
@@ -521,11 +563,25 @@ Manager may use the full drain budget before publishing its stopped registry
 record, and slower broker backends can add observable registry propagation and
 scheduler delay under release-load parallelism.
 
+Reader omission alone does not prove manager exit. When a previously observed
+row disappears from the filtered view, stop confirmation requires definitive
+stale runtime evidence or exit of the caller-owned process, plus the existing
+local process exit gate. Missing PID or handle evidence remains unknown.
+Explicit stopped-record and foreground-serve proofs retain their documented
+semantics.
+
 Signal handlers record requests through `note_termination_signal`. The manager
 reactor applies them through its owner-thread transition path. There is no
 Manager-specific synchronous signal alias.
 
 _Implementation mapping_:
+- Registry liveness reduction —
+  `weft/core/manager_runtime.py::manager_registry_record_liveness`; missing
+  handles or an empty scoped host-process set yield unknown. Registry readers
+  only filter; `weft/core/pruning/runtime.py::_manager_candidates` owns the
+  cross-owner stale/unknown age rules and `_service_candidates` owns service
+  history expiry.
+- Stop confirmation — `weft/core/manager_runtime.py::_await_manager_stop_confirmation`.
 - Shared manager lifecycle owner —
   `weft/core/manager_runtime.py::generate_tid`,
   `weft/core/manager_runtime.py::build_manager_spec`,

@@ -39,7 +39,6 @@ from weft._constants import (
     SERVICE_TYPE_MANAGED,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     STATUS_WATCH_MIN_INTERVAL,
-    TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_TASK_STATUSES,
     WALL_CLOCK_TASK_LAST_TIMESTAMP_CLASSIFICATIONS,
     WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS,
@@ -48,7 +47,6 @@ from weft._constants import (
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft._exceptions import CommandError, CommandExecutionError, CommandUsageError
 from weft.commands.manager import (
@@ -66,6 +64,7 @@ from weft.commands.types import (
 )
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime, task_evidence
+from weft.core.endpoints import latest_tid_mapping_rows
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.service_convergence import (
     ServiceOwnerRecord,
@@ -81,6 +80,7 @@ from weft.helpers import (
     handle_has_live_host_process,
     iter_queue_json_entries,
     pid_is_live,
+    tid_short_form,
 )
 
 from ._boundary import typed_command_errors
@@ -326,54 +326,39 @@ def _format_manager_summary(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _read_tid_mappings(ctx: WeftContext) -> dict[str, str]:
-    queue = _queue(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    try:
-        mapping: dict[str, str] = {}
-        for payload, _timestamp in iter_queue_json_entries(queue):
-            full = payload.get("full")
-            short = payload.get("short")
-            if isinstance(full, str) and isinstance(short, str):
-                mapping[short] = full
-        return mapping
-    finally:
-        queue.close()
+def _read_tid_mappings(ctx: WeftContext) -> dict[str, list[str]]:
+    """Group valid newest mappings by derived short form [CLI-1.2.3]."""
+    mapping: dict[str, list[str]] = {}
+    for full in latest_tid_mapping_rows(ctx):
+        try:
+            short = tid_short_form(full)
+        except ValueError:
+            continue
+        mapping.setdefault(short, []).append(full)
+    return {short: sorted(fulls) for short, fulls in mapping.items()}
 
 
 def _latest_tid_mapping_entries(ctx: WeftContext) -> dict[str, dict[str, Any]]:
-    queue = _queue(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    try:
-        latest: dict[str, tuple[int, dict[str, Any]]] = {}
-        for payload, timestamp in iter_queue_json_entries(queue):
-            full = payload.get("full")
-            if not isinstance(full, str):
-                continue
-            previous = latest.get(full)
-            if previous is None or previous[0] <= timestamp:
-                latest[full] = (timestamp, payload)
-        return {full: payload for full, (_timestamp, payload) in latest.items()}
-    finally:
-        queue.close()
+    return {
+        full: payload
+        for full, (_message_id, payload) in latest_tid_mapping_rows(ctx).items()
+    }
 
 
 def _resolve_tid_filters(ctx: WeftContext, raw: str | None) -> set[str] | None:
     if raw is None:
         return None
-
-    candidate = raw.strip()
+    candidate = raw.strip().lstrip("T")
     if not candidate:
         return None
-
-    if candidate.isdigit() and len(candidate) == 19:
-        return {candidate, candidate[-TASKSPEC_TID_SHORT_LENGTH:]}
-
-    mapping = _read_tid_mappings(ctx)
-    full = mapping.get(candidate)
-    if full:
-        return {full, candidate}
-
-    # Fall back to treating the input as a bare identifier
-    return {candidate}
+    if candidate.isascii() and candidate.isdecimal() and len(candidate) == 19:
+        return {candidate}
+    matches = _read_tid_mappings(ctx).get(candidate, [])
+    if len(matches) > 1:
+        raise CommandUsageError(
+            f"Ambiguous short TID {candidate}: {', '.join(matches)}"
+        )
+    return {matches[0]} if matches else {candidate}
 
 
 def _iter_log_events(
@@ -1419,19 +1404,19 @@ def collect_known_tid_snapshot(
 ) -> TaskSnapshot | None:
     """Return one full-TID diagnostic snapshot using bounded task-log replay."""
 
-    if not tid.isdigit() or len(tid) != 19:
+    if not tid.isascii() or not tid.isdecimal() or len(tid) != 19:
         return None
     records = _collect_task_snapshot_records(
         ctx,
         include_terminal=include_terminal,
-        tid_filters={tid, tid[-TASKSPEC_TID_SHORT_LENGTH:]},
+        tid_filters={tid},
         since_timestamp=int(tid) - 1,
     )
     if not records and int(tid) > time.time_ns():
         records = _collect_task_snapshot_records(
             ctx,
             include_terminal=include_terminal,
-            tid_filters={tid, tid[-TASKSPEC_TID_SHORT_LENGTH:]},
+            tid_filters={tid},
         )
     return records[0].snapshot if records else None
 
@@ -1594,7 +1579,10 @@ def _watch_task_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-119] exception
                 tid = payload.get("tid")
                 if not isinstance(tid, str):
                     continue
-                short_tid = tid[-TASKSPEC_TID_SHORT_LENGTH:]
+                try:
+                    short_tid = tid_short_form(tid)
+                except ValueError:
+                    continue
                 if (
                     tid_filters is not None
                     and tid not in tid_filters
@@ -1734,6 +1722,10 @@ def _public_status_event(
 
     tid = payload.get("tid")
     if not isinstance(tid, str):
+        return None
+    try:
+        tid_short_form(tid)
+    except ValueError:
         return None
     taskspec = payload.get("taskspec")
     state = taskspec.get("state") if isinstance(taskspec, dict) else None

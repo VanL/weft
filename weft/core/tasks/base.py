@@ -66,7 +66,6 @@ from weft._constants import (
     TASK_REACTOR_WAKEUP_MAX_SECONDS,
     TASK_WORKER_RESULT_DRAIN_MAX_PER_TURN,
     TASK_WORKER_RESULT_QUEUE_MAXSIZE,
-    TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_ENVELOPE_TYPE,
     TERMINAL_EVENT_WRITE_RETRIES,
     TERMINAL_EVENT_WRITE_RETRY_INTERVAL,
@@ -83,7 +82,6 @@ from weft.context import WeftContext, build_context
 from weft.core.control_messages import ControlRequest, parse_control_request
 from weft.core.endpoints import (
     build_endpoint_record_payload,
-    find_endpoint_registry_message,
     validate_endpoint_claim_name,
 )
 from weft.core.taskspec import ReservedPolicy, TaskSpec
@@ -94,6 +92,7 @@ from weft.helpers import (
     process_create_time,
     redact_taskspec_dump,
     terminate_verified_process_tree,
+    tid_short_form,
     write_owner_only_bytes,
 )
 
@@ -267,7 +266,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         tid = taskspec.tid
         assert tid is not None
         self.tid: str = tid
-        self.tid_short = self.tid[-TASKSPEC_TID_SHORT_LENGTH:]
+        self.tid_short = tid_short_form(self.tid)
         self.should_stop = False
         self._paused = False
         self._resource_monitor: Any | None = None
@@ -2532,10 +2531,19 @@ class BaseTask(MultiQueueWatcher, ABC):
         metadata: Mapping[str, Any] | None = None,
         _allow_reserved_internal: bool = False,
     ) -> None:
-        """Claim a stable runtime endpoint name for this live task.
+        """Append one endpoint claim and retain its exact message ID.
 
-        Spec: [CC-2.2], [CC-2.4.1], [MF-3.1]
+        A task must release its held claim before registering another.
+        Failed appends acquire no custody and may be retried.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-2.4.1];
+            docs/specifications/05-Message_Flow_and_State.md [MF-3.1]
         """
+
+        if self._endpoint_registration_message_id is not None:
+            raise RuntimeError(
+                "Task already holds an endpoint claim; unregister it first"
+            )
 
         runtime_class = self.taskspec.metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
         allow_reserved_internal = (
@@ -2561,16 +2569,8 @@ class BaseTask(MultiQueueWatcher, ABC):
             last_seen=registered_at,
         )
 
-        previous_message_id = self._endpoint_registration_message_id
-        if previous_message_id is None and self._endpoint_registration_name is not None:
-            previous_message_id = find_endpoint_registry_message(
-                queue,
-                name=self._endpoint_registration_name,
-                tid=self.tid,
-            )
-
         try:
-            queue.write(json.dumps(payload, ensure_ascii=False))
+            current_message_id = queue.write(json.dumps(payload, ensure_ascii=False))
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to register endpoint %s for task %s",
@@ -2580,58 +2580,33 @@ class BaseTask(MultiQueueWatcher, ABC):
             )
             return
 
-        current_message_id = find_endpoint_registry_message(
-            queue,
-            name=normalized_name,
-            tid=self.tid,
-        )
-        if (
-            previous_message_id is not None
-            and current_message_id is not None
-            and previous_message_id != current_message_id
-        ):
-            try:
-                queue.delete(message_id=previous_message_id)
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to prune prior endpoint registration %s for task %s",
-                    previous_message_id,
-                    self.tid,
-                    exc_info=True,
-                )
-
         self._endpoint_registration_name = normalized_name
         self._endpoint_registration_metadata = dict(metadata or {})
         self._endpoint_registration_message_id = current_message_id
 
     def unregister_endpoint_name(self) -> None:
-        """Release any active runtime endpoint name claimed by this task.
+        """Release only the exact endpoint row acquired by this task.
 
-        Spec: [CC-2.2], [CC-2.4.1], [MF-3.1]
+        A failed delete retains custody for a later explicit retry. No
+        registry scan may substitute another writer's newer row.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-2.4.1];
+            docs/specifications/05-Message_Flow_and_State.md [MF-3.1]
         """
-
-        if self._endpoint_registration_name is None:
-            return
-
-        queue = self._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
         message_id = self._endpoint_registration_message_id
         if message_id is None:
-            message_id = find_endpoint_registry_message(
-                queue,
-                name=self._endpoint_registration_name,
-                tid=self.tid,
-            )
+            return
 
-        if message_id is not None:
-            try:
-                queue.delete(message_id=message_id)
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to clear endpoint registration %s for task %s",
-                    message_id,
-                    self.tid,
-                    exc_info=True,
-                )
+        try:
+            self._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE).delete(message_id=message_id)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to clear endpoint registration %s for task %s",
+                message_id,
+                self.tid,
+                exc_info=True,
+            )
+            return
 
         self._endpoint_registration_name = None
         self._endpoint_registration_metadata = None

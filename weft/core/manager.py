@@ -3,7 +3,7 @@
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3], [CC-2.5]
 - docs/specifications/03-Manager_Architecture.md [MA-0], [MA-1], [MA-2], [MA-3]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-3.1]
 """
 
 from __future__ import annotations
@@ -88,7 +88,6 @@ from weft._constants import (
     QUEUE_INTERNAL_RESERVED_SUFFIX,
     QUEUE_PRIORITY_INTERNAL,
     QUEUE_PRIORITY_NORMAL,
-    SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_DRAINING,
     SERVICE_STATUS_STOPPED,
@@ -113,13 +112,16 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
-    WEFT_TID_MAPPINGS_QUEUE,
     WORK_ENVELOPE_START,
     WRAPPER_LOST_ERROR,
     get_weft_directory_name,
 )
 from weft.context import WeftContext
-from weft.core.endpoints import latest_tid_mapping_entries_for_endpoint_resolution
+from weft.core.endpoints import (
+    latest_tid_mapping_entries_for_endpoint_resolution,
+    latest_tid_mapping_rows,
+)
+from weft.core.manager_runtime import manager_registry_record_liveness
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -137,7 +139,6 @@ from weft.helpers import (
     terminate_process_tree,
 )
 from weft.liveness.policy import mapping_row_is_live
-from weft.liveness.registry import runtime_liveness_from_registered_probe
 
 from .control_messages import ControlRequest, encode_control_message
 from .control_probe import (
@@ -178,7 +179,6 @@ from .service_convergence import (
     discard_v1_service_registry_rows,
     manager_service_key,
     parse_service_owner_record,
-    plan_service_owner_history_prune,
     project_manager_service_record,
     reduce_service_ownership,
 )
@@ -2046,7 +2046,7 @@ class Manager(ServiceTask):
     def _prune_expired_manager_registry_entries(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         self, queue: Queue, *, now_ns: int | None = None
     ) -> None:
-        """Delete canonical manager service-owner rows outside the runtime window."""
+        """Delete only this manager owner's expired rows ([MF-3.1])."""
 
         observed_now_ns = time.time_ns() if now_ns is None else now_ns
         service_key = self._manager_service_key
@@ -2071,12 +2071,7 @@ class Manager(ServiceTask):
                         continue
                     if not isinstance(payload, dict):
                         continue
-                    if (
-                        payload.get("schema") == SERVICE_OWNER_SCHEMA
-                        and parse_service_owner_record(payload, timestamp=timestamp)
-                        is None
-                    ):
-                        expired_timestamps.append(timestamp)
+                    if payload.get("owner_tid") != self.tid:
                         continue
                     projected = project_manager_service_record(
                         payload,
@@ -2465,38 +2460,11 @@ class Manager(ServiceTask):
         return True
 
     @staticmethod
-    def _manager_record_liveness(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-006] exception
+    def _manager_record_liveness(
         record: Mapping[str, Any],
     ) -> Literal["live", "stale", "unknown"]:
-        payload = record.get("runtime_handle")
-        if not isinstance(payload, Mapping):
-            return "stale"
-        try:
-            handle = RunnerHandle.from_dict(payload)
-        except ValueError:
-            return "stale"
-        if handle.control.get("authority") == "external-supervisor":
-            runtime_liveness = runtime_liveness_from_registered_probe(handle)
-            if runtime_liveness == "live":
-                return "live"
-            if runtime_liveness == "stale":
-                return "stale"
-            timestamp = record.get("_timestamp")
-            if not isinstance(timestamp, int):
-                return "unknown"
-            stale_after_ns = int(
-                MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
-            )
-            if time.time_ns() - timestamp > stale_after_ns:
-                return "stale"
-            return "unknown"
-        if handle.control.get("authority") == "host-pid":
-            if handle_has_live_host_process(handle):
-                return "live"
-            if detect_container_runtime() is not None:
-                return "unknown"
-            return "stale"
-        return "unknown"
+        """Share exact manager runtime evidence across readers ([MA-1])."""
+        return manager_registry_record_liveness(dict(record))
 
     @staticmethod
     def _manager_record_is_live(record: Mapping[str, Any]) -> bool:
@@ -2844,18 +2812,14 @@ class Manager(ServiceTask):
                 source="runtime-handle",
             )
         if liveness == "stale":
-            if allow_ping:
-                proof = self._manager_pong_dispatch_proof(record, now_ns=now_ns)
-                if proof.liveness == "unknown" and proof.reason == "ping_pending":
-                    return proof
-                if proof.liveness == "unknown":
-                    return ManagerLeadershipProof(
-                        "stale",
-                        source=proof.source,
-                        reason=proof.reason,
-                    )
-                return proof
             return ManagerLeadershipProof("stale", source="runtime-handle")
+        timestamp = record.get("_timestamp", record.get("timestamp"))
+        if isinstance(timestamp, int) and self._registry_entry_is_expired(
+            timestamp, now_ns=now_ns
+        ):
+            return ManagerLeadershipProof(
+                "stale", source="registry-heartbeat", reason="expired"
+            )
         if allow_ping:
             return self._manager_pong_dispatch_proof(record, now_ns=now_ns)
         return ManagerLeadershipProof("unknown", source="runtime-handle")
@@ -3106,20 +3070,13 @@ class Manager(ServiceTask):
             if proof.dispatch_eligible:
                 active[tid] = record
 
-        queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
-        for timestamp in stale_timestamps:
-            try:
-                queue.delete(message_id=timestamp)
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug("Failed to prune stale manager record", exc_info=True)
-
         active_tids = sorted(active)
         leader_tid = canonical_owner_tid(active)
         fields = {
             "active_manager_tids": active_tids,
             "active_manager_count": len(active_tids),
             "leader_tid": leader_tid,
-            "stale_pruned_count": len(stale_timestamps),
+            "stale_omitted_count": len(stale_timestamps),
         }
         self._emit_serve_log_rate_limited(
             "manager_registry_snapshot",
@@ -5096,16 +5053,11 @@ class Manager(ServiceTask):
         killed_pids.add(pid)
 
     def _latest_tid_runtime_handle(self, tid: str) -> RunnerHandle | None:
-        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
-        latest_payload: dict[str, Any] | None = None
-        latest_timestamp = -1
-        for payload, timestamp in iter_queue_json_entries(queue):
-            if payload.get("full") != tid or timestamp < latest_timestamp:
-                continue
-            latest_payload = payload
-            latest_timestamp = timestamp
-        if latest_payload is None:
+        """Read the canonical newest valid mapping handle ([OBS.4])."""
+        latest = latest_tid_mapping_rows(self._manager_context()).get(tid)
+        if latest is None:
             return None
+        _timestamp, latest_payload = latest
 
         handle_payload = latest_payload.get("runtime_handle")
         if not isinstance(handle_payload, Mapping):
@@ -5114,32 +5066,6 @@ class Manager(ServiceTask):
             return RunnerHandle.from_dict(handle_payload)
         except ValueError:
             return None
-
-    def _latest_tid_runtime_handles(self, tids: set[str]) -> dict[str, RunnerHandle]:
-        """Return latest runtime handles for the requested TIDs from one scan."""
-
-        if not tids:
-            return {}
-        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
-        latest_by_tid: dict[str, tuple[dict[str, Any], int]] = {}
-        for payload, timestamp in iter_queue_json_entries(queue):
-            tid = payload.get("full")
-            if not isinstance(tid, str) or tid not in tids:
-                continue
-            existing = latest_by_tid.get(tid)
-            if existing is None or existing[1] <= timestamp:
-                latest_by_tid[tid] = (payload, timestamp)
-
-        handles: dict[str, RunnerHandle] = {}
-        for tid, (payload, _timestamp) in latest_by_tid.items():
-            handle_payload = payload.get("runtime_handle")
-            if not isinstance(handle_payload, Mapping):
-                continue
-            try:
-                handles[tid] = RunnerHandle.from_dict(handle_payload)
-            except ValueError:
-                continue
-        return handles
 
     @staticmethod
     def _service_probe_key(
@@ -5763,15 +5689,6 @@ class Manager(ServiceTask):
         )
         now_ns = time.time_ns()
         for service_key in desired_keys:
-            self._prune_managed_service_registry_history(
-                queue,
-                plan_service_owner_history_prune(
-                    read.records,
-                    service_key=service_key,
-                    now_ns=now_ns,
-                    ttl_ns=self._manager_registry_retention_ns(),
-                ),
-            )
             decision = reduce_service_ownership(
                 service_key,
                 read.records,
@@ -5799,22 +5716,6 @@ class Manager(ServiceTask):
                     self._service_candidate_from_service_owner_record(record)
                 )
         return candidates_by_key
-
-    def _prune_managed_service_registry_history(
-        self,
-        queue: Queue,
-        message_ids: Sequence[int],
-    ) -> None:
-        """Delete exact superseded managed-service registry rows."""
-
-        for message_id in message_ids:
-            try:
-                queue.delete(message_id=message_id)
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to prune managed service registry history",
-                    exc_info=True,
-                )
 
     def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:
         return self._observed_service_candidates_by_key({service_key}).get(
@@ -6341,23 +6242,8 @@ class Manager(ServiceTask):
         return durable_sources | {source for source in tracked_sources if source}
 
     def _managed_pids_for_child(self, tid: str) -> set[int]:
-        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
-        latest_payload: dict[str, Any] | None = None
-        latest_timestamp = -1
-        for payload, timestamp in iter_queue_json_entries(queue):
-            if payload.get("full") != tid or timestamp < latest_timestamp:
-                continue
-            latest_payload = payload
-            latest_timestamp = timestamp
-        if latest_payload is None:
-            return set()
-
-        handle_payload = latest_payload.get("runtime_handle")
-        if not isinstance(handle_payload, Mapping):
-            return set()
-        try:
-            handle = RunnerHandle.from_dict(handle_payload)
-        except ValueError:
+        handle = self._latest_tid_runtime_handle(tid)
+        if handle is None:
             return set()
         # Create-time-gated so a recycled PID held by a stale mapping is never
         # force-reaped ([MA-1] item 4); falls back to liveness when no create_time

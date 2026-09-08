@@ -28,7 +28,11 @@ from weft._constants import (
 from weft.cli import validate_taskspec as validate_cli
 from weft.commands.queue import _InvalidMessageIDUsageError
 from weft.context import build_context
-from weft.helpers import resolve_broker_max_message_size, resolve_cli_message_content
+from weft.helpers import (
+    resolve_broker_max_message_size,
+    resolve_cli_message_content,
+    tid_short_form,
+)
 
 from .run import (
     consume_run_session,
@@ -1508,7 +1512,7 @@ def task_tid(
         )
     except (commands.CommandError, commands.InvalidTID, commands.TaskNotFound) as exc:
         _command_exit(exc)
-    typer.echo(result[-10:] if reverse is not None else result)
+    typer.echo(tid_short_form(result) if reverse is not None else result)
 
 
 @app.command("init")

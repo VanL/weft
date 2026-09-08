@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 
+import psutil
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    MANAGER_PONG_LIVE_AT_KEY,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
-    SERVICE_STATUS_SUPERSEDED,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft._exceptions import CommandExecutionError
@@ -49,7 +50,11 @@ def _host_runtime_handle(pid: int) -> dict[str, object]:
         "kind": "process",
         "id": str(pid),
         "control": {"authority": "host-pid"},
-        "observations": {"host_pids": [pid]},
+        "observations": {
+            "host_processes": [
+                {"pid": pid, "create_time": psutil.Process(pid).create_time()}
+            ]
+        },
         "metadata": {},
     }
 
@@ -334,11 +339,17 @@ def test_serve_foreground_blocks_positive_external_supervisor_duplicate(
     finally:
         registry_queue.close()
     run_calls: list[object] = []
+    pong_tids: list[str] = []
+
+    def matched_pong(_context, record, **_kwargs):
+        pong_tids.append(record["tid"])
+        record[MANAGER_PONG_LIVE_AT_KEY] = record["timestamp"]
+        return True
 
     monkeypatch.setattr(
         core_manager_runtime,
         "_manager_record_has_matched_pong",
-        lambda *args, **kwargs: True,
+        matched_pong,
     )
     monkeypatch.setattr(
         core_manager_runtime,
@@ -351,9 +362,10 @@ def test_serve_foreground_blocks_positive_external_supervisor_duplicate(
     assert exit_code == 1
     assert message == f"Manager {tid} already running"
     assert run_calls == []
+    assert pong_tids and set(pong_tids) == {tid}
 
 
-def test_serve_foreground_replaces_ambiguous_external_supervisor_record(
+def test_serve_foreground_preserves_unconfirmed_external_record_when_starting(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -380,10 +392,14 @@ def test_serve_foreground_replaces_ambiguous_external_supervisor_record(
         registry_queue.close()
     run_calls: list[tuple[object, object]] = []
 
+    probe_tids: list[str] = []
+
+    def unmatched_pong(_context, record, **_kwargs):
+        probe_tids.append(record["tid"])
+        return False
+
     monkeypatch.setattr(
-        core_manager_runtime,
-        "_manager_record_has_matched_pong",
-        lambda *args, **kwargs: False,
+        core_manager_runtime, "_manager_record_has_matched_pong", unmatched_pong
     )
     monkeypatch.setattr(
         core_manager_runtime,
@@ -405,10 +421,11 @@ def test_serve_foreground_replaces_ambiguous_external_supervisor_record(
     assert run_calls == [(invocation, context)]
     latest = _latest_manager_record(context, stale_tid)
     assert latest is not None
-    assert latest["status"] == SERVICE_STATUS_SUPERSEDED
+    assert latest["status"] == "active"
+    assert stale_tid in probe_tids
 
 
-def test_serve_foreground_rechecks_after_replacing_ambiguous_record(
+def test_serve_foreground_ignores_unconfirmed_record_and_blocks_on_live_owner(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -440,10 +457,14 @@ def test_serve_foreground_rechecks_after_replacing_ambiguous_record(
         registry_queue.close()
     run_calls: list[object] = []
 
+    probe_tids: list[str] = []
+
+    def unmatched_pong(_context, record, **_kwargs):
+        probe_tids.append(record["tid"])
+        return False
+
     monkeypatch.setattr(
-        core_manager_runtime,
-        "_manager_record_has_matched_pong",
-        lambda *args, **kwargs: False,
+        core_manager_runtime, "_manager_record_has_matched_pong", unmatched_pong
     )
     monkeypatch.setattr(
         core_manager_runtime,
@@ -458,4 +479,5 @@ def test_serve_foreground_rechecks_after_replacing_ambiguous_record(
     assert run_calls == []
     latest = _latest_manager_record(context, stale_tid)
     assert latest is not None
-    assert latest["status"] == SERVICE_STATUS_SUPERSEDED
+    assert latest["status"] == "active"
+    assert stale_tid in probe_tids

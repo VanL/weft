@@ -26,6 +26,7 @@ from weft.context import WeftContext
 from weft.core import manager_runtime
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import iter_queue_json_entries
+from weft.liveness.policy import valid_tid_mapping_payload
 
 _spawn_reconciliation_static_queue_specs: Final[tuple[tuple[str, bool], ...]] = (
     (WEFT_TID_MAPPINGS_QUEUE, False),
@@ -75,7 +76,7 @@ def _mapping_exists_for_tid(context: WeftContext, tid: str) -> bool:
             queue,
             since_timestamp=int(tid) - 1,
         ):
-            if payload.get("full") == tid:
+            if valid_tid_mapping_payload(payload) and payload.get("full") == tid:
                 return True
         return False
     finally:

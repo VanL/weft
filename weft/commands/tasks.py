@@ -33,7 +33,6 @@ from weft._constants import (
     TASK_EVIDENCE_POLL_INTERVAL,
     TASK_PID_EXIT_POLL_INTERVAL,
     TASK_PING_TIMEOUT_SECONDS,
-    TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
@@ -58,6 +57,7 @@ from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import send_keyed_ping_probe
+from weft.core.endpoints import latest_tid_mapping_rows
 from weft.core.monitor.store import (
     MonitorStoreNotInitialized,
     MonitorTaskCollationRecord,
@@ -69,6 +69,7 @@ from weft.helpers import (
     iter_queue_json_entries,
     pid_is_live,
     terminate_verified_process_tree,
+    tid_short_form,
 )
 
 from ._boundary import typed_command_errors
@@ -102,26 +103,16 @@ def _coerce_context(
 
 
 def _read_tid_mapping_entries(ctx: WeftContext) -> list[dict[str, Any]]:
-    queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-    try:
-        entries: list[dict[str, Any]] = []
-        for payload, _timestamp in iter_queue_json_entries(queue):
-            if isinstance(payload, dict):
-                entries.append(payload)
-        return entries
-    finally:
-        queue.close()
+    return [
+        payload
+        for _message_id, payload in sorted(latest_tid_mapping_rows(ctx).values())
+    ]
 
 
 def mapping_for_tid(ctx: WeftContext, tid: str) -> dict[str, Any] | None:
     full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
-    if not full:
-        return None
-    latest_match: dict[str, Any] | None = None
-    for entry in _read_tid_mapping_entries(ctx):
-        if entry.get("full") == full:
-            latest_match = entry
-    return latest_match
+    row = latest_tid_mapping_rows(ctx).get(full)
+    return row[1] if row is not None else None
 
 
 def _load_taskspec_payload_bounded(
@@ -153,18 +144,21 @@ def _load_taskspec_payload_bounded(
 
 
 def resolve_full_tid(ctx: WeftContext, raw: str) -> str | None:
+    """Resolve one full or unambiguous derived short TID.
+
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3].
+    """
     candidate = raw.strip().lstrip("T")
     if not candidate:
         return None
-    if candidate.isdigit() and len(candidate) == 19:
+    if candidate.isascii() and candidate.isdecimal() and len(candidate) == 19:
         return candidate
-    mappings = _read_tid_mapping_entries(ctx)
-    for entry in mappings:
-        if entry.get("short") == candidate:
-            full = entry.get("full")
-            if isinstance(full, str):
-                return full
-    return None
+    matches = system_cmd._read_tid_mappings(ctx).get(candidate, [])
+    if len(matches) > 1:
+        raise CommandUsageError(
+            f"Ambiguous short TID {candidate}: {', '.join(matches)}"
+        )
+    return matches[0] if matches else None
 
 
 def task_tid(
@@ -182,8 +176,8 @@ def task_tid(
     ctx = _coerce_context(context=context, context_path=context_path)
     if reverse:
         value = reverse.strip().lstrip("T")
-        if value.isdigit() and len(value) == 19:
-            return value[-TASKSPEC_TID_SHORT_LENGTH:]
+        if (value.isascii() and value.isdecimal()) and len(value) == 19:
+            return tid_short_form(value)
         return None
     if pid is not None:
         entries = list(_read_tid_mapping_entries(ctx))
@@ -370,7 +364,7 @@ def task_terminal_snapshot(
         full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     except ValueError:
         full_tid = tid.strip().lstrip("T")
-    if not full_tid or not full_tid.isdigit():
+    if not full_tid or not (full_tid.isascii() and full_tid.isdecimal()):
         return TaskTerminalSnapshot(
             tid=full_tid or tid,
             status="missing",
@@ -457,7 +451,7 @@ def task_status(
     ctx = _coerce_context(context=context, context_path=context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid)
-    if ping and full_tid.isdigit() and len(full_tid) == 19:
+    if ping and (full_tid.isascii() and full_tid.isdecimal()) and len(full_tid) == 19:
         taskspec_payload = load_latest_taskspec_payload(ctx, full_tid)
         mapping_entry = mapping_for_tid(ctx, full_tid)
         evidence = task_evidence.known_tid_evidence(
@@ -475,7 +469,7 @@ def task_status(
                 base_snapshot=None,
                 taskspec_payload=taskspec_payload,
             )
-    if full_tid.isdigit() and len(full_tid) == 19:
+    if (full_tid.isascii() and full_tid.isdecimal()) and len(full_tid) == 19:
         base_snapshot = system_cmd.collect_known_tid_snapshot(
             ctx,
             full_tid,
@@ -485,14 +479,18 @@ def task_status(
         snapshots = system_cmd._collect_task_snapshots(
             ctx,
             include_terminal=include_terminal,
-            tid_filters={full_tid, full_tid[-TASKSPEC_TID_SHORT_LENGTH:]},
+            tid_filters={full_tid},
         )
         base_snapshot = snapshots[0] if snapshots else None
     if pipeline_snapshot is not None and _prefer_pipeline_snapshot(
         pipeline_snapshot, base_snapshot
     ):
         return _pipeline_task_snapshot(ctx, full_tid, pipeline_snapshot, base_snapshot)
-    if base_snapshot is None and full_tid.isdigit() and len(full_tid) == 19:
+    if (
+        base_snapshot is None
+        and (full_tid.isascii() and full_tid.isdecimal())
+        and len(full_tid) == 19
+    ):
         base_snapshot = _monitor_store_task_snapshot(
             ctx,
             full_tid,
@@ -522,7 +520,7 @@ def _task_snapshot_from_monitor_store_record(
     status_is_terminal = status in system_cmd.TERMINAL_TASK_STATUSES
     return system_cmd.TaskSnapshot(
         tid=record.tid,
-        tid_short=record.tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        tid_short=tid_short_form(record.tid),
         name=record.name or str(taskspec_summary.get("name") or record.tid),
         status=status,
         event=record.terminal_event or "monitor_store",
@@ -565,7 +563,7 @@ def _monitor_store_task_snapshot(
     except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-355] exception
         return system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+            tid_short=tid_short_form(tid),
             name=tid,
             status="unknown",
             event="monitor_store_unavailable",
@@ -667,7 +665,7 @@ def task_ping(
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     taskspec_payload = (
         load_latest_taskspec_payload(ctx, full_tid)
-        if full_tid.isdigit() and len(full_tid) == 19
+        if (full_tid.isascii() and full_tid.isdecimal()) and len(full_tid) == 19
         else None
     )
     ctrl_in_name, ctrl_out_name = task_evidence.control_queue_names_for_tid(
@@ -755,7 +753,7 @@ def _task_snapshot_from_live_pong(
     )
     return system_cmd.TaskSnapshot(
         tid=tid,
-        tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        tid_short=tid_short_form(tid),
         name=name,
         status=evidence.status,
         event="live_pong",
@@ -875,7 +873,8 @@ def task_snapshot(
         snapshot,
         taskspec_payload=(
             _load_taskspec_payload_bounded(ctx, snapshot.tid)
-            if snapshot.tid.isdigit() and len(snapshot.tid) == 19
+            if (snapshot.tid.isascii() and snapshot.tid.isdecimal())
+            and len(snapshot.tid) == 19
             else load_latest_taskspec_payload(ctx, snapshot.tid)
         ),
     )
@@ -1075,7 +1074,7 @@ def _pipeline_task_snapshot(
 
     return system_cmd.TaskSnapshot(
         tid=tid,
-        tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        tid_short=tid_short_form(tid),
         name=snapshot_name,
         status=status_text,
         event="pipeline_status",
@@ -1189,7 +1188,7 @@ def _snapshot_from_terminal_ctrl_out(
     error = payload.get("error")
     return system_cmd.TaskSnapshot(
         tid=tid,
-        tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        tid_short=tid_short_form(tid),
         name=str(taskspec_payload.get("name") or tid),
         status=status,
         event="ctrl_out_terminal",
@@ -1611,8 +1610,10 @@ def stop_tasks(
         if isinstance(full_tid, str):
             lookup[full_tid] = mapping_entry
     count = 0
-    for tid in tids:
-        full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    resolved_tids = [
+        resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
+    ]
+    for full in resolved_tids:
         if not full:
             continue
         _send_control(ctx, full, CONTROL_STOP)
@@ -1709,8 +1710,10 @@ def kill_tasks(
         if isinstance(full_tid, str):
             lookup[full_tid] = mapping_entry
     killed = 0
-    for tid in tids:
-        full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    resolved_tids = [
+        resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
+    ]
+    for full in resolved_tids:
         if not full:
             continue
         _send_control(ctx, full, CONTROL_KILL)
@@ -1839,7 +1842,7 @@ def _command_tid(
     """Normalize one public command TID or raise its typed failure."""
 
     candidate = raw.strip().lstrip("T")
-    if not candidate or not candidate.isdigit():
+    if not candidate or not (candidate.isascii() and candidate.isdecimal()):
         raise InvalidTID(f"Invalid task ID: {raw!r}")
     if len(candidate) == 19:
         if allow_unknown_full:
@@ -1847,7 +1850,11 @@ def _command_tid(
         resolved = resolve_tid(tid=candidate, context=context)
         return resolved or candidate
     resolved = resolve_tid(tid=candidate, context=context)
-    if resolved is None or not resolved.isdigit() or len(resolved) != 19:
+    if (
+        resolved is None
+        or not (resolved.isascii() and resolved.isdecimal())
+        or len(resolved) != 19
+    ):
         raise TaskNotFound(f"Task {raw} not found")
     return resolved
 
@@ -1997,6 +2004,10 @@ def _task_control_result(
         )
     else:
         selected = tuple(explicit_tids)
+    # Ambiguity is batch-fatal before any control write. Other item errors
+    # retain the normal accepted/failures partition below.
+    for selected_tid in selected:
+        resolve_full_tid(ctx, selected_tid)
     operation = stop_task if command == "stop" else kill_task
     requested: list[str] = []
     accepted: list[str] = []
@@ -2110,12 +2121,12 @@ def cmd_task_tid(
     ctx = _coerce_context(context_path=context)
     if reverse is not None:
         candidate = reverse.strip().lstrip("T")
-        if not candidate.isdigit() or len(candidate) != 19:
+        if not (candidate.isascii() and candidate.isdecimal()) or len(candidate) != 19:
             raise InvalidTID(f"Invalid full task ID: {reverse!r}")
         return candidate
     resolved = resolve_tid(tid=tid, pid=pid, context=ctx)
     if resolved is None:
         raise TaskNotFound("No matching TID found")
-    if not resolved.isdigit() or len(resolved) != 19:
+    if not (resolved.isascii() and resolved.isdecimal()) or len(resolved) != 19:
         raise InvalidTID(f"Invalid resolved task ID: {resolved!r}")
     return resolved

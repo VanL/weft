@@ -773,14 +773,14 @@ def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(
         low_task.cleanup()
 
 
-def test_resolve_command_prunes_stale_endpoint_records(
+def test_resolve_command_filters_stale_endpoint_records_without_deleting(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     registry = ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
     try:
-        registry.write(
+        claim_id = registry.write(
             json.dumps(
                 build_endpoint_record_payload(
                     name="ghost",
@@ -796,6 +796,9 @@ def test_resolve_command_prunes_stale_endpoint_records(
         monkeypatch.setattr(queue_cmd, "_public_command_context", lambda: ctx)
         with pytest.raises(CommandExecutionError, match="No active endpoint"):
             queue_cmd.cmd_queue_resolve("ghost")
-        assert list(iter_queue_json_entries(registry)) == []
+        remaining = list(iter_queue_json_entries(registry))
+        assert len(remaining) == 1
+        assert remaining[0][1] == claim_id
+        assert remaining[0][0]["tid"] == "1775630560447778816"
     finally:
         registry.close()

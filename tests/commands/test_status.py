@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
@@ -163,6 +164,17 @@ def _manager_service_payload(
     internal_requests: str | None = None,
     internal_reserved: str | None = None,
 ) -> dict[str, Any]:
+    runtime_handle = dict(runtime_handle or {})
+    observations = dict(runtime_handle.get("observations", {}))
+    if (
+        runtime_handle.get("control", {}).get("authority") == "host-pid"
+        and observations.get("host_pids") == [os.getpid()]
+        and "host_processes" not in observations
+    ):
+        observations["host_processes"] = [
+            {"pid": os.getpid(), "create_time": psutil.Process().create_time()}
+        ]
+        runtime_handle["observations"] = observations
     return build_manager_service_payload(
         context=ctx,
         tid=tid,
@@ -1397,10 +1409,9 @@ def test_status_preserves_active_manager_while_terminal_manager_row_stays_termin
                 ctx,
                 tid=active_tid,
                 runtime_handle=_runtime_handle(
-                    "manager-supervisor",
-                    "supervisor-active",
-                    kind="supervised-process",
-                    authority="external-supervisor",
+                    "host",
+                    str(os.getpid()),
+                    host_pids=[os.getpid()],
                 ),
             )
         )

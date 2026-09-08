@@ -23,6 +23,7 @@ from weft._constants import (
 )
 from weft.context import build_context
 from weft.core.service_convergence import build_manager_service_payload
+from weft.helpers import process_create_time
 
 pytestmark = [pytest.mark.shared]
 
@@ -155,11 +156,17 @@ def test_status_json_includes_manager_records(workdir) -> None:
     context = build_context(spec_context=workdir)
     registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
 
+    handle = _host_runtime_handle(os.getpid())
+    create_time = process_create_time(os.getpid())
+    assert create_time is not None
+    handle["observations"]["host_processes"] = [
+        {"pid": os.getpid(), "create_time": create_time}
+    ]
     record = _manager_service_payload(
         context,
         tid="1762000000000000999",
         name="cli-manager",
-        runtime_handle=_host_runtime_handle(os.getpid()),
+        runtime_handle=handle,
     )
 
     registry.write(json.dumps(record))

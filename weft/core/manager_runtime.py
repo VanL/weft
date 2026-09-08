@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.4], [MA-3]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-7]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-3.1], [MF-7]
 """
 
 from __future__ import annotations
@@ -45,7 +45,6 @@ from weft._constants import (
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft._exceptions import ManagerStartFailed
 from weft.context import WeftContext
@@ -54,6 +53,7 @@ from weft.core.control_probe import (
     pong_proves_dispatch_eligible,
     send_keyed_ping_probe,
 )
+from weft.core.endpoints import latest_tid_mapping_rows
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import (
     TaskSpec,
@@ -66,9 +66,9 @@ from weft.helpers import (
     is_canonical_manager_record,
     iter_queue_json_entries,
     pid_is_live,
-    pid_matches_create_time,
     terminate_process_tree,
 )
+from weft.liveness.host import inspect_host_process
 from weft.liveness.registry import runtime_liveness_from_registered_probe
 
 from .queue_wait import QueueChangeMonitor
@@ -135,7 +135,7 @@ class _ManagerDiagnostic:
     canonical_candidate: bool
 
 
-_ManagerRegistryDisposition = Literal["keep", "omit", "prune"]
+_ManagerRegistryDisposition = Literal["keep", "omit"]
 
 
 def generate_tid(context: WeftContext) -> str:
@@ -185,26 +185,21 @@ def _manager_registry_disposition(
     probe_stale: bool,
     probe_cache: dict[str, int | None] | None,
 ) -> _ManagerRegistryDisposition:
-    """Return whether one normalized active manager row stays, omits, or prunes."""
+    """Filter one active manager row without taking delete custody ([MA-1])."""
 
-    is_stale, definitive_stale = _manager_record_stale_status(record)
-    if not is_stale:
+    del probe_stale
+    liveness = manager_registry_record_liveness(record)
+    if liveness == "live":
         return "keep"
-    if (
-        not definitive_stale
-        and is_canonical_manager_record(record)
-        and _manager_record_has_matched_pong(
-            context,
-            record,
-            probe_cache=probe_cache,
-        )
+    if liveness == "stale" or _manager_record_unknown_is_expired(record):
+        return "omit"
+    if is_canonical_manager_record(record) and _manager_record_has_matched_pong(
+        context, record, probe_cache=probe_cache
     ):
         return "keep"
-    if definitive_stale:
-        return "prune"
     if _host_pid_visibility_is_namespace_ambiguous(record):
         return "keep"
-    return "prune" if probe_stale else "omit"
+    return "omit"
 
 
 def _retain_latest_included_manager_record(
@@ -230,10 +225,10 @@ def _snapshot_registry(
     probe_cache: dict[str, int | None] | None = None,
     queue: Queue | None = None,
 ) -> dict[str, dict[str, Any]]:
+    """Fold included manager rows without deleting peer evidence ([MF-3.1])."""
     registry_queue = queue or _registry_queue(context)
     owns_queue = queue is None
     snapshot: dict[str, dict[str, Any]] = {}
-    stale_timestamps: list[int] = []
     try:
         for data, timestamp in iter_queue_json_entries(registry_queue):
             record = normalize_manager_registry_record(
@@ -253,9 +248,6 @@ def _snapshot_registry(
                     probe_stale=probe_stale,
                     probe_cache=probe_cache,
                 )
-                if disposition == "prune":
-                    stale_timestamps.append(timestamp)
-                    continue
                 if disposition == "omit":
                     continue
             _retain_latest_included_manager_record(
@@ -265,15 +257,6 @@ def _snapshot_registry(
                 timestamp=timestamp,
             )
 
-        for ts in stale_timestamps:
-            try:
-                registry_queue.delete(message_id=ts)
-            except (
-                BrokerError,
-                OSError,
-                RuntimeError,
-            ):  # pragma: no cover - stale prune best effort
-                pass
     finally:
         if owns_queue:
             registry_queue.close()
@@ -293,9 +276,12 @@ def _select_active_manager_from_snapshot(
             continue
         if record.get("status") != "active":
             continue
-        if not manager_registry_record_is_stale(
-            record
-        ) or _manager_record_has_pong_live(record):
+        liveness = manager_registry_record_liveness(record)
+        if liveness == "live" or (
+            liveness == "unknown"
+            and not _manager_record_unknown_is_expired(record)
+            and _manager_record_has_pong_live(record)
+        ):
             payload = record.get("_service_owner_payload")
             timestamp = _manager_record_timestamp(record)
             if not isinstance(payload, dict) or timestamp is None:
@@ -376,7 +362,7 @@ def _namespace_ambiguous_incumbent_should_block_start(
     return time.time_ns() - timestamp <= grace_ns
 
 
-def _manager_record_diagnostic(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-016] exception
+def _manager_record_diagnostic(
     context: WeftContext,
     record: dict[str, Any],
     *,
@@ -409,7 +395,7 @@ def _manager_record_diagnostic(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-016] e
     if handle is None:
         return _ManagerDiagnostic(
             record=record,
-            liveness="stale",
+            liveness="unknown",
             proof_source="runtime-handle",
             proof_detail="missing_or_invalid",
             dispatch_eligible=False,
@@ -417,102 +403,42 @@ def _manager_record_diagnostic(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-016] e
         )
 
     authority = handle.control.get("authority")
+    liveness = manager_registry_record_liveness(record)
+    expired_unknown = liveness == "unknown" and _manager_record_unknown_is_expired(
+        record
+    )
+    if (
+        liveness == "unknown"
+        and not expired_unknown
+        and _manager_record_has_matched_pong(context, record, probe_cache=probe_cache)
+    ):
+        return _ManagerDiagnostic(
+            record=record,
+            liveness="live",
+            proof_source="pong",
+            proof_detail=_manager_ctrl_queue_name(str(record.get("tid")), record),
+            dispatch_eligible=True,
+            canonical_candidate=True,
+        )
+    source = (
+        str(authority)
+        if authority in {"host-pid", "external-supervisor"}
+        else "runtime-handle"
+    )
+    detail = handle.id
     if authority == "host-pid":
-        live_processes = _live_host_processes_from_handle(handle)
-        if live_processes:
-            pid, _create_time = live_processes[0]
-            return _ManagerDiagnostic(
-                record=record,
-                liveness="live",
-                proof_source="host-pid",
-                proof_detail=str(pid),
-                dispatch_eligible=True,
-                canonical_candidate=True,
-            )
-        if _manager_record_has_matched_pong(
-            context,
-            record,
-            probe_cache=probe_cache,
-        ):
-            return _ManagerDiagnostic(
-                record=record,
-                liveness="live",
-                proof_source="pong",
-                proof_detail=_manager_ctrl_queue_name(str(record.get("tid")), record),
-                dispatch_eligible=True,
-                canonical_candidate=True,
-            )
-        return _ManagerDiagnostic(
-            record=record,
-            liveness="stale",
-            proof_source="host-pid",
-            proof_detail="no_live_scoped_host_process",
-            dispatch_eligible=False,
-            canonical_candidate=True,
-        )
-
-    if authority == "external-supervisor":
-        runtime_liveness = runtime_liveness_from_registered_probe(handle)
-        if runtime_liveness == "live":
-            return _ManagerDiagnostic(
-                record=record,
-                liveness="live",
-                proof_source="external-supervisor",
-                proof_detail=handle.id,
-                dispatch_eligible=True,
-                canonical_candidate=True,
-            )
-        if runtime_liveness == "stale":
-            return _ManagerDiagnostic(
-                record=record,
-                liveness="stale",
-                proof_source="external-supervisor",
-                proof_detail=handle.id,
-                dispatch_eligible=False,
-                canonical_candidate=True,
-            )
-        if _manager_record_has_matched_pong(
-            context,
-            record,
-            probe_cache=probe_cache,
-        ):
-            return _ManagerDiagnostic(
-                record=record,
-                liveness="live",
-                proof_source="pong",
-                proof_detail=_manager_ctrl_queue_name(str(record.get("tid")), record),
-                dispatch_eligible=True,
-                canonical_candidate=True,
-            )
-        timestamp = _manager_record_timestamp(record)
-        if timestamp is not None:
-            stale_after_ns = int(
-                MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
-            )
-            if time.time_ns() - timestamp > stale_after_ns:
-                return _ManagerDiagnostic(
-                    record=record,
-                    liveness="stale",
-                    proof_source="registry-heartbeat",
-                    proof_detail="expired",
-                    dispatch_eligible=False,
-                    canonical_candidate=True,
-                )
-        return _ManagerDiagnostic(
-            record=record,
-            liveness="unknown",
-            proof_source="external-supervisor",
-            proof_detail=handle.id,
-            dispatch_eligible=False,
-            canonical_candidate=True,
-        )
-
+        detail = "no_live_scoped_host_process"
+        if liveness == "live":
+            live_processes = _live_host_processes_from_handle(handle)
+            detail = str(live_processes[0][0]) if live_processes else handle.id
+    if expired_unknown:
+        source, detail = "registry-heartbeat", "expired"
     return _ManagerDiagnostic(
         record=record,
-        liveness="unknown",
-        proof_source="runtime-handle",
-        proof_detail=str(authority) if authority is not None else None,
-        dispatch_eligible=False,
+        liveness=liveness,
+        proof_source=source,
+        proof_detail=detail,
+        dispatch_eligible=liveness == "live",
         canonical_candidate=True,
     )
 
@@ -618,26 +544,8 @@ def _live_host_processes_from_handle(
     return tuple(
         (pid, create_time)
         for pid, create_time in handle.scoped_host_processes()
-        if (
-            pid_matches_create_time(pid, create_time)
-            if create_time is not None
-            else pid_is_live(pid)
-        )
+        if inspect_host_process(pid, create_time).evidence == "live"
     )
-
-
-def _manager_handle_has_live_host_process(handle: RunnerHandle) -> bool:
-    return bool(_live_host_processes_from_handle(handle))
-
-
-def _manager_handle_is_stale(handle: RunnerHandle | None) -> bool:
-    if handle is None:
-        return True
-    if handle.control.get("authority") == "external-supervisor":
-        return False
-    if handle.control.get("authority") == "host-pid":
-        return not _manager_handle_has_live_host_process(handle)
-    return False
 
 
 def _host_pid_visibility_is_namespace_ambiguous(
@@ -651,35 +559,49 @@ def _host_pid_visibility_is_namespace_ambiguous(
     )
 
 
-def manager_registry_record_is_stale(record: dict[str, Any] | None) -> bool:
-    """Return whether a normalized manager registry row lacks live proof."""
+def manager_registry_record_liveness(
+    record: dict[str, Any] | None,
+) -> Literal["live", "stale", "unknown"]:
+    """Reduce exact runtime evidence without PING or age conversion.
 
-    return _manager_record_stale_status(record)[0]
-
-
-def _manager_record_stale_status(record: dict[str, Any] | None) -> tuple[bool, bool]:
-    """Return ``(is_stale, is_definitive)`` for manager registry liveness."""
+    Spec: [MA-1], [LIVENESS.R3]. Reader expiry and pruning own age policy.
+    """
 
     handle = _manager_handle_from_record(record)
     if handle is None:
-        return True, True
+        return "unknown"
     authority = handle.control.get("authority")
-    if authority != "external-supervisor":
-        return _manager_handle_is_stale(handle), False
+    if authority == "external-supervisor":
+        return runtime_liveness_from_registered_probe(handle)
+    if authority != "host-pid":
+        return "unknown"
+    processes = handle.scoped_host_processes()
+    if not processes:
+        return "unknown"
+    evidence: Literal["stale", "unknown"] = "stale"
+    for pid, create_time in processes:
+        observation = inspect_host_process(pid, create_time)
+        if observation.evidence == "live":
+            return "live"
+        if observation.evidence == "unknown" or (
+            observation.reason == "process_absent"
+            and detect_container_runtime() is not None
+        ):
+            evidence = "unknown"
+    return evidence
 
-    runtime_liveness = runtime_liveness_from_registered_probe(handle)
-    if runtime_liveness == "live":
-        return False, False
-    if runtime_liveness == "stale":
-        return True, True
 
+def _manager_record_unknown_is_expired(record: dict[str, Any] | None) -> bool:
     timestamp = _manager_record_timestamp(record)
-    if timestamp is None:
-        return False, False
-    stale_after_ns = int(
+    return timestamp is not None and time.time_ns() - timestamp > int(
         MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
     )
-    return time.time_ns() - timestamp > stale_after_ns, False
+
+
+def manager_registry_record_is_stale(record: dict[str, Any] | None) -> bool:
+    """Return whether a normalized manager row lacks positive runtime proof."""
+
+    return manager_registry_record_liveness(record) != "live"
 
 
 def _manager_record_has_pong_live(record: dict[str, Any] | None) -> bool:
@@ -739,7 +661,7 @@ def _manager_record_has_matched_pong(
 def _manager_record_timestamp(record: dict[str, Any] | None) -> int | None:
     if not isinstance(record, dict):
         return None
-    value = record.get("timestamp")
+    value = record.get("timestamp", record.get("_timestamp"))
     if isinstance(value, int):
         return value
     if isinstance(value, str) and value.isdigit():
@@ -808,21 +730,16 @@ def select_active_manager(
 
 
 def _lookup_manager_pid(context: WeftContext, tid: str) -> int | None:
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-    latest_timestamp = -1
-    resolved_pid: int | None = None
-    for data, timestamp in iter_queue_json_entries(queue):
-        if data.get("full") != tid or timestamp < latest_timestamp:
-            continue
-        handle = _manager_handle_from_record(data)
-        pid = None
-        if handle is not None and handle.control.get("authority") == "host-pid":
-            live_processes = _live_host_processes_from_handle(handle)
-            pid = live_processes[0][0] if live_processes else None
-        if pid is not None:
-            latest_timestamp = timestamp
-            resolved_pid = pid
-    return resolved_pid
+    """Resolve control authority from only the newest valid mapping ([OBS.4])."""
+    latest = latest_tid_mapping_rows(context).get(tid)
+    if latest is None:
+        return None
+    _timestamp, payload = latest
+    handle = _manager_handle_from_record(payload)
+    if handle is None or handle.control.get("authority") != "host-pid":
+        return None
+    live_processes = _live_host_processes_from_handle(handle)
+    return live_processes[0][0] if live_processes else None
 
 
 def _manager_ctrl_queue_name(tid: str, record: dict[str, Any] | None = None) -> str:
@@ -858,12 +775,11 @@ def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] except
     record: dict[str, Any] | None,
     status: Literal["stopped", "superseded"] = "stopped",
 ) -> bool:
-    """Replace a manager registry row with terminal non-live service evidence."""
+    """Append terminal service evidence without deleting owner rows ([MF-3.1])."""
 
     registry_queue = _registry_queue(context)
     try:
         latest_record = record
-        delete_timestamps: list[int] = []
         for data, timestamp in iter_queue_json_entries(registry_queue):
             normalized = normalize_manager_registry_record(
                 context,
@@ -874,27 +790,12 @@ def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] except
                 continue
             if normalized.get("tid") != tid:
                 continue
-            delete_timestamps.append(timestamp)
             if latest_record is None:
                 latest_record = normalized
                 continue
             existing_ts = _manager_record_timestamp(latest_record) or -1
             if existing_ts < timestamp:
                 latest_record = normalized
-
-        for timestamp in delete_timestamps:
-            try:
-                registry_queue.delete(message_id=timestamp)
-            except (
-                BrokerError,
-                OSError,
-                RuntimeError,
-            ):  # pragma: no cover - registry cleanup best effort
-                logger.debug(
-                    "Failed to prune manager registry entry for %s",
-                    tid,
-                    exc_info=True,
-                )
 
         queues = {
             "requests": WEFT_SPAWN_REQUESTS_QUEUE,
@@ -1317,6 +1218,7 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
     process: subprocess.Popen[Any] | None,
     stop_if_absent: bool,
 ) -> tuple[bool, dict[str, Any] | None]:
+    """Require terminal or exit proof; filtered absence is not exit ([MA-3])."""
     entry_observed = initial_record is not None
     last_record = initial_record
     pid_checked_at = 0.0
@@ -1331,10 +1233,19 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
             )
             current = view.target_record
             if current is None:
-                if stop_if_absent or entry_observed:  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
-                    if not pid_is_live(_record_pid(last_record)):  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
-                        if _wait_for_process_exit(process, deadline=deadline):
-                            return True, last_record
+                if (
+                    (stop_if_absent or entry_observed)
+                    and (
+                        (
+                            _manager_handle_from_record(last_record) is not None
+                            and manager_registry_record_liveness(last_record) == "stale"
+                        )
+                        or (process is not None and process.poll() is not None)
+                    )
+                    and not pid_is_live(_record_pid(last_record))
+                    and _wait_for_process_exit(process, deadline=deadline)
+                ):
+                    return True, last_record
             else:
                 entry_observed = True
                 last_record = current
@@ -1352,9 +1263,19 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
                     now = time.monotonic()
                     if now - pid_checked_at >= MANAGER_PID_LIVENESS_RECHECK_INTERVAL:
                         pid_checked_at = now
-                        if not pid_is_live(current_pid):  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-241] exception
-                            if _wait_for_process_exit(process, deadline=deadline):
-                                return True, current
+                        if (
+                            (
+                                (
+                                    _manager_handle_from_record(current) is not None
+                                    and manager_registry_record_liveness(current)
+                                    == "stale"
+                                )
+                                or (process is not None and process.poll() is not None)
+                            )
+                            and not pid_is_live(current_pid)
+                            and _wait_for_process_exit(process, deadline=deadline)
+                        ):
+                            return True, current
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1438,7 +1359,11 @@ def _manager_start_record_matches_launch(
     if handle.control.get("authority") == "host-pid":
         return _record_pid(record) == launch_pid
     if handle.control.get("authority") == "external-supervisor":
-        return not manager_registry_record_is_stale(record)
+        # Owned launch evidence is separate from shared leader liveness [MA-3].
+        liveness = manager_registry_record_liveness(record)
+        return liveness == "live" or (
+            liveness == "unknown" and not _manager_record_unknown_is_expired(record)
+        )
     return False
 
 
@@ -1807,11 +1732,10 @@ def serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
 def _foreground_serve_blocking_manager(context: WeftContext) -> dict[str, Any] | None:
     """Return the active manager that should block foreground serve startup.
 
-    Generic manager selection intentionally treats fresh external-supervisor
-    records as live when no probe can prove otherwise. Foreground serve has a
-    stronger supervisor boundary: if a previous foreground-serve row has no
-    positive live proof, it is a stale deployment artifact, not a reason to
-    make systemd flap until the generic TTL expires.
+    Selection includes positive runtime or matched-PONG proof and leaves
+    unconfirmed registry history intact. If a selected foreground supervisor
+    loses that proof during this startup check, publish supersession and
+    reselect before launching a replacement.
     """
 
     probe_cache: dict[str, int | None] = {}
@@ -1857,11 +1781,14 @@ def stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
     if not isinstance(target_tid, str) or not target_tid:
         raise ValueError("manager tid is required")
 
-    current = record or manager_record(context, target_tid)
+    current = record or manager_record(context, target_tid, prune_stale=False)
     if (
         isinstance(current, dict)
         and current.get("status") == "stopped"
-        and _manager_handle_is_stale(_manager_handle_from_record(current))
+        and (
+            _manager_handle_from_record(current) is None
+            or manager_registry_record_liveness(current) == "stale"
+        )
     ):
         return True, None
 
@@ -1933,7 +1860,7 @@ def stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
             if _mark_manager_stopped(context, target_tid, record=current):
                 return True, None
             return False, f"Manager {target_tid} stopped but registry update failed"
-        if _external_supervisor_record_is_live(current):
+        if _external_supervisor_record_is_unconfirmed(current):
             return (
                 False,
                 (
@@ -1941,7 +1868,10 @@ def stop_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
                     "no host PID is available for --force"
                 ),
             )
-        return True, None
+        return (
+            False,
+            f"Manager {target_tid} stop is unconfirmed; no host PID is available for --force",
+        )
 
     return False, f"Manager {target_tid} did not stop within {timeout:.1f}s"
 
@@ -1993,12 +1923,12 @@ def replace_active_manager(
         continue
 
 
-def _external_supervisor_record_is_live(record: dict[str, Any] | None) -> bool:
+def _external_supervisor_record_is_unconfirmed(record: dict[str, Any] | None) -> bool:
     handle = _manager_handle_from_record(record)
     return (
         handle is not None
         and handle.control.get("authority") == "external-supervisor"
-        and not manager_registry_record_is_stale(record)
+        and manager_registry_record_liveness(record) != "stale"
     )
 
 
@@ -2013,6 +1943,7 @@ __all__ = [
     "manager_diagnostic_records",
     "manager_record",
     "manager_registry_record_is_stale",
+    "manager_registry_record_liveness",
     "normalize_manager_registry_record",
     "replace_active_manager",
     "select_active_manager",

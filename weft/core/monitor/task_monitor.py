@@ -83,10 +83,10 @@ from weft._constants import (
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
     WEFT_SERVICES_REGISTRY_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
 from weft.core.control_messages import ControlRequest
+from weft.core.endpoints import latest_tid_mapping_rows
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
 from weft.core.monitor.cleanup import (
     TaskMonitorCleanupConfig,
@@ -214,7 +214,7 @@ from weft.core.tasks.service import (
     ServiceWorkerSpec,
 )
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.helpers import iter_queue_entries
+from weft.helpers import iter_queue_entries, tid_short_form
 
 logger = logging.getLogger(__name__)
 
@@ -1283,7 +1283,7 @@ class TaskMonitor(ServiceTask):
                 event=event,
                 component="task_monitor",
                 manager_tid=manager_tid,
-                manager_tid_short=manager_tid[-10:],
+                manager_tid_short=tid_short_form(manager_tid),
                 required_level=required_level,
                 severity=severity,
                 weft_context=str(self._monitor_context().root),
@@ -3473,27 +3473,9 @@ class TaskMonitor(ServiceTask):
     def _nonterminal_mapping_row_tids(ctx: WeftContext) -> set[str]:
         """Return TIDs whose newest valid mapping row is non-terminal."""
 
-        newest_payload_by_tid: dict[str, tuple[int, Mapping[str, Any]]] = {}
-        mappings = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-        try:
-            for body, timestamp in iter_queue_entries(mappings):
-                try:
-                    payload = json.loads(body)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(payload, Mapping):
-                    continue
-                tid = payload.get("full")
-                if not isinstance(tid, str) or not tid:
-                    continue
-                current = newest_payload_by_tid.get(tid)
-                if current is None or int(timestamp) > current[0]:
-                    newest_payload_by_tid[tid] = (int(timestamp), payload)
-        finally:
-            mappings.close()
         return {
             tid
-            for tid, (_timestamp, payload) in newest_payload_by_tid.items()
+            for tid, (_timestamp, payload) in latest_tid_mapping_rows(ctx).items()
             if payload.get("terminal") is not True
         }
 
