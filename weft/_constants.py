@@ -1095,10 +1095,6 @@ TASK_LIFETIME_REPORT_RECORD_TYPE: Final[str] = "task_lifetime_report"
 WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES: Final[int] = 8192
 """Maximum malformed raw task-log body bytes included in external records."""
 
-TASK_MONITOR_TASK_LOG_CLEANUP_SKIPPED_OWNER: Final[str] = (
-    "task_log_cleanup_owned_by_external_or_store_policy"
-)
-"""Stop reason when broad task-log cleanup is disabled for a cycle owner."""
 
 WEFT_TASK_MONITOR_MODE_DEFAULT: Final[str] = "delete"
 """Default supervised task-monitor cleanup mode."""
@@ -1122,8 +1118,6 @@ WEFT_TASK_MONITOR_LOG_SINKS: Final[frozenset[str]] = frozenset(
 WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT: Final[float] = 60.0
 """Default manager restart backoff for the supervised task monitor."""
 
-WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT: Final[bool] = True
-"""Default for the supervised monitor's durable collation store."""
 
 WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT: Final[bool] = True
 """Self-maintenance (backend vacuum + runtime-state prune) in the monitor.
@@ -1177,7 +1171,6 @@ _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS: Final[frozenset[str]] = frozenset(
         "_delete_terminal_control_queues",
         "_queue_name_snapshot",
         "_run_monitor_store_cycle",
-        "_run_task_monitor_cleanup_cycle",
         "_worker_local_monitor_clone",
     }
 )
@@ -1252,7 +1245,7 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _worker_result_event _worker_result_queue _worker_stopping _worker_threads
     _yield_strategy enable_process_title should_stop tid tid_short
     _delete_runtime_reserved_queue _delete_terminal_control_queues
-    _queue_name_snapshot _run_monitor_store_cycle _run_task_monitor_cleanup_cycle
+    _queue_name_snapshot _run_monitor_store_cycle
     _worker_local_monitor_clone
     """.split()  # noqa: SIM905 approved [TS-3.1] [RUFF-SUP-250] exception
 )
@@ -2801,6 +2794,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
         Dict with WEFT_* configuration values
     """
     removed_task_monitor_env = {
+        "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": (
+            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED was removed; "
+            "the collation store is always enabled; use "
+            "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
+        ),
         "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": (
             "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS was removed; use "
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"
@@ -2969,11 +2967,6 @@ def _load_weft_env_vars() -> dict[str, Any]:
             "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
             default=WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
             parser=_parse_task_monitor_restart_backoff_seconds,
-        ),
-        "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
-            default=WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
-            parser=_parse_bool,
         ),
         "WEFT_TASK_MONITOR_MAINTENANCE": _load_weft_env_value(
             "WEFT_TASK_MONITOR_MAINTENANCE",
@@ -3232,8 +3225,12 @@ _WEFT_OVERRIDE_RULES: Final[dict[str, _OverrideRule]] = {
         parser=_parse_bool,
     ),
     "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
+        kind=_OverrideKind.REMOVED,
+        removed_message=(
+            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED was removed; "
+            "the collation store is always enabled; use "
+            "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
+        ),
     ),
     "WEFT_TASK_MONITOR_MAINTENANCE": _OverrideRule(
         kind=_OverrideKind.BOOLISH,

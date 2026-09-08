@@ -4,6 +4,13 @@
 
 ### Changed
 
+- Removed `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` and the retired task-log
+  window cleanup engine. Both environment and explicit override forms now fail
+  fast; remove the key before upgrade and use `WEFT_TASK_MONITOR_MODE=report_only`
+  for non-destructive collation. After removing an old opt-out, the first delete
+  cycle ingests and exact-deletes visible raw rows. Reverting code cannot restore
+  those rows. Raw external ownership continues to bypass the store.
+
 - Retired unused legacy command adapters, helper functions, and Monitor cleanup
   paths. Python tidy/dump convenience wrappers now raise the shared typed
   `CommandExecutionError` (a `RuntimeError`) for command failures.

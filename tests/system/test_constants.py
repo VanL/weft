@@ -114,6 +114,7 @@ def test_env_loader_and_explicit_override_normalizer_keys_stay_in_parity() -> No
         "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
         "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED",
         "WEFT_TASK_MONITOR_CLEANUP_WORKERS",
+        "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
         constants.MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     }
 
@@ -282,7 +283,6 @@ class TestConstants:
 
         assert DEFAULT_MEMORY_MB == 1024
         assert isinstance(DEFAULT_MEMORY_MB, int)
-
 
         assert DEFAULT_STREAM_OUTPUT is False
         assert isinstance(DEFAULT_STREAM_OUTPUT, bool)
@@ -1300,3 +1300,24 @@ class TestLoadConfig:
         # Should have original value, not modified one
         assert config2["WEFT_DEBUG"] == original_debug
         assert config2["WEFT_DEBUG"] != config1["WEFT_DEBUG"]
+
+
+@pytest.mark.parametrize("source", ["environment", "override"])
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_removed_collation_store_toggle_fails_with_migration_message(
+    source: str,
+    value: str,
+) -> None:
+    name = "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED"
+    expected = (
+        name + " was removed; the collation store is always enabled; "
+        "use WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
+    )
+    with (
+        patch.dict(
+            os.environ, {name: value} if source == "environment" else {}, clear=True
+        ),
+        pytest.raises(ValueError) as caught,
+    ):
+        load_config({name: value} if source == "override" else None)
+    assert str(caught.value) == expected

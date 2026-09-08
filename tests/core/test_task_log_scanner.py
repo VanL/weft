@@ -1,4 +1,4 @@
-"""Tests for task-log scan and family selection primitives."""
+"""Live non-consuming task-log scanner contracts [MF-5], [OBS.13]."""
 
 from __future__ import annotations
 
@@ -9,145 +9,108 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._constants import (
+    TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED,
+    WEFT_GLOBAL_LOG_QUEUE,
+)
 from weft.context import WeftContext, build_context
 from weft.core.monitor.task_log_scanner import (
     GeneratorTaskLogScanner,
-    select_task_log_family_groups,
+    decode_task_log_row,
 )
+from weft.core.queue_window import QueueWindowRow
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
 
 
-def _context(tmp_path: Path) -> WeftContext:
-    root = prepare_project_root(tmp_path)
-    return build_context(spec_context=root)
-
-
-def _write_json(ctx: WeftContext, queue_name: str, payload: dict[str, Any]) -> int:
-    body = json.dumps(payload)
-    queue = ctx.queue(queue_name, persistent=False)
+def _seed(ctx: WeftContext) -> list[tuple[str, int]]:
+    queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     try:
-        queue.write(body)
-        latest: int | None = None
-        for row, message_id in iter_queue_entries(queue):
-            if row == body:
-                latest = int(message_id)
-        assert latest is not None
-        return latest
+        for index in range(4):
+            queue.write(json.dumps({"tid": "1780000000000000000", "index": index}))
+        return list(iter_queue_entries(queue))
     finally:
         queue.close()
 
 
-def _now_after(message_id: int, seconds: float) -> int:
-    return message_id + int(seconds * 1_000_000_000) + 1
+@pytest.mark.parametrize("limit,reached", [(2, True), (4, False), (5, False)])
+def test_scan_window_is_bounded_fifo_and_non_consuming(
+    tmp_path: Path, limit: int, reached: bool
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    before = _seed(ctx)
+    window = GeneratorTaskLogScanner().scan_window(
+        ctx, WEFT_GLOBAL_LOG_QUEUE, scan_limit=limit
+    )
+    assert [(row.raw.body, row.raw.message_id) for row in window.rows] == before[:limit]
+    assert window.scanned == min(limit, len(before))
+    assert window.to_summary() == {"scan_limit": limit, "scan_limit_reached": reached}
+    assert window.stop_reason == (
+        TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED if reached else None
+    )
+    queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        assert list(iter_queue_entries(queue)) == before
+        assert queue.stats().claimed == 0
+    finally:
+        queue.close()
 
 
-def test_task_log_scanner_selects_complete_family_behind_open_prefix(
+def test_scan_window_respects_timestamp_bounds_and_excludes_claimed_rows(
     tmp_path: Path,
 ) -> None:
-    ctx = _context(tmp_path)
-    open_tid = "1778000000000000001"
-    complete_tid = "1778000000000000002"
-    _write_json(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        {"event": "work_started", "tid": open_tid},
-    )
-    _write_json(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        {"event": "task_activity", "tid": open_tid, "activity": "waiting"},
-    )
-    _write_json(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        {"event": "work_started", "tid": complete_tid},
-    )
-    complete_terminal_id = _write_json(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        {"event": "work_completed", "status": "completed", "tid": complete_tid},
-    )
-
-    scanner = GeneratorTaskLogScanner()
-    window = scanner.scan_window(ctx, WEFT_GLOBAL_LOG_QUEUE, scan_limit=10)
-    selection = select_task_log_family_groups(
-        window.rows,
-        now_ns=_now_after(complete_terminal_id, 2.0),
-        min_age_seconds=1.0,
-        exclude_tids=set(),
-        selection_limit=10,
-    )
-
-    assert [group.tid for group in selection.complete_lifecycle_groups] == [
-        complete_tid
-    ]
-    assert selection.terminal_without_start_groups == ()
-    assert [family.tid for family in selection.skipped_open_families] == [open_tid]
-    assert selection.stop_reason is None
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    before = _seed(ctx)
+    queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        assert queue.read_one(with_timestamps=True) == before[0]
+        window = GeneratorTaskLogScanner().scan_window(
+            ctx,
+            WEFT_GLOBAL_LOG_QUEUE,
+            scan_limit=10,
+            since_timestamp=before[1][1],
+            before_timestamp=before[3][1],
+        )
+        assert [row.raw.message_id for row in window.rows] == [before[2][1]]
+        unbounded = GeneratorTaskLogScanner().scan_window(
+            ctx, WEFT_GLOBAL_LOG_QUEUE, scan_limit=10
+        )
+        assert [row.raw.message_id for row in unbounded.rows] == [
+            row[1] for row in before[1:]
+        ]
+        assert queue.stats().claimed == 1
+    finally:
+        queue.close()
 
 
-def test_task_log_scanner_selects_terminal_without_visible_start(
-    tmp_path: Path,
+@pytest.mark.parametrize("limit", [0, -1])
+def test_scan_window_rejects_nonpositive_limit(tmp_path: Path, limit: int) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    with pytest.raises(ValueError, match="scan_limit must be positive"):
+        GeneratorTaskLogScanner().scan_window(
+            ctx, WEFT_GLOBAL_LOG_QUEUE, scan_limit=limit
+        )
+
+
+@pytest.mark.parametrize(
+    "body,payload,reason",
+    [
+        ("{bad", None, "invalid_json"),
+        ("[]", None, "json_not_object"),
+        ("{}", {}, "invalid_task_log_shape"),
+        ('{"tid": ""}', {"tid": ""}, "invalid_task_log_shape"),
+        ('{"tid": 123}', {"tid": 123}, "invalid_task_log_shape"),
+        ('{"tid": "1780000000000000000"}', {"tid": "1780000000000000000"}, None),
+    ],
+)
+def test_decode_task_log_row_preserves_raw_evidence(
+    body: str, payload: dict[str, Any] | None, reason: str | None
 ) -> None:
-    ctx = _context(tmp_path)
-    terminal_tid = "1778000000000000003"
-    terminal_id = _write_json(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        {"event": "work_completed", "status": "completed", "tid": terminal_tid},
+    raw = QueueWindowRow(
+        queue=WEFT_GLOBAL_LOG_QUEUE, body=body, message_id=1780000000000000001
     )
-
-    scanner = GeneratorTaskLogScanner()
-    window = scanner.scan_window(ctx, WEFT_GLOBAL_LOG_QUEUE, scan_limit=10)
-    selection = select_task_log_family_groups(
-        window.rows,
-        now_ns=_now_after(terminal_id, 2.0),
-        min_age_seconds=1.0,
-        exclude_tids=set(),
-        selection_limit=10,
-    )
-
-    assert selection.complete_lifecycle_groups == ()
-    assert [group.tid for group in selection.terminal_without_start_groups] == [
-        terminal_tid
-    ]
-
-
-def test_task_log_scanner_waits_for_terminal_event_after_activity_status(
-    tmp_path: Path,
-) -> None:
-    ctx = _context(tmp_path)
-    tid = "1778000000000000004"
-    _write_json(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        {"event": "work_started", "status": "running", "tid": tid},
-    )
-    _write_json(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        {"event": "task_activity", "status": "failed", "tid": tid},
-    )
-    terminal_id = _write_json(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        {"event": "work_failed", "status": "failed", "tid": tid},
-    )
-
-    scanner = GeneratorTaskLogScanner()
-    window = scanner.scan_window(ctx, WEFT_GLOBAL_LOG_QUEUE, scan_limit=10)
-    selection = select_task_log_family_groups(
-        window.rows,
-        now_ns=_now_after(terminal_id, 2.0),
-        min_age_seconds=1.0,
-        exclude_tids=set(),
-        selection_limit=10,
-    )
-
-    assert [group.message_ids for group in selection.complete_lifecycle_groups] == [
-        tuple(row.raw.message_id for row in window.rows)
-    ]
-    assert selection.terminal_without_start_groups == ()
+    row = decode_task_log_row(raw)
+    assert row.raw == raw
+    assert row.payload == payload
+    assert row.malformed_reason == reason

@@ -13,13 +13,18 @@ Spec: docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17]
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.monitor.store import MonitorRawMessageRef
 from weft.core.pruning.apply import apply_exact_prune_candidates
+from weft.core.pruning.policies import malformed_row_candidates, older_than_candidates
+from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
@@ -145,3 +150,209 @@ def test_exact_id_apply_reports_missing_rows_without_reconcile(tmp_path) -> None
 
     assert [(deleted, error) for _c, deleted, error in results] == [(False, None)]
     assert len(_remaining_rows(ctx)) == 1
+
+
+def _context(tmp_path: Path) -> WeftContext:
+    root = prepare_project_root(tmp_path)
+    return build_context(spec_context=root)
+
+
+def _write_raw(ctx: WeftContext, queue_name: str, body: str) -> int:
+    queue = ctx.queue(queue_name, persistent=False)
+    try:
+        queue.write(body)
+        latest: int | None = None
+        for row, message_id in iter_queue_entries(queue):
+            if row == body:
+                latest = int(message_id)
+        assert latest is not None
+        return latest
+    finally:
+        queue.close()
+
+
+def _read_rows(ctx: WeftContext, queue_name: str) -> list[tuple[str, int]]:
+    queue = ctx.queue(queue_name, persistent=False)
+    try:
+        return list(iter_queue_entries(queue))
+    finally:
+        queue.close()
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactDeleteCandidate:
+    queue: str
+    message_id: int
+    report_only: bool = False
+
+
+def test_apply_exact_prune_candidates_reports_missing_row_not_deleted(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    missing_id = 1779000000000020000
+
+    applied = apply_exact_prune_candidates(
+        ctx,
+        (
+            _ExactDeleteCandidate(
+                queue="test.exact-delete",
+                message_id=missing_id,
+            ),
+        ),
+        apply_result=lambda candidate, deleted, error: (
+            candidate.message_id,
+            deleted,
+            error,
+        ),
+    )
+
+    assert applied == [(missing_id, False, None)]
+
+
+def test_apply_exact_prune_candidates_reports_deleted_rows(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    queue_name = "test.exact-delete"
+    message_id = _write_raw(ctx, queue_name, "payload")
+
+    applied = apply_exact_prune_candidates(
+        ctx,
+        (
+            _ExactDeleteCandidate(
+                queue=queue_name,
+                message_id=message_id,
+            ),
+        ),
+        apply_result=lambda candidate, deleted, error: (
+            candidate.message_id,
+            deleted,
+            error,
+        ),
+    )
+
+    assert applied == [(message_id, True, None)]
+    assert _read_rows(ctx, queue_name) == []
+
+
+def test_apply_exact_prune_candidates_exact_status_handles_mixed_missing_rows(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    queue_name = "test.exact-delete"
+    first_id = _write_raw(ctx, queue_name, "first")
+    second_id = _write_raw(ctx, queue_name, "second")
+    missing_id = second_id + 100_000
+
+    applied = apply_exact_prune_candidates(
+        ctx,
+        (
+            _ExactDeleteCandidate(queue=queue_name, message_id=first_id),
+            _ExactDeleteCandidate(queue=queue_name, message_id=missing_id),
+            _ExactDeleteCandidate(queue=queue_name, message_id=second_id),
+        ),
+        apply_result=lambda candidate, deleted, error: (
+            candidate.message_id,
+            deleted,
+            error,
+        ),
+        exact_status=True,
+    )
+
+    assert applied == [
+        (first_id, True, None),
+        (missing_id, False, None),
+        (second_id, True, None),
+    ]
+    assert _read_rows(ctx, queue_name) == []
+
+
+def test_apply_exact_prune_candidates_reconcile_missing_marks_success(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    queue_name = "test.exact-delete"
+    first_id = _write_raw(ctx, queue_name, "first")
+    second_id = _write_raw(ctx, queue_name, "second")
+    missing_id = second_id + 100_000
+
+    applied = apply_exact_prune_candidates(
+        ctx,
+        (
+            _ExactDeleteCandidate(queue=queue_name, message_id=first_id),
+            _ExactDeleteCandidate(queue=queue_name, message_id=missing_id),
+            _ExactDeleteCandidate(queue=queue_name, message_id=second_id),
+        ),
+        apply_result=lambda candidate, deleted, error: (
+            candidate.message_id,
+            deleted,
+            error,
+        ),
+        reconcile_missing=True,
+    )
+
+    assert applied == [
+        (first_id, True, None),
+        (missing_id, True, None),
+        (second_id, True, None),
+    ]
+    assert _read_rows(ctx, queue_name) == []
+
+
+def _decoded_row(
+    queue_name: str,
+    message_id: int,
+    payload: dict[str, Any] | None,
+    *,
+    malformed_reason: str | None = None,
+) -> DecodedQueueWindowRow:
+    body = json.dumps(payload) if payload is not None else "{bad-json"
+    return DecodedQueueWindowRow(
+        raw=QueueWindowRow(queue=queue_name, body=body, message_id=message_id),
+        payload=payload,
+        malformed_reason=malformed_reason,
+    )
+
+
+def test_malformed_policy_selects_only_explicitly_malformed_rows() -> None:
+    rows = (
+        _decoded_row("owned.queue", 100, None, malformed_reason="invalid_json"),
+        _decoded_row("owned.queue", 101, {"tid": "1778000000000000001"}),
+    )
+
+    candidates = malformed_row_candidates(
+        rows,
+        policy="test.delete_malformed",
+        candidate_class="malformed_owned_queue",
+    )
+
+    assert [candidate.message_id for candidate in candidates] == [100]
+    assert candidates[0].policy == "test.delete_malformed"
+    assert candidates[0].candidate_class == "malformed_owned_queue"
+    assert candidates[0].reason == "invalid_json"
+
+
+def test_older_than_policy_skips_claimed_rows_and_stops_at_young_fifo_row() -> None:
+    rows = (
+        _decoded_row("owned.queue", 1_000_000_000, {"tid": "claimed"}),
+        _decoded_row("owned.queue", 2_000_000_000, {"tid": "old"}),
+        _decoded_row("owned.queue", 3_000_000_000, {"tid": "young"}),
+    )
+
+    selection = older_than_candidates(
+        rows,
+        policy="test.delete_old",
+        now_ns=3_500_000_000,
+        min_age_seconds=1.0,
+        candidate_class="old_owned_row",
+        reason="older_than_policy",
+        stop_reason="first_owned_row_too_young",
+        claimed_ids={1_000_000_000},
+    )
+
+    assert [candidate.tid for candidate in selection.candidates] == ["old"]
+    assert [candidate.policy for candidate in selection.candidates] == [
+        "test.delete_old"
+    ]
+    assert selection.stop_reason == "first_owned_row_too_young"

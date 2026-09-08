@@ -1223,7 +1223,7 @@ def test_monitor_store_status_represents_backend_failure(
 
     status = store.status()
 
-    assert status.enabled is True
+    assert "enabled" not in status.to_summary()
     assert status.available is False
     assert status.schema_version is None
     assert status.checkpoint is None

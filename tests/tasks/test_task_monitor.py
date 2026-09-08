@@ -1682,7 +1682,7 @@ def test_task_monitor_builtin_delete_removes_cleanup_rows(
     assert task._last_processed >= 1
     assert task._last_deleted >= 1
     assert task._last_prune_records_scanned == 0
-    assert task._last_cleanup_queue_stats
+    assert task._last_cleanup_queue_stats == ()
 
 
 def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
@@ -1891,7 +1891,7 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["batch_size"] == 10
     assert pong["last_candidate_class_counts"] == {}
     assert pong["last_safe_to_delete_candidates"] == 0
-    assert pong["last_cleanup_queue_stats"]
+    assert pong["last_cleanup_queue_stats"] == []
     assert pong["last_cleanup_policy_stats"] == []
     assert pong["last_policy_progress"]
     extended = pong[PONG_EXTENSION_KEY]["task_monitor"]
@@ -2014,8 +2014,10 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
         for response in responses
         if response["command"] == CONTROL_PING and response.get("request_id") == "store"
     )
+    assert "collation_store_enabled" not in pong
+    assert "collation_store_enabled" not in pong[PONG_EXTENSION_KEY]["task_monitor"]
     store = pong[PONG_EXTENSION_KEY]["task_monitor"]["collation_store"]
-    assert store["enabled"] is True
+    assert "enabled" not in store
     assert store["available"] is True
     assert store["schema_version"] == WEFT_MONITOR_SCHEMA_VERSION
     assert store["checkpoint"] is not None
@@ -7851,14 +7853,14 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
     task = TaskMonitor(db_path, spec, config=config)
     started = threading.Event()
     release = threading.Event()
-    real_cleanup = task._run_task_monitor_cleanup_cycle
+    real_cleanup = task._run_monitor_store_cycle
 
-    def slow_cleanup(*args: object, **kwargs: object) -> TaskMonitorProcessorResult:
+    def slow_cleanup(*args: object, **kwargs: object) -> bool:
         started.set()
         assert release.wait(timeout=5.0)
         return real_cleanup(*args, **kwargs)
 
-    monkeypatch.setattr(task, "_run_task_monitor_cleanup_cycle", slow_cleanup)
+    monkeypatch.setattr(task, "_run_monitor_store_cycle", slow_cleanup)
     try:
         deadline = time.monotonic() + 10.0
         while not started.is_set() and time.monotonic() < deadline:
@@ -8167,7 +8169,9 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
             del args, kwargs
             raise AssertionError("PING must not run cleanup")
 
-        monkeypatch.setattr(task_monitor_mod, "run_task_monitor_cleanup", fail_cleanup)
+        monkeypatch.setattr(
+            task_monitor_mod.GeneratorTaskLogScanner, "scan_window", fail_cleanup
+        )
         ctrl_in.write(encode_control_message(CONTROL_PING, request_id="cached"))
         deadline = time.monotonic() + 3.0
         while pong is None and time.monotonic() < deadline:
@@ -11084,3 +11088,152 @@ def test_persistent_consumer_resurrects_after_ambiguous_family_cleanup(
     finally:
         monitor.stop()
         _drain_queue(mappings)
+
+
+@pytest.mark.parametrize("mode", ["delete", "report_only", "jsonl_then_delete"])
+@pytest.mark.parametrize(
+    "external,store_available",
+    [
+        ("off", True),
+        ("off", False),
+        ("collated", True),
+        ("collated", False),
+        ("raw", None),
+    ],
+)
+def test_task_monitor_store_ownership_characterization(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+    external: str,
+    store_available: bool | None,
+) -> None:
+    """Pin reachable cleanup owners and their durable effects [MF-5]."""
+    db_path, make_queue = broker_env
+    path = tmp_path / "ownership.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": mode,
+            "WEFT_TASK_MONITOR_MAINTENANCE": "0",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": "0" if external == "off" else "1",
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw" if external == "raw" else "collated",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(path),
+        }
+    )
+    if mode == "jsonl_then_delete" and external != "collated":
+        with pytest.raises(ValueError, match="jsonl_then_delete requires"):
+            TaskMonitor(
+                db_path,
+                make_task_monitor_taskspec("1778089999999999301"),
+                config=config,
+            )
+        return
+    task = TaskMonitor(
+        db_path, make_task_monitor_taskspec("1778089999999999301"), config=config
+    )
+    log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    tid = "1778084345905438301"
+    message_id = log.write(
+        json.dumps({"tid": tid, "event": "work_completed", "status": "completed"})
+    )
+    initial_rows = len(list(log.peek_generator()))
+    opened: list[bool] = []
+    real_open = task_monitor_mod.open_monitor_store
+
+    def open_store(*args: Any, **kwargs: Any) -> Any:
+        opened.append(True)
+        if store_available is False:
+            raise RuntimeError("characterization store unavailable")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(task_monitor_mod, "open_monitor_store", open_store)
+    try:
+        owner = task._task_log_deletion_owner()
+        result, runtime_ready = task._run_builtin_cycle_worker_local(
+            task_monitor_mod._TaskMonitorBuiltinCycleWork(
+                request_id="ownership",
+                now_ns=message_id + 1_000_000_000,
+                task_log_owner=owner,
+            )
+        )
+        checkpoint = (
+            task._monitor_store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
+            if task._monitor_store is not None
+            else None
+        )
+        records = (
+            [json.loads(line) for line in path.read_text().splitlines()]
+            if path.exists()
+            else []
+        )
+        task._finish_monitor_cycle(
+            candidates=(), last_timestamp=checkpoint, events_scanned=0, result=result
+        )
+        observed = {
+            "ingested": task._last_retained_task_log_ingest.valid_ingested,
+            "deleted": log.peek_one(exact_timestamp=message_id) is None,
+            "reports": len(records),
+            "lifetime_reports": sum(
+                record.get("record_type", record.get("type")) == "task_lifetime_report"
+                for record in records
+            ),
+            "checkpoint": checkpoint == message_id,
+            "runtime": runtime_ready,
+            "processed": task._last_processed,
+            "deleted_counter": task._last_deleted,
+            "reported": task._last_reported,
+            "success": task._last_processor_success,
+        }
+        collated_ready = external != "raw" and store_available is True
+        destructive = mode != "report_only"
+        assert observed == {
+            "ingested": initial_rows if collated_ready else 0,
+            "deleted": destructive and (collated_ready or external == "raw"),
+            "reports": int(
+                (external == "collated" and collated_ready)
+                or (external == "raw" and destructive)
+            ),
+            "lifetime_reports": int(collated_ready and mode == "jsonl_then_delete"),
+            "checkpoint": collated_ready,
+            "runtime": collated_ready and destructive,
+            "processed": (initial_rows if collated_ready else int(external == "raw"))
+            if destructive
+            else 0,
+            "deleted_counter": (
+                initial_rows
+                if collated_ready and mode == "delete"
+                else int(external == "raw")
+            )
+            if destructive
+            else 0,
+            "reported": int(collated_ready and destructive),
+            "success": external == "raw" or store_available is True,
+        }
+        if external == "raw" and destructive:
+            assert len(task._last_cleanup_queue_stats) == 1
+            assert len(task._last_cleanup_policy_stats) == 1
+            assert task._last_cleanup_queue_stats[0]["deleted"] == 1
+            assert (
+                task._last_cleanup_policy_stats[0]["policy"]
+                == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
+            )
+        else:
+            assert task._last_cleanup_queue_stats == ()
+            assert task._last_cleanup_policy_stats == ()
+        if records:
+            assert records[0].get("record_type", records[0].get("type")) == (
+                "task_log_raw"
+                if external == "raw"
+                else "task_lifetime_report"
+                if mode == "jsonl_then_delete"
+                else "task_summary"
+            )
+        assert owner == ("raw_external" if external == "raw" else "collated_store")
+        assert bool(opened) is (external != "raw")
+    finally:
+        task.stop()
+        log.close()

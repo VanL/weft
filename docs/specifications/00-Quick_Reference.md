@@ -201,7 +201,6 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_TASK_MONITOR_PROCESSOR` | Custom task-monitor processor reference. Empty by default. Only valid with `WEFT_TASK_MONITOR_MODE=custom`; built-in modes must not be set through this key. Custom values use `module:function`. |
 | `WEFT_TASK_MONITOR_LOG_SINK` | Operational output sink selector for monitor processors: `stdout`, `disk`, or `none`. |
 | `WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS` | Manager restart backoff after the supervised monitor exits. |
-| `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` | Whether the supervised monitor creates/verifies and uses its Monitor-owned durable collation tables. Defaults to true. |
 | `WEFT_TASK_MONITOR_MAINTENANCE` | Whether the supervised monitor runs periodic self-maintenance (backend vacuum plus runtime-state prune). Defaults to true. |
 | `WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS` | Minimum seconds between monitor self-maintenance passes. A wall-clock deadline, not a cycle count. Defaults to 3600 seconds. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |
@@ -252,3 +251,5 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)
+
+The collation-store toggle was retired by [Collation store toggle removal](../plans/2026-08-31-collation-store-toggle-removal-plan.md). An exported removed key is rejected; use `WEFT_TASK_MONITOR_MODE=report_only` for non-destructive operation.

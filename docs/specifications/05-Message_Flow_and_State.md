@@ -594,19 +594,20 @@ Current rules:
   TaskMonitor-owned built-in cycle worker group; the reactor stays available
   for task-local PING/STATUS/STOP/KILL, heartbeat registration, and schedule
   bookkeeping while the worker scans, writes Monitor-store rows, and applies
-  exact deletes. For the built-in `delete` mode with Monitor
-  collation enabled, retained `weft.log.tasks` rows are processed in FIFO order:
+  exact deletes. For the built-in `delete` mode under collated ownership, retained
+  `weft.log.tasks` rows are processed in FIFO order:
   malformed rows are exact-deleted; valid rows are folded into the Monitor
   table and then exact-deleted in the same bounded pass when running the
   built-in `delete` mode. Terminal families may be summarized and
   disposed only after the pass reaches a complete FIFO high-water; open
   families continue to use `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` plus
-  stale-open policy before summary/disposition. Built-in cleanup still
-  runs runtime-state policies such as `weft.state.tid_mappings`, but it no
-  longer uses bounded task-log family windows as the supervised task-log
-  deletion authority. The manager owns only child supervision; it does not scan
+  stale-open policy before summary/disposition. Runtime-state pruning runs
+  in the monitor's maintenance pass
+  (`weft.state.tid_mappings` is owned by LivenessMonitor); the Monitor
+  collation store is the supervised task-log deletion authority. The manager
+  owns only child supervision; it does not scan
   lifecycle queues.
-- when table collation is enabled, each retained FIFO pass reduces valid
+- under collated ownership, each retained FIFO pass reduces valid
   task-log rows through `weft/core/monitor/collation.py`, upserts one summary
   row per TID, and records each incorporated raw message ID in
   `weft_monitor_task_messages` before deleting the raw broker row. Child rows
@@ -1265,11 +1266,15 @@ self-maintenance, and explicit operator commands for force and compaction:
   participates in the existing report ID; the nested schema versions this
   addition without changing the surrounding lifetime-report schema. Nothing
   is ever auto-requeued. `weft.log.tasks` is now
-  table driven when Monitor collation is enabled: the monitor scans visible
+  table driven under collated ownership: the monitor scans visible
   rows in FIFO order up to `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT`, deletes
-  malformed rows, folds valid rows into the Monitor table, and then deletes
-  exact raw rows only after the table proves a terminal or classified-stale
-  family has been summarized. Family summaries are emitted only after a
+  malformed rows, folds valid rows into the Monitor table and, in `delete`
+  mode, then
+  deletes those exact raw rows once the fold is durably recorded
+  ([OBS.13.3]); in `jsonl_then_delete` mode valid raw rows are retained
+  until the family's `task_lifetime_report` has been handed off, and only
+  malformed rows are deleted at fold time. Family summaries are emitted only
+  after a
   completed FIFO high-water pass, never after a scan-limited or error-limited
   pass. Rows with non-terminal events such as
   `task_activity` do not close lifecycle groups solely because they carry a
@@ -1410,14 +1415,16 @@ deletion is logged at error level when Weft logging is enabled
   claimed outbox residue, malformed/unknown-shape rows, and inbox/reserved work
   unless the class is safe for ordinary deletion. `--force --apply` is the
   explicit human override for those ordinary protections.
-- the manager-supervised `TaskMonitor` reports and deletes through the
-  TaskMonitor-owned cleanup runner in `weft/core/monitor/cleanup.py` for
-  runtime-state queues and foreground cleanup surfaces. Retained
-  `weft.log.tasks` cleanup is orchestrated by
+- the manager-supervised `TaskMonitor` deletes through two owners only:
+  retained `weft.log.tasks` cleanup is orchestrated by
   `weft/core/monitor/task_monitor.py` with durable collation in
-  `weft/core/monitor/store.py`, not by the old bounded family-window task-log
-  policy runner. All destructive paths still use the canonical exact-delete
-  helper shared with foreground `weft system prune`. The supervised monitor
+  `weft/core/monitor/store.py`, and task-local runtime queue cleanup runs
+  in the TaskMonitor-owned runtime cleanup slices
+  (`weft/core/monitor/policies/runtime_control.py`). Runtime-state
+  pruning is the separate maintenance pass through
+  `weft/core/pruning/runtime.py`. All destructive paths still use the
+  canonical exact-delete helper shared with foreground `weft system
+  prune`. The supervised monitor
   must not apply archive side effects, force-only retention cleanup, or
   task-local retention cleanup in this slice. Normal task exit owns standard
   control-queue cleanup; the monitor-owned runtime pass is a backstop for
@@ -1449,15 +1456,25 @@ deletion is logged at error level when Weft logging is enabled
   helper after durable table ingestion for collated mode, after accepted
   lifetime-report handoff for `jsonl_then_delete`, and after raw external emit
   for raw mode.
-  Disabling `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` leaves the tables in
-  place and removes them from the monitor cycle. The supervised `delete`
-  mode deletes retained collated raw rows when the collation store is enabled
-  and available; `report_only` is the non-destructive override. If the
-  store is unavailable, well-formed task-log rows remain visible rather than
-  falling back to the old family-window deleter. If
-  `WEFT_LOG_TASKS_EXTERNAL_ENABLED=true` and
-  `WEFT_LOG_TASKS_EXTERNAL_MODE=raw`, raw retained rows are emitted and deleted
-  without writing Monitor collation tables. A configured external path by
+  The Monitor collation store is always enabled; there is no disabled
+  mode. Retained `weft.log.tasks` deletion has exactly two owners, selected
+  by configuration, not by `WEFT_TASK_MONITOR_MODE`: when
+  `WEFT_LOG_TASKS_EXTERNAL_ENABLED=true` with
+  `WEFT_LOG_TASKS_EXTERNAL_MODE=raw`, raw rows are emitted and deleted
+  without table ingest (`raw_external` ownership); otherwise the collation
+  store owns them. Under collated ownership the supervised `delete` mode
+  deletes retained collated raw rows when the store is available;
+  `report_only` is the non-destructive override and continues table ingest
+  and checkpoint advance without deletion. Under `raw_external` ownership
+  `report_only` performs no ingest and advances no checkpoint. "Available"
+  means opened and verified per [SB-0.4a]; under collated ownership, if the
+  store is unavailable,
+  well-formed task-log rows remain visible, no task-local runtime cleanup
+  runs, and there is no fallback deleter. Claimed `weft.log.tasks` rows are
+  outside Monitor collation: they are not ingested, and their physical
+  removal is SimpleBroker vacuum's job — auto-vacuum, the monitor
+  maintenance pass, or `weft system tidy` — none of which is
+  unconditional. A configured external path by
   itself is only a destination and does not trigger logging. Open families with
   a usable reporting interval may be
   classified `suspected_inactive` after the configured reporting gap; open
@@ -1506,6 +1523,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Collation store toggle removal](../plans/2026-08-31-collation-store-toggle-removal-plan.md)
 
 - [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md)
 

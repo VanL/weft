@@ -23,7 +23,6 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
 )
-from weft.core.pruning.models import CleanupCandidate
 from weft.core.queue_window import QueueWindowRow
 from weft.helpers.message_ids import normalize_exact_message_id
 
@@ -56,54 +55,6 @@ def build_collation_lifetime_report(
         taskspec=_taskspec_from_collation(record),
         monitor=_monitor_from_collation(record),
         observations=observations,
-    )
-
-
-def build_candidate_lifetime_report(
-    candidate: CleanupCandidate,
-    *,
-    monitor_tid: str,
-    emitted_at_ns: int,
-    report_kind: str | None = None,
-    completeness: str | None = None,
-    observations: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build a baseline report for one cleanup candidate."""
-
-    subject = {
-        "queue": candidate.queue,
-        "message_id": candidate.message_id,
-    }
-    if candidate.tid is not None:
-        subject["tid"] = candidate.tid
-    metadata = dict(candidate.metadata)
-    taskspec = _taskspec_from_mapping(metadata.pop("taskspec", None))
-    candidate_observations: dict[str, Any] = {
-        "candidate_class": candidate.candidate_class,
-        "reason": candidate.reason,
-    }
-    if candidate.payload_sha256 is not None:
-        candidate_observations["payload_sha256"] = candidate.payload_sha256
-    if candidate.payload_size_bytes is not None:
-        candidate_observations["payload_size_bytes"] = candidate.payload_size_bytes
-    if metadata:
-        candidate_observations["metadata"] = metadata
-    candidate_observations.update(dict(observations or {}))
-    return build_lifetime_report(
-        monitor_tid=monitor_tid,
-        emitted_at_ns=emitted_at_ns,
-        source_policy=candidate.policy,
-        report_kind=report_kind or candidate.candidate_class,
-        completeness=completeness or "state_only",
-        subject=subject,
-        lifetime=_lifetime_from_candidate(
-            candidate,
-            taskspec=taskspec,
-            close_reason=candidate.reason,
-        ),
-        taskspec=taskspec,
-        monitor=_monitor_from_candidate(candidate),
-        observations=candidate_observations,
     )
 
 
@@ -393,57 +344,6 @@ def baseline_lifetime(
     """Return the common lifetime shape with unknown values set to ``None``."""
 
     return _complete_lifetime({"tid": tid, "close_reason": close_reason})
-
-
-def _lifetime_from_candidate(
-    candidate: CleanupCandidate,
-    *,
-    taskspec: Mapping[str, Any] | None,
-    close_reason: str,
-) -> dict[str, Any]:
-    metadata = candidate.metadata
-    state = _mapping(taskspec.get("state") if taskspec is not None else None)
-    status = _string(metadata.get("status")) or _string(
-        state.get("status") if state is not None else None
-    )
-    event = _string(metadata.get("event"))
-    terminal_status = _terminal_status(event=event, status=status)
-    return _complete_lifetime(
-        {
-            "tid": candidate.tid,
-            "name": _string(taskspec.get("name") if taskspec is not None else None),
-            "runner": _runner_from_taskspec(taskspec),
-            "parent_tid": _metadata_string(taskspec, "parent_tid"),
-            "role": _metadata_string(taskspec, "role"),
-            "status": status,
-            "terminal_seen": terminal_status is not None,
-            "terminal_status": terminal_status,
-            "return_code": _int_or_none(
-                state.get("return_code") if state is not None else None
-            ),
-            "started_at_ns": _int_or_none(
-                state.get("started_at") if state is not None else None
-            ),
-            "completed_at_ns": _int_or_none(
-                state.get("completed_at") if state is not None else None
-            ),
-            "close_reason": close_reason,
-        }
-    )
-
-
-def _monitor_from_candidate(candidate: CleanupCandidate) -> dict[str, Any]:
-    monitor: dict[str, Any] = {
-        "queue": candidate.queue,
-        "message_id": candidate.message_id,
-        "candidate_class": candidate.candidate_class,
-        "reason": candidate.reason,
-    }
-    if candidate.payload_sha256 is not None:
-        monitor["payload_sha256"] = candidate.payload_sha256
-    if candidate.payload_size_bytes is not None:
-        monitor["payload_size_bytes"] = candidate.payload_size_bytes
-    return monitor
 
 
 def _lifetime_from_task_log_payload(

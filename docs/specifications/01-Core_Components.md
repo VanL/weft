@@ -482,10 +482,7 @@ Current task families:
   `task_log.retention`, `monitor_store.lifecycle`,
   `task_local.terminal_runtime`, and `task_local.dead_tid`. Runtime-state
   maintenance and LivenessMonitor mapping retention are separate owners and
-  do not appear as TaskMonitor cleanup-policy identities. Policy run result
-  values share the internal
-  result type `weft/core/monitor/policies/task_log.py::CleanupPolicyRun`;
-  private helper phases
+  do not appear as TaskMonitor cleanup-policy identities. Private helper phases
   must not create additional policy identities. The persistent
   monitor also calls the configured task-monitor processor. The persistent
   monitor is a reactor: it owns task-local control, heartbeat registration,
@@ -539,6 +536,7 @@ Current task families:
   loop or task-local queue pending probe. Queue readiness is owned by
   `MultiQueueWatcher`.
 - `Debugger`: in-process diagnostic command surface for interactive debugging
+  Implementation plan: [Collation store toggle removal](../plans/2026-08-31-collation-store-toggle-removal-plan.md).
 
 Interactive command sessions reuse the same task/runtime conventions rather
 than inventing a second terminal subsystem, and long-lived agent sessions reuse

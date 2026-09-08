@@ -354,7 +354,6 @@ def test_runtime_config_rejects_custom_mode_without_processor() -> None:
             {
                 "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": 0,
                 "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
-                "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": False,
             },
             "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
         ),
@@ -614,7 +613,6 @@ def test_runtime_config_accepts_jsonl_then_delete_when_reporting_is_configured()
         {
             "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
             "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
-            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "1",
         }
     )
 
@@ -641,10 +639,6 @@ def test_runtime_config_accepts_jsonl_then_delete_when_reporting_is_configured()
             {"WEFT_LOG_TASKS_EXTERNAL_MODE": "raw"},
             "WEFT_LOG_TASKS_EXTERNAL_MODE=collated",
         ),
-        (
-            {"WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "0"},
-            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED=true",
-        ),
     ],
 )
 def test_runtime_config_rejects_jsonl_then_delete_without_reporting_requirements(
@@ -656,7 +650,6 @@ def test_runtime_config_rejects_jsonl_then_delete_without_reporting_requirements
         "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
         "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "task-lifetime.jsonl"),
         "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
-        "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "1",
     }
     settings.update(overrides)
 

@@ -88,10 +88,6 @@ from weft.context import WeftContext
 from weft.core.control_messages import ControlRequest
 from weft.core.endpoints import latest_tid_mapping_rows
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
-from weft.core.monitor.cleanup import (
-    TaskMonitorCleanupConfig,
-    run_task_monitor_cleanup,
-)
 from weft.core.monitor.collation import (
     MonitorTaskEventUpdate,
     update_from_task_log_payload,
@@ -105,7 +101,6 @@ from weft.core.monitor.external_log import (
     project_task_summary_for_external_json,
 )
 from weft.core.monitor.lifetime_report import (
-    build_candidate_lifetime_report,
     build_collation_lifetime_report,
     build_inferred_tid_lifetime_report,
     build_raw_row_lifetime_report,
@@ -180,8 +175,6 @@ from weft.core.monitor.store import (
 from weft.core.monitor.task_log_scanner import GeneratorTaskLogScanner
 from weft.core.pruning.apply import apply_exact_prune_candidates
 from weft.core.pruning.models import (
-    AppliedCleanupCandidate,
-    CleanupCandidate,
     CleanupPolicyStats,
     CleanupQueueStats,
 )
@@ -691,7 +684,6 @@ class TaskMonitor(ServiceTask):
         self._last_catchup_pending = False
         self._monitor_store: MonitorStore | None = None
         self._monitor_store_status = MonitorStoreStatus(
-            enabled=False,
             available=False,
         )
         self._last_collation_rows_processed = 0
@@ -1231,7 +1223,6 @@ class TaskMonitor(ServiceTask):
                     self._monitor_store = None
                     self._last_collation_store_error = str(exc)
                     self._monitor_store_status = MonitorStoreStatus(
-                        enabled=True,
                         available=False,
                         error=str(exc),
                     )
@@ -1386,7 +1377,6 @@ class TaskMonitor(ServiceTask):
             task_monitor_mode=self._monitor_config.mode,
             processor=self._monitor_config.processor,
             log_sink=self._monitor_config.log_sink,
-            collation_store_enabled=(self._monitor_config.collation_store_enabled),
         )
 
     def _activate_monitor(self) -> None:
@@ -1648,9 +1638,6 @@ class TaskMonitor(ServiceTask):
                 ),
                 "task_log_external": self._external_task_log_status.to_summary(),
                 "log_sink": self._monitor_config.log_sink,
-                "collation_store_enabled": (
-                    self._monitor_config.collation_store_enabled
-                ),
                 "last_cycle_at": self._last_cycle_at,
                 "last_checkpoint": self._last_checkpoint,
                 "last_candidates_seen": self._last_candidates_seen,
@@ -2346,28 +2333,17 @@ class TaskMonitor(ServiceTask):
         return flushed
 
     def _task_log_deletion_owner(self) -> str:
-        """Return the single task-log deletion owner for the current cycle."""
-
-        if self._monitor_config.task_log_external_enabled:
-            if self._monitor_config.task_log_external_mode == "raw":
-                return "raw_external"
-            return "collated_store"
-        if self._monitor_config.collation_store_enabled:
-            return "collated_store"
-        if self._monitor_config.mode in {"delete", "report_only"}:
-            return "cleanup_policy"
-        return "none"
+        """Select raw external or durable collation ownership [MF-5]."""
+        if (
+            self._monitor_config.task_log_external_enabled
+            and self._monitor_config.task_log_external_mode == "raw"
+        ):
+            return "raw_external"
+        return "collated_store"
 
     def _ensure_monitor_store(self) -> MonitorStore | None:
-        """Return the durable Monitor store when enabled and available."""
+        """Return the durable Monitor store when opened and verified [MF-5]."""
 
-        if not self._monitor_config.collation_store_enabled:
-            self._monitor_store_status = MonitorStoreStatus(
-                enabled=False,
-                available=False,
-            )
-            self._last_collation_store_error = None
-            return None
         if self._monitor_store is not None:
             return self._monitor_store
         store: MonitorStore | None = None
@@ -2390,7 +2366,6 @@ class TaskMonitor(ServiceTask):
                 error = f"{error}; {close_error}"
             self._last_collation_store_error = error
             self._monitor_store_status = MonitorStoreStatus(
-                enabled=True,
                 available=False,
                 error=error,
             )
@@ -2399,7 +2374,6 @@ class TaskMonitor(ServiceTask):
         self._monitor_store = store
         self._last_collation_store_error = None
         self._monitor_store_status = MonitorStoreStatus(
-            enabled=True,
             available=True,
             schema_version=store.schema_version,
             checkpoint=checkpoint,
@@ -2550,7 +2524,6 @@ class TaskMonitor(ServiceTask):
                     self._maybe_start_terminal_control_cleanup_worker(now_ns=now_ns)
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
             self._monitor_store_status = MonitorStoreStatus(
-                enabled=True,
                 available=True,
                 schema_version=store.schema_version,
                 checkpoint=checkpoint,
@@ -2558,7 +2531,6 @@ class TaskMonitor(ServiceTask):
         except (OSError, RuntimeError, ValueError) as exc:
             self._last_collation_store_error = str(exc)
             self._monitor_store_status = MonitorStoreStatus(
-                enabled=True,
                 available=False,
                 schema_version=store.schema_version,
                 checkpoint=self._monitor_store_status.checkpoint,
@@ -3692,7 +3664,6 @@ class TaskMonitor(ServiceTask):
                         errors=(str(exc),),
                     ),
                     monitor_status=MonitorStoreStatus(
-                        enabled=True,
                         available=False,
                         error=str(exc),
                     ),
@@ -3761,7 +3732,6 @@ class TaskMonitor(ServiceTask):
                     now_ns=work.now_ns,
                 )
             status = MonitorStoreStatus(
-                enabled=True,
                 available=True,
                 schema_version=store.schema_version,
                 checkpoint=store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE),
@@ -3772,7 +3742,6 @@ class TaskMonitor(ServiceTask):
                 errors=(str(exc),),
             )
             status = MonitorStoreStatus(
-                enabled=True,
                 available=False,
                 error=str(exc),
             )
@@ -5624,12 +5593,7 @@ class TaskMonitor(ServiceTask):
         now_ns: int,
         task_log_owner: str,
     ) -> TaskMonitorProcessorResult:
-        """Run built-in cleanup while honoring task-log deletion ownership."""
-
-        cleanup = self._run_task_monitor_cleanup_cycle(
-            apply=apply,
-            task_log_cleanup_enabled=task_log_owner == "cleanup_policy",
-        )
+        """Report the owning processor's effects without fallback cleanup [MF-5]."""
         collation_errors = (
             (self._last_collation_store_error,)
             if task_log_owner == "collated_store"
@@ -5640,7 +5604,6 @@ class TaskMonitor(ServiceTask):
             ingest = self._last_retained_task_log_ingest
             pre_checkpoint = self._last_pre_checkpoint_task_log_recovery
             errors = (
-                *cleanup.errors,
                 *ingest.store_write_errors,
                 *ingest.raw_delete_errors,
                 *pre_checkpoint.store_write_errors,
@@ -5650,156 +5613,29 @@ class TaskMonitor(ServiceTask):
             )
             return TaskMonitorProcessorResult(
                 success=(
-                    cleanup.success
-                    and ingest.success
+                    ingest.success
                     and pre_checkpoint.success
                     and not self._last_control_delete_errors
                     and not collation_errors
                 ),
-                processed=cleanup.processed
-                + ingest.malformed_deleted
+                processed=ingest.malformed_deleted
                 + ingest.valid_ingested
                 + pre_checkpoint.selected,
                 deleted=(
-                    cleanup.deleted
-                    + ingest.malformed_deleted
+                    ingest.malformed_deleted
                     + ingest.raw_deleted
                     + pre_checkpoint.raw_deleted
                     + self._last_control_rows_deleted
                 ),
-                reported=cleanup.reported + self._last_collation_summaries_emitted,
+                reported=self._last_collation_summaries_emitted,
                 errors=errors,
-                warnings=(*cleanup.warnings, *self._last_control_delete_warnings),
+                warnings=self._last_control_delete_warnings,
             )
         if collation_errors:
-            return TaskMonitorProcessorResult(
-                success=False,
-                processed=cleanup.processed,
-                deleted=cleanup.deleted,
-                reported=cleanup.reported,
-                errors=(*cleanup.errors, *collation_errors),
-                warnings=cleanup.warnings,
-            )
-        if task_log_owner != "raw_external" or not apply:
-            return cleanup
-        raw_result = self._run_raw_external_task_log_cycle(now_ns=now_ns)
-        errors = (*cleanup.errors, *raw_result.errors)
-        warnings = (*cleanup.warnings, *raw_result.warnings)
-        return TaskMonitorProcessorResult(
-            success=cleanup.success and raw_result.success,
-            processed=cleanup.processed + raw_result.processed,
-            deleted=cleanup.deleted + raw_result.deleted,
-            reported=cleanup.reported + raw_result.reported,
-            errors=errors,
-            warnings=warnings,
-        )
-
-    def _run_task_monitor_cleanup_cycle(
-        self,
-        *,
-        apply: bool,
-        task_log_cleanup_enabled: bool = True,
-    ) -> TaskMonitorProcessorResult:
-        ctx = self._monitor_context()
-        pre_apply_reporter = None
-        if apply and self._jsonl_then_delete_enabled():
-            store = self._ensure_monitor_store()
-            if store is None:
-                error = self._last_collation_store_error or "Monitor store unavailable"
-
-                def failed_reporter(
-                    selected: Sequence[CleanupCandidate],
-                ) -> tuple[AppliedCleanupCandidate, ...]:
-                    return tuple(
-                        AppliedCleanupCandidate(
-                            candidate=candidate,
-                            deleted=False,
-                            error=error,
-                        )
-                        for candidate in selected
-                    )
-
-                pre_apply_reporter = failed_reporter
-            else:
-
-                def report_selected(
-                    selected: Sequence[CleanupCandidate],
-                ) -> tuple[AppliedCleanupCandidate, ...]:
-                    return self._report_cleanup_candidates_for_jsonl(
-                        selected,
-                        store=store,
-                    )
-
-                pre_apply_reporter = report_selected
-        if not getattr(self, "_worker_lane_snapshot_only", False):
-            self._set_activity("cleanup_scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
-        cleanup = run_task_monitor_cleanup(
-            ctx,
-            TaskMonitorCleanupConfig(
-                batch_size=self._monitor_config.batch_size,
-                task_log_scan_limit=self._monitor_config.task_log_scan_limit,
-                task_log_min_age_seconds=(
-                    self._monitor_config.task_log_retention_period_seconds
-                ),
-                task_log_cleanup_enabled=task_log_cleanup_enabled,
-                pre_apply_reporter=pre_apply_reporter,
-            ),
-            apply=apply,
-            exclude_tids=(self.tid,),
-        )
-        self._last_prune_records_scanned = cleanup.records_scanned
-        self._last_cleanup_queue_stats = cleanup.queue_stats_summary()
-        self._last_cleanup_policy_stats = cleanup.policy_stats_summary()
-        self._last_policy_progress = (
-            *self._last_policy_progress,
-            *cleanup.policy_progress,
-        )
-        return TaskMonitorProcessorResult(
-            success=cleanup.success,
-            processed=cleanup.processed,
-            deleted=cleanup.deleted,
-            reported=cleanup.reported,
-            errors=cleanup.errors,
-            warnings=cleanup.warnings,
-        )
-
-    def _report_cleanup_candidates_for_jsonl(
-        self,
-        candidates: Sequence[CleanupCandidate],
-        *,
-        store: MonitorStore,
-    ) -> tuple[AppliedCleanupCandidate, ...]:
-        """Durably hand off baseline reports before generic exact deletes."""
-
-        failures: list[AppliedCleanupCandidate] = []
-        now_ns = time.time_ns()
-        for candidate in candidates:
-            completeness = (
-                "raw_row" if candidate.queue == WEFT_GLOBAL_LOG_QUEUE else "state_only"
-            )
-            report = build_candidate_lifetime_report(
-                candidate,
-                monitor_tid=self.tid,
-                emitted_at_ns=now_ns,
-                completeness=completeness,
-            )
-            try:
-                self._handoff_lifetime_report(
-                    report,
-                    store=store,
-                    emitted_at_ns=now_ns,
-                )
-            except ExternalTaskLogError as exc:
-                failure = str(exc)
-                return tuple(
-                    AppliedCleanupCandidate(
-                        candidate=blocked,
-                        deleted=False,
-                        error=failure,
-                    )
-                    for blocked in candidates
-                )
-        return tuple(failures)
+            return TaskMonitorProcessorResult(success=False, errors=collation_errors)
+        if task_log_owner == "raw_external" and apply:
+            return self._run_raw_external_task_log_cycle(now_ns=now_ns)
+        return TaskMonitorProcessorResult(success=True)
 
     def _run_raw_external_task_log_cycle(
         self,

@@ -106,7 +106,6 @@ class MonitorStoreConfig:
 class MonitorStoreStatus:
     """Cached Monitor store availability summary."""
 
-    enabled: bool
     available: bool
     schema_version: int | None = None
     checkpoint: int | None = None
@@ -116,7 +115,6 @@ class MonitorStoreStatus:
         """Return a JSON-safe cached PONG summary."""
 
         return {
-            "enabled": self.enabled,
             "available": self.available,
             "schema_version": self.schema_version,
             "checkpoint": self.checkpoint,
@@ -3163,14 +3161,12 @@ class MonitorStore:
             checkpoint = self.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
         except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-364] exception
             return MonitorStoreStatus(
-                enabled=True,
                 available=False,
                 schema_version=None,
                 checkpoint=None,
                 error=str(exc),
             )
         return MonitorStoreStatus(
-            enabled=True,
             available=True,
             schema_version=WEFT_MONITOR_SCHEMA_VERSION,
             checkpoint=checkpoint,

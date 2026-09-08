@@ -41,7 +41,6 @@ from weft._constants import (
     WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
-    WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
     WEFT_TASK_MONITOR_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
@@ -150,7 +149,6 @@ def _validate_jsonl_then_delete_config(
     task_log_external_path: str,
     task_log_external_enabled: bool,
     task_log_external_mode: str,
-    collation_store_enabled: bool,
 ) -> None:
     """Validate the reporting prerequisites for destructive JSONL mode."""
     if mode != "jsonl_then_delete":
@@ -169,11 +167,6 @@ def _validate_jsonl_then_delete_config(
         raise ValueError(
             "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
             "WEFT_LOG_TASKS_EXTERNAL_MODE=collated"
-        )
-    if not collation_store_enabled:
-        raise ValueError(
-            "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
-            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED=true"
         )
 
 
@@ -209,7 +202,6 @@ class TaskMonitorRuntimeConfig:
     processor: str | None = WEFT_TASK_MONITOR_PROCESSOR_DEFAULT or None
     log_sink: str = WEFT_TASK_MONITOR_LOG_SINK_DEFAULT
     restart_backoff_seconds: float = WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT
-    collation_store_enabled: bool = WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT
     maintenance_enabled: bool = WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT
     maintenance_interval_seconds: float = WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS
 
@@ -334,13 +326,6 @@ class TaskMonitorRuntimeConfig:
             WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
         )
 
-        collation_store_enabled = bool(
-            config.get(
-                "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
-                WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
-            )
-        )
-
         maintenance_enabled = bool(
             config.get(
                 "WEFT_TASK_MONITOR_MAINTENANCE",
@@ -357,7 +342,6 @@ class TaskMonitorRuntimeConfig:
             task_log_external_path=task_log_external_path,
             task_log_external_enabled=task_log_external_enabled,
             task_log_external_mode=task_log_external_mode,
-            collation_store_enabled=collation_store_enabled,
         )
 
         return cls(
@@ -378,7 +362,6 @@ class TaskMonitorRuntimeConfig:
             processor=processor,
             log_sink=log_sink,
             restart_backoff_seconds=restart_backoff_seconds,
-            collation_store_enabled=collation_store_enabled,
             maintenance_enabled=maintenance_enabled,
             maintenance_interval_seconds=maintenance_interval_seconds,
         )

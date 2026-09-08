@@ -11,11 +11,9 @@ from weft._constants import (
     TASK_MONITOR_CLEANUP_POLICY_NAMES,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
-    TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
 )
 from weft.core.monitor.lifetime_report import (
-    build_candidate_lifetime_report,
     build_collation_lifetime_report,
     build_inferred_tid_lifetime_report,
     build_raw_row_lifetime_report,
@@ -23,7 +21,6 @@ from weft.core.monitor.lifetime_report import (
     restore_lifetime_report_from_external_json,
 )
 from weft.core.monitor.store import MonitorTaskCollationRecord
-from weft.core.pruning.models import CleanupCandidate
 from weft.core.queue_window import QueueWindowRow
 
 pytestmark = [pytest.mark.shared]
@@ -287,80 +284,6 @@ def test_lifetime_salvage_row_set_participates_in_report_identity() -> None:
 
     assert first["report_id"] == retry["report_id"]
     assert first["report_id"] != changed["report_id"]
-
-
-@pytest.mark.parametrize(
-    "source_policy",
-    [
-        TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
-        TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
-        TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
-        TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
-    ],
-)
-def test_candidate_lifetime_report_uses_common_policy_shape(
-    source_policy: str,
-) -> None:
-    candidate = CleanupCandidate(
-        queue="weft.test.queue",
-        message_id=1779000000000000201,
-        policy=source_policy,
-        candidate_class="test_candidate",
-        reason="test_reason",
-        tid="1779000000000000200",
-    )
-
-    report = build_candidate_lifetime_report(
-        candidate,
-        monitor_tid="1779000000000000999",
-        emitted_at_ns=1779000000000000202,
-    )
-
-    _assert_common_report_shape(report, source_policy=source_policy)
-    assert report["subject"]["tid"] == "1779000000000000200"
-    assert report["taskspec"] is None
-    assert report["lifetime"]["tid"] == "1779000000000000200"
-    assert report["monitor"]["queue"] == "weft.test.queue"
-    assert report["monitor"]["message_id"] == 1779000000000000201
-    assert report["monitor"]["candidate_class"] == "test_candidate"
-
-
-def test_candidate_lifetime_report_promotes_available_taskspec() -> None:
-    candidate = CleanupCandidate(
-        queue="weft.log.tasks",
-        message_id=1779000000000000301,
-        policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
-        candidate_class="old_task_log",
-        reason="older_than_task_log_cleanup_min_age",
-        tid="1779000000000000300",
-        metadata={
-            "event": "work_completed",
-            "status": "completed",
-            "taskspec": {
-                "tid": "1779000000000000300",
-                "name": "sample",
-                "spec": {"runner": {"name": "host"}},
-                "state": {
-                    "status": "completed",
-                    "started_at": 1779000000000000300,
-                    "completed_at": 1779000000000000301,
-                    "return_code": 0,
-                },
-            },
-        },
-    )
-
-    report = build_candidate_lifetime_report(
-        candidate,
-        monitor_tid="1779000000000000999",
-        emitted_at_ns=1779000000000000302,
-    )
-
-    assert report["taskspec"]["tid"] == "1779000000000000300"
-    assert report["taskspec"]["name"] == "sample"
-    assert report["lifetime"]["status"] == "completed"
-    assert report["lifetime"]["terminal_status"] == "completed"
-    assert report["lifetime"]["return_code"] == 0
 
 
 def test_raw_row_lifetime_report_promotes_available_taskspec() -> None:
