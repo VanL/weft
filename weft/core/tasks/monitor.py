@@ -112,12 +112,5 @@ class Monitor(BaseTask):
             return True
         return super()._handle_control_command(request, context)
 
-    def _cleanup_reserved_if_needed(self) -> None:
-        """Monitor never allocates its own reserved queue so cleanup is unnecessary.
-
-        Spec: [CC-2.3]
-        """
-        return
-
 
 # ~

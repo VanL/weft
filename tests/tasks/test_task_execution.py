@@ -2693,6 +2693,15 @@ def test_deferred_stop_finalizes_before_timeout_outcome(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    delete_attempts: list[int] = []
+    original_delete = reserved.delete
+
+    def delete_once(*, message_id: int) -> bool:
+        delete_attempts.append(message_id)
+        return original_delete(message_id=message_id)
+
+    monkeypatch.setattr(reserved, "delete", delete_once)
+    monkeypatch.setattr(task, "_get_reserved_queue", lambda: reserved)
     worker_started = threading.Event()
     release_worker = threading.Event()
 
@@ -2748,6 +2757,7 @@ def test_deferred_stop_finalizes_before_timeout_outcome(
     assert task.taskspec.state.status == "cancelled"
     assert task._deferred_active_control_command is None
     assert reserved.has_pending() is False
+    assert len(delete_attempts) == 1
     task.cleanup()
 
 
@@ -2767,6 +2777,15 @@ def test_deferred_kill_finalizes_before_limit_outcome(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    delete_attempts: list[int] = []
+    original_delete = reserved.delete
+
+    def delete_once(*, message_id: int) -> bool:
+        delete_attempts.append(message_id)
+        return original_delete(message_id=message_id)
+
+    monkeypatch.setattr(reserved, "delete", delete_once)
+    monkeypatch.setattr(task, "_get_reserved_queue", lambda: reserved)
     worker_started = threading.Event()
     release_worker = threading.Event()
 
@@ -2819,6 +2838,7 @@ def test_deferred_kill_finalizes_before_limit_outcome(
     assert task.taskspec.state.status == "killed"
     assert task._deferred_active_control_command is None
     assert reserved.has_pending() is False
+    assert len(delete_attempts) == 1
     task.cleanup()
 
 
@@ -2903,12 +2923,14 @@ def test_active_consumer_acks_invalid_control_then_defers_later_valid_stop(
     ("command", "expected_status"),
     ((CONTROL_STOP, "cancelled"), (CONTROL_KILL, "killed")),
 )
+@pytest.mark.parametrize("ack_fails", [False, True])
 def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
     broker_env,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
     command: str,
     expected_status: str,
+    ack_fails: bool,
 ) -> None:
     """A STOP/KILL deferred during active work must be honored even when the
     work outcome is ``ok`` -- a persistent consumer must not exit leaving
@@ -2932,6 +2954,17 @@ def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
+    delete_attempts: list[int] = []
+    original_delete = reserved.delete
+
+    def delete_once(*, message_id: int) -> bool:
+        delete_attempts.append(message_id)
+        if ack_fails and len(delete_attempts) == 1:
+            raise OSError("injected acknowledgement failure")
+        return original_delete(message_id=message_id)
+
+    monkeypatch.setattr(reserved, "delete", delete_once)
+    monkeypatch.setattr(task, "_get_reserved_queue", lambda: reserved)
     worker_started = threading.Event()
     release_worker = threading.Event()
 
@@ -3004,7 +3037,8 @@ def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
     assert len(result_messages) == 1
     assert result_messages[0] == "persistent-ok-result"
 
-    assert reserved.has_pending() is False
+    assert reserved.has_pending() is ack_fails
+    assert len(delete_attempts) == 1
     task.cleanup()
 
 
@@ -3100,87 +3134,6 @@ def test_deferred_stop_finalizes_one_shot_task_without_double_terminal_emission(
     result_messages = drain_queue(outbox)
     assert len(result_messages) == 1
     assert result_messages[0] == "one-shot-ok-result"
-
-    task.cleanup()
-
-
-def test_deferred_stop_on_ok_outcome_does_not_requeue_completed_work(
-    broker_env,
-    unique_tid: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When ``reserved_policy_on_stop`` is ``requeue``, a STOP deferred during
-    active work that completes ``ok`` must NOT requeue the already-consumed
-    reserved row (that would duplicate execution). [QUEUE.6] governs
-    unfinished work; the reserved row here was already consumed by
-    ``_finalize_message`` on the ok path.
-    """
-    db_path, make_queue = broker_env
-    spec = make_command_taskspec(
-        unique_tid,
-        sys.executable,
-        reserved_stop=ReservedPolicy.REQUEUE,
-        persistent=True,
-    )
-    task = Consumer(db_path, spec)
-    inbox = make_queue(spec.io.inputs["inbox"])
-    ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    outbox = make_queue(spec.io.outputs["outbox"])
-    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
-    worker_started = threading.Event()
-    release_worker = threading.Event()
-
-    class OkTaskRunner:
-        def __init__(self, **_kwargs: Any) -> None:
-            pass
-
-        def supports_stream_callbacks(self) -> bool:
-            return False
-
-        def run_with_hooks(
-            self,
-            work_item: Any,
-            **_kwargs: Any,
-        ) -> RunnerOutcome:
-            del work_item
-            worker_started.set()
-            release_worker.wait()
-            return RunnerOutcome(
-                status="ok",
-                value="requeue-policy-ok-result",
-                error=None,
-                stdout=None,
-                stderr=None,
-                returncode=0,
-                duration=0.0,
-            )
-
-    monkeypatch.setattr(consumer_module, "TaskRunner", OkTaskRunner)
-    inbox.write(json.dumps({"args": []}))
-
-    try:
-        task.process_once()
-        assert worker_started.wait(timeout=2.0)
-        assert task.taskspec.state.status == "running"
-
-        ctrl_in.write(encode_control_message(CONTROL_STOP))
-        task.process_once()
-        assert task._deferred_active_control_command == CONTROL_STOP
-    finally:
-        release_worker.set()
-
-    _drive_consumer_until(
-        task,
-        lambda: task.taskspec.state.status == "cancelled",
-    )
-
-    assert task.taskspec.state.status == "cancelled"
-    assert inbox.has_pending() is False
-    assert reserved.has_pending() is False
-
-    result_messages = drain_queue(outbox)
-    assert len(result_messages) == 1
-    assert result_messages[0] == "requeue-policy-ok-result"
 
     task.cleanup()
 
@@ -4921,33 +4874,6 @@ def test_reserved_policy_clear_on_stop(broker_env, unique_tid: str) -> None:
     assert reserved.has_pending() is False
 
 
-def test_reserved_policy_requeue_on_stop(broker_env, unique_tid: str) -> None:
-    db_path, make_queue = broker_env
-    custom_inbox_name = f"custom.requeue.{unique_tid}.in"
-    custom_ctrl_in_name = f"custom.requeue.{unique_tid}.ctrl_in"
-    spec = with_queue_role_overrides(
-        make_function_taskspec(
-            unique_tid,
-            "tests.tasks.sample_targets:echo_payload",
-            reserved_stop=ReservedPolicy.REQUEUE,
-        ),
-        inbox=custom_inbox_name,
-        ctrl_in=custom_ctrl_in_name,
-    )
-    task = Consumer(db_path, spec)
-
-    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
-    reserved.write("job")
-    ctrl_in = make_queue(custom_ctrl_in_name)
-    ctrl_in.write(encode_control_message(CONTROL_STOP))
-
-    task.process_once()
-
-    inbox = make_queue(custom_inbox_name)
-    assert inbox.read_one() == "job"
-    assert reserved.has_pending() is False
-
-
 def test_stop_with_default_cleanup_preserves_reserved_when_keep(
     broker_env, unique_tid: str
 ) -> None:
@@ -5026,27 +4952,4 @@ def test_reserved_policy_clear_on_error(broker_env, unique_tid: str) -> None:
 
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     assert reserved.has_pending() is False
-    assert task.taskspec.state.status == "failed"
-
-
-def test_reserved_policy_requeue_on_error(broker_env, unique_tid: str) -> None:
-    db_path, make_queue = broker_env
-    spec = make_function_taskspec(
-        unique_tid,
-        "tests.tasks.sample_targets:fail_payload",
-        reserved_error=ReservedPolicy.REQUEUE,
-    )
-    task = Consumer(db_path, spec)
-
-    inbox = make_queue(spec.io.inputs["inbox"])
-    inbox.write(json.dumps({"args": ["payload"]}))
-
-    _drive_consumer_until(
-        task,
-        lambda: task.taskspec.state.status == "failed",
-    )
-
-    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
-    assert reserved.has_pending() is False
-    assert inbox.read_one() is not None
     assert task.taskspec.state.status == "failed"

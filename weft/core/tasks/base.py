@@ -178,6 +178,10 @@ def _merge_host_process_observations(
 class BaseTask(MultiQueueWatcher, ABC):
     """Abstract base for task runtimes that share queue wiring and state tracking (Spec: [CC-2.2], [MF-2], [MF-3], [MF-5])."""
 
+    _allowed_reserved_policies: ClassVar[frozenset[ReservedPolicy]] = frozenset(
+        {ReservedPolicy.KEEP, ReservedPolicy.CLEAR}
+    )
+
     control_policy: ClassVar[TaskControlPolicy] = TaskControlPolicy(
         stop="immediate",
         kill="immediate",
@@ -251,6 +255,13 @@ class BaseTask(MultiQueueWatcher, ABC):
         Spec: [CC-2.2], [CC-2.5], [MF-2], [MF-5], [SB-0.1]
         """
         taskspec._validate_strict_requirements()
+        # Runtime class owns this authority; advisory metadata cannot grant it.
+        # Spec: [TS-1.1], [QUEUE.6]. Manager overrides the allowed policy set.
+        for field in ("reserved_policy_on_stop", "reserved_policy_on_error"):
+            if getattr(taskspec.spec, field) not in self._allowed_reserved_policies:
+                raise ValueError(
+                    f"spec.{field} must be keep or clear for task runtimes"
+                )
 
         self.taskspec = taskspec
         tid = taskspec.tid
@@ -2082,9 +2093,6 @@ class BaseTask(MultiQueueWatcher, ABC):
         if apply_reserved_policy:
             policy = self.taskspec.spec.reserved_policy_on_stop
             self._apply_reserved_policy(policy)
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
 
         if self._stop_event:
             self._stop_event.set()
@@ -2116,9 +2124,6 @@ class BaseTask(MultiQueueWatcher, ABC):
         if apply_reserved_policy:
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy)
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
 
         if self._stop_event:
             self._stop_event.set()
@@ -2857,24 +2862,6 @@ class BaseTask(MultiQueueWatcher, ABC):
     # ------------------------------------------------------------------
     # Reserved queue utilities
     # ------------------------------------------------------------------
-    def _ensure_reserved_empty(self) -> None:
-        """Drain reserved messages when policies expect an empty queue.
-
-        Spec: [MF-2]
-        """
-        reserved_queue = self._get_reserved_queue()
-        try:
-            has_pending = reserved_queue.has_pending()
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to check reserved queue state", exc_info=True)
-            return
-
-        if not has_pending:
-            return
-
-        logger.warning("Reserved queue not empty for task %s", self.tid)
-        while reserved_queue.read_many(64):
-            continue
 
     def _ack_control_message(self, queue_name: str, timestamp: int) -> None:
         """Delete a processed control message, logging at debug level on failure.
@@ -2902,77 +2889,23 @@ class BaseTask(MultiQueueWatcher, ABC):
         if policy is ReservedPolicy.KEEP:
             return
 
+        if policy is not ReservedPolicy.CLEAR:
+            raise ValueError("Task reserved policy must be keep or clear")
         reserved_queue = self._get_reserved_queue()
 
-        if policy is ReservedPolicy.CLEAR:
-            if message_timestamp is not None:
-                try:
-                    reserved_queue.delete(message_id=message_timestamp)
-                except (BrokerError, OSError, RuntimeError):
-                    logger.debug(
-                        "Failed to clear reserved message %s",
-                        message_timestamp,
-                        exc_info=True,
-                    )
-            else:
-                while reserved_queue.read_many(64):
-                    continue
-            return
-
-        if policy is ReservedPolicy.REQUEUE:
-            inbox_name = self._queue_names["inbox"]
-            if message_timestamp is not None:
-                try:
-                    reserved_queue.move_one(
-                        inbox_name,
-                        exact_timestamp=message_timestamp,
-                        require_unclaimed=True,
-                        with_timestamps=False,
-                    )
-                    return
-                except (BrokerError, OSError, RuntimeError):
-                    logger.debug(
-                        "Failed to requeue reserved message %s",
-                        message_timestamp,
-                        exc_info=True,
-                    )
-            self._move_reserved_to_inbox()
-
-    def _move_reserved_to_inbox(self) -> None:
-        """Move all reserved messages back into the inbox queue.
-
-        Spec: [MF-2]
-        """
-        reserved_queue = self._get_reserved_queue()
-        inbox_name = self._queue_names["inbox"]
-        while True:
+        if message_timestamp is not None:
             try:
-                batch = reserved_queue.move_many(
-                    inbox_name,
-                    limit=64,
-                    with_timestamps=False,
-                    require_unclaimed=True,
-                )
+                reserved_queue.delete(message_id=message_timestamp)
             except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed moving reserved messages back to inbox", exc_info=True
+                logger.warning(
+                    "Failed to clear reserved message %s",
+                    message_timestamp,
+                    exc_info=True,
                 )
-                break
-
-            if not batch:
-                break
-
-    def _cleanup_reserved_if_needed(self) -> None:
-        """Remove reserved messages entirely when ``cleanup_on_exit`` is set.
-
-        Spec: [CC-2.4], [MF-2]
-        """
-        if not getattr(self.taskspec.spec, "cleanup_on_exit", False):
-            return
-
-        reserved_queue = self._get_reserved_queue()
-        while reserved_queue.read_many(64):
-            continue
+        else:
+            while reserved_queue.read_many(64):
+                continue
+        return
 
     def _cleanup_spilled_outputs_if_needed(self) -> None:
         """Remove spilled output directories when ``cleanup_on_exit`` is enabled.

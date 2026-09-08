@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import run_cli
 from tests.fixtures.provider_cli_fixture import write_provider_cli_wrapper
 from tests.taskspec import fixtures as taskspec_fixtures
@@ -12,6 +14,37 @@ from tests.taskspec import fixtures as taskspec_fixtures
 
 def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "field", ["reserved_policy_on_stop", "reserved_policy_on_error"]
+)
+@pytest.mark.parametrize("command", ["validate", "create"])
+def test_spec_rejects_task_requeue_without_traceback(
+    workdir, field: str, command: str
+) -> None:
+    spec_path = workdir / "requeue.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "requeue-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                field: "requeue",
+            },
+        },
+    )
+    args = ["spec", command]
+    if command == "create":
+        args.extend(["requeue-task", "--type", "task"])
+        args.append("--file")
+    args.append(str(spec_path))
+    rc, out, err = run_cli(*args, cwd=workdir)
+    assert rc != 0
+    assert "keep" in out + err
+    assert "clear" in out + err
+    assert "Traceback" not in err
 
 
 def test_spec_create_list_show_delete(workdir) -> None:

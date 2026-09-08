@@ -127,9 +127,33 @@ acknowledgement and shared dispatch; direct codec coverage lives in
   destructive reads
 - **QUEUE.5**: the active reserved message, if present, is treated as the
   single in-flight work item for that task
-- **QUEUE.6**: reserved-policy handling is explicit: `keep` leaves the
-  reserved message in place, `requeue` moves it back to inbox, and `clear`
-  deletes it
+- **QUEUE.6**: reserved-policy handling is explicit and applied once within
+  each disposition operation — the task's terminal
+  transition, or a persistent service task's per-message rejection
+  ([MF-3.2]): `keep` leaves the reserved row in place; `clear` deletes
+  the active row, or every row when no single active row is identified.
+  A row that survives a failed policy application or a failed
+  success-path acknowledgement delete remains in `T{tid}.reserved` for
+  operator recovery ([MF-5] prune). That operation must not retry its
+  disposition through a backstop or error policy. A successful work outcome
+  does not apply stop/error reserved policy to that input as part of its
+  completion, including
+  when STOP/KILL was deferred during execution and the success
+  acknowledgement failed; task termination and control acknowledgement
+  still complete. A later independent control operation with no active row
+  may deliberately apply its configured bulk `clear` to remaining backlog;
+  residue has no lifetime exemption from that separate operation.
+  Monitor reserved cleanup covers
+  terminal non-completed families ([OBS.13]). No task-side or
+  manager-side code drains a reserved queue as a backstop, where a
+  backstop is a drain after policy application or after an exact
+  acknowledgement (the manager's own `internal_reserved` lifecycle
+  cleanup under [OBS.13.9] is not a backstop). Manager
+  spawn-request queues are not task reserved queues: the shared spawn
+  lane has a live consumer, so `requeue` remains valid for the manager's
+  own spawn-request disposition — unlaunched requests return to their
+  source queue on manager stop or leadership yield, and a failed child
+  launch is restored per the manager's reserved policy ([MF-6]).
 - **QUEUE.7**: a live task declares every construction-fixed reactor role and
   fixed support route that it watches, reserves into, or uses for durable task
   or runtime output. The five BaseTask roles (`inbox`, `reserved`, `outbox`,
@@ -1023,6 +1047,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
 
 - [`docs/plans/2026-08-25-bounded-tid-mapping-publication-plan.md`](../plans/2026-08-25-bounded-tid-mapping-publication-plan.md)
 - [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)

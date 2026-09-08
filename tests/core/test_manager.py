@@ -10487,3 +10487,57 @@ def test_managed_pids_for_child_excludes_create_time_mismatch(
     finally:
         manager.stop(join=False)
         manager.cleanup()
+
+
+def test_failed_launch_clear_policy_preserves_failed_delete_residue(
+    broker_env, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failed Manager CLEAR applies once and retains the request for recovery."""
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(
+            unique_tid, idle_timeout=0.0, reserved_policy_on_error=ReservedPolicy.CLEAR
+        ),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        ),
+    )
+    public = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved_name = manager._queue_names["reserved"]
+    reserved = make_queue(reserved_name)
+    drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    request = json.dumps(make_child_spec())
+    public.write(request)
+    manager._mark_pending_messages_prechecked()
+    real_queue = manager._queue
+    calls = []
+
+    class FailedDeleteQueue:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(reserved, name)
+
+        def delete(self, **kwargs: Any) -> bool:
+            calls.append(kwargs)
+            raise RuntimeError("injected Manager CLEAR failure")
+
+    monkeypatch.setattr(
+        manager,
+        "_queue",
+        lambda name: FailedDeleteQueue() if name == reserved_name else real_queue(name),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_start_service_worker",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("launch unavailable")
+        ),
+    )
+    try:
+        manager.process_once()
+        assert len(calls) == 1
+        assert reserved.peek_one() == request
+        assert public.peek_one() is None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()

@@ -127,16 +127,6 @@ class InteractiveTaskMixin(ABC):
         """Apply reserved-queue cleanup policy."""
 
     @abstractmethod
-    def _ensure_reserved_empty(self) -> None:  # pragma: no cover - interface definition
-        """Ensure the reserved queue does not retain stale work."""
-
-    @abstractmethod
-    def _cleanup_reserved_if_needed(
-        self,
-    ) -> None:  # pragma: no cover - interface definition
-        """Perform post-policy reserved-queue cleanup."""
-
-    @abstractmethod
     def _send_control_response(
         self,
         command: str,
@@ -247,9 +237,6 @@ class InteractiveTaskMixin(ABC):
             )
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy, message_timestamp=message_id)
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
             self.should_stop = True
             raise
         self._interactive_runner = runner
@@ -292,9 +279,6 @@ class InteractiveTaskMixin(ABC):
             )
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy)
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
             self._update_process_title("killed", "limit")
             session.terminate()
             session.stop_monitor()
@@ -437,9 +421,6 @@ class InteractiveTaskMixin(ABC):
                 )
                 policy = self.taskspec.spec.reserved_policy_on_error
                 self._apply_reserved_policy(policy)
-                if policy is not ReservedPolicy.KEEP:
-                    self._ensure_reserved_empty()
-                    self._cleanup_reserved_if_needed()
                 self._update_process_title("failed")
         else:
             if terminal_override_allowed:
@@ -541,9 +522,6 @@ class InteractiveTaskMixin(ABC):
             self._update_process_title("cancelled")
             policy = self.taskspec.spec.reserved_policy_on_stop
             self._apply_reserved_policy(policy)
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
             if self._stop_event:
                 self._stop_event.set()
             self._send_control_response("STOP", "ack", **response_extra)
@@ -556,9 +534,6 @@ class InteractiveTaskMixin(ABC):
             self._update_process_title("killed")
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy)
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
             if self._stop_event:
                 self._stop_event.set()
             self._send_control_response("KILL", "ack", **response_extra)

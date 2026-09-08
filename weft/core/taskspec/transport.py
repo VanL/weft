@@ -12,7 +12,7 @@ from typing import Any
 
 from weft._constants import TASKSPEC_BUNDLE_ROOT_FIELD
 
-from .model import TaskSpec
+from .model import TaskSpec, task_reserved_policy_errors
 
 
 def validate_taskspec_payload(
@@ -23,7 +23,10 @@ def validate_taskspec_payload(
     resolved_tid: str | None = None,
     inherited_weft_context: str | None = None,
 ) -> TaskSpec:
-    """Strictly validate a TaskSpec payload with explicit bundle provenance."""
+    """Strictly validate a TaskSpec payload with explicit bundle provenance.
+
+    Spec: docs/specifications/02-TaskSpec.md [TS-1], [TS-1.1]
+    """
     context: dict[str, Any] = {}
     if template:
         context.update(template=True, auto_expand=False)
@@ -33,6 +36,11 @@ def validate_taskspec_payload(
         context["inherited_weft_context"] = inherited_weft_context
 
     taskspec = TaskSpec.model_validate(copy.deepcopy(dict(payload)), context=context)
+    policy_errors = task_reserved_policy_errors(taskspec)
+    if policy_errors:
+        raise ValueError(
+            "; ".join(f"{field}: {error}" for field, error in policy_errors.items())
+        )
     taskspec.set_bundle_root(bundle_root)
     return taskspec
 

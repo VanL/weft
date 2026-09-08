@@ -151,7 +151,7 @@ schema validity.
     "interactive": false,                     // OPTIONAL. Keep command processes alive and stream line-oriented stdin/stdout over queues. This is not a PTY/TTY terminal-emulation mode.
     "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message. Non-interactive command streams use outbox for both streams; stderr frames are diagnostics, not result values.
     "cleanup_on_exit": true,                 // OPTIONAL. Delete task-owned scratch artifacts on completion. Standard task-local control queues are runtime-only and are cleared on task cleanup regardless; outbox is retained until consumed.
-    "reserved_policy_on_stop": "keep",      // OPTIONAL. Behaviour for messages left in T{tid}.reserved when STOP is received. Options: "keep", "requeue", "clear". Default is "keep".
+    "reserved_policy_on_stop": "keep",      // OPTIONAL. Behaviour for messages left in T{tid}.reserved when STOP is received. Task options: "keep", "clear"; Manager spawn disposition also accepts "requeue". Default is "keep".
     "reserved_policy_on_error": "keep",     // OPTIONAL. Behaviour for messages left in T{tid}.reserved when execution fails, times out, or is killed. Same options and default as above.
     "polling_interval": 1,                   // OPTIONAL. psutil polling interval in seconds. Defaults to 1 second.
     "reporting_interval": "poll" | "transition",  // OPTIONAL. Send reports to weft.log.tasks either on each transition or on each polling interval. Defaults to "transition"
@@ -301,7 +301,7 @@ _Per-field implementation status_:
 - `spec.weft_context`: Implemented. Resolved by Manager at spawn time via `resolve_taskspec_payload()`.
 - `spec.interactive`: Implemented. `InteractiveTaskMixin` in `weft/core/tasks/interactive.py`.
 - `spec.stream_output`: Implemented. One-shot command producers stream incrementally via `weft/core/runners/subprocess_runner.py`, `weft/core/runners/host.py`, and `weft/core/tasks/consumer.py`; non-command results still use the consumer chunking path.
-- `spec.cleanup_on_exit`: Implemented. `BaseTask._cleanup_reserved_if_needed()`, `BaseTask._cleanup_spilled_outputs_if_needed()`. Standard task-local control queues are cleared by `BaseTask._cleanup_standard_control_queues_on_exit()` whenever task cleanup runs.
+- `spec.cleanup_on_exit`: Implemented. `BaseTask._cleanup_spilled_outputs_if_needed()`. Standard task-local control queues are cleared by `BaseTask._cleanup_standard_control_queues_on_exit()` whenever task cleanup runs.
 - `spec.reserved_policy_on_stop`, `spec.reserved_policy_on_error`: Implemented. `BaseTask._apply_reserved_policy()`, `Consumer._apply_reserved_policy_on_error()`.
 - `spec.polling_interval`, `spec.reporting_interval`: Implemented. `BaseTask._maybe_emit_poll_report()`.
 - `spec.monitor_class`: Implemented. Loaded dynamically in `HostTaskRunner` and `Consumer`.
@@ -619,18 +619,34 @@ _Implementation mapping_: `weft/core/manager.py` — `Manager._tick_autostart()`
 
 ### Reserved queue policies [TS-1.1]
 
-Reserved queue policy semantics are defined in
-[05-Message_Flow_and_State.md](05-Message_Flow_and_State.md#8-failure-recovery-flow).
-TaskSpec exposes `reserved_policy_on_stop` and `reserved_policy_on_error`, each
-accepting `keep` (default), `requeue`, or `clear`.
+TaskSpec exposes `reserved_policy_on_stop` and `reserved_policy_on_error`.
+For task specs each accepts `keep` (default) or `clear`; the former
+task-level `requeue` value was removed on 2026-08-31 because a task's
+policy applies at the row's disposition point (terminal transition, or
+a service task's per-message rejection). A terminal task has no consumer
+for a returned row; a live Heartbeat would repeatedly reject the same row.
+Task specs carrying `requeue` are
+rejected at the public validation surfaces and at task construction
+with a message naming `keep` and `clear`. `requeue` remains valid on the
+manager's own spec for spawn-request disposition ([QUEUE.6], [MF-6]).
+The field-level JSON schema documentation for these two fields carries
+the same task/manager split.
+
+See [QUEUE.6] and [MF-2] for disposition and recovery rules.
 
 Timeouts are treated as error exits for reserved-policy purposes:
 `reserved_policy_on_error` applies when a task exceeds its timeout, is
 killed, or fails with a non-zero exit code.
 
-_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy()`), `weft/core/tasks/consumer.py` (`Consumer._apply_reserved_policy_on_error()`, `Consumer._handle_stop()`, `Consumer._handle_kill()`), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — applies policies on stop/kill/error for interactive sessions). The `ReservedPolicy` enum lives in `weft/core/taskspec/model.py`.
+_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy()`), `weft/core/tasks/consumer.py` (`Consumer._apply_reserved_policy_on_error()`, `Consumer._handle_stop()`, `Consumer._handle_kill()`), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — applies policies on stop/kill/error for interactive sessions). The `ReservedPolicy` enum and shared public `task_reserved_policy_errors()`
+predicate live in `weft/core/taskspec/model.py`; `validate_taskspec()` and
+`weft/core/taskspec/transport.py::validate_taskspec_payload()` apply the predicate.
+`BaseTask.__init__()` enforces the runtime class policy set; Manager includes
+its internal spawn-request `requeue` policy.
 
 ## Related Plans
+
+- [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
 
 - [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)

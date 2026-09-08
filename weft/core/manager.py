@@ -355,6 +355,8 @@ class Manager(ServiceTask):
     #   9. Shutdown and unregister           - see [MA-1.4], [MA-3]
     # ---------------------------------------------------------------------
 
+    _allowed_reserved_policies = frozenset(ReservedPolicy)
+
     control_policy = TaskControlPolicy(
         stop="drain-children",
         kill="immediate",
@@ -1349,9 +1351,6 @@ class Manager(ServiceTask):
             reserved_queue=request.reserved_queue,
             message_timestamp=request.message_timestamp,
         )
-        if policy is not ReservedPolicy.KEEP:
-            self._ensure_reserved_queue_empty(request.reserved_queue)
-            self._cleanup_reserved_queue_if_needed(request.reserved_queue)
 
     def _handle_child_launch_result(
         self,
@@ -3892,9 +3891,6 @@ class Manager(ServiceTask):
 
         policy = self.taskspec.spec.reserved_policy_on_stop
         self._apply_reserved_policy(policy)
-        if policy is not ReservedPolicy.KEEP:
-            self._ensure_reserved_empty()
-            self._cleanup_reserved_if_needed()
 
         self._signal_children_to_stop()
 
@@ -4267,31 +4263,6 @@ class Manager(ServiceTask):
                 self._last_activity_ns, max(now_ns, new_timestamp)
             )
 
-    def _ensure_reserved_queue_empty(self, reserved_queue_name: str) -> None:
-        """Drain one manager reserved queue when policy requires it."""
-
-        reserved_queue = self._queue(reserved_queue_name)
-        try:
-            has_pending = reserved_queue.has_pending()
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to check reserved queue %s state",
-                reserved_queue_name,
-                exc_info=True,
-            )
-            return
-
-        if not has_pending:
-            return
-
-        logger.warning(
-            "Reserved queue %s not empty for manager %s",
-            reserved_queue_name,
-            self.tid,
-        )
-        while reserved_queue.read_many(64):
-            continue
-
     def _delete_queue_messages_by_id(
         self,
         queue_name: str,
@@ -4317,16 +4288,6 @@ class Manager(ServiceTask):
             if queue.delete(message_id=message_id):
                 deleted += 1
         return deleted
-
-    def _cleanup_reserved_queue_if_needed(self, reserved_queue_name: str) -> None:
-        """Remove one manager reserved queue's messages when cleanup is enabled."""
-
-        if not self.taskspec.spec.cleanup_on_exit:
-            return
-
-        reserved_queue = self._queue(reserved_queue_name)
-        while reserved_queue.read_many(64):
-            continue
 
     def _cleanup_own_internal_reserved_queue(self) -> None:
         """Delete this manager's private internal spawn reservations on shutdown."""
@@ -4517,22 +4478,10 @@ class Manager(ServiceTask):
                 reserved_queue=reserved_queue,
             )
 
-    def _ensure_reserved_empty(self) -> None:
-        """Drain all manager spawn reserved queues when policies require it."""
-
-        for reserved_queue, _source_queue in self._spawn_reserved_queue_pairs():
-            self._ensure_reserved_queue_empty(reserved_queue)
-
-    def _cleanup_reserved_if_needed(self) -> None:
-        """Clean all manager spawn reserved queues when cleanup is enabled."""
-
-        for reserved_queue, _source_queue in self._spawn_reserved_queue_pairs():
-            self._cleanup_reserved_queue_if_needed(reserved_queue)
-
     # ------------------------------------------------------------------
     # Message handling
     # ------------------------------------------------------------------
-    def _handle_work_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-011] exception
+    def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
         """Consume a reserved spawn request, build child spec, and launch.
@@ -4585,9 +4534,6 @@ class Manager(ServiceTask):
                 reserved_queue=reserved_queue,
                 message_timestamp=timestamp,
             )
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_queue_empty(reserved_queue)
-                self._cleanup_reserved_queue_if_needed(reserved_queue)
             return
 
         child_spec = self._build_child_spec(payload, timestamp)
@@ -4610,9 +4556,6 @@ class Manager(ServiceTask):
                 reserved_queue=reserved_queue,
                 message_timestamp=timestamp,
             )
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_queue_empty(reserved_queue)
-                self._cleanup_reserved_queue_if_needed(reserved_queue)
             return
 
         inbox_message = payload.get("inbox_message", WORK_ENVELOPE_START)

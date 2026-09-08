@@ -695,14 +695,18 @@ Weft implements inbox -> reserved -> outbox flow for reliable message processing
 2. **Process**: Execute work while message is in reserved
 3. **Complete**: Write output to outbox, delete from reserved (or apply policy)
 
-If a task crashes mid-work, the message remains in reserved for manual recovery or explicit requeue.
+If a task crashes mid-work, the message remains in reserved for manual recovery or an explicit queue move to a new task.
 
 **Idempotency guidance**
 - Single-message tasks may use `tid` as an idempotency key.
 - Multi-message tasks should use the inbox/reserved message ID (timestamp).
 - Recommended composite key: `tid:message_id`.
 
-Configurable policies (`keep`, `requeue`, `clear`) control reserved queue behavior on errors.
+Configurable task policies (`keep`, `clear`) control reserved queue behavior on errors.
+Task-level `requeue` is no longer accepted by spec validation or task construction;
+update stored specs and spawn payloads to use `keep` or `clear`. The Manager
+retains `requeue` for its shared spawn-request lane. Failed acknowledgements or
+policy operations preserve reserved residue for operator or monitor recovery.
 
 ### Managers
 

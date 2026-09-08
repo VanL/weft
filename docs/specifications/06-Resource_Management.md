@@ -262,7 +262,7 @@ state rather than from a separate error database.
 Current recovery is explicit and operator-driven:
 
 - inspect reserved queues
-- move or requeue messages manually with queue commands
+- move messages manually with queue commands
 - rerun work intentionally
 
 There is no built-in automatic retry or recovery framework in the current

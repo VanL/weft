@@ -978,8 +978,14 @@ class SpecSection(BaseModel):
     enable_process_title: bool = DEFAULT_ENABLE_PROCESS_TITLE
     output_size_limit_mb: int | None = DEFAULT_OUTPUT_SIZE_LIMIT_MB
     weft_context: str | None = DEFAULT_WEFT_CONTEXT
-    reserved_policy_on_stop: ReservedPolicy = ReservedPolicy.KEEP
-    reserved_policy_on_error: ReservedPolicy = ReservedPolicy.KEEP
+    reserved_policy_on_stop: ReservedPolicy = Field(
+        ReservedPolicy.KEEP,
+        description="Task policy: keep or clear. Manager spawn requests also allow requeue.",
+    )
+    reserved_policy_on_error: ReservedPolicy = Field(
+        ReservedPolicy.KEEP,
+        description="Task policy: keep or clear. Manager spawn requests also allow requeue.",
+    )
 
     @model_validator(mode="after")
     def validate_target(self) -> SpecSection:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-052] exception
@@ -1876,6 +1882,23 @@ class TaskSpec(BaseModel):
         }
 
 
+def task_reserved_policy_errors(taskspec: TaskSpec) -> dict[str, str]:
+    """Reject unsupported task policies early at public validation surfaces.
+
+    The role marker is advisory. BaseTask construction enforces the actual
+    class's allowed policies, so a forged manager role grants no exemption.
+
+    Spec: docs/specifications/02-TaskSpec.md [TS-1.1]
+    """
+    if taskspec.metadata.get("role") == "manager":
+        return {}
+    return {
+        f"spec.{field}": "Task reserved policy must be keep or clear; requeue is only for Manager spawn requests"
+        for field in ("reserved_policy_on_stop", "reserved_policy_on_error")
+        if getattr(taskspec.spec, field) is ReservedPolicy.REQUEUE
+    }
+
+
 def validate_taskspec(json_str: str) -> tuple[bool, dict[str, Any]]:
     """Validate a JSON-formatted TaskSpec.
 
@@ -1896,10 +1919,11 @@ def validate_taskspec(json_str: str) -> tuple[bool, dict[str, Any]]:
             return False, {"_json": f"Invalid JSON: {e}"}
 
         # Then validate with Pydantic - templates are permitted
-        TaskSpec.model_validate_json(
+        taskspec = TaskSpec.model_validate_json(
             json_str, context={"template": True, "auto_expand": False}
         )
-        return True, {}
+        policy_errors = task_reserved_policy_errors(taskspec)
+        return not policy_errors, policy_errors
     except ValidationError as e:
         errors = {}
         for error in e.errors():

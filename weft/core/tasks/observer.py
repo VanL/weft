@@ -56,13 +56,6 @@ class Observer(BaseTask):
         """
         self._observer(message, timestamp)
 
-    def _cleanup_reserved_if_needed(self) -> None:
-        """Observers never create reserved messages, so no cleanup is required.
-
-        Spec: [CC-2.3]
-        """
-        return
-
 
 class SamplingObserver(Observer):
     """Observer that samples messages based on elapsed time (Spec: [CC-2.3], [MF-5])."""

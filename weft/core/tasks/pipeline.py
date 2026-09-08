@@ -37,7 +37,7 @@ from weft.core.pipelines import (
     PipelineQueues,
 )
 from weft.core.spawn_requests import submit_spawn_request
-from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.core.taskspec import TaskSpec
 from weft.helpers import closing_queue_iterator
 
 from .base import BaseTask, TaskControlPolicy
@@ -238,6 +238,11 @@ class PipelineEdgeTask(BaseTask):
             )
 
     def _handoff_payload(self, timestamp: int) -> None:
+        """Deliver once; preserve the source row if its exact ack fails.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.6];
+            docs/specifications/12-Pipeline_Composition_and_UX.md [PL-4.1]
+        """
         reserved_queue = self._get_reserved_queue()
         self._assert_single_handoff_payload()
         if self._runtime.override_input is None:
@@ -252,9 +257,14 @@ class PipelineEdgeTask(BaseTask):
         payload = self._runtime.override_input
         payload_text = payload if isinstance(payload, str) else json.dumps(payload)
         self._queue(self._runtime.target_queue).write(payload_text)
-        reserved_queue.delete(message_id=timestamp)
-        self._ensure_reserved_empty()
-        self._cleanup_reserved_if_needed()
+        try:
+            reserved_queue.delete(message_id=timestamp)
+        except (BrokerError, OSError, RuntimeError):
+            logger.warning(
+                "Failed to acknowledge delivered edge message %s",
+                timestamp,
+                exc_info=True,
+            )
 
     def _assert_single_handoff_payload(self) -> None:
         """Fail linear pipeline edges when an upstream emits more than one payload."""
@@ -279,9 +289,6 @@ class PipelineEdgeTask(BaseTask):
         self._emit_pipeline_terminal_event(status="failed", error=error)
         policy = self.taskspec.spec.reserved_policy_on_error
         self._apply_reserved_policy(policy, message_timestamp=timestamp)
-        if policy is not ReservedPolicy.KEEP:
-            self._ensure_reserved_empty()
-            self._cleanup_reserved_if_needed()
         self.should_stop = True
         if self._stop_event:
             self._stop_event.set()

@@ -521,30 +521,10 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             # Without this call a persistent consumer's status could be left
             # `running` forever with no terminal event ([STATE.1], [OBS.1]).
             #
-            # This must run here, inside the try block, *before* the
-            # `finally` below clears `_active_message_timestamp`:
-            # `_finalize_deferred_active_control` reads that attribute to
-            # decide whether a reserved-queue row still needs the configured
-            # disposition policy applied. On the ok path `_finalize_message`
-            # has already consumed the reserved row (the work completed
-            # successfully), so the finalizer's reserved-policy step is a
-            # clean no-op here (`_apply_reserved_policy`/`_ensure_reserved_empty`
-            # tolerate an already-missing row) -- applying `requeue` to
-            # completed work would cause duplicate execution, which
-            # [QUEUE.6] does not intend. Only the task-level part (terminal
-            # transition, envelope, control ack) has any effect.
-            #
-            # `_finalize_deferred_active_control` also no-ops cleanly when
-            # there is no pending deferred command, and when the task is
-            # already terminal (one-shot tasks reach `completed` inside
-            # `_finalize_message` above), so this call never double-emits a
-            # terminal event.
-            #
-            # Accepted trade: if the ok-commit above raises (broker write
-            # failure), this call is skipped and the deferral stays
-            # unfinalized — result-then-terminal ordering is mandated, so
-            # the deferral cannot run before the commit.
-            self._finalize_deferred_active_control()
+            # Success acknowledgement is the input's sole disposition, even
+            # if its exact delete failed. Deferred control still finalizes
+            # task state and replies, without retrying that row [QUEUE.6].
+            self._finalize_deferred_active_control(apply_reserved_policy=False)
         except Exception as exc:  # pragma: no cover - worker result finalization
             if self._direct_work_waiting:
                 self._direct_work_exception = exc
@@ -685,9 +665,10 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         1. ``taskspec`` state mutations and reserved-queue operations are not
            applied until the active runner has unwound.
-        2. The reserved-queue policy (keep/requeue/clear) must be applied
-           against ``_active_message_timestamp`` after the worker result comes
-           back to the reactor.
+        2. Reserved policy (keep/clear) applies against
+           ``_active_message_timestamp`` after the worker result returns,
+           unless successful work already selected its exact acknowledgement
+           as the input's disposition.
         3. Sending the control acknowledgement response before the runner has
            unwound would create a false ordering: the caller would see an ack
            before the task is actually done.
@@ -705,8 +686,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         After the runner unwinds (whether due to cancellation, an error, or
         normal completion), the main execution loop calls
         ``_finalize_deferred_active_control``.  That method re-reads the
-        stored command and applies the terminal state transition,
-        reserved-queue policy, and acknowledgement response in the correct
+        stored command and applies the terminal state transition, reserved
+        policy when required, and acknowledgement response in the correct
         order on the main thread, where all broker and TaskSpec state is owned.
         """
 
@@ -717,15 +698,21 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if command == CONTROL_KILL:
             self._kill_requested = True
 
-    def _finalize_deferred_active_control(self) -> None:
+    def _finalize_deferred_active_control(
+        self, *, apply_reserved_policy: bool = True
+    ) -> None:
         """Apply deferred STOP/KILL state transitions on the main task thread.
 
         Called by the main execution loop after the work runner has fully
         unwound.  Reads the command stashed by ``_defer_active_control``,
         applies the appropriate terminal transition (``_handle_stop_request``
-        or ``_handle_kill_request``), enforces the reserved-queue policy, and
-        sends the control acknowledgement.  Clears the deferred state before
-        returning so a second call is a no-op.
+        or ``_handle_kill_request``), applies reserved policy only when requested,
+        and sends the control acknowledgement. Successful work disables policy
+        because its exact acknowledgement already owns row disposition.
+        Clears the deferred state before returning so a second call is a no-op.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.6];
+        docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3].
         """
 
         command = self._deferred_active_control_command
@@ -738,7 +725,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._deferred_active_control_timestamp = None
         self._deferred_active_control_request_id = None
         active_message_timestamp = self._active_message_timestamp
-        has_active_reserved_message = active_message_timestamp is not None
+        has_active_reserved_message = (
+            apply_reserved_policy and active_message_timestamp is not None
+        )
         response_extra = {"request_id": request_id} if request_id is not None else {}
 
         if command == CONTROL_STOP:
@@ -753,9 +742,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._apply_reserved_policy(
                     policy, message_timestamp=active_message_timestamp
                 )
-            if has_active_reserved_message and policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
             self._send_control_response("STOP", "ack", **response_extra)
             return
 
@@ -771,9 +757,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._apply_reserved_policy(
                     policy, message_timestamp=active_message_timestamp
                 )
-            if has_active_reserved_message and policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
             self._send_control_response("KILL", "ack", **response_extra)
 
     def _make_task_runner(
@@ -852,14 +835,12 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 BrokerError,
                 OSError,
                 RuntimeError,
-            ):  # pragma: no cover - broker ack best effort
-                logger.debug(
+            ):
+                logger.warning(
                     "Failed to acknowledge reserved message %s",
                     timestamp,
                     exc_info=True,
                 )
-            self._ensure_reserved_empty()
-            self._cleanup_reserved_if_needed()
 
         self._monitor_resource_usage()
         if self._task_is_persistent():
@@ -1186,9 +1167,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._apply_reserved_policy(
             policy, message_timestamp=self._active_message_timestamp
         )
-        if policy is not ReservedPolicy.KEEP:
-            self._ensure_reserved_empty()
-            self._cleanup_reserved_if_needed()
         self._end_streaming_session()
 
     def _handle_external_kill(self, reason: str) -> None:
@@ -1208,9 +1186,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._apply_reserved_policy(
             policy, message_timestamp=self._active_message_timestamp
         )
-        if policy is not ReservedPolicy.KEEP:
-            self._ensure_reserved_empty()
-            self._cleanup_reserved_if_needed()
         self._end_streaming_session()
 
     def _terminate_active_worker(self, *, graceful: bool) -> None:
@@ -1287,9 +1262,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
         policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_error)
         self._apply_reserved_policy(policy, message_timestamp=timestamp)
-        if policy is not ReservedPolicy.KEEP:
-            self._ensure_reserved_empty()
-            self._cleanup_reserved_if_needed()
 
     @staticmethod
     def _is_start_token(raw: str | None) -> bool:
@@ -1425,10 +1397,3 @@ class SelectiveConsumer(BaseTask):
             self._callback(message, timestamp)
         if self._selector(message, timestamp):
             self._queue(context.queue_name).delete(message_id=timestamp)
-
-    def _cleanup_reserved_if_needed(self) -> None:
-        """Selectors never operate in reserve mode, so reserved cleanup is unnecessary.
-
-        Spec: [CC-2.3]
-        """
-        return

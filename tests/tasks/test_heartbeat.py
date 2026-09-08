@@ -11,6 +11,7 @@ import heapq
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -559,3 +560,40 @@ def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None
         task.cleanup()
         ctrl_in.close()
         ctrl_out.close()
+
+
+def test_heartbeat_failed_exact_ack_preserves_reserved_row(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed acknowledgement must propagate without a destructive backstop."""
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    reserved_name = task._queue_names["reserved"]
+    reserved = task._queue(reserved_name)
+    timestamp = reserved.write("retained")
+    real_queue = task._queue
+    failure = RuntimeError("injected heartbeat acknowledgement failure")
+    calls = []
+
+    class AckQueue:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(reserved, name)
+
+        def delete(self, **kwargs: Any) -> bool:
+            calls.append(kwargs)
+            raise failure
+
+    monkeypatch.setattr(
+        task,
+        "_queue",
+        lambda name: AckQueue() if name == reserved_name else real_queue(name),
+    )
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            task._delete_reserved_message(timestamp)
+        assert exc_info.value is failure
+        assert len(calls) == 1
+        assert reserved.peek_one() == "retained"
+    finally:
+        task.cleanup()

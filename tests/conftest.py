@@ -164,6 +164,8 @@ _SHARED_MODULES = frozenset(
         "tests/tasks/test_task_execution.py",
         "tests/tasks/test_runtime_identity_custody.py",
         "tests/tasks/test_runtime_identity_signals.py",
+        "tests/tasks/test_reserved_disposition.py",
+        "tests/tasks/test_pipeline_reserved_disposition.py",
         "tests/tasks/test_task_endpoints.py",
         "tests/tasks/test_task_interactive.py",
         "tests/tasks/test_task_observability.py",

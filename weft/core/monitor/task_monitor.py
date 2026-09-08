@@ -6152,8 +6152,3 @@ class TaskMonitor(ServiceTask):
             *self._last_cleanup_policy_stats,
             policy_stat.to_summary(),
         )
-
-    def _cleanup_reserved_if_needed(self) -> None:
-        """Task monitors never create reserved messages."""
-
-        return

@@ -36,7 +36,7 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.endpoints import resolve_endpoint
-from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.core.taskspec import TaskSpec
 from weft.helpers import closing_queue_iterator
 
 from .multiqueue_watcher import QueueMessageContext, QueueMode
@@ -230,9 +230,6 @@ class HeartbeatTask(ServiceTask):
             )
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy, message_timestamp=timestamp)
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
             return
 
         if mutation.action == "cancel":
@@ -317,11 +314,11 @@ class HeartbeatTask(ServiceTask):
             raise ValueError("message must be JSON-serializable") from exc
 
     def _delete_reserved_message(self, message_id: int) -> None:
-        try:
-            self._get_reserved_queue().delete(message_id=message_id)
-        finally:
-            self._ensure_reserved_empty()
-            self._cleanup_reserved_if_needed()
+        """Acknowledge one row without consuming failed-ack residue.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.6]
+        """
+        self._get_reserved_queue().delete(message_id=message_id)
 
     def _emit_due_registrations(self) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-043] exception
         now = time.monotonic()

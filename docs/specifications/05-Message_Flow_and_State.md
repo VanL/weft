@@ -112,8 +112,23 @@ Current rules:
 
 - inbox work is reserved before execution
 - success clears or finalizes reserved state
-- error, timeout, or external control applies the configured reserved policy
-- crash leaves the message in reserved state for explicit operator recovery
+- error, timeout, or external control applies the configured reserved
+  policy (`keep` or `clear`) once within that disposition operation; rows
+  that survive a failed application, or a failed success-path
+  acknowledgement delete, are left in `T{tid}.reserved` for the explicit
+  recovery path below
+- a successful work outcome uses only success acknowledgement for its
+  input; deferred STOP/KILL completes task termination and acknowledges
+  control without applying reserved policy to that completed input,
+  even when its acknowledgement delete failed. A later independent idle
+  control operation may apply configured bulk `clear` to remaining backlog
+- a live task may return a reserved row it has not begun executing to
+  its own inbox (pause, or a second reservation arriving while a work
+  item is in flight); that is reservation bookkeeping under [QUEUE.5],
+  not a reserved policy
+- crash leaves the message in reserved state for explicit operator
+  recovery; no policy is applied at restart. Re-execution of preserved
+  work is a new task plus a queue move
 - direct `run_work_item()` execution has no reserved message and must not
   mutate unrelated reserved backlog as if it did
 - persistent tasks emit `work_item_completed` for each completed message and
@@ -126,7 +141,8 @@ targets.
 
 Reactor ownership hardening does not replace Weft's reservation contract with
 peek/checkpoint delivery or a second durable output ledger. A crash still leaves
-the active input in `T{tid}.reserved` for the explicit [QUEUE.6] recovery policy.
+the active input in `T{tid}.reserved` for operator recovery ([MF-5] prune);
+no reserved policy is applied at restart.
 The SimpleBroker reference reactor's sidecar outbox is specific to its
 peek/checkpoint example and is not part of ordinary Weft task delivery.
 
@@ -1077,7 +1093,7 @@ Plan backlink:
 Current recovery is explicit:
 
 - inspect reserved queues
-- move or requeue work intentionally
+- move work intentionally with queue commands
 - use `weft queue` primitives to recover from failure
 
 There is no separate built-in retry-orchestrator surface in the current
@@ -1478,6 +1494,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
 
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)

@@ -20,9 +20,33 @@ from weft.core.taskspec import (
     validate_taskspec,
 )
 from weft.core.taskspec import model as taskspec_model
+from weft.core.taskspec.transport import validate_taskspec_payload
 from weft.ext import AgentMCPServerDescriptor, AgentToolProfileResult
 
 from . import fixtures
+
+
+@pytest.mark.parametrize(
+    "field", ["reserved_policy_on_stop", "reserved_policy_on_error"]
+)
+def test_public_task_validation_rejects_requeue_but_preserves_manager(
+    field: str,
+) -> None:
+    payload = fixtures.create_valid_function_taskspec().model_dump(mode="json")
+    payload["spec"][field] = "requeue"
+    valid, errors = validate_taskspec(json.dumps(payload))
+    assert not valid
+    assert "keep" in errors[f"spec.{field}"]
+    assert "clear" in errors[f"spec.{field}"]
+    with pytest.raises(ValueError, match="keep.*clear"):
+        validate_taskspec_payload(payload)
+
+    payload["metadata"]["role"] = "manager"
+    assert validate_taskspec(json.dumps(payload)) == (True, {})
+    assert (
+        getattr(validate_taskspec_payload(payload).spec, field)
+        is ReservedPolicy.REQUEUE
+    )
 
 
 def test_model_post_init_context_is_runtime_positional_only() -> None:
