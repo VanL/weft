@@ -2041,8 +2041,6 @@ class Manager(ServiceTask):
 
     def _registry_entry_is_expired(self, timestamp: int, *, now_ns: int) -> bool:
         retention_ns = self._manager_registry_retention_ns()
-        if retention_ns < 0:
-            return True
         return now_ns - timestamp > retention_ns
 
     def _prune_expired_manager_registry_entries(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
@@ -2489,7 +2487,7 @@ class Manager(ServiceTask):
             stale_after_ns = int(
                 MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
             )
-            if stale_after_ns < 0 or time.time_ns() - timestamp > stale_after_ns:
+            if time.time_ns() - timestamp > stale_after_ns:
                 return "stale"
             return "unknown"
         if handle.control.get("authority") == "host-pid":

@@ -6,16 +6,19 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.reactor_driver import drive_until
+from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
-from weft.core.control_messages import encode_control_message
+from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
@@ -200,44 +203,175 @@ def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None
     task.stop(join=False)
 
 
-def test_interactive_command_stop_cancels(broker_env, unique_tid: str) -> None:
+class _TerminalWriteQueue:
+    """Keep queue behavior real while failing one terminal write before commit."""
+
+    def __init__(self, delegate: Queue, *, fail_once: bool) -> None:
+        self.delegate = delegate
+        self.fail_once = fail_once
+        self.terminal_attempts = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.delegate, name)
+
+    def write(self, message: str) -> int:
+        if json.loads(message).get("type") == "terminal":
+            self.terminal_attempts += 1
+            if self.fail_once and self.terminal_attempts == 1:
+                raise RuntimeError("injected terminal write failure")
+        return self.delegate.write(message)
+
+
+@pytest.mark.parametrize("command", ["STOP", "KILL"])
+@pytest.mark.parametrize("started", [False, True], ids=["before-input", "active"])
+@pytest.mark.parametrize("fail_once", [False, True], ids=["write-ok", "write-retry"])
+def test_interactive_command_control_unwinds_before_terminal_and_ack(
+    broker_env, unique_tid: str, command: str, started: bool, fail_once: bool
+) -> None:
     db_path, make_queue = broker_env
     spec = make_interactive_spec(unique_tid)
     task = Consumer(db_path, spec)
-
-    inbox = make_queue(spec.io.inputs["inbox"])
-    ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    outbox = make_queue(spec.io.outputs["outbox"])
+    writer = _TerminalWriteQueue(task._ctrl_out_queue, fail_once=fail_once)
+    task._ctrl_out_queue = cast(Queue, writer)
+    session = None
+    try:
+        if started:
+            make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": "first\n"}))
+            drive_until(
+                lambda: task._interactive_session,
+                lambda value: value is not None,
+                step=task.process_once,
+                wait=task.wait_for_activity,
+                timeout=10,
+            )
+            session = task._interactive_session
+        else:
+            # Exercise a launched task process before its first input, not an
+            # unlaunched created spec (created -> killed is intentionally invalid).
+            task.taskspec.mark_started()
+        request_id = f"interactive-{command.lower()}"
+        make_queue(spec.io.control["ctrl_in"]).write(
+            encode_control_message(command, request_id=request_id)
+        )
+        drive_until(
+            lambda: task.should_stop,
+            bool,
+            step=task.process_once,
+            wait=task.wait_for_activity,
+            timeout=10,
+        )
+        rows = [
+            (json.loads(raw), timestamp)
+            for raw, timestamp in ctrl_out.peek_generator(with_timestamps=True)
+        ]
+        terminals = [
+            (row, timestamp) for row, timestamp in rows if row.get("type") == "terminal"
+        ]
+        assert len(terminals) == 1
+        terminal, terminal_timestamp = terminals[0]
+        expected_status = "cancelled" if command == "STOP" else "killed"
+        assert terminal["status"] == expected_status
+        assert terminal["source"] == "task"
+        assert terminal["tid"] == unique_tid
+        assert set(terminal) == {
+            "type",
+            "source",
+            "tid",
+            "status",
+            "timestamp",
+            "error",
+        }
+        acknowledgements = [
+            (row, timestamp)
+            for row, timestamp in rows
+            if row.get("command") == command and row.get("status") == "ack"
+        ]
+        assert len(acknowledgements) == 1
+        assert acknowledgements[0][0]["request_id"] == request_id
+        assert terminal_timestamp < acknowledgements[0][1]
+        assert writer.terminal_attempts == (2 if fail_once else 1)
+        if session is not None:
+            assert not session.is_alive()
+            assert task._interactive_session is None
+            stderr_finals = [
+                timestamp
+                for row, timestamp in rows
+                if row.get("stream") == "stderr" and row.get("final")
+            ]
+            stdout_finals = [
+                timestamp
+                for raw, timestamp in make_queue(
+                    spec.io.outputs["outbox"]
+                ).peek_generator(with_timestamps=True)
+                if _is_final_marker(raw)
+            ]
+            assert len(stderr_finals) == len(stdout_finals) == 1
+            assert stderr_finals[0] < terminal_timestamp
+            assert stdout_finals[0] < terminal_timestamp
+        # The status, not a new emission ledger, prevents a repeated command
+        # from re-emitting terminal proof after the session has been released.
+        task._interactive_handle_control(
+            ControlRequest(command=command, request_id="repeat")
+        )
+        assert (
+            sum(
+                json.loads(raw).get("type") == "terminal"
+                for raw in ctrl_out.peek_generator()
+            )
+            == 1
+        )
+    finally:
+        task.cleanup()
 
-    inbox.write(json.dumps({"stdin": "first\n"}))
-    _spin(task)
 
-    ctrl_in.write(encode_control_message("STOP", request_id="interactive-stop"))
-    _spin(task, iterations=20)
-
-    final_messages = []
-    while True:
-        msg = outbox.read_one()
-        if msg is None:
-            break
-        final_messages.append(json.loads(msg))
-
-    assert final_messages
-    assert final_messages[-1]["final"] is True
-    ctrl_messages = [json.loads(msg) for msg in _drain(ctrl_out)]
-    assert any(
-        message.get("type") == "terminal" and message.get("status") == "cancelled"
-        for message in ctrl_messages
+@pytest.mark.parametrize("fail_once", [False, True])
+def test_interactive_session_start_failure_uses_canonical_terminal_writer(
+    broker_env, tmp_path: Path, unique_tid: str, fail_once: bool
+) -> None:
+    db_path, make_queue = broker_env
+    payload = make_interactive_spec(unique_tid).model_dump(mode="json")
+    payload["spec"]["working_dir"] = str(tmp_path / "missing-directory")
+    task = Consumer(db_path, TaskSpec.model_validate(payload))
+    ctrl_out = make_queue(task.taskspec.io.control["ctrl_out"])
+    writer = _TerminalWriteQueue(task._ctrl_out_queue, fail_once=fail_once)
+    task._ctrl_out_queue = cast(Queue, writer)
+    ordinary = Consumer(
+        db_path,
+        make_function_taskspec(
+            str(time.time_ns()), "tests.tasks.sample_targets:echo_payload"
+        ),
     )
-    assert any(
-        message.get("command") == "STOP"
-        and message.get("status") == "ack"
-        and message.get("request_id") == "interactive-stop"
-        for message in ctrl_messages
-    )
-    assert task.taskspec.state.status == "cancelled"
-    task.stop(join=False)
+    try:
+        with pytest.raises(FileNotFoundError):
+            task._interactive_ensure_session(1)
+        assert task.taskspec.state.status == "failed"
+        ordinary.taskspec.mark_failed(error=task.taskspec.state.error)
+        ordinary._send_terminal_envelope()
+        expected = next(
+            json.loads(raw)
+            for raw in make_queue(
+                ordinary.taskspec.io.control["ctrl_out"]
+            ).peek_generator()
+            if json.loads(raw).get("type") == "terminal"
+        )
+        task._interactive_shutdown()
+        task._interactive_handle_control(
+            ControlRequest(command="STOP", request_id="after-start-failure")
+        )
+        terminals = [
+            json.loads(raw)
+            for raw in ctrl_out.peek_generator()
+            if json.loads(raw).get("type") == "terminal"
+        ]
+        assert len(terminals) == 1
+        assert set(terminals[0]) == set(expected)
+        assert terminals[0]["status"] == "failed"
+        assert terminals[0]["tid"] == unique_tid
+        assert writer.terminal_attempts == (2 if fail_once else 1)
+    finally:
+        task.cleanup()
+        ordinary.cleanup()
 
 
 def test_interactive_command_routes_stderr_and_reports_failure(

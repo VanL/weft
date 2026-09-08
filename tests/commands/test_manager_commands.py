@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -1750,7 +1751,7 @@ def test_list_command_omits_stale_external_supervisor_manager(
 
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     registry_queue = Queue(
         WEFT_SERVICES_REGISTRY_QUEUE,
@@ -1758,21 +1759,24 @@ def test_list_command_omits_stale_external_supervisor_manager(
         persistent=False,
         config=context.config,
     )
-    registry_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "active",
-                "name": "stale-supervised-manager",
-                "runtime_handle": _external_supervisor_runtime_handle(),
-                "role": "manager",
-                "requests": "weft.spawn.requests",
-                "ctrl_in": f"T{tid}.ctrl_in",
-                "ctrl_out": f"T{tid}.ctrl_out",
-                "outbox": "weft.manager.outbox",
-            }
+    try:
+        registry_queue.insert_messages(
+            [
+                (
+                    json.dumps(
+                        _manager_service_payload(
+                            context,
+                            tid,
+                            name="stale-supervised-manager",
+                            runtime_handle=_external_supervisor_runtime_handle(),
+                        )
+                    ),
+                    time.time_ns() - 120_000_000_000,
+                )
+            ]
         )
-    )
+    finally:
+        registry_queue.close()
 
     records = manager_cmd.cmd_manager_list(context=context_root)
 

@@ -6177,12 +6177,13 @@ def test_manager_registry_prunes_expired_rows_on_refresh(
     )
 
     monkeypatch.setattr(manager_mod, "MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS", 0.0)
-    monkeypatch.setattr(manager, "_manager_registry_retention_ns", lambda: 0)
     monkeypatch.setattr(
         manager_mod,
         "MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
+    observed_now_ns = time.time_ns() + 120_000_000_000
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: observed_now_ns)
     manager._refresh_manager_registration()
 
     entries = [json.loads(item) for item in drain(registry_queue)]
@@ -6668,17 +6669,18 @@ def test_manager_liveness_rejects_stale_external_supervisor_record(
     monkeypatch.setattr(
         manager_mod,
         "MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     record = {
         "tid": "1761000000000000010",
         "status": "active",
         "runtime_handle": _external_supervisor_runtime_handle(),
-        "_timestamp": time.time_ns(),
+        "_timestamp": time.time_ns() - 120_000_000_000,
         "role": "manager",
         "requests": WEFT_SPAWN_REQUESTS_QUEUE,
     }
 
+    assert Manager._manager_record_liveness(record) == "stale"
     assert Manager._manager_record_is_live(record) is False
 
 

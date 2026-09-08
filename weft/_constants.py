@@ -1194,7 +1194,7 @@ _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS: Final[frozenset[str]] = frozenset(
 _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     """
     _active_queues _activity _caller_pid
-    _cleanup_errors _closed_activity_waiter_ids _config _weft_config
+    _cleanup_errors _config _weft_config
     _ctrl_out_queue_obj
     _db_path _default_error_handler
     _deferred_task_log_last_error _deferred_task_log_last_flush_at
@@ -1268,7 +1268,7 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
 
 _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     """
-    _active_queues _cleanup_errors _closed_activity_waiter_ids _weft_config
+    _active_queues _cleanup_errors _weft_config
     _ctrl_out_queue_obj
     _drive_loop_active _drive_owner_ident _drive_owner_thread
     _endpoint_registration_message_id _endpoint_registration_metadata

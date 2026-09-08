@@ -329,7 +329,7 @@ def _record_is_recent_enough_for_uncertain_selection(record: dict[str, Any]) -> 
     stale_after_ns = int(
         MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
     )
-    return stale_after_ns < 0 or time.time_ns() - timestamp <= stale_after_ns
+    return time.time_ns() - timestamp <= stale_after_ns
 
 
 def _select_uncertain_active_manager_from_snapshot(
@@ -373,7 +373,7 @@ def _namespace_ambiguous_incumbent_should_block_start(
     if timestamp is None:
         return True
     grace_ns = int(MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS * 1_000_000_000)
-    return grace_ns < 0 or time.time_ns() - timestamp <= grace_ns
+    return time.time_ns() - timestamp <= grace_ns
 
 
 def _manager_record_diagnostic(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-016] exception
@@ -489,7 +489,7 @@ def _manager_record_diagnostic(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-016] e
             stale_after_ns = int(
                 MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
             )
-            if stale_after_ns >= 0 and time.time_ns() - timestamp > stale_after_ns:
+            if time.time_ns() - timestamp > stale_after_ns:
                 return _ManagerDiagnostic(
                     record=record,
                     liveness="stale",

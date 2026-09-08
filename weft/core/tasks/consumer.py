@@ -619,11 +619,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
 
         entry = entries[0]
-        if not isinstance(entry, tuple) or len(entry) != 2:
-            return
         raw_message, timestamp = entry
-        if not isinstance(raw_message, str):
-            return
 
         timestamp_int = int(timestamp)
         request = parse_control_request(raw_message)

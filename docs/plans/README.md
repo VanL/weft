@@ -23,6 +23,7 @@ There are currently 191 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-08-31-monitor-and-task-correctness-fixes-plan.md`](./2026-08-31-monitor-and-task-correctness-fixes-plan.md) | Monitor and Task Correctness Fixes Plan | `completed` | none |
 | [`2026-08-31-reserved-disposition-and-requeue-removal-plan.md`](./2026-08-31-reserved-disposition-and-requeue-removal-plan.md) | Reserved Disposition and REQUEUE Removal Plan | `completed` | none |
 | [`2026-08-31-runtime-identity-custody-plan.md`](./2026-08-31-runtime-identity-custody-plan.md) | Runtime Identity Custody Plan | `completed` | none |
 | [`2026-08-31-guard-and-custody-simplification-plan.md`](./2026-08-31-guard-and-custody-simplification-plan.md) | Guard and Custody Simplification Plan | `draft` | none |

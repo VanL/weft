@@ -68,6 +68,7 @@ _SHARED_MODULES = frozenset(
         "tests/context/test_context.py",
         "tests/commands/test_dump_load.py",
         "tests/commands/test_interactive_client.py",
+        "tests/commands/test_interactive_exit_terminal.py",
         "tests/commands/test_result.py",
         "tests/commands/test_run.py",
         "tests/commands/test_submission.py",

@@ -287,7 +287,6 @@ class MultiQueueWatcher(BaseWatcher):
         self._multi_activity_waiter: Any | None = None
         self._multi_activity_waiter_generation: int | None = None
         self._multi_activity_waiter_signature: tuple[str, ...] | None = None
-        self._closed_activity_waiter_ids: set[int] = set()
         self._pending_messages_precheck_confirmed = False
         self._next_inactive_probe_at = time.monotonic()
         self._topology_lock = threading.RLock()
@@ -505,13 +504,13 @@ class MultiQueueWatcher(BaseWatcher):
             logger.debug("Failed to close candidate topology resource", exc_info=True)
 
     def _close_activity_waiter_once(self, waiter: Any | None) -> None:
-        """Close one displaced waiter once at its owner boundary."""
+        """Close a displaced waiter through its idempotent resource contract.
+
+        ActivityWaiter.close is terminal, including after cleanup errors
+        (SimpleBroker [SB-API-6]); object ids are not lifetime identities.
+        """
         if waiter is None:
             return
-        waiter_id = id(waiter)
-        if waiter_id in self._closed_activity_waiter_ids:
-            return
-        self._closed_activity_waiter_ids.add(waiter_id)
         try:
             waiter.close()
         except Exception:  # pragma: no cover - defensive backend cleanup

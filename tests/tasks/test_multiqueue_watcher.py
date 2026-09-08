@@ -36,10 +36,13 @@ def run_single_drain(watcher: MultiQueueWatcher) -> None:
 
 
 class FakeWaiter:
+    """Mirror ActivityWaiter terminal, idempotent close semantics [SB-API-6]."""
+
     def __init__(self, *, raises: bool = False, result: bool = False) -> None:
         self.wait_calls: list[float | None] = []
         self.wait_entered = threading.Event()
         self.close_calls = 0
+        self.closed = False
         self.raises = raises
         self.result = result
 
@@ -51,6 +54,9 @@ class FakeWaiter:
         return self.result
 
     def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
         self.close_calls += 1
 
 
@@ -72,6 +78,8 @@ class BlockingWaiter(FakeWaiter):
         return True
 
     def close(self) -> None:
+        if self.closed:
+            return
         if self.wait_entered.is_set() and not self.release.is_set():
             self.close_overlapped_wait = True
         self.close_threads.append(threading.get_ident())
@@ -86,6 +94,8 @@ class RaisingCloseWaiter(BlockingWaiter):
         self.error_type = error_type
 
     def close(self) -> None:
+        if self.closed:
+            return
         super().close()
         raise self.error_type("injected close failure")
 
@@ -2550,12 +2560,19 @@ def test_wait_for_activity_falls_back_when_helper_returns_none(
     assert time.monotonic() - start >= 0
 
 
+@pytest.mark.parametrize("reuse_id", [False, True])
 def test_queue_set_changes_close_stale_multi_queue_waiter(
     broker_env,
     monkeypatch,
+    reuse_id: bool,
 ) -> None:
     db_path, _make_queue = broker_env
     waiters: list[FakeWaiter] = []
+    if reuse_id:
+        # Model allocator id reuse at the watcher boundary deterministically.
+        monkeypatch.setattr(
+            "weft.core.tasks.multiqueue_watcher.id", lambda _waiter: 7, raising=False
+        )
 
     def handler(
         _message: str,
@@ -2583,12 +2600,13 @@ def test_queue_set_changes_close_stale_multi_queue_waiter(
         watcher.wait_for_activity(timeout=0.01)
         watcher.add_queue("dynamic.two", handler)
         watcher.wait_for_activity(timeout=0.01)
+        watcher.add_queue("dynamic.three", handler)
+        watcher.wait_for_activity(timeout=0.01)
     finally:
         watcher.stop(join=False)
 
-    assert len(waiters) == 2
-    assert waiters[0].close_calls == 1
-    assert waiters[1].close_calls == 1
+    assert len(waiters) == 3
+    assert [waiter.close_calls for waiter in waiters] == [1, 1, 1]
 
 
 def test_stop_closes_multi_queue_waiter(

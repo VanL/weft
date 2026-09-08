@@ -20,7 +20,7 @@ import weakref
 from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
-from types import BuiltinFunctionType, FunctionType
+from types import BuiltinFunctionType, FunctionType, SimpleNamespace
 from typing import Any
 
 import psutil
@@ -4197,7 +4197,14 @@ def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_dispositi
 
         assert cleanup.families_disposed == 1
         assert cleanup.families_retired == 0
-        assert reserved_cleanup.families_retired == 1
+        assert reserved_cleanup.families_retired == 0
+        assert store.get_task(tid) is not None
+        task._run_monitor_store_cycle(
+            now_ns=time.time_ns(),
+            task_log_owner="collated_store",
+            start_control_cleanup=False,
+        )
+        assert task._last_monitor_store_families_retired == 1
         assert store.get_task(tid) is None
     finally:
         task.stop()
@@ -6654,6 +6661,255 @@ def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
         task.stop()
 
     assert cleanup.pending is False
+
+
+def test_task_monitor_discovery_cadence_survives_frequent_store_cycles(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real cleanup chains stay bounded and eventually discover newly orphaned queues."""
+    db_path, make_queue = broker_env
+    clock = [0.0]
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: clock[0], time_ns=time.time_ns, sleep=time.sleep
+        ),
+    )
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "2",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 100,
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 100,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    completed_chains: list[float] = []
+    actual_handler = TaskMonitor._handle_control_cleanup_worker_result
+
+    def record_result(
+        task: TaskMonitor, result: base_task_mod.TaskWorkerResult
+    ) -> None:
+        worker_result = result.value
+        if (
+            isinstance(worker_result, task_monitor_mod._TaskControlCleanupWorkerResult)
+            and worker_result.work.slice_kind == "dead_tid"
+            and worker_result.cleanup.success
+            and not worker_result.cleanup.pending
+        ):
+            completed_chains.append(clock[0])
+        actual_handler(task, result)
+
+    monkeypatch.setattr(
+        TaskMonitor, "_handle_control_cleanup_worker_result", record_result
+    )
+    task = TaskMonitor(
+        db_path, make_task_monitor_taskspec("1778089999999961871"), config=config
+    )
+    orphan = make_queue("T1778084345905438871.ctrl_in")
+    try:
+        for now in range(0, 122, 2):
+            clock[0] = float(now)
+            if now == 2:
+                orphan.write("orphan discovered on the next due pass")
+            task._wake_requested = True
+            task.process_once()
+            drive_task_monitor_until_idle(task)
+            assert (
+                task._next_runtime_cleanup_queue_discovery_due_monotonic
+                == ((now // 60) + 1) * 60
+            )
+            assert completed_chains == [float(value) for value in range(0, now + 1, 60)]
+            if 2 <= now < 60:
+                assert orphan.has_pending()
+            elif now >= 60:
+                assert not orphan.has_pending()
+
+        # A newly terminal family bypasses the future idle deadline.
+        tid = "1778084345905438872"
+        make_queue(f"T{tid}.ctrl_in").write("terminal stop")
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": tid,
+                "taskspec": {
+                    "tid": tid,
+                    "version": "1.0",
+                    "name": "terminal",
+                    "io": {
+                        "control": {
+                            "ctrl_in": f"T{tid}.ctrl_in",
+                            "ctrl_out": f"T{tid}.ctrl_out",
+                        }
+                    },
+                    "state": {"status": "completed"},
+                    "metadata": {},
+                },
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE, (update,), checkpoint_message_id=None
+        )
+        store.mark_summary_emitted(tid, int(tid) + 1)
+        clock[0] = 122.0
+        task._wake_requested = True
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert completed_chains == [0.0, 60.0, 120.0, 122.0]
+        assert task._next_runtime_cleanup_queue_discovery_due_monotonic == 182.0
+        assert not make_queue(f"T{tid}.ctrl_in").has_pending()
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("slice_kind", ["terminal_control", "reserved", "dead_tid"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_task_monitor_pending_cleanup_retains_catchup_deadline(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    slice_kind: task_monitor_mod.RuntimeCleanupSliceKind,
+    failed: bool,
+) -> None:
+    """Pending and failed worker results retain their existing retry schedule."""
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "time",
+        SimpleNamespace(monotonic=lambda: 10.0, time_ns=time.time_ns, sleep=time.sleep),
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "2",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path, make_task_monitor_taskspec("1778089999999961873"), config=config
+    )
+    try:
+        task._next_runtime_cleanup_queue_discovery_due_monotonic = 70.0
+        work = task_monitor_mod._TaskControlCleanupWork(
+            request_id="pending-cadence",
+            now_ns=time.time_ns(),
+            slice_kind=slice_kind,
+        )
+        cleanup = task_monitor_mod._TaskControlCleanupResult(
+            pending=not failed,
+            errors=("cleanup failed",) if failed else (),
+        )
+        task._service_lane_work_items[
+            task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE
+        ] = work
+        task._handle_control_cleanup_worker_result(
+            base_task_mod.TaskWorkerResult(
+                lane=task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                value=task_monitor_mod._TaskControlCleanupWorkerResult(
+                    work=work, cleanup=cleanup
+                ),
+            )
+        )
+        assert task._runtime_cleanup_queue_discovery_pending
+        assert task._next_runtime_cleanup_queue_discovery_due_monotonic == 12.0
+    finally:
+        task.stop()
+
+
+def test_task_monitor_store_retires_eligible_family_despite_reserved_delete_failure(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An erroring reserved family cannot retain an unrelated eligible collation."""
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": "0.000001",
+        }
+    )
+    task = TaskMonitor(
+        db_path, make_task_monitor_taskspec("1778089999999961874"), config=config
+    )
+    completed_tid = "1778084345905438874"
+    failed_tid = "1778084345905438875"
+    reserved_name = f"T{failed_tid}.reserved"
+    make_queue(reserved_name).write("failure residue")
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        for tid, status in ((completed_tid, "completed"), (failed_tid, "failed")):
+            update = update_from_task_log_payload(
+                {
+                    "event": f"work_{status}",
+                    "status": status,
+                    "tid": tid,
+                    "taskspec": {
+                        "tid": tid,
+                        "version": "1.0",
+                        "name": "sample",
+                        "io": {},
+                        "state": {"status": status},
+                        "metadata": {},
+                    },
+                },
+                message_id=int(tid),
+            )
+            assert update is not None
+            store.record_task_log_updates(
+                WEFT_GLOBAL_LOG_QUEUE, (update,), checkpoint_message_id=None
+            )
+            store.delete_task_messages_after_raw_delete(
+                (update.message_id,), deleted_at_ns=update.message_id + 1
+            )
+            store.mark_summary_emitted(tid, update.message_id + 2)
+            store.mark_family_disposed(
+                tid, update.message_id + 3, disposition_reason="terminal"
+            )
+            store.mark_task_control_deleted(tid, update.message_id + 4)
+
+        with task._monitor_context().broker() as broker:
+            broker_type = type(broker)
+        real_delete = broker_type.delete_from_queues
+
+        def fail_reserved_delete(broker: Any, names: Any) -> Any:
+            if reserved_name in names:
+                raise OSError("persistent reserved deletion failure")
+            return real_delete(broker, names)
+
+        monkeypatch.setattr(broker_type, "delete_from_queues", fail_reserved_delete)
+        for _ in range(2):
+            cleanup = task._run_reserved_cleanup_slice(store, now_ns=time.time_ns())
+            assert not cleanup.success
+            assert cleanup.families_retired == 0
+        task._run_monitor_store_cycle(
+            now_ns=time.time_ns(),
+            task_log_owner="collated_store",
+            start_control_cleanup=False,
+        )
+        assert store.get_task(completed_tid) is None
+        assert store.get_task(failed_tid) is not None
+        assert make_queue(reserved_name).has_pending()
+        assert task._last_monitor_store_families_retired == 1
+    finally:
+        task.stop()
 
 
 def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budget(

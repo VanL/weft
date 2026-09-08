@@ -923,7 +923,6 @@ class TaskMonitor(ServiceTask):
         worker._stop_lock = threading.Lock()
         object.__setattr__(worker, "_ctrl_out_queue_obj", None)
         worker._task_context_cache = None
-        worker._closed_activity_waiter_ids = set()
         worker._task_lifecycle_lock = threading.Lock()
         worker._task_lifecycle = TaskReactorLifecycle.NEW
         worker._drive_owner_thread = None
@@ -2447,8 +2446,6 @@ class TaskMonitor(ServiceTask):
         self._last_reserved_skipped_active = 0
         self._last_reserved_skipped_not_ready = 0
         self._last_reserved_rows_deleted = 0
-        self._runtime_cleanup_queue_discovery_pending = False
-        self._next_runtime_cleanup_queue_discovery_due_monotonic = 0.0
         self._last_control_delete_errors = ()
         self._last_control_delete_warnings = ()
         self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
@@ -2510,6 +2507,8 @@ class TaskMonitor(ServiceTask):
                     self._apply_monitor_store_retirement_result(
                         self._delete_monitor_store_task_log_rows(store)
                     )
+                    # Sole collation-retirement owner. The SQL predicate keeps
+                    # probe-needed families until reserved cleanup is proved.
                     family_retirement = store.retire_completed_collation_families(
                         limit=self._monitor_config.batch_size,
                         retired_at_ns=now_ns,
@@ -3959,9 +3958,6 @@ class TaskMonitor(ServiceTask):
                 families_disposed += len(family_disposition_marks)
             except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"mark_families_disposed: {exc}")
-        # The reserved slice is the sole collation-retirement owner. Keeping
-        # the row through that slice preserves terminal lifecycle proof for
-        # any queue discovered by the fallback name scan.
 
         terminal_pending = (
             family_limit_hit or deadline_hit or unprocessed_selected > 0 or bool(errors)
@@ -4186,20 +4182,6 @@ class TaskMonitor(ServiceTask):
             errors.extend(cleanup.errors)
             warnings.extend(cleanup.warnings)
 
-        families_retired = 0
-        if not errors:
-            try:
-                retirement = store.retire_completed_collation_families(
-                    limit=control_limit,
-                    retired_at_ns=now_ns,
-                    retention_seconds=(
-                        self._monitor_config.task_log_retention_period_seconds
-                    ),
-                )
-                families_retired = retirement.families_retired
-            except (OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"retire_completed_collation_families: {exc}")
-
         deferred_count = (
             selection.skipped_active
             + selection.skipped_not_ready
@@ -4224,7 +4206,6 @@ class TaskMonitor(ServiceTask):
             reserved_rows_estimated_deleted=reserved_rows_estimated_deleted,
             reserved_skipped_active=selection.skipped_active + monitor_skipped_active,
             reserved_skipped_not_ready=selection.skipped_not_ready,
-            families_retired=families_retired,
             pending=pending,
             errors=tuple(errors),
             warnings=tuple(warnings),
@@ -4247,7 +4228,6 @@ class TaskMonitor(ServiceTask):
                         "reserved_rows_estimated_deleted": (
                             reserved_rows_estimated_deleted
                         ),
-                        "families_retired": families_retired,
                     },
                 ),
             ),
@@ -5597,7 +5577,10 @@ class TaskMonitor(ServiceTask):
             self._maybe_start_terminal_control_cleanup_worker(now_ns=work.now_ns)
 
     def _handle_control_cleanup_worker_result(self, result: TaskWorkerResult) -> None:
-        """Apply runtime cleanup worker results on the reactor thread."""
+        """Apply runtime cleanup results and own the discovery deadline.
+
+        Spec: docs/specifications/07-System_Invariants.md [OBS.13.12].
+        """
 
         work = cast(
             _TaskControlCleanupWork | None,
@@ -5666,11 +5649,16 @@ class TaskMonitor(ServiceTask):
         self._runtime_cleanup_queue_discovery_pending = (
             cleanup.pending or not cleanup.success
         )
-        self._next_runtime_cleanup_queue_discovery_due_monotonic = time.monotonic() + (
-            self._monitor_config.catchup_interval_seconds
-            if self._runtime_cleanup_queue_discovery_pending
-            else self._monitor_config.interval_seconds
-        )
+        if self._runtime_cleanup_queue_discovery_pending:
+            self._next_runtime_cleanup_queue_discovery_due_monotonic = (
+                time.monotonic() + self._monitor_config.catchup_interval_seconds
+            )
+        elif work.slice_kind == "dead_tid":
+            # Only the final discovery slice proves a complete pass. A skipped
+            # terminal-control pass must not postpone the existing deadline.
+            self._next_runtime_cleanup_queue_discovery_due_monotonic = (
+                time.monotonic() + self._monitor_config.interval_seconds
+            )
         if monitor_status is not None:
             self._monitor_store_status = monitor_status
             self._last_collation_store_error = monitor_status.error
@@ -5733,10 +5721,10 @@ class TaskMonitor(ServiceTask):
     def _maybe_run_maintenance_pass(self, *, now_ns: int) -> None:
         """Run self-maintenance once its monotonic next-due deadline passes.
 
-        Mirrors the runtime-cleanup queue-discovery deadline pattern: a
-        wall-clock cadence, never a cycle counter, so catch-up cycles do not
-        change maintenance frequency. Runs inside the builtin cycle worker
-        lane; no new service, thread, or process is involved.
+        Uses its own monotonic deadline, advanced only after a maintenance
+        pass, so catch-up cycles do not change maintenance frequency. Runs
+        inside the builtin cycle worker lane; no new service, thread, or
+        process is involved.
 
         Spec: [OBS.13.10]
         """

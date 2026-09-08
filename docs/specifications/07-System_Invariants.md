@@ -688,6 +688,13 @@ the sole exact-delete executor for TID mappings),
   `tests/tasks/test_task_monitor.py`, `tests/core/test_monitor_external_log.py`,
   and `tests/core/test_monitor_store.py` fire this invariant.
 
+Monitor scheduling implementation notes: `TaskMonitor._run_monitor_store_cycle`
+owns collation-family retirement.
+`TaskMonitor._handle_control_cleanup_worker_result` owns the queue-discovery
+deadline; a skipped discovery pass preserves it, while a completed `dead_tid`
+chain advances it. Real store/worker-result cadence regressions are in
+`tests/tasks/test_task_monitor.py`; see [Monitor and task correctness fixes](../plans/2026-08-31-monitor-and-task-correctness-fixes-plan.md).
+
 ### Manager Invariants
 
 _Implementation mapping_: `weft/core/manager.py`,

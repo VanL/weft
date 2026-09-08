@@ -136,6 +136,12 @@ class InteractiveTaskMixin(ABC):
     ) -> None:  # pragma: no cover - interface definition
         """Publish a control response on the task control channel."""
 
+    @abstractmethod
+    def _send_terminal_envelope(
+        self, *, source: str = "task"
+    ) -> None:  # pragma: no cover - interface definition
+        """Publish terminal proof through the canonical bounded writer."""
+
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -219,7 +225,7 @@ class InteractiveTaskMixin(ABC):
         runner = self._make_task_runner(interactive=True)
         try:
             session = runner.start_session()
-        except Exception as exc:  # pragma: no cover - session startup failure surface
+        except Exception as exc:
             diagnostics = runner_diagnostics(
                 phase="process_spawn",
                 runner=self.taskspec.spec.runner.name,
@@ -235,6 +241,7 @@ class InteractiveTaskMixin(ABC):
                 error=str(exc),
                 runner_diagnostics=diagnostics,
             )
+            self._send_terminal_envelope()
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy, message_timestamp=message_id)
             self.should_stop = True
@@ -344,36 +351,6 @@ class InteractiveTaskMixin(ABC):
                 break
             time.sleep(INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL)
 
-    def _interactive_terminal_envelope(self) -> dict[str, Any]:
-        """Build the task-local terminal event emitted on ctrl_out.
-
-        Spec: [CC-2.3], [MF-2], [MF-3]
-        """
-
-        status = str(self.taskspec.state.status)
-        event = {
-            "completed": "work_completed",
-            "failed": "work_failed",
-            "timeout": "work_timeout",
-            "cancelled": "control_stop",
-            "killed": "control_kill",
-        }.get(status, "work_completed")
-        payload: dict[str, Any] = {
-            "type": "terminal",
-            "source": "task",
-            "tid": str(self.taskspec.tid),
-            "status": status,
-            "timestamp": time.time_ns(),
-            "event": event,
-        }
-        error = self.taskspec.state.error
-        if isinstance(error, str) and error:
-            payload["error"] = error
-        return_code = self.taskspec.state.return_code
-        if isinstance(return_code, int):
-            payload["return_code"] = return_code
-        return payload
-
     def _interactive_finalize_session(self, failure_reason: str | None = None) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-044] exception
         if getattr(self, "_interactive_session", None) is None:
             return
@@ -460,7 +437,7 @@ class InteractiveTaskMixin(ABC):
             self._interactive_stderr_index += 1
             self._interactive_stderr_final_sent = True
 
-        self._ctrl_out_queue.write(json.dumps(self._interactive_terminal_envelope()))
+        self._send_terminal_envelope()
 
         self.should_stop = True
         self._interactive_completion_reported = True
@@ -508,6 +485,13 @@ class InteractiveTaskMixin(ABC):
             self._interactive_shutdown()
 
     def _interactive_handle_control(self, request: ControlRequest) -> bool:
+        """Publish terminal proof after unwind, then acknowledge keyed control.
+
+        A task with no session owns its terminal publication here. Cleanup
+        stays silent so a failed startup cannot publish the envelope twice.
+
+        Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
+        """
         if not getattr(self, "_interactive_mode", False):
             return False
 
@@ -515,6 +499,12 @@ class InteractiveTaskMixin(ABC):
         response_extra = (
             {"request_id": request.request_id} if request.request_id is not None else {}
         )
+        if (
+            command in {CONTROL_STOP, CONTROL_KILL}
+            and self.taskspec.state.status in TERMINAL_TASK_STATUSES
+        ):
+            self._send_control_response(command, "ack", **response_extra)
+            return True
         if command == CONTROL_STOP:
             self.should_stop = True
             self.taskspec.mark_cancelled(reason="STOP command received")
@@ -524,8 +514,11 @@ class InteractiveTaskMixin(ABC):
             self._apply_reserved_policy(policy)
             if self._stop_event:
                 self._stop_event.set()
+            if self._interactive_session is None:
+                self._send_terminal_envelope()
+            else:
+                self._interactive_shutdown(reason="cancelled")
             self._send_control_response("STOP", "ack", **response_extra)
-            self._interactive_shutdown(reason="cancelled")
             return True
         if command == CONTROL_KILL:
             self.should_stop = True
@@ -536,8 +529,11 @@ class InteractiveTaskMixin(ABC):
             self._apply_reserved_policy(policy)
             if self._stop_event:
                 self._stop_event.set()
+            if self._interactive_session is None:
+                self._send_terminal_envelope()
+            else:
+                self._interactive_shutdown(reason="killed")
             self._send_control_response("KILL", "ack", **response_extra)
-            self._interactive_shutdown(reason="killed")
             return True
         return False
 

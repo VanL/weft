@@ -270,6 +270,11 @@ interpretation and CLI convergence live in `weft/core/task_evidence.py` and
 `weft/commands/control_convergence.py`. Direct protocol coverage lives in
 `tests/core/test_control_messages.py`, `tests/core/test_control_probe.py`,
 `tests/tasks/test_control_channel.py`, and `tests/tasks/test_task_execution.py`.
+Interactive startup failure and session finalization use
+`BaseTask._send_terminal_envelope`;
+`InteractiveSessionMixin._interactive_handle_control` acknowledges after
+shutdown. Ordering and retry coverage is in
+`tests/tasks/test_task_interactive.py`; see [Monitor and task correctness fixes](../plans/2026-08-31-monitor-and-task-correctness-fixes-plan.md).
 The wire module owns shape only, not task or manager policy.
 
 Implementation plan backlinks:
@@ -1494,6 +1499,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Monitor and task correctness fixes](../plans/2026-08-31-monitor-and-task-correctness-fixes-plan.md)
 
 - [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
 

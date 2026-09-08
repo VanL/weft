@@ -174,12 +174,8 @@ class HeartbeatTask(ServiceTask):
         pending = ctrl_queue.peek_one(with_timestamps=True)
         if pending is None:
             return False
-        if not isinstance(pending, tuple) or len(pending) != 2:
-            return False
 
         body, timestamp = pending
-        if not isinstance(timestamp, int):
-            return False
 
         context = QueueMessageContext(
             queue_name=self._queue_names["ctrl_in"],
@@ -198,12 +194,8 @@ class HeartbeatTask(ServiceTask):
         )
         if moved is None:
             return False
-        if not isinstance(moved, tuple) or len(moved) != 2:
-            return False
 
         body, timestamp = moved
-        if not isinstance(timestamp, int):
-            return False
 
         context = QueueMessageContext(
             queue_name=self._queue_names["inbox"],
@@ -443,13 +435,8 @@ class HeartbeatTask(ServiceTask):
             iterator = queue.peek_generator(with_timestamps=True)
             with closing_queue_iterator(iterator) as rows:
                 for item in rows:
-                    if not isinstance(item, tuple) or len(item) != 2:
-                        continue
                     _body, timestamp = item
-                    if isinstance(timestamp, int):
-                        version = (
-                            timestamp if version is None else max(version, timestamp)
-                        )
+                    version = timestamp if version is None else max(version, timestamp)
         except (BrokerError, OSError, RuntimeError):
             return None
         return version

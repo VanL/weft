@@ -210,20 +210,23 @@ def _write_active_manager_registry_record(
     tid: str,
     runtime_handle: dict[str, Any],
     requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
+    timestamp: int | None = None,
 ) -> None:
     registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
-        registry.write(
-            json.dumps(
-                _manager_service_payload(
-                    ctx,
-                    tid=tid,
-                    status="active",
-                    runtime_handle=runtime_handle,
-                    requests=requests,
-                )
+        message = json.dumps(
+            _manager_service_payload(
+                ctx,
+                tid=tid,
+                status="active",
+                runtime_handle=runtime_handle,
+                requests=requests,
             )
         )
+        if timestamp is None:
+            registry.write(message)
+        else:
+            registry.insert_messages([(message, timestamp)])
     finally:
         registry.close()
 
@@ -265,6 +268,7 @@ def _select_active_manager_while_answering_probe(
     tid: str,
     monkeypatch: pytest.MonkeyPatch,
     pong_fields: dict[str, Any] | None = None,
+    probed_tids: list[str] | None = None,
 ) -> dict[str, Any] | None:
     monkeypatch.setattr(
         core_manager_runtime,
@@ -282,6 +286,8 @@ def _select_active_manager_while_answering_probe(
         timeout: float,
         request_id: str | None = None,
     ) -> ControlProbeResult:
+        if probed_tids is not None:
+            probed_tids.append(tid)
         del _ctx, timeout
         probe_request_id = request_id or "test-probe"
         if tid != target_tid:
@@ -3457,7 +3463,47 @@ def test_select_active_manager_ignores_noncanonical_request_queue(
     assert core_manager_runtime.select_active_manager(ctx) is None
 
 
-def test_select_active_manager_uses_matched_pong_for_stale_supervised_record(
+@pytest.mark.parametrize(
+    ("pong_fields", "expected_selected"),
+    [({}, True), ({"role": "consumer"}, False), ({"task_status": "draining"}, False)],
+)
+def test_select_active_manager_uses_matched_pong_for_fresh_unobservable_host_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pong_fields: dict[str, Any],
+    expected_selected: bool,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000200"
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        60.0,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=tid,
+        runtime_handle=_host_runtime_handle(987654321),
+    )
+    probed_tids: list[str] = []
+
+    record = _select_active_manager_while_answering_probe(
+        ctx,
+        tid=tid,
+        monkeypatch=monkeypatch,
+        pong_fields=pong_fields,
+        probed_tids=probed_tids,
+    )
+
+    assert probed_tids == [tid]
+    assert (record is not None) is expected_selected
+    if record is not None:
+        assert record["tid"] == tid
+        assert record["_pong_live_at"] > 0
+
+
+def test_select_active_manager_omits_expired_supervised_record_despite_matched_pong(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3466,23 +3512,25 @@ def test_select_active_manager_uses_matched_pong_for_stale_supervised_record(
     tid = "1775622400000000201"
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     _write_active_manager_registry_record(
         ctx,
         tid=tid,
         runtime_handle=_external_supervisor_runtime_handle(),
+        timestamp=time.time_ns() - 120_000_000_000,
     )
 
+    probed_tids: list[str] = []
     record = _select_active_manager_while_answering_probe(
         ctx,
         tid=tid,
         monkeypatch=monkeypatch,
+        probed_tids=probed_tids,
     )
 
-    assert record is not None
-    assert record["tid"] == tid
-    assert record["_pong_live_at"] > 0
+    assert probed_tids == [tid]
+    assert record is None
 
 
 def test_select_active_manager_rejects_non_manager_pong_for_stale_record(
@@ -3494,12 +3542,13 @@ def test_select_active_manager_rejects_non_manager_pong_for_stale_record(
     tid = "1775622400000000205"
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     _write_active_manager_registry_record(
         ctx,
         tid=tid,
         runtime_handle=_external_supervisor_runtime_handle(),
+        timestamp=time.time_ns() - 120_000_000_000,
     )
 
     record = _select_active_manager_while_answering_probe(
@@ -3521,12 +3570,13 @@ def test_select_active_manager_rejects_draining_pong_for_stale_record(
     tid = "1775622400000000209"
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     _write_active_manager_registry_record(
         ctx,
         tid=tid,
         runtime_handle=_external_supervisor_runtime_handle(),
+        timestamp=time.time_ns() - 120_000_000_000,
     )
 
     record = _select_active_manager_while_answering_probe(
@@ -3548,7 +3598,7 @@ def test_select_active_manager_prunes_stale_record_without_pong(
     tid = "1775622400000000206"
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_COMPETING_STARTUP_GRACE_SECONDS",
@@ -3562,6 +3612,7 @@ def test_select_active_manager_prunes_stale_record_without_pong(
         ctx,
         tid=tid,
         runtime_handle=_external_supervisor_runtime_handle(),
+        timestamp=time.time_ns() - 120_000_000_000,
     )
 
     record = core_manager_runtime.select_active_manager(ctx, probe_stale=True)
@@ -3570,7 +3621,7 @@ def test_select_active_manager_prunes_stale_record_without_pong(
     assert len(_read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True)) == 1
 
 
-def test_select_active_manager_lowest_tid_pong_beats_higher_hard_live_record(
+def test_select_active_manager_fresh_hard_live_beats_expired_lower_tid_pong(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3580,12 +3631,13 @@ def test_select_active_manager_lowest_tid_pong_beats_higher_hard_live_record(
     higher_tid = "1775622400000000208"
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     _write_active_manager_registry_record(
         ctx,
         tid=lower_tid,
         runtime_handle=_external_supervisor_runtime_handle(),
+        timestamp=time.time_ns() - 120_000_000_000,
     )
     _write_active_manager_registry_record(
         ctx,
@@ -3593,14 +3645,17 @@ def test_select_active_manager_lowest_tid_pong_beats_higher_hard_live_record(
         runtime_handle=_host_runtime_handle(os.getpid()),
     )
 
+    probed_tids: list[str] = []
     record = _select_active_manager_while_answering_probe(
         ctx,
         tid=lower_tid,
         monkeypatch=monkeypatch,
+        probed_tids=probed_tids,
     )
 
     assert record is not None
-    assert record["tid"] == lower_tid
+    assert probed_tids == [lower_tid]
+    assert record["tid"] == higher_tid
 
 
 def test_select_active_manager_lower_hard_live_record_beats_higher_pong(
@@ -3613,7 +3668,7 @@ def test_select_active_manager_lower_hard_live_record_beats_higher_pong(
     higher_tid = "1775622400000000210"
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     _write_active_manager_registry_record(
         ctx,
@@ -3624,6 +3679,7 @@ def test_select_active_manager_lower_hard_live_record_beats_higher_pong(
         ctx,
         tid=higher_tid,
         runtime_handle=_external_supervisor_runtime_handle(),
+        timestamp=time.time_ns() - 120_000_000_000,
     )
 
     record = _select_active_manager_while_answering_probe(
@@ -3731,7 +3787,7 @@ def test_await_manager_start_settlement_probes_stale_record_once(
     new_tid = "1775622400000000204"
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
-        -1.0,
+        60.0,
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_COMPETING_STARTUP_GRACE_SECONDS",
@@ -3749,6 +3805,7 @@ def test_await_manager_start_settlement_probes_stale_record_once(
         ctx,
         tid=stale_tid,
         runtime_handle=_external_supervisor_runtime_handle(),
+        timestamp=time.time_ns() - 120_000_000_000,
     )
 
     record = core_manager_runtime._await_manager_start_settlement(

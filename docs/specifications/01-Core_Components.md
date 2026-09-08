@@ -157,7 +157,9 @@ _Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` —
 `_submit_topology_mutation()`, and owner-confined replacement in
 `_apply_topology_mutation_on_owner()`. Firing coverage is in
 `tests/tasks/test_multiqueue_watcher.py`; BaseTask ownership preservation is in
-`tests/tasks/test_task_execution.py`.
+`tests/tasks/test_task_execution.py`. Displaced waiter close uses the
+SimpleBroker resource's terminal, idempotent close contract in
+`MultiQueueWatcher._close_activity_waiter_once`; see [Monitor and task correctness fixes](../plans/2026-08-31-monitor-and-task-correctness-fixes-plan.md).
 
 Current role:
 

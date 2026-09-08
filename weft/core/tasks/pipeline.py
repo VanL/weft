@@ -782,8 +782,6 @@ class PipelineTask(BaseTask):
         )
         with closing_queue_iterator(iterator) as rows:
             for entry in rows:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
                 body, timestamp = entry
                 try:
                     payload = json.loads(body)
