@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Short TIDs now fold the hybrid timestamp grain and logical counter into
+  ten zero-padded digits, reducing common counter-zero collisions. Shorts
+  computed after upgrade, process titles, and default pipeline names change.
+  Previously copied shorts may no longer resolve; full TIDs remain stable.
+
 - Removed `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` and the retired task-log
   window cleanup engine. Both environment and explicit override forms now fail
   fast; remove the key before upgrade and use `WEFT_TASK_MONITOR_MODE=report_only`

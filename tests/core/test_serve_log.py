@@ -7,6 +7,7 @@ import io
 import pytest
 
 from weft.core import serve_log
+from weft.helpers import tid_short_form
 
 pytestmark = [pytest.mark.shared]
 
@@ -17,7 +18,7 @@ def test_build_serve_log_record_formats_only_owned_broker_message_ids() -> None:
         event="spawn_reserved",
         component="manager",
         manager_tid="1779300000000000001",
-        manager_tid_short="00000001",
+        manager_tid_short=tid_short_form("1779300000000000001"),
         required_level="info",
         pid=42,
         fields={

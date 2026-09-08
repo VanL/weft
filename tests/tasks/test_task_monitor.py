@@ -91,7 +91,7 @@ from weft.core.service_convergence import (
     manager_service_key,
 )
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.helpers import iter_queue_entries
+from weft.helpers import iter_queue_entries, tid_short_form
 
 pytestmark = [pytest.mark.shared]
 
@@ -4874,7 +4874,9 @@ def test_task_monitor_recordless_terminal_mapping_does_not_block_control_cleanup
     ctrl_in.write("stop")
     ctrl_out.write("pong")
     mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    mappings.write(json.dumps({"full": tid, "short": tid[-10:], "terminal": True}))
+    mappings.write(
+        json.dumps({"full": tid, "short": tid_short_form(tid), "terminal": True})
+    )
     task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999860"),
@@ -10064,7 +10066,7 @@ def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
     )
     _write_json_row(
         mappings,
-        {"short": live_tid[-10:], "full": live_tid, "name": "live-owner"},
+        {"short": tid_short_form(live_tid), "full": live_tid, "name": "live-owner"},
     )
     spec = make_task_monitor_taskspec("1778089999999961903")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
@@ -10187,7 +10189,7 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
         json.dumps(
             _tid_mapping_row(
                 full=tid,
-                short=tid[-10:],
+                short=tid_short_form(tid),
                 host_processes=[],
             )
         )
@@ -10288,7 +10290,7 @@ def test_task_monitor_stale_open_disposal_waits_for_mapping_row_retirement(
     mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     mapping_id = _write_json_row(
         mappings,
-        _tid_mapping_row(full=tid, short=tid[-10:], host_processes=[]),
+        _tid_mapping_row(full=tid, short=tid_short_form(tid), host_processes=[]),
     )
 
     task = TaskMonitor(
@@ -10458,7 +10460,9 @@ def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
     inbox.write("input")
 
     mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    mappings.write(json.dumps(_docker_style_mapping_row(full=tid, short=tid[-10:])))
+    mappings.write(
+        json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
+    )
 
     task = TaskMonitor(
         db_path,
@@ -10571,7 +10575,9 @@ def test_task_monitor_delete_recheck_protects_disposed_undecidable_owner(
     inbox.write("input")
 
     mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    mappings.write(json.dumps(_docker_style_mapping_row(full=tid, short=tid[-10:])))
+    mappings.write(
+        json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
+    )
 
     task = TaskMonitor(
         db_path,
@@ -10649,7 +10655,9 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
     ctrl_out.write("pong")
 
     mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    mappings.write(json.dumps(_docker_style_mapping_row(full=tid, short=tid[-10:])))
+    mappings.write(
+        json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
+    )
 
     task = TaskMonitor(
         db_path,

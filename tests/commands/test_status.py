@@ -43,6 +43,7 @@ from weft.core.service_convergence import (
     build_service_owner_payload,
 )
 from weft.ext import RunnerRuntimeDescription
+from weft.helpers import tid_short_form
 from weft.helpers.container_detection import ContainerRuntimeDetection
 
 pytestmark = [pytest.mark.shared]
@@ -313,7 +314,7 @@ def _write_manager_spawned_task_monitor(
             {
                 "event": "task_spawned",
                 "tid": manager_tid,
-                "tid_short": manager_tid[-10:],
+                "tid_short": tid_short_form(manager_tid),
                 "status": "running",
                 "timestamp": time.time_ns(),
                 "taskspec": {
@@ -502,7 +503,7 @@ def test_status_services_report_task_monitor_external_log_diagnostics(
         json.dumps(
             {
                 "full": tid,
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "runner": "host",
                 "task_monitor": {
                     "task_monitor_mode": "jsonl_then_delete",
@@ -907,7 +908,7 @@ def test_cmd_status_json_includes_runner_runtime_details(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "docker",
                 "runtime_handle": _runtime_handle(
@@ -977,7 +978,7 @@ def test_task_status_does_not_apply_host_pid_identity_to_docker_runtime(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "docker",
                 "runtime_handle": _runtime_handle(
@@ -1049,7 +1050,7 @@ def test_terminal_log_status_wins_over_weak_live_host_pid(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(
@@ -1195,7 +1196,7 @@ def test_status_preserves_active_manager_while_terminal_manager_row_stays_termin
     ctx.queue("weft.state.tid_mappings", persistent=False).write(
         json.dumps(
             {
-                "short": old_tid[-10:],
+                "short": tid_short_form(old_tid),
                 "full": old_tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(
@@ -1250,7 +1251,7 @@ def test_task_status_keeps_terminal_log_state_when_task_pid_is_alive(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(
@@ -1357,7 +1358,7 @@ def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "docker",
                 "runtime_handle": _runtime_handle(
@@ -1465,7 +1466,7 @@ def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(
@@ -1504,7 +1505,7 @@ def test_task_status_reports_dead_host_running_snapshot_as_stale_liveness(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(
@@ -1547,7 +1548,7 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_stale_liveness(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(
@@ -1727,7 +1728,7 @@ def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
     ctx.queue("weft.state.tid_mappings", persistent=False).write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(
@@ -2219,7 +2220,7 @@ def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "docker",
                 "runtime_handle": _runtime_handle(
@@ -2286,7 +2287,7 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(
@@ -2335,7 +2336,7 @@ def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
     mapping_queue.write(
         json.dumps(
             {
-                "short": tid[-10:],
+                "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _runtime_handle(

@@ -276,9 +276,19 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.3**: task state remains observable through task-local queues and the
   global task log
 - **OBS.4**: process titles follow `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
-- **OBS.5**: TID short form uses the low-order digits from the resolved
-  19-digit TID. A short form matching more than one full TID is an ambiguity
-  error per [CLI-1.2.3]. Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
+- **OBS.5**: The TID short form is exactly ten decimal characters derived
+  from the hybrid timestamp's components: `grain = tid >> 12` (a count of
+  4,096-nanosecond grains; SimpleBroker clears the low 12 bits of
+  `time.time_ns()` and stores the logical counter there), `counter = tid &
+  0xFFF`, and `short = (grain + counter × 2_441_406) mod 10¹⁰`, zero-padded
+  to ten characters. The multiplier is `⌊10¹⁰ / 4096⌋`, so all 4,096
+  counters within one grain remain distinct. `weft/helpers/__init__.py::tid_short_form`
+  owns the derivation; no producer slices digits from the decimal TID.
+  The form is not unique: a short form matching more than one full TID is
+  an ambiguity error per [CLI-1.2.3]. Stored mapping shorts are display
+  metadata; resolution derives the current form from the full TID.
+  Implementation plans: [Short TID derivation](../plans/2026-08-31-short-tid-derivation-plan.md),
+  [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
 - **OBS.6**: Each TID mapping row is a complete runtime-observability
   snapshot written to `weft.state.tid_mappings`. A consumer that requires
   current state selects the valid row with the greatest broker message ID for

@@ -77,7 +77,7 @@ TASKSPEC_TID_LENGTH: Final[int] = 19
 """Required length for Task ID (19 digits from time.time_ns())."""
 
 TASKSPEC_TID_SHORT_LENGTH: Final[int] = 10
-"""Length for short TID display (last N digits for process titles)."""
+"""Width of the zero-padded hybrid timestamp short form [OBS.5]."""
 
 # Spec Section Defaults
 # ---------------------

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from tests.conftest import run_cli
+from weft.helpers import tid_short_form
 
 
 def _submit_task(workdir, harness) -> str:
@@ -62,7 +63,7 @@ def test_task_tid_reverse(workdir, weft_harness) -> None:
 
     rc, out, err = run_cli("task", "tid", "--reverse", tid, cwd=workdir)
     assert rc == 0
-    assert out.strip() == tid[-10:]
+    assert out.strip() == tid_short_form(tid)
     assert err == ""
 
 

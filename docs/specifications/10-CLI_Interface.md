@@ -554,7 +554,7 @@ control message. Resolution derives each row's short form from its
 `full` TID per [OBS.5]; the stored `short` field remains required
 row shape but is not resolution authority.
 
-Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
+Implementation plans: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md), [Short TID derivation](../plans/2026-08-31-short-tid-derivation-plan.md).
 
 _Implementation mapping_: `weft/helpers/__init__.py::tid_short_form` owns
 short-form derivation; `weft/core/endpoints.py::latest_tid_mapping_rows` owns

@@ -18,6 +18,7 @@ from weft.context import build_context
 from weft.core import task_evidence
 from weft.core.tasks import Consumer
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
+from weft.helpers import tid_short_form
 
 pytestmark = [pytest.mark.shared]
 
@@ -207,7 +208,7 @@ def _write_dead_runtime_mapping(ctx: Any, tid: str) -> None:
         queue.write(
             json.dumps(
                 {
-                    "short": tid[-10:],
+                    "short": tid_short_form(tid),
                     "full": tid,
                     "runner": "host",
                     "timestamp": time.time_ns(),

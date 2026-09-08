@@ -17,13 +17,13 @@ from tests.tasks import sample_targets as targets  # noqa: F401
 from weft import helpers as weft_helpers
 from weft._constants import (
     CONTROL_STOP,
-    TASKSPEC_TID_SHORT_LENGTH,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.core.control_messages import encode_control_message
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
+from weft.helpers import tid_short_form
 
 
 @pytest.fixture
@@ -140,7 +140,7 @@ def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
     assert record is not None
     data = json.loads(record)
     assert data["full"] == unique_tid
-    assert data["short"] == unique_tid[-TASKSPEC_TID_SHORT_LENGTH:]
+    assert data["short"] == tid_short_form(unique_tid)
     assert data["name"] == "observability-task"
     assert data["runner"] == "host"
     runtime_handle = data["runtime_handle"]
@@ -287,7 +287,7 @@ def test_tid_mapping_registration_appends_without_history_read(
     assert len(changed) == 1
     for row in rows + equivalent + changed:
         assert row["full"] == unique_tid
-        assert row["short"] == unique_tid[-len(row["short"]) :]
+        assert row["short"] == tid_short_form(unique_tid)
         assert "runner" in row and "runtime_handle" in row
         assert row["name"] == spec.name
         assert "hostname" in row and "started" in row
@@ -478,9 +478,7 @@ def test_process_titles_update(task_factory, unique_tid) -> None:
     assert any(title.endswith(":init:waiting") for title in calls)
     assert any(title.endswith(":running:waiting") for title in calls)
     assert any(title.endswith(":completed") for title in calls)
-    expected_prefix = (
-        f"weft-ctx-root-{unique_tid[-TASKSPEC_TID_SHORT_LENGTH:]}:observability-task:"
-    )
+    expected_prefix = f"weft-ctx-root-{tid_short_form(unique_tid)}:observability-task:"
     assert any(title.startswith(expected_prefix) for title in calls)
 
 
@@ -524,7 +522,7 @@ def test_process_title_sanitizes_dynamic_segments(
 
     assert calls == [
         (
-            f"weft-ctxrm-rf-{unique_tid[-TASKSPEC_TID_SHORT_LENGTH:]}"
+            f"weft-ctxrm-rf-{tid_short_form(unique_tid)}"
             ":rm-rf:runningcatetcpasswd:waitingqueuerm"
         )
     ]

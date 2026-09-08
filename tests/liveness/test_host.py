@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+from weft.helpers import tid_short_form
 from weft.liveness import host
 
 pytestmark = [pytest.mark.shared]
@@ -27,8 +28,12 @@ def test_host_inspection_accepts_matching_non_zombie_identity(
     ("title", "reason"),
     [
         (
-            "weft-project-0000000001:consumer:running",
+            f"weft-project-{tid_short_form('1779000000000000001')}:consumer:running",
             "identity_match_title_match",
+        ),
+        (
+            "weft-project-0000000001:consumer:running",
+            "identity_match_title_unconfirmed",
         ),
         ("python worker.py", "identity_match_title_unconfirmed"),
     ],

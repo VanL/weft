@@ -49,7 +49,7 @@ from weft.core.service_convergence import (
     build_service_owner_payload,
 )
 from weft.ext import RunnerHandle
-from weft.helpers import iter_queue_json_entries, reload_config
+from weft.helpers import iter_queue_json_entries, reload_config, tid_short_form
 from weft.liveness import registry
 
 pytestmark = [pytest.mark.shared]
@@ -632,7 +632,9 @@ def test_endpoint_prune_preserves_live_duplicate_claimants(tmp_path) -> None:
         "1770000000000000032",
         "1770000000000000033",
     ):
-        _write_json(ctx, WEFT_TID_MAPPINGS_QUEUE, {"full": tid, "short": tid[-10:]})
+        _write_json(
+            ctx, WEFT_TID_MAPPINGS_QUEUE, {"full": tid, "short": tid_short_form(tid)}
+        )
     _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,

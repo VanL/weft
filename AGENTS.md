@@ -213,7 +213,7 @@ Runtime state:      weft.state.services, weft.state.tid_mappings, weft.state.str
 ## 3. Invariants
 
 **NEVER break**:
-- TID is a 64-bit SimpleBroker hybrid timestamp (microseconds + logical counter), format-compatible with `time.time_ns()` and typically 19 digits; immutable after creation
+- TID is a 64-bit SimpleBroker hybrid timestamp (nanosecond magnitude with the low 12 bits holding the logical counter), format-compatible with `time.time_ns()` and typically 19 digits; immutable after creation
 - State transitions are forward-only (created → spawning → running → completed/failed/timeout/cancelled/killed)
 - Reserved queue policy must be honored (keep/clear for tasks; the manager spawn lane may requeue)
 - Process titles must be shell-safe: `weft-{context_short}-{tid_short}:{name}:{status}[:details]`

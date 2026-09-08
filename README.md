@@ -626,10 +626,12 @@ logs are non-normative operational evidence.
 
 ### Task IDs (TIDs)
 
-Every task receives a unique 64-bit SimpleBroker timestamp (hybrid microseconds + logical counter), typically 19 digits:
+Every task receives a unique 64-bit SimpleBroker timestamp with nanosecond
+magnitude and the low 12 bits reserved for a logical counter, typically 19 digits:
 
 - **Full TID**: `1837025672140161024` (Unique task ID)
-- **Short TID**: `0161024` (last 10 digits for convenience)
+- **Short TID**: `2595737344` (ten zero-padded digits folded from the physical
+  grain and logical counter per [OBS.5](docs/specifications/07-System_Invariants.md))
 - Used for correlation across queues and process titles
 - Monotonic within a context, format-compatible with time.time_ns()
 - The spawn-request message ID becomes the task TID for the full lifecycle
@@ -743,8 +745,8 @@ Tasks update their process title for observability:
 
 ```bash
 $ ps aux | grep weft
-weft-proj-0161024:mytask:running
-weft-proj-0161025:manager:completed
+weft-proj-2595737344:mytask:running
+weft-proj-2598178750:manager:completed
 ```
 
 Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
@@ -1018,7 +1020,7 @@ $ weft run echo "start"
 
 # Verify running
 $ ps aux | grep weft
-weft-proj-1234567:file-watcher:running
+weft-proj-0001234567:file-watcher:running
 ```
 
 ### Resource-Constrained Execution

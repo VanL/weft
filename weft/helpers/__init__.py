@@ -118,7 +118,10 @@ def tid_short_form(tid: str) -> str:
         or not tid.isdecimal()
     ):
         raise ValueError("tid must be a 19-digit decimal task ID")
-    return tid[len(tid) - TASKSPEC_TID_SHORT_LENGTH :]
+    value = int(tid)
+    grain = value >> 12
+    counter = value & 0xFFF
+    return f"{(grain + counter * 2_441_406) % 10**10:0{TASKSPEC_TID_SHORT_LENGTH}d}"
 
 
 def live_host_processes_from_handle(

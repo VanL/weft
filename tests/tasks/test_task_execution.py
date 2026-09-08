@@ -40,7 +40,6 @@ from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
-    TASKSPEC_TID_SHORT_LENGTH,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
@@ -72,6 +71,7 @@ from weft.core.taskspec import (
     TaskSpec,
 )
 from weft.ext import RunnerHandle
+from weft.helpers import tid_short_form
 
 PROCESS_SCRIPT = str((Path(__file__).resolve().parent / "process_target.py").resolve())
 _launcher_wait_calls: list[float | None] = []
@@ -2165,7 +2165,7 @@ def test_base_task_rejects_duplicate_queue_roles_before_broker_side_effects(
     assert right_role in message
     assert role_values[left_role if right_role != "reserved" else right_role] in message
     assert db_path.exists() is False
-    tid_short = tid[-TASKSPEC_TID_SHORT_LENGTH:]
+    tid_short = tid_short_form(tid)
     assert not any(tid_short in thread.name for thread in threading.enumerate())
 
 

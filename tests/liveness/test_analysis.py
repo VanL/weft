@@ -7,6 +7,7 @@ import json
 import pytest
 
 from weft.ext import RunnerHandle
+from weft.helpers import tid_short_form
 from weft.liveness import analysis
 from weft.liveness.models import HostProcessObservation
 
@@ -18,7 +19,7 @@ def _payload(
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "full": "1779000000000000001",
-        "short": "0000000001",
+        "short": tid_short_form("1779000000000000001"),
         "terminal": terminal,
     }
     if handle is not None:

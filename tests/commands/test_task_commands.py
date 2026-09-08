@@ -44,6 +44,7 @@ from weft.helpers import (
     kill_process_tree,
     pid_is_live,
     process_create_time,
+    tid_short_form,
 )
 
 pytestmark = [pytest.mark.shared]
@@ -1338,7 +1339,7 @@ def test_await_control_surface_uses_queue_monitor(
             None,
             task_cmd.system_cmd.TaskSnapshot(
                 tid=tid,
-                tid_short=tid[-10:],
+                tid_short=tid_short_form(tid),
                 name="task-func",
                 status="completed",
                 event="work_completed",
@@ -1703,7 +1704,7 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
         "task_status",
         lambda *_args, **_kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid[-10:],
+            tid_short=tid_short_form(tid),
             name="task-func",
             status="running",
             event="task_started",
@@ -2047,7 +2048,7 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
         del timeout
         return mapping_payload, task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid[-10:],
+            tid_short=tid_short_form(tid),
             name="task-func",
             status="running",
             event="task_started",
@@ -2158,7 +2159,7 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
         "task_status",
         lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid[-10:],
+            tid_short=tid_short_form(tid),
             name="docker-task",
             status="cancelled",
             event="control_stop",
@@ -2226,7 +2227,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
         "task_status",
         lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid[-10:],
+            tid_short=tid_short_form(tid),
             name="host-task",
             status="running",
             event="work_started",
@@ -2288,7 +2289,7 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
         "task_status",
         lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid[-10:],
+            tid_short=tid_short_form(tid),
             name="sandbox-task",
             status="killed",
             event="control_kill",
