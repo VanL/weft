@@ -23,6 +23,7 @@ There are currently 191 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-08-31-dead-generation-retirement-plan.md`](./2026-08-31-dead-generation-retirement-plan.md) | Dead Generation Retirement Plan | `completed` | none |
 | [`2026-08-31-registry-custody-contracts-plan.md`](./2026-08-31-registry-custody-contracts-plan.md) | Registry Custody Contracts Plan | `completed` | none |
 | [`2026-08-31-monitor-and-task-correctness-fixes-plan.md`](./2026-08-31-monitor-and-task-correctness-fixes-plan.md) | Monitor and Task Correctness Fixes Plan | `completed` | none |
 | [`2026-08-31-reserved-disposition-and-requeue-removal-plan.md`](./2026-08-31-reserved-disposition-and-requeue-removal-plan.md) | Reserved Disposition and REQUEUE Removal Plan | `completed` | none |

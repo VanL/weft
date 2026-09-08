@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import asdict
 from typing import Any
 
 import pytest
@@ -357,27 +358,18 @@ def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
         assert task_status.reconciliation is not None
         assert task_status.reconciliation["classification"] == "wrapper_lost"
 
-        exit_code, payload = status_cmd._legacy_cmd_status(
-            json_output=True,
-            include_terminal=True,
-            spec_context=root,
-        )
-        assert exit_code == 0
+        payload = asdict(status_cmd.cmd_status(all=True, context=root))
         assert payload is not None
-        rows = json.loads(payload)["tasks"]
+        rows = payload["tasks"]
         assert rows[0]["tid"] == tid
         assert rows[0]["status"] == "failed"
         assert rows[0]["error"] == task_evidence.WRAPPER_LOST_ERROR
         assert rows[0]["return_code"] == 1
         assert rows[0]["reconciliation"]["classification"] == "wrapper_lost"
 
-        exit_code, payload = status_cmd._legacy_cmd_status(
-            json_output=True,
-            spec_context=root,
-        )
-        assert exit_code == 0
+        payload = asdict(status_cmd.cmd_status(context=root))
         assert payload is not None
-        assert json.loads(payload)["tasks"] == []
+        assert payload["tasks"] == []
     finally:
         ctrl_out.close()
 
@@ -420,14 +412,9 @@ def test_one_shot_outbox_without_terminal_log_classifies_completed(
         assert task_status.reconciliation is not None
         assert task_status.reconciliation["classification"] == "result_without_terminal"
 
-        exit_code, payload = status_cmd._legacy_cmd_status(
-            json_output=True,
-            include_terminal=True,
-            spec_context=root,
-        )
-        assert exit_code == 0
+        payload = asdict(status_cmd.cmd_status(all=True, context=root))
         assert payload is not None
-        rows = json.loads(payload)["tasks"]
+        rows = payload["tasks"]
         assert rows[0]["status"] == "completed"
         assert rows[0]["reconciliation"]["classification"] == (
             "result_without_terminal"
@@ -798,13 +785,8 @@ def test_project_status_does_not_active_ping_tasks_by_default(tmp_path) -> None:
     )
     ctrl_in = ctx.queue(f"T{tid}.ctrl_in", persistent=True)
     try:
-        exit_code, payload = status_cmd._legacy_cmd_status(
-            json_output=True,
-            include_terminal=True,
-            spec_context=root,
-        )
+        payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-        assert exit_code == 0
         assert payload is not None
         assert ctrl_in.peek_one() is None
     finally:

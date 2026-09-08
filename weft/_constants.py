@@ -82,7 +82,10 @@ TASKSPEC_TID_SHORT_LENGTH: Final[int] = 10
 # Spec Section Defaults
 # ---------------------
 DEFAULT_FUNCTION_TARGET: Final[str] = "weft.tasks:noop"
-"""Default function target for tasks (no-op function)."""
+"""Internal service placeholder satisfying SpecSection; never dereferenced.
+
+Services dispatch by INTERNAL_RUNTIME_TASK_CLASS_KEY.
+"""
 
 DEFAULT_TIMEOUT: Final[float | None] = None
 """Default timeout in seconds. None means no timeout."""
@@ -113,10 +116,6 @@ TASK_LIFECYCLE_STATUS_VALUES: Final[frozenset[str]] = frozenset(
 )
 """Allowed TaskSpec lifecycle status values."""
 
-TERMINAL_TASK_LIFECYCLE_STATUS_VALUES: Final[frozenset[str]] = frozenset(
-    ("completed", "failed", "timeout", "cancelled", "killed")
-)
-"""TaskSpec lifecycle statuses that cannot transition further."""
 
 TASK_LIFECYCLE_ACTION_VALUES: Final[frozenset[str]] = frozenset(
     ("begin_spawn", "start_running", "complete", "fail", "timeout", "cancel", "kill")
@@ -888,14 +887,6 @@ PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS: Final[float] = 10.0
 DEFAULT_MEMORY_MB: Final[int] = 1024
 """Default memory limit in MB (1GB)."""
 
-DEFAULT_CPU_PERCENT: Final[int | None] = None
-"""Default CPU limit in percent. None means no limit."""
-
-DEFAULT_MAX_FDS: Final[int | None] = None
-"""Default maximum number of open file descriptors. None means no limit."""
-
-DEFAULT_MAX_CONNECTIONS: Final[int | None] = None
-"""Default maximum number of network connections. None means no limit."""
 
 # Queue Naming Conventions
 # ------------------------
@@ -1607,11 +1598,6 @@ WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
 WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.internal"
 """Global queue for manager-owned internal spawn requests."""
 
-WEFT_MANAGER_CTRL_IN_QUEUE: Final[str] = "weft.manager.ctrl_in"
-"""Control inbox for manager lifecycle commands."""
-
-WEFT_MANAGER_CTRL_OUT_QUEUE: Final[str] = "weft.manager.ctrl_out"
-"""Control response queue for manager status messages."""
 
 WEFT_MANAGER_OUTBOX_QUEUE: Final[str] = "weft.manager.outbox"
 """Manager output queue (e.g. informational responses)."""
@@ -1736,17 +1722,10 @@ PIPELINE_OWNER_METADATA_KEY: Final[str] = "_weft_pipeline_owner"
 STATUS_CREATED: Final = "created"
 """Initial status for newly created tasks."""
 
-STATUS_RUNNING: Final = "running"
-"""Status when task is actively running."""
 
 STATUS_COMPLETED: Final = "completed"
 """Status when task has finished successfully."""
 
-STATUS_FAILED: Final = "failed"
-"""Status when task has failed with an error."""
-
-STATUS_CANCELLED: Final = "cancelled"
-"""Status when task was cancelled by user."""
 
 DEFAULT_STATUS: Final = STATUS_CREATED
 """Default initial status for tasks."""

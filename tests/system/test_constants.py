@@ -20,10 +20,7 @@ from weft._constants import (
     CONTROL_STOP,
     CONTROL_SURFACE_WAIT_INTERVAL,
     DEFAULT_CLEANUP_ON_EXIT,
-    DEFAULT_CPU_PERCENT,  # RENAMED from DEFAULT_CPU_LIMIT
     DEFAULT_FUNCTION_TARGET,
-    DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_FDS,
     DEFAULT_MEMORY_MB,  # RENAMED from DEFAULT_MEMORY_LIMIT
     DEFAULT_POLLING_INTERVAL,
     DEFAULT_REPORTING_INTERVAL,
@@ -62,11 +59,8 @@ from weft._constants import (
     RUNNER_DIAGNOSTICS_MESSAGE_MAX_CHARS,
     RUNNER_DIAGNOSTICS_TRACEBACK_MAX_CHARS,
     SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
-    STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_CREATED,
-    STATUS_FAILED,
-    STATUS_RUNNING,
     STATUS_WATCH_MIN_INTERVAL,
     STREAM_CHUNK_SIZE_BYTES,
     SUBPROCESS_POLL_INTERVAL_FLOOR,
@@ -289,9 +283,6 @@ class TestConstants:
         assert DEFAULT_MEMORY_MB == 1024
         assert isinstance(DEFAULT_MEMORY_MB, int)
 
-        assert DEFAULT_CPU_PERCENT is None
-        assert DEFAULT_MAX_FDS is None
-        assert DEFAULT_MAX_CONNECTIONS is None
 
         assert DEFAULT_STREAM_OUTPUT is False
         assert isinstance(DEFAULT_STREAM_OUTPUT, bool)
@@ -368,10 +359,7 @@ class TestConstants:
     def test_state_section_defaults(self) -> None:
         """Test StateSection status constants."""
         assert STATUS_CREATED == "created"
-        assert STATUS_RUNNING == "running"
         assert STATUS_COMPLETED == "completed"
-        assert STATUS_FAILED == "failed"
-        assert STATUS_CANCELLED == "cancelled"
 
         assert DEFAULT_STATUS == STATUS_CREATED
         assert DEFAULT_STATUS == "created"
@@ -379,10 +367,7 @@ class TestConstants:
         # All should be strings
         for status in [
             STATUS_CREATED,
-            STATUS_RUNNING,
             STATUS_COMPLETED,
-            STATUS_FAILED,
-            STATUS_CANCELLED,
         ]:
             assert isinstance(status, str)
 

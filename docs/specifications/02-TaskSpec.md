@@ -554,6 +554,14 @@ passed into the guest.
 
 _Implementation mapping_: `weft/core/taskspec/model.py` (`RunnerSection`, `resolve_taskspec_payload()`), `weft/core/environment_profiles.py` (`RunnerEnvironmentProfileResult`, `materialize_runner_environment()`, `materialize_runner_environment_from_taskspec()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`, `validate_taskspec_runner_environment()`, `validate_runner_capabilities()`, `runner_name_from_taskspec()`), `weft/ext.py` (`RunnerPlugin`, `RunnerHandle`, `RunnerEnvironmentProfile`), `weft/_runner_plugins.py` (`get_runner_plugin()`, `require_runner_plugin()`), `weft/core/tasks/runner.py` (`TaskRunner`, `_build_runner_validation_payload()`), `extensions/weft_microsandbox/weft_microsandbox/_options.py` (`parse_options_from_payload()`, `parse_options()`), `extensions/weft_microsandbox/weft_microsandbox/plugin.py` (`MicrosandboxRunnerPlugin`).
 
+Option parsing is shared by validation and runner creation in
+`extensions/weft_docker/weft_docker/plugin.py::_parse_command_options` and
+`extensions/weft_macos_sandbox/weft_macos_sandbox/plugin.py::_parse_options`.
+Existing capability gates remain at their existing boundaries. Runtime-only IO
+validation remains `TaskSpec._validate_runtime_ready_io`, invoked by
+`BaseTask.__init__`; empty IO templates remain valid before resolution.
+Implementation maintenance: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md).
+
 ### Autostart Manifests [TS-1.2]
 
 Autostart is enabled by operator intent: any JSON file placed in

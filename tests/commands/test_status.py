@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,6 @@ from weft._constants import (
 from weft._exceptions import CommandExecutionError
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
-from weft.commands.system import _legacy_cmd_status as cmd_status
 from weft.commands.system import collect_broker_status
 from weft.commands.types import SystemStatusSnapshot, TaskEvent, TaskSnapshot
 from weft.context import build_context
@@ -459,11 +459,10 @@ def test_status_services_include_manager_spawned_task_monitor_before_child_log(
         child_pid=os.getpid(),
     )
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    services = json.loads(payload)["services"]
+    services = payload["services"]
     monitor = next(
         service
         for service in services
@@ -520,12 +519,10 @@ def test_status_services_report_task_monitor_external_log_diagnostics(
         )
     )
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
-    text_exit_code, text_payload = cmd_status(json_output=False, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    services = json.loads(payload)["services"]
+    services = payload["services"]
     monitor = next(
         service
         for service in services
@@ -535,11 +532,6 @@ def test_status_services_report_task_monitor_external_log_diagnostics(
     assert external["healthy"] is False
     assert external["last_error"] == "permission denied"
     assert external["deferred_pending"] == 3
-    assert text_exit_code == 0
-    assert text_payload is not None
-    assert "warning=external-log-unhealthy" in text_payload
-    assert "warning=deferred-writes-pending" in text_payload
-    assert "deferred_writes=3" in text_payload
 
 
 def test_status_services_child_terminal_evidence_overrides_manager_spawn(
@@ -573,11 +565,10 @@ def test_status_services_child_terminal_evidence_overrides_manager_spawn(
         },
     )
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    services = json.loads(payload)["services"]
+    services = payload["services"]
     monitor = next(
         service
         for service in services
@@ -625,11 +616,10 @@ def test_status_services_prefer_live_duplicate_over_terminal_duplicate(
         metadata=heartbeat_metadata,
     )
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    services = json.loads(payload)["services"]
+    services = payload["services"]
     heartbeat = next(
         service
         for service in services
@@ -752,11 +742,10 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
         lambda: observed_now + 2_000_000_000_000,
     )
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    services = json.loads(payload)["services"]
+    services = payload["services"]
     monitor = next(
         service
         for service in services
@@ -765,18 +754,13 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
     assert monitor["status"] == "running"
     assert monitor["tid"] == live_tid
     assert monitor["evidence"] == "service-registry"
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     assert stale_tid not in {task["tid"] for task in tasks}
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     stale = next(task for task in tasks if task["tid"] == stale_tid)
     stale_snapshot = task_cmd.task_status(stale_tid, context_path=root)
     assert stale_snapshot is not None
@@ -785,7 +769,7 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
         "superseded_internal_service_record"
     )
     assert stale["reconciliation"]["active_service_tid"] == live_tid
-    assert stale["last_timestamp"] == str(stale_snapshot.last_timestamp)
+    assert stale["last_timestamp"] == stale_snapshot.last_timestamp
 
 
 def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_superseded(
@@ -850,22 +834,16 @@ def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_supersede
         metadata=heartbeat_metadata,
     )
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     assert stale_tid not in {task["tid"] for task in tasks}
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     stale = next(task for task in tasks if task["tid"] == stale_tid)
     stale_snapshot = task_cmd.task_status(stale_tid, context_path=root)
     assert stale_snapshot is not None
@@ -874,30 +852,7 @@ def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_supersede
         "superseded_internal_service_record"
     )
     assert stale["reconciliation"]["active_service_tid"] == live_tid
-    assert stale["last_timestamp"] == str(stale_snapshot.last_timestamp)
-
-
-def test_cmd_status_text_output(tmp_path):
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    queue = ctx.queue("status.queue", persistent=True)
-    queue.write("payload")
-
-    exit_code, payload = cmd_status(spec_context=root)
-
-    assert exit_code == 0
-    assert payload is not None
-    lines = payload.splitlines()
-    assert lines[0].startswith("total_messages: ")
-
-    ts_line = next(line for line in lines if line.startswith("last_timestamp: "))
-    assert ts_line.endswith(")")
-    assert "(" in ts_line
-
-    size_line = next(line for line in lines if line.startswith("db_size: "))
-    assert "bytes" in size_line
-    assert "(" in size_line
-    assert "Services:" in lines
+    assert stale["last_timestamp"] == stale_snapshot.last_timestamp
 
 
 def test_cmd_status_json_output(tmp_path):
@@ -906,200 +861,14 @@ def test_cmd_status_json_output(tmp_path):
     queue = ctx.queue("status.queue", persistent=True)
     queue.write("payload")
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    data = json.loads(payload)
+    data = payload
     assert data["broker"]["total_messages"] >= 1
     assert "db_size" in data["broker"]
     assert isinstance(data["managers"], list)
     assert isinstance(data["services"], list)
-
-
-def test_status_json_projects_only_owned_broker_identity_fields() -> None:
-    first_id = 1_779_200_000_000_000_001
-    second_id = 1_779_200_000_000_000_002
-    wall_clock_ns = 1_779_200_000_000_000_099
-    broker = status_cmd.BrokerStatusSnapshot(
-        total_messages=7,
-        last_timestamp=first_id,
-        db_size=4096,
-    )
-    managers = [
-        {
-            "tid": "1779200000000000100",
-            "timestamp": first_id,
-            "_pong_live_at": second_id,
-            "metadata": {
-                "supersession_observed_timestamp": first_id,
-                "opaque_timestamp": second_id,
-            },
-        }
-    ]
-    services = [
-        status_cmd.ServiceSnapshot(
-            key="service",
-            name="service",
-            desired=True,
-            enabled=True,
-            status="running",
-            evidence="registry",
-            updated_at=second_id,
-            pid=4321,
-        )
-    ]
-    tasks = [
-        status_cmd.TaskSnapshot(
-            tid="1779200000000000200",
-            tid_short="000200",
-            name="broker-backed",
-            status="completed",
-            event="work_completed",
-            activity=None,
-            waiting_on=None,
-            started_at=wall_clock_ns,
-            completed_at=wall_clock_ns,
-            last_timestamp=first_id,
-            duration_seconds=1.0,
-            runner="host",
-            runtime_handle=None,
-            runtime=None,
-            metadata={},
-            reconciliation={
-                "classification": "terminal_ctrl_out",
-                "observed_at": second_id,
-            },
-        ),
-        status_cmd.TaskSnapshot(
-            tid="1779200000000000201",
-            tid_short="000201",
-            name="wall-clock",
-            status="failed",
-            event="unknown",
-            activity=None,
-            waiting_on=None,
-            started_at=None,
-            completed_at=None,
-            last_timestamp=wall_clock_ns,
-            duration_seconds=None,
-            runner="host",
-            runtime_handle=None,
-            runtime=None,
-            metadata={},
-            reconciliation={
-                "classification": "claimed_result_without_terminal",
-                "observed_at": wall_clock_ns,
-            },
-        ),
-        status_cmd.TaskSnapshot(
-            tid="1779200000000000202",
-            tid_short="000202",
-            name="monitor-backed",
-            status="completed",
-            event="work_completed",
-            activity=None,
-            waiting_on=None,
-            started_at=wall_clock_ns,
-            completed_at=wall_clock_ns,
-            last_timestamp=second_id,
-            duration_seconds=1.0,
-            runner="host",
-            runtime_handle=None,
-            runtime=None,
-            metadata={},
-            reconciliation={
-                "classification": "terminal_monitor_store",
-                "reason": "raw_task_log_retired",
-            },
-        ),
-        status_cmd.TaskSnapshot(
-            tid="1779200000000000203",
-            tid_short="000203",
-            name="stale-task-log",
-            status="running",
-            event="task_started",
-            activity=None,
-            waiting_on=None,
-            started_at=wall_clock_ns,
-            completed_at=None,
-            last_timestamp=first_id,
-            duration_seconds=1.0,
-            runner="host",
-            runtime_handle=None,
-            runtime=None,
-            metadata={},
-            reconciliation={
-                "classification": "stale_liveness",
-                "observed_at": wall_clock_ns,
-            },
-        ),
-        status_cmd.TaskSnapshot(
-            tid="1779200000000000204",
-            tid_short="000204",
-            name="pipeline-clock",
-            status="running",
-            event="pipeline_status",
-            activity=None,
-            waiting_on=None,
-            started_at=wall_clock_ns,
-            completed_at=None,
-            last_timestamp=wall_clock_ns,
-            duration_seconds=1.0,
-            runner="host",
-            runtime_handle=None,
-            runtime=None,
-            metadata={},
-            pipeline_status={"timestamp": wall_clock_ns},
-        ),
-        status_cmd.TaskSnapshot(
-            tid="1779200000000000205",
-            tid_short="000205",
-            name="terminal-control-clock",
-            status="completed",
-            event="ctrl_out_terminal",
-            activity=None,
-            waiting_on=None,
-            started_at=wall_clock_ns,
-            completed_at=wall_clock_ns,
-            last_timestamp=wall_clock_ns,
-            duration_seconds=1.0,
-            runner="host",
-            runtime_handle=None,
-            runtime=None,
-            metadata={},
-        ),
-    ]
-
-    payload = json.loads(
-        status_cmd._render_json_payload(broker, managers, services, tasks)
-    )
-
-    assert payload["broker"] == {
-        "total_messages": 7,
-        "last_timestamp": "1779200000000000001",
-        "db_size": 4096,
-    }
-    assert payload["managers"][0]["timestamp"] == "1779200000000000001"
-    assert payload["managers"][0]["_pong_live_at"] == "1779200000000000002"
-    assert payload["managers"][0]["metadata"] == {
-        "supersession_observed_timestamp": "1779200000000000001",
-        "opaque_timestamp": second_id,
-    }
-    assert payload["services"][0]["updated_at"] == "1779200000000000002"
-    assert payload["services"][0]["pid"] == 4321
-    assert payload["tasks"][0]["last_timestamp"] == "1779200000000000001"
-    assert payload["tasks"][0]["reconciliation"]["observed_at"] == (
-        "1779200000000000002"
-    )
-    assert payload["tasks"][0]["started_at"] == wall_clock_ns
-    assert payload["tasks"][1]["last_timestamp"] == wall_clock_ns
-    assert payload["tasks"][1]["reconciliation"]["observed_at"] == wall_clock_ns
-    assert payload["tasks"][2]["last_timestamp"] == "1779200000000000002"
-    assert payload["tasks"][3]["last_timestamp"] == "1779200000000000001"
-    assert payload["tasks"][3]["reconciliation"]["observed_at"] == wall_clock_ns
-    assert payload["tasks"][4]["last_timestamp"] == wall_clock_ns
-    assert payload["tasks"][5]["last_timestamp"] == wall_clock_ns
 
 
 def test_cmd_status_json_includes_runner_runtime_details(
@@ -1168,13 +937,10 @@ def test_cmd_status_json_includes_runner_runtime_details(
         lambda name: FakeRunnerPlugin(),
     )
 
-    exit_code, payload = cmd_status(
-        json_output=True, include_terminal=True, spec_context=root
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    data = json.loads(payload)
+    data = payload
     assert len(data["tasks"]) == 1
     entry = data["tasks"][0]
     assert entry["tid"] == tid
@@ -1312,26 +1078,20 @@ def test_terminal_log_status_wins_over_weak_live_host_pid(
         == "weak_host_pid_ignored_for_terminal_lifecycle"
     )
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     assert len(tasks) == 1
     assert tasks[0]["status"] == "failed"
     assert tasks[0]["completed_at"] == completed
     assert tasks[0]["reconciliation"]["classification"] == "runtime_conflict"
-    assert tasks[0]["last_timestamp"] == str(snapshot.last_timestamp)
+    assert tasks[0]["last_timestamp"] == snapshot.last_timestamp
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    assert json.loads(payload)["tasks"] == []
+    assert payload["tasks"] == []
 
 
 @pytest.mark.parametrize(
@@ -1380,16 +1140,11 @@ def test_terminal_event_reconciles_stale_running_status_payload(
     assert snapshot.reconciliation["classification"] == "stale_status_payload"
     assert snapshot.reconciliation["reason"] == "contradictory_terminal_event_status"
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    task = json.loads(payload)["tasks"][0]
-    assert task["last_timestamp"] == str(snapshot.last_timestamp)
+    task = payload["tasks"][0]
+    assert task["last_timestamp"] == snapshot.last_timestamp
 
 
 def test_status_preserves_active_manager_while_terminal_manager_row_stays_terminal(
@@ -1457,15 +1212,10 @@ def test_status_preserves_active_manager_while_terminal_manager_row_stays_termin
         lambda handle: True,
     )
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    data = json.loads(payload)
+    data = payload
     assert [(manager["tid"], manager["status"]) for manager in data["managers"]] == [
         (active_tid, "active")
     ]
@@ -1815,22 +1565,17 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_stale_liveness(
     assert snapshot.reconciliation is not None
     assert snapshot.reconciliation["classification"] == "stale_liveness"
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    data = json.loads(payload)
+    data = payload
     tasks = data["tasks"]
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
     assert tasks[0]["status"] == "running"
     assert tasks[0]["reconciliation"]["classification"] == "stale_liveness"
     assert tasks[0]["reconciliation"]["reason"] == "host_process_not_live"
-    assert tasks[0]["last_timestamp"] == str(snapshot.last_timestamp)
+    assert tasks[0]["last_timestamp"] == snapshot.last_timestamp
 
 
 def test_cmd_status_reports_stale_runtime_less_running_snapshot(
@@ -1853,25 +1598,19 @@ def test_cmd_status_reports_stale_runtime_less_running_snapshot(
         name="stale-manager",
     )
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
     assert tasks[0]["status"] == "running"
     assert tasks[0]["reconciliation"]["reason"] == "runtime_missing_after_stale_window"
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
     assert tasks[0]["status"] == "running"
@@ -1954,16 +1693,11 @@ def test_cmd_status_marks_stale_internal_service_without_owner_failed(
         "internal_service_runtime_missing_after_stale_window"
     )
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    task = json.loads(payload)["tasks"][0]
-    assert task["last_timestamp"] == str(snapshot.last_timestamp)
+    task = payload["tasks"][0]
+    assert task["last_timestamp"] == snapshot.last_timestamp
 
 
 def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
@@ -2020,15 +1754,10 @@ def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
         ),
     )
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     task = next(item for item in tasks if item["tid"] == tid)
     assert task["status"] == "running"
     assert task["runtime"]["state"] == "unknown"
@@ -2036,7 +1765,7 @@ def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
         "namespace_unobservable"
     )
     assert task["runtime"]["metadata"]["container_runtime"] == "docker"
-    assert "reconciliation" not in task
+    assert task["reconciliation"] is None
 
 
 def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
@@ -2075,15 +1804,10 @@ def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
         )
     )
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = json.loads(payload)["tasks"]
+    tasks = payload["tasks"]
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
     assert tasks[0]["status"] == "running"
@@ -2133,23 +1857,17 @@ def test_cmd_status_marks_superseded_manager_record_failed(
         )
     )
 
-    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    payload = asdict(status_cmd.cmd_status(context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    default_tasks = json.loads(payload)["tasks"]
+    default_tasks = payload["tasks"]
     assert [task["tid"] for task in default_tasks] == [active_tid]
     assert default_tasks[0]["status"] == "running"
 
-    exit_code, payload = cmd_status(
-        json_output=True,
-        include_terminal=True,
-        spec_context=root,
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    tasks = {task["tid"]: task for task in json.loads(payload)["tasks"]}
+    tasks = {task["tid"]: task for task in payload["tasks"]}
     old_snapshot = task_cmd.task_status(old_tid, context_path=root)
     assert old_snapshot is not None
     assert tasks[active_tid]["status"] == "running"
@@ -2159,7 +1877,7 @@ def test_cmd_status_marks_superseded_manager_record_failed(
         "superseded_manager_record"
     )
     assert tasks[old_tid]["reconciliation"]["active_manager_tid"] == active_tid
-    assert tasks[old_tid]["last_timestamp"] == str(old_snapshot.last_timestamp)
+    assert tasks[old_tid]["last_timestamp"] == old_snapshot.last_timestamp
 
 
 def test_status_snapshot_preserves_activity_from_latest_log_event(
@@ -2583,13 +2301,10 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     monkeypatch.setattr(host_runner, "pid_is_live", lambda pid: False)
     monkeypatch.setattr(host_runner, "_current_container_runtime", lambda: None)
 
-    exit_code, payload = cmd_status(
-        json_output=True, include_terminal=True, spec_context=root
-    )
+    payload = asdict(status_cmd.cmd_status(all=True, context=root))
 
-    assert exit_code == 0
     assert payload is not None
-    data = json.loads(payload)
+    data = payload
     assert len(data["tasks"]) == 1
     entry = data["tasks"][0]
     assert entry["runtime_handle"]["runner"] == "host"
@@ -2693,11 +2408,10 @@ def test_cmd_status_discovers_parent_context_from_subdirectory(
 
     monkeypatch.chdir(Path(nested))
 
-    exit_code, payload = cmd_status()
+    payload = asdict(status_cmd.cmd_status())
 
-    assert exit_code == 0
     assert payload is not None
-    assert "total_messages: 1" in payload
+    assert payload["broker"]["total_messages"] == 1
 
 
 def test_task_snapshot_collection_tolerates_unexpected_manager_selection_failure(
@@ -2789,69 +2503,21 @@ def test_watch_task_events_uses_queue_monitor(
 
     monkeypatch.setattr(status_cmd, "_iter_log_events", _fake_iter_log_events)
 
-    exit_code = status_cmd._watch_task_events(
-        ctx,
-        tid_filters=None,
-        status_filter=None,
-        json_output=False,
-        interval=0.25,
+    events = status_cmd._iter_public_status_events(
+        ctx, status_filter=None, interval=0.25
     )
+    observed = []
+    with pytest.raises(KeyboardInterrupt):
+        observed.extend(events)
 
     captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "work_completed" in captured.out
+    assert captured.out == ""
+    assert [event.event_type for event in observed] == ["work_completed"]
     assert len(created_monitors) == 1
     assert created_monitors[0].queue_names == ["weft.log.tasks"]
-    assert iter_queue_names == ["weft.log.tasks", "weft.log.tasks"]
-    assert iter_since_timestamps == [0, 0]
+    assert iter_queue_names == ["weft.log.tasks"] * 3
+    assert iter_since_timestamps == [0, 0, 123]
     assert created_monitors[0].wait_calls == [0.25, 0.25]
-
-
-def test_watch_task_events_json_formats_broker_message_id(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = "1844674407370955166"
-    message_id = 1_779_500_000_000_000_001
-    log_iterations = iter(
-        [
-            [
-                (
-                    {
-                        "tid": tid,
-                        "status": "completed",
-                        "event": "work_completed",
-                        "taskspec": {"name": "status-task"},
-                    },
-                    message_id,
-                )
-            ],
-            [],
-        ]
-    )
-
-    monkeypatch.setattr(status_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
-    monkeypatch.setattr(
-        status_cmd,
-        "_iter_log_events",
-        lambda *_args, **_kwargs: next(log_iterations, []),
-    )
-
-    exit_code = status_cmd._watch_task_events(
-        ctx,
-        tid_filters=None,
-        status_filter=None,
-        json_output=True,
-        interval=0.25,
-    )
-
-    captured = capsys.readouterr()
-    assert exit_code == 0
-    assert captured.err == ""
-    assert json.loads(captured.out)["timestamp"] == "1779500000000000001"
 
 
 def test_watch_task_events_reports_unexpected_watch_loop_failure(
@@ -2870,18 +2536,16 @@ def test_watch_task_events_reports_unexpected_watch_loop_failure(
 
     monkeypatch.setattr(status_cmd, "_iter_log_events", _fail_log_read)
 
-    exit_code = status_cmd._watch_task_events(
-        ctx,
-        tid_filters=None,
-        status_filter=None,
-        json_output=False,
-        interval=0.25,
-    )
+    with pytest.raises(CommandExecutionError, match="watch source failed"):
+        next(
+            status_cmd._iter_public_status_events(
+                ctx, status_filter=None, interval=0.25
+            )
+        )
 
     captured = capsys.readouterr()
-    assert exit_code == 1
     assert captured.out == ""
-    assert captured.err == "weft: status watch failed: watch source failed\n"
+    assert captured.err == ""
 
 
 def test_cmd_status_reports_unexpected_status_source_failure(
@@ -2898,7 +2562,5 @@ def test_cmd_status_reports_unexpected_status_source_failure(
 
     monkeypatch.setattr(status_cmd, "collect_broker_status", _fail_broker_status)
 
-    exit_code, payload = cmd_status(spec_context=root)
-
-    assert exit_code == 1
-    assert payload == "weft: failed to retrieve status: status source failed"
+    with pytest.raises(CommandExecutionError, match="status source failed"):
+        status_cmd.cmd_status(context=root)

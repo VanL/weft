@@ -13,17 +13,14 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, cast
 
-from simplebroker import Queue, format_message_id
+from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
@@ -33,6 +30,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     LIVE_SERVICE_STATUSES,
     NON_LIVE_RUNTIME_STATES,
+    RUNNER_DIAGNOSTICS_FIELD,
     SERVICE_STATUS_STOPPED,
     SERVICE_STATUS_SUPERSEDED,
     SERVICE_STATUS_TERMINAL,
@@ -40,8 +38,6 @@ from weft._constants import (
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     STATUS_WATCH_MIN_INTERVAL,
     TERMINAL_TASK_STATUSES,
-    WALL_CLOCK_TASK_LAST_TIMESTAMP_CLASSIFICATIONS,
-    WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS,
     WEFT_CONTEXT_ENV,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
@@ -50,7 +46,6 @@ from weft._constants import (
 )
 from weft._exceptions import CommandError, CommandExecutionError, CommandUsageError
 from weft.commands.manager import (
-    _manager_record_to_json,
     _manager_snapshot,
 )
 from weft.commands.types import (
@@ -75,8 +70,6 @@ from weft.core.service_convergence import (
 from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
-    format_byte_size,
-    format_timestamp_ns_relative,
     handle_has_live_host_process,
     iter_queue_json_entries,
     pid_is_live,
@@ -142,24 +135,6 @@ class BrokerStatusSnapshot:
             "last_timestamp": self.last_timestamp,
             "db_size": self.db_size,
         }
-
-    def to_text(self) -> str:
-        human_size = format_byte_size(self.db_size)
-        relative_ts = format_timestamp_ns_relative(self.last_timestamp)
-
-        timestamp_line = f"last_timestamp: {self.last_timestamp}"
-        if relative_ts:
-            timestamp_line += f" ({relative_ts})"
-
-        size_line = f"db_size: {self.db_size} bytes ({human_size})"
-
-        return "\n".join(
-            (
-                f"total_messages: {self.total_messages}",
-                timestamp_line,
-                size_line,
-            )
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,49 +258,6 @@ def _collect_manager_records(
     )
 
 
-def _format_manager_summary(records: list[dict[str, Any]]) -> str:
-    if not records:
-        return "Managers: none registered"
-
-    lines = ["Managers:"]
-    for record in records:
-        tid = record.get("tid", "?")
-        status = record.get("status", "unknown")
-        role = record.get("role", "manager")
-        runtime_handle = record.get("runtime_handle")
-        requests = record.get("requests", WEFT_SPAWN_REQUESTS_QUEUE)
-        internal_requests = record.get("internal_requests")
-        internal_reserved = record.get("internal_reserved")
-        outbox = record.get("outbox", "")
-        timestamp = _to_int(record.get("timestamp"))
-        relative_ts = format_timestamp_ns_relative(timestamp)
-        ts_line = f"timestamp: {timestamp}"
-        if relative_ts:
-            ts_line += f" ({relative_ts})"
-
-        queue_lines = [
-            f"    requests: {requests}",
-        ]
-        if isinstance(internal_requests, str) and internal_requests:
-            queue_lines.append(f"    internal_requests: {internal_requests}")
-        if isinstance(internal_reserved, str) and internal_reserved:
-            queue_lines.append(f"    internal_reserved: {internal_reserved}")
-        queue_lines.append(f"    outbox: {outbox}")
-
-        lines.extend(
-            [
-                f"  - tid: {tid}",
-                f"    role: {role}",
-                f"    status: {status}",
-                f"    runtime: {json.dumps(runtime_handle, sort_keys=True) if isinstance(runtime_handle, dict) else 'n/a'}",
-                *queue_lines,
-                f"    {ts_line}",
-            ]
-        )
-
-    return "\n".join(lines)
-
-
 def _read_tid_mappings(ctx: WeftContext) -> dict[str, list[str]]:
     """Group valid newest mappings by derived short form [CLI-1.2.3]."""
     mapping: dict[str, list[str]] = {}
@@ -404,27 +336,6 @@ def _iter_log_events(
                 yield payload, int(timestamp)
 
     return _generator()
-
-
-def _format_timestamp(ts: int | None) -> str:
-    if not ts:
-        return "-"
-    dt = datetime.fromtimestamp(ts / 1_000_000_000, tz=UTC)
-    return dt.isoformat().replace("+00:00", "Z")
-
-
-def _format_duration(seconds: float | None) -> str:
-    if seconds is None:
-        return "-"
-    if seconds < 1:
-        return f"{seconds:.3f}s"
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    minutes, secs = divmod(seconds, 60.0)
-    if minutes < 60:
-        return f"{int(minutes)}m{secs:04.1f}s"
-    hours, minutes = divmod(minutes, 60.0)
-    return f"{int(hours)}h{int(minutes):02}m"
 
 
 def _runtime_handle_from_mapping(entry: Mapping[str, Any]) -> RunnerHandle | None:
@@ -1404,7 +1315,7 @@ def collect_known_tid_snapshot(
 ) -> TaskSnapshot | None:
     """Return one full-TID diagnostic snapshot using bounded task-log replay."""
 
-    if not tid.isascii() or not tid.isdecimal() or len(tid) != 19:
+    if not tid.isdigit() or len(tid) != 19:
         return None
     records = _collect_task_snapshot_records(
         ctx,
@@ -1419,297 +1330,6 @@ def collect_known_tid_snapshot(
             tid_filters={tid},
         )
     return records[0].snapshot if records else None
-
-
-def _format_task_summary(snapshots: Sequence[TaskSnapshot]) -> str:
-    if not snapshots:
-        return "Tasks: none"
-
-    headers = (
-        "TID",
-        "STATUS",
-        "ACTIVITY",
-        "RUNNER",
-        "NAME",
-        "STARTED",
-        "DURATION",
-        "EVENT",
-    )
-    lines = [
-        "Tasks:",
-        "  {:<19} {:<10} {:<12} {:<14} {:<20} {:<20} {:<10} {}".format(*headers),
-    ]
-    for snap in snapshots:
-        lines.append(
-            f"  {snap.tid:<19} {snap.status:<10} {(snap.activity or '-'): <12} {(snap.runner or '-'):<14} {snap.name[:20]:<20} {_format_timestamp(snap.started_at):<20} {_format_duration(snap.duration_seconds):<10} {snap.event}"
-        )
-    return "\n".join(lines)
-
-
-def _format_service_summary(snapshots: Sequence[ServiceSnapshot]) -> str:
-    if not snapshots:
-        return "Services: none"
-
-    lines = ["Services:"]
-    for snap in snapshots:
-        parts = [f"  {snap.name:<18}", f"{snap.status:<10}"]
-        if snap.tid is not None:
-            parts.append(f"tid={snap.tid}")
-        parts.append(f"evidence={snap.evidence}")
-        diagnostics = snap.diagnostics or {}
-        task_monitor = diagnostics.get("task_monitor")
-        if isinstance(task_monitor, Mapping):
-            external = task_monitor.get("task_log_external")
-            if isinstance(external, Mapping):
-                if external.get("healthy") is False:
-                    parts.append("warning=external-log-unhealthy")
-                pending = external.get("deferred_pending")
-                if isinstance(pending, int) and pending > 0:
-                    parts.append("warning=deferred-writes-pending")
-                    parts.append(f"deferred_writes={pending}")
-        if snap.queue is not None:
-            parts.append(f"queue={snap.queue}")
-        lines.append(" ".join(parts))
-    return "\n".join(lines)
-
-
-def _service_snapshot_to_dict(snapshot: ServiceSnapshot) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "key": snapshot.key,
-        "name": snapshot.name,
-        "desired": snapshot.desired,
-        "enabled": snapshot.enabled,
-        "status": snapshot.status,
-        "evidence": snapshot.evidence,
-        "tid": snapshot.tid,
-        "manager_tid": snapshot.manager_tid,
-        "queue": snapshot.queue,
-        "pid": snapshot.pid,
-        "updated_at": (
-            format_message_id(snapshot.updated_at)
-            if snapshot.updated_at is not None
-            else None
-        ),
-    }
-    if snapshot.reconciliation is not None:
-        payload["reconciliation"] = snapshot.reconciliation
-    if snapshot.diagnostics is not None:
-        payload["diagnostics"] = snapshot.diagnostics
-    return payload
-
-
-def _task_snapshot_to_json_dict(snapshot: TaskSnapshot) -> dict[str, Any]:
-    """Project broker-backed task identity fields for external JSON."""
-
-    payload = snapshot.to_dict()
-    reconciliation = payload.get("reconciliation")
-    classification = (
-        reconciliation.get("classification")
-        if isinstance(reconciliation, dict)
-        else None
-    )
-    last_timestamp_is_broker_backed = (
-        classification not in WALL_CLOCK_TASK_LAST_TIMESTAMP_CLASSIFICATIONS
-        and snapshot.event not in WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS
-    )
-    last_timestamp = payload.get("last_timestamp")
-    if (
-        last_timestamp_is_broker_backed
-        and isinstance(last_timestamp, int)
-        and not isinstance(last_timestamp, bool)
-        and last_timestamp > 0
-    ):
-        payload["last_timestamp"] = format_message_id(last_timestamp)
-
-    if (
-        classification in BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS
-        and isinstance(reconciliation, dict)
-    ):
-        projected_reconciliation = dict(reconciliation)
-        observed_at = projected_reconciliation.get("observed_at")
-        if isinstance(observed_at, int) and not isinstance(observed_at, bool):
-            projected_reconciliation["observed_at"] = format_message_id(observed_at)
-        payload["reconciliation"] = projected_reconciliation
-    return payload
-
-
-def _render_json_payload(
-    broker: BrokerStatusSnapshot,
-    managers: list[dict[str, Any]],
-    services: Sequence[ServiceSnapshot],
-    tasks: Sequence[TaskSnapshot],
-) -> str:
-    broker_payload: dict[str, Any] = broker.to_dict()
-    if broker.last_timestamp is not None:
-        broker_payload["last_timestamp"] = format_message_id(broker.last_timestamp)
-    payload = {
-        "broker": broker_payload,
-        "managers": [_manager_record_to_json(record) for record in managers],
-        "services": [_service_snapshot_to_dict(snap) for snap in services],
-        "tasks": [_task_snapshot_to_json_dict(snap) for snap in tasks],
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _watch_task_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-119] exception
-    ctx: WeftContext,
-    *,
-    tid_filters: set[str] | None,
-    status_filter: str | None,
-    json_output: bool,
-    interval: float,
-) -> int:
-    """Tail the global log queue for live state-change events.
-
-    Spec: [MF-5]
-    """
-    last_timestamp = 0
-    queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
-    monitor: QueueChangeMonitor | None = None
-    try:
-        monitor = QueueChangeMonitor([queue], config=ctx.config)
-        while True:
-            emitted = False
-            for payload, timestamp in _iter_log_events(
-                queue,
-                since_timestamp=last_timestamp,
-            ):
-                if timestamp <= last_timestamp:
-                    continue
-                tid = payload.get("tid")
-                if not isinstance(tid, str):
-                    continue
-                try:
-                    short_tid = tid_short_form(tid)
-                except ValueError:
-                    continue
-                if (
-                    tid_filters is not None
-                    and tid not in tid_filters
-                    and short_tid not in tid_filters
-                ):
-                    continue
-
-                taskspec = payload.get("taskspec") or {}
-                name = taskspec.get("name") or payload.get("name") or tid
-                status = payload.get("status") or taskspec.get("state", {}).get(
-                    "status"
-                )
-                if status_filter and status != status_filter:
-                    continue
-                event = payload.get("event") or "event"
-                record = {
-                    "timestamp": format_message_id(timestamp),
-                    "tid": tid,
-                    "tid_short": short_tid,
-                    "status": status,
-                    "event": event,
-                    "name": name,
-                }
-                if json_output:
-                    print(json.dumps(record, ensure_ascii=False))
-                else:
-                    ts_text = _format_timestamp(timestamp)
-                    print(
-                        f"{ts_text} {tid:<19} {status or 'unknown':<10} {event:<16} {name}",
-                        flush=True,
-                    )
-                emitted = True
-                last_timestamp = max(last_timestamp, timestamp)
-
-            if json_output and emitted:
-                sys.stdout.flush()
-            monitor.wait(max(STATUS_WATCH_MIN_INTERVAL, interval))
-    except KeyboardInterrupt:
-        return 0
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-336] exception
-        print(f"weft: status watch failed: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        if monitor is not None:
-            monitor.close()
-        queue.close()
-
-
-def _legacy_cmd_status(
-    *,
-    tid: str | None = None,
-    include_terminal: bool = False,
-    status_filter: str | None = None,
-    json_output: bool = False,
-    watch: bool = False,
-    watch_interval: float = 1.0,
-    spec_context: str | os.PathLike[str] | None = None,
-) -> tuple[int, str | None]:
-    """Broker status snapshot with optional task filtering.
-
-    Spec: [CLI-1.2.1]
-    """
-    try:
-        context = _resolve_context(spec_context)
-        tid_filters = _resolve_tid_filters(context, tid)
-        broker_snapshot = collect_broker_status(context)
-        managers = _collect_manager_records(context, include_stopped=include_terminal)
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-337] exception
-        return 1, f"weft: failed to retrieve status: {exc}"
-
-    if watch:
-        exit_code = _watch_task_events(
-            context,
-            tid_filters=tid_filters,
-            status_filter=status_filter,
-            json_output=json_output,
-            interval=watch_interval,
-        )
-        return exit_code, None
-
-    now_ns = time.time_ns()
-    service_registry_evidence = tuple(
-        _collect_service_registry_evidence(context, now_ns=now_ns)
-    )
-    all_task_records = _collect_task_snapshot_records(
-        context,
-        include_terminal=True,
-        tid_filters=tid_filters,
-        now_ns=now_ns,
-        service_registry_evidence=service_registry_evidence,
-    )
-    task_records = (
-        all_task_records
-        if include_terminal
-        else [
-            record
-            for record in all_task_records
-            if record.snapshot.status not in TERMINAL_TASK_STATUSES
-        ]
-    )
-    tasks = [record.snapshot for record in task_records]
-    services = _collect_internal_service_snapshots(
-        context,
-        managers=managers,
-        task_records=all_task_records,
-        now_ns=now_ns,
-        service_registry_evidence=service_registry_evidence,
-    )
-    if status_filter:
-        tasks = [snap for snap in tasks if snap.status == status_filter]
-
-    if tid and not tasks:
-        return 2, f"weft: task {tid} not found"
-
-    if json_output:
-        payload = _render_json_payload(broker_snapshot, managers, services, tasks)
-    else:
-        payload = "\n".join(
-            (
-                broker_snapshot.to_text(),
-                _format_manager_summary(managers),
-                _format_service_summary(services),
-                _format_task_summary(tasks),
-            )
-        )
-
-    return 0, payload
 
 
 def _public_status_event(
@@ -1929,8 +1549,8 @@ def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
             else None
         ),
         runner_diagnostics=(
-            dict(payload["runner_diagnostics"])
-            if isinstance(payload.get("runner_diagnostics"), dict)
+            dict(payload[RUNNER_DIAGNOSTICS_FIELD])
+            if isinstance(payload.get(RUNNER_DIAGNOSTICS_FIELD), dict)
             else None
         ),
     )

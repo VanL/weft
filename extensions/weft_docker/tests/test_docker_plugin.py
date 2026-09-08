@@ -231,7 +231,6 @@ def test_docker_plugin_registers_runtime_liveness_probes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
-    monkeypatch.setattr(plugin, "_liveness_probes_registered", False)
 
     get_runner_plugin()
 
@@ -1114,7 +1113,7 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
         limits=None,
         monitor_class=None,
         monitor_interval=0.01,
-        runner_options={"image": "busybox:latest"},
+        options=plugin._parse_command_options({"image": "busybox:latest"}),
     )
 
     outcome = runner.run_with_hooks({})
@@ -1136,11 +1135,13 @@ def test_command_runner_uses_container_workdir_without_mounting_host_workdir(
         limits=None,
         monitor_class=None,
         monitor_interval=0.01,
-        runner_options={
-            "image": "busybox:latest",
-            "mount_workdir": False,
-            "container_workdir": "/app/project",
-        },
+        options=plugin._parse_command_options(
+            {
+                "image": "busybox:latest",
+                "mount_workdir": False,
+                "container_workdir": "/app/project",
+            }
+        ),
     )
 
     command, stdin_data = runner._build_docker_command(
@@ -1169,11 +1170,13 @@ def test_command_runner_avoids_duplicate_workdir_when_mounting_host_workdir(
         limits=None,
         monitor_class=None,
         monitor_interval=0.01,
-        runner_options={
-            "image": "busybox:latest",
-            "mount_workdir": True,
-            "container_workdir": "/app/project",
-        },
+        options=plugin._parse_command_options(
+            {
+                "image": "busybox:latest",
+                "mount_workdir": True,
+                "container_workdir": "/app/project",
+            }
+        ),
     )
 
     command, _stdin_data = runner._build_docker_command(
@@ -1454,7 +1457,7 @@ def test_command_runner_cleans_up_container_when_runtime_start_fails(
         limits=None,
         monitor_class=None,
         monitor_interval=0.01,
-        runner_options={"image": "busybox:latest"},
+        options=plugin._parse_command_options({"image": "busybox:latest"}),
     )
 
     with pytest.raises(RuntimeError, match="startup failed"):
@@ -1463,3 +1466,126 @@ def test_command_runner_cleans_up_container_when_runtime_start_fails(
     assert fake_process.killed is True
     assert fake_process.wait_timeout == 1.0
     assert removed == [(fake_client, "weft-cleanup-test")]
+
+
+def test_factory_restores_replaced_liveness_registry(monkeypatch) -> None:
+    monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
+    get_runner_plugin()
+    liveness_registry.register_runtime_liveness_probe(
+        "docker", lambda handle, budget: "unknown"
+    )
+    replaced = liveness_registry._runtime_liveness_probes["docker"]
+    get_runner_plugin()
+    assert liveness_registry._runtime_liveness_probes["docker"] is not replaced
+
+
+@pytest.mark.parametrize(
+    "state,expected", [(True, "live"), (False, "stale"), (None, "unknown")]
+)
+def test_alias_routed_docker_liveness_classifies_container_evidence(
+    monkeypatch, state, expected
+) -> None:
+    monkeypatch.setattr(plugin, "_load_docker_sdk", lambda: None)
+    monkeypatch.setattr(plugin, "_docker_client", lambda timeout: _fake_docker_client())
+    monkeypatch.setattr(
+        plugin,
+        "_lookup_container",
+        lambda *args, **kwargs: _FakeContainer(running=state),
+    )
+    monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
+    liveness_registry.register_runtime_liveness_probe(
+        "docker", plugin._docker_runtime_liveness
+    )
+    handle = RunnerHandle(
+        runner="alias",
+        control={"authority": "runner"},
+        kind="container",
+        id="docker:alias-container",
+        observations={"liveness_provider": "docker"},
+    )
+    assert liveness_registry.runtime_liveness_from_registered_probe(handle) == expected
+
+
+def _create_command_runner_for_validation(runner_plugin, options, **overrides):
+    kwargs = {
+        "target_type": "command",
+        "tid": "1770000000000000001",
+        "function_target": None,
+        "process_target": "echo",
+        "agent": None,
+        "args": [],
+        "kwargs": {},
+        "env": {},
+        "working_dir": None,
+        "timeout": None,
+        "limits": None,
+        "monitor_class": None,
+        "monitor_interval": None,
+        "runner_options": options,
+        "bundle_root": None,
+        "persistent": False,
+        "interactive": False,
+    }
+    kwargs.update(overrides)
+    return runner_plugin.create_runner(**kwargs)
+
+
+def test_profile_conflict_has_same_error_in_validation_and_creation(tmp_path):
+    profile = tmp_path / "docker-profiles.toml"
+    profile.write_text(
+        'version = 1\n[profiles.ops]\nimage = "busybox"\n[profiles.ops.build]\ncontext = "."\n'
+    )
+    options = {"container_profile": "ops", "container_profile_file": str(profile)}
+    runner_plugin = get_runner_plugin()
+    with pytest.raises(ValueError) as validated:
+        runner_plugin.validate_taskspec(
+            {"spec": {"type": "command", "runner": {"options": options}}}
+        )
+    with pytest.raises(ValueError) as created:
+        _create_command_runner_for_validation(runner_plugin, options)
+    assert str(created.value) == str(validated.value)
+    assert "profile 'ops'" in str(created.value)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"image": "busybox", "build": {"context": "."}},
+        {"image": "busybox", "work_item_mounts": []},
+        {"image": "busybox", "docker_args": "bad"},
+        {"image": "busybox", "mounts": "bad"},
+        {"image": "busybox", "network": 42},
+    ],
+)
+def test_docker_option_rejections_match_validate_create_sequence(options):
+    runner_plugin = get_runner_plugin()
+    with pytest.raises(ValueError) as validated:
+        runner_plugin.validate_taskspec(
+            {"spec": {"type": "command", "runner": {"options": options}}}
+        )
+    with pytest.raises(ValueError) as created:
+        _create_command_runner_for_validation(runner_plugin, options)
+    assert str(created.value) == str(validated.value)
+
+
+@pytest.mark.parametrize("capability", ["persistent", "interactive"])
+def test_docker_preserves_direct_create_capability_behavior(capability):
+    runner_plugin = get_runner_plugin()
+    options = {"image": "busybox"}
+    with pytest.raises(ValueError, match=capability):
+        runner_plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "command",
+                    capability: True,
+                    "runner": {"options": options},
+                }
+            }
+        )
+    assert (
+        _create_command_runner_for_validation(
+            runner_plugin, options, **{capability: True}
+        )
+        is not None
+    )

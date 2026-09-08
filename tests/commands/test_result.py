@@ -31,9 +31,7 @@ from weft.commands.result import (
     _load_taskspec_payload,
     await_one_shot_result,
     await_task_result,
-)
-from weft.commands.result import (
-    _legacy_cmd_result as cmd_result,
+    cmd_result,
 )
 from weft.commands.types import TaskEvent, TaskResult
 from weft.context import build_context
@@ -278,12 +276,11 @@ def test_collect_all_results_reports_backend_queue_enumeration_failure() -> None
         def broker(self) -> FailingBroker:
             return FailingBroker()
 
-    assert result_cmd._collect_all_results(  # type: ignore[arg-type]
-        FakeContext(),
-        json_output=False,
-        show_stderr=False,
-        peek_only=False,
-    ) == (1, f"weft: failed to enumerate queues: {error}")
+    with pytest.raises(
+        CommandExecutionError, match="failed to enumerate task results"
+    ) as exc_info:
+        result_cmd._collect_all_task_results(FakeContext(), peek=False)  # type: ignore[arg-type]
+    assert exc_info.value.__cause__ is error
 
 
 @pytest.mark.parametrize("raw_tid", ["123", "T123", " T123 "])
@@ -302,18 +299,10 @@ def test_cmd_result_reports_ordinary_context_resolution_failure(
 
     monkeypatch.setattr(result_cmd, "build_context", fail_context)
 
-    result = cmd_result(
-        tid="1777000000000000789",
-        all_results=False,
-        peek=False,
-        timeout=None,
-        stream=False,
-        json_output=False,
-        show_stderr=False,
-        context_path="ignored",
-    )
-
-    assert result == (1, "weft: failed to resolve context: context detail")
+    with pytest.raises(
+        CommandExecutionError, match="failed to resolve result context: context detail"
+    ):
+        cmd_result("1777000000000000789", context="ignored")
 
 
 def test_cmd_result_propagates_fatal_context_resolution_signal(
@@ -331,14 +320,7 @@ def test_cmd_result_propagates_fatal_context_resolution_signal(
 
     with pytest.raises(ResultContextSignal) as exc_info:
         cmd_result(
-            tid="1777000000000000789",
-            all_results=False,
-            peek=False,
-            timeout=None,
-            stream=False,
-            json_output=False,
-            show_stderr=False,
-            context_path="ignored",
+            tid="1777000000000000789", peek=False, timeout=None, context="ignored"
         )
 
     assert exc_info.value is signal
@@ -790,38 +772,20 @@ def test_cmd_result_reports_failed_task_without_outbox(tmp_path) -> None:
         )
     )
 
-    exit_code, payload = cmd_result(
-        tid=tid,
-        all_results=False,
-        peek=False,
-        timeout=0.1,
-        stream=False,
-        json_output=False,
-        show_stderr=False,
-        context_path=str(root),
-    )
+    result = cmd_result(tid=tid, peek=False, timeout=0.1, context=str(root))
 
-    assert exit_code == 1
-    assert payload == "intentional failure"
+    assert result.status == "failed"
+    assert result.error == "intentional failure"
 
 
 def test_cmd_result_zero_timeout_reports_materialization_timeout(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     tid = str(time.time_ns())
 
-    exit_code, payload = cmd_result(
-        tid=tid,
-        all_results=False,
-        peek=False,
-        timeout=0.0,
-        stream=False,
-        json_output=False,
-        show_stderr=False,
-        context_path=str(root),
-    )
-
-    assert exit_code == 124
-    assert payload == f"Timed out after 0.0 seconds waiting for task {tid}"
+    with pytest.raises(
+        CommandTimeoutError, match=f"Timed out after 0.0 seconds waiting for task {tid}"
+    ):
+        cmd_result(tid, timeout=0.0, context=root)
 
 
 def test_await_task_result_zero_timeout_reports_materialization_timeout(
@@ -868,28 +832,18 @@ def test_cmd_result_reports_claimed_outbox_without_waiting(
         outbox_queue.write(json.dumps({"ok": True}))
         assert outbox_queue.read_one() is not None
 
-        exit_code, payload = cmd_result(
-            tid=tid,
-            all_results=False,
-            peek=False,
-            timeout=RESULT_WAIT_TIMEOUT,
-            stream=False,
-            json_output=True,
-            show_stderr=False,
-            context_path=str(root),
+        result = cmd_result(
+            tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
         )
     finally:
         outbox_queue.close()
         log_queue.close()
 
-    assert exit_code == 1
-    assert payload is not None
-    data = json.loads(payload)
-    assert data["tid"] == tid
-    assert data["status"] == "failed"
-    assert data["result"] is None
-    assert "claimed" in data["error"]
-    assert data["reconciliation"]["classification"] == (
+    assert result.tid == tid
+    assert result.status == "failed"
+    assert result.value is None
+    assert "claimed" in result.error
+    assert result.reconciliation["classification"] == (
         "claimed_result_without_terminal"
     )
 
@@ -1828,22 +1782,18 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
 
     monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _WakeMonitor)
     try:
-        exit_code, payload = cmd_result(
+        result = cmd_result(
             tid=tid,
-            all_results=False,
             peek=False,
             timeout=RESULT_MATERIALIZATION_TEST_TIMEOUT,
-            stream=False,
-            json_output=False,
-            show_stderr=False,
-            context_path=str(root),
+            context=str(root),
         )
     finally:
         outbox_queue.close()
         log_queue.close()
 
-    assert exit_code == 0
-    assert payload == "hello"
+    assert result.status == "completed"
+    assert result.value == "hello"
 
 
 def test_await_single_result_reuses_materialized_batch_boundary_state(
@@ -2037,100 +1987,32 @@ def test_await_single_result_tolerates_late_polled_boundary_timestamp_skew(
 
 
 @pytest.mark.parametrize(
-    (
-        "tid",
-        "all_results",
-        "peek",
-        "timeout",
-        "stream",
-        "json_output",
-        "expected",
-    ),
+    "options,expected",
     [
         (
-            "123",
-            True,
-            True,
-            1.0,
-            True,
-            True,
-            "weft result: task id not expected with --all",
+            {"tid": "123", "all": True, "peek": True, "timeout": 1.0, "stream": True},
+            "task id cannot be used with all",
         ),
         (
-            None,
-            True,
-            True,
-            1.0,
-            True,
-            True,
-            "weft result: --stream cannot be used with --all",
+            {"all": True, "peek": True, "timeout": 1.0, "stream": True},
+            "stream cannot be used with all",
         ),
         (
-            None,
-            True,
-            True,
-            1.0,
-            False,
-            True,
-            "weft result: --timeout is not supported with --all",
+            {"all": True, "peek": True, "timeout": 1.0},
+            "timeout is not supported with all",
         ),
-        (
-            None,
-            False,
-            True,
-            1.0,
-            True,
-            True,
-            "weft result: --peek requires --all",
-        ),
-        (
-            None,
-            False,
-            False,
-            1.0,
-            True,
-            True,
-            "weft result: task id required",
-        ),
-        (
-            "123",
-            False,
-            False,
-            1.0,
-            True,
-            True,
-            "weft result: --stream cannot be used with --json",
-        ),
+        ({"peek": True, "timeout": 1.0, "stream": True}, "peek requires all"),
+        ({"timeout": 1.0, "stream": True}, "task id is required"),
     ],
 )
 def test_cmd_result_reports_conflicting_options_in_precedence_order(
-    tmp_path,
-    tid: str | None,
-    all_results: bool,
-    peek: bool,
-    timeout: float | None,
-    stream: bool,
-    json_output: bool,
-    expected: str,
+    options, expected
 ) -> None:
-    root = prepare_project_root(tmp_path)
-
-    exit_code, payload = cmd_result(
-        tid=tid,
-        all_results=all_results,
-        peek=peek,
-        timeout=timeout,
-        stream=stream,
-        json_output=json_output,
-        show_stderr=False,
-        context_path=str(root),
-    )
-
-    assert exit_code == 2
-    assert payload == expected
+    with pytest.raises(CommandUsageError, match=expected):
+        cmd_result(**options)
 
 
-def test_cmd_result_stream_preserves_error_payload_selection(
+def test_await_task_result_stream_preserves_error_payload_selection(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2147,22 +2029,15 @@ def test_cmd_result_stream_preserves_error_payload_selection(
 
     monkeypatch.setattr(result_cmd, "poll_log_events", _no_log_events)
 
-    exit_code, payload = cmd_result(
-        tid=tid,
-        all_results=False,
-        peek=False,
-        timeout=0.0,
-        stream=True,
-        json_output=False,
-        show_stderr=True,
-        context_path=str(root),
+    result = await_task_result(
+        ctx, tid, timeout=0.0, show_stderr=True, emit_stream=True
     )
 
-    assert exit_code == 0
-    assert payload == "err"
+    assert result.status == "completed"
+    assert result.value == "err"
 
 
-def test_cmd_result_stream_reuses_materialized_completion_state(
+def test_await_task_result_stream_reuses_materialized_completion_state(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2185,19 +2060,12 @@ def test_cmd_result_stream_reuses_materialized_completion_state(
         lambda *_args, **_kwargs: materialized,
     )
 
-    exit_code, payload = cmd_result(
-        tid=tid,
-        all_results=False,
-        peek=False,
-        timeout=RESULT_WAIT_TIMEOUT,
-        stream=True,
-        json_output=False,
-        show_stderr=True,
-        context_path=str(root),
+    result = await_task_result(
+        ctx, tid, timeout=RESULT_WAIT_TIMEOUT, show_stderr=True, emit_stream=True
     )
 
-    assert exit_code == 0
-    assert payload == "err"
+    assert result.status == "completed"
+    assert result.value == "err"
 
 
 def test_await_result_materialization_waits_for_taskspec_after_activity_event(
@@ -2334,19 +2202,12 @@ def test_cmd_result_passes_materialized_state_to_result_wait(
         lambda *args, **kwargs: captured.update(kwargs) or ("completed", "err", None),
     )
 
-    exit_code, payload = cmd_result(
-        tid=tid,
-        all_results=False,
-        peek=False,
-        timeout=RESULT_WAIT_TIMEOUT,
-        stream=True,
-        json_output=False,
-        show_stderr=True,
-        context_path=str(root),
+    result = cmd_result(
+        tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
     )
 
-    assert exit_code == 0
-    assert payload == "err"
+    assert result.status == "completed"
+    assert result.value == "err"
     assert captured["taskspec_payload"] is None
     assert captured["outbox_name"] == materialized.outbox_name
     assert captured["ctrl_out_name"] == materialized.ctrl_out_name
@@ -2380,19 +2241,12 @@ def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path) -> None:
         )
     )
 
-    exit_code, payload = cmd_result(
-        tid=tid,
-        all_results=False,
-        peek=False,
-        timeout=RESULT_WAIT_TIMEOUT,
-        stream=False,
-        json_output=False,
-        show_stderr=False,
-        context_path=str(root),
+    result = cmd_result(
+        tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
     )
 
-    assert exit_code == 0
-    assert payload == "pipeline-result"
+    assert result.status == "completed"
+    assert result.value == "pipeline-result"
     retained_status = status_queue.peek_one()
     assert retained_status is not None
     assert json.loads(retained_status)["type"] == "pipeline_status"

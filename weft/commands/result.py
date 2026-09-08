@@ -7,7 +7,6 @@ Spec references:
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -17,7 +16,6 @@ from typing import Any, cast
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    FAILURE_LIKE_TASK_STATUSES,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -345,26 +343,6 @@ def _active_streaming_queues(context: WeftContext) -> set[str]:
     return active
 
 
-def _iter_queue_messages(queue: Queue, *, peek: bool) -> Iterator[str]:
-    if peek:
-        iterator = queue.peek_generator()
-        with closing_queue_iterator(iterator) as rows:
-            for peek_item in rows:
-                if isinstance(peek_item, tuple):
-                    yield str(peek_item[0])
-                else:
-                    yield str(peek_item)
-    else:
-        while True:
-            next_item = queue.read_one()
-            if next_item is None:
-                break
-            if isinstance(next_item, tuple):
-                yield str(next_item[0])
-            else:
-                yield str(next_item)
-
-
 def _is_persistent_task(taskspec_payload: dict[str, Any] | None) -> bool:
     """Return ``True`` when the loaded TaskSpec payload is persistent."""
     if not isinstance(taskspec_payload, dict):
@@ -436,58 +414,6 @@ def _resolve_persistent_result_boundary(
     if not completion_timestamps:
         return None
     return _latest_visible_outbox_timestamp(outbox_queue) or first_pending_timestamp
-
-
-def _collect_all_results(
-    context: WeftContext,
-    *,
-    json_output: bool,
-    show_stderr: bool,
-    peek_only: bool,
-) -> tuple[int, str | None]:
-    """Aggregate results from completed task outboxes (Spec: [CLI-1.1.1])."""
-    with context.broker() as db:
-        try:
-            queue_names = db.list_queues(pattern=f"T*.{QUEUE_OUTBOX_SUFFIX}")
-        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-309] exception
-            return 1, f"weft: failed to enumerate queues: {exc}"
-
-    outbox_names = [str(name) for name in queue_names]
-
-    streaming = _active_streaming_queues(context)
-
-    aggregated: list[dict[str, Any]] = []
-    for name in outbox_names:
-        if name in streaming:
-            continue
-        tid = name.split(".", 1)[0][1:]
-        queue = context.queue(name, persistent=True)
-        try:
-            stream_buffer: list[str] = []
-            result_values: list[Any] = []
-            for payload in _iter_queue_messages(queue, peek=peek_only):
-                final, value = process_outbox_message(
-                    payload,
-                    stream_buffer,
-                    emit_stream=False,
-                )
-                if not final or value is None:
-                    continue
-                append_public_value(result_values, value, show_stderr=show_stderr)
-            rendered = aggregate_public_outputs(result_values)
-            if rendered is not None:
-                aggregated.append({"tid": tid, "result": rendered})
-        finally:
-            queue.close()
-
-    if json_output:
-        return 0, json.dumps({"results": aggregated}, ensure_ascii=False)
-
-    if not aggregated:
-        return 0, ""
-
-    lines = [f"{item['tid']}: {item['result']}" for item in aggregated]
-    return 0, "\n".join(lines)
 
 
 def _await_single_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-109] exception
@@ -836,6 +762,7 @@ def await_task_result(
             stdout=None,
             stderr=None,
             error=claimed_evidence.error,
+            reconciliation=claimed_evidence.reconciliation,
         )
 
     remaining_timeout = timeout
@@ -866,172 +793,6 @@ def await_task_result(
         stdout=stdout,
         stderr=stderr,
         error=error_message,
-    )
-
-
-def _result_request_error(
-    *,
-    tid: str | None,
-    all_results: bool,
-    peek: bool,
-    timeout: float | None,
-    stream: bool,
-    json_output: bool,
-) -> str | None:
-    """Return the first static result-option validation error."""
-    if all_results:
-        if tid is not None:
-            return "weft result: task id not expected with --all"
-        if stream:
-            return "weft result: --stream cannot be used with --all"
-        if timeout:
-            return "weft result: --timeout is not supported with --all"
-        return None
-    if peek:
-        return "weft result: --peek requires --all"
-    if tid is None:
-        return "weft result: task id required"
-    if stream and json_output:
-        return "weft result: --stream cannot be used with --json"
-    return None
-
-
-def _claimed_result_response(
-    tid: str,
-    evidence: task_evidence.TaskEvidenceSnapshot,
-    *,
-    json_output: bool,
-) -> tuple[int, str]:
-    """Render claimed-result recovery evidence for the command interface."""
-    claimed_error = evidence.error or (
-        f"weft result: task {tid} result output is claimed and requires recovery"
-    )
-    if not json_output:
-        return 1, claimed_error
-    json_payload = {
-        "tid": tid,
-        "status": evidence.status,
-        "result": None,
-        "error": claimed_error,
-        "reconciliation": evidence.reconciliation,
-    }
-    return 1, json.dumps(json_payload, ensure_ascii=False)
-
-
-def _single_result_response(
-    tid: str,
-    status: str,
-    value: Any,
-    error_message: str | None,
-    *,
-    json_output: bool,
-) -> tuple[int, str]:
-    """Render one completed or terminal result for the command interface."""
-    if status == "completed":
-        if json_output:
-            json_payload = {"tid": tid, "status": status, "result": value}
-            return 0, json.dumps(json_payload, ensure_ascii=False)
-        if value is None:
-            return 0, ""
-        if isinstance(value, (dict, list)):
-            return 0, json.dumps(value, ensure_ascii=False)
-        return 0, str(value)
-    if status == "timeout":
-        return 124, error_message or f"weft result: timed out waiting for task {tid}"
-    if status in FAILURE_LIKE_TASK_STATUSES:
-        return 1, error_message or f"weft result: task {tid} failed"
-    return 2, f"weft result: task {tid} not found"
-
-
-def _legacy_cmd_result(
-    *,
-    tid: str | None,
-    all_results: bool,
-    peek: bool,
-    timeout: float | None,
-    stream: bool,
-    json_output: bool,
-    show_stderr: bool,
-    context_path: str | None,
-) -> tuple[int, str | None]:
-    try:
-        context = build_context(spec_context=context_path)
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-353] exception
-        return 1, f"weft: failed to resolve context: {exc}"
-
-    request_error = _result_request_error(
-        tid=tid,
-        all_results=all_results,
-        peek=peek,
-        timeout=timeout,
-        stream=stream,
-        json_output=json_output,
-    )
-    if request_error is not None:
-        return 2, request_error
-    if all_results:
-        exit_code, payload = _collect_all_results(
-            context,
-            json_output=json_output,
-            show_stderr=show_stderr,
-            peek_only=peek,
-        )
-        return exit_code, payload
-
-    try:
-        full_tid = _normalize_tid(cast(str, tid))
-    except ValueError as exc:
-        return 2, f"weft result: {exc}"
-
-    start_monotonic = time.monotonic()
-    materialized = _await_result_materialization(
-        context,
-        full_tid,
-        timeout=timeout,
-    )
-    if materialized is None:
-        if timeout is not None:
-            return 124, f"Timed out after {timeout} seconds waiting for task {full_tid}"
-        return 2, f"weft result: no outbox queue for task {full_tid}"
-
-    claimed_evidence = _claimed_result_blockage(context, full_tid, materialized)
-    if claimed_evidence is not None:
-        return _claimed_result_response(
-            full_tid,
-            claimed_evidence,
-            json_output=json_output,
-        )
-
-    remaining_timeout = timeout
-    if timeout is not None and timeout > 0:
-        elapsed = time.monotonic() - start_monotonic
-        remaining_timeout = max(0.0, timeout - elapsed)
-
-    try:
-        status, value, error_message = _await_single_result(
-            context,
-            full_tid,
-            timeout=remaining_timeout,
-            show_stderr=show_stderr,
-            emit_stream=stream,
-            taskspec_payload=materialized.taskspec_payload,
-            outbox_name=materialized.outbox_name,
-            ctrl_out_name=materialized.ctrl_out_name,
-            initial_log_last_timestamp=materialized.log_last_timestamp,
-            initial_terminal_status=materialized.terminal_status,
-            initial_terminal_error_message=materialized.terminal_error_message,
-            initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
-            initial_result_surface_had_activity=materialized.result_surface_had_activity,
-        )
-    except CommandTimeoutError as exc:
-        return 124, str(exc)
-
-    return _single_result_response(
-        full_tid,
-        status,
-        value,
-        error_message,
-        json_output=json_output,
     )
 
 

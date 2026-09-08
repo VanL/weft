@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -108,6 +109,64 @@ class DockerContainerMonitor:
         return _lookup_container(client, self._runtime_id)
 
 
+@dataclass(frozen=True, slots=True)
+class _DockerCommandOptions:
+    image: str | None
+    build: dict[str, Any] | None
+    docker_binary: str
+    docker_args: list[str]
+    container_workdir: str | None
+    mount_workdir: bool
+    network: str | None
+    mounts: list[dict[str, Any]]
+
+
+def _parse_command_options(
+    options: Mapping[str, Any],
+    *,
+    profile: MaterializedContainerProfile | None = None,
+) -> _DockerCommandOptions:
+    """Parse command options once per validation or construction [TS-1.3]."""
+    image = options.get("image")
+    build = options.get("build")
+    normalized_build = (
+        _normalize_build_options(build, name="spec.runner.options.build")
+        if build is not None
+        else None
+    )
+    normalized_image = (
+        image.strip() if isinstance(image, str) and image.strip() else None
+    )
+    if (normalized_image is None) == (normalized_build is None):
+        raise ValueError(
+            _image_build_conflict_message(
+                profile if normalized_image is not None else None
+            )
+        )
+    if options.get("work_item_mounts") is not None:
+        raise ValueError(
+            "Docker command tasks do not accept spec.runner.options.work_item_mounts"
+        )
+    return _DockerCommandOptions(
+        image=normalized_image,
+        build=normalized_build,
+        docker_binary=str(options.get("docker_binary") or "docker"),
+        docker_args=_string_list(
+            options.get("docker_args"), name="spec.runner.options.docker_args"
+        ),
+        container_workdir=str(options["container_workdir"])
+        if options.get("container_workdir") is not None
+        else None,
+        mount_workdir=bool(options.get("mount_workdir", True)),
+        network=_normalize_optional_text(
+            options.get("network"), name="spec.runner.options.network"
+        ),
+        mounts=_normalize_mounts(
+            options.get("mounts"), name="spec.runner.options.mounts"
+        ),
+    )
+
+
 class DockerCommandRunner:
     """One-shot command runner that executes inside Docker."""
 
@@ -123,38 +182,11 @@ class DockerCommandRunner:
         limits: Any | None,
         monitor_class: str | None,
         monitor_interval: float | None,
-        runner_options: Mapping[str, Any] | None,
+        options: _DockerCommandOptions,
     ) -> None:
         del monitor_class
         if not isinstance(process_target, str) or not process_target.strip():
             raise ValueError("Docker runner requires spec.process_target")
-
-        options = dict(runner_options or {})
-        image = options.get("image")
-        build = options.get("build")
-        normalized_build = (
-            _normalize_build_options(build, name="spec.runner.options.build")
-            if build is not None
-            else None
-        )
-        normalized_image = (
-            image.strip() if isinstance(image, str) and image.strip() else None
-        )
-        if normalized_image is None and normalized_build is None:
-            raise ValueError(
-                "Docker runner requires exactly one of spec.runner.options.image "
-                "or spec.runner.options.build"
-            )
-        if normalized_image is not None and normalized_build is not None:
-            raise ValueError(
-                "Docker runner requires exactly one of spec.runner.options.image "
-                "or spec.runner.options.build"
-            )
-        if options.get("work_item_mounts") is not None:
-            raise ValueError(
-                "Docker command tasks do not accept "
-                "spec.runner.options.work_item_mounts"
-            )
 
         self._tid = tid
         self._process_target = process_target.strip()
@@ -164,27 +196,14 @@ class DockerCommandRunner:
         self._timeout = timeout
         self._limits = limits
         self._monitor_interval = monitor_interval or 1.0
-        self._image = normalized_image
-        self._build = normalized_build
-        self._docker_binary = str(options.get("docker_binary") or "docker")
-        self._docker_args = _string_list(
-            options.get("docker_args"),
-            name="spec.runner.options.docker_args",
-        )
-        self._container_workdir = (
-            str(options["container_workdir"])
-            if options.get("container_workdir") is not None
-            else None
-        )
-        self._mount_workdir = bool(options.get("mount_workdir", True))
-        self._network = _normalize_optional_text(
-            options.get("network"),
-            name="spec.runner.options.network",
-        )
-        self._mounts = _normalize_mounts(
-            options.get("mounts"),
-            name="spec.runner.options.mounts",
-        )
+        self._image = options.image
+        self._build = options.build
+        self._docker_binary = options.docker_binary
+        self._docker_args = options.docker_args
+        self._container_workdir = options.container_workdir
+        self._mount_workdir = options.mount_workdir
+        self._network = options.network
+        self._mounts = options.mounts
 
     def run(self, work_item: Any) -> RunnerOutcome:
         return self.run_with_hooks(work_item)
@@ -422,44 +441,10 @@ class DockerRunnerPlugin:
             bundle_root=bundle_root,
             preflight=preflight,
         )
-        options = materialized_profile.runner_options
-        image = options.get("image")
-        build = options.get("build")
-        normalized_image = (
-            image.strip() if isinstance(image, str) and image.strip() else None
+        parsed = _parse_command_options(
+            materialized_profile.runner_options, profile=materialized_profile
         )
-        normalized_build = (
-            _normalize_build_options(build, name="spec.runner.options.build")
-            if build is not None
-            else None
-        )
-        if normalized_image is None and normalized_build is None:
-            raise ValueError(
-                "Docker runner requires exactly one of spec.runner.options.image "
-                "or spec.runner.options.build"
-            )
-        if normalized_image is not None and normalized_build is not None:
-            raise ValueError(_image_build_conflict_message(materialized_profile))
-        if options.get("work_item_mounts") is not None:
-            raise ValueError(
-                "Docker command tasks do not accept "
-                "spec.runner.options.work_item_mounts"
-            )
-        docker_args = _string_list(
-            options.get("docker_args"),
-            name="spec.runner.options.docker_args",
-        )
-        _validate_extra_docker_args(docker_args)
-        _normalize_mounts(
-            options.get("mounts"),
-            name="spec.runner.options.mounts",
-        )
-        network = options.get("network")
-        normalized_network: str | None = None
-        if network is not None:
-            normalized_network = _normalize_optional_text(
-                network, name="spec.runner.options.network"
-            )
+        _validate_extra_docker_args(parsed.docker_args)
 
         limits = spec.get("limits")
         if isinstance(limits, Mapping):
@@ -471,14 +456,14 @@ class DockerRunnerPlugin:
                 )
 
         if preflight:
-            docker_binary = str(options.get("docker_binary") or "docker")
+            docker_binary = parsed.docker_binary
             _resolve_docker_binary(docker_binary)
-            if normalized_build is not None:
-                _validate_build_paths(normalized_build)
+            if parsed.build is not None:
+                _validate_build_paths(parsed.build)
             with _docker_client(timeout=5) as client:
                 client.ping()
-                if normalized_network is not None:
-                    _validate_docker_network_exists(client, normalized_network)
+                if parsed.network is not None:
+                    _validate_docker_network_exists(client, parsed.network)
         if os.name == "nt":
             raise ValueError(
                 "Docker runner is currently supported only on Linux and macOS"
@@ -549,7 +534,9 @@ class DockerRunnerPlugin:
             limits=limits,
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
-            runner_options=materialized_profile.runner_options,
+            options=_parse_command_options(
+                materialized_profile.runner_options, profile=materialized_profile
+            ),
         )
 
     def _reject_agent_container_profile(self, spec: Mapping[str, Any]) -> None:
@@ -696,14 +683,14 @@ def _materialize_command_container_profile(
 
 
 def _image_build_conflict_message(
-    materialized_profile: MaterializedContainerProfile,
+    materialized_profile: MaterializedContainerProfile | None,
 ) -> str:
-    profile_name = materialized_profile.profile_name
-    if profile_name is None:
+    if materialized_profile is None or materialized_profile.profile_name is None:
         return (
             "Docker runner requires exactly one of spec.runner.options.image "
             "or spec.runner.options.build"
         )
+    profile_name = materialized_profile.profile_name
     profile_file = materialized_profile.profile_file
     source = f" (from {profile_file})" if profile_file is not None else ""
     return (
@@ -713,7 +700,6 @@ def _image_build_conflict_message(
 
 
 _PLUGIN = DockerRunnerPlugin()
-_liveness_probes_registered = False
 
 
 def get_runner_plugin() -> RunnerPlugin:
@@ -722,11 +708,7 @@ def get_runner_plugin() -> RunnerPlugin:
 
 
 def _register_liveness_probes() -> None:
-    global _liveness_probes_registered
-    if _liveness_probes_registered:
-        return
     register_runtime_liveness_probe("docker", _docker_runtime_liveness)
-    _liveness_probes_registered = True
 
 
 def _docker_runtime_liveness(

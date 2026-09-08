@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from weft._constants import (
+    RUNNER_DIAGNOSTICS_FIELD,
     STATUS_COMPLETED,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
@@ -252,7 +253,7 @@ def _resource_summary(
 
 def _diagnostics_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {}
-    for key in ("runner_diagnostics", "runtime_handle", "error"):
+    for key in (RUNNER_DIAGNOSTICS_FIELD, "runtime_handle", "error"):
         value = payload.get(key)
         if value is not None:
             diagnostics[key] = value

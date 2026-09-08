@@ -28,10 +28,8 @@ from tests.conftest import (
 )
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.helpers import (
-    CommandNotFoundError,
     debug_print,
     ensure_owner_only_dir,
-    format_tid,
     is_debug_enabled,
     is_logging_enabled,
     iter_queue_entries,
@@ -42,11 +40,9 @@ from weft.helpers import (
     log_info,
     log_warning,
     open_owner_only_text,
-    parse_tid,
     pid_is_live,
     reload_config,
     resolve_broker_max_message_size,
-    resolve_cli_command,
     safe_cancel,
     send_log,
     write_file_atomically,
@@ -324,22 +320,6 @@ class TestLogConvenienceFunctions:
         assert record.exc_info is not None
 
 
-class TestTidUtilities:
-    """Tests for the TID formatting helpers."""
-
-    def test_format_tid_handles_str_and_int(self) -> None:
-        assert format_tid("123") == "T123"
-        assert format_tid(456) == "T456"
-
-    def test_parse_tid_valid(self) -> None:
-        assert parse_tid("T123456") == "123456"
-
-    @pytest.mark.parametrize("value", ["123456", "X123", ""])
-    def test_parse_tid_invalid(self, value: str) -> None:
-        with pytest.raises(ValueError):
-            parse_tid(value)
-
-
 class TestConfigurationUtilities:
     """Tests for configuration queries and reload behaviour."""
 
@@ -592,53 +572,6 @@ class TestWriteJsonAtomically:
         assert len(written) == 5
         final_data = json.loads(target.read_text())
         assert final_data["thread"] in range(5)
-
-
-class TestResolveCliCommand:
-    """Tests for resolving CLI commands to executable paths."""
-
-    @staticmethod
-    def _make_dummy_executable(tmp_path: Path) -> tuple[Path, str]:
-        base_name = "weft-test-command"
-        if os.name == "nt":
-            file_name = f"{base_name}.bat"
-            command_name = base_name
-            script = "@echo off\nexit /B 0\n"
-        else:
-            file_name = base_name
-            command_name = base_name
-            script = "#!/bin/sh\nexit 0\n"
-
-        path = tmp_path / file_name
-        path.write_text(script, encoding="utf-8")
-        try:
-            path.chmod(path.stat().st_mode | 0o111)
-        except PermissionError:  # pragma: no cover - Windows may not permit chmod
-            pass
-
-        return path, command_name
-
-    def test_resolves_using_environment_path(self, tmp_path: Path) -> None:
-        executable, command = self._make_dummy_executable(tmp_path)
-        extra_path = str(tmp_path)
-        with patch.dict("os.environ", {"PATH": extra_path}):
-            resolved = resolve_cli_command(command)
-        assert Path(resolved).resolve() == executable.resolve()
-
-    def test_resolves_with_custom_search_path(self, tmp_path: Path) -> None:
-        executable, command = self._make_dummy_executable(tmp_path)
-        resolved = resolve_cli_command(command, search_path=str(tmp_path))
-        assert Path(resolved).resolve() == executable.resolve()
-
-    def test_raises_for_missing_command(self) -> None:
-        missing = "weft-command-that-does-not-exist"
-        with pytest.raises(CommandNotFoundError) as excinfo:
-            resolve_cli_command(missing)
-        assert missing in str(excinfo.value)
-
-    def test_rejects_blank_commands(self) -> None:
-        with pytest.raises(ValueError):
-            resolve_cli_command("   ")
 
 
 class TestCliOutputRegistration:

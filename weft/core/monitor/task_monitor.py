@@ -3384,7 +3384,6 @@ class TaskMonitor(ServiceTask):
             ),
             dead_tid_rows_estimated_deleted=rows_deleted,
             dead_tid_control_queues_deleted=control_queues_deleted,
-            dead_tid_control_rows_estimated_deleted=0,
             dead_tid_inbox_queues_deleted=inbox_queues_deleted,
             dead_tid_outbox_queues_deleted=outbox_queues_deleted,
             dead_tid_reserved_queues_deleted=reserved_queues_deleted,
@@ -4290,7 +4289,6 @@ class TaskMonitor(ServiceTask):
         dead_tid_queues_deleted = 0
         dead_tid_rows_estimated_deleted = 0
         dead_tid_control_queues_deleted = 0
-        dead_tid_control_rows_estimated_deleted = 0
         dead_tid_inbox_queues_deleted = 0
         dead_tid_outbox_queues_deleted = 0
         dead_tid_reserved_queues_deleted = 0
@@ -4319,9 +4317,6 @@ class TaskMonitor(ServiceTask):
             dead_tid_queues_deleted += cleanup.dead_tid_queues_deleted
             dead_tid_rows_estimated_deleted += cleanup.dead_tid_rows_estimated_deleted
             dead_tid_control_queues_deleted += cleanup.dead_tid_control_queues_deleted
-            dead_tid_control_rows_estimated_deleted += (
-                cleanup.dead_tid_control_rows_estimated_deleted
-            )
             dead_tid_inbox_queues_deleted += cleanup.dead_tid_inbox_queues_deleted
             dead_tid_outbox_queues_deleted += cleanup.dead_tid_outbox_queues_deleted
             dead_tid_reserved_queues_deleted += cleanup.dead_tid_reserved_queues_deleted
@@ -4347,9 +4342,6 @@ class TaskMonitor(ServiceTask):
             dead_tid_queues_deleted=dead_tid_queues_deleted,
             dead_tid_rows_estimated_deleted=dead_tid_rows_estimated_deleted,
             dead_tid_control_queues_deleted=dead_tid_control_queues_deleted,
-            dead_tid_control_rows_estimated_deleted=(
-                dead_tid_control_rows_estimated_deleted
-            ),
             dead_tid_inbox_queues_deleted=dead_tid_inbox_queues_deleted,
             dead_tid_outbox_queues_deleted=dead_tid_outbox_queues_deleted,
             dead_tid_reserved_queues_deleted=dead_tid_reserved_queues_deleted,
@@ -4790,171 +4782,6 @@ class TaskMonitor(ServiceTask):
             ),
         )
         return result
-
-    def _coalesce_and_delete_dead_task_log_rows_for_tids(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-058] exception
-        self,
-        store: MonitorStore,
-        tids: tuple[str, ...],
-        *,
-        now_ns: int,
-    ) -> _DeadTaskLogDeleteResult:
-        """Coalesce and delete exact task-log rows for known dead TIDs.
-
-        Spec: [MF-5], [OBS.17]
-        """
-
-        api_matches = 0
-        coalesced_rows = 0
-        summaries_emitted = 0
-        refs_selected = 0
-        rows_deleted = 0
-        errors: list[str] = []
-        for tid in tids:
-            try:
-                group = _fetch_dead_task_log_coalesce_group(
-                    self._monitor_context(),
-                    tid,
-                    chunk_limit=max(1, self._monitor_config.batch_size),
-                )
-                api_matches += group.api_matches
-                updates: list[MonitorTaskEventUpdate] = []
-                for row in group.rows:
-                    try:
-                        payload = json.loads(row.body)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(payload, Mapping):
-                        continue
-                    update = update_from_task_log_payload(
-                        payload,
-                        queue_name=row.queue,
-                        message_id=row.message_id,
-                    )
-                    if update is not None and update.tid == tid:
-                        updates.append(update)
-                if updates:
-                    ingest = store.record_task_log_updates(
-                        WEFT_GLOBAL_LOG_QUEUE,
-                        tuple(updates),
-                        checkpoint_message_id=None,
-                    )
-                    coalesced_rows += ingest.updates_written
-                    record = store.get_task(tid)
-                    if record is not None:
-                        if record.summary_emitted_at_ns is None:
-                            close_reason = (
-                                "terminal" if record.terminal_seen else "dead_task"
-                            )
-                            self._emit_monitor_store_summary(
-                                MonitorSummaryReadyTask(
-                                    record=record,
-                                    close_reason=close_reason,
-                                ),
-                                store=store,
-                                emitted_at_ns=now_ns,
-                            )
-                            store.mark_summary_emitted(
-                                tid,
-                                now_ns,
-                                suspect_reason=(
-                                    None if close_reason == "terminal" else close_reason
-                                ),
-                            )
-                            summaries_emitted += 1
-                        if record.disposition_at_ns is None:
-                            disposition_reason = (
-                                "terminal" if record.terminal_seen else "dead_task"
-                            )
-                            store.mark_family_disposed(
-                                tid,
-                                now_ns,
-                                disposition_reason=disposition_reason,
-                                suspect_reason=(
-                                    None
-                                    if disposition_reason == "terminal"
-                                    else disposition_reason
-                                ),
-                                suspect_at_ns=(
-                                    None if disposition_reason == "terminal" else now_ns
-                                ),
-                            )
-                deleted = self._delete_monitor_store_task_log_rows_for_tids(
-                    store,
-                    (tid,),
-                )
-            except (ExternalTaskLogError, OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"{tid}: {exc}")
-                continue
-            refs_selected += deleted.refs_selected
-            rows_deleted += deleted.rows_deleted
-            errors.extend(deleted.errors)
-        result = _DeadTaskLogDeleteResult(
-            api_matches=api_matches,
-            coalesced_rows=coalesced_rows,
-            summaries_emitted=summaries_emitted,
-            refs_selected=refs_selected,
-            rows_deleted=rows_deleted,
-            errors=tuple(errors),
-        )
-        self._last_policy_progress = (
-            *self._last_policy_progress,
-            PolicyProgress(
-                policy=TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
-                domain=WEFT_GLOBAL_LOG_QUEUE,
-                scanned=len(tids),
-                selected=refs_selected,
-                applied=rows_deleted,
-                base_reached=not tids or refs_selected == 0,
-                blocked_reason=errors[0] if errors else None,
-                reason_counts={
-                    "api_matches": api_matches,
-                    "coalesced_rows": coalesced_rows,
-                    "summaries_emitted": summaries_emitted,
-                    "refs_selected": refs_selected,
-                    "rows_deleted": rows_deleted,
-                },
-            ),
-        )
-        return result
-
-    def _delete_monitor_store_task_log_rows_for_tids(
-        self,
-        store: MonitorStore,
-        tids: tuple[str, ...],
-    ) -> _DeadTaskLogDeleteResult:
-        """Delete exact task-log rows proven deletable for known TIDs."""
-
-        refs = store.list_deletable_task_log_messages_for_tids(
-            tids,
-            limit=self._monitor_config.batch_size,
-            require_summary=True,
-        )
-        if not refs:
-            return _DeadTaskLogDeleteResult()
-        applied = apply_exact_prune_candidates(
-            self._monitor_context(),
-            refs,
-            apply_result=_applied_monitor_raw_message,
-            reconcile_missing=True,
-        )
-        reconciled_ids = tuple(
-            result.candidate.message_id
-            for result in applied
-            if result.deleted
-            or (result.error is None and not result.candidate.report_only)
-        )
-        if reconciled_ids:
-            retirement = store.delete_task_messages_after_raw_delete(reconciled_ids)
-        else:
-            retirement = MonitorStoreRetirementResult()
-        errors = tuple(result.error for result in applied if result.error is not None)
-        if errors:
-            self._last_collation_store_error = "; ".join(errors)
-        return _DeadTaskLogDeleteResult(
-            refs_selected=len(refs),
-            rows_deleted=retirement.message_rows_deleted,
-            errors=errors,
-        )
 
     def _ensure_heartbeat_registered(self) -> None:
         if self._heartbeat_registered:

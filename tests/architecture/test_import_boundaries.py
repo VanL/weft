@@ -780,7 +780,6 @@ def test_commands_specs_import_does_not_initialize_sibling_capabilities() -> Non
         "weft.commands.result",
         "weft.commands.status",
         "weft.commands.system",
-        "weft.cli.validate_taskspec",
         "rich",
     )
     assert not {

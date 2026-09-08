@@ -1130,3 +1130,5 @@ doc:
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - [`06-Resource_Management.md`](06-Resource_Management.md)
+
+Implementation maintenance: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md) removes the unused dead-TID raw-log coalescing chain and its SQL/store accessors. Live orphan recovery and store-cycle ingestion remain owned by `weft/core/monitor/task_monitor.py::TaskMonitor`; dead-TID cleanup does not coalesce task logs.

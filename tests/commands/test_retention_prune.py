@@ -23,7 +23,7 @@ from weft._constants import (
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft.commands.prune import cmd_prune, run_retention_prune
+from weft.commands.prune import cmd_system_prune, run_retention_prune
 from weft.context import WeftContext, build_context
 from weft.core.pruning import retention as retention_pruning
 from weft.core.pruning.retention import (
@@ -337,19 +337,19 @@ def test_retention_apply_report_error_is_classified_after_delete(
     blocked_parent = tmp_path / "not-a-directory"
     blocked_parent.write_text("occupied", encoding="utf-8")
 
-    exit_code, stdout, stderr = cmd_prune(
+    result = cmd_system_prune(
         family="task-log",
         context=ctx.root,
         apply=True,
-        min_age_seconds=0,
-        archive_path=archive,
-        report_path=blocked_parent / "report.jsonl",
-        json_output=True,
+        min_age=0,
+        archive=archive,
+        report=blocked_parent / "report.jsonl",
     )
 
-    assert exit_code == 1
-    assert json.loads(stdout)["deleted"] == 1
-    assert stderr.startswith("failed to write report:")
+    assert result.deleted == 1
+    assert result.details["retention"]["errors"][0].startswith(
+        "failed to write report:"
+    )
     remaining = _read_ids(ctx, WEFT_GLOBAL_LOG_QUEUE)
     assert old_id not in remaining
     assert keep_id in remaining

@@ -87,6 +87,12 @@ New/refined exact contracts:
 - `QueueMoveResult(source: str, destination: str,
   entries: tuple[QueueEntry, ...], moved_count: int)`; entries are the exact
   ordered moved set.
+- `TaskResult` retains its result fields and carries optional
+  `reconciliation: dict[str, Any] | None = None` so the CLI can render the
+  existing claimed-result metadata contract [CLI-1.2.2]. The owner is
+  `weft/commands/result.py::await_task_result`; the CLI renders that evidence
+  without another lifecycle probe. Implementation plan:
+  [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md).
 - `TaskPingResult(tid: str, acknowledged: bool, timed_out: bool,
   error: str | None, observed_at: int | None, pong: Mapping[str, Any] | None,
   snapshot: TaskSnapshot | None)`.

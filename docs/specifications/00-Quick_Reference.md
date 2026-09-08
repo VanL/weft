@@ -33,14 +33,24 @@ Global queues:
 | `weft.log.tasks` | Runtime task lifecycle evidence / state events | Yes |
 | `weft.spawn.requests` | Manager spawn requests | Yes |
 | `weft.spawn.internal` | Manager-owned internal service spawn requests | Yes |
-| `weft.manager.ctrl_in` | Manager control input | Yes |
-| `weft.manager.ctrl_out` | Manager control output | Yes |
 | `weft.manager.outbox` | Manager informational output | Yes |
 | `weft.state.services` | Runtime service-owner registry, including managers | No (runtime state) |
 | `weft.state.tid_mappings` | Short→full TID mappings | No (runtime state) |
 | `weft.state.endpoints` | Active named endpoint registry | No (runtime state) |
 | `weft.state.streaming` | Active streaming sessions | No (runtime state) |
 | `weft.state.pipelines` | Active pipeline registry | No (runtime state) |
+
+Manager control queues are task-local: a manager is addressed through its own
+`T{manager_tid}.ctrl_in` / `T{manager_tid}.ctrl_out`, located through the
+`ctrl_in`/`ctrl_out` fields of its `weft.state.services` record. Readers honor
+whatever queue names a live manager's record advertises, so an older manager
+still registered under the legacy global names `weft.manager.ctrl_in`/
+`ctrl_out` remains controllable during an in-place upgrade. Those legacy names
+are not created by current managers; a queue with such a name appearing in a
+dump has no implicit live consumer.
+
+Implementation: `weft/core/manager_runtime.py::_manager_ctrl_queue_name` and
+`_manager_ctrl_out_queue_name`; plan: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md).
 
 Notes:
 - `weft.state.*` queues are runtime state and are excluded from dumps by default.

@@ -15,18 +15,25 @@ from pathlib import Path
 from typing import Annotated, Any, cast
 
 import typer
+from rich.console import Console
+from rich.markup import escape
+from rich.table import Table
 
 from simplebroker import format_message_id
 from weft import commands
 from weft._constants import (
+    BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS,
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     PROG_NAME,
+    RUNNER_DIAGNOSTICS_FIELD,
+    WALL_CLOCK_TASK_LAST_TIMESTAMP_CLASSIFICATIONS,
+    WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS,
     WEFT_CONTEXT_ENV,
     __version__,
     get_weft_directory_name,
 )
-from weft.cli import validate_taskspec as validate_cli
 from weft.commands.queue import _InvalidMessageIDUsageError
+from weft.commands.types import SpecValidationResult
 from weft.context import build_context
 from weft.helpers import (
     resolve_broker_max_message_size,
@@ -112,6 +119,75 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _status_task_json_payload(snapshot: commands.TaskSnapshot) -> dict[str, Any]:
+    """Project broker-backed task identity fields for external JSON."""
+
+    payload: dict[str, Any] = _jsonable(snapshot)
+    reconciliation = payload.get("reconciliation")
+    classification = (
+        reconciliation.get("classification")
+        if isinstance(reconciliation, dict)
+        else None
+    )
+    last_timestamp_is_broker_backed = (
+        classification not in WALL_CLOCK_TASK_LAST_TIMESTAMP_CLASSIFICATIONS
+        and snapshot.event not in WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS
+    )
+    last_timestamp = payload.get("last_timestamp")
+    if (
+        last_timestamp_is_broker_backed
+        and isinstance(last_timestamp, int)
+        and not isinstance(last_timestamp, bool)
+        and last_timestamp > 0
+    ):
+        payload["last_timestamp"] = format_message_id(last_timestamp)
+
+    if (
+        classification in BROKER_BACKED_RECONCILIATION_OBSERVATION_CLASSIFICATIONS
+        and isinstance(reconciliation, dict)
+    ):
+        projected_reconciliation = dict(reconciliation)
+        observed_at = projected_reconciliation.get("observed_at")
+        if isinstance(observed_at, int) and not isinstance(observed_at, bool):
+            projected_reconciliation["observed_at"] = format_message_id(observed_at)
+        payload["reconciliation"] = projected_reconciliation
+    return payload
+
+
+def _status_json_payload(snapshot: commands.SystemStatusSnapshot) -> dict[str, Any]:
+    """Keep the live status shape and project owned broker IDs [CLI-1.2.1]."""
+    payload: dict[str, Any] = _jsonable(snapshot)
+    if snapshot.broker.get("last_timestamp") is not None:
+        payload["broker"]["last_timestamp"] = format_message_id(
+            snapshot.broker["last_timestamp"]
+        )
+    for manager in payload["managers"]:
+        if manager["timestamp"] is not None:
+            manager["timestamp"] = format_message_id(manager["timestamp"])
+    for service in payload["services"]:
+        if service["updated_at"] is not None:
+            service["updated_at"] = format_message_id(service["updated_at"])
+    payload["tasks"] = [_status_task_json_payload(task) for task in snapshot.tasks]
+    return payload
+
+
+def _service_warning_parts(service: commands.ServiceSnapshot) -> list[str]:
+    """Render TaskMonitor diagnostics without changing their typed ownership."""
+    parts: list[str] = []
+    diagnostics = service.diagnostics or {}
+    task_monitor = diagnostics.get("task_monitor")
+    if isinstance(task_monitor, dict):
+        external = task_monitor.get("task_log_external")
+        if isinstance(external, dict):
+            if external.get("healthy") is False:
+                parts.append("warning=external-log-unhealthy")
+            pending = external.get("deferred_pending")
+            if isinstance(pending, int) and pending > 0:
+                parts.append("warning=deferred-writes-pending")
+                parts.append(f"deferred_writes={pending}")
+    return parts
+
+
 def _render_status_snapshot(
     snapshot: commands.SystemStatusSnapshot,
     *,
@@ -120,7 +196,7 @@ def _render_status_snapshot(
     """Render one structured root-status outcome."""
 
     if json_output:
-        typer.echo(json.dumps(_jsonable(snapshot), ensure_ascii=False))
+        typer.echo(json.dumps(_status_json_payload(snapshot), ensure_ascii=False))
         return
     broker = snapshot.broker
     lines = [
@@ -156,6 +232,7 @@ def _render_status_snapshot(
             if service.tid is not None:
                 parts.append(f"tid={service.tid}")
             parts.append(f"evidence={service.evidence}")
+            parts.extend(_service_warning_parts(service))
             if service.queue is not None:
                 parts.append(f"queue={service.queue}")
             lines.append(" ".join(parts))
@@ -217,6 +294,20 @@ def _render_task_result(
         elif value is not None:
             typer.echo(str(value))
         return 0
+    if json_output and result.reconciliation is not None:
+        typer.echo(
+            json.dumps(
+                {
+                    "tid": result.tid,
+                    "status": result.status,
+                    "result": None,
+                    "error": result.error,
+                    "reconciliation": result.reconciliation,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 124 if result.status == "timeout" else 1
     message = result.error or f"weft result: task {result.tid} failed"
     typer.echo(message, err=True)
     return 124 if result.status == "timeout" else 1
@@ -1090,11 +1181,9 @@ def spec_validate(
     except (commands.CommandError, commands.SpecNotFound) as exc:
         if spec_type == "task":
             if not validation_file.exists():
-                validate_cli.console.print(
-                    f"[red]Error:[/red] File not found: {validation_file}"
-                )
+                console.print(f"[red]Error:[/red] File not found: {validation_file}")
             else:
-                validate_cli.console.print(
+                console.print(
                     "[red]✗[/red] TaskSpec validation failed\n\n"
                     f"[cyan]_json[/cyan]: {exc}"
                 )
@@ -1107,6 +1196,173 @@ def spec_validate(
     )
 
 
+console = Console()
+
+_failure_headings = {
+    "schema": "TaskSpec validation failed",
+    "parameterization": "Parameterization validation failed",
+    "run_input": "Run-input validation failed",
+    "environment_profile": "Environment profile validation failed",
+    "runner": "Runner validation failed",
+    "agent_runtime": "Agent runtime validation failed",
+    "tool_profile": "Tool profile validation failed",
+}
+_preflight_stage_order = (
+    "environment_profile",
+    "runner",
+    "agent_runtime",
+    "tool_profile",
+)
+
+
+def _display_completed_preflight_stages(
+    result: SpecValidationResult,
+    *,
+    failed_stage: str | None,
+    load_runner: bool,
+    preflight: bool,
+) -> None:
+    if not load_runner or result.payload is None:
+        return
+
+    if failed_stage is None:
+        failure_index = len(_preflight_stage_order)
+    elif failed_stage in _preflight_stage_order:
+        failure_index = _preflight_stage_order.index(failed_stage)
+    else:
+        failure_index = 0
+    is_agent = _is_agent(result.payload)
+    supports_tool_profile = _agent_runtime(result.payload) == "provider_cli"
+    labels = {
+        "environment_profile": (
+            "Environment profile preflight passed"
+            if preflight
+            else "Environment profile is available"
+        ),
+        "runner": "Runner preflight passed" if preflight else "Runner is available",
+        "agent_runtime": (
+            "Agent runtime preflight passed"
+            if preflight
+            else "Agent runtime is available"
+        ),
+        "tool_profile": (
+            "Tool profile preflight passed"
+            if preflight
+            else "Tool profile is available"
+        ),
+    }
+    for index, stage in enumerate(_preflight_stage_order):
+        if index >= failure_index:
+            break
+        if stage == "agent_runtime" and not is_agent:
+            continue
+        if stage == "tool_profile" and not supports_tool_profile:
+            continue
+        console.print(f"[green]✓[/green] {labels[stage]}")
+
+
+def _display_failure(result: SpecValidationResult, stage: str) -> None:
+    heading = _failure_headings.get(stage, "TaskSpec validation failed")
+    console.print(f"[red]✗[/red] {heading}\n")
+    _display_validation_errors(result.errors_by_stage[stage])
+
+
+def _is_agent(payload: dict[str, Any]) -> bool:
+    spec = payload.get("spec")
+    return isinstance(spec, dict) and spec.get("type") == "agent"
+
+
+def _agent_runtime(payload: dict[str, Any]) -> str | None:
+    spec = payload.get("spec")
+    if not isinstance(spec, dict):
+        return None
+    agent = spec.get("agent")
+    if not isinstance(agent, dict):
+        return None
+    runtime = agent.get("runtime")
+    return runtime if isinstance(runtime, str) else None
+
+
+def _display_taskspec_summary(data: dict[str, Any]) -> None:
+    """Display a summary of the validated TaskSpec."""
+    table = Table(title="TaskSpec Summary", show_header=False)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+
+    for field, value in _taskspec_summary_rows(data):
+        table.add_row(field, value)
+
+    console.print()
+    console.print(table)
+
+
+def _taskspec_summary_rows(data: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Project a validated TaskSpec into ordered summary rows."""
+    rows: list[tuple[str, Any]] = [
+        ("TID", data.get("tid", "N/A")),
+        ("Name", data.get("name", "N/A")),
+    ]
+    if "description" in data:
+        rows.append(("Description", data["description"]))
+
+    spec = data.get("spec")
+    if not isinstance(spec, dict):
+        return rows
+
+    rows.append(("Type", spec.get("type", "N/A")))
+    runner = spec.get("runner") or {}
+    if isinstance(runner, dict):
+        rows.append(("Runner", str(runner.get("name", "host"))))
+
+    spec_type = spec.get("type")
+    if spec_type == "function":
+        rows.append(("Function", spec.get("function_target", "N/A")))
+    elif spec_type == "command":
+        rows.append(("Command", _command_summary_value(spec)))
+    elif spec_type == "agent":
+        agent = spec.get("agent") or {}
+        if isinstance(agent, dict):
+            rows.append(("Runtime", str(agent.get("runtime", "N/A"))))
+            rows.append(("Model", str(agent.get("model", "N/A"))))
+        else:
+            rows.append(("Runtime", "N/A"))
+            rows.append(("Model", "N/A"))
+
+    run_input = spec.get("run_input")
+    if isinstance(run_input, dict):
+        rows.append(("Run input", str(run_input.get("adapter_ref", "N/A"))))
+    parameterization = spec.get("parameterization")
+    if isinstance(parameterization, dict):
+        rows.append(
+            (
+                "Parameterization",
+                str(parameterization.get("adapter_ref", "N/A")),
+            )
+        )
+    return rows
+
+
+def _command_summary_value(spec: dict[str, Any]) -> str:
+    """Format the command target and arguments for one summary row."""
+    target = spec.get("process_target")
+    if not isinstance(target, str):
+        return "N/A"
+    args = spec.get("args") or []
+    return " ".join([target, *[str(arg) for arg in args]]) if args else target
+
+
+def _display_validation_errors(errors: dict[str, str]) -> None:
+    """Display validation errors in a formatted table."""
+    table = Table(title="Validation Errors", show_header=True)
+    table.add_column("Field", style="yellow")
+    table.add_column("Error", style="red")
+
+    for field, error in errors.items():
+        table.add_row(field, escape(error))
+
+    console.print(table)
+
+
 def _render_spec_validation(
     result: commands.SpecValidationResult,
     *,
@@ -1117,20 +1373,20 @@ def _render_spec_validation(
     if result.spec_type == "task":
         failed_stage = next(iter(result.errors_by_stage), None)
         if failed_stage == "schema":
-            validate_cli._display_failure(result, failed_stage)
+            _display_failure(result, failed_stage)
             raise typer.Exit(code=1)
-        validate_cli.console.print("[green]✓[/green] TaskSpec is valid")
-        validate_cli._display_completed_preflight_stages(
+        console.print("[green]✓[/green] TaskSpec is valid")
+        _display_completed_preflight_stages(
             result,
             failed_stage=failed_stage,
             load_runner=load_runner or preflight,
             preflight=preflight,
         )
         if failed_stage is not None:
-            validate_cli._display_failure(result, failed_stage)
+            _display_failure(result, failed_stage)
             raise typer.Exit(code=1)
         if result.payload is not None:
-            validate_cli._display_taskspec_summary(dict(result.payload))
+            _display_taskspec_summary(dict(result.payload))
         return
     if result.valid:
         typer.echo("Spec is valid")
@@ -1254,7 +1510,7 @@ def _task_status_plain_lines(
     waiting_on = status_payload.get("waiting_on")
     if waiting_on:
         lines.append(f"waiting_on: {waiting_on}")
-    raw_diagnostics = status_payload.get("runner_diagnostics")
+    raw_diagnostics = status_payload.get(RUNNER_DIAGNOSTICS_FIELD)
     diagnostics = _runner_diagnostics_text(
         raw_diagnostics if isinstance(raw_diagnostics, dict) else None
     )
@@ -1856,7 +2112,9 @@ def status_command(
             try:
                 for event in stream_outcome:
                     if json_output:
-                        typer.echo(json.dumps(_jsonable(event), ensure_ascii=False))
+                        event_payload = _jsonable(event)
+                        event_payload["timestamp"] = format_message_id(event.timestamp)
+                        typer.echo(json.dumps(event_payload, ensure_ascii=False))
                     else:
                         payload = event.payload
                         name = payload.get("name") or event.tid

@@ -21,10 +21,12 @@ from simplebroker import DumpClockSkewWarning
 from simplebroker.ext import TimestampError
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, load_config
+from weft._exceptions import CommandExecutionError, CommandUsageError
 from weft.commands import dump as dump_command
 from weft.commands import load as load_command
-from weft.commands.dump import cmd_dump
-from weft.commands.load import ImportReport, cmd_load
+from weft.commands.dump import cmd_system_dump
+from weft.commands.load import ImportReport, cmd_system_load
+from weft.commands.types import SystemDumpResult, SystemLoadResult
 from weft.context import WeftContext, build_context
 from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import resolve_taskspec_payload
@@ -110,11 +112,11 @@ def test_cmd_dump_basic(sample_data_context: WeftContext) -> None:
     ctx = sample_data_context
     export_path = ctx.weft_dir / "test_export.jsonl"
 
-    exit_code, message = cmd_dump(output=str(export_path), context_path=str(ctx.root))
+    exit_result = cmd_system_dump(output=str(export_path), context=ctx.root)
 
-    assert exit_code == 0
-    assert "Exported 3 messages from 2 queues and 2 aliases" in message
-    assert str(export_path) in message
+    assert isinstance(exit_result, SystemDumpResult)
+    assert (exit_result.messages, exit_result.queues, exit_result.aliases) == (3, 2, 2)
+    assert exit_result.path == export_path
     assert export_path.exists()
 
 
@@ -123,9 +125,9 @@ def test_cmd_dump_default_path(sample_data_context: WeftContext) -> None:
 
     ctx = sample_data_context
 
-    exit_code, _message = cmd_dump(context_path=str(ctx.root))
+    exit_result = cmd_system_dump(context=ctx.root)
 
-    assert exit_code == 0
+    assert isinstance(exit_result, SystemDumpResult)
     default_path = ctx.weft_dir / "weft_export.jsonl"
     assert default_path.exists()
 
@@ -136,7 +138,7 @@ def test_dump_export_format(sample_data_context: WeftContext) -> None:
     ctx = sample_data_context
     export_path = ctx.weft_dir / "test_export.jsonl"
 
-    cmd_dump(output=str(export_path), context_path=str(ctx.root))
+    cmd_system_dump(output=str(export_path), context=ctx.root)
 
     lines = export_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) >= 6
@@ -181,14 +183,15 @@ def test_cmd_load_dry_run(sample_data_context: WeftContext) -> None:
     ctx = sample_data_context
     export_path = ctx.weft_dir / "test_export.jsonl"
 
-    cmd_dump(output=str(export_path), context_path=str(ctx.root))
+    cmd_system_dump(output=str(export_path), context=ctx.root)
     header_record = json.loads(export_path.read_text(encoding="utf-8").splitlines()[0])
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path), dry_run=True, context_path=str(ctx.root)
+    exit_result = cmd_system_load(
+        input=str(export_path), dry_run=True, context=ctx.root
     )
+    message = exit_result.message
 
-    assert exit_code == 0
+    assert isinstance(exit_result, SystemLoadResult)
     assert "Import Preview:" in message
     assert "Total messages: 3" in message
     assert f"{header_record['format']} v{header_record['version']}" in message
@@ -223,11 +226,12 @@ def test_cmd_load_actual_import(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path), dry_run=False, context_path=str(ctx.root)
+    exit_result = cmd_system_load(
+        input=str(export_path), dry_run=False, context=ctx.root
     )
+    message = exit_result.message
 
-    assert exit_code == 0
+    assert isinstance(exit_result, SystemLoadResult)
     assert "✓" in message
     assert "Import completed successfully" in message
 
@@ -263,11 +267,9 @@ def test_cmd_load_ignores_invalid_ambient_broker_config(
     )
     monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path), dry_run=False, context_path=str(root)
-    )
+    exit_result = cmd_system_load(input=str(export_path), dry_run=False, context=root)
 
-    assert exit_code == 0, message
+    assert isinstance(exit_result, SystemLoadResult)
     context = build_context(spec_context=root)
     assert _snapshot_broker_state(context)[1]["isolated.load"] == ["ok"]
 
@@ -364,12 +366,11 @@ def test_cmd_load_rejects_message_newer_than_header_before_writes(
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path),
-        context_path=str(context.root),
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), context=context.root)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert "exceeds header last_ts" in (message or "")
     assert _snapshot_broker_state(context) == before
 
@@ -397,12 +398,9 @@ def test_header_only_load_advances_next_generated_message_id(tmp_path: Path) -> 
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DumpClockSkewWarning)
-        exit_code, message = cmd_load(
-            input_file=str(export_path),
-            context_path=str(context.root),
-        )
+        exit_result = cmd_system_load(input=str(export_path), context=context.root)
 
-    assert exit_code == 0, message
+    assert isinstance(exit_result, SystemLoadResult)
     queue = context.queue("after-floor", persistent=True)
     try:
         generated = queue.write("after")
@@ -446,12 +444,13 @@ def test_weft_skew_setting_changes_load_refusal_behavior(
 
     monkeypatch.setenv("WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS", "0")
     assert load_config()["BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS"] == 0
-    with pytest.warns(DumpClockSkewWarning):
-        refused_code, refused_message = cmd_load(
-            input_file=str(export_path),
-            context_path=str(root),
-        )
-    assert refused_code == 1
+    with (
+        pytest.warns(DumpClockSkewWarning),
+        pytest.raises(CommandExecutionError) as caught,
+    ):
+        cmd_system_load(input=str(export_path), context=root)
+    refused_message = str(caught.value)
+    assert isinstance(caught.value, CommandExecutionError)
     assert "future skew exceeds configured maximum" in (refused_message or "")
     assert "partial import may have occurred" not in (refused_message or "")
     with build_context(spec_context=root).broker() as broker:
@@ -460,11 +459,8 @@ def test_weft_skew_setting_changes_load_refusal_behavior(
     monkeypatch.setenv("WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS", "3")
     assert load_config()["BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS"] == 3
     with pytest.warns(DumpClockSkewWarning):
-        accepted_code, accepted_message = cmd_load(
-            input_file=str(export_path),
-            context_path=str(root),
-        )
-    assert accepted_code == 0, accepted_message
+        accepted_result = cmd_system_load(input=str(export_path), context=root)
+    assert isinstance(accepted_result, SystemLoadResult)
     with build_context(spec_context=root).broker() as broker:
         assert dict(broker.list_aliases())["future-alias"] == "future.queue"
 
@@ -486,12 +482,9 @@ def test_dump_load_round_trip_preserves_adjacent_unsafe_message_ids(
         )
     export_path = source_context.weft_dir / "unsafe-export.jsonl"
 
-    dump_code, dump_message = cmd_dump(
-        output=str(export_path),
-        context_path=str(source_context.root),
-    )
+    dump_result = cmd_system_dump(output=str(export_path), context=source_context.root)
 
-    assert dump_code == 0, dump_message
+    assert isinstance(dump_result, SystemDumpResult)
     records = [
         json.loads(line)
         for line in export_path.read_text(encoding="utf-8").splitlines()
@@ -510,12 +503,11 @@ def test_dump_load_round_trip_preserves_adjacent_unsafe_message_ids(
 
     destination_root = prepare_project_root(tmp_path / "destination")
     destination_context = build_context(spec_context=destination_root)
-    load_code, load_message = cmd_load(
-        input_file=str(export_path),
-        context_path=str(destination_context.root),
+    load_result = cmd_system_load(
+        input=str(export_path), context=destination_context.root
     )
 
-    assert load_code == 0, load_message
+    assert isinstance(load_result, SystemLoadResult)
     assert _queue_rows_with_timestamps(destination_context, "unsafe.queue") == [
         ("first", message_ids[0]),
         ("second", message_ids[1]),
@@ -583,12 +575,11 @@ def test_cmd_load_rejects_noncanonical_exact_ids_before_writes(
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path),
-        context_path=str(context.root),
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), context=context.root)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert f"'{field}'" in (message or "")
     assert _snapshot_broker_state(context) == before
 
@@ -911,13 +902,11 @@ def test_cmd_load_rejects_reserved_zero_id_before_writes(
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path),
-        dry_run=dry_run,
-        context_path=str(ctx.root),
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), dry_run=dry_run, context=ctx.root)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert "positive integer or canonical 19-digit string 'id'" in (message or "")
     assert _snapshot_broker_state(ctx) == before
 
@@ -926,11 +915,11 @@ def test_load_missing_file(tmp_path: Path) -> None:
     """Test load with missing input file."""
 
     root = prepare_project_root(tmp_path)
-    exit_code, message = cmd_load(
-        input_file="/nonexistent/file.jsonl", context_path=str(root)
-    )
+    with pytest.raises(CommandUsageError) as caught:
+        cmd_system_load(input="/nonexistent/file.jsonl", context=root)
+    message = str(caught.value)
 
-    assert exit_code == 2
+    assert isinstance(caught.value, CommandUsageError)
     assert "input file not found" in message
 
 
@@ -939,9 +928,11 @@ def test_load_invalid_context(tmp_path: Path) -> None:
 
     invalid_context = tmp_path / "not-a-directory"
     invalid_context.write_text("context", encoding="utf-8")
-    exit_code, message = cmd_load(context_path=str(invalid_context))
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(context=invalid_context)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert "failed to resolve context" in message
 
 
@@ -956,9 +947,11 @@ def test_cmd_load_reports_unexpected_context_failure(
 
     monkeypatch.setattr(load_command, "build_context", fail_context)
 
-    exit_code, message = cmd_load()
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load()
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert message == "private context detail"
 
 
@@ -977,12 +970,11 @@ def test_cmd_load_reports_unexpected_plan_failure(
 
     monkeypatch.setattr(load_command, "_build_import_plan", fail_plan)
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path),
-        context_path=str(root),
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), context=root)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert message == "private plan detail"
 
 
@@ -1011,12 +1003,11 @@ def test_cmd_load_reports_unexpected_apply_failure(
 
     monkeypatch.setattr(load_command, "_execute_import", fail_apply)
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path),
-        context_path=str(root),
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), context=root)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert message == "weft load: import failed: private apply detail"
 
 
@@ -1039,9 +1030,11 @@ def test_cmd_load_rejects_legacy_weft_dump_format(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(input_file=str(export_path), context_path=str(root))
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), context=root)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert "first record must be the dump header" in (message or "")
 
 
@@ -1050,9 +1043,11 @@ def test_dump_invalid_context(tmp_path: Path) -> None:
 
     invalid_context = tmp_path / "not-a-directory"
     invalid_context.write_text("context", encoding="utf-8")
-    exit_code, message = cmd_dump(context_path=str(invalid_context))
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_dump(context=invalid_context)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert "failed to resolve context" in message
 
 
@@ -1069,9 +1064,11 @@ def test_cmd_dump_reports_unexpected_context_resolution_error(
 
     monkeypatch.setattr(dump_command, "build_context", fail_context_resolution)
 
-    exit_code, message = cmd_dump(context_path="unused")
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_dump(context=Path("unused"))
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert message == (
         "weft dump: failed to resolve context: context resolution sentinel"
     )
@@ -1093,9 +1090,11 @@ def test_cmd_dump_reports_unexpected_export_error(
 
     monkeypatch.setattr(dump_command, "_write_dump", fail_export)
 
-    exit_code, message = cmd_dump(context_path=str(root))
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_dump(context=root)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert message == "weft dump: export failed: export adapter sentinel"
 
 
@@ -1137,11 +1136,11 @@ def test_round_trip_consistency(sample_data_context: WeftContext) -> None:
 
     initial_aliases, initial_queues = _snapshot_broker_state(ctx)
 
-    cmd_dump(output=str(export_path), context_path=str(ctx.root))
+    cmd_system_dump(output=str(export_path), context=ctx.root)
 
     new_root = prepare_project_root(ctx.root.parent / "roundtrip_test")
     new_ctx = build_context(spec_context=new_root)
-    cmd_load(input_file=str(export_path), context_path=str(new_ctx.root))
+    cmd_system_load(input=str(export_path), context=new_ctx.root)
 
     final_aliases, final_queues = _snapshot_broker_state(new_ctx)
 
@@ -1168,19 +1167,13 @@ def test_dump_load_preserves_spawn_request_message_id(tmp_path: Path) -> None:
     )
     export_path = ctx.weft_dir / "spawn-export.jsonl"
 
-    dump_code, dump_message = cmd_dump(
-        output=str(export_path),
-        context_path=str(ctx.root),
-    )
-    assert dump_code == 0, dump_message
+    dump_result = cmd_system_dump(output=str(export_path), context=ctx.root)
+    assert isinstance(dump_result, SystemDumpResult)
 
     new_root = prepare_project_root(tmp_path / "loaded")
     new_ctx = build_context(spec_context=new_root)
-    load_code, load_message = cmd_load(
-        input_file=str(export_path),
-        context_path=str(new_ctx.root),
-    )
-    assert load_code == 0, load_message
+    load_result = cmd_system_load(input=str(export_path), context=new_ctx.root)
+    assert isinstance(load_result, SystemLoadResult)
 
     rows = _queue_rows_with_timestamps(new_ctx, WEFT_SPAWN_REQUESTS_QUEUE)
     assert len(rows) == 1
@@ -1200,10 +1193,13 @@ def test_dump_warns_when_claimed_messages_are_omitted(tmp_path: Path) -> None:
     assert queue.read_one() == "claimed"
 
     export_path = ctx.weft_dir / "claimed-export.jsonl"
-    exit_code, message = cmd_dump(output=str(export_path), context_path=str(ctx.root))
+    exit_result = cmd_system_dump(output=str(export_path), context=ctx.root)
 
-    assert exit_code == 0
-    assert "omitted 1 claimed messages from 1 queues" in (message or "")
+    assert isinstance(exit_result, SystemDumpResult)
+    assert (
+        exit_result.omitted_claimed_messages,
+        exit_result.omitted_claimed_queues,
+    ) == (1, 1)
     message_records = [
         json.loads(line)
         for line in export_path.read_text(encoding="utf-8").splitlines()
@@ -1219,10 +1215,10 @@ def test_empty_database_dump(tmp_path: Path) -> None:
     ctx = build_context(spec_context=root)
     export_path = ctx.weft_dir / "empty_export.jsonl"
 
-    exit_code, message = cmd_dump(output=str(export_path), context_path=str(ctx.root))
+    exit_result = cmd_system_dump(output=str(export_path), context=ctx.root)
 
-    assert exit_code == 0
-    assert "Exported 0 messages from 0 queues" in message
+    assert isinstance(exit_result, SystemDumpResult)
+    assert (exit_result.messages, exit_result.queues) == (0, 0)
     assert export_path.exists()
 
     lines = export_path.read_text(encoding="utf-8").strip().split("\n")
@@ -1268,13 +1264,13 @@ def test_cmd_load_dry_run_reports_alias_conflicts_without_writes(
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path), dry_run=True, context_path=str(ctx.root)
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), dry_run=True, context=ctx.root)
+    message = str(caught.value)
 
     after_aliases, after_queues = _snapshot_broker_state(ctx)
 
-    assert exit_code == 3
+    assert caught.value.cli_exit_code == 3
     assert "alias conflicts" in (message or "").lower()
     assert "existing_alias" in (message or "")
     assert after_aliases == before_aliases
@@ -1315,13 +1311,13 @@ def test_cmd_load_rejects_alias_conflicts_before_any_writes(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path), context_path=str(ctx.root)
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), context=ctx.root)
+    message = str(caught.value)
 
     after_aliases, after_queues = _snapshot_broker_state(ctx)
 
-    assert exit_code == 3
+    assert caught.value.cli_exit_code == 3
     assert "alias conflicts" in (message or "").lower()
     assert "existing_alias" in (message or "")
     assert after_aliases == before_aliases
@@ -1358,11 +1354,10 @@ def test_cmd_load_treats_same_target_existing_alias_as_noop(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path), context_path=str(ctx.root)
-    )
+    exit_result = cmd_system_load(input=str(export_path), context=ctx.root)
+    message = exit_result.message
 
-    assert exit_code == 0, message
+    assert isinstance(exit_result, SystemLoadResult)
     assert "Created 1 aliases" not in (message or "")
     aliases, queues = _snapshot_broker_state(ctx)
     assert aliases["existing_alias"] == "same_target"
@@ -1380,9 +1375,9 @@ def test_export_large_message_data(tmp_path: Path) -> None:
     queue.write(json.dumps(large_data))
 
     export_path = ctx.weft_dir / "large_export.jsonl"
-    exit_code, _message = cmd_dump(output=str(export_path), context_path=str(ctx.root))
+    exit_result = cmd_system_dump(output=str(export_path), context=ctx.root)
 
-    assert exit_code == 0
+    assert isinstance(exit_result, SystemDumpResult)
     assert export_path.exists()
 
     lines = export_path.read_text(encoding="utf-8").strip().split("\n")
@@ -1404,7 +1399,7 @@ def test_cmd_dump_output_file_is_owner_only(tmp_path: Path) -> None:
     out_path.write_text("stale", encoding="utf-8")
     os.chmod(out_path, 0o644)
 
-    exit_code, _message = cmd_dump(output=str(out_path), context_path=str(root))
+    exit_result = cmd_system_dump(output=str(out_path), context=root)
 
-    assert exit_code == 0
+    assert isinstance(exit_result, SystemDumpResult)
     assert stat.S_IMODE(out_path.stat().st_mode) == 0o600

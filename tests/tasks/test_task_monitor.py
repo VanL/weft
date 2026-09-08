@@ -5152,7 +5152,7 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
             counted_coalesce,
         )
 
-        cleanup = task._run_dead_task_cleanup_slice(
+        task._run_dead_task_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
@@ -5168,8 +5168,6 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
     ]
     assert retained_task_rows == [payload]
     assert coalesce_calls == []
-    assert cleanup.dead_tid_log_refs_selected == 0
-    assert cleanup.dead_tid_log_rows_deleted == 0
 
 
 def test_task_monitor_dead_task_cleanup_skips_live_service_owner(

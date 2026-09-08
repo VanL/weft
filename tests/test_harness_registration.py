@@ -19,8 +19,8 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
+from weft.core import manager_runtime
 
 
 @pytest.mark.shared
@@ -767,9 +767,9 @@ def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
             task_cmd, "kill_tasks", lambda tids, **kwargs: len(tuple(tids))
         )
         monkeypatch.setattr(
-            manager_cmd,
-            "stop_command",
-            lambda **kwargs: (0, None),
+            manager_runtime,
+            "stop_manager",
+            lambda *_args, **kwargs: True,
         )
 
         harness._stop_active_managers()
@@ -852,9 +852,9 @@ def test_harness_stop_active_managers_skips_terminal_task_tids(
             lambda tids, **kwargs: kill_calls.append(tuple(tids)),
         )
         monkeypatch.setattr(
-            manager_cmd,
-            "stop_command",
-            lambda **kwargs: (0, None),
+            manager_runtime,
+            "stop_manager",
+            lambda *_args, **kwargs: True,
         )
 
         harness._stop_active_managers()
@@ -915,9 +915,9 @@ def test_harness_stop_active_managers_does_not_fan_out_worker_tid_as_task(
             lambda tids, **kwargs: kill_calls.append(tuple(tids)),
         )
         monkeypatch.setattr(
-            manager_cmd,
-            "stop_command",
-            lambda **kwargs: (0, None),
+            manager_runtime,
+            "stop_manager",
+            lambda *_args, **kwargs: True,
         )
 
         harness._stop_active_managers()
@@ -967,9 +967,9 @@ def test_harness_stop_active_managers_does_not_fan_out_in_process_task_tid(
             lambda tids, **kwargs: kill_calls.append(tuple(tids)),
         )
         monkeypatch.setattr(
-            manager_cmd,
-            "stop_command",
-            lambda **kwargs: (0, None),
+            manager_runtime,
+            "stop_manager",
+            lambda *_args, **kwargs: True,
         )
 
         harness._stop_active_managers()

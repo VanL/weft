@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,35 @@ from weft.liveness.registry import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _SandboxOptions:
+    profile: str
+    env_passthrough: tuple[str, ...]
+    sandbox_binary: str
+
+
+def _parse_options(options: Mapping[str, Any]) -> _SandboxOptions:
+    """Share option validity between validation and construction [TS-1.3]."""
+    profile = options.get("profile")
+    if not isinstance(profile, str) or not profile.strip():
+        raise ValueError("macOS sandbox runner requires spec.runner.options.profile")
+    env_passthrough = options.get("env_passthrough")
+    if env_passthrough is not None and (
+        not isinstance(env_passthrough, list)
+        or not all(isinstance(item, str) and item.strip() for item in env_passthrough)
+    ):
+        raise ValueError(
+            "macOS sandbox runner option env_passthrough must be a list of non-empty environment variable names"
+        )
+    return _SandboxOptions(
+        profile=str(Path(profile).expanduser()),
+        env_passthrough=tuple(item.strip() for item in env_passthrough)
+        if env_passthrough is not None
+        else (),
+        sandbox_binary=str(options.get("sandbox_binary") or "sandbox-exec"),
+    )
+
+
 class MacOSSandboxRunner:
     """One-shot command runner that wraps commands with sandbox-exec."""
 
@@ -56,30 +86,12 @@ class MacOSSandboxRunner:
         limits: Any | None,
         monitor_class: str | None,
         monitor_interval: float | None,
-        runner_options: Mapping[str, Any] | None,
+        options: _SandboxOptions,
     ) -> None:
         if not isinstance(process_target, str) or not process_target.strip():
             raise ValueError("macOS sandbox runner requires spec.process_target")
 
-        options = dict(runner_options or {})
-        profile = options.get("profile")
-        if not isinstance(profile, str) or not profile.strip():
-            raise ValueError(
-                "macOS sandbox runner requires spec.runner.options.profile"
-            )
-
-        env_passthrough = options.get("env_passthrough")
-        if env_passthrough is None:
-            self._env_passthrough: tuple[str, ...] = ()
-        else:
-            if not isinstance(env_passthrough, list) or not all(
-                isinstance(item, str) and item.strip() for item in env_passthrough
-            ):
-                raise ValueError(
-                    "macOS sandbox runner option env_passthrough must be a "
-                    "list of non-empty environment variable names"
-                )
-            self._env_passthrough = tuple(item.strip() for item in env_passthrough)
+        self._env_passthrough = options.env_passthrough
 
         self._process_target = process_target.strip()
         self._args = list(args or [])
@@ -89,8 +101,8 @@ class MacOSSandboxRunner:
         self._limits = limits
         self._monitor_class = monitor_class
         self._monitor_interval = monitor_interval or 1.0
-        self._profile = str(Path(profile).expanduser())
-        self._sandbox_binary = str(options.get("sandbox_binary") or "sandbox-exec")
+        self._profile = options.profile
+        self._sandbox_binary = options.sandbox_binary
 
     def run(self, work_item: Any) -> RunnerOutcome:
         return self.run_with_hooks(work_item)
@@ -218,33 +230,15 @@ class MacOSSandboxRunnerPlugin:
 
         runner = _require_mapping(spec.get("runner"), name="spec.runner")
         options = _require_mapping(runner.get("options"), name="spec.runner.options")
-        profile = options.get("profile")
-        if not isinstance(profile, str) or not profile.strip():
-            raise ValueError(
-                "macOS sandbox runner requires spec.runner.options.profile"
-            )
-
-        env_passthrough = options.get("env_passthrough")
-        if env_passthrough is not None and (
-            not isinstance(env_passthrough, list)
-            or not all(
-                isinstance(item, str) and item.strip() for item in env_passthrough
-            )
-        ):
-            raise ValueError(
-                "macOS sandbox runner option env_passthrough must be a "
-                "list of non-empty environment variable names"
-            )
+        parsed = _parse_options(options)
 
         if preflight:
             if sys.platform != "darwin":
                 raise ValueError("macOS sandbox runner is available only on macOS")
-            executable = shutil.which(
-                str(options.get("sandbox_binary") or "sandbox-exec")
-            )
+            executable = shutil.which(parsed.sandbox_binary)
             if executable is None:
                 raise ValueError("sandbox-exec is not available on PATH")
-            profile_path = Path(profile).expanduser()
+            profile_path = Path(parsed.profile)
             if not profile_path.exists():
                 raise ValueError(f"Sandbox profile does not exist: {profile_path}")
 
@@ -292,7 +286,7 @@ class MacOSSandboxRunnerPlugin:
             limits=limits,
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
-            runner_options=runner_options,
+            options=_parse_options(dict(runner_options or {})),
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
@@ -338,7 +332,6 @@ class MacOSSandboxRunnerPlugin:
 
 
 _PLUGIN = MacOSSandboxRunnerPlugin()
-_liveness_probe_registered = False
 
 
 def get_runner_plugin() -> RunnerPlugin:
@@ -347,14 +340,10 @@ def get_runner_plugin() -> RunnerPlugin:
 
 
 def _register_liveness_probe() -> None:
-    global _liveness_probe_registered
-    if _liveness_probe_registered:
-        return
     register_runtime_liveness_probe(
         "macos-sandbox",
         _macos_sandbox_runtime_liveness,
     )
-    _liveness_probe_registered = True
 
 
 def _macos_sandbox_runtime_liveness(
@@ -364,8 +353,6 @@ def _macos_sandbox_runtime_liveness(
     """Inspect the exact host-process identities owned by this runtime."""
 
     del timeout_seconds  # Local psutil calls have no cooperative timeout option.
-    if handle.runner != "macos-sandbox":
-        return "unknown"
     identities = handle.scoped_host_processes()
     if not identities or any(create_time is None for _, create_time in identities):
         return "unknown"

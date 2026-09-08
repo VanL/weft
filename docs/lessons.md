@@ -1242,3 +1242,17 @@ index is not a dated section and does not count toward the coalescing trigger.
   immediately. Both observations are best-effort, non-atomic snapshots, so
   document admission as a soft guard rather than inventing a lease or
   conjoining a second Manager-local counter.
+
+## 2026-09-07 Preserve Resolved Context Through Client Adapters
+
+- Command/client consolidation owns both behavior and context custody. A
+  `WeftContext` carries a resolved broker target and explicit configuration;
+  passing only its root path can rebuild different settings. Keep one concrete
+  context-accepting owner when the public command takes a path but the client
+  already owns a context. A shorter wrapper is not equivalent if it discards
+  those values.
+- Verify the public client boundary with a non-default config and the exact
+  supplied broker target. The serve regression changed interval137 to default5
+  while preserving the same path, so default-only tests missed it. Require
+  context/broker identity and the non-default setting to survive before
+  retiring the prior adapter.

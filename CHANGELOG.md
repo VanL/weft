@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Changed
+
+- Retired unused legacy command adapters, helper functions, and Monitor cleanup
+  paths. Python tidy/dump convenience wrappers now raise the shared typed
+  `CommandExecutionError` (a `RuntimeError`) for command failures.
+- Runtime cleanup PONG summaries no longer include the always-zero
+  `dead_tid_control_rows_estimated_deleted`, `dead_tid_log_refs_selected`, or
+  `dead_tid_log_rows_deleted` fields.
+- Manager control queues are documented as task-local. Existing managers that
+  advertise older global control names remain addressable through their records.
+
+### Fixed
+
+- Live status JSON now formats owned broker identifiers as strings while
+  preserving wall-clock values and opaque payload fields. Human status output
+  retains external-log health and deferred-write warnings.
+- Claimed result residue returns the specified failed JSON response promptly,
+  including reconciliation metadata. `TaskResult` carries that evidence in an
+  optional `reconciliation` field, defaulting to `None`.
+
 ## [0.9.99] - 2026-08-31
 
 ### Changed

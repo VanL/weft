@@ -57,12 +57,9 @@ class TaskControlCleanupResult:
     dead_tid_queues_deleted: int = 0
     dead_tid_rows_estimated_deleted: int = 0
     dead_tid_control_queues_deleted: int = 0
-    dead_tid_control_rows_estimated_deleted: int = 0
     dead_tid_inbox_queues_deleted: int = 0
     dead_tid_outbox_queues_deleted: int = 0
     dead_tid_reserved_queues_deleted: int = 0
-    dead_tid_log_refs_selected: int = 0
-    dead_tid_log_rows_deleted: int = 0
     pending: bool = False
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -101,14 +98,9 @@ class TaskControlCleanupResult:
             "dead_tid_queues_deleted": self.dead_tid_queues_deleted,
             "dead_tid_rows_estimated_deleted": (self.dead_tid_rows_estimated_deleted),
             "dead_tid_control_queues_deleted": (self.dead_tid_control_queues_deleted),
-            "dead_tid_control_rows_estimated_deleted": (
-                self.dead_tid_control_rows_estimated_deleted
-            ),
             "dead_tid_inbox_queues_deleted": self.dead_tid_inbox_queues_deleted,
             "dead_tid_outbox_queues_deleted": self.dead_tid_outbox_queues_deleted,
             "dead_tid_reserved_queues_deleted": (self.dead_tid_reserved_queues_deleted),
-            "dead_tid_log_refs_selected": self.dead_tid_log_refs_selected,
-            "dead_tid_log_rows_deleted": self.dead_tid_log_rows_deleted,
             "pending": self.pending,
             "errors": list(self.errors),
             "warnings": list(self.warnings),

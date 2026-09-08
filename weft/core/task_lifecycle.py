@@ -18,7 +18,7 @@ from weft._constants import (
     TASK_LIFECYCLE_ACTION_VALUES,
     TASK_LIFECYCLE_STATUS_VALUES,
     TASK_LIFECYCLE_TRANSITION_SPECS,
-    TERMINAL_TASK_LIFECYCLE_STATUS_VALUES,
+    TERMINAL_TASK_STATUSES,
 )
 from weft.core.state_machines import StateDecision, StateMachine, Transition
 
@@ -48,7 +48,7 @@ task_lifecycle_statuses = cast(
 )
 terminal_task_lifecycle_statuses = cast(
     frozenset[TaskLifecycleStatus],
-    TERMINAL_TASK_LIFECYCLE_STATUS_VALUES,
+    TERMINAL_TASK_STATUSES,
 )
 task_lifecycle_actions = cast(
     frozenset[TaskLifecycleAction],

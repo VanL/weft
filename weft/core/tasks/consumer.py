@@ -28,6 +28,7 @@ from weft._constants import (
     CONTROL_STOP,
     DEFAULT_CLEANUP_ON_EXIT,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
+    RUNNER_DIAGNOSTICS_FIELD,
     TERMINAL_TASK_STATUSES,
     VALID_RUNNER_OUTCOME_STATUSES,
     WORK_ENVELOPE_START,
@@ -984,7 +985,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             "metrics": metrics_payload,
         }
         if runner_diagnostics is not None:
-            state_extra["runner_diagnostics"] = runner_diagnostics
+            state_extra[RUNNER_DIAGNOSTICS_FIELD] = runner_diagnostics
         self._report_state_change(event=event, **state_extra)
         self._send_terminal_envelope()
         self._emit_pipeline_terminal_event(

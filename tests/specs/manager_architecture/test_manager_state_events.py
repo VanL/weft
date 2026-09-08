@@ -9,8 +9,6 @@ import pytest
 
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGER_CTRL_IN_QUEUE,
-    WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
@@ -50,8 +48,8 @@ def test_manager_emits_spawning_events(broker_env, unique_tid: str) -> None:
             inputs={"inbox": WEFT_SPAWN_REQUESTS_QUEUE},
             outputs={"outbox": WEFT_MANAGER_OUTBOX_QUEUE},
             control={
-                "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
-                "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
+                "ctrl_in": f"T{unique_tid}.ctrl_in",
+                "ctrl_out": f"T{unique_tid}.ctrl_out",
             },
         ),
         state=StateSection(),

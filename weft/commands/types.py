@@ -143,6 +143,7 @@ class TaskResult:
     stdout: str | None
     stderr: str | None
     error: str | None
+    reconciliation: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

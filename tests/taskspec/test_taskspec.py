@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from inspect import Parameter, signature
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from weft.core import taskspec as taskspec_pkg
+from weft.core.tasks.consumer import Consumer
 from weft.core.taskspec import (
     AgentSection,
     AgentToolSection,
@@ -848,3 +850,20 @@ def test_agent_tool_frozen_instance_rejects_assignment_with_attribute_error() ->
     tool._freeze()
     with pytest.raises(AttributeError, match="frozen AgentToolSection"):
         tool.name = "renamed"
+
+
+def test_resolved_empty_io_is_rejected_at_task_construction(tmp_path: Path) -> None:
+    payload = {
+        "tid": "1760000000123456789",
+        "name": "runtime-empty-io",
+        "spec": {"type": "function", "function_target": "module:func"},
+        "io": {"inputs": {}, "outputs": {}, "control": {}},
+    }
+    spec = TaskSpec.model_validate(payload, context={"auto_expand": False})
+    with pytest.raises(ValueError) as caught:
+        Consumer(tmp_path / "test.db", spec)
+    assert str(caught.value) == (
+        "TaskSpec validation failed after resolution: "
+        "io.outputs.outbox is required; io.control.ctrl_in is required; "
+        "io.control.ctrl_out is required"
+    )

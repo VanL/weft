@@ -15,6 +15,7 @@ from simplebroker import format_message_id
 from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
 from weft._exceptions import ControlRejected, ManagerNotRunning, ManagerStartFailed
 from weft.commands._boundary import typed_command_errors
+from weft.commands.serve import _serve_manager_context
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
@@ -179,9 +180,7 @@ def cmd_manager_start(
 def serve_manager(context: WeftContext) -> None:
     """Run the canonical manager in the foreground."""
 
-    exit_code, message = manager_runtime.serve_manager_foreground(context)
-    if exit_code != 0:
-        raise ManagerNotRunning(message or "Manager serve failed")
+    _serve_manager_context(context)
 
 
 def stop_manager(
@@ -190,10 +189,15 @@ def stop_manager(
     *,
     force: bool = False,
     timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    _record: dict[str, Any] | None = None,
 ) -> None:
-    """Stop one manager or the active manager, or raise a typed exception."""
+    """Stop one manager or the active manager, or raise a typed exception.
 
-    record: dict[str, Any] | None = None
+    ``_record`` preserves a typed facade's already-selected control identity.
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    record = _record
     if tid is None:
         record = manager_runtime.select_active_manager(
             context,
@@ -247,15 +251,7 @@ def cmd_manager_stop(
     else:
         record = manager_runtime.manager_record(resolved, tid)
 
-    stopped, message = manager_runtime.stop_manager(
-        resolved,
-        record,
-        tid=tid,
-        timeout=timeout,
-        force=force,
-    )
-    if not stopped:
-        raise ControlRejected(message or f"Manager {tid} did not stop")
+    stop_manager(resolved, tid, force=force, timeout=timeout, _record=record)
     terminal = manager_runtime.manager_record(resolved, tid)
     if terminal is None:
         terminal = dict(record or {"tid": tid, "name": "manager"})
@@ -309,69 +305,10 @@ def cmd_manager_status(
     return _manager_snapshot(record)
 
 
-def start_command(
-    *,
-    context_path: Path | None = None,
-    replace: bool = False,
-) -> tuple[int, str | None]:
-    context = build_context(context_path)
-    if replace:
-        replaced, message = manager_runtime.replace_active_manager(context)
-        if not replaced:
-            return 1, message or "Manager replacement failed"
-        record, started_here, _process_handle = manager_runtime.start_manager(context)
-    else:
-        record, started_here, _process_handle = manager_runtime.ensure_manager(context)
-    tid = cast(str, record.get("tid"))
-
-    if started_here:
-        return 0, f"Started manager {tid}"
-    return 0, f"Manager {tid} already running"
-
-
-def stop_command(
-    *,
-    tid: str | None,
-    force: bool,
-    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-    context_path: Path | None = None,
-    stop_if_absent: bool = False,
-) -> tuple[int, str | None]:
-    context = build_context(context_path)
-    record: dict[str, Any] | None = None
-    if tid is None:
-        record = manager_runtime.select_active_manager(
-            context,
-            probe_stale=True,
-            probe_cache={},
-        )
-        if record is None:
-            return 0, None
-        tid_value = record.get("tid")
-        if not isinstance(tid_value, str) or not tid_value:
-            return 1, "Active manager record is missing a TID"
-        tid = tid_value
-    stopped, message = manager_runtime.stop_manager(
-        context,
-        record,
-        tid=tid,
-        timeout=timeout,
-        force=force,
-        stop_if_absent=stop_if_absent,
-    )
-    if stopped:
-        return 0, None
-    if message is None:
-        return 1, f"Manager {tid} did not stop within {timeout:.1f}s"
-    return 1, message
-
-
-__all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-245] exception
+__all__ = [
     "list_managers",
     "manager_status",
     "serve_manager",
     "start_manager",
-    "start_command",
     "stop_manager",
-    "stop_command",
 ]

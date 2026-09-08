@@ -19,6 +19,7 @@ from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    RUNNER_DIAGNOSTICS_FIELD,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     TASK_TERMINAL_ENVELOPE_SOURCES,
     TERMINAL_ENVELOPE_TYPE,
@@ -323,7 +324,7 @@ def terminal_error_message(payload: dict[str, Any], status: str) -> str | None:
             state_error = state.get("error")
             if isinstance(state_error, str) and state_error:
                 return state_error
-    diagnostics = payload.get("runner_diagnostics")
+    diagnostics = payload.get(RUNNER_DIAGNOSTICS_FIELD)
     if isinstance(diagnostics, dict):
         summary = diagnostic_summary(diagnostics)
         if summary is not None:

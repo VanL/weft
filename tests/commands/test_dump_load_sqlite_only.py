@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from weft.commands.load import cmd_load
+from weft._exceptions import CommandExecutionError
+from weft.commands.load import cmd_system_load
 from weft.context import WeftContext, build_context
 
 pytestmark = [pytest.mark.sqlite_only]
@@ -72,13 +73,13 @@ def test_cmd_load_rolls_back_sqlite_snapshot_on_apply_failure(
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path), context_path=str(ctx.root)
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), context=ctx.root)
+    message = str(caught.value)
 
     after_aliases, after_queues = _snapshot_broker_state(ctx)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert "import failed" in (message or "").lower()
     assert after_aliases == before_aliases
     assert after_queues == before_queues
@@ -115,13 +116,13 @@ def test_cmd_load_rolls_back_sqlite_snapshot_on_duplicate_message_id(
         encoding="utf-8",
     )
 
-    exit_code, message = cmd_load(
-        input_file=str(export_path), context_path=str(ctx.root)
-    )
+    with pytest.raises(CommandExecutionError) as caught:
+        cmd_system_load(input=str(export_path), context=ctx.root)
+    message = str(caught.value)
 
     after_aliases, after_queues = _snapshot_broker_state(ctx)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, CommandExecutionError)
     assert "import failed" in (message or "").lower()
     assert "exact message ID import failed" in (message or "")
     assert after_aliases == before_aliases

@@ -13,7 +13,7 @@ from typing import Any, TextIO
 from simplebroker import dump_lines
 from simplebroker.ext import BrokerError
 from weft._constants import WEFT_STATE_QUEUE_PREFIX
-from weft._exceptions import CommandError, CommandExecutionError
+from weft._exceptions import CommandExecutionError
 from weft.commands.types import SystemDumpResult
 from weft.context import WeftContext, build_context
 from weft.helpers import open_owner_only_text
@@ -69,31 +69,6 @@ def _write_dump(output: TextIO, db: Any) -> tuple[int, int, int]:
     return alias_count, message_count, len(message_queues)
 
 
-def cmd_dump(
-    *,
-    output: str | None = None,
-    context_path: str | None = None,
-) -> tuple[int, str | None]:
-    """Export database state to JSONL format."""
-    try:
-        result = cmd_system_dump(
-            output=output,
-            context=Path(context_path) if context_path is not None else None,
-        )
-    except CommandError as exc:
-        return 1, str(exc)
-    message = f"Exported {result.messages} messages from {result.queues} queues"
-    if result.aliases > 0:
-        message += f" and {result.aliases} aliases"
-    if result.omitted_claimed_messages > 0:
-        message += (
-            f"; omitted {result.omitted_claimed_messages} claimed messages from "
-            f"{result.omitted_claimed_queues} queues"
-        )
-    message += f" to {result.path}"
-    return 0, message
-
-
 @typed_command_errors
 def cmd_system_dump(
     *,
@@ -141,19 +116,10 @@ def dump_system(
 ) -> Path:
     """Dump broker state and return the output path."""
 
-    output_path = (
-        context.weft_dir / "weft_export.jsonl"
-        if output is None
-        else Path(output)
-        if Path(output).is_absolute()
-        else Path.cwd() / Path(output)
-    )
-    exit_code, message = cmd_dump(
-        output=str(output_path), context_path=str(context.root)
-    )
-    if exit_code != 0:
-        raise RuntimeError(message or "weft dump failed")
-    return output_path
+    return cmd_system_dump(
+        context=context.root,
+        output=str(output) if output is not None else None,
+    ).path
 
 
-__all__ = ["cmd_dump", "cmd_system_dump", "dump_system"]
+__all__ = ["cmd_system_dump", "dump_system"]

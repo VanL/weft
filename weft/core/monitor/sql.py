@@ -629,23 +629,6 @@ def select_tasks_by_tids(
         """
 
 
-def select_unemitted_terminal_tasks(
-    collations_table: str,
-    columns: Sequence[str],
-) -> str:
-    """Build a query for terminal task summaries that need emission."""
-
-    return f"""
-        SELECT {identifier_list(columns)}
-        FROM {identifier(collations_table)}
-        WHERE context_key = ?
-          AND terminal_seen = 1
-          AND summary_emitted_at_ns IS NULL
-        ORDER BY terminal_message_id, tid
-        LIMIT ?
-        """
-
-
 def select_summary_ready_terminal_tasks(
     collations_table: str,
     columns: Sequence[str],
@@ -835,35 +818,6 @@ def select_deletable_task_log_messages(
         JOIN {identifier(collations_table)} AS c
           ON c.context_key = m.context_key AND c.tid = m.tid
         WHERE m.context_key = ?
-          AND c.raw_deleted_at_ns IS NULL
-          {state_condition}
-          {summary_condition}
-        ORDER BY m.message_id
-        LIMIT ?
-        """
-
-
-def select_deletable_task_log_messages_for_tids(
-    messages_table: str,
-    collations_table: str,
-    tid_count: int,
-    *,
-    require_summary: bool,
-) -> str:
-    """Build a query for exact deletable task-log refs for known TIDs."""
-
-    summary_condition = ""
-    state_condition = ""
-    if require_summary:
-        summary_condition = "AND c.summary_emitted_at_ns IS NOT NULL"
-        state_condition = "AND (c.terminal_seen = 1 OR c.suspect_reason IS NOT NULL)"
-    return f"""
-        SELECT m.queue_name, m.message_id, m.tid
-        FROM {identifier(messages_table)} AS m
-        JOIN {identifier(collations_table)} AS c
-          ON c.context_key = m.context_key AND c.tid = m.tid
-        WHERE m.context_key = ?
-          AND m.tid IN ({placeholders(tid_count)})
           AND c.raw_deleted_at_ns IS NULL
           {state_condition}
           {summary_condition}

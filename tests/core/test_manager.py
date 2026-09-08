@@ -74,8 +74,6 @@ from weft._constants import (
     WEFT_ADMISSION_RESERVE_FRACTION,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
-    WEFT_MANAGER_CTRL_IN_QUEUE,
-    WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MANAGER_SERVE_LOG_LEVEL,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -223,8 +221,8 @@ def _manager_service_payload(
         status=status,
         queues={
             "requests": requests,
-            "ctrl_in": ctrl_in or WEFT_MANAGER_CTRL_IN_QUEUE,
-            "ctrl_out": ctrl_out or WEFT_MANAGER_CTRL_OUT_QUEUE,
+            "ctrl_in": ctrl_in or f"T{tid}.ctrl_in",
+            "ctrl_out": ctrl_out or f"T{tid}.ctrl_out",
             "outbox": outbox,
         },
         runtime_handle=runtime_handle or {},
@@ -300,8 +298,8 @@ def _external_supervisor_runtime_handle() -> dict[str, object]:
 def make_manager_spec(
     tid: str,
     inbox: str = WEFT_SPAWN_REQUESTS_QUEUE,
-    ctrl_in: str = WEFT_MANAGER_CTRL_IN_QUEUE,
-    ctrl_out: str = WEFT_MANAGER_CTRL_OUT_QUEUE,
+    ctrl_in: str | None = None,
+    ctrl_out: str | None = None,
     *,
     idle_timeout: float | None = None,
     role: str | None = None,
@@ -327,8 +325,8 @@ def make_manager_spec(
             inputs={"inbox": inbox},
             outputs={"outbox": WEFT_MANAGER_OUTBOX_QUEUE},
             control={
-                "ctrl_in": ctrl_in,
-                "ctrl_out": ctrl_out,
+                "ctrl_in": ctrl_in or f"T{tid}.ctrl_in",
+                "ctrl_out": ctrl_out or f"T{tid}.ctrl_out",
             },
         ),
         state=StateSection(),
@@ -6640,16 +6638,16 @@ def test_manager_pong_from_draining_candidate_is_not_dispatch_eligible(
         "message": "PONG",
         "role": "manager",
         "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-        "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
-        "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
+        "ctrl_in": "weft.manager.ctrl_in",
+        "ctrl_out": "weft.manager.ctrl_out",
         "weft_context": str(manager._manager_context().root),
     }
 
     assert not manager._pong_dispatch_eligible(
         payload,
         record=record,
-        ctrl_in_name=WEFT_MANAGER_CTRL_IN_QUEUE,
-        ctrl_out_name=WEFT_MANAGER_CTRL_OUT_QUEUE,
+        ctrl_in_name="weft.manager.ctrl_in",
+        ctrl_out_name="weft.manager.ctrl_out",
     )
 
 
@@ -8721,7 +8719,8 @@ def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
 
     assert manager._maybe_yield_leadership(force=True) is False
     pending = manager._leader_probe_pending[lower_tid]
-    make_queue(WEFT_MANAGER_CTRL_OUT_QUEUE).write(
+    assert pending.ctrl_out_name == f"T{lower_tid}.ctrl_out"
+    make_queue(pending.ctrl_out_name).write(
         json.dumps(
             {
                 "command": CONTROL_PING,
@@ -8732,8 +8731,8 @@ def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
                 "task_status": "running",
                 "role": "manager",
                 "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
-                "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
+                "ctrl_in": f"T{lower_tid}.ctrl_in",
+                "ctrl_out": pending.ctrl_out_name,
                 "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
                 "weft_context": str(manager._manager_context().root),
                 "should_stop": False,

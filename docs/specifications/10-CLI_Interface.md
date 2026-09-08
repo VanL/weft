@@ -19,7 +19,7 @@ _Implementation mapping_: `weft/cli/app.py` (command registration),
 `weft/commands/builtins.py`, `weft/commands/init.py`, `weft/commands/dump.py`,
 `weft/commands/load.py`,
 `weft/commands/tidy.py`,
-`weft/cli/validate_taskspec.py`.
+`weft/cli/app.py` (validation rendering).
 
 See also:
 
@@ -294,7 +294,7 @@ Current interactive behavior:
 
 ### `manager serve` - Run the manager in the foreground [CLI-1.1.2]
 
-_Implementation mapping_: `weft/commands/serve.py` `serve_command()`,
+_Implementation mapping_: `weft/commands/serve.py` `cmd_manager_serve()`,
 registered in `weft/cli/app.py` as `weft manager serve`.
 
 Current behavior:
@@ -467,7 +467,7 @@ Implementation plan backlinks:
 
 _Implementation mapping_: `weft/commands/result.py::cmd_result`,
 `weft/commands/result.py::_await_single_result`, and
-`weft/commands/result.py::_collect_all_results`.
+`weft/commands/result.py::_collect_all_task_results` and `await_task_result`.
 
 Current behavior:
 
@@ -680,7 +680,8 @@ Current rules:
 ### `spec validate` - Validate a task or pipeline spec [CLI-1.4.1]
 
 _Implementation mapping_: `weft/commands/specs.py` owns structured validation;
-`weft/cli/validate_taskspec.py` owns `cmd_validate_taskspec()` rendering and
+`weft/cli/app.py` owns `_render_spec_validation()`, `_display_taskspec_summary()`,
+`_display_validation_errors()`, and validation rendering and
 exit adaptation; runner validation reuses `weft/core/runner_validation.py` and
 `weft/core/agents/validation.py`.
 
@@ -890,12 +891,12 @@ Related plan:
 
 ## System Maintenance (`weft system …`) [CLI-6]
 
-_Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
-`weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`,
+_Implementation mapping_: `weft/commands/tidy.py` `cmd_system_tidy()`,
+`weft/commands/dump.py` `cmd_system_dump()`, `weft/commands/load.py` `cmd_system_load()`,
 including import validation,
 `weft/commands/builtins.py` `cmd_system_builtins()`,
 `weft/commands/task_monitor.py` `run_task_monitor()`,
-`weft/commands/prune.py` `cmd_prune()`, and the separate canonical prune policy
+`weft/commands/prune.py` `cmd_system_prune()`, and the separate canonical prune policy
 implementations under `weft/core/pruning/`, registered in `weft/cli/app.py`
 under the `system` sub-app.
 
@@ -1071,3 +1072,5 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
 - [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
 - [`13-Agent_Runtime.md`](13-Agent_Runtime.md)
+
+Implementation maintenance: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md) removes legacy tuple adapters, keeps typed command owners, and restores owned-ID JSON projection and claimed-result reconciliation in the live CLI adapter.

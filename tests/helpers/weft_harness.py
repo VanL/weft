@@ -34,9 +34,9 @@ from weft._constants import (
 from weft._constants import (
     TERMINAL_TASK_EVENTS as CANONICAL_TERMINAL_TASK_EVENTS,
 )
-from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
+from weft.core import manager_runtime
 from weft.core.control_messages import encode_control_message
 from weft.core.manager import Manager
 from weft.core.manager_runtime import build_manager_spec, generate_tid
@@ -1023,11 +1023,12 @@ class WeftTestHarness:
             task_cmd.kill_tasks(sorted(issued_task_stops), context_path=context_path)
         if force:
             for tid in sorted(manager_records):
-                manager_cmd.stop_command(
+                manager_runtime.stop_manager(
+                    self.context,
+                    manager_records[tid],
                     tid=tid,
                     force=True,
                     timeout=stop_timeout,
-                    context_path=context_path,
                     stop_if_absent=True,
                 )
 

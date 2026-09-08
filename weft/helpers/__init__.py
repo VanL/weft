@@ -18,7 +18,6 @@ import json
 import logging
 import math
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -56,20 +55,6 @@ _config = load_config()
 
 # Set up module logger
 logger = logging.getLogger(__name__)
-
-
-class CommandNotFoundError(FileNotFoundError):
-    """Raised when a CLI command cannot be resolved to an executable path (Spec: [CLI-1.1.1])."""
-
-    def __init__(self, command: str, *, search_path: str | None = None) -> None:
-        message = f"Unable to locate command '{command}'"
-        if search_path is not None:
-            message += f" using search path '{search_path}'"
-        else:
-            message += " on PATH"
-        super().__init__(message)
-        self.command = command
-        self.search_path = search_path
 
 
 def stdin_is_tty(stream: Any | None = None) -> bool:
@@ -233,38 +218,6 @@ def resolve_cli_message_content(
     if message_bytes > max_bytes:
         raise ValueError(f"Message exceeds maximum size of {max_bytes} bytes")
     return message
-
-
-def resolve_cli_command(command: str, *, search_path: str | None = None) -> str:
-    """Resolve a CLI command to its fully qualified executable path.
-
-    Args:
-        command: Name of the command to resolve. May include a path component.
-        search_path: Optional PATH string to use instead of ``os.environ['PATH']``.
-
-    Returns:
-        Absolute path to the executable that will be invoked.
-
-    Raises:
-        ValueError: If *command* is an empty or whitespace-only string.
-        CommandNotFoundError: If the command cannot be located.
-
-    Notes:
-        This is a thin wrapper around :func:`shutil.which` so all command
-        resolution happens in one place. Centralising this logic makes it easy
-        to layer additional policy (allow-lists, sandbox checks, etc.) without
-        changing callers.
-
-    Spec: [CLI-1.1.1]
-    """
-    candidate = command.strip()
-    if not candidate:
-        raise ValueError("command must be a non-empty string")
-
-    resolved = shutil.which(candidate, path=search_path)
-    if resolved is None:
-        raise CommandNotFoundError(candidate, search_path=search_path)
-    return resolved
 
 
 def iter_queue_entries(
@@ -783,45 +736,6 @@ def log_exception(message: str, **kwargs: Any) -> None:
         **kwargs: Additional keyword arguments for logging
     """
     send_log(message, level=logging.ERROR, exc_info=True, **kwargs)
-
-
-def format_tid(tid: str | int) -> str:
-    """Format a Task ID for display.
-
-    Args:
-        tid: The task ID (as string or int)
-
-    Returns:
-        Formatted TID string (e.g., "T1234567890123456789")
-
-    Example:
-        >>> format_tid("1234567890123456789")
-        'T1234567890123456789'
-        >>> format_tid(1234567890123456789)
-        'T1234567890123456789'
-    """
-    return f"T{tid}"
-
-
-def parse_tid(formatted_tid: str) -> str:
-    """Parse a formatted TID to extract the numeric ID.
-
-    Args:
-        formatted_tid: The formatted TID (e.g., "T1234567890123456789")
-
-    Returns:
-        The numeric TID string
-
-    Raises:
-        ValueError: If the formatted TID is invalid
-
-    Example:
-        >>> parse_tid("T1234567890123456789")
-        '1234567890123456789'
-    """
-    if not formatted_tid.startswith("T"):
-        raise ValueError(f"Invalid formatted TID: {formatted_tid}")
-    return formatted_tid[1:]
 
 
 def is_logging_enabled() -> bool:

@@ -653,8 +653,8 @@ Global queues:
 
 ```
 weft.log.tasks           # Global state log (all tasks)
-weft.manager.ctrl_in     # Manager control input
-weft.manager.ctrl_out    # Manager control output
+T{manager_tid}.ctrl_in  # Manager control input (from service record)
+T{manager_tid}.ctrl_out # Manager control output (from service record)
 weft.manager.outbox      # Manager informational output
 weft.spawn.requests      # Task spawn requests to manager
 weft.spawn.internal      # Manager-owned internal service spawn requests

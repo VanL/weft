@@ -385,7 +385,14 @@ def test_docker_command_runner_build_profile_materializes_mounts(
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM busybox\n", encoding="utf-8")
 
-    runner = plugin_module.DockerCommandRunner(
+    runner = plugin_module.DockerRunnerPlugin().create_runner(
+        target_type="command",
+        function_target=None,
+        agent=None,
+        kwargs=None,
+        bundle_root=None,
+        persistent=False,
+        interactive=False,
         tid="1844674407370955161",
         process_target="python3",
         args=["-c", "print('ok')"],

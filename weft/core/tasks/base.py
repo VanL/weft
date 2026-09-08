@@ -253,7 +253,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.2], [CC-2.5], [MF-2], [MF-5], [SB-0.1]
         """
-        taskspec._validate_strict_requirements()
+        taskspec._validate_runtime_ready_io()
         # Runtime class owns this authority; advisory metadata cannot grant it.
         # Spec: [TS-1.1], [QUEUE.6]. Manager overrides the allowed policy set.
         for field in ("reserved_policy_on_stop", "reserved_policy_on_error"):
@@ -2077,7 +2077,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         """Transition the task into a cancelled state and stop processing."""
 
         self.should_stop = True
-        terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
+        terminal_states = TERMINAL_TASK_STATUSES
         if self.taskspec.state.status not in terminal_states:
             self.taskspec.mark_cancelled(reason=reason)
             self._clear_activity()
@@ -2108,7 +2108,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         self.should_stop = True
         self._kill_requested = True
-        terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
+        terminal_states = TERMINAL_TASK_STATUSES
         if self.taskspec.state.status not in terminal_states:
             self.taskspec.mark_killed(reason=reason)
             self._clear_activity()

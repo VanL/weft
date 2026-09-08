@@ -49,6 +49,7 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
+    TERMINAL_TASK_STATUSES,
 )
 from weft.core.task_lifecycle import (
     task_lifecycle_statuses,
@@ -1255,7 +1256,7 @@ class StateSection(BaseModel):
         """
 
         # Define valid state requirements
-        terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
+        terminal_states = TERMINAL_TASK_STATUSES
         running_states = {"running", "spawning"}
 
         # Validate timestamp consistency
@@ -1358,18 +1359,6 @@ class TaskSpec(BaseModel):
             raise ValueError("tid must be a nonzero SimpleBroker message ID")
         return v
 
-    @model_validator(mode="after")
-    def validate_required_elements(self) -> TaskSpec:
-        """Validate that all REQUIRED elements per spec are present.
-
-        Strict validation is always enforced:
-        - io.outputs has 'outbox'
-        - io.control has 'ctrl_in' and 'ctrl_out'
-        """
-        # These are already validated by IOSection validator
-        # This is here for documentation and could do additional cross-field validation
-        return self
-
     @model_validator(mode="before")
     @classmethod
     def prepare_payload(cls, data: Any, info: ValidationInfo) -> Any:
@@ -1462,79 +1451,20 @@ class TaskSpec(BaseModel):
         # Allow normal assignment for mutable fields and during initialization
         super().__setattr__(name, value)
 
-    def _validate_strict_requirements(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-054] exception
-        """Validate that this TaskSpec meets all REQUIRED fields per the specification.
+    def _validate_runtime_ready_io(self) -> None:
+        """Require runtime output/control wiring at task construction.
 
-        Raises:
-            ValueError: If any required fields are missing or invalid
+        Templates may retain empty IO until resolution. Spec: [TS-1], [CC-2.2].
         """
-        errors = []
-
         if self.is_template():
             return
-
-        # Check required top-level fields
-        if not self.tid:
-            errors.append("tid is required")
-        if not self.name:
-            errors.append("name is required")
-        if not self.spec:
-            errors.append("spec is required")
-
-        # Check spec requirements
-        if self.spec:
-            if not self.spec.type:
-                errors.append("spec.type is required")
-            elif self.spec.type == "function" and not self.spec.function_target:
-                errors.append(
-                    "spec.function_target is required when type is 'function'"
-                )
-            elif self.spec.type == "command" and not self.spec.process_target:
-                errors.append("spec.process_target is required when type is 'command'")
-            elif self.spec.type == "agent" and self.spec.agent is None:
-                errors.append("spec.agent is required when type is 'agent'")
-
-        # Check io requirements - all are REQUIRED per spec
-        if not hasattr(self, "io") or self.io is None:
-            errors.append("io section is required")
-        else:
-            # inputs is REQUIRED (but can be empty)
-            if self.io.inputs is None:
-                errors.append("io.inputs is required (can be empty dict)")
-
-            # outputs is REQUIRED and must have outbox
-            if self.io.outputs is None:
-                errors.append("io.outputs is required")
-            elif "outbox" not in self.io.outputs:
-                errors.append("io.outputs.outbox is required")
-
-            # control is REQUIRED and must have both ctrl_in and ctrl_out
-            if self.io.control is None:
-                errors.append("io.control is required")
-            else:
-                if "ctrl_in" not in self.io.control:
-                    errors.append("io.control.ctrl_in is required")
-                if "ctrl_out" not in self.io.control:
-                    errors.append("io.control.ctrl_out is required")
-
-        # Check state requirements - all listed fields are REQUIRED per spec
-        if not hasattr(self, "state") or self.state is None:
-            errors.append("state section is required")
-        else:
-            # These fields are REQUIRED (can be None but must exist)
-            if not hasattr(self.state, "status"):
-                errors.append("state.status is required")
-            if not hasattr(self.state, "return_code"):
-                errors.append("state.return_code is required (can be None)")
-            if not hasattr(self.state, "started_at"):
-                errors.append("state.started_at is required (can be None)")
-            if not hasattr(self.state, "completed_at"):
-                errors.append("state.completed_at is required (can be None)")
-
-        # Check metadata requirement - REQUIRED per spec but can be empty dict
-        if not hasattr(self, "metadata") or self.metadata is None:
-            errors.append("metadata section is required (can be empty dict)")
-
+        errors = []
+        if "outbox" not in self.io.outputs:
+            errors.append("io.outputs.outbox is required")
+        if "ctrl_in" not in self.io.control:
+            errors.append("io.control.ctrl_in is required")
+        if "ctrl_out" not in self.io.control:
+            errors.append("io.control.ctrl_out is required")
         if errors:
             raise ValueError(
                 f"TaskSpec validation failed after resolution: {'; '.join(errors)}"
@@ -1785,8 +1715,6 @@ class TaskSpec(BaseModel):
         Args:
             updates: Dictionary of metadata updates to apply
         """
-        if self.metadata is None:
-            self.metadata = {}
         self.metadata.update(updates)
 
     def set_metadata(self, key: str, value: Any) -> None:
@@ -1796,8 +1724,6 @@ class TaskSpec(BaseModel):
             key: Metadata key
             value: Metadata value
         """
-        if self.metadata is None:
-            self.metadata = {}
         self.metadata[key] = value
 
     def get_metadata(self, key: str, default: Any = None) -> Any:
@@ -1810,8 +1736,6 @@ class TaskSpec(BaseModel):
         Returns:
             The metadata value or default if not found
         """
-        if self.metadata is None:
-            return default
         return self.metadata.get(key, default)
 
     def get_queue_path(self, queue_type: str, queue_name: str) -> str | None:

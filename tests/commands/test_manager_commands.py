@@ -25,7 +25,7 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft._exceptions import ManagerNotRunning
+from weft._exceptions import ManagerNotRunning, WeftError
 from weft.commands import manager as manager_cmd
 from weft.commands.types import ManagerSnapshot
 from weft.context import build_context
@@ -1124,10 +1124,10 @@ def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
 
     monkeypatch.setattr(core_manager_runtime, "ensure_manager", _fake_ensure)
 
-    exit_code, message = manager_cmd.start_command(context_path=context_root)
+    result = manager_cmd.cmd_manager_start(context=context_root)
 
-    assert exit_code == 0
-    assert message == "Started manager 1761000000000000000"
+    assert isinstance(result, ManagerSnapshot)
+    assert (result.tid, result.started_here) == ("1761000000000000000", True)
     assert calls == ["ensure"]
 
 
@@ -1149,10 +1149,10 @@ def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
         ),
     )
 
-    exit_code, message = manager_cmd.start_command(context_path=context_root)
+    result = manager_cmd.cmd_manager_start(context=context_root)
 
-    assert exit_code == 0
-    assert message == "Manager 1761000000000000001 already running"
+    assert isinstance(result, ManagerSnapshot)
+    assert (result.tid, result.started_here) == ("1761000000000000001", False)
 
 
 def test_start_command_replace_supersedes_before_start(tmp_path, monkeypatch):
@@ -1182,13 +1182,10 @@ def test_start_command_replace_supersedes_before_start(tmp_path, monkeypatch):
     monkeypatch.setattr(core_manager_runtime, "replace_active_manager", fake_replace)
     monkeypatch.setattr(core_manager_runtime, "start_manager", fake_start)
 
-    exit_code, message = manager_cmd.start_command(
-        context_path=context_root,
-        replace=True,
-    )
+    result = manager_cmd.cmd_manager_start(context=context_root, replace=True)
 
-    assert exit_code == 0
-    assert message == "Started manager 1761000000000000002"
+    assert isinstance(result, ManagerSnapshot)
+    assert (result.tid, result.started_here) == ("1761000000000000002", True)
     assert calls == ["replace", "start"]
 
 
@@ -1209,12 +1206,11 @@ def test_start_command_replace_failure_does_not_start(tmp_path, monkeypatch):
         lambda *args, **kwargs: calls.append("start"),
     )
 
-    exit_code, message = manager_cmd.start_command(
-        context_path=context_root,
-        replace=True,
-    )
+    with pytest.raises(WeftError) as caught:
+        manager_cmd.cmd_manager_start(context=context_root, replace=True)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, WeftError)
     assert message == "failed to send STOP"
     assert calls == []
 
@@ -1347,15 +1343,11 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
 
     monkeypatch.setattr(core_manager_runtime, "stop_manager", fake_stop_manager)
 
-    exit_code, message = manager_cmd.stop_command(
-        tid="1761000000000000001",
-        force=False,
-        timeout=0.1,
-        context_path=context_root,
+    result = manager_cmd.cmd_manager_stop(
+        tid="1761000000000000001", force=False, timeout=0.1, context=context_root
     )
 
-    assert exit_code == 0
-    assert message is None
+    assert isinstance(result, ManagerSnapshot)
     assert calls == [(context, None, "1761000000000000001", 0.1, False)]
 
 
@@ -1365,6 +1357,7 @@ def test_stop_command_without_tid_stops_active_manager(tmp_path, monkeypatch):
     active_record = {
         "tid": "1761000000000000006",
         "runtime_handle": _host_runtime_handle(os.getpid()),
+        "ctrl_in": "selected-manager.control",
     }
     select_calls: list[tuple[object, bool, object]] = []
     stop_calls: list[tuple[object, object, object, object, object]] = []
@@ -1401,15 +1394,14 @@ def test_stop_command_without_tid_stops_active_manager(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(core_manager_runtime, "stop_manager", fake_stop_manager)
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=None,
-        force=False,
-        timeout=0.1,
-        context_path=context_root,
+    result = manager_cmd.cmd_manager_stop(
+        tid=None, force=False, timeout=0.1, context=context_root
     )
 
-    assert exit_code == 0
-    assert message is None
+    assert isinstance(result, ManagerSnapshot)
+    assert result.tid == "1761000000000000006"
+    assert result.status == "stopped"
+    assert result.ctrl_in == "selected-manager.control"
     assert select_calls == [(context, True, {})]
     assert stop_calls == [(context, active_record, "1761000000000000006", 0.1, False)]
 
@@ -1434,15 +1426,11 @@ def test_stop_command_without_tid_noops_when_no_active_manager(
         lambda *args, **kwargs: stop_calls.append(args),
     )
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=None,
-        force=False,
-        timeout=0.1,
-        context_path=context_root,
+    result = manager_cmd.cmd_manager_stop(
+        tid=None, force=False, timeout=0.1, context=context_root
     )
 
-    assert exit_code == 0
-    assert message is None
+    assert result is None
     assert stop_calls == []
 
 
@@ -1472,14 +1460,11 @@ def test_stop_command_default_timeout_exceeds_manager_drain_budget(
 
     monkeypatch.setattr(core_manager_runtime, "stop_manager", fake_stop_manager)
 
-    exit_code, message = manager_cmd.stop_command(
-        tid="1761000000000000001",
-        force=False,
-        context_path=context_root,
+    result = manager_cmd.cmd_manager_stop(
+        tid="1761000000000000001", force=False, context=context_root
     )
 
-    assert exit_code == 0
-    assert message is None
+    assert isinstance(result, ManagerSnapshot)
     assert calls == [MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS]
     assert (
         MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
@@ -1534,14 +1519,13 @@ def test_stop_command_rewrites_timeout_message(tmp_path, monkeypatch):
         ),
     )
 
-    exit_code, message = manager_cmd.stop_command(
-        tid="1761000000000000001",
-        force=False,
-        timeout=0.1,
-        context_path=context_root,
-    )
+    with pytest.raises(WeftError) as caught:
+        manager_cmd.cmd_manager_stop(
+            tid="1761000000000000001", force=False, timeout=0.1, context=context_root
+        )
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, WeftError)
     assert message == "Manager 1761000000000000001 did not stop within 0.1s"
 
 
@@ -1566,14 +1550,13 @@ def test_stop_command_writes_stop_for_active_manager(tmp_path):
         )
     )
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=tid,
-        force=False,
-        timeout=0.1,
-        context_path=context_root,
-    )
+    with pytest.raises(WeftError) as caught:
+        manager_cmd.cmd_manager_stop(
+            tid=tid, force=False, timeout=0.1, context=context_root
+        )
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, WeftError)
     assert message is not None
     assert "did not stop" in message
     ctrl_queue = Queue(
@@ -1600,15 +1583,11 @@ def test_stop_command_noops_for_stopped_manager(tmp_path):
         json.dumps(_manager_service_payload(context, tid, status="stopped"))
     )
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=tid,
-        force=False,
-        timeout=0.1,
-        context_path=context_root,
+    result = manager_cmd.cmd_manager_stop(
+        tid=tid, force=False, timeout=0.1, context=context_root
     )
 
-    assert exit_code == 0
-    assert message is None
+    assert isinstance(result, ManagerSnapshot)
     ctrl_queue = Queue(
         f"T{tid}.ctrl_in",
         db_path=context.broker_target,
@@ -1640,14 +1619,13 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
         )
     )
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=tid,
-        force=False,
-        timeout=0.1,
-        context_path=context_root,
-    )
+    with pytest.raises(WeftError) as caught:
+        manager_cmd.cmd_manager_stop(
+            tid=tid, force=False, timeout=0.1, context=context_root
+        )
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, WeftError)
     assert message is not None
     assert "did not stop" in message
     ctrl_queue = Queue(
@@ -1664,15 +1642,11 @@ def test_stop_command_stop_if_absent_still_sends_stop(tmp_path):
     context = build_context(context_root)
     tid = "1761000000000000004"
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=tid,
-        force=False,
-        timeout=0.1,
-        context_path=context_root,
-        stop_if_absent=True,
+    stopped, message = core_manager_runtime.stop_manager(
+        context, None, tid=tid, force=False, timeout=0.1, stop_if_absent=True
     )
 
-    assert exit_code == 0
+    assert stopped is True
     assert message is None
     ctrl_queue = Queue(
         f"T{tid}.ctrl_in",
@@ -1696,15 +1670,16 @@ def test_stop_command_waits_for_pid_exit_after_stopped_status(
         lambda *args, **kwargs: (True, None),
     )
 
-    exit_code, message = manager_cmd.stop_command(
+    stopped, message = core_manager_runtime.stop_manager(
+        context,
+        None,
         tid="1761000000000000005",
         force=False,
         timeout=1.0,
-        context_path=context_root,
         stop_if_absent=True,
     )
 
-    assert exit_code == 0
+    assert stopped is True
     assert message is None
 
 
@@ -2027,14 +2002,13 @@ def test_stop_command_force_reports_fresh_external_supervisor_without_host_pid(
         )
     )
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=tid,
-        force=True,
-        timeout=0.0,
-        context_path=context_root,
-    )
+    with pytest.raises(WeftError) as caught:
+        manager_cmd.cmd_manager_stop(
+            tid=tid, force=True, timeout=0.0, context=context_root
+        )
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, WeftError)
     assert message is not None
     assert "externally supervised" in message
     assert "no host PID" in message
@@ -2074,15 +2048,11 @@ def test_stop_command_force_ignores_registry_only_pid_without_mapping(
         ),
     )
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=tid,
-        force=True,
-        timeout=0.0,
-        context_path=context_root,
-        stop_if_absent=True,
+    stopped, message = core_manager_runtime.stop_manager(
+        context, None, tid=tid, force=True, timeout=0.0, stop_if_absent=True
     )
 
-    assert exit_code == 0
+    assert stopped is True
     assert message is None
 
 
@@ -2136,15 +2106,11 @@ def test_stop_command_force_appends_terminal_registry_record(
     monkeypatch.setattr("weft.core.manager_runtime.pid_is_live", is_pid_alive)
     monkeypatch.setattr("weft.core.manager_runtime.terminate_process_tree", terminate)
 
-    exit_code, message = manager_cmd.stop_command(
-        tid=tid,
-        force=True,
-        timeout=0.0,
-        context_path=context_root,
+    result = manager_cmd.cmd_manager_stop(
+        tid=tid, force=True, timeout=0.0, context=context_root
     )
 
-    assert exit_code == 0
-    assert message is None
+    assert isinstance(result, ManagerSnapshot)
     assert ("alive", kill_pid) in lifecycle_events
     assert lifecycle_events[-2:] == [
         ("terminate", kill_pid),

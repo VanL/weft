@@ -552,37 +552,6 @@ def _update_message_id_range(
     return (min(start, message_id), max(end, message_id))
 
 
-def cmd_load(
-    *,
-    input_file: str | None = None,
-    dry_run: bool = False,
-    context_path: str | None = None,
-) -> tuple[int, str | None]:
-    """Import broker state from JSONL format.
-
-    Args:
-        input_file: Input file path, defaults to `weft_export.jsonl` under the
-            active Weft metadata directory.
-        dry_run: Preview what would be imported without making changes.
-        context_path: Weft context directory.
-
-    Returns:
-        `(exit_code, message)`
-    """
-
-    try:
-        result = cmd_system_load(
-            input=input_file,
-            dry_run=dry_run,
-            context=Path(context_path) if context_path is not None else None,
-        )
-    except CommandUsageError as exc:
-        return 2, str(exc)
-    except CommandExecutionError as exc:
-        return int(getattr(exc, "cli_exit_code", 1)), str(exc)
-    return 0, result.message
-
-
 @typed_command_errors
 def cmd_system_load(
     *,
@@ -646,4 +615,4 @@ def load_system(
     )
 
 
-__all__ = ["ImportReport", "cmd_load", "cmd_system_load", "load_system"]
+__all__ = ["ImportReport", "cmd_system_load", "load_system"]

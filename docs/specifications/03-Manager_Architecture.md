@@ -620,7 +620,7 @@ _Implementation mapping_:
   commands are thin wrappers over the shared lifecycle helper.
   `weft/commands/system.py` :: `_collect_manager_records` reuses the same
   lifecycle reader for manager views.
-- Foreground supervision command and process-log diagnostics — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli/app.py` as `weft manager serve`; structured process-log emission lives in `weft/core/serve_log.py`, `weft/core/manager.py`, and `weft/core/monitor/task_monitor.py`.
+- Foreground supervision command and process-log diagnostics — `weft/commands/serve.py` :: `cmd_manager_serve` and `_serve_manager_context` (preserves explicit client broker/config), registered in `weft/cli/app.py` as `weft manager serve`; structured process-log emission lives in `weft/core/serve_log.py`, `weft/core/manager.py`, and `weft/core/monitor/task_monitor.py`.
 
 ## Scope Boundary [MA-4]
 
@@ -636,3 +636,5 @@ _Implementation mapping_: `weft/core/manager.py`
 internal runtime envelope. Public submission surfaces do not authorize
 internal runtime class selection through stored TaskSpec metadata alone.
 Runner extensibility affects execution backends, not manager specialization.
+
+Implementation maintenance: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md) retains the shared lifecycle owner behind typed manager command and client adapters.

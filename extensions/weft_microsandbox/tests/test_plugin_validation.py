@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import weft_microsandbox
 from weft.ext import RunnerHandle
 from weft.liveness import registry as liveness_registry
+from weft_microsandbox import _runtime
 from weft_microsandbox import plugin as plugin_module
 from weft_microsandbox.plugin import MicrosandboxRunnerPlugin, get_runner_plugin
 
@@ -21,7 +24,6 @@ def test_microsandbox_plugin_registers_its_entry_point_liveness_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
-    monkeypatch.setattr(plugin_module, "_liveness_probe_registered", False)
 
     get_runner_plugin()
 
@@ -122,3 +124,79 @@ def test_validate_preflight_uses_runtime_gate(
     plugin.validate_taskspec(_payload(), preflight=True)
 
     assert calls == ["preflight"]
+
+
+def test_factory_restores_replaced_liveness_registry(monkeypatch) -> None:
+    monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
+    get_runner_plugin()
+    liveness_registry.register_runtime_liveness_probe(
+        "microsandbox", lambda handle, budget: "unknown"
+    )
+    replaced = liveness_registry._runtime_liveness_probes["microsandbox"]
+    get_runner_plugin()
+    assert liveness_registry._runtime_liveness_probes["microsandbox"] is not replaced
+
+
+@pytest.mark.parametrize(
+    "state,expected", [("running", "live"), ("stopped", "stale"), (None, "unknown")]
+)
+def test_alias_routed_microsandbox_liveness_classifies_sdk_evidence(
+    monkeypatch, state, expected
+) -> None:
+    class Sandbox:
+        @staticmethod
+        async def get(sandbox_id):
+            assert sandbox_id == "alias-sandbox"
+            return Sandbox()
+
+        async def refresh(self):
+            return SimpleNamespace(status=state)
+
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SimpleNamespace(Sandbox=Sandbox))
+    monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
+    liveness_registry.register_runtime_liveness_probe(
+        "microsandbox", plugin_module._microsandbox_runtime_liveness
+    )
+    handle = RunnerHandle(
+        runner="alias",
+        control={"authority": "runner"},
+        kind="sandboxed-process",
+        id="alias-sandbox",
+        observations={"liveness_provider": "microsandbox"},
+    )
+    assert liveness_registry.runtime_liveness_from_registered_probe(handle) == expected
+
+
+def _create_command_runner_for_validation(runner_plugin, options, **overrides):
+    kwargs = {
+        "target_type": "command",
+        "tid": "1770000000000000001",
+        "function_target": None,
+        "process_target": "echo",
+        "agent": None,
+        "args": [],
+        "kwargs": {},
+        "env": {},
+        "working_dir": None,
+        "timeout": None,
+        "limits": None,
+        "monitor_class": None,
+        "monitor_interval": None,
+        "runner_options": options,
+        "bundle_root": None,
+        "persistent": False,
+        "interactive": False,
+    }
+    kwargs.update(overrides)
+    return runner_plugin.create_runner(**kwargs)
+
+
+@pytest.mark.parametrize("capability", ["persistent", "interactive"])
+def test_microsandbox_preserves_both_capability_checks(capability):
+    runner_plugin = get_runner_plugin()
+    with pytest.raises(ValueError, match=capability):
+        runner_plugin.validate_taskspec(_payload(**{capability: True}))
+    with pytest.raises(ValueError, match=capability):
+        _create_command_runner_for_validation(
+            runner_plugin, {"image": "python:3.12-alpine"}, **{capability: True}
+        )

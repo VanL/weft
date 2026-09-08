@@ -1779,23 +1779,6 @@ class _MonitorTableAccess:
         )
         return tuple(_record_from_row(row) for row in rows)
 
-    def list_unemitted_terminal_tasks(
-        self,
-        *,
-        limit: int,
-    ) -> tuple[MonitorTaskCollationRecord, ...]:
-        """Return terminal task summaries that still need emission."""
-
-        rows = self._session.run(
-            monitor_sql.select_unemitted_terminal_tasks(
-                self._tables.task_collations,
-                _task_columns,
-            ),
-            (self._context_key, int(limit)),
-            fetch=True,
-        )
-        return tuple(_record_from_row(row) for row in rows)
-
     def _terminal_readiness_cutoff_ns(
         self,
         *,
@@ -2118,37 +2101,6 @@ class _MonitorTableAccess:
                 require_summary=require_summary,
             ),
             (self._context_key, int(limit)),
-            fetch=True,
-        )
-        return tuple(
-            MonitorRawMessageRef(
-                queue=str(row[0]),
-                message_id=int(row[1]),
-                tid=str(row[2]),
-            )
-            for row in rows
-        )
-
-    def list_deletable_task_log_messages_for_tids(
-        self,
-        tids: Sequence[str],
-        *,
-        limit: int,
-        require_summary: bool,
-    ) -> tuple[MonitorRawMessageRef, ...]:
-        """Return exact task-log messages proven deletable for known TIDs."""
-
-        tid_tuple = tuple(str(tid) for tid in tids if tid)
-        if not tid_tuple or limit <= 0:
-            return ()
-        rows = self._session.run(
-            monitor_sql.select_deletable_task_log_messages_for_tids(
-                self._tables.task_messages,
-                self._tables.task_collations,
-                len(tid_tuple),
-                require_summary=require_summary,
-            ),
-            (self._context_key, *tid_tuple, int(limit)),
             fetch=True,
         )
         return tuple(
@@ -2663,20 +2615,6 @@ class MonitorStore:
                 records.extend(access.fetch_tasks(chunk))
         return tuple(records)
 
-    def list_unemitted_terminal_tasks(
-        self,
-        *,
-        limit: int,
-    ) -> tuple[MonitorTaskCollationRecord, ...]:
-        """Return terminal task summaries that have not been emitted."""
-
-        if limit <= 0:
-            return ()
-        with self._sidecar_session() as session:
-            return self._access(session).list_unemitted_terminal_tasks(
-                limit=limit,
-            )
-
     def list_summary_ready_tasks(
         self,
         *,
@@ -2961,25 +2899,6 @@ class MonitorStore:
             return ()
         with self._sidecar_session() as session:
             return self._access(session).list_deletable_task_log_messages(
-                limit=limit,
-                require_summary=require_summary,
-            )
-
-    def list_deletable_task_log_messages_for_tids(
-        self,
-        tids: Sequence[str],
-        *,
-        limit: int,
-        require_summary: bool = True,
-    ) -> tuple[MonitorRawMessageRef, ...]:
-        """Return exact deletable task-log refs for known TIDs."""
-
-        tid_tuple = tuple(str(tid) for tid in tids if tid)
-        if not tid_tuple or limit <= 0:
-            return ()
-        with self._sidecar_session() as session:
-            return self._access(session).list_deletable_task_log_messages_for_tids(
-                tid_tuple,
                 limit=limit,
                 require_summary=require_summary,
             )

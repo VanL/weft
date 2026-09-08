@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
+from pathlib import Path
 
 import psutil
 import pytest
@@ -12,10 +14,12 @@ from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     MANAGER_PONG_LIVE_AT_KEY,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
+    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
-from weft._exceptions import CommandExecutionError
-from weft.context import build_context
+from weft._exceptions import CommandExecutionError, WeftError
+from weft.client import WeftClient
+from weft.context import WeftContext, build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.service_convergence import (
     build_manager_service_payload,
@@ -127,10 +131,9 @@ def test_serve_command_delegates_to_shared_foreground_helper(
         fake_serve_manager,
     )
 
-    exit_code, message = serve_cmd.serve_command(context_path=context_root)
+    result = serve_cmd.cmd_manager_serve(context=context_root)
 
-    assert exit_code == 0
-    assert message is None
+    assert result is None
     assert calls == ["serve"]
     assert context_calls
     assert context_calls[0][0] == context_root
@@ -185,9 +188,11 @@ def test_serve_command_returns_preflight_message(tmp_path, monkeypatch) -> None:
         ),
     )
 
-    exit_code, message = serve_cmd.serve_command(context_path=context_root)
+    with pytest.raises(WeftError) as caught:
+        serve_cmd.cmd_manager_serve(context=context_root)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, WeftError)
     assert message == "Manager 1761000000000000001 already running (pid 54321)"
 
 
@@ -221,13 +226,9 @@ def test_serve_command_replace_supersedes_before_foreground(
     monkeypatch.setattr(core_manager_runtime, "replace_active_manager", fake_replace)
     monkeypatch.setattr(core_manager_runtime, "serve_manager_foreground", fake_serve)
 
-    exit_code, message = serve_cmd.serve_command(
-        context_path=context_root,
-        replace=True,
-    )
+    result = serve_cmd.cmd_manager_serve(context=context_root, replace=True)
 
-    assert exit_code == 0
-    assert message is None
+    assert result is None
     assert calls == ["replace", "serve"]
 
 
@@ -257,12 +258,11 @@ def test_serve_command_replace_failure_does_not_serve(
         lambda *args, **kwargs: calls.append("serve"),
     )
 
-    exit_code, message = serve_cmd.serve_command(
-        context_path=context_root,
-        replace=True,
-    )
+    with pytest.raises(WeftError) as caught:
+        serve_cmd.cmd_manager_serve(context=context_root, replace=True)
+    message = str(caught.value)
 
-    assert exit_code == 1
+    assert isinstance(caught.value, WeftError)
     assert message == "failed to send STOP"
     assert calls == []
 
@@ -481,3 +481,28 @@ def test_serve_foreground_ignores_unconfirmed_record_and_blocks_on_live_owner(
     assert latest is not None
     assert latest["status"] == "active"
     assert stale_tid in probe_tids
+
+
+def test_client_serve_preserves_explicit_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client serve retains the supplied broker and runtime configuration [PY-2]."""
+    original = build_context(prepare_project_root(tmp_path / "project"))
+    context = replace(
+        original,
+        config={**original.config, WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS: 137.0},
+    )
+    seen: list[WeftContext] = []
+
+    def serve(resolved: WeftContext) -> tuple[int, None]:
+        seen.append(resolved)
+        return 0, None
+
+    monkeypatch.setattr(core_manager_runtime, "serve_manager_foreground", serve)
+    result = WeftClient.from_weft_context(context).managers.serve()
+
+    assert result is None
+    assert len(seen) == 1
+    assert seen[0] is context
+    assert seen[0].config[WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS] == 137.0
+    assert seen[0].broker_target is context.broker_target

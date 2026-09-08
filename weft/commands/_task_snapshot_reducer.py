@@ -25,6 +25,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    RUNNER_DIAGNOSTICS_FIELD,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
 )
@@ -85,7 +86,7 @@ class TaskSnapshot:
         if self.reconciliation is not None:
             payload["reconciliation"] = self.reconciliation
         if self.runner_diagnostics is not None:
-            payload["runner_diagnostics"] = self.runner_diagnostics
+            payload[RUNNER_DIAGNOSTICS_FIELD] = self.runner_diagnostics
         return payload
 
 
@@ -286,7 +287,7 @@ def reduce_task_event(
         event_payload=dict(payload),
         runner_diagnostics=(
             dict(diagnostics)
-            if isinstance((diagnostics := payload.get("runner_diagnostics")), Mapping)
+            if isinstance((diagnostics := payload.get(RUNNER_DIAGNOSTICS_FIELD)), Mapping)
             else None
         ),
         status_reason=status_reason,

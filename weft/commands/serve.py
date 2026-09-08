@@ -18,35 +18,10 @@ from weft._constants import (
     load_config,
 )
 from weft._exceptions import CommandExecutionError, ManagerStartFailed
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 
 from ._boundary import typed_command_errors
-
-
-def serve_command(
-    *,
-    context_path: Path | None = None,
-    level: str | None = None,
-    log_interval: float | None = None,
-    replace: bool = False,
-    replace_timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-) -> tuple[int, str | None]:
-    overrides: dict[str, object] = {MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True}
-    if level is not None:
-        overrides[WEFT_MANAGER_SERVE_LOG_LEVEL] = level
-    if log_interval is not None:
-        overrides[WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS] = log_interval
-    config = load_config(overrides)
-    context = build_context(context_path, config=config)
-    if replace:
-        replaced, message = manager_runtime.replace_active_manager(
-            context,
-            timeout=replace_timeout,
-        )
-        if not replaced:
-            return 1, message or "Manager replacement failed"
-    return manager_runtime.serve_manager_foreground(context)
 
 
 @typed_command_errors
@@ -69,14 +44,23 @@ def cmd_manager_serve(
         overrides[WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS] = log_interval
     try:
         resolved = build_context(context, config=load_config(overrides))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CommandExecutionError(str(exc)) from exc
+    _serve_manager_context(resolved, replace=replace)
+
+
+@typed_command_errors
+def _serve_manager_context(context: WeftContext, *, replace: bool = False) -> None:
+    """Serve with the caller's resolved broker and configuration [PY-2]."""
+    try:
         if replace:
             replaced, message = manager_runtime.replace_active_manager(
-                resolved,
+                context,
                 timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
             )
             if not replaced:
                 raise ManagerStartFailed(message or "Manager replacement failed")
-        exit_code, message = manager_runtime.serve_manager_foreground(resolved)
+        exit_code, message = manager_runtime.serve_manager_foreground(context)
     except ManagerStartFailed:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
@@ -85,4 +69,4 @@ def cmd_manager_serve(
         raise CommandExecutionError(message or "Manager foreground runtime failed")
 
 
-__all__ = ["cmd_manager_serve", "serve_command"]
+__all__ = ["cmd_manager_serve"]
