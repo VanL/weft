@@ -14,7 +14,7 @@ import psutil
 import pytest
 
 from tests.tasks.test_task_execution import make_function_taskspec
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
 from weft.core.tasks import Consumer
 from weft.core.tasks import base as base_module
 from weft.core.tasks.base import BaseTask
@@ -162,3 +162,84 @@ def test_signal_respects_worker_identity_and_authority(
     finally:
         if task is not None:
             task.cleanup()
+
+
+@pytest.mark.parametrize("graceful", [True, False], ids=["stop", "kill"])
+@pytest.mark.parametrize(
+    "evidence", ["supplied_exact", "both_unknown", "conflicting_exact"]
+)
+def test_managed_identity_merge_preserves_explicit_evidence(
+    broker_env, worker_tree, monkeypatch, graceful: bool, evidence: str
+) -> None:
+    """Publication and control share exact evidence without a second PID lookup."""
+    worker, descendant = worker_tree
+    exact = psutil.Process(worker.pid).create_time()
+    recorded = exact if evidence == "conflicting_exact" else None
+    supplied = None if evidence == "both_unknown" else exact
+    if evidence == "conflicting_exact":
+        supplied = exact + 1000.0
+    expected = None if evidence == "both_unknown" else exact
+    db_path, make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_function_taskspec(
+            str(time.time_ns()), "tests.tasks.sample_targets:echo_payload"
+        ),
+    )
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    try:
+        monkeypatch.setattr(base_module, "process_create_time", lambda pid: recorded)
+        task.register_managed_pid(worker.pid)
+        lookup = Mock(
+            side_effect=AssertionError("recorded identities must not be re-observed")
+        )
+        monkeypatch.setattr(base_module, "process_create_time", lookup)
+        task.register_runtime_handle(
+            RunnerHandle(
+                runner="host",
+                kind="process",
+                id=str(worker.pid),
+                control={"authority": "host-pid"},
+                observations={
+                    "host_pids": [worker.pid],
+                    "host_processes": [{"pid": worker.pid, "create_time": supplied}],
+                },
+            )
+        )
+        rows = [
+            row
+            for row, _ in iter_queue_json_entries(mappings)
+            if row.get("full") == task.tid
+        ]
+        published = RunnerHandle.from_dict(rows[-1]["runtime_handle"])
+        assert dict(published.scoped_host_processes()) == {worker.pid: expected}
+        assert task._managed_pids[worker.pid] == expected
+        task._stop_managed_runtime(timeout=0.2, graceful=graceful)
+        lookup.assert_not_called()
+        if expected is None:
+            assert worker.poll() is None
+            assert descendant.is_running()
+        else:
+            worker.wait(timeout=5)
+            assert (
+                not descendant.is_running()
+                or descendant.status() == psutil.STATUS_ZOMBIE
+            )
+    finally:
+        task.cleanup()
+        mappings.close()
+
+
+@pytest.mark.parametrize(
+    "recorded,supplied,expected",
+    [(None, 10.0, 10.0), (None, None, None), (10.0, 20.0, 10.0)],
+)
+def test_observation_merge_keeps_exact_evidence(
+    monkeypatch, recorded: float | None, supplied: float | None, expected: float | None
+) -> None:
+    lookup = Mock(side_effect=AssertionError("must not re-observe recorded identity"))
+    monkeypatch.setattr(base_module, "process_create_time", lookup)
+    assert base_module._merge_host_process_observations(
+        ((123, supplied),), {123}, {123: recorded}
+    ) == [{"pid": 123, "create_time": expected}]
+    lookup.assert_not_called()

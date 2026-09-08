@@ -36,6 +36,7 @@ from weft.commands.prune import (
     write_runtime_prune_report,
 )
 from weft.context import build_context
+from weft.core import manager_runtime
 from weft.core.endpoints import build_endpoint_record_payload
 from weft.core.pruning import runtime as runtime_pruning
 from weft.core.pruning.runtime import (
@@ -47,6 +48,7 @@ from weft.core.pruning.runtime import (
 from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
+    parse_service_owner_row,
 )
 from weft.ext import RunnerHandle
 from weft.helpers import iter_queue_json_entries, reload_config, tid_short_form
@@ -788,3 +790,52 @@ def test_malformed_service_prune_logs_only_actual_deletions(
             } == {unknown_id}
     finally:
         reload_config()
+
+
+@pytest.mark.parametrize(
+    "handle",
+    [
+        {},
+        {"runner": "invalid"},
+        {
+            "runner": "host",
+            "kind": "process",
+            "id": "empty",
+            "control": {"authority": "host-pid"},
+            "observations": {"host_processes": []},
+        },
+    ],
+)
+@pytest.mark.parametrize(
+    "age,min_age,deleted",
+    [(299, 0, False), (300, 0, True), (599, 600, False), (600, 600, True)],
+)
+def test_valid_manager_row_with_missing_identity_obeys_both_prune_windows(
+    tmp_path, monkeypatch, handle, age, min_age, deleted
+) -> None:
+    ctx = _context(tmp_path)
+    payload = _manager_service_payload(
+        ctx, tid="1770000000000000081", runtime_handle=handle
+    )
+    mid = _write_json(ctx, WEFT_SERVICES_REGISTRY_QUEUE, payload)
+    assert parse_service_owner_row(payload, timestamp=mid).disposition == "accepted"
+    record = manager_runtime.normalize_manager_registry_record(
+        ctx, payload, timestamp=mid
+    )
+    assert record is not None
+    assert manager_runtime.manager_registry_record_liveness(record) == "unknown"
+    monkeypatch.setattr(runtime_pruning.time, "time_ns", lambda: mid + age * 10**9)
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("managers",),
+            min_age_seconds=min_age,
+            apply=True,
+        )
+    )
+    assert result.errors == ()
+    assert result.deleted == int(deleted)
+    assert [stamp for _row, stamp in _read_rows(ctx, WEFT_SERVICES_REGISTRY_QUEUE)] == (
+        [] if deleted else [mid]
+    )
+    assert _read_rows(ctx, "T1770000000000000081.ctrl_in") == []

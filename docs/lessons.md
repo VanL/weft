@@ -1256,3 +1256,21 @@ index is not a dated section and does not count toward the coalescing trigger.
   while preserving the same path, so default-only tests missed it. Require
   context/broker identity and the non-default setting to survive before
   retiring the prior adapter.
+- 2026-09-08 correction: dump repeated the same root-only reconstruction,
+  changing both default output location and the supplied broker. The regression
+  now exports distinct rows from two real targets and checks the configured
+  directory through the public client. A shared materializer must also retain
+  the old error boundary around relative-path resolution. See the
+  [complexity review corrections](plans/2026-09-08-complexity-review-corrections-plan.md).
+
+## 2026-09-08 Review Deltas Include Observable Side Effects
+
+- Registry custody's ban on reader deletion did not require dropping foreground
+  supersession appends. Tightening shared selection changed which rows reached
+  that separate takeover owner, including their TID order. The correction tests
+  the retained history and both lower/higher incumbent orderings.
+- The later stop-confirmation paragraph was documented in implementation notes
+  but lay outside the original reviewed spec delta. Later review is not evidence
+  of earlier approval. The correction explicitly includes that retained text in
+  its review baseline. Source and tests are recorded in the
+  [correction plan](plans/2026-09-08-complexity-review-corrections-plan.md).

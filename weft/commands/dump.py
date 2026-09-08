@@ -86,14 +86,21 @@ def cmd_system_dump(
         raise CommandExecutionError(
             f"weft dump: failed to resolve context: {exc}"
         ) from exc
-    output_path = (
-        resolved.weft_dir / "weft_export.jsonl" if output is None else Path(output)
-    )
-    if not output_path.is_absolute():
-        output_path = Path.cwd() / output_path
+    return _dump_resolved_context(resolved, output=output)
+
+
+def _dump_resolved_context(
+    context: WeftContext, *, output: str | None
+) -> SystemDumpResult:
+    """Materialize an export using the caller's resolved context [PY-2], [CLI-6]."""
     try:
+        output_path = (
+            context.weft_dir / "weft_export.jsonl" if output is None else Path(output)
+        )
+        if not output_path.is_absolute():
+            output_path = Path.cwd() / output_path
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with resolved.broker() as db:
+        with context.broker() as db:
             with open_owner_only_text(output_path) as output_file:
                 aliases, messages, queues = _write_dump(output_file, db)
             omitted_queues, omitted_messages = _claimed_summary(db)
@@ -116,8 +123,8 @@ def dump_system(
 ) -> Path:
     """Dump broker state and return the output path."""
 
-    return cmd_system_dump(
-        context=context.root,
+    return _dump_resolved_context(
+        context,
         output=str(output) if output is not None else None,
     ).path
 

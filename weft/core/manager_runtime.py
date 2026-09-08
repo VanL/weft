@@ -1729,13 +1729,27 @@ def serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     return 0, None
 
 
+def _foreground_serve_takeover_candidate(context: WeftContext) -> dict[str, Any] | None:
+    """Select only newest active foreground incumbents in this service [MA-1]."""
+    snapshot = _snapshot_registry(context, prune_stale=False)
+    candidates = [
+        record
+        for record in snapshot.values()
+        if record.get("status") == SERVICE_STATUS_ACTIVE
+        and is_canonical_manager_record(record)
+        and _manager_record_is_foreground_serve(record)
+        and (handle := _manager_handle_from_record(record)) is not None
+        and handle.control.get("authority") == "external-supervisor"
+    ]
+    return min(candidates, key=lambda record: int(str(record["tid"])), default=None)
+
+
 def _foreground_serve_blocking_manager(context: WeftContext) -> dict[str, Any] | None:
     """Return the active manager that should block foreground serve startup.
 
-    Selection includes positive runtime or matched-PONG proof and leaves
-    unconfirmed registry history intact. If a selected foreground supervisor
-    loses that proof during this startup check, publish supersession and
-    reselect before launching a replacement.
+    Positive runtime or matched-PONG proof blocks startup. Otherwise inspect
+    newest scoped foreground incumbents and append supersession before takeover,
+    preserving all peer history. A failed append blocks startup [MA-1], [MA-3].
     """
 
     probe_cache: dict[str, int | None] = {}
@@ -1745,6 +1759,11 @@ def _foreground_serve_blocking_manager(context: WeftContext) -> dict[str, Any] |
             probe_stale=True,
             probe_cache=probe_cache,
         )
+        candidate = _foreground_serve_takeover_candidate(context)
+        if candidate is not None and (
+            existing is None or int(str(candidate["tid"])) < int(str(existing["tid"]))
+        ):
+            existing = candidate
         if existing is None:
             return None
 

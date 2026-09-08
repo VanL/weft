@@ -292,6 +292,15 @@ Current interactive behavior:
   stderr stream frames to `T{tid}.outbox`, with stderr treated as live
   diagnostics rather than result data
 
+After requesting STOP, the interactive client observes matching
+acknowledgement or existing terminal evidence for the named
+`INTERACTIVE_STOP_COMPLETION_TIMEOUT` budget before escalating to KILL.
+Terminal evidence ends the wait promptly; acknowledgement remains after
+task-side runtime unwind.
+
+Implementation: `weft/commands/run.py::_InteractiveRunLifecycle.request_exit`.
+Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
+
 ### `manager serve` - Run the manager in the foreground [CLI-1.1.2]
 
 _Implementation mapping_: `weft/commands/serve.py` `cmd_manager_serve()`,

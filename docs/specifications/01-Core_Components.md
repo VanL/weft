@@ -802,6 +802,17 @@ Current rule:
   `runner` runtimes are controlled only through their plugin and
   `external-supervisor` runtimes receive no runtime control from Weft;
   neither is signaled by PID.
+- When combining observations of the same host PID, a recorded exact
+  creation time takes precedence. If the recorded creation time is unknown,
+  an exact creation time explicitly supplied by the runtime handle is
+  retained. Unknown observations never erase exact evidence, and a fresh PID
+  lookup must not fill a previously recorded unknown identity. A private
+  worker outcome alone is not public result delivery or reap proof; failure
+  to confirm one-shot worker exit fails the runner call and retains custody.
+  Implementation: `BaseTask` identity merge and control in
+  `weft/core/tasks/base.py`; `HostTaskRunner.run_with_hooks` in
+  `weft/core/runners/host.py`.
+  Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
 - legacy handle keys such as `runner_name`, `runtime_id`, and top-level
   `host_pids` are invalid at runtime-contract boundaries
 - manager records use the same `runtime_handle` shape. Detached host launch

@@ -448,6 +448,21 @@ Younger unknown rows keep the bounded keyed-PING rescue described above;
 both the definite-stale and expired-unknown pruning predicates override
 keep-newest for every manager status.
 
+Foreground startup may supersede an unconfirmed active canonical
+public-request manager in the same scoped manager service only when its
+handle has external-supervisor authority and `foreground_serve=True`
+metadata. It reduces to the newest row per owner and appends a superseded
+owner record; draining and terminal rows are not takeover candidates.
+Positive runtime or matching PONG evidence blocks this takeover.
+Candidates are considered in ascending TID order: a lower unconfirmed
+foreground incumbent is superseded before a higher proved-live manager blocks
+startup. A lower proved-live manager blocks without superseding higher rows.
+This does not delete peer history or classify unknown identity as dead;
+failure to append supersession blocks takeover.
+
+Implementation: `weft/core/manager_runtime.py::_foreground_serve_blocking_manager`.
+Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
+
 Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
 
 Before an existing `weft.state.services` queue is passed to manager, status,
@@ -569,6 +584,11 @@ stale runtime evidence or exit of the caller-owned process, plus the existing
 local process exit gate. Missing PID or handle evidence remains unknown.
 Explicit stopped-record and foreground-serve proofs retain their documented
 semantics.
+
+Missing, invalid or empty runtime identity remains unknown. Expiration
+of the reader or pruning age windows does not prove manager exit. Valid
+service rows with unknown identity remain subject to the unknown-row
+pruning rule in [MA-1], including when the runtime handle is missing.
 
 Signal handlers record requests through `note_termination_signal`. The manager
 reactor applies them through its owner-thread transition path. There is no

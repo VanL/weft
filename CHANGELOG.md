@@ -27,6 +27,12 @@
 
 ### Fixed
 
+- Preserve exact worker identity when a later observation lacks creation time,
+  and retain client dump context, including its broker and default directory.
+- Interactive STOP waits through its existing shutdown budget before KILL;
+  foreground takeover again records supersession in incumbent TID order.
+- Failed Manager CLEAR logs retained reserved residue at WARNING.
+
 - Live status JSON now formats owned broker identifiers as strings while
   preserving wall-clock values and opaque payload fields. Human status output
   retains external-log health and deferred-write warnings.

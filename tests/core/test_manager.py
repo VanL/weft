@@ -10504,7 +10504,10 @@ def test_managed_pids_for_child_excludes_create_time_mismatch(
 
 
 def test_failed_launch_clear_policy_preserves_failed_delete_residue(
-    broker_env, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Failed Manager CLEAR applies once and retains the request for recovery."""
     db_path, make_queue = broker_env
@@ -10552,6 +10555,15 @@ def test_failed_launch_clear_policy_preserves_failed_delete_residue(
         assert len(calls) == 1
         assert reserved.peek_one() == request
         assert public.peek_one() is None
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "clear reserved spawn message" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert str(calls[0]["message_id"]) in warnings[0].getMessage()
+        assert reserved_name in warnings[0].getMessage()
     finally:
         manager.stop(join=False)
         manager.cleanup()

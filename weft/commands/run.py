@@ -33,6 +33,7 @@ from weft._constants import (
     CONTROL_STOP,
     DEFAULT_STREAM_OUTPUT,
     INTERACTIVE_STOP_COMPLETION_TIMEOUT,
+    INTERACTIVE_STOP_POLL_INTERVAL,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -697,26 +698,34 @@ class _InteractiveRunLifecycle:
                 return True
 
     def request_exit(self) -> bool:
-        """Close input, then escalate STOP to KILL only as needed.
+        """Close input, then allow the task's STOP unwind budget before KILL.
 
-        Spec: [CC-2.4], [MF-3]
+        Existing terminal evidence or acknowledgement ends the STOP wait;
+        neither gains new process-death or signal authority here.
+
+        Spec: [CC-2.4], [MF-3], [CLI-1.1.1]
         """
 
         self.close_input()
         if self.wait_for_completion(timeout=1.0):
             return True
         self._send_control(CONTROL_STOP)
-        if (
-            self._client.wait_for_control_response(
-                "STOP",
-                status="ack",
-                timeout=1.0,
-            )
-            is not None
-        ):
-            return True
-        if self.wait_for_completion(timeout=0.1):
-            return True
+        stop_deadline = time.monotonic() + INTERACTIVE_STOP_COMPLETION_TIMEOUT
+        while True:
+            if self.wait_for_completion(timeout=0):
+                return True
+            remaining = stop_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if (
+                self._client.wait_for_control_response(
+                    "STOP",
+                    status="ack",
+                    timeout=min(INTERACTIVE_STOP_POLL_INTERVAL, remaining),
+                )
+                is not None
+            ):
+                return True
         self._send_control(CONTROL_KILL)
         if (
             self._client.wait_for_control_response(

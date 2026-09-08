@@ -4366,9 +4366,10 @@ class Manager(ServiceTask):
                 try:
                     reserved.delete(message_id=message_timestamp)
                 except (BrokerError, OSError, RuntimeError):
-                    logger.debug(
-                        "Failed to clear reserved spawn message %s",
+                    logger.warning(
+                        "Failed to clear reserved spawn message %s in %s; residue retained",
                         message_timestamp,
+                        reserved_queue,
                         exc_info=True,
                     )
             else:

@@ -244,9 +244,11 @@ def test_verified_tree_rejects_zombie_root(
 
 
 @pytest.mark.parametrize("caller_handling_exception", [False, True])
+@pytest.mark.parametrize("outcome_status", ["ok", "error"])
 def test_host_return_rejects_worker_surviving_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     caller_handling_exception: bool,
+    outcome_status: str,
 ) -> None:
     runner = _build_function_host_runner(timeout=5.0)
     context = Mock()
@@ -260,7 +262,7 @@ def test_host_return_rejects_worker_surviving_cleanup(
         runner,
         "_run_one_shot_terminal_handoff",
         lambda *args, **kwargs: RunnerOutcome(
-            status="ok",
+            status=outcome_status,
             value="value",
             error=None,
             stdout=None,

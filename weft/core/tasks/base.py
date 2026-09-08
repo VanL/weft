@@ -162,7 +162,9 @@ def _merge_host_process_observations(
     """Preserve PID identities for host processes recorded in runtime handles."""
 
     create_times = dict(existing_processes)
-    create_times.update(recorded_processes)
+    for pid, create_time in recorded_processes.items():
+        if create_time is not None or pid not in create_times:
+            create_times[pid] = create_time
     return [
         {
             "pid": pid,
@@ -2309,7 +2311,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._register_tid_mapping()
 
     def register_runtime_handle(self, handle: RunnerHandle | None) -> None:
-        """Persist the runtime handle used to control the active runner."""
+        """Persist active runtime authority and exact identity evidence [CC-3.2]."""
         if handle is None:
             return
 
@@ -2318,6 +2320,17 @@ class BaseTask(MultiQueueWatcher, ABC):
             handle.runner in {"host", "macos-sandbox"}
             and handle.control.get("authority") == "host-pid"
         ):
+            # The runner may supply exact evidence after the worker-start
+            # callback recorded an unknown identity. Retain it in the same
+            # custody store used by publication and control, without observing
+            # the PID again or replacing an already recorded exact identity.
+            for pid, create_time in handle.scoped_host_processes():
+                if (
+                    pid in self._managed_pids
+                    and self._managed_pids[pid] is None
+                    and create_time is not None
+                ):
+                    self._managed_pids[pid] = create_time
             observations = dict(handle.observations)
             host_pids = set(handle.scoped_host_pids()).union(self._managed_pids)
             observations["host_pids"] = sorted(

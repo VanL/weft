@@ -10,6 +10,7 @@ import time
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from simplebroker.ext import TimestampError
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, load_config
 from weft._exceptions import CommandExecutionError, CommandUsageError
+from weft.client import WeftClient
 from weft.commands import dump as dump_command
 from weft.commands import load as load_command
 from weft.commands.dump import cmd_system_dump
@@ -130,6 +132,63 @@ def test_cmd_dump_default_path(sample_data_context: WeftContext) -> None:
     assert isinstance(exit_result, SystemDumpResult)
     default_path = ctx.weft_dir / "weft_export.jsonl"
     assert default_path.exists()
+
+
+@pytest.mark.parametrize("explicit_output", [False, True])
+def test_client_dump_preserves_resolved_directory_and_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_output: bool
+) -> None:
+    """Client export retains its context instead of rediscovering the root [PY-2]."""
+    root = prepare_project_root(tmp_path / "project")
+    default_context = build_context(root)
+    alternate = build_context(prepare_project_root(tmp_path / "alternate"))
+    configured = build_context(
+        root, config=load_config({"WEFT_DIRECTORY_NAME": ".client-state"})
+    )
+    context = replace(
+        configured,
+        broker_target=alternate.broker_target,
+        broker_config=alternate.broker_config,
+        database_path=alternate.database_path,
+    )
+    for target, body in (
+        (default_context, "root-default-only"),
+        (context, "supplied-context-only"),
+    ):
+        queue = target.queue("dump.context", persistent=False)
+        try:
+            queue.write(body)
+        finally:
+            queue.close()
+    monkeypatch.chdir(tmp_path)
+    output = "explicit.jsonl" if explicit_output else None
+
+    path = WeftClient.from_weft_context(context).system.dump(output=output)
+
+    expected = tmp_path / output if output else context.weft_dir / "weft_export.jsonl"
+    assert path == expected
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["body"] for row in rows if row["type"] == "message"] == [
+        "supplied-context-only"
+    ]
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_client_dump_translates_output_path_failure(
+    sample_data_context: WeftContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shared materializer retains the typed boundary for relative output."""
+    client = WeftClient.from_weft_context(sample_data_context)
+
+    def missing_cwd() -> Path:
+        raise FileNotFoundError("working directory unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "cwd", missing_cwd)
+        with pytest.raises(CommandExecutionError) as caught:
+            client.system.dump(output="relative.jsonl")
+    assert isinstance(caught.value.__cause__, FileNotFoundError)
 
 
 def test_dump_export_format(sample_data_context: WeftContext) -> None:

@@ -365,7 +365,7 @@ def test_serve_foreground_blocks_positive_external_supervisor_duplicate(
     assert pong_tids and set(pong_tids) == {tid}
 
 
-def test_serve_foreground_preserves_unconfirmed_external_record_when_starting(
+def test_serve_foreground_supersedes_unconfirmed_external_record_when_starting(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -421,18 +421,29 @@ def test_serve_foreground_preserves_unconfirmed_external_record_when_starting(
     assert run_calls == [(invocation, context)]
     latest = _latest_manager_record(context, stale_tid)
     assert latest is not None
-    assert latest["status"] == "active"
+    assert latest["status"] == "superseded"
+    with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as queue:
+        history = [
+            row
+            for row, _mid in iter_queue_json_entries(queue)
+            if row.get("owner_tid") == stale_tid
+        ]
+    assert [row["status"] for row in history] == ["active", "superseded"]
     assert stale_tid in probe_tids
 
 
-def test_serve_foreground_ignores_unconfirmed_record_and_blocks_on_live_owner(
+@pytest.mark.parametrize("unknown_first", [True, False])
+def test_serve_foreground_supersedes_in_tid_order_before_live_blocker(
     tmp_path,
     monkeypatch,
+    unknown_first: bool,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
     stale_tid = "1761000000000000006"
     live_tid = "1761000000000000007"
+    if not unknown_first:
+        stale_tid, live_tid = live_tid, stale_tid
     registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         registry_queue.write(
@@ -479,7 +490,7 @@ def test_serve_foreground_ignores_unconfirmed_record_and_blocks_on_live_owner(
     assert run_calls == []
     latest = _latest_manager_record(context, stale_tid)
     assert latest is not None
-    assert latest["status"] == "active"
+    assert latest["status"] == ("superseded" if unknown_first else "active")
     assert stale_tid in probe_tids
 
 
@@ -506,3 +517,94 @@ def test_client_serve_preserves_explicit_context(
     assert seen[0] is context
     assert seen[0].config[WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS] == 137.0
     assert seen[0].broker_target is context.broker_target
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "nonforeground",
+        "draining",
+        "stopped",
+        "noncanonical",
+        "newest_draining",
+        "other_service",
+    ],
+)
+def test_foreground_takeover_excludes_unqualified_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "project"))
+    tid = "1761000000000000021"
+    handle = _external_supervisor_runtime_handle(
+        foreground_serve=kind != "nonforeground"
+    )
+    payload = _manager_service_payload(
+        context,
+        tid,
+        runtime_handle=handle,
+        status=kind if kind in {"draining", "stopped"} else "active",
+    )
+    if kind == "noncanonical":
+        payload["queues"]["requests"] = "private.requests"
+    if kind == "other_service":
+        payload["service_key"] = "manager:another-service"
+    with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as queue:
+        first = queue.write(json.dumps(payload))
+        ids = [first]
+        if kind == "newest_draining":
+            ids.append(queue.write(json.dumps({**payload, "status": "draining"})))
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "_manager_record_has_matched_pong",
+            lambda *args, **kwargs: False,
+        )
+        assert core_manager_runtime._foreground_serve_blocking_manager(context) is None
+        assert [mid for _row, mid in iter_queue_json_entries(queue)] == ids
+
+
+def test_foreground_takeover_append_failure_blocks_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "project"))
+    tid = "1761000000000000022"
+    payload = _manager_service_payload(
+        context, tid, runtime_handle=_external_supervisor_runtime_handle()
+    )
+    with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as queue:
+        mid = queue.write(json.dumps(payload))
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "_manager_record_has_matched_pong",
+            lambda *args, **kwargs: False,
+        )
+        monkeypatch.setattr(
+            core_manager_runtime, "_mark_manager_stopped", lambda *args, **kwargs: False
+        )
+        blocker = core_manager_runtime._foreground_serve_blocking_manager(context)
+        assert blocker is not None and blocker["tid"] == tid
+        assert [
+            (row["status"], stamp) for row, stamp in iter_queue_json_entries(queue)
+        ] == [("active", mid)]
+
+
+def test_foreground_takeover_preserves_positive_external_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive external runtime proof blocks takeover without rewriting history."""
+    context = build_context(prepare_project_root(tmp_path / "project"))
+    tid = "1761000000000000023"
+    payload = _manager_service_payload(
+        context, tid, runtime_handle=_external_supervisor_runtime_handle()
+    )
+    with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as queue:
+        mid = queue.write(json.dumps(payload))
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "runtime_liveness_from_registered_probe",
+            lambda _handle: "live",
+        )
+        blocker = core_manager_runtime._foreground_serve_blocking_manager(context)
+        assert blocker is not None and blocker["tid"] == tid
+        assert [
+            (row["status"], stamp) for row, stamp in iter_queue_json_entries(queue)
+        ] == [("active", mid)]
