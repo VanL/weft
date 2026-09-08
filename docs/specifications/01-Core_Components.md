@@ -778,6 +778,21 @@ Current rule:
 - runners publish live host identity through `on_worker_started` and
   `on_runtime_handle_started`; completed `RunnerOutcome` values retain the
   runtime handle without a duplicate worker-PID field
+- A completed outcome's runtime handle is historical metadata for that
+  outcome. For a one-shot host worker, the return of the runner call that
+  joined the worker is the reap proof: the task then releases that
+  worker's identity, and its newest TID mapping carries only the task
+  process's own `host-pid` handle, never a reaped worker's identity. A
+  task's own mapping identity is not an active worker-control target:
+  task-internal termination must not signal the task process itself.
+  A released worker PID grants no control authority. Session-held runtimes are
+  released by their session's teardown, not by this rule. Direct host
+  control acts through the same acquired process instance whose
+  `create_time` was matched; a recorded host identity whose `create_time`
+  is unknown grants no direct signal authority. Per `control.authority`,
+  `runner` runtimes are controlled only through their plugin and
+  `external-supervisor` runtimes receive no runtime control from Weft;
+  neither is signaled by PID.
 - legacy handle keys such as `runner_name`, `runtime_id`, and top-level
   `host_pids` are invalid at runtime-contract boundaries
 - manager records use the same `runtime_handle` shape. Detached host launch
@@ -802,17 +817,21 @@ metadata and other mutable observations do not reset an unknown deadline.
 
 _Implementation mapping_: `weft/ext.py::RunnerHandle`;
 `weft/core/tasks/runner.py::TaskRunner.run_with_hooks()` owns the live callback
-seam; `weft/core/tasks/consumer.py` registers callback events and the returned
+seam; `weft/core/tasks/consumer.py` registers callback events, releases joined
+host identities at `_register_outcome_runtime`, and the returned
 `weft/core/runners/outcome.py::RunnerOutcome` owns the completed runtime-handle
 field;
 `weft/core/runners/host.py::HostTaskRunner.run_with_hooks` owns the host-runner
 publication path;
 `extensions/weft_docker/weft_docker/agent_runner.py::DockerProviderCLIRunner.run_with_hooks`
 owns the Docker agent-runner path; `weft/core/tasks/base.py::BaseTask.register_runtime_handle`
-publishes the durable mapping; CLI status/control surfaces live in
+publishes the durable mapping; `BaseTask._stop_managed_runtime` routes active
+worker control and `weft/helpers/__init__.py::terminate_verified_process_tree`
+owns same-instance host identity verification and signaling; CLI status/control surfaces live in
 `weft/commands/system.py` and `weft/commands/tasks.py`.
 
 Plan backlink:
+[`docs/plans/2026-08-31-runtime-identity-custody-plan.md`](../plans/2026-08-31-runtime-identity-custody-plan.md).
 [`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md).
 [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
 hardens manager-owned singleton force-kill authority so raw task-log PIDs are

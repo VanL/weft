@@ -83,6 +83,7 @@ from weft.helpers import (
     process_create_time,
     safe_cancel,
     terminate_process_tree,
+    terminate_verified_process_tree,
 )
 
 logger = logging.getLogger(__name__)
@@ -485,6 +486,7 @@ class HostTaskRunner:
             daemon=True,
         )
         process_started = False
+        completed = False
         try:
             process.start()
             process_started = True
@@ -501,13 +503,15 @@ class HostTaskRunner:
                     on_runtime_handle_started(runtime_handle)
                 except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-343] exception
                     logger.warning("Host runtime-handle callback failed")
-            return self._run_one_shot_terminal_handoff(
+            outcome = self._run_one_shot_terminal_handoff(
                 process,
                 response_receiver,
                 worker_pid=worker_pid,
                 runtime_handle=runtime_handle,
                 cancel_requested=cancel_requested,
             )
+            completed = True
+            return outcome
         finally:
             with contextlib.suppress(Exception):
                 response_sender.close()
@@ -519,7 +523,25 @@ class HostTaskRunner:
                         self._stop_process(process)
                     else:
                         process.join(timeout=0.2)
-            self._close_process_handle(process)
+            try:
+                # A normal return is the Consumer's one-shot identity release
+                # proof. A bounded join alone does not establish that proof.
+                if completed:
+                    self._require_worker_reaped(process)
+            finally:
+                self._close_process_handle(process)
+
+    @staticmethod
+    def _require_worker_reaped(process: BaseProcess) -> None:
+        """Reject normal outcomes without owned-process reap proof [CC-3.2]."""
+        try:
+            reaped = not process.is_alive() and process.exitcode is not None
+        except (OSError, ValueError, AssertionError) as exc:
+            raise RuntimeError("Cannot confirm host worker reap") from exc
+        if not reaped:
+            raise RuntimeError(
+                f"Host worker {process.pid} was not reaped after cleanup"
+            )
 
     def _run_one_shot_terminal_handoff(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-034] exception
         self,
@@ -960,7 +982,11 @@ class HostTaskRunner:
 
         pid = process.pid
         if isinstance(pid, int) and pid > 0:
-            terminate_process_tree(pid, timeout=timeout)
+            # This helper never waitpid-reaps the root: the owned BaseProcess
+            # below must collect its exit status before identity release.
+            terminate_verified_process_tree(
+                pid, process_create_time(pid), kill=False, timeout=timeout
+            )
 
         try:
             process.join(timeout=timeout)
@@ -1220,24 +1246,28 @@ class HostRunnerPlugin:
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        host_processes = handle.scoped_host_processes()
-        if not host_processes:
-            return False
-        for pid, create_time in host_processes:
-            if not _host_pid_matches(pid, create_time):
-                continue
-            terminate_process_tree(pid, timeout=timeout)
-        return True
+        """Stop only recorded host identities (Spec: [CC-3.2])."""
+        return self._control_host_processes(handle, timeout=timeout, kill=False)
 
     def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        host_processes = handle.scoped_host_processes()
-        if not host_processes:
+        """Kill only recorded host identities (Spec: [CC-3.2])."""
+        return self._control_host_processes(handle, timeout=timeout, kill=True)
+
+    @staticmethod
+    def _control_host_processes(
+        handle: RunnerHandle, *, timeout: float, kill: bool
+    ) -> bool:
+        if handle.control.get("authority") != "host-pid":
             return False
-        for pid, create_time in host_processes:
-            if not _host_pid_matches(pid, create_time):
-                continue
-            kill_process_tree(pid, timeout=timeout)
-        return True
+        attempted = False
+        for pid, create_time in handle.scoped_host_processes():
+            attempted = (
+                terminate_verified_process_tree(
+                    pid, create_time, kill=kill, timeout=timeout
+                )
+                or attempted
+            )
+        return attempted
 
     def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription | None:
         host_processes = handle.scoped_host_processes()

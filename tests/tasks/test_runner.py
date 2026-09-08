@@ -16,10 +16,13 @@ from itertools import combinations
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
+import psutil
 import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
+from weft import helpers as helpers_module
 from weft._constants import AGENT_SESSION_READY_TIMEOUT_SECONDS
 from weft.core.resource_monitor import ResourceMetrics
 from weft.core.runner_diagnostics import runner_diagnostics
@@ -111,32 +114,180 @@ def test_runner_handle_exposes_host_process_identities() -> None:
     assert handle.scoped_host_processes() == ((123, 456.5),)
 
 
-def test_host_runner_plugin_skips_pid_identity_mismatch(monkeypatch) -> None:
+@pytest.mark.parametrize("kill", [False, True])
+def test_host_runner_plugin_skips_pid_identity_mismatch(
+    kill: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    process = psutil.Process()
     handle = RunnerHandle(
         runner="host",
         kind="process",
-        id="123",
+        id=str(process.pid),
         control={"authority": "host-pid"},
         observations={
-            "host_pids": [123],
-            "host_processes": [{"pid": 123, "create_time": 456.5}],
+            "host_processes": [
+                {"pid": process.pid, "create_time": process.create_time() - 100}
+            ]
         },
     )
-    terminated: list[int] = []
+    plugin = host_module.HostRunnerPlugin()
+    with caplog.at_level(logging.WARNING):
+        attempted = plugin.kill(handle) if kill else plugin.stop(handle)
+    assert attempted is False
+    assert str(process.pid) in caplog.text
 
-    monkeypatch.setattr(
-        host_module,
-        "pid_matches_create_time",
-        lambda pid, create_time: False,
-    )
-    monkeypatch.setattr(
-        host_module,
-        "terminate_process_tree",
-        lambda pid, *, timeout: terminated.append(pid),
-    )
 
-    assert host_module.HostRunnerPlugin().stop(handle)
-    assert terminated == []
+@pytest.mark.parametrize("kill", [False, True])
+@pytest.mark.parametrize("identity", [None, float("nan"), float("inf"), -1.0])
+def test_verified_tree_refuses_missing_or_mismatched_identity(
+    kill: bool,
+    identity: float | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        assert not helpers_module.terminate_verified_process_tree(
+            os.getpid(), identity, kill=kill, timeout=0.1
+        )
+    assert str(os.getpid()) in caplog.text
+
+
+@pytest.mark.parametrize("kill", [False, True])
+def test_verified_tree_terminates_matching_real_descendants(kill: bool) -> None:
+    script = (
+        "import subprocess,sys; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        "print(child.pid,flush=True); child.wait()"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script], stdout=subprocess.PIPE, text=True
+    )
+    assert process.stdout is not None
+    child = psutil.Process(int(process.stdout.readline()))
+    try:
+        identity = psutil.Process(process.pid).create_time()
+        assert helpers_module.terminate_verified_process_tree(
+            process.pid, identity, kill=kill, timeout=0.5
+        )
+        assert process.poll() is not None
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        process.stdout.close()
+        if child.is_running():
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+
+@pytest.mark.parametrize("kill", [False, True])
+def test_verified_tree_signals_the_verified_instance(
+    kill: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Mock()
+    root.pid = 123
+    root.create_time.return_value = 10.0
+    root.status.return_value = psutil.STATUS_RUNNING
+    root.children.return_value = []
+    acquired = Mock(return_value=root)
+    monkeypatch.setattr(helpers_module.psutil, "Process", acquired)
+    forbidden_wait = Mock(side_effect=AssertionError("must not steal owned child reap"))
+    monkeypatch.setattr(helpers_module.psutil, "wait_procs", forbidden_wait)
+    assert helpers_module.terminate_verified_process_tree(
+        123, 10.0, kill=kill, timeout=0.1
+    )
+    acquired.assert_called_once_with(123)
+    root.create_time.assert_called_once_with()
+    root.kill.assert_called_once_with()
+    assert root.terminate.call_count == (0 if kill else 1)
+
+
+@pytest.mark.parametrize("kill", [False, True])
+def test_verified_tree_preserves_owned_multiprocessing_reap(kill: bool) -> None:
+    process = multiprocessing.get_context("spawn").Process(
+        target=time.sleep, args=(60,)
+    )
+    process.start()
+    assert process.pid is not None
+    try:
+        identity = psutil.Process(process.pid).create_time()
+        assert helpers_module.terminate_verified_process_tree(
+            process.pid, identity, kill=kill, timeout=0.2
+        )
+        process.join(timeout=5)
+        assert process.exitcode is not None
+        assert not process.is_alive()
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5)
+        process.close()
+
+
+@pytest.mark.parametrize("kill", [False, True])
+def test_verified_tree_rejects_zombie_root(
+    kill: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Mock()
+    root.create_time.return_value = 10.0
+    root.status.return_value = psutil.STATUS_ZOMBIE
+    monkeypatch.setattr(helpers_module.psutil, "Process", lambda pid: root)
+    assert not helpers_module.terminate_verified_process_tree(
+        123, 10.0, kill=kill, timeout=0.1
+    )
+    root.children.assert_not_called()
+    root.terminate.assert_not_called()
+    root.kill.assert_not_called()
+
+
+@pytest.mark.parametrize("caller_handling_exception", [False, True])
+def test_host_return_rejects_worker_surviving_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    caller_handling_exception: bool,
+) -> None:
+    runner = _build_function_host_runner(timeout=5.0)
+    context = Mock()
+    context.Pipe.return_value = (Mock(), Mock())
+    context.Process.return_value.pid = 123
+    context.Process.return_value.is_alive.return_value = True
+    monkeypatch.setattr(runner, "_ctx", context)
+    monkeypatch.setattr(host_module, "_host_handle", lambda pid: None)
+    monkeypatch.setattr(runner, "_stop_process", lambda process: None)
+    monkeypatch.setattr(
+        runner,
+        "_run_one_shot_terminal_handoff",
+        lambda *args, **kwargs: RunnerOutcome(
+            status="ok",
+            value="value",
+            error=None,
+            stdout=None,
+            stderr=None,
+            returncode=0,
+            duration=0.0,
+        ),
+    )
+    if caller_handling_exception:
+        try:
+            raise ValueError("caller is handling an unrelated exception")
+        except ValueError:
+            with pytest.raises(RuntimeError, match="reap"):
+                runner.run_with_hooks(None)
+    else:
+        with pytest.raises(RuntimeError, match="reap"):
+            runner.run_with_hooks(None)
+
+
+def test_host_return_follows_real_worker_reap() -> None:
+    runner = _build_function_host_runner(timeout=5.0)
+    workers: list[int | None] = []
+    outcome = runner.run_with_hooks("payload", on_worker_started=workers.append)
+    assert outcome.status == "ok"
+    assert len(workers) == 1
+    assert workers[0] is not None
+    assert not psutil.pid_exists(workers[0])
 
 
 def test_runner_handle_rejects_legacy_shape() -> None:
@@ -4011,8 +4162,10 @@ def test_host_process_stop_reports_join_failure_and_escalates(
 
     monkeypatch.setattr(
         host_module,
-        "terminate_process_tree",
-        lambda pid, *, timeout: calls.append(f"terminate_tree:{pid}:{timeout}"),
+        "terminate_verified_process_tree",
+        lambda pid, create_time, *, kill, timeout: calls.append(
+            f"terminate_tree:{pid}:{timeout}"
+        ),
     )
     caplog.set_level(logging.WARNING, logger="weft.core.runners.host")
 

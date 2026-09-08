@@ -23,6 +23,7 @@ There are currently 191 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-08-31-runtime-identity-custody-plan.md`](./2026-08-31-runtime-identity-custody-plan.md) | Runtime Identity Custody Plan | `completed` | none |
 | [`2026-08-31-guard-and-custody-simplification-plan.md`](./2026-08-31-guard-and-custody-simplification-plan.md) | Guard and Custody Simplification Plan | `draft` | none |
 | [`2026-08-29-liveness-reaper-and-custody-split-plan.md`](./2026-08-29-liveness-reaper-and-custody-split-plan.md) | Liveness Reaper and TID-Mapping Custody Split Plan | `completed` | none |
 | [`2026-08-29-liveness-monitor-plan.md`](./2026-08-29-liveness-monitor-plan.md) | LivenessMonitor Service and Runtime Probe Package Plan | `draft` | [`2026-08-29-liveness-reaper-and-custody-split-plan.md`](./2026-08-29-liveness-reaper-and-custody-split-plan.md) |

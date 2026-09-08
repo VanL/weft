@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -68,10 +67,8 @@ from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.runner_diagnostics import diagnostic_summary
 from weft.helpers import (
     iter_queue_json_entries,
-    kill_process_tree,
     pid_is_live,
-    pid_matches_create_time,
-    terminate_process_tree,
+    terminate_verified_process_tree,
 )
 
 from ._boundary import typed_command_errors
@@ -1153,7 +1150,7 @@ def _host_processes_from_mapping(
 
     Sibling of `_host_pids_from_mapping` that preserves the recorded process
     creation-time identity so signal-sending call sites can verify each PID
-    with `pid_matches_create_time` before signaling (Spec: [CC-3.2]).
+    through the same verified process instance (Spec: [CC-3.2]).
     """
     handle = system_cmd._runtime_handle_from_mapping(entry)
     if handle is None or handle.control.get("authority") != "host-pid":
@@ -1478,18 +1475,6 @@ def _stop_via_fallback(task_entry: dict[str, Any] | None) -> bool:
         plugin.stop(handle, timeout=0.2)
         return True
 
-    for pid, create_time in _host_processes_from_mapping(task_entry):
-        if not pid_matches_create_time(pid, create_time):
-            logger.debug(
-                "Skipping stale PID %s (create_time=%r) in stop fallback",
-                pid,
-                create_time,
-            )
-            continue
-        if _pid_exists(pid):
-            terminate_process_tree(pid, timeout=0.2, kill_after=False)
-            return False
-
     return False
 
 
@@ -1516,25 +1501,6 @@ def _kill_via_fallback(task_entry: dict[str, Any] | None) -> bool:
         plugin.kill(handle, timeout=0.2)
         return True
 
-    for pid, create_time in _host_processes_from_mapping(task_entry):
-        if not pid_matches_create_time(pid, create_time):
-            logger.debug(
-                "Skipping stale PID %s (create_time=%r) in kill fallback",
-                pid,
-                create_time,
-            )
-            continue
-        if _pid_exists(pid):
-            sigusr1 = getattr(signal, "SIGUSR1", None)
-            if sigusr1 is not None:
-                try:
-                    os.kill(pid, sigusr1)
-                except OSError:
-                    pass
-            else:
-                kill_process_tree(pid, timeout=0.2)
-            return False
-
     return False
 
 
@@ -1553,15 +1519,10 @@ def _force_kill_task_processes(task_entry: dict[str, Any] | None) -> bool:
 
     kill_attempted = False
     for pid_value, create_time in processes.items():
-        if not pid_matches_create_time(pid_value, create_time):
-            logger.debug(
-                "Skipping stale PID %s (create_time=%r) in force-kill fallback",
-                pid_value,
-                create_time,
-            )
-            continue
-        kill_process_tree(pid_value, timeout=0.2)
-        kill_attempted = True
+        attempted = terminate_verified_process_tree(
+            pid_value, create_time, timeout=0.2, kill=True
+        )
+        kill_attempted = attempted or kill_attempted
     return kill_attempted
 
 

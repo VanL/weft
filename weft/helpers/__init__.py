@@ -5,6 +5,7 @@ code. It includes queue-history readers, command-resolution helpers, and
 runtime ownership reducers that multiple spec-owned surfaces reuse.
 
 Spec references:
+- docs/specifications/01-Core_Components.md [CC-3.2]
 - docs/specifications/03-Manager_Architecture.md [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-6]
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
@@ -33,6 +34,7 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     ATOMIC_WRITE_RETRY_ATTEMPTS,
     ATOMIC_WRITE_RETRY_INTERVAL,
+    SUBPROCESS_POLL_INTERVAL_FLOOR,
     WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS,
     WEFT_SPAWN_REQUESTS_QUEUE,
     load_config,
@@ -395,6 +397,93 @@ def canonical_owner_tid(claimant_tids: Iterable[str]) -> str | None:
             lowest_value = numeric_tid
             lowest_tid = tid
     return lowest_tid
+
+
+def _verified_host_process(
+    pid: int, create_time: float | None
+) -> psutil.Process | None:
+    """Acquire the exact process instance authorized for host control [CC-3.2]."""
+    if pid <= 0 or create_time is None or not math.isfinite(create_time):
+        logger.warning("Skipping PID %s: no exact creation-time signal authority", pid)
+        return None
+    try:
+        process = psutil.Process(pid)
+        observed = process.create_time()
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return None
+        if not math.isclose(observed, create_time, rel_tol=0.0, abs_tol=0.001):
+            logger.warning("Skipping PID %s: creation-time identity mismatch", pid)
+            return None
+        return process
+    except psutil.NoSuchProcess:
+        return None
+    except psutil.Error:
+        logger.warning("Skipping PID %s: process identity cannot be verified", pid)
+        return None
+
+
+def terminate_verified_process_tree(
+    pid: int,
+    create_time: float | None,
+    *,
+    kill: bool,
+    timeout: float = 0.5,
+) -> bool:
+    """Signal an identity-verified tree through the acquired process instances.
+
+    Return whether any signal was attempted; death is verified by callers.
+    Graceful termination escalates survivors after the bounded wait. Descendant
+    instances are acquired from the verified root, never reconstructed by PID.
+
+    Spec: docs/specifications/01-Core_Components.md [CC-3.2].
+    """
+    root = _verified_host_process(pid, create_time)
+    if root is None:
+        return False
+    attempted: list[psutil.Process] = []
+    for process in [*_list_process_descendants(root), root]:
+        attempted.append(process)
+        try:
+            if kill:
+                process.kill()
+            else:
+                process.terminate()
+        except psutil.Error:
+            continue
+    alive = _wait_for_verified_processes(attempted, timeout=timeout)
+    if not kill and alive:
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.Error:
+                continue
+        _wait_for_verified_processes(alive, timeout=timeout)
+    return bool(attempted)
+
+
+def _process_instance_is_live(process: psutil.Process) -> bool:
+    """Inspect without waitpid so the runner retains its owned child reap."""
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True
+
+
+def _wait_for_verified_processes(
+    processes: list[psutil.Process], *, timeout: float
+) -> list[psutil.Process]:
+    """Bound observation without stealing a Popen or multiprocessing child wait."""
+    deadline = time.monotonic() + timeout
+    alive = processes
+    while alive:
+        alive = [process for process in alive if _process_instance_is_live(process)]
+        remaining = deadline - time.monotonic()
+        if not alive or remaining <= 0:
+            break
+        time.sleep(min(SUBPROCESS_POLL_INTERVAL_FLOOR, remaining))
+    return alive
 
 
 def terminate_process_tree(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-124] exception

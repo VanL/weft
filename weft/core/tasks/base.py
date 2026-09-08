@@ -91,10 +91,9 @@ from weft.ext import RunnerHandle
 from weft.helpers import (
     ensure_owner_only_dir,
     iter_queue_json_entries,
-    kill_process_tree,
     process_create_time,
     redact_taskspec_dump,
-    terminate_process_tree,
+    terminate_verified_process_tree,
     write_owner_only_bytes,
 )
 
@@ -159,12 +158,19 @@ class TaskReactorLifecycle(StrEnum):
 def _merge_host_process_observations(
     existing_processes: tuple[tuple[int, float | None], ...],
     host_pids: set[int],
+    recorded_processes: Mapping[int, float | None],
 ) -> list[dict[str, float | int | None]]:
     """Preserve PID identities for host processes recorded in runtime handles."""
 
     create_times = dict(existing_processes)
+    create_times.update(recorded_processes)
     return [
-        {"pid": pid, "create_time": create_times.get(pid, process_create_time(pid))}
+        {
+            "pid": pid,
+            "create_time": create_times[pid]
+            if pid in create_times
+            else process_create_time(pid),
+        }
         for pid in sorted(pid for pid in host_pids if pid > 0)
     ]
 
@@ -297,7 +303,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._task_pid = os.getpid()
         self._task_pid_create_time = process_create_time(self._task_pid)
         self._caller_pid = os.getppid()
-        self._managed_pids: set[int] = set()
+        self._managed_pids: dict[int, float | None] = {}
         self._runtime_handle: RunnerHandle | None = None
         self._kill_requested = False
         self._external_stop_handled = False
@@ -2033,9 +2039,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         signal_name = _signal_name(signum)
         sigusr1 = getattr(signal, "SIGUSR1", None)
         if sigusr1 is not None and signum == sigusr1:
-            self._stop_registered_runtime_handle(timeout=0.2, graceful=False)
-            for pid in sorted(self._managed_pids):
-                kill_process_tree(pid, timeout=0.2)
+            self._stop_managed_runtime(timeout=0.2, graceful=False)
             self._handle_kill_request(
                 reason=f"{signal_name} received",
                 event="task_signal_kill",
@@ -2044,9 +2048,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             )
             return
 
-        self._stop_registered_runtime_handle(timeout=0.2, graceful=True)
-        for pid in sorted(self._managed_pids):
-            terminate_process_tree(pid, timeout=0.2)
+        self._stop_managed_runtime(timeout=0.2, graceful=True)
         self._handle_stop_request(
             reason=f"{signal_name} received",
             event="task_signal_stop",
@@ -2291,7 +2293,14 @@ class BaseTask(MultiQueueWatcher, ABC):
             return
         if pid in self._managed_pids:
             return
-        self._managed_pids.add(pid)
+        existing = (
+            dict(self._runtime_handle.scoped_host_processes())
+            if self._runtime_handle is not None
+            else {}
+        )
+        self._managed_pids[pid] = (
+            existing[pid] if pid in existing else process_create_time(pid)
+        )
         self._merge_runtime_handle_host_pid(pid)
         self._register_tid_mapping()
 
@@ -2313,6 +2322,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             observations["host_processes"] = _merge_host_process_observations(
                 handle.scoped_host_processes(),
                 host_pids,
+                self._managed_pids,
             )
             merged_handle = RunnerHandle(
                 runner=handle.runner,
@@ -2737,6 +2747,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         observations["host_processes"] = _merge_host_process_observations(
             self._runtime_handle.scoped_host_processes(),
             host_pids,
+            self._managed_pids,
         )
         self._runtime_handle = RunnerHandle(
             runner=self._runtime_handle.runner,
@@ -2746,6 +2757,24 @@ class BaseTask(MultiQueueWatcher, ABC):
             observations=observations,
             metadata=dict(self._runtime_handle.metadata),
         )
+
+    def _stop_managed_runtime(self, *, timeout: float, graceful: bool) -> None:
+        """Control only active workers through their recorded authority.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-3.2]
+        """
+        handle = self._runtime_handle
+        if handle is not None and handle.control.get("authority") != "host-pid":
+            self._stop_registered_runtime_handle(timeout=timeout, graceful=graceful)
+            return
+        identities = dict(handle.scoped_host_processes()) if handle else {}
+        identities.update(self._managed_pids)
+        for pid, create_time in identities.items():
+            if pid == self._task_pid:
+                continue
+            terminate_verified_process_tree(
+                pid, create_time, timeout=timeout, kill=not graceful
+            )
 
     def _stop_registered_runtime_handle(
         self,

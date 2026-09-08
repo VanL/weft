@@ -2197,6 +2197,20 @@ def test_cli_run_persistent_spec_name_claims_and_releases_endpoint(
     )
     assert resolved_payload["tid"] == tid
 
+    _write_queue_message(weft_harness.context, f"T{tid}.inbox", "still-serving")
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "20",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+    assert rc == 0
+    assert json.loads(out)["result"] == "still-serving"
+    assert err == ""
+
     rc, out, err = run_cli(
         "queue",
         "resolve",

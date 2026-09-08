@@ -1864,7 +1864,7 @@ def test_stop_tasks_uses_runner_handle_when_available(
     monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: False)
     monkeypatch.setattr(
         task_cmd,
-        "terminate_process_tree",
+        "terminate_verified_process_tree",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("should not fall back to direct PID stop")
         ),
@@ -1928,9 +1928,9 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
     monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: pid == 11111)
     monkeypatch.setattr(
         task_cmd,
-        "terminate_process_tree",
-        lambda pid, timeout=0.2, kill_after=True: terminate_calls.append(
-            (pid, timeout, kill_after)
+        "terminate_verified_process_tree",
+        lambda pid, create_time, *, timeout, kill: terminate_calls.append(
+            (pid, timeout, not kill)
         ),
     )
 
@@ -1991,7 +1991,7 @@ def test_kill_tasks_uses_runner_handle_when_available(
     monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: False)
     monkeypatch.setattr(
         task_cmd,
-        "kill_process_tree",
+        "terminate_verified_process_tree",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("should not fall back to direct PID kill")
         ),
@@ -2076,12 +2076,9 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
     # PID still lives) independent of the create-time verification added to
     # close the reused-PID defect.
     monkeypatch.setattr(
-        task_cmd, "pid_matches_create_time", lambda pid, create_time: pid == 33333
-    )
-    monkeypatch.setattr(
         task_cmd,
-        "kill_process_tree",
-        lambda pid, timeout=0.2: force_calls.append(pid) or False,
+        "terminate_verified_process_tree",
+        lambda pid, create_time, *, timeout, kill: force_calls.append(pid) or True,
     )
 
     killed = task_cmd.kill_tasks([tid], context_path=root)
@@ -2191,7 +2188,7 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
     )
     monkeypatch.setattr(
         task_cmd,
-        "terminate_process_tree",
+        "terminate_verified_process_tree",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("external runners must not force-stop the consumer PID")
         ),
@@ -2247,7 +2244,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
     )
     monkeypatch.setattr(
         task_cmd,
-        "terminate_process_tree",
+        "terminate_verified_process_tree",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("graceful stop must not terminate the consumer PID")
         ),
@@ -2321,7 +2318,7 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
     )
     monkeypatch.setattr(
         task_cmd,
-        "kill_process_tree",
+        "terminate_verified_process_tree",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("external runners must not force-kill the consumer PID")
         ),
@@ -2405,18 +2402,8 @@ def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
         stale_entry = dict(entry)
         stale_entry["runtime_handle"] = handle_payload
 
-        signaled: list[int] = []
-        original_kill_process_tree = task_cmd.kill_process_tree
-        try:
-            task_cmd.kill_process_tree = (  # type: ignore[assignment]
-                lambda pid, **kwargs: signaled.append(pid) or False
-            )
+        task_killed = task_cmd._force_kill_task_processes(stale_entry)
 
-            task_killed = task_cmd._force_kill_task_processes(stale_entry)
-        finally:
-            task_cmd.kill_process_tree = original_kill_process_tree  # type: ignore[assignment]
-
-        assert signaled == []
         assert task_killed is False
         # The real mapped process was never touched, so it is still alive.
         assert pid_is_live(target_pid)
@@ -2449,13 +2436,8 @@ def test_force_kill_task_processes_records_attempt_while_verified_pid_lingers(
     kill_calls: list[int] = []
     monkeypatch.setattr(
         task_cmd,
-        "pid_matches_create_time",
-        lambda pid, create_time: pid == 33333,
-    )
-    monkeypatch.setattr(
-        task_cmd,
-        "kill_process_tree",
-        lambda pid, timeout=0.2: kill_calls.append(pid) or set(),
+        "terminate_verified_process_tree",
+        lambda pid, create_time, *, timeout, kill: kill_calls.append(pid) or True,
     )
     monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: True)
 
@@ -2465,13 +2447,10 @@ def test_force_kill_task_processes_records_attempt_while_verified_pid_lingers(
     assert kill_calls == [33333]
 
 
-def test_force_kill_task_processes_preserves_liveness_fallback_without_create_time(
+def test_force_kill_task_processes_refuses_unknown_create_time(
     tmp_path,
 ) -> None:
-    """A mapping entry with no recorded create_time keeps the shared helper's
-    existing plain-liveness fallback (manager parity), per external review
-    semantics decision: entries whose payload carries no create-time are not
-    skipped, they fall back to `pid_is_live` (Spec: [CC-3.2])."""
+    """A live PID without an exact recorded identity grants no control [CC-3.2]."""
     spec, process, worker_pid = _launch_running_task(tmp_path)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -2498,8 +2477,8 @@ def test_force_kill_task_processes_preserves_liveness_fallback_without_create_ti
 
         task_killed = task_cmd._force_kill_task_processes(no_create_time_entry)
 
-        assert task_killed is True
-        assert _wait_for_process_exit(target_pid)
+        assert task_killed is False
+        assert task_cmd._pid_exists(target_pid)
     finally:
         kill_process_tree(process.pid)
         kill_process_tree(worker_pid)
@@ -2510,17 +2489,7 @@ def test_force_kill_task_processes_preserves_liveness_fallback_without_create_ti
 def test_stop_and_kill_via_fallback_guard_is_defensive_and_unreachable_today(
     tmp_path,
 ) -> None:
-    """`_stop_via_fallback`/`_kill_via_fallback` guard their raw-PID loop with
-    `pid_matches_create_time` for defense-in-depth and call-site consistency
-    with `_force_kill_task_processes`, matching the plan's instruction to
-    change `_host_pids_from_mapping` consumers uniformly. That loop is
-    unreachable today: both functions return early via the runner-plugin
-    branch whenever `_runtime_handle_from_mapping` parses a handle, and
-    `_host_processes_from_mapping`/`_host_pids_from_mapping` require that
-    same parseable handle to yield any PIDs. The live host-pid case is
-    therefore fully covered end-to-end through the plugin branch, which
-    itself verifies create-time via `weft.core.runners.host._host_pid_matches`
-    (Spec: [CC-3.2])."""
+    """Fallback controls a live exact host identity through its plugin [CC-3.2]."""
     spec, process, worker_pid = _launch_running_task(tmp_path)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

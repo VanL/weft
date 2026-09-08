@@ -38,7 +38,6 @@ from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
-from weft.helpers import kill_process_tree, terminate_process_tree
 
 from .base import BaseTask, TaskControlPolicy, TaskWorkerResult
 from .interactive import InteractiveTaskMixin
@@ -299,6 +298,21 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         return outcome.value
 
     def _register_outcome_runtime(self, outcome: RunnerOutcome) -> None:
+        """Release joined one-shot host workers before publishing idle identity.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-3.2]
+        """
+        if (
+            self.taskspec.spec.runner.name == "host"
+            and not self._uses_agent_session()
+            and self._managed_pids
+        ):
+            # Host run_with_hooks returns only after its owned worker exits.
+            # Sessions use their own teardown; outcomes retain historical handles.
+            self._managed_pids.clear()
+            self._runtime_handle = None
+            self._register_tid_mapping()
+            return
         self.register_runtime_handle(outcome.runtime_handle)
 
     def run_work_item(self, work_item: Any) -> Any:
@@ -1200,12 +1214,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._end_streaming_session()
 
     def _terminate_active_worker(self, *, graceful: bool) -> None:
-        self._stop_registered_runtime_handle(timeout=0.2, graceful=graceful)
-        for pid in sorted(self._managed_pids):
-            if graceful:
-                terminate_process_tree(pid, timeout=0.2)
-            else:
-                kill_process_tree(pid, timeout=0.2)
+        self._stop_managed_runtime(timeout=0.2, graceful=graceful)
         self._shutdown_agent_session()
 
     def _cleanup_task_resources(self, deadline: float) -> None:
