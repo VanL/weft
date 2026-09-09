@@ -8,9 +8,12 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.test_backend import prepare_project_root
 from weft import commands
+from weft.commands import tasks as task_commands
+from weft.commands.run import _LiveRunSession
 from weft.commands.types import RunExecutionResult, RunSpecDescription, TaskResult
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 
 pytestmark = pytest.mark.shared
 
@@ -244,3 +247,30 @@ def test_run_session_wait_preserves_terminal_task_timeout(
         error_message="target timed out",
         error_prefix="Target failed",
     )
+
+
+def test_run_session_stop_controls_on_the_session_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`RunSession.stop` keeps the submitted context instead of rebuilding [PY-2]."""
+
+    context = build_context(prepare_project_root(tmp_path / "project"))
+    session = _LiveRunSession(RunExecutionResult(tid="1" * 19), context)
+    seen: list[WeftContext] = []
+
+    def refuse_rebuild(*_args: Any, **_kwargs: Any) -> WeftContext:
+        raise AssertionError("stop must not resolve a fresh context")
+
+    def record_stop(tid: str, *, context: WeftContext | None = None) -> None:
+        assert context is not None
+        seen.append(context)
+
+    monkeypatch.setattr(task_commands, "build_context", refuse_rebuild)
+    monkeypatch.setattr(task_commands, "stop_task", record_stop)
+
+    result = session.stop()
+
+    assert [id(entry) for entry in seen] == [id(context)]
+    assert result.command == "stop"
+    assert result.accepted == ("1" * 19,)

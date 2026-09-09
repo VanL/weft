@@ -408,11 +408,21 @@ class _LiveRunSession:
         finally:
             queue.close()
 
+    @typed_command_errors
     def stop(self) -> TaskControlResult:
+        """Stop this session's task on the context it was submitted with [PY-2]."""
         # Late import avoids the tasks -> system -> run dependency closure.
-        from .tasks import cmd_task_stop
+        from .tasks import _task_control_result
 
-        return cmd_task_stop(self.tid, context=self._context.root)
+        return _task_control_result(
+            "stop",
+            self.tid,
+            tids=None,
+            all_tasks=False,
+            pattern=None,
+            context_path=None,
+            runtime_context=self._context,
+        )
 
     def wait(self, timeout: float | None = None) -> RunExecutionResult:
         if self._result is not None:

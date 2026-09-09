@@ -175,6 +175,90 @@ def test_client_dump_preserves_resolved_directory_and_broker(
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("explicit_input", [False, True])
+def test_client_load_preserves_resolved_directory_and_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_input: bool
+) -> None:
+    """Client import writes into its context instead of the rebuilt root [PY-2]."""
+    root = prepare_project_root(tmp_path / "project")
+    default_context = build_context(root)
+    alternate = build_context(prepare_project_root(tmp_path / "alternate"))
+    configured = build_context(
+        root, config=load_config({"WEFT_DIRECTORY_NAME": ".client-state"})
+    )
+    context = replace(
+        configured,
+        broker_target=alternate.broker_target,
+        broker_config=alternate.broker_config,
+        database_path=alternate.database_path,
+    )
+    source = build_context(prepare_project_root(tmp_path / "source"))
+    source_queue = source.queue("load.context", persistent=False)
+    try:
+        source_queue.write("supplied-context-only")
+    finally:
+        source_queue.close()
+    export = tmp_path / "source.jsonl"
+    cmd_system_dump(output=str(export), context=source.root)
+    if explicit_input:
+        input_path = tmp_path / "explicit.jsonl"
+        input_file: str | None = "explicit.jsonl"
+    else:
+        input_path = context.weft_dir / "weft_export.jsonl"
+        input_file = None
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text(export.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = WeftClient.from_weft_context(context).system.load(input_file=input_file)
+
+    assert result.imported is True
+    assert result.total_messages == 1
+    _, supplied_queues = _snapshot_broker_state(context)
+    _, root_queues = _snapshot_broker_state(default_context)
+    assert supplied_queues.get("load.context") == ["supplied-context-only"]
+    assert "load.context" not in root_queues
+
+
+def test_client_tidy_preserves_the_supplied_broker_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client compaction targets its context's broker, not the rebuilt root [PY-2].
+
+    The oracle records which resolved context opens its broker for the vacuum,
+    so it is backend-neutral: under PostgreSQL both roots share a DSN and
+    differ only by schema, which the display target omits.
+    """
+    root = prepare_project_root(tmp_path / "project")
+    default_context = build_context(root)
+    alternate = build_context(prepare_project_root(tmp_path / "alternate"))
+    configured = build_context(
+        root, config=load_config({"WEFT_DIRECTORY_NAME": ".client-state"})
+    )
+    context = replace(
+        configured,
+        broker_target=alternate.broker_target,
+        broker_config=alternate.broker_config,
+        database_path=alternate.database_path,
+    )
+
+    opened_on: list[object] = []
+    original_broker = WeftContext.broker
+
+    def recording_broker(self: WeftContext) -> object:
+        opened_on.append(self.broker_target)
+        return original_broker(self)
+
+    monkeypatch.setattr(WeftContext, "broker", recording_broker)
+
+    result = WeftClient.from_weft_context(context).system.tidy()
+
+    assert result.target == context.broker_display_target
+    assert len(opened_on) == 1
+    assert opened_on[0] is context.broker_target
+    assert opened_on[0] is not default_context.broker_target
+
+
 def test_client_dump_translates_output_path_failure(
     sample_data_context: WeftContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:

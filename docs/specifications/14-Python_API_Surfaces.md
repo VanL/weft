@@ -178,12 +178,18 @@ Interactive run only changes session capabilities. Task monitor returns
 `TaskMonitorResult`; sink does not alter the branch. `cmd_manager_serve` is the
 sole blocking non-stream exception and emits no process output.
 
-Client system dump preserves the supplied resolved context, including
-its broker target and artifact directory. Without an explicit output,
-the export is `weft_export.jsonl` in that context's Weft directory.
+Client system dump, load, and tidy preserve the supplied resolved
+context, including its broker target and artifact directory. Without an
+explicit output, the export is `weft_export.jsonl` in that context's
+Weft directory; without an explicit input, load reads that same file.
+A `RunSession.stop` likewise controls the task on the context the
+session was submitted with.
 
 Implementation: `weft/commands/dump.py::dump_system` and `cmd_system_dump`
-share the resolved-context materializer.
+share the resolved-context materializer; `weft/commands/load.py` and
+`weft/commands/tidy.py` share theirs the same way, and
+`weft/commands/run.py::_LiveRunSession.stop` passes its session context
+to the task-control owner.
 Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
 
 ### Typed errors and CLI exits

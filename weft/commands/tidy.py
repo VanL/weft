@@ -16,10 +16,14 @@ from weft.context import WeftContext, build_context
 from ._boundary import typed_command_errors
 
 
+@typed_command_errors
 def tidy_system(context: WeftContext) -> SystemTidyResult:
-    """Run broker compaction and return the broker display target."""
+    """Run broker compaction and return the broker display target.
 
-    return cmd_system_tidy(context=context.root)
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    return _tidy_resolved_context(context)
 
 
 @typed_command_errors
@@ -31,11 +35,20 @@ def cmd_system_tidy(*, context: Path | None = None) -> SystemTidyResult:
 
     try:
         resolved = build_context(spec_context=context)
-        with resolved.broker() as broker:
+    except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+        raise CommandExecutionError(str(exc)) from exc
+    return _tidy_resolved_context(resolved)
+
+
+def _tidy_resolved_context(context: WeftContext) -> SystemTidyResult:
+    """Compact the caller's resolved context and report it [PY-2], [CLI-6]."""
+
+    try:
+        with context.broker() as broker:
             broker.vacuum(compact=True)
     except (BrokerError, OSError, RuntimeError, ValueError) as exc:
         raise CommandExecutionError(str(exc)) from exc
-    return SystemTidyResult(target=resolved.broker_display_target)
+    return SystemTidyResult(target=context.broker_display_target)
 
 
 __all__ = ["cmd_system_tidy", "tidy_system"]

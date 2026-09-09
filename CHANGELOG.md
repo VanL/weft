@@ -52,6 +52,11 @@
 
 - Preserve exact worker identity when a later observation lacks creation time,
   and retain client dump context, including its broker and default directory.
+- Client `system.load` and `system.tidy` now import into and compact the
+  supplied resolved context instead of rebuilding one from its root path, and
+  `RunSession.stop` controls the task on its submission context. Callers that
+  relied on the rebuilt-root behavior — including the re-read of process
+  environment configuration — now act on the context they passed in.
 - Interactive STOP waits through its existing shutdown budget before KILL;
   foreground takeover again records supersession in incumbent TID order.
 - Failed Manager CLEAR logs retained reserved residue at WARNING.

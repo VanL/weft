@@ -570,8 +570,16 @@ def cmd_system_load(
         raise CommandExecutionError(
             f"weft load: failed to resolve context: {exc}"
         ) from exc
+    return _load_resolved_context(resolved, input=input, dry_run=dry_run)
+
+
+def _load_resolved_context(
+    context: WeftContext, *, input: str | None, dry_run: bool
+) -> SystemLoadResult:
+    """Import a dump into the caller's resolved context [PY-2], [CLI-6]."""
+
     input_path = (
-        resolved.weft_dir / "weft_export.jsonl" if input is None else Path(input)
+        context.weft_dir / "weft_export.jsonl" if input is None else Path(input)
     )
     if not input_path.is_absolute():
         input_path = Path.cwd() / input_path
@@ -579,13 +587,13 @@ def cmd_system_load(
         raise CommandUsageError(f"weft load: input file not found: {input_path}")
     try:
         with input_path.open(encoding="utf-8") as handle:
-            plan = _build_import_plan(handle, resolved)
+            plan = _build_import_plan(handle, context)
         if plan.report.alias_conflicts:
             conflicts = ", ".join(sorted(plan.report.alias_conflicts))
             raise _AliasConflictError(
                 "weft load: alias conflicts detected: " + conflicts
             )
-        report = plan.report if dry_run else _execute_import(plan, resolved)
+        report = plan.report if dry_run else _execute_import(plan, context)
     except (CommandExecutionError, CommandUsageError):
         raise
     except (BrokerError, ImportError, OSError, RuntimeError, ValueError) as exc:
@@ -600,18 +608,22 @@ def cmd_system_load(
     )
 
 
+@typed_command_errors
 def load_system(
     context: WeftContext,
     *,
     input_file: str | Path | None = None,
     dry_run: bool = False,
 ) -> SystemLoadResult:
-    """Load broker state from a dump file."""
+    """Load broker state into the supplied resolved context.
 
-    return cmd_system_load(
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    return _load_resolved_context(
+        context,
         input=str(input_file) if input_file is not None else None,
         dry_run=dry_run,
-        context=context.root,
     )
 
 
