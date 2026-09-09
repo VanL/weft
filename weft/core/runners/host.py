@@ -45,7 +45,7 @@ from weft.core.runners.subprocess_runner import (
     prepare_command_invocation,
     run_monitored_subprocess,
 )
-from weft.core.targets import execute_command_target, execute_function_target
+from weft.core.targets import execute_function_target
 from weft.core.tasks.agent_session_protocol import (
     make_booted_response,
     make_ready_response,
@@ -137,7 +137,14 @@ def _worker_entry(
     work_item: Any,
     result_sender: Connection,
 ) -> None:
-    """Execute a single work item in a spawned process."""
+    """Execute a single function or agent work item in a spawned process.
+
+    Command targets are served by :meth:`HostTaskRunner._run_command_with_hooks`
+    and never reach this worker; any other target type is rejected with a
+    terminal error outcome.
+
+    Spec: [RM-5] (command tasks run through the subprocess runner).
+    """
     start = time.monotonic()
     status = "ok"
     value = None
@@ -166,28 +173,15 @@ def _worker_entry(
                     bundle_root=cast(str | None, spec_data.get("bundle_root")),
                 )
             else:
-                completed = execute_command_target(
-                    spec_data["process_target"],
-                    work_item,
-                    args=spec_data.get("args"),
-                    env=spec_data.get("env") or {},
-                    working_dir=spec_data.get("working_dir"),
-                    # HostTaskRunner owns timeout enforcement for one-shot command
-                    # tasks. Passing the same timeout into subprocess.run() races the
-                    # outer worker timeout and can orphan grandchildren when the
-                    # direct child exits first.
-                    timeout=None,
+                # Command tasks never reach the spawned worker: run_with_hooks
+                # routes type == "command" to _run_command_with_hooks, which owns
+                # streaming, timeout enforcement, and process-tree teardown
+                # [RM-5]. Anything else is a target type TaskSpec forbids
+                # [TS-1]. Fail loudly instead of starting an unmonitored
+                # subprocess.
+                raise ValueError(
+                    f"Host worker cannot execute target type {spec_data.get('type')!r}"
                 )
-                value = completed.stdout.strip() if completed.stdout is not None else ""
-                stdout = completed.stdout
-                stderr = completed.stderr
-                returncode = completed.returncode
-                if completed.returncode != 0:
-                    status = "error"
-                    error = (
-                        f"Command exited with {completed.returncode}: "
-                        f"{(completed.stderr or '').strip()}"
-                    )
     except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-342] exception
         traceback_text = traceback.format_exc()
         status = "error"

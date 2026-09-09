@@ -2578,6 +2578,58 @@ def _build_function_host_runner(
     )
 
 
+def test_spawned_worker_rejects_command_targets_without_running_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spawned worker never executes command targets.
+
+    Command tasks are served by ``run_with_hooks`` delegating to
+    ``_run_command_with_hooks`` (Spec: [RM-5]), so reaching the spawned worker
+    with ``type == "command"`` is a programming error. It must surface as an
+    explicit terminal error instead of silently starting a second subprocess.
+    """
+
+    sentinel = tmp_path / "command-ran"
+
+    class Sender:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    sent: list[RunnerOutcome] = []
+    sender = Sender()
+    monkeypatch.setattr(
+        host_module,
+        "send_terminal_payload",
+        lambda _sender, payload, **_kwargs: sent.append(payload) or True,
+    )
+
+    host_module._worker_entry(
+        {
+            "type": "command",
+            "process_target": sys.executable,
+            "args": ["-c", f"open({str(sentinel)!r}, 'w').close()"],
+        },
+        "payload",
+        sender,  # type: ignore[arg-type]
+    )
+
+    assert sentinel.exists() is False
+    assert sender.closed is True
+    assert len(sent) == 1
+    outcome = sent[0]
+    assert outcome.status == "error"
+    assert outcome.value is None
+    assert outcome.returncode is None
+    assert outcome.error is not None
+    assert "command" in outcome.error
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["phase"] == "execute"
+    assert outcome.diagnostics["target_type"] == "command"
+
+
 def test_function_worker_maps_arbitrary_execution_failure_to_terminal_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
