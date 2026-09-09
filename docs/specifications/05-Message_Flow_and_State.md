@@ -790,8 +790,10 @@ a permanent normal-cycle compatibility lane.
   publication remains best-effort and cannot become task lifecycle authority.
 - shared task evidence classification lives in
   `weft/core/task_evidence.py`; status, task inspection, known-TID terminal
-  snapshots, and result helpers reuse that interpretation instead of each
-  inventing their own priority rules
+  snapshots, result helpers, and realtime event iteration reuse that
+  interpretation instead of each inventing their own priority rules. Realtime
+  iteration reuses it after its first snapshot as well, for late typed terminal
+  `ctrl_out` envelopes and eligible readable final one-shot outbox evidence
 - shared task evidence priority is: terminal task-log lifecycle proof, typed
   terminal `ctrl_out`, readable final one-shot outbox, live runtime evidence,
   terminal Monitor-store fallback for known full TIDs after raw task-log
@@ -864,6 +866,8 @@ runtime description, and structured stdout/stderr extraction;
 replay; `weft/commands/_task_snapshot_reducer.py` pure event folding, evidence
 precedence, snapshot construction, filtering, and ordering;
 `weft/commands/result.py` materialization and completion waits;
+`weft/commands/events.py` `iter_task_realtime_events` non-consuming realtime
+observation, reusing the shared classifier for late terminal proof;
 `weft/core/task_evidence.py` shared lifecycle/result evidence;
 `weft/commands/tasks.py` task control and runner-diagnostic presentation over
 `weft/core/runner_diagnostics.py`;

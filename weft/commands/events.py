@@ -18,12 +18,18 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
+    WRAPPER_LOST_ERROR,
 )
 from weft._exceptions import CommandTimeoutError
 from weft.commands.types import TaskEvent
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
-from weft.core.task_evidence import queue_names_for_tid
+from weft.core.task_evidence import (
+    TaskEvidenceSnapshot,
+    peek_terminal_ctrl_out_evidence,
+    queue_names_for_tid,
+    task_local_terminal_evidence,
+)
 from weft.helpers import iter_queue_entries, iter_queue_json_entries
 
 from ._result_wait import (
@@ -84,6 +90,78 @@ def _state_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 normalized["return_code"] = return_code
 
     return normalized
+
+
+def _terminal_payload_from_evidence(
+    evidence: TaskEvidenceSnapshot,
+    *,
+    tid: str,
+) -> dict[str, Any]:
+    """Render shared terminal evidence as a realtime terminal event payload.
+
+    The realtime iterator does not re-derive lifecycle meaning; it renders the
+    verdict already produced by the shared classifier so every observation
+    surface agrees on when a task has finished.
+
+    Args:
+        evidence: Terminal snapshot returned by the shared evidence helpers.
+        tid: Normalized task identifier the iterator is following.
+
+    Returns:
+        A task-log shaped payload accepted by ``_state_payload``,
+        ``terminal_status_from_event`` and ``terminal_error_message``.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
+    """
+
+    payload: dict[str, Any] = {"tid": tid, "status": evidence.status}
+    if evidence.error is not None:
+        payload["error"] = evidence.error
+    return payload
+
+
+def _is_wrapper_lost_verdict(payload: dict[str, Any] | None) -> bool:
+    """Whether a held terminal verdict is only the manager wrapper-lost failsafe.
+
+    The manager writes ``wrapper_lost`` when no task proof was visible at write
+    time, so a task-authored terminal envelope that becomes durable afterwards
+    must still be able to replace it.
+
+    Args:
+        payload: Terminal event payload currently held by the iterator, if any.
+
+    Returns:
+        ``True`` when the held verdict carries the wrapper-lost error text.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
+    """
+
+    if payload is None:
+        return False
+    status = terminal_status_from_event(payload)
+    if status is None:
+        return False
+    return terminal_error_message(payload, status) == WRAPPER_LOST_ERROR
+
+
+def _task_streams_output(taskspec_payload: dict[str, Any] | None) -> bool:
+    """Whether a logged TaskSpec payload publishes its output as stream frames.
+
+    Args:
+        taskspec_payload: Logged TaskSpec payload for the observed task, if any.
+
+    Returns:
+        ``True`` when the task writes streaming frames to its outbox.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
+    """
+
+    if not isinstance(taskspec_payload, dict):
+        return False
+    spec = taskspec_payload.get("spec")
+    if not isinstance(spec, dict):
+        return False
+    return bool(spec.get("stream_output"))
 
 
 def _stream_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +357,18 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
 
     The iterator never consumes result or stream queues. It peeks all queues so
     HTTP/SSE/WS diagnostics do not mutate the underlying task result surface.
+
+    Completion is decided by the shared task evidence classification rather than
+    by a private priority table: terminal task-log rows end the stream, and so
+    does task-local terminal proof (typed terminal ctrl_out, or eligible final
+    one-shot outbox evidence) that only becomes visible after the startup
+    snapshot. Streaming outbox frames are observation, never completion, so
+    they are never offered to the final one-shot outbox fallback, and a held
+    manager ``wrapper_lost`` verdict still yields to task-authored terminal
+    proof that arrives during the terminal grace.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5];
+    docs/specifications/09-Implementation_Plan.md [IP-1.1]
     """
 
     normalized_tid = normalize_tid(tid)
@@ -352,8 +442,20 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 "tid": normalized_tid,
                 "status": snapshot_status,
             }
+            # Carry the snapshot's error text so a startup verdict that is only
+            # the manager wrapper-lost failsafe stays replaceable by a later
+            # task-authored terminal envelope [MF-5].
+            snapshot_error = snapshot_event.payload.get("error")
+            if isinstance(snapshot_error, str) and snapshot_error:
+                terminal_payload["error"] = snapshot_error
             terminal_timestamp = snapshot_event.timestamp
             terminal_observed_monotonic = time.monotonic()
+
+    # Terminal proof can land on the task-local queues after the startup
+    # snapshot was taken. Re-run the shared classifier whenever those queues
+    # change so realtime observation agrees with status and result [MF-5].
+    evidence_scan_pending = True
+    outbox_stream_frames_seen = False
 
     try:
         while not _is_cancelled(cancel_event):
@@ -367,11 +469,16 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 since_timestamp=outbox_since,
             ):
                 last_outbox_timestamp = timestamp
+                if payload.get("type") == "stream":
+                    # Streaming output is observation, not completion proof, so
+                    # it must never reach the one-shot outbox fallback [MF-5].
+                    outbox_stream_frames_seen = True
                 stream = payload.get("stream")
                 if payload.get("type") != "stream" or stream not in {
                     "stdout",
                     "stderr",
                 }:
+                    evidence_scan_pending = True
                     continue
                 saw_event = True
                 if _is_cancelled(cancel_event):
@@ -392,6 +499,7 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
             ):
                 last_ctrl_timestamp = timestamp
                 if payload.get("type") != "stream" or payload.get("stream") != "stderr":
+                    evidence_scan_pending = True
                     continue
                 saw_event = True
                 if _is_cancelled(cancel_event):
@@ -432,6 +540,44 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                     if terminal_observed_monotonic is None:
                         terminal_observed_monotonic = time.monotonic()
                     terminal_state_emitted = True
+
+            if evidence_scan_pending and (
+                terminal_payload is None or _is_wrapper_lost_verdict(terminal_payload)
+            ):
+                evidence_scan_pending = False
+                streams_output = outbox_stream_frames_seen or _task_streams_output(
+                    taskspec_payload
+                )
+                evidence = (
+                    peek_terminal_ctrl_out_evidence(
+                        context,
+                        tid=normalized_tid,
+                        ctrl_out_name=ctrl_out_name,
+                        taskspec_payload=taskspec_payload,
+                    )
+                    if streams_output
+                    else task_local_terminal_evidence(
+                        context,
+                        tid=normalized_tid,
+                        taskspec_payload=taskspec_payload,
+                    )
+                )
+                if (
+                    evidence is not None
+                    and evidence.terminal
+                    and (
+                        terminal_payload is None
+                        or evidence.classification != "wrapper_lost"
+                    )
+                ):
+                    terminal_payload = _terminal_payload_from_evidence(
+                        evidence,
+                        tid=normalized_tid,
+                    )
+                    terminal_timestamp = evidence.observed_at
+                    if terminal_observed_monotonic is None:
+                        # Replacing a held verdict must not restart the grace.
+                        terminal_observed_monotonic = time.monotonic()
 
             if terminal_payload is not None:
                 if terminal_observed_monotonic is None:
@@ -529,7 +675,8 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
             if not saw_event:
                 remaining = task_ops._remaining_timeout(deadline)
                 wait_timeout = 0.1 if remaining is None else min(0.1, remaining)
-                monitor.wait(wait_timeout)
+                if monitor.wait(wait_timeout):
+                    evidence_scan_pending = True
     finally:
         monitor.close()
         outbox_queue.close()

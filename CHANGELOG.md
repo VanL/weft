@@ -59,6 +59,15 @@
 
 ### Fixed
 
+- Realtime task observation (`weft run` in the foreground, `weft result
+  --stream`, `Task.realtime_events`, and the Django SSE/Channels adapters) now
+  reuses the shared task evidence classification for terminal proof that
+  arrives after its first snapshot. A typed terminal `ctrl_out` envelope —
+  including the manager `wrapper_lost` failsafe — or an eligible final one-shot
+  outbox result now ends the stream instead of hanging until timeout, and a
+  task-authored terminal envelope that lands during the terminal grace still
+  outranks a held manager `wrapper_lost` verdict. Queue contents are still only
+  peeked, and streaming output is still never treated as completion.
 - Preserve exact worker identity when a later observation lacks creation time,
   and retain client dump context, including its broker and default directory.
 - Client `system.load` and `system.tidy` now import into and compact the
