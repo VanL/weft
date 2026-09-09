@@ -40,6 +40,13 @@
   Docker's substring name filter after every exact-name check fails. Stop, kill,
   remove, liveness, and describe now report the container as missing instead of
   acting on an unrelated one whose name merely shares the requested prefix.
+- The built-in heartbeat service is desired only when `TaskMonitor` is enabled,
+  its one internal dependent. `LivenessMonitor` schedules from its own due heap
+  and no longer pulls heartbeat in, so a `WEFT_TASK_MONITOR_ENABLED=0` plus
+  `WEFT_LIVENESS_MONITOR_ENABLED=1` manager no longer supervises a heartbeat and
+  `weft status` reports it `disabled`. Shipping defaults are unchanged. Configs
+  that relied on the liveness flag to obtain the `_weft.heartbeat` endpoint must
+  keep `WEFT_TASK_MONITOR_ENABLED=1`.
 
 - Live status JSON now formats owned broker identifiers as strings while
   preserving wall-clock values and opaque payload fields. Human status output

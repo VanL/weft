@@ -2565,3 +2565,40 @@ def test_cmd_status_reports_unexpected_status_source_failure(
 
     with pytest.raises(CommandExecutionError, match="status source failed"):
         status_cmd.cmd_status(context=root)
+
+
+def test_status_reports_heartbeat_disabled_when_only_liveness_monitor_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ops status mirrors the manager desire gate for the heartbeat service."""
+
+    root = prepare_project_root(tmp_path)
+    monkeypatch.setenv("WEFT_TASK_MONITOR_ENABLED", "0")
+    monkeypatch.setenv("WEFT_LIVENESS_MONITOR_ENABLED", "1")
+
+    payload = asdict(status_cmd.cmd_status(context=root))
+
+    services = {service["key"]: service for service in payload["services"]}
+    heartbeat = services[INTERNAL_SERVICE_KEY_HEARTBEAT]
+    assert heartbeat["enabled"] is False
+    assert heartbeat["status"] == "disabled"
+    assert heartbeat["evidence"] == "config-disabled"
+    assert services[INTERNAL_SERVICE_KEY_LIVENESS_MONITOR]["enabled"] is True
+
+
+def test_status_reports_heartbeat_enabled_when_task_monitor_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """TaskMonitor is the heartbeat dependent, so heartbeat stays enabled."""
+
+    root = prepare_project_root(tmp_path)
+    monkeypatch.setenv("WEFT_TASK_MONITOR_ENABLED", "1")
+    monkeypatch.setenv("WEFT_LIVENESS_MONITOR_ENABLED", "0")
+
+    payload = asdict(status_cmd.cmd_status(context=root))
+
+    services = {service["key"]: service for service in payload["services"]}
+    assert services[INTERNAL_SERVICE_KEY_HEARTBEAT]["enabled"] is True
+    assert services[INTERNAL_SERVICE_KEY_LIVENESS_MONITOR]["enabled"] is False

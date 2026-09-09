@@ -1071,6 +1071,15 @@ def _collect_internal_spawn_queue_evidence(
 
 
 def _service_enabled(ctx: WeftContext, key: str) -> bool:
+    """Return whether config makes one internal service desired.
+
+    Heartbeat mirrors the manager's desire gate: it is desired only when an
+    enabled internal dependent needs it, and ``TaskMonitor`` is the only such
+    dependent. ``LivenessMonitor`` schedules from its own due heap.
+
+    Spec: [MA-1] item 7
+    """
+
     task_monitor_enabled = bool(ctx.config.get("WEFT_TASK_MONITOR_ENABLED", True))
     liveness_monitor_enabled = bool(
         ctx.config.get("WEFT_LIVENESS_MONITOR_ENABLED", True)
@@ -1078,7 +1087,7 @@ def _service_enabled(ctx: WeftContext, key: str) -> bool:
     if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
         return task_monitor_enabled
     if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
-        return task_monitor_enabled or liveness_monitor_enabled
+        return task_monitor_enabled
     if key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR:
         return liveness_monitor_enabled
     return False

@@ -1644,10 +1644,7 @@ def test_manager_enqueues_liveness_monitor_when_independently_enabled(
 
     assert {
         payload[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY] for payload in payloads
-    } == {
-        INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
-        INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
-    }
+    } == {INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR}
     payload = next(
         payload
         for payload in payloads
@@ -4486,6 +4483,100 @@ def test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart(
     manager._tick_internal_services(force=True)
 
     assert enqueued == [INTERNAL_SERVICE_KEY_HEARTBEAT]
+
+
+def _desired_internal_service_keys(
+    manager: Manager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    """Return the internal service keys one reconcile pass wants to launch."""
+
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+    manager._tick_internal_services(force=True)
+    return enqueued
+
+
+def test_liveness_monitor_only_does_not_desire_heartbeat(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LivenessMonitor is not a heartbeat dependent, so it must not pull it in."""
+
+    manager, _make_queue = manager_setup
+    manager._task_monitor_enabled = False
+    manager._liveness_monitor_enabled = True
+
+    assert _desired_internal_service_keys(manager, monkeypatch) == [
+        INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
+    ]
+
+
+def test_task_monitor_only_desires_heartbeat_and_task_monitor(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TaskMonitor registers with heartbeat, so heartbeat stays desired with it."""
+
+    manager, _make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._liveness_monitor_enabled = False
+
+    assert _desired_internal_service_keys(manager, monkeypatch) == [
+        INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    ]
+
+
+def test_both_internal_monitors_disabled_desires_no_internal_service(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no enabled dependent, heartbeat is not run as standalone work."""
+
+    manager, _make_queue = manager_setup
+    manager._task_monitor_enabled = False
+    manager._liveness_monitor_enabled = False
+
+    assert _desired_internal_service_keys(manager, monkeypatch) == []
+
+
+def test_liveness_monitor_only_convergence_ignores_missing_heartbeat(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle shutdown must not wait on a heartbeat no enabled dependent needs."""
+
+    manager, _make_queue = manager_setup
+    manager._task_monitor_enabled = False
+    manager._liveness_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._service_state(INTERNAL_SERVICE_KEY_HEARTBEAT).active_tid = None
+    manager._service_state(
+        INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
+    ).active_tid = "1777000000000000450"
+    monkeypatch.setattr(manager, "_internal_spawn_pending", lambda: False)
+
+    assert (
+        manager._managed_service_convergence_active_reasons(include_autostart=False)
+        == ()
+    )
+
+    manager._task_monitor_enabled = True
+
+    assert manager._managed_service_convergence_active_reasons(
+        include_autostart=False
+    ) == ("missing_active_tid",)
 
 
 def test_managed_service_pong_probe_is_nonblocking(

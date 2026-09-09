@@ -5852,10 +5852,10 @@ class Manager(ServiceTask):
         internal_services: list[ManagedServiceSpec] = []
         autostart_services: list[ManagedServiceSpec] = []
         if include_internal and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
-            # The heartbeat is a dependency of internal periodic services. Do not
-            # run it as standalone background work when there is no dependent
-            # service enabled.
-            if self._task_monitor_enabled or self._liveness_monitor_enabled:
+            # TaskMonitor is the only internal heartbeat dependent; LivenessMonitor
+            # schedules from its own due heap. Do not run heartbeat as standalone
+            # background work when no dependent service is enabled ([MA-1] item 7).
+            if self._task_monitor_enabled:
                 internal_services.append(self._heartbeat_service_spec())
             if self._task_monitor_enabled:
                 internal_services.append(self._task_monitor_service_spec())
@@ -6448,7 +6448,7 @@ class Manager(ServiceTask):
                     or service_key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
                     and self._liveness_monitor_enabled
                     or service_key == INTERNAL_SERVICE_KEY_HEARTBEAT
-                    and (self._task_monitor_enabled or self._liveness_monitor_enabled)
+                    and self._task_monitor_enabled
                 )
                 and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
             ):
