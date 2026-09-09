@@ -32,6 +32,10 @@
 - Interactive STOP waits through its existing shutdown budget before KILL;
   foreground takeover again records supersession in incumbent TID order.
 - Failed Manager CLEAR logs retained reserved residue at WARNING.
+- Docker runtime lookup no longer falls back to the first container returned by
+  Docker's substring name filter after every exact-name check fails. Stop, kill,
+  remove, liveness, and describe now report the container as missing instead of
+  acting on an unrelated one whose name merely shares the requested prefix.
 
 - Live status JSON now formats owned broker identifiers as strings while
   preserving wall-clock values and opaque payload fields. Human status output

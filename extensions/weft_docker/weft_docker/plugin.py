@@ -1153,6 +1153,16 @@ def _lookup_container(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-206] exception
     *,
     fallback_id: str | None = None,
 ) -> Any | None:
+    """Resolve the container that owns ``runtime_id``, or ``None``.
+
+    Lookup precedence is direct ``runtime_id`` get, then the recorded
+    ``fallback_id`` get, then an exact name match among the containers
+    Docker's name filter returns. That filter matches substrings, so a
+    candidate is only accepted on an exact name; a partial match never
+    acquires control authority.
+
+    Spec: [TS-1.3], [LIVENESS.R5]
+    """
     docker = _load_docker_sdk()
 
     def _get(identifier: str) -> Any | None:
@@ -1183,7 +1193,7 @@ def _lookup_container(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-206] exception
         candidate_name = getattr(candidate, "name", None)
         if isinstance(candidate_name, str) and candidate_name == runtime_id:
             return candidate
-    return candidates[0] if candidates else None
+    return None
 
 
 def _wait_for_container(

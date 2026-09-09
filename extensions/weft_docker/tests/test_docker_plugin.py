@@ -1292,6 +1292,82 @@ def test_lookup_container_propagates_unexpected_list_defect() -> None:
         plugin._lookup_container(client, "container-789")
 
 
+class _PartialNameContainer:
+    """Container whose name only shares a prefix with the requested runtime ID."""
+
+    id = "container-other"
+    name = "weft-runtime-name-other"
+
+    def __init__(self) -> None:
+        self.attrs = {"Name": "/weft-runtime-name-other"}
+        self.calls: list[str] = []
+
+    def stop(self, *, timeout: int) -> None:
+        del timeout
+        self.calls.append("stop")
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+
+    def remove(self, *, force: bool) -> None:
+        del force
+        self.calls.append("remove")
+
+
+def _partial_name_client(container: _PartialNameContainer) -> object:
+    """Build a client whose name filter only yields a partial-name candidate."""
+
+    class FakeContainers:
+        def get(self, runtime_id: str) -> object:
+            del runtime_id
+            raise NotFound("missing")
+
+        def list(
+            self,
+            *,
+            all: bool = False,
+            filters: dict[str, str] | None = None,
+        ) -> list[object]:
+            assert all is True
+            assert filters == {"name": "weft-runtime-name"}
+            return [container]
+
+    return type("FakeClient", (), {"containers": FakeContainers()})()
+
+
+def test_lookup_container_rejects_partial_name_candidate() -> None:
+    container = _PartialNameContainer()
+
+    assert (
+        plugin._lookup_container(  # pyright: ignore[reportPrivateUsage]
+            _partial_name_client(container),
+            "weft-runtime-name",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (
+            lambda client: plugin._docker_stop(client, "weft-runtime-name", timeout=2),
+            False,
+        ),
+        (lambda client: plugin._docker_kill(client, "weft-runtime-name"), False),
+        (lambda client: plugin._remove_container(client, "weft-runtime-name"), None),
+    ],
+)
+def test_docker_control_operations_do_not_reach_partial_name_candidate(
+    operation: Callable[[object], object],
+    expected: object,
+) -> None:
+    container = _PartialNameContainer()
+
+    assert operation(_partial_name_client(container)) is expected
+    assert container.calls == []
+
+
 @pytest.mark.parametrize(
     ("operation", "expected"),
     [
