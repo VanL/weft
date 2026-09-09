@@ -32,10 +32,12 @@ from weft.commands.types import (
     TaskSnapshot,
 )
 from weft.context import build_context
+from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.launcher import launch_task_process
 from weft.core.monitor.store import open_monitor_store
+from weft.core.task_evidence import TaskEvidenceSnapshot
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
@@ -980,6 +982,118 @@ def test_ack_terminal_snapshot_deletes_exact_message_only(tmp_path) -> None:
     remaining = ctrl_out.peek_many(limit=10)
     assert len(remaining) == 2
     assert all("terminal" not in message for message in remaining)
+
+
+def _live_evidence(tid: str, status: str = "running") -> TaskEvidenceSnapshot:
+    return TaskEvidenceSnapshot(
+        tid=tid,
+        status=status,
+        classification="live_runtime",
+        source="runtime",
+        terminal=False,
+    )
+
+
+def _terminal_evidence(tid: str) -> TaskEvidenceSnapshot:
+    return TaskEvidenceSnapshot(
+        tid=tid,
+        status="completed",
+        classification="terminal_outbox",
+        source="outbox",
+        terminal=True,
+        value={"ok": True},
+    )
+
+
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("live_status", ["running", "pending"])
+def test_terminal_snapshot_positive_timeout_stops_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    live_status: str,
+) -> None:
+    """A positive timeout bounds continuing nonterminal evidence.
+
+    Verifies:
+    - The evidence branch exits at the deadline instead of polling forever
+    - Expiry returns the latest honest nonterminal snapshot, not a timeout
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    calls: list[str] = []
+
+    def _always_live(_ctx: Any, *, tid: str, **_kwargs: Any) -> TaskEvidenceSnapshot:
+        calls.append(tid)
+        return _live_evidence(tid, live_status)
+
+    monkeypatch.setattr(task_evidence, "known_tid_evidence", _always_live)
+
+    started = time.monotonic()
+    snapshot = task_cmd.task_terminal_snapshot(tid, timeout=0.05, context=ctx)
+    elapsed = time.monotonic() - started
+
+    # 0.05 s budget + at most one TASK_EVIDENCE_POLL_INTERVAL sleep + slack;
+    # the mark.timeout above turns a regression into a failure, not a hang.
+    assert elapsed < 1.0
+    assert snapshot.status == live_status
+    assert snapshot.terminal is False
+    assert snapshot.ack_targets == ()
+    assert calls, "evidence was consulted"
+
+
+def test_terminal_snapshot_zero_timeout_observes_live_evidence_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """timeout=0 keeps its single-observation behavior."""
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    calls: list[str] = []
+
+    def _always_live(_ctx: Any, *, tid: str, **_kwargs: Any) -> TaskEvidenceSnapshot:
+        calls.append(tid)
+        return _live_evidence(tid)
+
+    monkeypatch.setattr(task_evidence, "known_tid_evidence", _always_live)
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, context=ctx)
+
+    assert snapshot.status == "running"
+    assert snapshot.terminal is False
+    assert calls == [tid]
+
+
+def test_terminal_snapshot_returns_terminal_evidence_before_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Polling still converges on terminal evidence within the budget."""
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    observations: list[str] = []
+
+    def _live_then_terminal(
+        _ctx: Any,
+        *,
+        tid: str,
+        **_kwargs: Any,
+    ) -> TaskEvidenceSnapshot:
+        observations.append(tid)
+        if len(observations) < 2:
+            return _live_evidence(tid)
+        return _terminal_evidence(tid)
+
+    monkeypatch.setattr(task_evidence, "known_tid_evidence", _live_then_terminal)
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, timeout=5.0, context=ctx)
+
+    assert snapshot.status == "completed"
+    assert snapshot.terminal is True
+    assert snapshot.value == {"ok": True}
+    assert len(observations) == 2
 
 
 def test_task_ping_returns_probe_payload(

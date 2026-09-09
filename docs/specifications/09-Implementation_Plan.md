@@ -125,7 +125,9 @@ capabilities, not a separate runtime API.
   keeps read-only observers from stealing task results or mutating queue state.
   After raw task-log retirement, known-TID terminal snapshots may fall back to
   terminal Monitor-store rows; nonterminal Monitor-store rows are not live task
-  proof.
+  proof. A positive `timeout` bounds the observation and returns the latest
+  nonterminal snapshot on expiry; it never publishes a task timeout or consumes
+  a result.
 - Realtime event iteration peeks task-log, outbox, and terminal-control
   surfaces instead of consuming them. That lets HTTP/SSE/WebSocket-style
   diagnostics coexist with `weft result`, `weft run`, and Python result waits.

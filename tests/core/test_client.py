@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from pathlib import Path
 from typing import cast
 
@@ -17,7 +18,7 @@ from tests.helpers.weft_harness import (
 )
 from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
 from weft import commands
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
 from weft.client import (
     ControlRejected,
     InvalidTID,
@@ -449,6 +450,92 @@ def test_task_terminal_snapshot_uses_monitor_store_terminal_fallback(
     assert handle_snapshot.source == "monitor_store"
     assert handle_snapshot.metadata["classification"] == "terminal_monitor_store"
     assert namespace_snapshot == handle_snapshot
+
+
+@pytest.mark.timeout(15)
+def test_task_terminal_snapshot_positive_timeout_returns_within_budget(
+    tmp_path: Path,
+) -> None:
+    """A live task with no terminal evidence still honors the caller's budget.
+
+    Verifies:
+    - The public client bounds `terminal_snapshot(timeout=...)` on a real broker
+    - Expiry yields a nonterminal snapshot instead of blocking or raising
+    - The observation writes no task state
+    """
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "work_started",
+                    "status": "running",
+                    "tid": tid,
+                    "taskspec": {
+                        "tid": tid,
+                        "name": "client-bounded-observation",
+                        "spec": {
+                            "type": "function",
+                            "function_target": (
+                                "tests.tasks.sample_targets:echo_payload"
+                            ),
+                            "runner": {"name": "host", "options": {}},
+                        },
+                        "io": {
+                            "outputs": {"outbox": f"T{tid}.outbox"},
+                            "control": {
+                                "ctrl_in": f"T{tid}.ctrl_in",
+                                "ctrl_out": f"T{tid}.ctrl_out",
+                            },
+                        },
+                        "state": {
+                            "status": "running",
+                            "started_at": int(tid),
+                            "completed_at": None,
+                        },
+                        "metadata": {},
+                    },
+                }
+            )
+        )
+    finally:
+        log_queue.close()
+    client = connect(path=root, autostart=False)
+
+    def _state_rows() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+        rows: list[list[tuple[str, int]]] = []
+        for name in (WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE):
+            queue = context.queue(name, persistent=False)
+            try:
+                rows.append(list(queue.peek_many(1000, with_timestamps=True)))
+            finally:
+                queue.close()
+        return rows[0], rows[1]
+
+    log_before, mappings_before = _state_rows()
+    started = time.monotonic()
+    snapshot = client.task(tid).terminal_snapshot(timeout=0.05)
+    elapsed = time.monotonic() - started
+
+    # 0.05 s budget + two real broker reads + one poll interval + slack; the
+    # mark.timeout above turns a regression into a failure, not a hang.
+    assert elapsed < 1.5
+    assert snapshot.terminal is False
+    assert snapshot.status in {"running", "pending"}
+    assert snapshot.ack_targets == ()
+    # Non-consuming and non-publishing: no task-log or mapping row appended,
+    # nothing consumed, no outbox row produced ([IP-1.1]).
+    log_after, mappings_after = _state_rows()
+    assert log_after == log_before
+    assert mappings_after == mappings_before
+    outbox = context.queue(f"T{tid}.outbox", persistent=False)
+    try:
+        assert outbox.peek_one() is None
+    finally:
+        outbox.close()
 
 
 def test_prepare_snapshots_payload_before_submission() -> None:

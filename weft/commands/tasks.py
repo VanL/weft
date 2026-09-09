@@ -355,6 +355,10 @@ def task_terminal_snapshot(
 ) -> TaskTerminalSnapshot:
     """Return a bounded, non-consuming known-TID terminal/live snapshot.
 
+    A positive `timeout` bounds the observation only. On expiry this returns
+    the latest honest nonterminal snapshot; it never publishes a task timeout
+    and never consumes a result.
+
     Spec: docs/specifications/09-Implementation_Plan.md [IP-1.1];
     docs/specifications/05-Message_Flow_and_State.md [MF-5]
     """
@@ -385,6 +389,8 @@ def task_terminal_snapshot(
         if evidence is not None:
             snapshot = task_evidence.terminal_snapshot_from_evidence(evidence)
             if snapshot.status in {"running", "pending"} and deadline is not None:
+                if time.monotonic() >= deadline:
+                    return snapshot
                 time.sleep(
                     min(
                         TASK_EVIDENCE_POLL_INTERVAL,

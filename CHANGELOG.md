@@ -52,6 +52,10 @@
   `weft status` reports it `disabled`. Shipping defaults are unchanged. Configs
   that relied on the liveness flag to obtain the `_weft.heartbeat` endpoint must
   keep `WEFT_TASK_MONITOR_ENABLED=1`.
+- Known-TID terminal snapshots now honor a positive `timeout` when live
+  evidence keeps reporting `running`/`pending`. The observer previously polled
+  past its own deadline and never returned. On expiry it returns the latest
+  nonterminal snapshot without publishing a task timeout or consuming a result.
 
 - Live status JSON now formats owned broker identifiers as strings while
   preserving wall-clock values and opaque payload fields. Human status output
