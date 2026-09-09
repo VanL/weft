@@ -223,7 +223,15 @@ def run_retention_prune_for_context(
     ctx: WeftContext,
     config: RetentionPruneConfig,
 ) -> RetentionPruneResult:
-    """Run retention pruning against an already-resolved context."""
+    """Run retention pruning against an already-resolved context.
+
+    One invocation takes exactly one candidate snapshot and applies the limit
+    to it once. In apply mode that same snapshot is archived (when archiving
+    is required) and then deleted; dry runs only report it. Any scan error
+    halts the run before archive and apply with `halted_at="initial_scan"`.
+
+    Spec: [MF-5], [OBS.17]
+    """
 
     validation_error = _validate_config(config)
     run_id = f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}.{time.time_ns() % 1_000_000_000:09d}Z:pid-{os.getpid()}"
@@ -256,15 +264,7 @@ def run_retention_prune_for_context(
     archived = 0
     warnings: list[str] = []
     applied: tuple[RetentionPruneCandidate, ...] = ()
-    apply_stats = stats
     if config.apply:
-        fresh_candidates, apply_stats, apply_errors = _build_candidates(ctx, config)
-        visible_candidates = list(
-            fresh_candidates
-            if config.limit is None
-            else fresh_candidates[: config.limit]
-        )
-        scan_errors.extend(apply_errors)
         archive_error: str | None = None
         if config.require_archive or config.archive_path is not None or config.force:
             archive_result = _write_archive(
@@ -290,7 +290,7 @@ def run_retention_prune_for_context(
                     run_id=run_id,
                     candidates=tuple(visible_candidates),
                     applied_candidates=(),
-                    scan_stats=tuple(apply_stats),
+                    scan_stats=tuple(stats),
                     errors=tuple(scan_errors),
                     warnings=tuple(warnings),
                     archived=archived,
@@ -302,7 +302,7 @@ def run_retention_prune_for_context(
         run_id=run_id,
         candidates=tuple(visible_candidates),
         applied_candidates=applied,
-        scan_stats=tuple(apply_stats if config.apply else stats),
+        scan_stats=tuple(stats),
         errors=tuple(scan_errors),
         warnings=tuple(warnings),
         archived=archived,

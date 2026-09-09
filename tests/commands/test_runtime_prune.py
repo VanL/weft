@@ -267,19 +267,16 @@ def test_runtime_initial_scan_error_does_not_create_or_truncate_report(
     assert not missing_report.exists()
 
 
-def test_runtime_apply_rescan_error_writes_optional_report(
+def test_runtime_apply_scan_error_halts_before_apply_without_report(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = _context(tmp_path)
-    calls = 0
 
-    def build_candidates(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        return ([], [], [] if calls == 1 else ["rescan failed"])
+    def fail_scan(*_args, **_kwargs):
+        raise RuntimeError("scan failed")
 
-    monkeypatch.setattr(runtime_pruning, "_build_candidates", build_candidates)
+    monkeypatch.setattr(runtime_pruning, "_read_runtime_queue", fail_scan)
     report_path = tmp_path / "runtime-report.jsonl"
 
     result = run_runtime_prune(
@@ -291,13 +288,85 @@ def test_runtime_apply_rescan_error_writes_optional_report(
         report_path=report_path,
     )
 
-    assert calls == 2
-    assert result.errors == ("rescan failed",)
-    records = [
-        json.loads(line)
-        for line in report_path.read_text(encoding="utf-8").splitlines()
+    assert result.halted_at == "initial_scan"
+    assert result.errors == (
+        f"failed to scan {WEFT_SERVICES_REGISTRY_QUEUE}: scan failed",
+    )
+    assert result.applied_candidates == ()
+    assert result.deleted == 0
+    assert not report_path.exists()
+
+
+def test_runtime_apply_scans_once_and_deletes_that_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    service_key = "_weft.service.heartbeat"
+    first_active = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _managed_service_payload(
+            service_key=service_key,
+            tid="1770000000000000110",
+            status=SERVICE_STATUS_ACTIVE,
+        ),
+    )
+    first_terminal = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _managed_service_payload(
+            service_key=service_key,
+            tid="1770000000000000110",
+            status=SERVICE_STATUS_TERMINAL,
+        ),
+    )
+    second_active = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _managed_service_payload(
+            service_key=service_key,
+            tid="1770000000000000111",
+            status=SERVICE_STATUS_ACTIVE,
+        ),
+    )
+    real_build = runtime_pruning._build_candidates
+    calls = 0
+
+    def counting_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_pruning, "_build_candidates", counting_build)
+
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("services",),
+            min_age_seconds=0,
+            apply=True,
+        )
+    )
+
+    assert calls == 1
+    assert result.errors == ()
+    assert [candidate.message_id for candidate in result.candidates] == [
+        first_active,
+        first_terminal,
     ]
-    assert records[-1]["errors"] == ["rescan failed"]
+    assert [candidate.message_id for candidate in result.applied_candidates] == [
+        first_active,
+        first_terminal,
+    ]
+    assert result.deleted == 2
+    remaining_ids = {
+        message_id
+        for _payload, message_id in _read_rows(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+    }
+    assert first_active not in remaining_ids
+    assert first_terminal not in remaining_ids
+    assert second_active in remaining_ids
 
 
 @pytest.mark.parametrize("status", ["active", "draining", "stopped", "superseded"])

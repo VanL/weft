@@ -33,6 +33,12 @@
   TaskSpec. A frozen section can no longer be reopened by any caller;
   recursive freezing, nested-container protection, frozen-assignment error
   messages, and the mutable `state`/`metadata` boundary are unchanged.
+- Runtime-state and retention pruning now take one candidate snapshot per
+  invocation instead of rescanning before apply. Any scan error halts the run
+  with `halted_at="initial_scan"` and applies nothing, so an apply run can no
+  longer report a partial deletion alongside a later scan failure; runtime
+  pruning writes no report for that halt, as it already did for initial-scan
+  errors.
 
 ### Fixed
 

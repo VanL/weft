@@ -178,7 +178,14 @@ def run_runtime_prune_for_context(
     ctx: WeftContext,
     config: RuntimePruneConfig,
 ) -> RuntimePruneResult:
-    """Run runtime-state pruning against an already-resolved context."""
+    """Run runtime-state pruning against an already-resolved context.
+
+    One invocation takes exactly one candidate snapshot, applies the limit to
+    it once, and applies that snapshot. Any scan error halts the run before
+    apply with `halted_at="initial_scan"`.
+
+    Spec: [MF-5], [OBS.13.6], [OBS.13.7]
+    """
 
     validation_error = _validate_config(config)
     run_id = f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}.{time.time_ns() % 1_000_000_000:09d}Z:pid-{os.getpid()}"
@@ -209,24 +216,15 @@ def run_runtime_prune_for_context(
         )
 
     applied: tuple[RuntimePruneCandidate, ...] = ()
-    apply_stats = stats
     if config.apply:
-        fresh_candidates, apply_stats, apply_errors = _build_candidates(ctx, config)
-        to_apply = list(
-            fresh_candidates
-            if config.limit is None
-            else fresh_candidates[: config.limit]
-        )
-        applied = tuple(_apply_candidates(ctx, to_apply))
-        scan_errors.extend(apply_errors)
-        visible_candidates = to_apply
+        applied = tuple(_apply_candidates(ctx, visible_candidates))
 
     return RuntimePruneResult(
         config=config,
         run_id=run_id,
         candidates=tuple(visible_candidates),
         applied_candidates=applied,
-        scan_stats=tuple(apply_stats if config.apply else stats),
+        scan_stats=tuple(stats),
         errors=tuple(scan_errors),
     )
 

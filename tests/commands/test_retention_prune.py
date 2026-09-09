@@ -265,8 +265,9 @@ def test_task_log_apply_requires_archive_and_deletes_exact_rows(
     assert archive_records[-1]["record_type"] == "retention_prune_completed"
 
 
-def test_retention_limit_applies_to_dry_run_and_apply_rescan(
+def test_retention_limit_applies_to_dry_run_and_apply(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = _context(tmp_path)
     tid = "1770000000000001091"
@@ -301,6 +302,16 @@ def test_retention_limit_applies_to_dry_run_and_apply_rescan(
         latest_id,
     }
 
+    real_build = retention_pruning._build_candidates
+    calls = 0
+
+    def counting_build(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(retention_pruning, "_build_candidates", counting_build)
+
     applied = retention_pruning.run_retention_prune_for_context(
         ctx,
         RetentionPruneConfig(
@@ -313,6 +324,7 @@ def test_retention_limit_applies_to_dry_run_and_apply_rescan(
         ),
     )
 
+    assert calls == 1
     assert [candidate.message_id for candidate in applied.candidates] == [oldest_id]
     assert [candidate.message_id for candidate in applied.applied_candidates] == [
         oldest_id
