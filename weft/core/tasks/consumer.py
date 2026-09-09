@@ -999,7 +999,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._stop_event.set()
         raise exc
 
-    def _ensure_outcome_ok(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-042] exception
+    def _ensure_outcome_ok(
         self,
         outcome: RunnerOutcome,
         timestamp: int | None,
@@ -1007,23 +1007,32 @@ class Consumer(BaseTask, InteractiveTaskMixin):
     ) -> None:
         """Raise on non-ok outcomes and transition task state accordingly.
 
-        Spec: [RM-1], [RM-2] (limit violations), docs/specifications/06-Resource_Management.md#error-categories
+        Every non-ok outcome first finalizes any STOP/KILL deferred while the
+        runner was active, then honors an already cancelled or killed state so a
+        late runner classification cannot override accepted control. Only then
+        does the outcome-specific branch select its terminal transition.
+
+        Spec: [RM-1], [RM-2] (limit violations), docs/specifications/06-Resource_Management.md#error-categories;
+        docs/specifications/07-System_Invariants.md [QUEUE.6];
+        docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3]
         """
-        if outcome.status != "ok" and self._uses_agent_session():
+        if outcome.status == "ok":
+            return
+
+        if self._uses_agent_session():
             self._shutdown_agent_session()
 
+        self._finalize_deferred_active_control()
+        if self.taskspec.state.status == "cancelled":
+            self._raise_already_terminal(
+                RuntimeError(self.taskspec.state.error or "Target execution cancelled")
+            )
+        if self.taskspec.state.status == "killed":
+            self._raise_already_terminal(
+                RuntimeError(self.taskspec.state.error or "Target execution killed")
+            )
+
         if outcome.status not in VALID_RUNNER_OUTCOME_STATUSES:
-            self._finalize_deferred_active_control()
-            if self.taskspec.state.status == "cancelled":
-                self._raise_already_terminal(
-                    RuntimeError(
-                        self.taskspec.state.error or "Target execution cancelled"
-                    )
-                )
-            if self.taskspec.state.status == "killed":
-                self._raise_already_terminal(
-                    RuntimeError(self.taskspec.state.error or "Target execution killed")
-                )
             error_exc = RuntimeError(
                 f"unsupported runner outcome status {outcome.status!r}"
             )
@@ -1040,17 +1049,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
 
         if outcome.status == "timeout":
-            self._finalize_deferred_active_control()
-            if self.taskspec.state.status == "cancelled":
-                self._raise_already_terminal(
-                    RuntimeError(
-                        self.taskspec.state.error or "Target execution cancelled"
-                    )
-                )
-            if self.taskspec.state.status == "killed":
-                self._raise_already_terminal(
-                    RuntimeError(self.taskspec.state.error or "Target execution killed")
-                )
             timeout_exc = TimeoutError(outcome.error or "Target timeout")
             self.taskspec.mark_timeout(error=str(timeout_exc))
             self._finalize_terminal_outcome(
@@ -1065,17 +1063,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
 
         if outcome.status == "limit":
-            self._finalize_deferred_active_control()
-            if self.taskspec.state.status == "cancelled":
-                self._raise_already_terminal(
-                    RuntimeError(
-                        self.taskspec.state.error or "Target execution cancelled"
-                    )
-                )
-            if self.taskspec.state.status == "killed":
-                self._raise_already_terminal(
-                    RuntimeError(self.taskspec.state.error or "Target execution killed")
-                )
             limit_exc = RuntimeError(outcome.error or "Resource limits exceeded")
             # Spec: docs/specifications/06-Resource_Management.md#error-categories
             self.taskspec.mark_killed(reason=str(limit_exc))
@@ -1091,17 +1078,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
 
         if outcome.status == "error":
-            self._finalize_deferred_active_control()
-            if self.taskspec.state.status == "cancelled":
-                self._raise_already_terminal(
-                    RuntimeError(
-                        self.taskspec.state.error or "Target execution cancelled"
-                    )
-                )
-            if self.taskspec.state.status == "killed":
-                self._raise_already_terminal(
-                    RuntimeError(self.taskspec.state.error or "Target execution killed")
-                )
             error_exc = RuntimeError(outcome.error or "Target execution failed")
             self.taskspec.mark_failed(error=str(error_exc))
             self._finalize_terminal_outcome(
@@ -1116,17 +1092,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
 
         if outcome.status == "cancelled":
-            self._finalize_deferred_active_control()
-            if self.taskspec.state.status == "killed":
-                self._raise_already_terminal(
-                    RuntimeError(self.taskspec.state.error or "Target execution killed")
-                )
-            if self.taskspec.state.status == "cancelled":
-                self._raise_already_terminal(
-                    RuntimeError(
-                        self.taskspec.state.error or "Target execution cancelled"
-                    )
-                )
             reason = outcome.error or "Target execution cancelled"
             self._handle_external_stop(reason)
             raise RuntimeError(reason)

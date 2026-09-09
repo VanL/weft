@@ -40,6 +40,7 @@ from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
+    TERMINAL_TASK_EVENTS,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
@@ -2837,6 +2838,127 @@ def test_deferred_kill_finalizes_before_limit_outcome(
     )
     assert task.taskspec.state.status == "killed"
     assert task._deferred_active_control_command is None
+    assert reserved.has_pending() is False
+    assert len(delete_attempts) == 1
+    task.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_status", "expected_event"),
+    (
+        (CONTROL_STOP, "cancelled", "control_stop"),
+        (CONTROL_KILL, "killed", "control_kill"),
+    ),
+)
+@pytest.mark.parametrize("outcome_status", ("error", "cancelled"))
+def test_deferred_control_wins_over_error_and_cancelled_outcomes(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    expected_status: str,
+    expected_event: str,
+    outcome_status: str,
+) -> None:
+    """Accepted STOP/KILL outranks a late error or cancelled runner outcome.
+
+    Verifies for both non-ok outcomes that were previously untested with
+    deferred control:
+    - terminal status comes from the control command, not the outcome
+    - exactly one terminal state event is logged, and no work_* terminal event
+    - the control acknowledgement is sent exactly once
+    - the reserved row receives exactly one disposition
+
+    Spec: docs/specifications/07-System_Invariants.md [QUEUE.6];
+    docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3]
+    """
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        reserved_stop=ReservedPolicy.CLEAR,
+        reserved_error=ReservedPolicy.CLEAR,
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(log_queue)
+    delete_attempts: list[int] = []
+    original_delete = reserved.delete
+
+    def delete_once(*, message_id: int) -> bool:
+        delete_attempts.append(message_id)
+        return original_delete(message_id=message_id)
+
+    monkeypatch.setattr(reserved, "delete", delete_once)
+    monkeypatch.setattr(task, "_get_reserved_queue", lambda: reserved)
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    class NonOkTaskRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def supports_stream_callbacks(self) -> bool:
+            return False
+
+        def run_with_hooks(
+            self,
+            work_item: Any,
+            **_kwargs: Any,
+        ) -> RunnerOutcome:
+            del work_item
+            worker_started.set()
+            release_worker.wait()
+            return RunnerOutcome(
+                status=outcome_status,
+                value=None,
+                error=f"runner reported {outcome_status}",
+                stdout=None,
+                stderr=None,
+                returncode=None,
+                duration=0.0,
+            )
+
+    monkeypatch.setattr(consumer_module, "TaskRunner", NonOkTaskRunner)
+    inbox.write(json.dumps({"args": []}))
+
+    try:
+        task.process_once()
+        assert worker_started.wait(timeout=2.0)
+        assert task.taskspec.state.status == "running"
+
+        ctrl_in.write(encode_control_message(command))
+        task.process_once()
+        assert task._deferred_active_control_command == command
+    finally:
+        release_worker.set()
+
+    _drive_consumer_until(
+        task,
+        lambda: task.taskspec.state.status == expected_status,
+    )
+
+    assert task.taskspec.state.status == expected_status
+    assert task._deferred_active_control_command is None
+
+    ctrl_out_messages = [json.loads(message) for message in drain_queue(ctrl_out)]
+    ack_responses = [
+        message for message in ctrl_out_messages if message.get("command") == command
+    ]
+    assert len(ack_responses) == 1
+    assert ack_responses[0]["status"] == "ack"
+
+    events = [json.loads(message) for message in drain_queue(log_queue)]
+    terminal_events = [
+        event for event in events if event["event"] in TERMINAL_TASK_EVENTS
+    ]
+    assert [event["event"] for event in terminal_events] == [expected_event]
+    assert terminal_events[0]["status"] == expected_status
+
     assert reserved.has_pending() is False
     assert len(delete_attempts) == 1
     task.cleanup()
