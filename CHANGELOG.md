@@ -28,6 +28,11 @@
   `make_callable` and `ManagedProcessResult`. It was never part of a public
   [PY-1] surface and its last facade export was dropped in 0.9.95; no runtime
   path used it. Importing it now raises `ModuleNotFoundError`.
+- Removed the unused `_mutations_allowed()` thaw context managers and the
+  `_allow_mutation` bypass flag from the frozen `spec` sub-sections of
+  TaskSpec. A frozen section can no longer be reopened by any caller;
+  recursive freezing, nested-container protection, frozen-assignment error
+  messages, and the mutable `state`/`metadata` boundary are unchanged.
 
 ### Fixed
 

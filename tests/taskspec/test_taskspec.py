@@ -535,6 +535,80 @@ class TestPartialImmutability:
 
         assert dict(taskspec.spec.env) == original_env
 
+    @pytest.mark.parametrize(
+        "section_name",
+        [
+            "LimitsSection",
+            "RunnerSection",
+            "RunInputArgumentSection",
+            "RunInputStdinSection",
+            "RunInputSection",
+            "ParameterizationSection",
+            "AgentToolSection",
+            "AgentTemplateSection",
+            "AgentSection",
+            "SpecSection",
+        ],
+    )
+    def test_frozen_sections_expose_no_thaw_escape_hatch(
+        self, section_name: str
+    ) -> None:
+        """Frozen sections offer no way to reopen themselves (Spec: [TS-0])."""
+        section_cls = getattr(taskspec_model, section_name)
+        assert not hasattr(section_cls, "_mutations_allowed")
+
+    def test_frozen_nested_sections_carry_no_mutation_flag(self) -> None:
+        """Frozen nested sections keep no ``_allow_mutation`` bypass flag."""
+        taskspec = TaskSpec.model_validate(
+            {
+                "tid": fixtures.VALID_TEST_TID,
+                "name": "nested-immutability",
+                "spec": {
+                    "type": "agent",
+                    "agent": {
+                        "runtime": "llm",
+                        "model": "weft-test-agent-model",
+                        "tools": [
+                            {"name": "lookup", "kind": "python", "ref": "pkg:lookup"}
+                        ],
+                        "templates": {"greeting": {"prompt": "hello"}},
+                    },
+                    "run_input": {
+                        "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                        "arguments": {"prompt": {"type": "string", "required": True}},
+                        "stdin": {"type": "text"},
+                    },
+                },
+                "io": {},
+                "state": {},
+                "metadata": {},
+            }
+        )
+        agent = taskspec.spec.agent
+        run_input = taskspec.spec.run_input
+        assert agent is not None
+        assert run_input is not None
+        assert run_input.stdin is not None
+
+        sections = [
+            taskspec.spec,
+            taskspec.spec.limits,
+            taskspec.spec.runner,
+            agent,
+            *agent.tools,
+            *agent.templates.values(),
+            run_input,
+            run_input.stdin,
+            *run_input.arguments.values(),
+        ]
+        for section in sections:
+            assert not hasattr(section, "_allow_mutation")
+
+        with pytest.raises(AttributeError):
+            agent.tools[0].name = "renamed"
+        with pytest.raises(AttributeError):
+            run_input.stdin.type = "json"
+
 
 class TestProviderCLIValidation:
     """Validation rules specific to the Phase 1 delegated runtime."""

@@ -10,8 +10,7 @@ from __future__ import annotations
 import copy
 import json as json_module
 import time
-from collections.abc import Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, Self, SupportsIndex
@@ -310,26 +309,12 @@ class LimitsSection(BaseModel):
     max_fds: int | None = Field(None, ge=MIN_FDS_LIMIT)
     max_connections: int | None = Field(None, ge=MIN_CONNECTIONS_LIMIT)
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         """Prevent modification if this instance is frozen."""
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen LimitsSection. "
                 "LimitsSection is immutable after TaskSpec creation."
@@ -339,7 +324,6 @@ class LimitsSection(BaseModel):
     def _freeze(self) -> None:
         """Mark this instance as frozen."""
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class RunnerSection(BaseModel):
@@ -383,26 +367,12 @@ class RunnerSection(BaseModel):
             )
         return normalized
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         """Prevent modification if this instance is frozen."""
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen RunnerSection. "
                 "RunnerSection is immutable after TaskSpec creation."
@@ -413,7 +383,6 @@ class RunnerSection(BaseModel):
         """Mark this instance as frozen."""
         object.__setattr__(self, "options", _freeze_container_value(self.options))
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class RunInputArgumentSection(BaseModel):
@@ -435,25 +404,11 @@ class RunInputArgumentSection(BaseModel):
             return None
         return normalized
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen RunInputArgumentSection. "
                 "RunInputArgumentSection is immutable after TaskSpec creation."
@@ -462,7 +417,6 @@ class RunInputArgumentSection(BaseModel):
 
     def _freeze(self) -> None:
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class ParameterizationArgumentSection(RunInputArgumentSection):
@@ -526,25 +480,11 @@ class RunInputStdinSection(BaseModel):
             return None
         return normalized
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen RunInputStdinSection. "
                 "RunInputStdinSection is immutable after TaskSpec creation."
@@ -553,7 +493,6 @@ class RunInputStdinSection(BaseModel):
 
     def _freeze(self) -> None:
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 def _validate_declared_argument_names(
@@ -612,31 +551,11 @@ class RunInputSection(BaseModel):
         )
         return self
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            with ExitStack() as stack:
-                for argument in self.arguments.values():
-                    if hasattr(argument, "_mutations_allowed"):
-                        stack.enter_context(argument._mutations_allowed())
-                if self.stdin is not None and hasattr(self.stdin, "_mutations_allowed"):
-                    stack.enter_context(self.stdin._mutations_allowed())
-                yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen RunInputSection. "
                 "RunInputSection is immutable after TaskSpec creation."
@@ -651,7 +570,6 @@ class RunInputSection(BaseModel):
             self.stdin._freeze()
         object.__setattr__(self, "arguments", _freeze_container_value(self.arguments))
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class ParameterizationSection(BaseModel):
@@ -675,29 +593,11 @@ class ParameterizationSection(BaseModel):
         )
         return self
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            with ExitStack() as stack:
-                for argument in self.arguments.values():
-                    if hasattr(argument, "_mutations_allowed"):
-                        stack.enter_context(argument._mutations_allowed())
-                yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen ParameterizationSection. "
                 "ParameterizationSection is immutable after TaskSpec creation."
@@ -710,7 +610,6 @@ class ParameterizationSection(BaseModel):
                 argument._freeze()
         object.__setattr__(self, "arguments", _freeze_container_value(self.arguments))
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class AgentToolSection(BaseModel):
@@ -725,26 +624,12 @@ class AgentToolSection(BaseModel):
     args_schema: dict[str, Any] | None = None
     config: dict[str, Any] = Field(default_factory=dict)
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         """Prevent modification if this instance is frozen."""
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen AgentToolSection. "
                 "AgentToolSection is immutable after TaskSpec creation."
@@ -760,7 +645,6 @@ class AgentToolSection(BaseModel):
         )
         object.__setattr__(self, "config", _freeze_container_value(self.config))
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class AgentTemplateSection(BaseModel):
@@ -771,26 +655,12 @@ class AgentTemplateSection(BaseModel):
     prompt: str = Field(..., min_length=1)
     instructions: str | None = None
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         """Prevent modification if this instance is frozen."""
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen AgentTemplateSection. "
                 "AgentTemplateSection is immutable after TaskSpec creation."
@@ -800,7 +670,6 @@ class AgentTemplateSection(BaseModel):
     def _freeze(self) -> None:
         """Mark this instance as frozen."""
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class AgentSection(BaseModel):
@@ -882,33 +751,12 @@ class AgentSection(BaseModel):
             return self.authority_class
         return "bounded"
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            with ExitStack() as stack:
-                for tool in self.tools:
-                    if hasattr(tool, "_mutations_allowed"):
-                        stack.enter_context(tool._mutations_allowed())
-                for template in self.templates.values():
-                    if hasattr(template, "_mutations_allowed"):
-                        stack.enter_context(template._mutations_allowed())
-                yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         """Prevent modification if this instance is frozen."""
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen AgentSection. "
                 "AgentSection is immutable after TaskSpec creation."
@@ -933,7 +781,6 @@ class AgentSection(BaseModel):
                 self, "output_schema", _freeze_container_value(self.output_schema)
             )
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class SpecSection(BaseModel):
@@ -1068,45 +915,12 @@ class SpecSection(BaseModel):
             raise ValueError("process_target must be a non-empty string")
         return value
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        object.__setattr__(self, "_allow_mutation", False)
-
-    @contextmanager
-    def _mutations_allowed(self) -> Iterator[None]:
-        object.__setattr__(self, "_allow_mutation", True)
-        try:
-            with ExitStack() as stack:
-                if hasattr(self, "limits") and hasattr(
-                    self.limits, "_mutations_allowed"
-                ):
-                    stack.enter_context(self.limits._mutations_allowed())
-                if hasattr(self, "runner") and hasattr(
-                    self.runner, "_mutations_allowed"
-                ):
-                    stack.enter_context(self.runner._mutations_allowed())
-                if self.agent is not None and hasattr(self.agent, "_mutations_allowed"):
-                    stack.enter_context(self.agent._mutations_allowed())
-                if self.parameterization is not None and hasattr(
-                    self.parameterization, "_mutations_allowed"
-                ):
-                    stack.enter_context(self.parameterization._mutations_allowed())
-                if self.run_input is not None and hasattr(
-                    self.run_input, "_mutations_allowed"
-                ):
-                    stack.enter_context(self.run_input._mutations_allowed())
-                yield
-        finally:
-            object.__setattr__(self, "_allow_mutation", False)
-
     def __setattr__(self, name: str, value: Any) -> None:
         """Prevent modification if this instance is frozen."""
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
-        if getattr(self, "_frozen", False) and not getattr(
-            self, "_allow_mutation", False
-        ):
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"Cannot modify field '{name}' on frozen SpecSection. "
                 "SpecSection is immutable after TaskSpec creation."
@@ -1136,7 +950,6 @@ class SpecSection(BaseModel):
         if self.env is not None:
             object.__setattr__(self, "env", _freeze_container_value(self.env))
         object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
 
 
 class IOSection(BaseModel):
