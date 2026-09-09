@@ -31,7 +31,6 @@ from weft.commands.types import (
     QueueDeleteReceipt,
     QueueEntry,
     QueueInfo,
-    QueueMoveReceipt,
     QueueMoveResult,
     QueueWriteReceipt,
 )
@@ -100,50 +99,6 @@ def _context(spec_context: str | None = None) -> WeftContext:
         return build_context(spec_context=env_context)
 
     return build_context(spec_context=os.getcwd())
-
-
-def _read_generator_after(
-    queue: Any,
-    *,
-    with_timestamps: bool,
-    after_timestamp: int | None,
-    before_timestamp: int | None = None,
-) -> CloseableIterator[Any]:
-    yield from queue.read_generator(
-        with_timestamps=with_timestamps,
-        after_timestamp=after_timestamp,
-        before_timestamp=before_timestamp,
-    )
-
-
-def _peek_generator_after(
-    queue: Any,
-    *,
-    with_timestamps: bool,
-    after_timestamp: int | None,
-    before_timestamp: int | None = None,
-) -> CloseableIterator[Any]:
-    yield from queue.peek_generator(
-        with_timestamps=with_timestamps,
-        after_timestamp=after_timestamp,
-        before_timestamp=before_timestamp,
-    )
-
-
-def _move_generator_after(
-    queue: Any,
-    destination: str,
-    *,
-    with_timestamps: bool,
-    after_timestamp: int | None,
-    before_timestamp: int | None = None,
-) -> CloseableIterator[Any]:
-    yield from queue.move_generator(
-        destination,
-        with_timestamps=with_timestamps,
-        after_timestamp=after_timestamp,
-        before_timestamp=before_timestamp,
-    )
 
 
 def _queue_entry(queue_name: str, message: QueueMessage) -> QueueEntry:
@@ -249,8 +204,7 @@ def read_queue(
                 )
             ]
 
-        iterator = _read_generator_after(
-            queue,
+        iterator = queue.read_generator(
             with_timestamps=True,
             after_timestamp=after,
             before_timestamp=before,
@@ -367,8 +321,7 @@ def peek_queue(
                 )
             ]
 
-        iterator = _peek_generator_after(
-            queue,
+        iterator = queue.peek_generator(
             with_timestamps=True,
             after_timestamp=after,
             before_timestamp=before,
@@ -388,30 +341,8 @@ def peek_queue(
         queue.close()
 
 
-def move_messages(
-    ctx: WeftContext,
-    source: str,
-    destination: str,
-    *,
-    limit: int | None = None,
-    after: int | None = None,
-    before: int | None = None,
-) -> int:
-    src_queue = ctx.queue(source, persistent=True)
-    try:
-        moved = src_queue.move_many(
-            destination,
-            limit=limit or 1000,
-            with_timestamps=False,
-            after_timestamp=after,
-            before_timestamp=before,
-        )
-        return len(moved)
-    finally:
-        src_queue.close()
-
-
-def move_queue_messages(
+@typed_queue_command_errors
+def move_queue_entries(
     ctx: WeftContext,
     source: str,
     destination: str,
@@ -421,75 +352,87 @@ def move_queue_messages(
     message_id: int | str | None = None,
     after: int | None = None,
     before: int | None = None,
-) -> QueueMoveReceipt:
-    """Move queue messages and return a structured receipt."""
+) -> QueueMoveResult:
+    """Move queue entries and return the exact ordered moved set.
 
+    This is the single move owner for the public command facade and the Python
+    client. A bounded ``limit`` delegates to ``Queue.move_many`` with the
+    caller's value passed through unchanged; every other selection delegates to
+    ``Queue.move``, SimpleBroker's CLI-mirroring method. SimpleBroker therefore
+    remains the only authority on move semantics, including rejecting a limit
+    below one and an identical source and destination.
+
+    Args:
+        ctx: Resolved context owning the broker target.
+        source: Source queue name.
+        destination: Destination queue name.
+        limit: Optional maximum number of entries to move.
+        all_messages: Move every matching entry when no explicit limit is set.
+        message_id: Optional exact message ID.
+        after: Optional exclusive lower message-ID bound.
+        before: Optional exclusive upper message-ID bound.
+
+    Returns:
+        Source, destination, and the exact entries moved in broker order.
+
+    Raises:
+        CommandUsageError: If selection options conflict or the broker rejects
+            them.
+        CommandExecutionError: If broker access fails.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    if message_id is not None and (
+        limit is not None or all_messages or after is not None or before is not None
+    ):
+        raise CommandUsageError(
+            "message cannot be used with limit, all, after, or before"
+        )
     normalized_message_id = (
         normalize_exact_message_id(message_id) if message_id is not None else None
     )
     queue = ctx.queue(source, persistent=True)
     try:
-        if normalized_message_id is not None:
-            iterator = queue.move_generator(
-                destination,
-                with_timestamps=True,
-                exact_timestamp=normalized_message_id,
-            )
-            with closing_queue_iterator(iterator) as rows:
-                moved = list(rows)
-            return QueueMoveReceipt(
-                source=source,
-                destination=destination,
-                moved_count=len(moved),
-            )
+        moved_rows: list[tuple[Any, Any]]
         if limit is not None:
-            moved_count = move_messages(
-                ctx,
-                source,
-                destination,
-                limit=limit,
-                after=after,
-                before=before,
+            moved_rows = list(
+                cast(
+                    list[tuple[Any, Any]],
+                    queue.move_many(
+                        destination,
+                        limit=limit,
+                        with_timestamps=True,
+                        after_timestamp=after,
+                        before_timestamp=before,
+                    ),
+                )
             )
-            return QueueMoveReceipt(
-                source=source,
-                destination=destination,
-                moved_count=moved_count,
-            )
-        if not all_messages:
-            iterator = _move_generator_after(
-                queue,
+        else:
+            selected = queue.move(
                 destination,
-                with_timestamps=True,
+                message_id=normalized_message_id,
                 after_timestamp=after,
                 before_timestamp=before,
+                all_messages=all_messages,
             )
-            moved_count = 0
-            with closing_queue_iterator(iterator) as rows:
-                for _item in rows:
-                    moved_count += 1
-                    break
-            return QueueMoveReceipt(
-                source=source,
-                destination=destination,
-                moved_count=moved_count,
-            )
-        iterator = _move_generator_after(
-            queue,
-            destination,
-            with_timestamps=True,
-            after_timestamp=after,
-            before_timestamp=before,
-        )
-        with closing_queue_iterator(iterator) as rows:
-            moved = list(rows)
-        return QueueMoveReceipt(
-            source=source,
-            destination=destination,
-            moved_count=len(moved),
-        )
+            if selected is None:
+                moved_rows = []
+            elif all_messages:
+                iterator = cast(CloseableIterator[Any], selected)
+                with closing_queue_iterator(iterator) as rows:
+                    moved_rows = [(row["message"], row["timestamp"]) for row in rows]
+            else:
+                row = cast(dict[str, Any], selected)
+                moved_rows = [(row["message"], row["timestamp"])]
     finally:
         queue.close()
+
+    entries = tuple(
+        QueueEntry(queue=source, message=str(body), timestamp=int(timestamp))
+        for body, timestamp in moved_rows
+    )
+    return QueueMoveResult(source, destination, entries, len(entries))
 
 
 def list_queues(
@@ -608,23 +551,20 @@ def watch_queue(
 
         while max_messages is None or emitted < max_messages:
             if move_to:
-                generator = _move_generator_after(
-                    queue,
+                generator = queue.move_generator(
                     move_to,
                     with_timestamps=True,
                     after_timestamp=last_timestamp,
                     before_timestamp=before,
                 )
             elif peek:
-                generator = _peek_generator_after(
-                    queue,
+                generator = queue.peek_generator(
                     with_timestamps=True,
                     after_timestamp=last_timestamp,
                     before_timestamp=before,
                 )
             else:
-                generator = _read_generator_after(
-                    queue,
+                generator = queue.read_generator(
                     with_timestamps=True,
                     after_timestamp=last_timestamp,
                     before_timestamp=before,
@@ -963,62 +903,6 @@ def cmd_queue_peek(
     )
 
 
-def _move_queue_entries(
-    ctx: WeftContext,
-    source: str,
-    destination: str,
-    *,
-    limit: int | None,
-    all_messages: bool,
-    message_id: int | None,
-    after: int | None,
-    before: int | None,
-) -> QueueMoveResult:
-    """Move and retain the exact ordered entry set for the public result."""
-
-    queue = ctx.queue(source, persistent=True)
-    try:
-        if message_id is not None:
-            iterator = queue.move_generator(
-                destination,
-                with_timestamps=True,
-                exact_timestamp=message_id,
-            )
-        elif limit is not None:
-            moved = queue.move_many(
-                destination,
-                limit=limit,
-                with_timestamps=True,
-                after_timestamp=after,
-                before_timestamp=before,
-            )
-            entries = tuple(
-                QueueEntry(source, str(item[0]), int(item[1]))
-                for item in cast(list[tuple[Any, Any]], moved)
-            )
-            return QueueMoveResult(source, destination, entries, len(entries))
-        else:
-            iterator = _move_generator_after(
-                queue,
-                destination,
-                with_timestamps=True,
-                after_timestamp=after,
-                before_timestamp=before,
-            )
-
-        entries_list: list[QueueEntry] = []
-        with closing_queue_iterator(iterator) as rows:
-            for item in rows:
-                body, timestamp = cast(tuple[Any, Any], item)
-                entries_list.append(QueueEntry(source, str(body), int(timestamp)))
-                if message_id is None and not all_messages:
-                    break
-        entries = tuple(entries_list)
-        return QueueMoveResult(source, destination, entries, len(entries))
-    finally:
-        queue.close()
-
-
 @typed_queue_command_errors
 def cmd_queue_move(
     source: str,
@@ -1051,20 +935,12 @@ def cmd_queue_move(
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
-    if limit is not None and limit < 0:
-        raise CommandUsageError("limit must be non-negative")
-    if message is not None and (
-        limit is not None or all or after is not None or before is not None
-    ):
-        raise CommandUsageError(
-            "message cannot be used with limit, all, after, or before"
-        )
     context = _public_command_context()
     canonical_source = _canonical_queue_operand(context, source)
     canonical_destination = _canonical_queue_operand(context, destination)
     if canonical_source == canonical_destination:
         raise CommandUsageError("source and destination queues cannot be the same")
-    return _move_queue_entries(
+    return move_queue_entries(
         context,
         canonical_source,
         canonical_destination,
@@ -1389,7 +1265,6 @@ __all__ = [  # noqa: RUF022 approved [TS-3.1] [RUFF-SUP-246] exception
     "read_messages",
     "write_message",
     "peek_messages",
-    "move_messages",
     "list_queues",
     "watch_queue",
     "cmd_queue_alias_add",

@@ -244,7 +244,7 @@ class QueuesNamespace:
         after: int | None = None,
         before: int | None = None,
     ) -> QueueMoveReceipt:
-        return queues.move_queue_messages(
+        result = queues.move_queue_entries(
             self.client.context,
             source,
             destination,
@@ -253,6 +253,11 @@ class QueuesNamespace:
             message_id=message_id,
             after=after,
             before=before,
+        )
+        return QueueMoveReceipt(
+            source=result.source,
+            destination=result.destination,
+            moved_count=result.moved_count,
         )
 
     def list(

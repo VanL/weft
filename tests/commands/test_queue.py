@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,6 +16,7 @@ from tests.helpers.test_backend import prepare_project_root
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import WEFT_ENDPOINTS_REGISTRY_QUEUE
 from weft._exceptions import CommandExecutionError, CommandUsageError
+from weft.client import WeftClient
 from weft.commands import queue as queue_cmd
 from weft.commands.types import (
     EndpointResolution,
@@ -25,7 +28,7 @@ from weft.commands.types import (
     QueueMoveResult,
     QueueWriteReceipt,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.endpoints import build_endpoint_record_payload
 from weft.core.tasks import Consumer
 from weft.helpers import iter_queue_json_entries
@@ -409,17 +412,249 @@ def test_peek_messages_preserves_queue(tmp_path):
     assert [m.body for m in second] == ["foo"]
 
 
-def test_move_messages(tmp_path):
+def test_move_queue_entries_moves_every_message_with_all(tmp_path):
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "from.queue", "a")
     queue_cmd.write_message(ctx, "from.queue", "b")
 
-    moved = queue_cmd.move_messages(ctx, "from.queue", "to.queue")
-    assert moved == 2
+    result = queue_cmd.move_queue_entries(
+        ctx,
+        "from.queue",
+        "to.queue",
+        all_messages=True,
+    )
+    assert isinstance(result, QueueMoveResult)
+    assert [entry.message for entry in result.entries] == ["a", "b"]
+    assert result.moved_count == 2
+    assert all(entry.queue == "from.queue" for entry in result.entries)
 
     dest_messages = queue_cmd.read_messages(ctx, "to.queue", all_messages=True)
     assert [m.body for m in dest_messages] == ["a", "b"]
+
+
+def _seed_move_source(ctx: WeftContext, name: str) -> list[int]:
+    """Seed one source queue and return its message IDs in broker order."""
+
+    for index in range(3):
+        queue_cmd.write_message(ctx, name, f"m{index}")
+    return [
+        int(entry.timestamp)
+        for entry in queue_cmd.peek_queue(ctx, name, all_messages=True)
+    ]
+
+
+def _move_via_command(
+    source: str, destination: str, **selection: Any
+) -> QueueMoveResult:
+    return queue_cmd.cmd_queue_move(
+        source,
+        destination,
+        limit=selection.get("limit"),
+        all=selection.get("all_messages", False),
+        message=selection.get("message_id"),
+        after=selection.get("after"),
+        before=selection.get("before"),
+    )
+
+
+def _move_via_client(
+    client: WeftClient, source: str, destination: str, **selection: Any
+) -> int:
+    return client.queues.move(
+        source,
+        destination,
+        limit=selection.get("limit"),
+        all_messages=selection.get("all_messages", False),
+        message_id=selection.get("message_id"),
+        after=selection.get("after"),
+        before=selection.get("before"),
+    ).moved_count
+
+
+@pytest.mark.parametrize(
+    ("case", "selection", "expected"),
+    [
+        ("limit_absent", lambda ids: {}, ["m0"]),
+        ("limit_one", lambda ids: {"limit": 1}, ["m0"]),
+        ("limit_two", lambda ids: {"limit": 2}, ["m0", "m1"]),
+        ("limit_over", lambda ids: {"limit": 99}, ["m0", "m1", "m2"]),
+        ("all", lambda ids: {"all_messages": True}, ["m0", "m1", "m2"]),
+        ("exact_id", lambda ids: {"message_id": ids[1]}, ["m1"]),
+        ("after_single", lambda ids: {"after": ids[0]}, ["m1"]),
+        (
+            "after_all",
+            lambda ids: {"after": ids[0], "all_messages": True},
+            ["m1", "m2"],
+        ),
+        (
+            "before_all",
+            lambda ids: {"before": ids[2], "all_messages": True},
+            ["m0", "m1"],
+        ),
+        (
+            "bounded_limit",
+            lambda ids: {"after": ids[0], "before": ids[2], "limit": 5},
+            ["m1"],
+        ),
+    ],
+)
+def test_queue_move_selection_matches_across_command_and_client_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    selection: Callable[[list[int]], dict[str, Any]],
+    expected: list[str],
+) -> None:
+    """Both public move surfaces select the same messages for one selection.
+
+    Verifies:
+    - `cmd_queue_move` and `client.queues.move` move identical message sets
+    - Destination contents and moved counts agree for every selector
+    """
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+    client = WeftClient.from_weft_context(ctx)
+
+    command_ids = _seed_move_source(ctx, f"{case}.command.source")
+    client_ids = _seed_move_source(ctx, f"{case}.client.source")
+
+    command_result = _move_via_command(
+        f"{case}.command.source",
+        f"{case}.command.dest",
+        **selection(command_ids),
+    )
+    command_count = command_result.moved_count
+    # [PY-2]: the command result carries the exact ordered moved set.
+    assert [entry.message for entry in command_result.entries] == expected
+    assert all(
+        entry.queue == f"{case}.command.source" for entry in command_result.entries
+    )
+    timestamps = [int(entry.timestamp) for entry in command_result.entries]
+    assert timestamps == sorted(timestamps)
+    assert set(timestamps) <= set(command_ids)
+    client_count = _move_via_client(
+        client,
+        f"{case}.client.source",
+        f"{case}.client.dest",
+        **selection(client_ids),
+    )
+
+    assert command_count == client_count == len(expected)
+    for surface in ("command", "client"):
+        moved = queue_cmd.read_queue(ctx, f"{case}.{surface}.dest", all_messages=True)
+        assert [entry.message for entry in moved] == expected
+
+
+@pytest.mark.parametrize(
+    ("case", "selection", "message"),
+    [
+        ("limit_zero", lambda ids: {"limit": 0}, "limit must be at least 1"),
+        ("limit_negative", lambda ids: {"limit": -1}, "limit must be at least 1"),
+        (
+            "id_with_limit",
+            lambda ids: {"message_id": ids[0], "limit": 1},
+            "message cannot be used with limit, all, after, or before",
+        ),
+        (
+            "id_with_all",
+            lambda ids: {"message_id": ids[0], "all_messages": True},
+            "message cannot be used with limit, all, after, or before",
+        ),
+        (
+            "id_with_after",
+            lambda ids: {"message_id": ids[0], "after": ids[0]},
+            "message cannot be used with limit, all, after, or before",
+        ),
+        (
+            "id_with_before",
+            lambda ids: {"message_id": ids[0], "before": ids[2]},
+            "message cannot be used with limit, all, after, or before",
+        ),
+    ],
+)
+def test_queue_move_rejects_the_same_selections_on_both_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    selection: Callable[[list[int]], dict[str, Any]],
+    message: str,
+) -> None:
+    """Rejected move selections raise the same typed error on both surfaces.
+
+    Verifies:
+    - `limit=0` is an error rather than an implicit bounded default
+    - Conflicting exact-ID selectors are rejected identically
+    - Nothing is moved when a selection is rejected
+    """
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+    client = WeftClient.from_weft_context(ctx)
+    ids = _seed_move_source(ctx, f"{case}.source")
+
+    with pytest.raises(CommandUsageError, match=message):
+        _move_via_command(f"{case}.source", f"{case}.dest", **selection(ids))
+    with pytest.raises(CommandUsageError, match=message):
+        _move_via_client(client, f"{case}.source", f"{case}.dest", **selection(ids))
+
+    assert queue_cmd.peek_queue(ctx, f"{case}.dest", all_messages=True) == []
+    assert len(queue_cmd.peek_queue(ctx, f"{case}.source", all_messages=True)) == 3
+
+
+def test_queue_move_rejects_identical_source_and_destination_on_both_surfaces(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both surfaces refuse a move whose source and destination are the same."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+    client = WeftClient.from_weft_context(ctx)
+    _seed_move_source(ctx, "same.source")
+
+    with pytest.raises(CommandUsageError, match="(?i)source and destination"):
+        _move_via_command("same.source", "same.source", all_messages=True)
+    with pytest.raises(CommandUsageError, match="(?i)source and destination"):
+        _move_via_client(client, "same.source", "same.source", all_messages=True)
+
+    assert len(queue_cmd.peek_queue(ctx, "same.source", all_messages=True)) == 3
+
+
+@pytest.mark.parametrize(
+    ("case", "selection"),
+    [
+        ("empty_absent", {}),
+        ("empty_limit", {"limit": 2}),
+        ("empty_all", {"all_messages": True}),
+    ],
+)
+def test_queue_move_from_empty_source_reports_nothing_on_both_surfaces(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    selection: dict[str, Any],
+) -> None:
+    """An empty source yields an empty moved set rather than an error."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    monkeypatch.setattr(queue_cmd, "_context", lambda: ctx)
+    client = WeftClient.from_weft_context(ctx)
+
+    result = queue_cmd.cmd_queue_move(
+        f"{case}.source",
+        f"{case}.dest",
+        limit=selection.get("limit"),
+        all=selection.get("all_messages", False),
+    )
+    assert result.entries == ()
+    assert result.moved_count == 0
+    assert _move_via_client(client, f"{case}.source", f"{case}.dest", **selection) == 0
 
 
 def test_list_queues(tmp_path):
@@ -515,16 +750,22 @@ def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> No
             calls.append(("peek", exact_timestamp))
             return "peek", message_id
 
-        def move_generator(
+        def move(
             self,
             _destination: str,
             *,
-            with_timestamps: bool,
-            exact_timestamp: object,
+            message_id: object,
+            after_timestamp: object,
+            before_timestamp: object,
+            all_messages: bool,
         ):
-            assert with_timestamps is True
-            calls.append(("move", exact_timestamp))
-            return iter([("move", message_id)])
+            assert (after_timestamp, before_timestamp, all_messages) == (
+                None,
+                None,
+                False,
+            )
+            calls.append(("move", message_id))
+            return {"message": "move", "timestamp": message_id}
 
         def delete(self, *, message_id: object) -> bool:
             calls.append(("delete", message_id))
@@ -543,7 +784,7 @@ def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> No
 
     read_entry = queue_cmd.read_queue(context, "source", message_id=canonical)[0]
     peek_entry = queue_cmd.peek_queue(context, "source", message_id=canonical)[0]
-    move_receipt = queue_cmd.move_queue_messages(
+    move_result = queue_cmd.move_queue_entries(
         context,
         "source",
         "destination",
@@ -563,7 +804,7 @@ def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> No
     ]
     assert read_entry.timestamp == message_id
     assert peek_entry.timestamp == message_id
-    assert move_receipt.moved_count == 1
+    assert move_result.moved_count == 1
     assert delete_receipt.deleted_count == 1
 
 

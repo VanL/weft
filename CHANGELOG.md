@@ -47,6 +47,15 @@
   recompiled. Inconsistent record topology (an edge naming a missing stage
   record, or a stage no edge reaches) now fails bootstrap with a clear error
   instead of being papered over by the array fallbacks.
+- Queue moves have one owner that delegates selection to SimpleBroker, so the
+  `weft queue move` command and `client.queues.move()` now select identically.
+  `client.queues.move(limit=0)` raises `CommandUsageError` instead of silently
+  moving up to 1000 messages, a negative `limit` raises the same broker error
+  rather than a separate Weft message, and `message_id` combined with `limit`,
+  `all_messages`, `after`, or `before` is rejected on both surfaces. The
+  private helpers `move_messages` and `move_queue_messages` are removed;
+  `move_queue_entries` replaces them and `move_messages` is gone from
+  `weft.commands.queue.__all__`.
 
 ### Fixed
 
