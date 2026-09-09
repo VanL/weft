@@ -24,6 +24,10 @@
   `dead_tid_log_rows_deleted` fields.
 - Manager control queues are documented as task-local. Existing managers that
   advertise older global control names remain addressable through their records.
+- Removed the unused private `weft.core.callable` module, including
+  `make_callable` and `ManagedProcessResult`. It was never part of a public
+  [PY-1] surface and its last facade export was dropped in 0.9.95; no runtime
+  path used it. Importing it now raises `ModuleNotFoundError`.
 
 ### Fixed
 

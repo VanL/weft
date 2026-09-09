@@ -318,6 +318,10 @@ def test_transitional_core_types_module_is_deleted() -> None:
     assert not (PACKAGE_ROOT / "core" / "types.py").exists()
 
 
+def test_managed_callable_module_is_deleted() -> None:
+    assert not (PACKAGE_ROOT / "core" / "callable.py").exists()
+
+
 def test_manager_lifecycle_mirror_module_is_deleted() -> None:
     assert not (PACKAGE_ROOT / "commands" / "_manager_lifecycle.py").exists()
 
