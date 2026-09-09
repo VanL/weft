@@ -930,6 +930,132 @@ def test_pipeline_task_bootstraps_all_children_before_any_stage_runs(
     assert ctx.queue(compiled.runtime.queues.events, persistent=True).read_one() is None
 
 
+def _compiled_three_stage_pipeline(tmp_path: Path) -> tuple[Any, Any]:
+    """Compile a three-stage pipeline through the production compiler."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    stage_names = ("first", "second", "third")
+    for stage_name in stage_names:
+        _write_json(ctx.weft_dir / "tasks" / f"{stage_name}.json", _task_payload())
+    compiled = compile_linear_pipeline(
+        load_pipeline_spec_payload(
+            {
+                "name": "pipe",
+                "stages": [{"name": name, "task": name} for name in stage_names],
+            }
+        ),
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+    return ctx, compiled
+
+
+def test_pipeline_child_launch_order_is_unchanged_by_record_traversal(
+    tmp_path: Path,
+) -> None:
+    """Characterization: the record traversal reproduces the pre-change order.
+
+    This passes on the base commit too; it pins the exact seven-child sequence
+    so the representation change is proven order-preserving.
+    """
+    ctx, compiled = _compiled_three_stage_pipeline(tmp_path)
+    task = PipelineTask(
+        ctx.broker_target, compiled.pipeline_taskspec, config=ctx.broker_config
+    )
+
+    ordered = task._ordered_child_taskspec_payloads()
+
+    assert [
+        payload["metadata"][PIPELINE_OWNER_METADATA_KEY]["edge_name"]
+        or payload["metadata"][PIPELINE_OWNER_METADATA_KEY]["stage_name"]
+        for payload in ordered
+    ] == [
+        "pipeline-to-first",
+        "first",
+        "first-to-second",
+        "second",
+        "second-to-third",
+        "third",
+        "third-to-pipeline",
+    ]
+    assert [payload["tid"] for payload in ordered] == [
+        compiled.runtime.edges[0].tid,
+        compiled.runtime.stages[0].tid,
+        compiled.runtime.edges[1].tid,
+        compiled.runtime.stages[1].tid,
+        compiled.runtime.edges[2].tid,
+        compiled.runtime.stages[2].tid,
+        compiled.runtime.edges[3].tid,
+    ]
+    assert ordered == [
+        compiled.runtime.edges[0].taskspec,
+        compiled.runtime.stages[0].taskspec,
+        compiled.runtime.edges[1].taskspec,
+        compiled.runtime.stages[1].taskspec,
+        compiled.runtime.edges[2].taskspec,
+        compiled.runtime.stages[2].taskspec,
+        compiled.runtime.edges[3].taskspec,
+    ]
+
+
+def test_pipeline_runtime_envelope_rejects_legacy_child_taskspec_arrays(
+    tmp_path: Path,
+) -> None:
+    """Envelopes compiled by older code carrying the arrays are rejected."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=1)
+    runtime = payload["metadata"][PIPELINE_RUNTIME_METADATA_KEY]
+    runtime["stage_taskspecs"] = [stage["taskspec"] for stage in runtime["stages"]]
+    runtime["edge_taskspecs"] = [edge["taskspec"] for edge in runtime["edges"]]
+    db_path = tmp_path / "legacy-envelope.sqlite3"
+
+    with pytest.raises(ValueError) as exc_info:
+        PipelineTask(db_path, TaskSpec.model_validate(payload))
+
+    message = str(exc_info.value)
+    assert "stage_taskspecs" in message
+    assert "edge_taskspecs" in message
+    assert db_path.exists() is False
+
+
+def test_pipeline_bootstrap_rejects_edge_pointing_at_missing_stage_record(
+    tmp_path: Path,
+) -> None:
+    """A downstream reference with no stage record fails instead of dropping it."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=2)
+    runtime = payload["metadata"][PIPELINE_RUNTIME_METADATA_KEY]
+    dropped = runtime["stages"].pop(0)
+    task = PipelineTask(
+        tmp_path / "missing-stage.sqlite3", TaskSpec.model_validate(payload)
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        task._ordered_child_taskspec_payloads()
+
+    message = str(exc_info.value)
+    assert dropped["tid"] in message
+    assert "pipeline-to-stage-0" in message
+
+
+def test_pipeline_bootstrap_rejects_stage_record_no_edge_reaches(
+    tmp_path: Path,
+) -> None:
+    """An unreachable stage record fails instead of silently never launching."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=2)
+    runtime = payload["metadata"][PIPELINE_RUNTIME_METADATA_KEY]
+    runtime["edges"][0]["downstream_tid"] = None
+    task = PipelineTask(
+        tmp_path / "unreachable-stage.sqlite3", TaskSpec.model_validate(payload)
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        task._ordered_child_taskspec_payloads()
+
+    message = str(exc_info.value)
+    assert runtime["stages"][0]["tid"] in message
+    assert "stage-0" in message
+
+
 def test_pipeline_bootstrap_first_child_failure_does_not_stop_unsubmitted_children(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

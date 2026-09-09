@@ -11,6 +11,7 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
+    PIPELINE_RUNTIME_METADATA_KEY,
     TASKSPEC_BUNDLE_ROOT_FIELD,
 )
 from weft.commands import specs as spec_cmd
@@ -393,3 +394,46 @@ def test_pipeline_compiler_rejects_nested_pipeline_stage_task(tmp_path: Path) ->
             context=ctx,
             task_loader=lambda name: _load_task(root, name),
         )
+
+
+def test_pipeline_compiler_stores_each_child_taskspec_once(tmp_path: Path) -> None:
+    """Compiled metadata carries child specs only on their own records."""
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    stage_names = ("first", "second", "third")
+    for stage_name in stage_names:
+        _write_json(ctx.weft_dir / "tasks" / f"{stage_name}.json", _task_payload())
+    pipeline = load_pipeline_spec_payload(
+        {
+            "name": "pipe",
+            "stages": [{"name": name, "task": name} for name in stage_names],
+        }
+    )
+
+    compiled = compile_linear_pipeline(
+        pipeline,
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+
+    runtime_metadata = compiled.pipeline_taskspec.metadata[
+        PIPELINE_RUNTIME_METADATA_KEY
+    ]
+    assert "stage_taskspecs" not in runtime_metadata
+    assert "edge_taskspecs" not in runtime_metadata
+    assert set(runtime_metadata) == set(compiled.runtime.model_dump(mode="json"))
+    child_count = len(compiled.runtime.stages) + len(compiled.runtime.edges)
+    assert child_count == 7
+    serialized = json.dumps(runtime_metadata)
+    assert serialized.count('"parent_tid"') == child_count
+    assert all(
+        serialized.count(json.dumps(child.taskspec)) == 1
+        for child in (*compiled.runtime.stages, *compiled.runtime.edges)
+    )
+    # The retired representation carried every child twice; the record-only
+    # metadata must be strictly smaller than the same metadata with the
+    # synthetic legacy arrays re-added.
+    legacy_shape = dict(runtime_metadata)
+    legacy_shape["stage_taskspecs"] = [s.taskspec for s in compiled.runtime.stages]
+    legacy_shape["edge_taskspecs"] = [e.taskspec for e in compiled.runtime.edges]
+    assert len(serialized) < len(json.dumps(legacy_shape))

@@ -76,8 +76,6 @@ class PipelineRuntimeEnvelope(BaseModel):
     queues: PipelineQueues
     stages: list[CompiledPipelineStage]
     edges: list[CompiledPipelineEdge]
-    stage_taskspecs: list[dict[str, Any]]
-    edge_taskspecs: list[dict[str, Any]]
 
 
 class PipelineEdgeTask(BaseTask):
@@ -485,46 +483,46 @@ class PipelineTask(BaseTask):
         self._publish_pipeline_snapshot()
 
     def _ordered_child_taskspec_payloads(self) -> list[dict[str, Any]]:
-        """Return child specs in dependency-friendly launch order."""
+        """Return child specs in dependency-friendly launch order.
 
-        stage_payloads = {
-            str(payload.get("tid")): payload
-            for payload in self._runtime.stage_taskspecs
-            if payload.get("tid") is not None
-        }
-        edge_payloads = {
-            str(payload.get("tid")): payload
-            for payload in self._runtime.edge_taskspecs
-            if payload.get("tid") is not None
-        }
+        Each compiled stage or edge record owns its child TaskSpec. Launch
+        order walks the compiled edge chain: every edge, then the stage that
+        edge feeds, ending with the exit edge that has no downstream stage.
 
+        Raises:
+            ValueError: If an edge names a downstream stage with no record, or
+                a stage record is unreachable from every edge. Either shape
+                would launch fewer children than the plan describes.
+
+        Spec: docs/specifications/12-Pipeline_Composition_and_UX.md [PL-3.2]
+        """
+
+        stages_by_tid = {stage.tid: stage for stage in self._runtime.stages}
         ordered: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        def append_once(
-            tid: str | None, payloads: Mapping[str, dict[str, Any]]
-        ) -> None:
-            if tid is None or tid in seen:
-                return
-            payload = payloads.get(tid)
-            if payload is None:
-                return
-            ordered.append(payload)
-            seen.add(tid)
-
+        launched: set[str] = set()
         for edge in self._runtime.edges:
-            append_once(edge.tid, edge_payloads)
-            append_once(edge.downstream_tid, stage_payloads)
+            ordered.append(edge.taskspec)
+            if edge.downstream_tid is None:
+                continue
+            stage = stages_by_tid.get(edge.downstream_tid)
+            if stage is None:
+                raise ValueError(
+                    f"Pipeline edge {edge.name!r} names downstream stage tid "
+                    f"{edge.downstream_tid} with no compiled stage record"
+                )
+            ordered.append(stage.taskspec)
+            launched.add(stage.tid)
 
-        for payload in self._runtime.stage_taskspecs:
-            append_once(
-                str(payload.get("tid")) if payload.get("tid") else None, stage_payloads
+        unreachable = [
+            f"{stage.name!r} ({stage.tid})"
+            for stage in self._runtime.stages
+            if stage.tid not in launched
+        ]
+        if unreachable:
+            raise ValueError(
+                "Pipeline stage records unreachable from any compiled edge: "
+                + ", ".join(unreachable)
             )
-        for payload in self._runtime.edge_taskspecs:
-            append_once(
-                str(payload.get("tid")) if payload.get("tid") else None, edge_payloads
-            )
-
         return ordered
 
     def _submit_child_spawn(self, taskspec_payload: Mapping[str, Any]) -> str:

@@ -39,6 +39,14 @@
   longer report a partial deletion alongside a later scan failure; runtime
   pruning writes no report for that halt, as it already did for initial-scan
   errors.
+- Breaking: compiled pipeline runtime metadata no longer carries the duplicate
+  `stage_taskspecs` and `edge_taskspecs` arrays; each compiled stage and edge
+  record is the sole owner of its child `TaskSpec`, and child launch order is
+  derived from those records. Envelopes that still carry the arrays are
+  rejected, so pipeline TaskSpecs compiled before upgrade must be drained or
+  recompiled. Inconsistent record topology (an edge naming a missing stage
+  record, or a stage no edge reaches) now fails bootstrap with a clear error
+  instead of being papered over by the array fallbacks.
 
 ### Fixed
 

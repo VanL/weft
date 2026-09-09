@@ -400,8 +400,6 @@ def compile_linear_pipeline(
 
     stage_records: list[CompiledPipelineStage] = []
     edge_records: list[CompiledPipelineEdge] = []
-    stage_specs_for_runtime: list[dict[str, Any]] = []
-    edge_specs_for_runtime: list[dict[str, Any]] = []
 
     pipeline_name = pipeline.name or f"pipeline-{tid_short_form(pipeline_tid)}"
     previous_stage: CompiledPipelineStage | None = None
@@ -479,7 +477,6 @@ def compile_linear_pipeline(
             taskspec=encode_taskspec_transport_payload(stage_taskspec),
         )
         stage_records.append(stage_record)
-        stage_specs_for_runtime.append(stage_record.taskspec)
 
         source_queue = (
             queues.inbox if previous_stage is None else previous_stage.outbox_queue
@@ -547,7 +544,6 @@ def compile_linear_pipeline(
             taskspec=encode_taskspec_transport_payload(edge_taskspec),
         )
         edge_records.append(edge_record)
-        edge_specs_for_runtime.append(edge_record.taskspec)
         previous_stage = stage_record
 
     assert previous_stage is not None
@@ -612,7 +608,6 @@ def compile_linear_pipeline(
         taskspec=encode_taskspec_transport_payload(exit_edge_taskspec),
     )
     edge_records.append(exit_edge_record)
-    edge_specs_for_runtime.append(exit_edge_record.taskspec)
 
     runtime_plan = PipelineRuntimePlan(
         pipeline_name=pipeline_name,
@@ -628,11 +623,7 @@ def compile_linear_pipeline(
         role="pipeline",
         public_queues=queues.model_dump(mode="json"),
         runtime_key=PIPELINE_RUNTIME_METADATA_KEY,
-        runtime_payload={
-            **runtime_plan.model_dump(mode="json"),
-            "stage_taskspecs": stage_specs_for_runtime,
-            "edge_taskspecs": edge_specs_for_runtime,
-        },
+        runtime_payload=runtime_plan.model_dump(mode="json"),
         internal_task_class=INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     )
     pipeline_taskspec = validate_taskspec_payload(
