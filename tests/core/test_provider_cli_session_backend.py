@@ -9,6 +9,8 @@ import pytest
 
 from tests.fixtures.provider_cli_fixture import (
     PROVIDER_FIXTURE_NAMES,
+    TOOL_PROFILE_CALLS,
+    reset_counting_tool_profile_calls,
     write_provider_cli_wrapper,
 )
 from weft.core.agents import register_builtin_agent_runtimes
@@ -90,6 +92,49 @@ def test_provider_cli_session_continues_across_turns(
         assert "color" not in second_payload["options"]
         assert "sandbox" not in second_payload["options"]
         assert "profile" not in second_payload["options"]
+
+
+def test_provider_cli_session_resolves_callable_tool_profile_once_per_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that session preparation evaluates a callable profile once per turn.
+
+    Verifies:
+    - `start_session` preflight resolves the tool profile exactly once
+    - every subsequent turn resolves it exactly once more
+    """
+
+    reset_counting_tool_profile_calls()
+    executable = str(write_provider_cli_wrapper(tmp_path, "codex"))
+    monkeypatch.chdir(tmp_path)
+    agent = make_agent_section(
+        executable=executable,
+        provider_name="codex",
+        model="fixture-model",
+        runtime_config={
+            "provider": "codex",
+            "executable": executable,
+            "resolver_ref": (
+                "tests.fixtures.provider_cli_fixture:resolve_operator_question"
+            ),
+            "tool_profile_ref": (
+                "tests.fixtures.provider_cli_fixture:counting_provider_tool_profile"
+            ),
+        },
+    )
+    expected_call = {"provider": "codex", "tid": "123"}
+
+    session = start_agent_runtime_session(agent, tid="123")
+    try:
+        assert TOOL_PROFILE_CALLS == [expected_call]
+        session.execute(normalize_agent_work_item(agent, {"task": "first"}))
+        assert TOOL_PROFILE_CALLS == [expected_call] * 2
+        session.execute(normalize_agent_work_item(agent, {"task": "second"}))
+    finally:
+        session.close()
+
+    assert TOOL_PROFILE_CALLS == [expected_call] * 3
 
 
 def test_provider_cli_session_close_cleans_up_tempdir_after_failure(

@@ -1,4 +1,4 @@
-"""Shared one-shot preparation helpers for delegated provider CLI execution.
+"""Shared preparation helpers for delegated provider CLI execution.
 
 Spec references:
 - docs/specifications/13-Agent_Runtime.md [AR-5]
@@ -25,6 +25,18 @@ from .registry import (
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderCLIPreparedTurn:
+    """Resolved, transport-neutral inputs for one delegated provider CLI turn."""
+
+    provider: ProviderCLIProvider
+    authority_class: str
+    prompt: str
+    provider_options: dict[str, Any]
+    resolver_result: Any
+    tool_profile: Any
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderCLIPreparedExecution:
     """Prepared one-shot provider CLI invocation and response metadata."""
 
@@ -37,22 +49,34 @@ class ProviderCLIPreparedExecution:
     tool_profile: Any
 
 
-def prepare_provider_cli_execution(
+def prepare_provider_cli_turn(
     *,
     agent: AgentSection,
     work_item: NormalizedAgentWorkItem,
     tid: str | None,
-    executable: str,
-    cwd: str,
-    tempdir: Path,
     bundle_root: str | None = None,
     preflight_tool_profile: bool = False,
-) -> ProviderCLIPreparedExecution:
-    """Prepare one-shot delegated CLI execution inputs.
+) -> ProviderCLIPreparedTurn:
+    """Resolve the shared per-turn inputs for a delegated provider CLI request.
 
-    This helper is transport-neutral. Host and Docker-backed one-shot paths can
-    both use it by supplying the executable, working directory, and tempdir as
-    seen by the process that will actually execute the provider CLI.
+    One-shot execution and persistent sessions resolve identical inputs, so both
+    paths go through this helper. It performs no invocation building, which
+    keeps it neutral between `build_invocation` and `build_session_invocation`.
+
+    Args:
+        agent: Validated `provider_cli` agent section.
+        work_item: Normalized work item for this turn.
+        tid: Owning task id, passed through to resolver and tool profile.
+        bundle_root: Optional spec bundle root for reference resolution.
+        preflight_tool_profile: Whether the provider should apply preflight
+            tool-profile checks. Sessions preflight once at `start_session`
+            and pass `False` for each subsequent turn.
+
+    Returns:
+        Resolved provider, authority class, composed prompt, provider options,
+        resolver result, and tool profile for this turn.
+
+    Spec: [AR-5]
     """
 
     resolver_result = resolve_agent_prompt(
@@ -81,24 +105,59 @@ def prepare_provider_cli_execution(
         tool_profile.instructions,
         resolver_result.prompt,
     )
-    invocation = provider.build_invocation(
-        executable=executable,
+    return ProviderCLIPreparedTurn(
+        provider=provider,
         authority_class=agent.resolved_authority_class,
         prompt=prompt,
-        cwd=cwd,
-        model=agent.model,
-        options=provider_options,
-        tempdir=tempdir,
-        tool_profile=tool_profile,
-    )
-    return ProviderCLIPreparedExecution(
-        provider=provider,
-        executable=executable,
-        authority_class=agent.resolved_authority_class,
-        invocation=invocation,
         provider_options=provider_options,
         resolver_result=resolver_result,
         tool_profile=tool_profile,
+    )
+
+
+def prepare_provider_cli_execution(
+    *,
+    agent: AgentSection,
+    work_item: NormalizedAgentWorkItem,
+    tid: str | None,
+    executable: str,
+    cwd: str,
+    tempdir: Path,
+    bundle_root: str | None = None,
+    preflight_tool_profile: bool = False,
+) -> ProviderCLIPreparedExecution:
+    """Prepare one-shot delegated CLI execution inputs.
+
+    This helper is transport-neutral. Host and Docker-backed one-shot paths can
+    both use it by supplying the executable, working directory, and tempdir as
+    seen by the process that will actually execute the provider CLI.
+    """
+
+    turn = prepare_provider_cli_turn(
+        agent=agent,
+        work_item=work_item,
+        tid=tid,
+        bundle_root=bundle_root,
+        preflight_tool_profile=preflight_tool_profile,
+    )
+    invocation = turn.provider.build_invocation(
+        executable=executable,
+        authority_class=turn.authority_class,
+        prompt=turn.prompt,
+        cwd=cwd,
+        model=agent.model,
+        options=turn.provider_options,
+        tempdir=tempdir,
+        tool_profile=turn.tool_profile,
+    )
+    return ProviderCLIPreparedExecution(
+        provider=turn.provider,
+        executable=executable,
+        authority_class=turn.authority_class,
+        invocation=invocation,
+        provider_options=turn.provider_options,
+        resolver_result=turn.resolver_result,
+        tool_profile=turn.tool_profile,
     )
 
 
@@ -188,9 +247,11 @@ def runtime_config_str(agent: AgentSection, key: str) -> str | None:
 
 __all__ = [
     "ProviderCLIPreparedExecution",
+    "ProviderCLIPreparedTurn",
     "build_provider_cli_execution_result",
     "compose_provider_cli_prompt",
     "prepare_provider_cli_execution",
+    "prepare_provider_cli_turn",
     "resolve_provider_cli",
     "runtime_config_str",
     "validate_authority_tool_profile",

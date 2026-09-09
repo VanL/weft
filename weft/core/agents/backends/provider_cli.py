@@ -11,7 +11,6 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,8 +19,8 @@ from weft.core.taskspec import AgentSection
 from ..provider_cli.execution import (
     ProviderCLIPreparedExecution,
     build_provider_cli_execution_result,
-    compose_provider_cli_prompt,
     prepare_provider_cli_execution,
+    prepare_provider_cli_turn,
     resolve_provider_cli,
     runtime_config_str,
     validate_authority_tool_profile,
@@ -35,7 +34,6 @@ from ..provider_cli.windows_shims import resolve_windows_cmd_shim_command
 from ..resolution import (
     load_agent_resolver,
     load_agent_tool_profile,
-    resolve_agent_prompt,
     resolve_agent_tool_profile,
 )
 from ..runtime import AgentExecutionResult, NormalizedAgentWorkItem
@@ -149,18 +147,6 @@ class ProviderCLIBackend:
             bundle_root=bundle_root,
         )
 
-    @staticmethod
-    def _merge_provider_options(
-        agent: AgentSection,
-        tool_profile: Any,
-        provider: ProviderCLIProvider,
-    ) -> dict[str, Any]:
-        return provider.resolve_options(
-            authority_class=agent.resolved_authority_class,
-            raw_options=dict(agent.options),
-            tool_profile=tool_profile,
-        )
-
     def _resolve_executable(
         self,
         agent: AgentSection,
@@ -172,44 +158,6 @@ class ProviderCLIBackend:
             provider,
             configured_executable=runtime_config_str(agent, "executable"),
             spec_context=spec_context,
-        )
-
-    def _prepare_execution(
-        self,
-        *,
-        agent: AgentSection,
-        work_item: NormalizedAgentWorkItem,
-        tid: str | None,
-        bundle_root: str | None = None,
-    ) -> ProviderCLIExecution:
-        resolver_result = resolve_agent_prompt(
-            agent,
-            work_item,
-            tid=tid,
-            bundle_root=bundle_root,
-        )
-        tool_profile = resolve_agent_tool_profile(
-            agent,
-            tid=tid,
-            bundle_root=bundle_root,
-        )
-        provider = resolve_provider_cli(agent)
-        validate_authority_tool_profile(agent, tool_profile)
-        provider_options = self._merge_provider_options(agent, tool_profile, provider)
-        provider.validate_tool_profile(tool_profile, preflight=False)
-        provider.validate_model(agent.model)
-        prompt = compose_provider_cli_prompt(
-            work_item.instructions,
-            resolver_result.instructions,
-            tool_profile.instructions,
-            resolver_result.prompt,
-        )
-        return ProviderCLIExecution(
-            authority_class=agent.resolved_authority_class,
-            prompt=prompt,
-            provider_options=provider_options,
-            resolver_result=resolver_result,
-            tool_profile=tool_profile,
         )
 
     def _run_provider_invocation(
@@ -297,17 +245,6 @@ class ProviderCLIBackend:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class ProviderCLIExecution:
-    """Resolved one-turn execution inputs for a provider_cli request."""
-
-    authority_class: str
-    prompt: str
-    provider_options: dict[str, Any]
-    resolver_result: Any
-    tool_profile: Any
-
-
 class ProviderCLIBackendSession:
     """Persistent delegated session backed by provider-native continuation."""
 
@@ -336,21 +273,24 @@ class ProviderCLIBackendSession:
         )
 
     def execute(self, work_item: NormalizedAgentWorkItem) -> AgentExecutionResult:
-        execution = self._backend._prepare_execution(
+        # `start_session` already preflighted the tool profile once, so each
+        # turn resolves without repeating the preflight checks.
+        turn = prepare_provider_cli_turn(
             agent=self._agent,
             work_item=work_item,
             tid=self._tid,
             bundle_root=self._bundle_root,
+            preflight_tool_profile=False,
         )
         invocation = self._provider.build_session_invocation(
             executable=self._executable,
-            authority_class=execution.authority_class,
-            prompt=execution.prompt,
+            authority_class=turn.authority_class,
+            prompt=turn.prompt,
             cwd=self._session.work_cwd,
             model=self._agent.model,
-            options=execution.provider_options,
+            options=turn.provider_options,
             session=self._session,
-            tool_profile=execution.tool_profile,
+            tool_profile=turn.tool_profile,
         )
         provider_result = self._backend._run_provider_invocation(
             provider=self._provider,
@@ -364,11 +304,11 @@ class ProviderCLIBackendSession:
             prepared=ProviderCLIPreparedExecution(
                 provider=self._provider,
                 executable=self._executable,
-                authority_class=execution.authority_class,
+                authority_class=turn.authority_class,
                 invocation=invocation,
-                provider_options=execution.provider_options,
-                resolver_result=execution.resolver_result,
-                tool_profile=execution.tool_profile,
+                provider_options=turn.provider_options,
+                resolver_result=turn.resolver_result,
+                tool_profile=turn.tool_profile,
             ),
             work_item=work_item,
             provider_result=provider_result,

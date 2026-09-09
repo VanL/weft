@@ -819,8 +819,9 @@ load and preflight validation: `weft/core/agents/validation.py`. Provider
 registry, provider-specific invocation building, and output parsing:
 `weft/core/agents/provider_cli/registry.py`. Internal provider container
 runtime descriptors and resolution:
-`weft/core/agents/provider_cli/container_runtime.py`. Shared one-shot delegated
-execution preparation: `weft/core/agents/provider_cli/execution.py`.
+`weft/core/agents/provider_cli/container_runtime.py`. Shared delegated
+execution preparation, used by both one-shot and session turns:
+`weft/core/agents/provider_cli/execution.py`.
 Docker-backed runtime-home and environment prep:
 `weft/core/agents/provider_cli/runtime_prep.py`.
 Project-local agent settings and advisory delegated-provider health cache
@@ -861,8 +862,8 @@ This slice does not attempt to:
   `weft/core/agents/tools.py`
 - Built-in `llm` backend (`LLMBackend`, `LLMBackendSession`):
   `weft/core/agents/backends/llm.py`
-- Built-in `provider_cli` backend, provider registry, and shared one-shot
-  execution helpers:
+- Built-in `provider_cli` backend, provider registry, and shared
+  execution-preparation helpers:
   `weft/core/agents/backends/provider_cli.py`,
   `weft/core/agents/provider_cli/registry.py`,
   `weft/core/agents/provider_cli/container_runtime.py`,
