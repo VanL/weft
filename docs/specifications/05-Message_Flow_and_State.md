@@ -459,7 +459,8 @@ _Implementation mapping_: status and foreground-monitor projection in
 external Monitor projection/restoration in `weft/core/monitor/store.py`,
 `weft/core/monitor/external_log.py`, and
 `weft/core/monitor/lifetime_report.py`; manager operational projection in
-`weft/core/serve_log.py`.
+`weft/core/serve_log.py`; terminal Monitor-store fallback for known full TIDs in
+`weft/commands/tasks.py::_monitor_store_task_snapshot` and `weft/commands/tasks.py::_task_snapshot_from_monitor_store_record`.
 
 Current rules:
 
@@ -469,7 +470,12 @@ Current rules:
 - Owner, boundary, and verification: BaseTask and task implementations emit
   task-owned lifecycle evidence; status/result/task command helpers reconstruct
   public observations from that evidence; the TaskMonitor owns operational
-  collation, cleanup selection, and cleanup diagnostics only. This split exists
+  collation, cleanup selection, and cleanup diagnostics, plus the one derived
+  read the shared evidence priority later in this section grants it: the
+  terminal-only Monitor collation store fallback for known full TIDs after raw
+  task-log retirement. That fallback replays task-owned evidence the Monitor
+  already collated, and nonterminal collation rows stay diagnostic history that
+  never establishes liveness ([OBS.13]). This split exists
   because process cleanup has to survive crashes and partial writes without
   letting cleanup machinery become a second lifecycle
   authority. Verification must assert both sides: public status/result
@@ -485,7 +491,14 @@ Current rules:
   numeric; arbitrary diagnostic mappings are not traversed.
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
   `weft.state.tid_mappings` entries and live runtime liveness where needed; they
-  do not depend on a separate state database
+  do not depend on a separate state database. Once raw `weft.log.tasks` rows are
+  retired and no higher evidence remains, the public terminal answer for a known
+  full TID comes from the Monitor collation store, which the shared evidence
+  priority later in this section ranks below live runtime evidence and above
+  the stale observer fallback. That store is a derived sidecar inside the same
+  broker database rather than a second state store, and a nonterminal collation
+  row is reported as diagnostic history only: it never establishes liveness and
+  never yields a terminal answer ([OBS.13])
 - terminal task-log events may carry `runner_diagnostics` for process/session
   startup, runtime readiness, and runner-boundary failure evidence. These
   diagnostics are operational metadata only. They may explain an already

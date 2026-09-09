@@ -504,7 +504,13 @@ def task_status(
 def _task_snapshot_from_monitor_store_record(
     record: MonitorTaskCollationRecord,
 ) -> system_cmd.TaskSnapshot:
-    """Build a task snapshot from durable Monitor collation state."""
+    """Build a task snapshot from durable Monitor collation state.
+
+    Terminal rows carry the `terminal_monitor_store` classification; nonterminal
+    rows stay diagnostic history and never establish liveness.
+
+    Spec: [MF-5]
+    """
 
     status = record.terminal_status or record.status or "unknown"
     taskspec_summary = record.taskspec_summary
@@ -553,7 +559,14 @@ def _monitor_store_task_snapshot(
     *,
     include_terminal: bool,
 ) -> system_cmd.TaskSnapshot | None:
-    """Return a snapshot from Monitor state after raw task-log retirement."""
+    """Return a snapshot from Monitor state after raw task-log retirement.
+
+    This is the last-resort derived read [MF-5] grants the Monitor collation
+    store for known full TIDs; it is not lifecycle, result, or control
+    authority.
+
+    Spec: [MF-5]
+    """
 
     try:
         store = open_monitor_store(ctx, config=ctx.config)
