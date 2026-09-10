@@ -23,9 +23,8 @@ There are currently 201 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-09-08-django-override-normalization-seam-plan.md`](./2026-09-08-django-override-normalization-seam-plan.md) | Django Override Normalization Seam Plan | `draft` | none |
 | [`2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md`](./2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) | Load-Sensitive Test Lifecycle Fixes | `completed` | none |
-| [`2026-09-08-django-override-normalization-seam-plan.md`](./2026-09-08-django-override-normalization-seam-plan.md) | Django Override Normalization Seam Plan | `draft` | none |
+| [`2026-09-08-django-override-normalization-seam-plan.md`](./2026-09-08-django-override-normalization-seam-plan.md) | Django Override Normalization Seam Plan | `completed` | none |
 | [`2026-09-08-complexity-review-corrections-plan.md`](./2026-09-08-complexity-review-corrections-plan.md) | Complexity Review Corrections Plan | `completed` | none |
 | [`2026-08-31-short-tid-derivation-plan.md`](./2026-08-31-short-tid-derivation-plan.md) | Short TID Derivation Plan | `completed` | none |
 | [`2026-08-31-collation-store-toggle-removal-plan.md`](./2026-08-31-collation-store-toggle-removal-plan.md) | Collation Store Toggle Removal Plan | `completed` | none |

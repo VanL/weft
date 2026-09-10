@@ -1,6 +1,6 @@
 # Django Override Normalization Seam Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-3], [PY-4]; docs/specifications/13C-Using_Weft_With_Django.md [DJ-1.1], [DJ-2.1], [DJ-2.2], [DJ-6.3], [DJ-8.1], [DJ-8.4]; docs/specifications/02-TaskSpec.md [TS-1.4A]; docs/specifications/07-System_Invariants.md OBS.9, CTX.5; docs/specifications/08-Testing_Strategy.md [TS-3.1]
 Superseded by: none
 
@@ -433,6 +433,11 @@ seam?
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| n/a (task 8, owner decision Q3) | Release coupling lands with the code work | Deferred to the owner's `Release 0.9.100` commit: no `weft`/`weft-django` version bump, no dependency-floor change, no `uv.lock` refresh | Owner decision (Van, 2026-09-09) keeps the release pattern `85196bc2` intact; the CHANGELOG entries land under `## Unreleased` as planned | n/a; task 8 stays open and owner-executed |
+| n/a (task 3, `tests/core/test_client.py`) | End-to-end proof reads `client.tasks.snapshot(tid)` | Uses `client.tasks.status(tid)` | `TasksNamespace` has no `snapshot` member at `c7628b6d`; `status` returns the `TaskSnapshot` carrying the `name` and `metadata` the proof asserts | n/a; plan text was wrong about the member name |
+| n/a (task 5, `test_as_taskspec_for_call_is_pure`) | "Green today and after" | Green today for every purity assertion; red today only on its trailing `spec.timeout == 30.0` retention assertion | The test carries a register-row-1 assertion (`timeout=None` no longer clears), which is red by construction before task 6; the diminution guard itself (tripwires, no writes, unchanged `TEST_ROOT/.weft` and broker db) passes at the promoted baseline | n/a; labelling correction only |
+| [TS-3.1] (task 7) | `C901=130` → `129` on the global inventory line | `C901=129` → `128`, and `E402=22` → `24` | The C901 inventory had already moved to 129 between `178e3a34` and `c7628b6d`; the two new `weft._constants`/`transport` imports in `test_weft_django.py` land under that file's existing file-level `# ruff: noqa: E402` blanket, so the raw E402 count moves with them | n/a; the inventory line is the human-owned ledger [TS-3.1] prescribes |
+| [TS-3.1] (task 7) | Registry edit plus `ruff_suppression_index.py --write` completes the retirement | `tests/specs/test_ruff_policy.py` also owns `EXPECTED_GROUP_IDS`, `EXPECTED_GROUP_COUNT` (208 → 207), `EXPECTED_DIRECTIVE_COUNT` (342 → 341), and `EXPECTED_C901_DIRECTIVE_COUNT` (129 → 128) | The plan named only the registry and the generated index; the policy test pins the same cardinalities independently and fails without the matching edit | n/a; test-side ledger, no contract change |
 
 ## Spec Baseline
 
@@ -440,7 +445,6 @@ seam?
   13C-Using_Weft_With_Django.md, 02-TaskSpec.md, 07-System_Invariants.md,
   08-Testing_Strategy.md, README.md at plan authoring time (2026-09-08).
   Plan type: implementation with spec revision. Promotion baseline
-  identifier: recorded after task 2.
   identifier: `c7628b6d` — the tree the promoted spec text landed on
   (spec-promotion slice, 2026-09-09). The only drift in the delta's spec
   files between `178e3a34` and `c7628b6d` is in spec 14 [PY-2]
@@ -1030,6 +1034,26 @@ owner-cut).
    `weft.core` module. Confirm 13C still reads "does not change current
    core Weft behavior on its own" (:6). Close the deviation log. Rerun §7
    final gates from the current state and record results here.
+
+   **Closeout record (2026-09-09).** Landed in three commits on
+   `worktree-agent-a2f7090ce074051eb` over `c7628b6d`: spec promotion,
+   the code/test slice, and this traceability slice. Every grep gate above
+   is clean — zero hits for `_apply_taskspec_payload_overrides` and
+   `RUFF-SUP-209` across `weft/`, `integrations/`, `tests/`,
+   `docs/specifications/`, and `docs/ruff-suppression-registry.md`; zero
+   `get_core_client` inside `export_registered_task_taskspec`; zero
+   `weft.core` imports under `weft/client/`; zero `weft.commands` imports
+   under `integrations/weft_django/weft_django/`; both code backlinks and
+   the [PY-3] `Implementation:` note present and mutually referencing; 13C
+   still carries its prose status line. Gates from the current state:
+   `pytest tests/core/test_client.py tests/architecture tests/commands
+   tests/specs` 1139 passed; `pytest -n 0 integrations/weft_django/tests`
+   60 passed; `mypy` clean on 186 source files; `ruff check .` clean;
+   `ruff format --check .` clean except the pre-existing
+   `weft/commands/_task_snapshot_reducer.py` offender (out of scope);
+   `ruff_suppression_index.py --check` clean at `C901=128`. The full
+   `pytest` run and task 8 are the owner's; task 8 is deferred by owner
+   decision (see the Deviation Log).
 
 ## 6. Testing Plan
 
