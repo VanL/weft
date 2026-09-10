@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +18,7 @@ from weft.client import (
     TaskSnapshot,
     TaskTerminalSnapshot,
     WeftClient,
+    normalize_taskspec_payload,
 )
 from weft_django.conf import (
     get_default_task_settings,
@@ -220,74 +220,6 @@ def _validate_decorated_task_overrides(overrides: Mapping[str, Any] | None) -> N
         raise ValueError("Decorated Django tasks only support runner='host' in v1")
 
 
-def _apply_taskspec_payload_overrides(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-209] exception
-    payload: Mapping[str, Any],
-    overrides: Mapping[str, Any] | None,
-    *,
-    decorated_task: Any | None = None,
-) -> dict[str, Any]:
-    def _copy_payload(source: Mapping[str, Any]) -> dict[str, Any]:
-        cloned = json.loads(json.dumps(dict(source)))
-        if not isinstance(cloned, dict):
-            raise TypeError("TaskSpec payload must be a JSON object")
-        return cloned
-
-    if not overrides:
-        return _copy_payload(payload)
-
-    updated = _copy_payload(payload)
-    spec_section = updated.setdefault("spec", {})
-    metadata = updated.get("metadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
-        updated["metadata"] = metadata
-    if not isinstance(spec_section, dict):
-        raise TypeError("TaskSpec spec section must be a mapping")
-
-    if "metadata" in overrides:
-        metadata.update(dict(overrides["metadata"] or {}))
-    if "description" in overrides and overrides["description"] is not None:
-        metadata["description"] = overrides["description"]
-    if "tags" in overrides and overrides["tags"] is not None:
-        metadata["tags"] = list(overrides["tags"])
-    if "timeout" in overrides:
-        spec_section["timeout"] = overrides["timeout"]
-    if "stream_output" in overrides:
-        spec_section["stream_output"] = overrides["stream_output"]
-    if name := overrides.get("name"):
-        updated["name"] = name
-    if "env" in overrides:
-        env = spec_section.get("env")
-        env = env if isinstance(env, dict) else {}
-        env.update(dict(overrides["env"] or {}))
-        spec_section["env"] = env
-    if "working_dir" in overrides:
-        spec_section["working_dir"] = overrides["working_dir"]
-    if "memory_mb" in overrides or "cpu_percent" in overrides:
-        limits = spec_section.get("limits")
-        limits = limits if isinstance(limits, dict) else {}
-        if "memory_mb" in overrides and overrides["memory_mb"] is not None:
-            limits["memory_mb"] = overrides["memory_mb"]
-        if "cpu_percent" in overrides and overrides["cpu_percent"] is not None:
-            limits["cpu_percent"] = overrides["cpu_percent"]
-        spec_section["limits"] = limits
-    if "runner" in overrides or "runner_options" in overrides:
-        runner = spec_section.get("runner")
-        runner = runner if isinstance(runner, dict) else {}
-        runner_name = overrides.get("runner", runner.get("name"))
-        if decorated_task is not None and runner_name not in (None, "", "host"):
-            raise ValueError("Decorated Django tasks only support runner='host' in v1")
-        if runner_name:
-            runner["name"] = runner_name
-        options = runner.get("options")
-        options = options if isinstance(options, dict) else {}
-        if "runner_options" in overrides:
-            options.update(dict(overrides["runner_options"] or {}))
-        runner["options"] = options
-        spec_section["runner"] = runner
-    return updated
-
-
 def _build_limits(
     *,
     memory_mb: int | None,
@@ -305,7 +237,6 @@ def build_registered_task_taskspec(
     task: Any,
     *,
     envelope: Mapping[str, Any],
-    overrides: Mapping[str, Any] | None,
     embed_envelope: bool,
 ) -> dict[str, Any]:
     default_task_settings = get_default_task_settings()
@@ -372,11 +303,7 @@ def build_registered_task_taskspec(
         spec_payload["spec"]["timeout"] = timeout
     if limits is not None:
         spec_payload["spec"]["limits"] = limits
-    return _apply_taskspec_payload_overrides(
-        spec_payload,
-        overrides,
-        decorated_task=task,
-    )
+    return spec_payload
 
 
 def submit_registered_task(
@@ -392,7 +319,6 @@ def submit_registered_task(
     taskspec_payload = build_registered_task_taskspec(
         task,
         envelope=built_envelope,
-        overrides=None,
         embed_envelope=False,
     )
     submission_name = _effective_submission_name(
@@ -423,7 +349,6 @@ def submit_registered_task_on_commit(
     taskspec_payload = build_registered_task_taskspec(
         task,
         envelope=envelope,
-        overrides=None,
         embed_envelope=False,
     )
     deferred_name = _effective_submission_name(task, overrides, default=task.name)
@@ -439,6 +364,32 @@ def submit_registered_task_on_commit(
 
     transaction.on_commit(_submit)
     return deferred
+
+
+def export_registered_task_taskspec(
+    task: Any,
+    *,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validated TaskSpec payload for one decorated-task call.
+
+    Applies the core submit-override contract through
+    `weft.client.normalize_taskspec_payload`; builds no Weft context, reads no
+    Weft configuration, opens no broker, writes nothing (README "Composition
+    Export"). Overrides travel unchanged so `wait` and `payload` reach core and
+    raise like any other name outside the override vocabulary.
+    """
+
+    _validate_decorated_task_overrides(overrides)
+    envelope = task.build_envelope(*args, **kwargs)
+    base_payload = build_registered_task_taskspec(
+        task,
+        envelope=envelope,
+        embed_envelope=True,
+    )
+    return normalize_taskspec_payload(base_payload, **dict(overrides or {}))
 
 
 def submit_taskspec(

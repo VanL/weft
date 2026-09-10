@@ -4,6 +4,7 @@ Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
 - docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-6]
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-1], [PL-4.1]
+- docs/specifications/14-Python_API_Surfaces.md [PY-3]
 """
 
 from __future__ import annotations
@@ -414,6 +415,41 @@ def submit_taskspec(
     return submit_prepared(context, prepared)
 
 
+def prepare_definition(
+    taskspec: TaskSpec | Mapping[str, Any],
+    overrides: Mapping[str, Any],
+    *,
+    payload: Any = None,
+) -> PreparedSubmissionRequest:
+    """Validate overrides, normalize, and snapshot a submission without a context.
+
+    Overrides travel as one mapping so every public-seam keyword, including
+    ``payload``, is checked against the override vocabulary.
+
+    Args:
+        taskspec: TaskSpec or JSON-compatible template mapping to normalize.
+        overrides: Public submit overrides to apply.
+        payload: Optional initial work payload to snapshot alongside.
+
+    Returns:
+        The validated, snapshotted submission request.
+
+    Raises:
+        TypeError: If an override name is outside the public vocabulary.
+        ValueError: If an override value or the resulting TaskSpec is invalid.
+
+    Note:
+        Constructs no `WeftContext`, reads no configuration, opens no broker,
+        and writes nothing; `prepare` delegates here.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-3]
+    """
+
+    _validate_submit_overrides(dict(overrides))
+    updated = apply_submit_overrides(normalize_taskspec(taskspec), **overrides)
+    return prepare_taskspec(updated, payload=payload)
+
+
 def prepare(
     context: WeftContext,
     taskspec: TaskSpec | Mapping[str, Any],
@@ -423,9 +459,7 @@ def prepare(
 ) -> PreparedSubmissionRequest:
     """Validate, normalize, and snapshot a TaskSpec submission."""
 
-    _validate_submit_overrides(overrides)
-    updated = apply_submit_overrides(normalize_taskspec(taskspec), **overrides)
-    return prepare_taskspec(updated, payload=payload)
+    return prepare_definition(taskspec, overrides, payload=payload)
 
 
 def submit(

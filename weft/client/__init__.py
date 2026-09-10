@@ -25,7 +25,7 @@ from weft._exceptions import (
     WeftError,
 )
 
-from ._client import WeftClient, connect
+from ._client import WeftClient, connect, normalize_taskspec_payload
 from ._prepared import PreparedSubmission
 from ._task import Task
 from ._types import (
@@ -60,4 +60,5 @@ __all__ = [
     "WeftClient",
     "WeftError",
     "connect",
+    "normalize_taskspec_payload",
 ]

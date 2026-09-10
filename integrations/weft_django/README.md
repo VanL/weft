@@ -91,6 +91,22 @@ and unserializable payloads fail before the app transaction commits. Mutating
 args, kwargs, or payload objects after helper call time does not change the work
 submitted at commit.
 
+## Composition Export
+
+`task.as_taskspec_for_call(*args, _overrides=None, **kwargs)` returns the
+validated, normalized TaskSpec payload Weft would submit for that call, with the
+call envelope embedded in `spec.args`, for manual composition into ordinary Weft
+task or pipeline specs. It does not submit anything, builds no Weft context,
+reads no Weft configuration, opens no broker, and writes nothing (the configured
+`REQUEST_ID_PROVIDER` still runs, as it does for every call).
+`_overrides` accepts exactly Weft's public submit overrides (`name`,
+`description`, `tags`, `env`, `working_dir`, `stream_output`, `timeout`,
+`memory_mb`, `cpu_percent`, `runner`, `runner_options`, `metadata`) with core
+semantics: `None` values are ignored, unknown names (including `wait`) raise
+`TypeError`, and invalid values raise the TaskSpec validation error. The export
+is `weft.client.normalize_taskspec_payload(...)` applied to the generated
+template; the package applies no overrides of its own.
+
 ## Native Helpers
 
 Use these helpers when Django code wants to launch native Weft work instead of a

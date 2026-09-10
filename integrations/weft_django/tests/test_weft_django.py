@@ -49,14 +49,16 @@ from django.test import Client, override_settings
 from fixture_project import authz as fixture_authz
 from fixture_project import request_id_provider
 from testapp.models import EventRecord
-from testapp.weft_tasks import echo_current_request_id, echo_task
+from testapp.weft_tasks import declared_task, echo_current_request_id, echo_task
 
 import weft_django
 import weft_django.client as weft_django_client
+from weft._constants import SUBMIT_OVERRIDE_NAMES
 from weft.client import SpecNotFound
 from weft.commands.types import TaskTerminalSnapshot
 from weft.context import build_context
 from weft.core.taskspec import TaskSpec
+from weft.core.taskspec.transport import validate_taskspec_payload
 from weft_django import (
     WeftSubmission,
     enqueue_on_commit,
@@ -144,29 +146,6 @@ def _native_taskspec() -> TaskSpec:
         },
         context={"template": True, "auto_expand": False},
     )
-
-
-def test_payload_override_copy_rejects_invalid_json_round_trip_type(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(weft_django_client.json, "loads", lambda _value: [])
-
-    with pytest.raises(TypeError) as exc_info:
-        weft_django_client._apply_taskspec_payload_overrides({"spec": {}}, None)
-    assert type(exc_info.value) is TypeError
-    assert str(exc_info.value) == "TaskSpec payload must be a JSON object"
-    assert exc_info.value.__cause__ is None
-
-
-def test_payload_overrides_reject_invalid_private_spec_type() -> None:
-    with pytest.raises(TypeError) as exc_info:
-        weft_django_client._apply_taskspec_payload_overrides(
-            {"spec": []},
-            {"name": "renamed"},
-        )
-    assert type(exc_info.value) is TypeError
-    assert str(exc_info.value) == "TaskSpec spec section must be a mapping"
-    assert exc_info.value.__cause__ is None
 
 
 def test_status_uses_terminal_snapshot_not_diagnostic_snapshot(
@@ -813,3 +792,238 @@ def test_management_commands_wrap_the_same_client_surface() -> None:
         call_command("weft_task_stop", "1776000000000000001")
     with pytest.raises(CommandError, match="Failed to kill"):
         call_command("weft_task_kill", "1776000000000000001")
+
+
+_DECLARED_EXPORT_PATHS: dict[str, tuple[str, ...]] = {
+    "name": ("name",),
+    "description": ("metadata", "description"),
+    "tags": ("metadata", "tags"),
+    "env": ("spec", "env"),
+    "working_dir": ("spec", "working_dir"),
+    "stream_output": ("spec", "stream_output"),
+    "timeout": ("spec", "timeout"),
+    "memory_mb": ("spec", "limits", "memory_mb"),
+    "cpu_percent": ("spec", "limits", "cpu_percent"),
+    "runner": ("spec", "runner", "name"),
+    "runner_options": ("spec", "runner", "options"),
+    "metadata": ("metadata", "declared_key"),
+}
+
+_DECLARED_EXPORT_VALUES: dict[str, Any] = {
+    "name": "testapp.declared_task",
+    "description": "declared",
+    "tags": ["declared"],
+    "env": {"DECLARED": "1"},
+    "working_dir": str(TEST_ROOT),
+    "stream_output": True,
+    "timeout": 30.0,
+    "memory_mb": 256,
+    "cpu_percent": 50,
+    "runner": "host",
+    "runner_options": {"declared": True},
+    "metadata": "declared",
+}
+
+
+def _export_at_path(payload: Any, path: tuple[str, ...]) -> Any:
+    current = payload
+    for key in path:
+        assert isinstance(current, dict)
+        current = current[key]
+    return current
+
+
+@pytest.mark.shared
+@pytest.mark.parametrize("override_name", sorted(SUBMIT_OVERRIDE_NAMES))
+def test_as_taskspec_for_call_explicit_none_keeps_declared_values(
+    override_name: str,
+) -> None:
+    """An explicit `None` override never clears a declared decorator value.
+
+    Verifies:
+    - The export matches the unoverridden export for every override name
+    - The declared value is still present at that field's own path
+    """
+
+    baseline = declared_task.as_taskspec_for_call("v")
+    with_none = declared_task.as_taskspec_for_call(
+        "v",
+        _overrides={override_name: None},
+    )
+
+    assert with_none == baseline
+    path = _DECLARED_EXPORT_PATHS[override_name]
+    assert _export_at_path(with_none, path) == _DECLARED_EXPORT_VALUES[override_name]
+
+
+@pytest.mark.shared
+def test_as_taskspec_for_call_rejects_unknown_and_wait() -> None:
+    """Every `_overrides` key is a core override name; others raise TypeError.
+
+    Verifies:
+    - An unknown name, the submission-only `wait`, and `payload` all raise
+    - The export applies no vocabulary of its own
+    """
+
+    for overrides in (
+        {"unknown_flag": 1},
+        {"wait": True},
+        {"payload": {"x": 1}},
+    ):
+        with pytest.raises(TypeError, match="Unknown submit override"):
+            declared_task.as_taskspec_for_call("v", _overrides=overrides)
+
+
+@pytest.mark.shared
+def test_as_taskspec_for_call_rejects_invalid_values() -> None:
+    """Schema-invalid and reserved values fail locally before anything is built.
+
+    Verifies:
+    - `memory_mb=0` and `name=""` raise the TaskSpec validation error
+    - The Django host-only rule and the reserved `_weft.` namespace raise
+    """
+
+    with pytest.raises(ValueError):
+        declared_task.as_taskspec_for_call("v", _overrides={"memory_mb": 0})
+    with pytest.raises(ValueError, match="runner='host'"):
+        declared_task.as_taskspec_for_call("v", _overrides={"runner": "docker"})
+    with pytest.raises(ValueError):
+        declared_task.as_taskspec_for_call("v", _overrides={"name": ""})
+    with pytest.raises(ValueError, match="reserved"):
+        declared_task.as_taskspec_for_call("v", _overrides={"name": "_weft.x"})
+
+
+@pytest.mark.shared
+@pytest.mark.parametrize(
+    ("override_name", "value", "expected"),
+    [
+        ("name", "renamed", "renamed"),
+        ("description", "d", "d"),
+        ("tags", ("a", "b"), ["a", "b"]),
+        ("env", {"K": "v"}, {"DECLARED": "1", "K": "v"}),
+        ("working_dir", str(TEST_ROOT), str(TEST_ROOT)),
+        ("stream_output", False, False),
+        ("timeout", 5.0, 5.0),
+        ("memory_mb", 512, 512),
+        ("cpu_percent", 25, 25),
+        ("runner", "host", "host"),
+        ("runner_options", {"x": 1}, {"declared": True, "x": 1}),
+        ("metadata", {"k": "v"}, "declared"),
+    ],
+)
+def test_as_taskspec_for_call_applies_every_override_like_prepare(
+    override_name: str,
+    value: Any,
+    expected: Any,
+) -> None:
+    """Every public override lands exactly as `prepare(...)` would place it.
+
+    Verifies:
+    - The exported value at each tabled path, with core merge semantics
+    - The export is a full validated template carrying the call envelope
+    """
+
+    exported = declared_task.as_taskspec_for_call(
+        "v",
+        _overrides={override_name: value},
+    )
+
+    assert _export_at_path(exported, _DECLARED_EXPORT_PATHS[override_name]) == expected
+    if override_name == "metadata":
+        assert exported["metadata"]["k"] == "v"
+    assert exported["tid"] is None
+    assert validate_taskspec_payload(exported, template=True) is not None
+    embedded = exported["spec"]["args"]
+    assert len(embedded) == 1
+    envelope = embedded[0]["payload"]
+    assert envelope["call"]["args"] == ["v"]
+
+
+@pytest.mark.shared
+def test_as_taskspec_for_call_is_pure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The export builds no context, reads no config, opens no broker, writes nothing.
+
+    Verifies:
+    - With no configured `CONTEXT`, `resolve_context_override()` resolves to a
+      read-only `BASE_DIR`, so a regression would have to build there
+    - Tripwires on `build_context`, `load_config`, `open_broker`, and
+      `get_core_client` never fire, and nothing is written anywhere
+    """
+
+    with override_settings(
+        WEFT_DJANGO=_fixture_weft_settings(CONTEXT=None),
+        BASE_DIR=tmp_path,
+    ):
+        _clear_core_context_override_env(monkeypatch)
+        monkeypatch.delenv("WEFT_CONTEXT", raising=False)
+        assert resolve_context_override() == str(tmp_path)
+
+        def _forbidden(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("forbidden on the export path")
+
+        monkeypatch.setattr("weft.client._client.build_context", _forbidden)
+        monkeypatch.setattr("weft.context.load_config", _forbidden)
+        monkeypatch.setattr("weft.context.open_broker", _forbidden)
+        monkeypatch.setattr(weft_django_client, "get_core_client", _forbidden)
+
+        weft_dir = TEST_ROOT / ".weft"
+        listing_before = sorted(path.name for path in weft_dir.iterdir())
+        database_path = Path(_bootstrap_context.database_path)
+        db_stat_before = database_path.stat()
+
+        monkeypatch.chdir(tmp_path)
+        tmp_path.chmod(0o500)
+        try:
+            exported = echo_task.as_taskspec_for_call(
+                "v",
+                _overrides={"timeout": None},
+            )
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert list(tmp_path.iterdir()) == []
+        assert not (tmp_path / ".weft").exists()
+        assert sorted(path.name for path in weft_dir.iterdir()) == listing_before
+        db_stat_after = database_path.stat()
+        assert db_stat_after.st_size == db_stat_before.st_size
+        assert db_stat_after.st_mtime == db_stat_before.st_mtime
+        assert exported["spec"]["timeout"] == 30.0
+
+
+@pytest.mark.shared
+def test_as_taskspec_for_call_export_runs_like_enqueue() -> None:
+    """The exported definition is submittable and runs like `enqueue(...)`.
+
+    Verifies:
+    - `submit_taskspec(exported)` completes with the same value as `enqueue`
+    - Both carry the same overridden name and metadata on their snapshots
+    """
+
+    overrides: dict[str, Any] = {
+        "name": "renamed",
+        "timeout": 5.0,
+        "metadata": {"k": "v"},
+    }
+    exported = echo_task.as_taskspec_for_call("v", _overrides=overrides)
+
+    exported_submission = submit_taskspec(exported)
+    enqueued = echo_task.enqueue("v", _overrides=overrides)
+
+    exported_result = exported_submission.result(timeout=30.0)
+    enqueued_result = enqueued.result(timeout=30.0)
+
+    assert exported_result.status == "completed"
+    assert enqueued_result.status == "completed"
+    assert exported_result.value == enqueued_result.value
+
+    exported_snapshot = exported_submission.snapshot()
+    enqueued_snapshot = enqueued.snapshot()
+    assert exported_snapshot is not None
+    assert enqueued_snapshot is not None
+    assert exported_snapshot.name == "renamed"
+    assert enqueued_snapshot.name == "renamed"
+    assert exported_snapshot.metadata["k"] == "v"
+    assert enqueued_snapshot.metadata["k"] == "v"

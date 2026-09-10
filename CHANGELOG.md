@@ -2,7 +2,27 @@
 
 ## Unreleased
 
+### Added
+
+- `weft.client.normalize_taskspec_payload(taskspec, **overrides)` returns the
+  validated, normalized TaskSpec payload a submission would use, as a fresh
+  JSON-compatible dict, without a client or context — it reads no
+  configuration, opens no broker, and writes nothing — so embedders can export
+  the exact definition without a second normalizer.
+
 ### Changed
+
+- `weft-django`: `RegisteredWeftTask.as_taskspec_for_call(..., _overrides=...)`
+  now applies the core submit-override contract through
+  `weft.client.normalize_taskspec_payload(...)`: explicit `None` overrides are
+  ignored instead of clearing declared values, unknown names (including `wait`)
+  raise `TypeError`, invalid values raise the TaskSpec validation error,
+  reserved `_weft.` names raise `ValueError`, and the returned dict is the full
+  validated TaskSpec payload (`tid: None`, `io`, `state`, defaulted `spec`
+  fields) rather than the compact builder dict. The export still builds no Weft
+  context, reads no Weft configuration, opens no broker, and writes nothing. The
+  private override copy was removed; `weft-django 0.9.34` requires
+  `weft>=0.9.100`.
 
 - Short TIDs now fold the hybrid timestamp grain and logical counter into
   ten zero-padded digits, reducing common counter-zero collisions. Shorts

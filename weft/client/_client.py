@@ -4,6 +4,7 @@ Spec references:
 - docs/specifications/09-Implementation_Plan.md [IP-1]
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-5]
+- docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-3]
 """
 
 from __future__ import annotations
@@ -180,3 +181,32 @@ def connect(
         path if path is not None else spec_context,
         autostart=autostart,
     )
+
+
+def normalize_taskspec_payload(taskspec: Any, **overrides: Any) -> dict[str, Any]:
+    """Return the validated, normalized TaskSpec payload for a submission.
+
+    Args:
+        taskspec: TaskSpec or JSON-compatible mapping; a mapping without a
+            `tid` is validated as a template.
+        **overrides: Public submit overrides. Every keyword is an override
+            name, so `payload` is rejected like any other unknown name.
+
+    Returns:
+        A fresh JSON-compatible mapping: the pre-transport snapshot
+        `WeftClient.prepare` would hold for the same inputs.
+
+    Raises:
+        TypeError: If an override name is outside the public vocabulary.
+        ValueError: If an override value or the resulting TaskSpec is invalid.
+
+    Note:
+        Needs no client or context: builds no context, reads no configuration,
+        resolves no project root, opens no broker, and writes nothing.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-3]
+    """
+
+    request = submission.prepare_definition(taskspec, overrides)
+    payload: dict[str, Any] = request.taskspec.model_dump(mode="json")
+    return payload

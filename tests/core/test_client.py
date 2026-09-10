@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
+import sys
 import time
 from pathlib import Path
 from typing import cast
@@ -18,7 +20,12 @@ from tests.helpers.weft_harness import (
 )
 from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
 from weft import commands
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import (
+    SUBMIT_OVERRIDE_NAMES,
+    TASKSPEC_BUNDLE_ROOT_FIELD,
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
+)
 from weft.client import (
     ControlRejected,
     InvalidTID,
@@ -35,6 +42,7 @@ from weft.client import (
     WeftClient,
     WeftError,
     connect,
+    normalize_taskspec_payload,
 )
 from weft.client._namespaces import (
     ManagersNamespace,
@@ -48,6 +56,7 @@ from weft.context import build_context
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import open_monitor_store
 from weft.core.taskspec import TaskSpec
+from weft.core.taskspec.transport import validate_taskspec_payload
 
 pytestmark = [pytest.mark.shared]
 
@@ -978,3 +987,373 @@ def test_prepare_snapshots_payload_without_starting_runtime() -> None:
         # PreparedSubmission owns this request before any runtime is launched.
         assert prepared._request.payload == {"value": ["before"]}
         assert harness._list_active_manager_records() == []
+
+
+def _declared_taskspec(*, working_dir: str = "/tmp") -> dict[str, object]:
+    """Template declaring a non-default value for every overridable field.
+
+    A default-valued template cannot prove `None`-retention, so every path the
+    `None` matrix asserts already carries a distinguishable value here.
+    """
+
+    return {
+        "name": "declared",
+        "spec": {
+            "type": "function",
+            "function_target": "os:getcwd",
+            "args": [],
+            "keyword_args": {},
+            "env": {"DECLARED": "1"},
+            "working_dir": working_dir,
+            "stream_output": True,
+            "timeout": 30.0,
+            "limits": {"memory_mb": 256, "cpu_percent": 50},
+            "runner": {"name": "host", "options": {"declared": True}},
+        },
+        "metadata": {
+            "description": "declared description",
+            "tags": ["declared"],
+            "declared_key": "declared",
+        },
+    }
+
+
+_DECLARED_OVERRIDE_PATHS: dict[str, tuple[str, ...]] = {
+    "name": ("name",),
+    "description": ("metadata", "description"),
+    "tags": ("metadata", "tags"),
+    "env": ("spec", "env"),
+    "working_dir": ("spec", "working_dir"),
+    "stream_output": ("spec", "stream_output"),
+    "timeout": ("spec", "timeout"),
+    "memory_mb": ("spec", "limits", "memory_mb"),
+    "cpu_percent": ("spec", "limits", "cpu_percent"),
+    "runner": ("spec", "runner", "name"),
+    "runner_options": ("spec", "runner", "options"),
+    "metadata": ("metadata", "declared_key"),
+}
+
+_DECLARED_OVERRIDE_VALUES: dict[str, object] = {
+    "name": "declared",
+    "description": "declared description",
+    "tags": ["declared"],
+    "env": {"DECLARED": "1"},
+    "working_dir": "/tmp",
+    "stream_output": True,
+    "timeout": 30.0,
+    "memory_mb": 256,
+    "cpu_percent": 50,
+    "runner": "host",
+    "runner_options": {"declared": True},
+    "metadata": "declared",
+}
+
+
+def _at_path(payload: object, path: tuple[str, ...]) -> object:
+    current = payload
+    for key in path:
+        assert isinstance(current, dict)
+        current = current[key]
+    return current
+
+
+@pytest.mark.parametrize("override_name", sorted(SUBMIT_OVERRIDE_NAMES))
+def test_normalize_taskspec_payload_ignores_none_for_every_override(
+    override_name: str,
+) -> None:
+    """An explicit `None` override never clears a declared value.
+
+    Verifies:
+    - `normalize_taskspec_payload(spec, <name>=None)` equals the plain dump
+    - The declared value is still present at that field's own path
+    """
+
+    baseline = normalize_taskspec_payload(_declared_taskspec())
+    with_none = normalize_taskspec_payload(
+        _declared_taskspec(),
+        **{override_name: None},
+    )
+
+    assert with_none == baseline
+    path = _DECLARED_OVERRIDE_PATHS[override_name]
+    assert _at_path(with_none, path) == _DECLARED_OVERRIDE_VALUES[override_name]
+
+
+@pytest.mark.parametrize(
+    ("override_name", "value", "expected"),
+    [
+        ("name", "renamed", "renamed"),
+        ("description", "d", "d"),
+        ("tags", ("a", "b"), ["a", "b"]),
+        ("env", {"K": "v"}, {"DECLARED": "1", "K": "v"}),
+        ("stream_output", False, False),
+        ("timeout", 5.0, 5.0),
+        ("memory_mb", 512, 512),
+        ("cpu_percent", 25, 25),
+        ("runner", "host", "host"),
+        ("runner_options", {"x": 1}, {"declared": True, "x": 1}),
+        ("metadata", {"k": "v"}, "declared"),
+    ],
+)
+def test_normalize_taskspec_payload_applies_every_override(
+    override_name: str,
+    value: object,
+    expected: object,
+) -> None:
+    """Each public override name lands at its own path with core merge rules.
+
+    Verifies:
+    - Scalar overrides replace; mapping overrides merge with declared entries
+    - `metadata` merges rather than replacing the declared metadata section
+    """
+
+    exported = normalize_taskspec_payload(
+        _declared_taskspec(),
+        **{override_name: value},
+    )
+
+    assert _at_path(exported, _DECLARED_OVERRIDE_PATHS[override_name]) == expected
+    if override_name == "metadata":
+        assert exported["metadata"]["k"] == "v"
+
+
+def test_normalize_taskspec_payload_applies_working_dir_override(
+    tmp_path: Path,
+) -> None:
+    """`working_dir` is an ordinary override taking a real path value."""
+
+    exported = normalize_taskspec_payload(
+        _declared_taskspec(),
+        working_dir=str(tmp_path),
+    )
+
+    assert exported["spec"]["working_dir"] == str(tmp_path)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="chmod read-only directory semantics differ on Windows",
+)
+def test_normalize_taskspec_payload_is_pure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The seam builds no context, reads no config, opens no broker, writes nothing.
+
+    Verifies:
+    - Tripwires on `build_context`, `load_config`, and `open_broker` at their
+      use-site bindings (by-name imports make the defining module the wrong
+      patch target) never fire
+    - No file appears in a read-only cwd and no new `.weft` anywhere up the chain
+    - Overrides still apply and a `None` override keeps the declared value
+    """
+
+    for key in [name for name in os.environ if name.startswith("WEFT")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    def _forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("forbidden on the export path")
+
+    monkeypatch.setattr("weft.client._client.build_context", _forbidden)
+    monkeypatch.setattr("weft.context.load_config", _forbidden)
+    monkeypatch.setattr("weft.context.open_broker", _forbidden)
+
+    parents = [tmp_path, *tmp_path.parents]
+    weft_dirs_before = {parent for parent in parents if (parent / ".weft").exists()}
+
+    tmp_path.chmod(0o500)
+    try:
+        exported = normalize_taskspec_payload(
+            _declared_taskspec(),
+            timeout=None,
+            name="renamed",
+        )
+    finally:
+        tmp_path.chmod(0o700)
+
+    assert list(tmp_path.iterdir()) == []
+    weft_dirs_after = {parent for parent in parents if (parent / ".weft").exists()}
+    assert weft_dirs_after == weft_dirs_before
+    assert exported["name"] == "renamed"
+    assert exported["spec"]["timeout"] == 30.0
+
+
+def test_normalize_taskspec_payload_is_a_fresh_copy() -> None:
+    """Every call returns an independent JSON-serializable template mapping.
+
+    Verifies:
+    - Two calls are equal but not identical, and mutation does not leak
+    - The result is JSON-serializable and carries `tid: None`
+    """
+
+    first = normalize_taskspec_payload(_declared_taskspec())
+    second = normalize_taskspec_payload(_declared_taskspec())
+
+    assert first == second
+    assert first is not second
+
+    first["spec"]["timeout"] = 999.0
+    third = normalize_taskspec_payload(_declared_taskspec())
+
+    assert third["spec"]["timeout"] == 30.0
+    assert json.dumps(first)
+    assert first["tid"] is None
+
+
+def test_normalize_taskspec_payload_omits_top_level_bundle_root(
+    tmp_path: Path,
+) -> None:
+    """Bundle provenance is stripped; nested caller metadata is untouched.
+
+    Verifies:
+    - A bundle-rooted TaskSpec is accepted and its provenance is absent
+    - The top-level-only guarantee leaves a nested marker key intact
+    """
+
+    rooted = validate_taskspec_payload(
+        _declared_taskspec(),
+        bundle_root=tmp_path,
+        template=True,
+    )
+    assert rooted.get_bundle_root() is not None
+
+    assert TASKSPEC_BUNDLE_ROOT_FIELD not in normalize_taskspec_payload(rooted)
+
+    nested_template = _declared_taskspec()
+    metadata_section = nested_template["metadata"]
+    assert isinstance(metadata_section, dict)
+    metadata_section["nested"] = {TASKSPEC_BUNDLE_ROOT_FIELD: "x"}
+    exported = normalize_taskspec_payload(nested_template)
+
+    assert TASKSPEC_BUNDLE_ROOT_FIELD not in exported
+    assert exported["metadata"]["nested"][TASKSPEC_BUNDLE_ROOT_FIELD] == "x"
+
+
+def test_normalize_taskspec_payload_raises_like_prepare() -> None:
+    """The seam raises exactly what `prepare(...)` raises for the same inputs.
+
+    Verifies:
+    - Unknown names, the submission-only `wait`, and `payload` raise TypeError
+    - Schema-invalid values and reserved `_weft.` names raise ValueError
+    """
+
+    with pytest.raises(TypeError, match="Unknown submit override"):
+        normalize_taskspec_payload(_declared_taskspec(), unknown_override=True)
+    with pytest.raises(ValueError):
+        normalize_taskspec_payload(_declared_taskspec(), memory_mb=0)
+    with pytest.raises(ValueError, match="reserved"):
+        normalize_taskspec_payload(_declared_taskspec(), name="_weft.x")
+    with pytest.raises(TypeError, match="Unknown submit override"):
+        normalize_taskspec_payload(_declared_taskspec(), wait=True)
+    with pytest.raises(TypeError, match=r"Unknown submit override\(s\): payload"):
+        normalize_taskspec_payload(_declared_taskspec(), payload={"x": 1})
+
+
+def test_normalize_taskspec_payload_matches_submitted_definition() -> None:
+    """The exported definition is what `submit(...)` would write.
+
+    Verifies:
+    - Submitting the exported dict yields the same name and metadata as
+      submitting the template with the same overrides
+    - The proof runs through a real broker and manager, not a stub
+    """
+
+    overrides: dict[str, object] = {
+        "name": "renamed",
+        "timeout": 7.5,
+        "metadata": {"k": "v"},
+    }
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+
+        exported = normalize_taskspec_payload(
+            _function_taskspec(harness.root),
+            **overrides,
+        )
+        exported_task = client.submit(exported)
+        exported_task.result(timeout=DEFAULT_TASK_COMPLETION_TIMEOUT)
+
+        direct_task = client.submit(_function_taskspec(harness.root), **overrides)
+        direct_task.result(timeout=DEFAULT_TASK_COMPLETION_TIMEOUT)
+
+        exported_snapshot = client.tasks.status(exported_task.tid)
+        direct_snapshot = client.tasks.status(direct_task.tid)
+
+        assert exported_snapshot is not None
+        assert direct_snapshot is not None
+        assert exported_snapshot.name == "renamed"
+        assert exported_snapshot.metadata["k"] == "v"
+        assert direct_snapshot.name == exported_snapshot.name
+        assert direct_snapshot.metadata["k"] == exported_snapshot.metadata["k"]
+
+
+def test_client_prepare_and_submit_raise_raw_type_error_for_unknown_override() -> None:
+    """`prepare`/`submit` do not translate an unknown override name ([PY-3])."""
+
+    with WeftTestHarness() as harness:
+        client = WeftClient(path=harness.root)
+        spec = _function_taskspec(harness.root)
+
+        with pytest.raises(TypeError, match="Unknown submit override"):
+            client.prepare(spec, unknown_override=True)
+        with pytest.raises(TypeError, match="Unknown submit override"):
+            client.submit(spec, unknown_override=True)
+
+
+def test_client_pipeline_and_command_raise_raw_type_error_for_unknown_override() -> (
+    None
+):
+    """`prepare_pipeline`/`submit_pipeline`/`submit_command` raise raw TypeError."""
+
+    with WeftTestHarness() as harness:
+        _write_json(
+            harness.root / ".weft" / "tasks" / "pipeline-stage.json",
+            {
+                "name": "pipeline-stage",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+                "metadata": {},
+            },
+        )
+        _write_json(
+            harness.root / ".weft" / "pipelines" / "stored-pipeline.json",
+            {
+                "name": "stored-pipeline",
+                "stages": [{"name": "only", "task": "pipeline-stage"}],
+            },
+        )
+        client = WeftClient(path=harness.root)
+
+        with pytest.raises(TypeError, match="Unknown submit override"):
+            client.prepare_pipeline("stored-pipeline", unknown_override=True)
+        with pytest.raises(TypeError, match="Unknown submit override"):
+            client.submit_pipeline("stored-pipeline", unknown_override=True)
+        with pytest.raises(TypeError, match="Unknown submit override"):
+            client.submit_command(["true"], unknown_override=True)
+
+
+def test_client_prepare_spec_translates_invalid_override_value() -> None:
+    """`prepare_spec`/`submit_spec` translate a schema-invalid value ([PY-3])."""
+
+    with WeftTestHarness() as harness:
+        spec_path = harness.root / ".weft" / "tasks" / "stored-echo.json"
+        _write_json(
+            spec_path,
+            {
+                "name": "stored-echo",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            },
+        )
+        client = WeftClient(path=harness.root)
+
+        with pytest.raises(exception_types.SubmissionValidationError):
+            client.prepare_spec(spec_path, memory_mb=0)
+        with pytest.raises(exception_types.SubmissionValidationError):
+            client.submit_spec(spec_path, memory_mb=0)

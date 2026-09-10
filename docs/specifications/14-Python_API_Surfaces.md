@@ -264,6 +264,9 @@ TaskSpec validation, and the result drops it. Embedders that need a TaskSpec
 definition for composition rather than submission call it; there is no second
 normalization path.
 
+Implementation: `weft/client/_client.py::normalize_taskspec_payload` over
+`weft/commands/submission.py::prepare_definition`.
+
 ## Layering [PY-4]
 
 Runtime imports are one-way: `cli -> commands -> core`,

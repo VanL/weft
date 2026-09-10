@@ -105,15 +105,15 @@ class RegisteredWeftTask:
         *args: Any,
         _overrides: Mapping[str, Any] | None = None,
         **kwargs: Any,
-    ) -> Any:
-        from weft_django.client import build_registered_task_taskspec
+    ) -> dict[str, Any]:
+        # Local import: breaks the client -> registry/decorators import cycle.
+        from weft_django.client import export_registered_task_taskspec
 
-        envelope = self.build_envelope(*args, **kwargs)
-        return build_registered_task_taskspec(
+        return export_registered_task_taskspec(
             self,
-            envelope=envelope,
+            args=args,
+            kwargs=kwargs,
             overrides=_overrides,
-            embed_envelope=True,
         )
 
     def enqueue(

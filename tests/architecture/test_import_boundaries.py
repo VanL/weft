@@ -971,6 +971,7 @@ COMMAND_ERRORS = {
                 "WeftClient",
                 "WeftError",
                 "connect",
+                "normalize_taskspec_payload",
             }
             | {
                 "CommandError",
