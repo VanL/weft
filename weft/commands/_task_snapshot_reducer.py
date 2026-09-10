@@ -287,7 +287,9 @@ def reduce_task_event(
         event_payload=dict(payload),
         runner_diagnostics=(
             dict(diagnostics)
-            if isinstance((diagnostics := payload.get(RUNNER_DIAGNOSTICS_FIELD)), Mapping)
+            if isinstance(
+                (diagnostics := payload.get(RUNNER_DIAGNOSTICS_FIELD)), Mapping
+            )
             else None
         ),
         status_reason=status_reason,
