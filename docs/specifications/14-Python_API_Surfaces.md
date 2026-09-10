@@ -24,8 +24,8 @@ there, including `weft.core.*`, helpers, constants, command leaves, and
 
 `weft.client.__all__` retains its existing inventory and adds exactly
 `CommandError`, `CommandUsageError`, `CommandTimeoutError`,
-`CommandExecutionError`, `SubmissionError`, `SubmissionValidationError`, and
-`SubmissionManagerError`.
+`CommandExecutionError`, `SubmissionError`, `SubmissionValidationError`,
+`SubmissionManagerError`, and `normalize_taskspec_payload`.
 
 ## Commands surface contract [PY-2]
 
@@ -237,6 +237,33 @@ does not use endpoint-name syntax validation; persistent names still do.
 `payload=` and `stdin_text=` are mutually exclusive even when
 the spec has no `run_input` contract, so the initial work payload has one owner.
 
+Submit-override semantics are identical on every surface that accepts
+`**overrides`: an override whose value is `None` is ignored and the template's
+value stands; a name outside the shared public override vocabulary raises
+`TypeError` from `prepare(...)`, `prepare_pipeline(...)`, and
+`submit_command(...)`, and `SubmissionValidationError` from `prepare_spec(...)`;
+a value the TaskSpec schema rejects raises the schema's validation error (a
+`ValueError`) from `prepare(...)` and `SubmissionValidationError` from
+`prepare_spec(...)`; a `name` in the reserved `_weft.` namespace raises
+`ValueError`. Each `submit(...)`, `submit_spec(...)`, and `submit_pipeline(...)`
+raises exactly what its `prepare*` counterpart raises.
+`weft.client.normalize_taskspec_payload(taskspec, **overrides)` runs that same
+contract without a client or context and returns the validated, normalized
+TaskSpec definition as a fresh JSON-compatible `dict`: the pre-transport
+snapshot `prepare(...)` would hold for the same inputs — overrides applied,
+re-validated, JSON round-tripped — before any submission-time transport
+encoding or reserved-metadata handling. It accepts a `TaskSpec` or a
+JSON-compatible mapping (a mapping without `tid` is validated as a template),
+raises what `prepare(...)` raises, constructs no Weft context, reads no
+configuration, resolves no project root, opens no broker, and writes nothing.
+Every keyword argument is an override name: `payload` is not part of the
+override vocabulary and raises `TypeError` here. The mapping carries no
+top-level bundle-root marker and no bundle provenance; a `TaskSpec` input that
+already carries a bundle root is accepted, its root is re-resolved read-only by
+TaskSpec validation, and the result drops it. Embedders that need a TaskSpec
+definition for composition rather than submission call it; there is no second
+normalization path.
+
 ## Layering [PY-4]
 
 Runtime imports are one-way: `cli -> commands -> core`,
@@ -253,3 +280,4 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [Public API surface remediation plan](../plans/2026-08-12-public-api-surface-remediation.md)
+- [Django override normalization seam plan](../plans/2026-09-08-django-override-normalization-seam-plan.md)

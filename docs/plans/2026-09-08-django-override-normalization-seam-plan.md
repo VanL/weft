@@ -441,6 +441,13 @@ seam?
   08-Testing_Strategy.md, README.md at plan authoring time (2026-09-08).
   Plan type: implementation with spec revision. Promotion baseline
   identifier: recorded after task 2.
+  identifier: `c7628b6d` — the tree the promoted spec text landed on
+  (spec-promotion slice, 2026-09-09). The only drift in the delta's spec
+  files between `178e3a34` and `c7628b6d` is in spec 14 [PY-2]
+  (client dump/load/tidy resolved-context wording, complexity-review
+  corrections plan); [PY-1], [PY-3], [PY-4], the 13C sections, 02, 07 and
+  08 are unchanged, so every line reference in this plan's delta still
+  resolves.
 
 ## Proposed Spec Delta
 

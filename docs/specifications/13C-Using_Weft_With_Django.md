@@ -627,8 +627,11 @@ Decorated task objects should expose:
 
 - `enqueue(*args, **kwargs) -> WeftSubmission`
 - `enqueue_on_commit(*args, **kwargs) -> WeftDeferredSubmission`
-- `as_taskspec_for_call(*args, _overrides=None, **kwargs) -> dict`
-  representing a validated TaskSpec payload
+- `as_taskspec_for_call(*args, _overrides=None, **kwargs) -> dict` returning
+  the validated, normalized TaskSpec payload for the decorated task's generated
+  TaskSpec with the call envelope embedded — the value of
+  `weft.client.normalize_taskspec_payload(...)` for the generated template and
+  `_overrides`
 
 Canonical name:
 
@@ -640,9 +643,27 @@ unsupported scheduling kwargs such as `eta` or `countdown`.
 `as_taskspec_for_call(...)` rule:
 
 - positional and keyword arguments before `_overrides` become the task call
-  payload
-- `_overrides` carries TaskSpec-level overrides such as `timeout`, `metadata`,
-  or runner configuration
+  payload, embedded in the generated TaskSpec's `spec.args`
+- `_overrides` carries TaskSpec-level submit overrides and uses the core
+  submit-override contract unchanged: the accepted names are exactly the shared
+  public override vocabulary (`name`, `description`, `tags`, `env`,
+  `working_dir`, `stream_output`, `timeout`, `memory_mb`, `cpu_percent`,
+  `runner`, `runner_options`, `metadata`); an override whose value is `None` is
+  ignored and the declared or default value stands; any other name — including
+  the submission-only `wait` — raises `TypeError` locally; a `runner` other than
+  `host` raises `ValueError` (the v1 host-only rule); a value the TaskSpec
+  schema rejects raises its validation error
+- for every override in the shared public override vocabulary, the export and
+  `enqueue(...)` apply it identically; the surfaces differ in where the call
+  envelope travels (embedded in `spec.args` for the export, as the work payload
+  for `enqueue`) and in `wait`, which `enqueue(...)` honors and the export
+  rejects because it submits nothing
+- the export constructs no Weft context, reads no Weft configuration, resolves
+  no project root, opens no broker, and writes nothing; the configured
+  request-ID provider runs inside the call envelope exactly as it does for
+  `enqueue(...)`
+- the integration applies no overrides itself; it calls
+  `weft.client.normalize_taskspec_payload(...)`
 
 This split avoids collisions between user task parameters and TaskSpec override
 names.
@@ -1327,6 +1348,7 @@ Once the package is split into a sibling repo:
 
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [Public API surface remediation plan](../plans/2026-08-12-public-api-surface-remediation.md)
+- [Django override normalization seam plan](../plans/2026-09-08-django-override-normalization-seam-plan.md)
 - Terminal status Monitor-store plan:
   [../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 - Client follow hardening plan:
