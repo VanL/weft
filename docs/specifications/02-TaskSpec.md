@@ -179,6 +179,7 @@ schema validity.
     "started_at": null,                      // OPTIONAL. Nanosecond timestamp (e.g. time.time_ns()).
     "completed_at": null,                    // OPTIONAL. Nanosecond timestamp (e.g. time.time_ns()).
     "error": null,                           // OPTIONAL. Error message if failed.
+    "process_title_error": null,             // OPTIONAL. Latest detected nonfatal title error.
     "time": 60.0 | null,                     // OPTIONAL. Time spent running so far (wall-clock in seconds). null = not started/measured yet, 0.0+ = actual measurement
     "memory": 4.8 | null,                    // OPTIONAL. Last memory measurement from psutil in MB. null = not measured yet, 0.0+ = actual measurement
     "cpu": 4 | null,                         // OPTIONAL. Last CPU percentage from psutil. null = not measured yet, 0+ = actual measurement (can be 0%)
@@ -335,12 +336,34 @@ policy. It should not be silently overloaded onto `spec.timeout`.
 
 ### State vs Metadata ownership [TS-1.4]
 
+`state.process_title_error` is an optional string or null, defaulting to null.
+It is a nonfatal process-title diagnostic owned by Weft and records the latest
+detected title-support failure returned to this task. It does not change
+`status`, `return_code`, or `state.error`. Success or a no-op does not clear this
+historical diagnostic; it is not a statement of current backend health. Native
+failures not exposed by the backend cannot be inferred from a successful setter
+return.
+
+The diagnostic is exposed in full task state, task-log snapshots, TaskSpec
+summaries, and live STATUS/PONG payloads. It is not a field in the materialized
+monitor-store projection or reduced historical task lists. Publication uses the
+existing reporting cadence; recording the diagnostic does not create a separate
+lifecycle event or synchronous broker write.
+
+_Implementation mapping_: `weft/core/taskspec/model.py::StateSection` owns the
+field and `weft/core/taskspec/model.py::TaskSpec.to_log_dict` its explicit summary;
+`weft/core/tasks/base.py::BaseTask` records returned errors and publishes full
+state/log snapshots and live STATUS/PONG diagnostics. Native errors originate
+in `weft/core/process_title.py`.
+
+Implementation plan: [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md).
+
 Both `state` and `metadata` are mutable at runtime, but they have distinct
 ownership:
 
 - **`state` is system-owned.** Weft's task lifecycle writes all `state` fields
   automatically: `status`, `pid`, `started_at`, `completed_at`, `return_code`,
-  `error`, resource metrics (`memory`, `cpu`, `fds`, `net_connections`), and
+  `error`, `process_title_error`, resource metrics (`memory`, `cpu`, `fds`, `net_connections`), and
   their peak variants. External code should treat `state` as read-only — it
   reflects what the system observes.
 

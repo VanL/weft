@@ -318,6 +318,7 @@ bug evidence.
 ## Related Plans
 
 - [Load-Sensitive Test Lifecycle Fixes](../plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) records harness driver closure, owned CLI contexts, readiness barriers, and optional run diagnostics.
+- [Updated Dependency Suite Repairs](../plans/2026-09-09-updated-dependency-suite-repairs-plan.md) records full-suite failure investigation and Django integration runtime ownership.
 
 - [`docs/plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md`](../plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md)
 - [`docs/plans/2026-08-10-subprocess-coverage-collection-plan.md`](../plans/2026-08-10-subprocess-coverage-collection-plan.md)

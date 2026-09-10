@@ -105,6 +105,7 @@ _SHARED_MODULES = frozenset(
         "tests/core/test_heartbeat_helpers.py",
         "tests/core/test_llm_backend.py",
         "tests/core/test_manager.py",
+        "tests/core/test_process_title.py",
         "tests/core/test_manager_services.py",
         "tests/core/test_monitor_collation.py",
         "tests/core/test_monitor_external_log.py",

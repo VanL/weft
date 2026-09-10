@@ -1,6 +1,7 @@
 """Shared helpers for one-shot task result waiting.
 
 Spec references:
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/07-System_Invariants.md [OBS.3], [IMPL.1]
 """
@@ -8,6 +9,7 @@ Spec references:
 from __future__ import annotations
 
 import time
+from contextlib import ExitStack
 from typing import Any
 
 from weft._constants import (
@@ -125,38 +127,51 @@ def await_one_shot_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-106] except
     initial_error_message: str | None = None,
 ) -> tuple[str, Any | None, str | None]:
     """Wait for a one-shot task to publish a terminal result."""
-    outbox_queue = context.queue(outbox_name, persistent=True)
-    ctrl_queue = (
-        context.queue(ctrl_out_name, persistent=False) if ctrl_out_name else None
-    )
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    monitor = QueueChangeMonitor(
-        [queue for queue in (outbox_queue, ctrl_queue, log_queue) if queue is not None],
-        config=context.config,
-    )
-
-    log_last_timestamp: int | None = initial_log_last_timestamp
-    stream_buffer: list[str] = []
-    status = "running"
-    result_values: list[Any] = []
-    result_value: Any | None = None
-    error_message: str | None = initial_error_message
-    pending_wrapper_lost_error: str | None = None
-    emitted_result_seen = False
-    completed_at: float | None = (
-        time.monotonic() if initial_terminal_status == "completed" else None
-    )
-    single_result_seen_at: float | None = None
-    materialized_completed = initial_terminal_status == "completed"
-    if initial_terminal_status is not None and initial_terminal_status != "completed":
-        status = initial_terminal_status
-
-    deadline = None
-    if timeout is not None:
-        deadline = time.monotonic() + max(0.0, timeout)
-    poll_interval = effective_result_surface_wait_interval(timeout)
-
+    resources = ExitStack()
     try:
+        outbox_queue = context.queue(outbox_name, persistent=True)
+        resources.callback(outbox_queue.close)
+        ctrl_queue = (
+            context.queue(ctrl_out_name, persistent=True) if ctrl_out_name else None
+        )
+        if ctrl_queue is not None:
+            resources.callback(ctrl_queue.close)
+        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+        resources.callback(log_queue.close)
+        monitor = QueueChangeMonitor(
+            [
+                queue
+                for queue in (outbox_queue, ctrl_queue, log_queue)
+                if queue is not None
+            ],
+            config=context.config,
+        )
+        resources.callback(monitor.close)
+
+        log_last_timestamp: int | None = initial_log_last_timestamp
+        stream_buffer: list[str] = []
+        status = "running"
+        result_values: list[Any] = []
+        result_value: Any | None = None
+        error_message: str | None = initial_error_message
+        pending_wrapper_lost_error: str | None = None
+        emitted_result_seen = False
+        completed_at: float | None = (
+            time.monotonic() if initial_terminal_status == "completed" else None
+        )
+        single_result_seen_at: float | None = None
+        materialized_completed = initial_terminal_status == "completed"
+        if (
+            initial_terminal_status is not None
+            and initial_terminal_status != "completed"
+        ):
+            status = initial_terminal_status
+
+        deadline = None
+        if timeout is not None:
+            deadline = time.monotonic() + max(0.0, timeout)
+        poll_interval = effective_result_surface_wait_interval(timeout)
+
         while True:
             while True:
                 if ctrl_queue is None:
@@ -328,10 +343,6 @@ def await_one_shot_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-106] except
             )
             monitor.wait(wait_timeout)
     finally:
-        monitor.close()
-        outbox_queue.close()
-        if ctrl_queue is not None:
-            ctrl_queue.close()
-        log_queue.close()
+        resources.close()
 
     return status, result_value, error_message

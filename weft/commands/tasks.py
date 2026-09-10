@@ -1245,9 +1245,9 @@ class _ControlSurfaceResources:
         self._queues: list[Queue] = []
         self._monitor: QueueChangeMonitor | None = None
         try:
-            self._queues.append(ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False))
-            self._queues.append(ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False))
-            self.ctrl_out_queue = ctx.queue(ctrl_out_name, persistent=False)
+            self._queues.append(ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=True))
+            self._queues.append(ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True))
+            self.ctrl_out_queue = ctx.queue(ctrl_out_name, persistent=True)
             self._queues.append(self.ctrl_out_queue)
             if isinstance(pipeline_status_name, str) and pipeline_status_name:
                 self._queues.append(ctx.queue(pipeline_status_name, persistent=True))

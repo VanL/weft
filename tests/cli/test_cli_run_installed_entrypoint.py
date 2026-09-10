@@ -9,9 +9,13 @@ import subprocess
 import sysconfig
 from pathlib import Path
 
+import psutil
 import pytest
 
-from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
+from tests.helpers.weft_harness import WeftTestHarness
+from weft.ext import RunnerHandle
+from weft.helpers import pid_is_live
 
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(90)]
 
@@ -57,47 +61,70 @@ def test_installed_console_function_handoffs_from_fresh_project(
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env["WEFT_TASK_MONITOR_MODE"] = "report_only"
-    root = prepare_project_root(tmp_path / "external-project", env=env)
-    env.pop("BROKER_TEST_BACKEND", None)
+    harness = WeftTestHarness()
+    managers: list[psutil.Process] = []
+    try:
+        root = prepare_project_root(harness.root, env=env)
+        env.pop("BROKER_TEST_BACKEND", None)
 
-    initialized = subprocess.run(
-        [str(console), "init", str(root)],
-        cwd=tmp_path,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30.0,
-        check=False,
-    )
-    _assert_ok(initialized)
+        initialized = subprocess.run(
+            [str(console), "init", str(root)],
+            cwd=tmp_path,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30.0,
+            check=False,
+        )
+        _assert_ok(initialized)
 
-    (root / "registry_probe.py").write_text(
-        """from __future__ import annotations
+        (root / "registry_probe.py").write_text(
+            """from __future__ import annotations
 
 
 def ping() -> dict[str, bool]:
     return {"ok": True}
 """,
-        encoding="utf-8",
-    )
-    task_dir = root / ".weft" / "tasks"
-    task_dir.mkdir(parents=True, exist_ok=True)
-    (task_dir / "fire-check.json").write_text(
-        json.dumps(
-            {
-                "name": "fire-check",
-                "spec": {
-                    "type": "function",
-                    "function_target": "registry_probe:ping",
+            encoding="utf-8",
+        )
+        task_dir = root / ".weft" / "tasks"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "fire-check.json").write_text(
+            json.dumps(
+                {
+                    "name": "fire-check",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "registry_probe:ping",
+                    },
+                    "metadata": {},
                 },
-                "metadata": {},
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except BaseException as primary:
+        # No runtime was launched. Avoid materializing a harness context before
+        # its environment is patched: inherited defaults may name another DB.
+        try:
+            cleanup_prepared_roots(harness.root)
+        except (OSError, RuntimeError) as cleanup_error:
+            primary.add_note(f"Fresh-project schema cleanup failed: {cleanup_error}")
+        try:
+            harness._tempdir.cleanup()
+        except OSError as cleanup_error:
+            primary.add_note(f"Fresh-project directory cleanup failed: {cleanup_error}")
+        harness._closed = True
+        raise
 
-    try:
+    with harness:
+        # Keep installed commands on the exact broker target owned by cleanup.
+        # The init above ran first, while the external project was still fresh.
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        env.pop("BROKER_TEST_BACKEND", None)
+        env["WEFT_TASK_MONITOR_MODE"] = "report_only"
+        env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
         stdlib = _run_console(
             console,
             root,
@@ -124,6 +151,8 @@ def ping() -> dict[str, bool]:
                 _run_console(console, root, "manager", "list", "--json", env=env)
             )
         )
+
+        assert managers_before, "reuse coverage requires an existing live manager"
 
         second_local = _run_console(
             console,
@@ -177,15 +206,39 @@ def ping() -> dict[str, bool]:
         payload = json.loads(_assert_ok(collected))
         assert payload["status"] == "completed"
         assert payload["result"] == {"ok": True}
-    finally:
-        _run_console(
-            console,
-            root,
-            "manager",
-            "stop",
-            "--force",
-            "--timeout",
-            "5",
-            env=env,
-            timeout=15.0,
-        )
+        for record in harness._list_active_manager_records():
+            handle = RunnerHandle.from_dict(record["runtime_handle"])
+            managers.extend(psutil.Process(pid) for pid in handle.scoped_host_pids())
+        assert managers, "acceptance test must observe its real manager before cleanup"
+
+    assert all(
+        not manager.is_running() or not pid_is_live(manager.pid) for manager in managers
+    ), "installed-console acceptance leaked its manager"
+    assert not harness.root.exists()
+
+
+def test_installed_console_init_failure_does_not_materialize_harness_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Before enter, cleanup owns files only, never inherited broker defaults."""
+    harness = WeftTestHarness()
+    foreign_root = tmp_path / "foreign-default"
+    foreign_root.mkdir()
+    sentinel = foreign_root / "sentinel"
+    sentinel.write_text("untouched", encoding="utf-8")
+    monkeypatch.setenv("WEFT_DEFAULT_DB_LOCATION", str(foreign_root))
+    monkeypatch.setitem(globals(), "WeftTestHarness", lambda: harness)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args, returncode=1, stdout="", stderr="injected init failure"
+        ),
+    )
+    with pytest.raises(AssertionError, match="injected init failure"):
+        test_installed_console_function_handoffs_from_fresh_project(tmp_path)
+    assert harness._context is None
+    assert harness._closed
+    assert not harness.root.exists()
+    assert list(foreign_root.iterdir()) == [sentinel]
+    assert sentinel.read_text(encoding="utf-8") == "untouched"

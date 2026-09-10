@@ -23,6 +23,8 @@ PY
 )"
 
 export UV_PROJECT_ENVIRONMENT="$PROJECT_ROOT/.venv"
-export PATH="$PATH_WITHOUT_SELF"
+# Resolve the real executable without recursively selecting this wrapper, but
+# preserve repo/bin for commands launched by uv (notably pytest-pg).
+REAL_UV="$(PATH="$PATH_WITHOUT_SELF" command -v uv)"
 
-exec uv "$@"
+exec "$REAL_UV" "$@"

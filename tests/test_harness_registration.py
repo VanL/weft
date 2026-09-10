@@ -557,6 +557,42 @@ def test_harness_cleanup_closes_live_queues_before_database_probe() -> None:
 
 
 @pytest.mark.sqlite_only
+def test_harness_queue_cleanup_does_not_resolve_lazy_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inspect allocation types without invoking arbitrary proxy properties."""
+
+    resolved: list[bool] = []
+
+    class LazyObject:
+        @property
+        def __class__(self) -> type:
+            resolved.append(True)
+            return object
+
+    class ConcreteQueue(Queue):
+        pass
+
+    with WeftTestHarness() as harness:
+        queue = ConcreteQueue(
+            "cleanup.lazy.neighbor",
+            db_path=harness.context.broker_target,
+            persistent=True,
+            config=harness.context.broker_config,
+        )
+        queue.write("open")
+        proxy = LazyObject()
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(harness_mod.gc, "get_objects", lambda: [proxy, queue])
+                harness._close_live_database_queues()
+            assert not resolved, "cleanup evaluated an unrelated lazy object"
+            assert len(queue.conn._connection_registry) == 0
+        finally:
+            queue.close()
+
+
+@pytest.mark.sqlite_only
 def test_harness_queue_cleanup_reports_failure_and_continues(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1701,3 +1737,50 @@ def test_original_failure_survives_blocked_inline_cleanup(
             thread.join(10.0)
             assert not thread.is_alive()
         harness.cleanup()
+
+
+@pytest.mark.shared
+@pytest.mark.parametrize("diagnostics_fail", [False, True])
+def test_completion_failure_preserves_terminal_payload_before_fixture_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, diagnostics_fail: bool
+) -> None:
+    """Fixture-style callers retain runner failure evidence after root removal."""
+    directory = tmp_path / "failure-artifacts"
+    monkeypatch.setenv("WEFT_TEST_DIAGNOSTICS_DIR", str(directory))
+    with WeftTestHarness() as harness:
+        queue = harness.context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+        try:
+            tid = str(queue.generate_timestamp())
+            payload = {
+                "tid": tid,
+                "event": "work_failed",
+                "error": "worker failed before reply",
+                "diagnostics": {"phase": "worker_bootstrap"},
+            }
+            queue.write(json.dumps(payload))
+        finally:
+            queue.close()
+        if diagnostics_fail:
+
+            def unavailable_snapshot() -> str:
+                raise OSError("snapshot unavailable")
+
+            monkeypatch.setattr(harness, "dump_debug_state", unavailable_snapshot)
+        # Catch before __exit__, as pytest does around a yield fixture's body.
+        with pytest.raises(RuntimeError, match="reported work_failed") as caught:
+            harness.wait_for_completion(tid)
+        failure = caught.value
+        assert "worker failed before reply" in str(failure)
+        assert "worker_bootstrap" in str(failure)
+        assert tid in harness.registered_tids()
+    assert not harness.root.exists()
+    if diagnostics_fail:
+        assert any("diagnostic collection failed" in note for note in failure.__notes__)
+    else:
+        files = list(directory.glob("harness-*.txt"))
+        assert len(files) == 1
+        saved = files[0].read_text(encoding="utf-8")
+        assert tid in saved
+        assert "worker failed before reply" in saved
+        assert "spawn_queue_tail" in saved
+        assert any(str(files[0]) in note for note in failure.__notes__)

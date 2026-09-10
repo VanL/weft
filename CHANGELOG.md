@@ -4,6 +4,10 @@
 
 ### Added
 
+- Task state now includes nullable `process_title_error`, the last detected
+  nonfatal title-update failure. Full task state/logs, summaries, and live
+  STATUS/PONG expose it; execution errors and outcomes remain separate.
+
 - `weft.client.normalize_taskspec_payload(taskspec, **overrides)` returns the
   validated, normalized TaskSpec payload a submission would use, as a fresh
   JSON-compatible dict, without a client or context — it reads no
@@ -11,6 +15,10 @@
   the exact definition without a second normalizer.
 
 ### Changed
+
+- macOS task processes set Unix titles immediately and defer GUI registration
+  until a live drive turn after a random deadline between one and three seconds.
+  Unchanged titles skip native updates. Linux and Windows retain setproctitle.
 
 - `weft-django`: `RegisteredWeftTask.as_taskspec_for_call(..., _overrides=...)`
   now applies the core submit-override contract through

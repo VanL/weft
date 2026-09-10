@@ -271,11 +271,35 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/monitor/task_monitor.py`, `weft/commands/system.py`,
 `weft/commands/task_monitor.py`, `weft/_constants.py`.
 
+Title implementation: `weft/core/tasks/base.py::BaseTask._update_process_title`
+formats titles using shared bounds in `weft/_constants.py`;
+`weft/core/process_title.py` applies them and owns the deferred handoff through
+`weft/core/deferred.py`. See [CC-2.4] and the
+[implementation plan](../plans/2026-09-10-deferred-macos-process-title-plan.md).
+
 - **OBS.1**: lifecycle changes are written to `weft.log.tasks`
 - **OBS.2**: Weft does not use a separate state database for task lifecycle
 - **OBS.3**: task state remains observable through task-local queues and the
   global task log
-- **OBS.4**: process titles follow `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
+
+### Process title format [OBS.4]
+
+Process titles follow `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
+  Context and task-name segments are limited to 8 and 20 ASCII characters respectively;
+  the short TID follows OBS.5; optional details are limited to 15 ASCII characters. When
+  the native buffer has sufficient capacity, the adapter preserves complete titles
+  within the formatter's supported bound across initialization and backend handoff,
+  including the longest supported status and details. Native buffer limitations may
+  cause silent truncation; Weft does not probe capacity or verify titles by runtime
+  read-back. The formatter and native adapter share the capacity calculation. Temporary
+  trailing spaces used during native buffer discovery are not task metadata and are
+  replaced by the current formatted title before a successful handoff returns. A failed
+  import or setter may leave padding visible, an accepted best-effort limitation. GUI
+  registration timing follows [CC-2.4]; delayed GUI visibility does not delay the
+  initial Unix title.
+
+_Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py`.
+
 - **OBS.5**: The TID short form is exactly ten decimal characters derived
   from the hybrid timestamp's components: `grain = tid >> 12` (a count of
   4,096-nanosecond grains; SimpleBroker clears the low 12 bits of
@@ -315,8 +339,20 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   abort the remaining lifecycle publication path. Payload construction and
   serialization defects are not broker failures and remain visible internal
   errors.
-- **OBS.7**: process-title segments are sanitized for shell-safe use
-- **OBS.8**: process titles stay within the allowed character vocabulary
+
+### Process title sanitation [OBS.7]
+
+Process-title segments are sanitized for shell-safe use
+
+_Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py`.
+
+
+### Process title vocabulary [OBS.8]
+
+Process titles stay within the allowed character vocabulary
+
+_Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py`.
+
 - **OBS.9**: endpoint names under `_weft.` are reserved for Weft-owned
   internal runtime services and are not claimable from public naming surfaces
 - **OBS.10**: durable task-log history may replay basic lifecycle status even
@@ -1066,6 +1102,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md)
 
 - [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
 

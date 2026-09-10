@@ -508,7 +508,7 @@ class _PromptCompletionContext:
 
     def queue(self, name: str, *, persistent: bool) -> _PromptCompletionQueue:
         assert name == WEFT_GLOBAL_LOG_QUEUE
-        assert persistent is False
+        assert persistent is True
         return self._log_queue
 
 
@@ -539,7 +539,7 @@ class _InteractiveExitContext:
 
     def queue(self, name: str, *, persistent: bool) -> _InteractiveExitQueue:
         if name == WEFT_GLOBAL_LOG_QUEUE:
-            assert persistent is False
+            assert persistent is True
             return self.log_queue
         assert name == f"T{self._tid}.ctrl_in"
         assert persistent is True

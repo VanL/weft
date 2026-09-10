@@ -35,6 +35,8 @@ See also:
 
 ## Related Plans
 
+- [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md)
+
 - [`docs/plans/2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md)
 - [`docs/plans/2026-08-25-bounded-tid-mapping-publication-plan.md`](../plans/2026-08-25-bounded-tid-mapping-publication-plan.md)
 - [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
@@ -571,8 +573,38 @@ Current required control behavior:
   authority, or a replacement for terminal task-log/control writes
 - user-facing surfaces may expose derived live `activity` without creating a
   second durable state machine
-- process titles stay shell-friendly and reflect durable state plus optional
-  live detail
+- process titles stay shell-friendly and reflect durable state plus optional live
+  detail. OS title application is best-effort process-local observability; it does not
+  own task state. Disabling process titles for a task prevents that task from
+  initializing title support or requesting updates. An ordinary request whose formatted
+  title equals the last successfully applied process title does not call the
+  process-title setter again. This memoization does not suppress due backend activation
+  or its mandatory unpadded title application. Separate thread names are not maintained;
+  the task main/drive thread owns title updates. On macOS, when stock setproctitle has
+  not already initialized in the process, Weft applies Unix titles without
+  LaunchServices on the initial path and schedules one GUI activation per process, due
+  at the first enabled update's monotonic time plus one second plus a uniform random
+  offset from zero to two seconds. Due activation runs at the end of a still-live,
+  enabled, owner-confined task turn at or after the deadline, after normal control and
+  result processing, and never on a separate thread; the shared wait boundary limits
+  sleep to the activation deadline, and a task busy in a long synchronous call activates
+  at the end of its next completed turn. The task drive-owner thread is responsible for
+  native updates. Later updates do not redraw or postpone the deadline. Activation uses
+  the latest requested title even when no further update arrives. The activation and
+  every later macOS title change are synchronous LaunchServices calls that hold the
+  interpreter lock for their duration; this stall is accepted and is moved out of task
+  startup, not removed. A process that exits before its deadline neither registers nor
+  waits; normal interpreter shutdown may be delayed by an activation already in
+  progress. Forced termination can interrupt the process without completing the native
+  call. GUI failure does not fail a task or trigger repeated attempts. Detected
+  process-title failures are exposed through state.process_title_error and do not fail
+  task execution; failures the library swallows are not detected. If another caller has
+  already initialized stock setproctitle, Weft retains it as the sole writer and does
+  not schedule a second activation; Weft cannot retroactively defer registration
+  performed by another caller. Linux and Windows use setproctitle for initial and
+  subsequent updates with no deferred phase. The shared module owns both phases, with a
+  delayed transition only where the backend changes. Other supported platforms retain
+  their existing direct best-effort native behavior.
 - streaming markers in `weft.state.streaming` reflect live stream ownership for
   result/status surfaces
 - streaming markers are runtime-only ownership hints and must clear before a
@@ -599,6 +631,12 @@ policy; specialized policies live on `Manager`, `Consumer`, `PipelineTask`,
 and `Monitor`. `BaseTask._build_tid_mapping_payload`,
 `BaseTask._tid_mapping_equivalent`, and `BaseTask._report_state_change` own the
 task mapping liveness hint and terminal publication path.
+`weft/core/tasks/base.py::BaseTask._update_process_title` owns formatting and
+records returned title errors; `weft/core/tasks/base.py::BaseTask.process_once` and
+`weft/core/tasks/base.py::BaseTask.wait_for_activity` own the live-turn activation and deadline-bound
+wait. `weft/core/process_title.py` owns serialized process-local native writes,
+memoization, and backend handoff; `weft/core/deferred.py` owns deferred backend
+accessors. See the [implementation plan](../plans/2026-09-10-deferred-macos-process-title-plan.md).
 
 Why this boundary matters:
 

@@ -292,7 +292,9 @@ from weft.core.taskspec import TaskSpec
 - Imports at the top of the module. Function-level imports are allowed only
   to break a real import cycle or to guard an optional dependency, and must
   carry a brief comment naming that reason; plain stdlib late imports are
-  not allowed.
+  not allowed. House style is to put all deferred imports into a deferred.py file
+  with a dedicated accessor function unless doing so would cause a significant
+  readability or performance issue.
 - Group: stdlib → third-party → local, alphabetized within groups
 - Use `collections.abc` for abstract types (Callable, Iterator, Mapping, Sequence)
 - Use `Path` from pathlib, never `os.path`

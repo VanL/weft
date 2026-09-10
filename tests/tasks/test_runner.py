@@ -2553,7 +2553,7 @@ def test_task_runner_materializes_docker_container_profile_at_plugin_boundary(
 
 
 def _build_function_host_runner(
-    timeout: float,
+    timeout: float | None,
     *,
     function_target: str = "tests.tasks.sample_targets:echo_payload",
     args: list[Any] | None = None,
@@ -2696,10 +2696,11 @@ def test_function_worker_propagates_non_exception_failure_identity(
     assert caught.value is fatal
 
 
+@pytest.mark.timeout(30)
 def test_function_host_start_callback_failures_are_logged_without_replacing_outcome(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    runner = _build_function_host_runner(timeout=5.0)
+    runner = _build_function_host_runner(timeout=None)
 
     def fail_callback(_value: object) -> None:
         raise RuntimeError("contains secret")
@@ -3837,8 +3838,11 @@ def test_one_shot_leaked_sender_reaches_bounded_drain_expiry() -> None:
     process = ctx.Process(target=_terminal_exit_without_send, args=(sender,))
     runner = _build_function_host_runner(timeout=5.0)
     process.start()
-    started = time.monotonic()
     try:
+        # [EXEC.7] bounds draining after producer exit, not interpreter startup.
+        process.join(timeout=5.0)
+        assert process.exitcode == 73
+        started = time.monotonic()
         outcome = runner._run_one_shot_terminal_handoff(
             process,
             receiver,

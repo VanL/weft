@@ -504,7 +504,7 @@ class WeftTestHarness:
             log_queue = Queue(
                 WEFT_GLOBAL_LOG_QUEUE,
                 db_path=self.context.broker_target,
-                persistent=False,
+                persistent=True,
                 config=self.context.broker_config,
             )
             deadline = time.time() + timeout
@@ -540,7 +540,10 @@ class WeftTestHarness:
                             "task_signal_stop",
                             "task_signal_kill",
                         }:
-                            raise RuntimeError(f"Task {tid} reported {event}")
+                            raise RuntimeError(
+                                f"Task {tid} reported {event}\n"
+                                f"Terminal event: {json.dumps(data, sort_keys=True)}"
+                            )
                     # SimpleBroker has no blocking read-with-timeout API.
                     # Polling iter_queue_json_entries is the only mechanism
                     # short of a QueueWatcher (which polls internally). 50 ms
@@ -568,6 +571,12 @@ class WeftTestHarness:
                 f"Timed out waiting for task {tid}\n"
                 f"{self.dump_completion_timeout_state(tid)}"
             )
+        except RuntimeError as failure:
+            # The queue/iterator has unwound before collecting more broker data.
+            # Yield-fixture teardown receives no test exception, so save here.
+            self.register_tid(tid)
+            self._attach_failure_diagnostics(failure)
+            raise
         finally:
             self._completion_wait_stats.append(
                 {
@@ -591,7 +600,7 @@ class WeftTestHarness:
             log_queue = Queue(
                 WEFT_GLOBAL_LOG_QUEUE,
                 db_path=self.context.broker_target,
-                persistent=False,
+                persistent=True,
                 config=self.context.broker_config,
             )
             deadline = time.time() + timeout
@@ -1182,7 +1191,7 @@ class WeftTestHarness:
         queue = Queue(
             WEFT_SERVICES_REGISTRY_QUEUE,
             db_path=self.context.broker_target,
-            persistent=False,
+            persistent=True,
             config=self.context.broker_config,
         )
         try:
@@ -1347,7 +1356,10 @@ class WeftTestHarness:
         gc.collect()
         target_path = self._normalized_database_path(self.context.database_path)
         for obj in gc.get_objects():
-            if not isinstance(obj, Queue):
+            # isinstance can evaluate a lazy proxy's __class__ and initialize
+            # unrelated application state. Only concrete Queue allocations own
+            # handles here; their subclasses must still be closed.
+            if not issubclass(type(obj), Queue):
                 continue
             if not self._queue_targets_database(obj, target_path):
                 continue

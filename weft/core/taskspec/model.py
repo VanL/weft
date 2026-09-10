@@ -1050,6 +1050,7 @@ class StateSection(BaseModel):
     # OPTIONAL fields
     pid: int | None = None
     error: str | None = None
+    process_title_error: str | None = None
     time: float | None = Field(None, ge=0, description="Runtime in seconds")
     memory: float | None = Field(None, ge=0, description="Memory usage in MB")
     cpu: int | None = Field(None, ge=0, le=100, description="CPU percentage")
@@ -1615,6 +1616,7 @@ class TaskSpec(BaseModel):
             "memory_mb": self.state.memory,
             "cpu_percent": self.state.cpu,
             "error": self.state.error,
+            "process_title_error": self.state.process_title_error,
             "metadata": self.metadata,
         }
 

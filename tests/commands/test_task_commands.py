@@ -11,6 +11,7 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
@@ -43,7 +44,6 @@ from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
     iter_queue_json_entries,
-    kill_process_tree,
     pid_is_live,
     process_create_time,
     tid_short_form,
@@ -859,13 +859,15 @@ def _runtime_handle(
     }
 
 
-def _make_taskspec(tid: str) -> TaskSpec:
+def _make_taskspec(
+    tid: str, *, function_target: str = "tests.tasks.sample_targets:simulate_work"
+) -> TaskSpec:
     return TaskSpec(
         tid=tid,
         name="task-func",
         spec=SpecSection(
             type="function",
-            function_target="tests.tasks.sample_targets:simulate_work",
+            function_target=function_target,
         ),
         io=IOSection(
             inputs={"inbox": f"T{tid}.inbox"},
@@ -1373,23 +1375,30 @@ def test_control_convergence_does_not_accept_kill_ack_or_wrong_terminal() -> Non
     assert wrong_terminal.action == "escalate_runner"
 
 
-def _wait_for_registered_worker_pid(ctx, tid: str, timeout: float = 15.0) -> int | None:
-    deadline = time.time() + timeout
+def _wait_for_registered_worker_pid(
+    ctx, tid: str, timeout: float = 15.0, *, ready_path: Path
+) -> int | None:
+    deadline = time.monotonic() + timeout
     mapping_queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-    while time.time() < deadline:
-        for payload, _timestamp in iter_queue_json_entries(mapping_queue):
-            if payload.get("full") != tid:
-                continue
-            runtime_handle = payload.get("runtime_handle")
-            if isinstance(runtime_handle, dict):
-                try:
-                    handle = RunnerHandle.from_dict(runtime_handle)
-                except (TypeError, ValueError):
-                    continue
-                for pid in handle.scoped_host_pids():
-                    return pid
-        time.sleep(0.05)
-    return None
+    try:
+        while time.monotonic() < deadline:
+            ready_pid = ready_path.read_text().strip() if ready_path.exists() else ""
+            if ready_pid:
+                for payload, _timestamp in iter_queue_json_entries(mapping_queue):
+                    if payload.get("full") != tid:
+                        continue
+                    runtime_handle = payload.get("runtime_handle")
+                    if isinstance(runtime_handle, dict):
+                        try:
+                            handle = RunnerHandle.from_dict(runtime_handle)
+                        except (TypeError, ValueError):
+                            continue
+                        if int(ready_pid) in handle.scoped_host_pids():
+                            return int(ready_pid)
+            time.sleep(0.05)
+        return None
+    finally:
+        mapping_queue.close()
 
 
 def _wait_for_process_exit(
@@ -1410,34 +1419,124 @@ def _wait_for_process_exit(
     return False
 
 
-def _launch_running_task(tmp_path) -> tuple[TaskSpec, BaseProcess, int]:
+def _launch_running_task(
+    tmp_path: Path,
+) -> tuple[TaskSpec, BaseProcess, psutil.Process]:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    spec = _make_taskspec(tid)
+    ready = root / f"{tid}.ready"
+    release = root / f"{tid}.release"
+    spec = _make_taskspec(
+        tid,
+        function_target="tests.tasks.sample_targets:signal_ready_and_wait_for_release",
+    )
     process = launch_task_process(
         Consumer,
         ctx.broker_target,
         spec,
         config=ctx.config,
     )
-    inbox = ctx.queue(spec.io.inputs["inbox"], persistent=True)
-    inbox.write(json.dumps({"kwargs": {"duration": 5.0}}))
-    worker_pid = _wait_for_registered_worker_pid(ctx, spec.tid)
-    assert worker_pid is not None
-    return spec, process, worker_pid
+    handed_off = False
+    try:
+        inbox = ctx.queue(spec.io.inputs["inbox"], persistent=True)
+        try:
+            inbox.write(json.dumps({"args": [str(ready), str(release)]}))
+        finally:
+            inbox.close()
+        worker_pid = _wait_for_registered_worker_pid(ctx, spec.tid, ready_path=ready)
+        assert worker_pid is not None, (
+            f"worker did not become ready: tid={tid}, pid={process.pid}, "
+            f"exitcode={process.exitcode}, target_ready={ready.exists()}"
+        )
+        worker = psutil.Process(worker_pid)
+        assert worker.is_running() and pid_is_live(worker.pid)
+        handed_off = True
+        return spec, process, worker
+    finally:
+        if not handed_off:
+            release.touch()
+            _cleanup_running_task(process, None)
+
+
+def _cleanup_running_task(process: BaseProcess, worker: psutil.Process | None) -> None:
+    """Reap the owned Consumer and only retained worker identities."""
+    descendants = {} if worker is None else {worker.pid: worker}
+    if worker is not None and worker.is_running():
+        try:
+            descendants.update(
+                (child.pid, child) for child in worker.children(recursive=True)
+            )
+        except psutil.NoSuchProcess:
+            pass
+    if process.is_alive():
+        try:
+            descendants.update(
+                (child.pid, child)
+                for child in psutil.Process(process.pid).children(recursive=True)
+            )
+        except psutil.NoSuchProcess:
+            pass
+        process.kill()
+    # multiprocessing must reap its own child; psutil.wait would consume waitpid.
+    process.join(timeout=5.0)
+    for descendant in descendants.values():
+        try:
+            descendant.kill()
+        except psutil.NoSuchProcess:
+            pass
+    _gone, alive = psutil.wait_procs(list(descendants.values()), timeout=5.0)
+    assert not process.is_alive(), "failed to reap owned Consumer"
+    assert all(
+        not descendant.is_running() or not pid_is_live(descendant.pid)
+        for descendant in alive
+    ), "failed to reap owned worker descendants"
+
+
+@pytest.mark.parametrize("after_worker_ready", [False, True])
+def test_running_task_setup_failure_reaps_launched_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_worker_ready: bool
+) -> None:
+    """Failed readiness still leaves the helper responsible for its child."""
+    processes: list[BaseProcess] = []
+    workers: list[psutil.Process] = []
+    launch = launch_task_process
+    wait_for_worker = _wait_for_registered_worker_pid
+
+    def capture_launch(*args: Any, **kwargs: Any) -> BaseProcess:
+        process = launch(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def fail_readiness(*args: Any, **kwargs: Any) -> None:
+        if after_worker_ready:
+            worker_pid = wait_for_worker(*args, **kwargs)
+            assert worker_pid is not None
+            workers.append(psutil.Process(worker_pid))
+        raise RuntimeError("injected readiness failure")
+
+    monkeypatch.setitem(globals(), "launch_task_process", capture_launch)
+    monkeypatch.setitem(globals(), "_wait_for_registered_worker_pid", fail_readiness)
+    try:
+        with pytest.raises(RuntimeError, match="injected readiness failure"):
+            _launch_running_task(tmp_path)
+        assert processes
+        assert not processes[0].is_alive(), "setup abandoned its live Consumer"
+        assert all(not worker.is_running() for worker in workers)
+    finally:
+        for process in processes:
+            _cleanup_running_task(process, workers[0] if workers else None)
 
 
 def test_stop_tasks_terminates_active_process_tree(tmp_path) -> None:
-    spec, process, worker_pid = _launch_running_task(tmp_path)
+    spec, process, worker = _launch_running_task(tmp_path)
     try:
         stopped = task_cmd.stop_tasks([spec.tid], context_path=tmp_path)
         assert stopped == 1
         assert _wait_for_process_exit(process.pid, process=process)
-        assert _wait_for_process_exit(worker_pid)
+        assert _wait_for_process_exit(worker.pid)
     finally:
-        kill_process_tree(process.pid)
-        kill_process_tree(worker_pid)
+        _cleanup_running_task(process, worker)
 
 
 def test_await_control_surface_uses_queue_monitor(
@@ -1629,16 +1728,16 @@ def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(
     )
     assert Counter(created_monitors[0].queue_persistence) == Counter(
         [
-            (WEFT_TID_MAPPINGS_QUEUE, False),
-            ("weft.log.tasks", False),
-            (initial_ctrl_out, False),
+            (WEFT_TID_MAPPINGS_QUEUE, True),
+            ("weft.log.tasks", True),
+            (initial_ctrl_out, True),
         ]
     )
     assert Counter(created_monitors[1].queue_persistence) == Counter(
         [
-            (WEFT_TID_MAPPINGS_QUEUE, False),
-            ("weft.log.tasks", False),
-            (late_ctrl_out, False),
+            (WEFT_TID_MAPPINGS_QUEUE, True),
+            ("weft.log.tasks", True),
+            (late_ctrl_out, True),
             (late_pipeline_status, True),
         ]
     )
@@ -1929,15 +2028,14 @@ def test_await_control_surface_accepts_terminal_ctrl_out_without_log_replay(
 
 
 def test_kill_tasks_terminates_active_process_tree(tmp_path) -> None:
-    spec, process, worker_pid = _launch_running_task(tmp_path)
+    spec, process, worker = _launch_running_task(tmp_path)
     try:
         killed = task_cmd.kill_tasks([spec.tid], context_path=tmp_path)
         assert killed >= 1
         assert _wait_for_process_exit(process.pid, process=process)
-        assert _wait_for_process_exit(worker_pid)
+        assert _wait_for_process_exit(worker.pid)
     finally:
-        kill_process_tree(process.pid)
-        kill_process_tree(worker_pid)
+        _cleanup_running_task(process, worker)
 
 
 def test_stop_tasks_uses_runner_handle_when_available(
@@ -2465,7 +2563,7 @@ def test_force_kill_task_processes_kills_pid_with_matching_create_time(
     any host pids in the mapping regardless of whether a runner-plugin kill
     already ran, so it must independently guard with `pid_matches_create_time`.
     """
-    spec, process, worker_pid = _launch_running_task(tmp_path)
+    spec, process, worker = _launch_running_task(tmp_path)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     try:
@@ -2486,10 +2584,7 @@ def test_force_kill_task_processes_kills_pid_with_matching_create_time(
         assert task_killed is True
         assert all(_wait_for_process_exit(pid) for pid in recorded)
     finally:
-        kill_process_tree(process.pid)
-        kill_process_tree(worker_pid)
-        for pid in recorded if "recorded" in locals() else ():
-            kill_process_tree(pid)
+        _cleanup_running_task(process, worker)
 
 
 def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
@@ -2497,7 +2592,7 @@ def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
     the command refuses to signal that PID and flows into the same outcome a
     dead task takes today, instead of killing a PID that may have been
     reused by an unrelated process (Spec: [CC-3.2])."""
-    spec, process, worker_pid = _launch_running_task(tmp_path)
+    spec, process, worker = _launch_running_task(tmp_path)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     try:
@@ -2523,10 +2618,7 @@ def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
         # The real mapped process was never touched, so it is still alive.
         assert pid_is_live(target_pid)
     finally:
-        kill_process_tree(process.pid)
-        kill_process_tree(worker_pid)
-        if "target_pid" in locals():
-            kill_process_tree(target_pid)
+        _cleanup_running_task(process, worker)
 
 
 def test_force_kill_task_processes_records_attempt_while_verified_pid_lingers(
@@ -2566,7 +2658,7 @@ def test_force_kill_task_processes_refuses_unknown_create_time(
     tmp_path,
 ) -> None:
     """A live PID without an exact recorded identity grants no control [CC-3.2]."""
-    spec, process, worker_pid = _launch_running_task(tmp_path)
+    spec, process, worker = _launch_running_task(tmp_path)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     try:
@@ -2595,17 +2687,14 @@ def test_force_kill_task_processes_refuses_unknown_create_time(
         assert task_killed is False
         assert task_cmd._pid_exists(target_pid)
     finally:
-        kill_process_tree(process.pid)
-        kill_process_tree(worker_pid)
-        if "target_pid" in locals():
-            kill_process_tree(target_pid)
+        _cleanup_running_task(process, worker)
 
 
 def test_stop_and_kill_via_fallback_guard_is_defensive_and_unreachable_today(
     tmp_path,
 ) -> None:
     """Fallback controls a live exact host identity through its plugin [CC-3.2]."""
-    spec, process, worker_pid = _launch_running_task(tmp_path)
+    spec, process, worker = _launch_running_task(tmp_path)
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     try:
@@ -2622,7 +2711,4 @@ def test_stop_and_kill_via_fallback_guard_is_defensive_and_unreachable_today(
         assert stopped is True
         assert _wait_for_process_exit(target_pid)
     finally:
-        kill_process_tree(process.pid)
-        kill_process_tree(worker_pid)
-        if "target_pid" in locals():
-            kill_process_tree(target_pid)
+        _cleanup_running_task(process, worker)

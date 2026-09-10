@@ -858,6 +858,42 @@ MANAGER_LAUNCHER_POLL_INTERVAL: Final[float] = 0.05
 DEFAULT_REPORTING_INTERVAL: Final = "transition"
 """Default reporting interval. Either 'poll' or 'transition'."""
 
+PROCESS_TITLE_CONTEXT_LENGTH: Final[int] = 8
+PROCESS_TITLE_NAME_LENGTH: Final[int] = 20
+PROCESS_TITLE_DETAILS_LENGTH: Final[int] = 15
+PROCESS_TITLE_ONLY_STATUSES: Final[frozenset[str]] = frozenset(
+    ("init", "paused", "draining", "stopping")
+)
+"""Title statuses with no lifecycle counterpart: construction, PAUSE control,
+and manager shutdown phases. Define a new title status here before using it."""
+PROCESS_TITLE_STATUSES: Final[frozenset[str]] = (
+    TASK_LIFECYCLE_STATUS_VALUES | PROCESS_TITLE_ONLY_STATUSES
+)
+"""Every status a process title may carry."""
+PROCESS_TITLE_STATUS_LENGTH: Final[int] = max(map(len, PROCESS_TITLE_STATUSES))
+"""Longest defined title status; a longer definition widens the handoff capacity."""
+PROCESS_TITLE_MAX_LENGTH: Final[int] = (
+    len("weft-")
+    + PROCESS_TITLE_CONTEXT_LENGTH
+    + 1
+    + TASKSPEC_TID_SHORT_LENGTH
+    + 1
+    + PROCESS_TITLE_NAME_LENGTH
+    + 1
+    + PROCESS_TITLE_STATUS_LENGTH
+    + 1
+    + PROCESS_TITLE_DETAILS_LENGTH
+)
+PROCESS_TITLE_NUL_RESERVATION: Final[int] = 1
+"""Stock setproctitle 1.3.7 spt_status.c reserves NUL within the discovered span."""
+PROCESS_TITLE_HANDOFF_LENGTH: Final[int] = (
+    PROCESS_TITLE_MAX_LENGTH + PROCESS_TITLE_NUL_RESERVATION
+)
+PROCESS_TITLE_GUI_DELAY: Final[float] = 1.0
+"""Minimum macOS GUI registration age, measured from initial title setup."""
+PROCESS_TITLE_GUI_JITTER: Final[float] = 2.0
+"""Uniform registration spread after the minimum age; avoids startup bursts."""
+
 DEFAULT_ENABLE_PROCESS_TITLE: Final[bool] = True
 """Default for enabling OS process title updates for observability."""
 
@@ -1230,7 +1266,7 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _signal_stop_requested
     _serve_log_config_emitted _serve_log_last_emit_ns _serve_log_last_state
     _service_lane_work_items _service_worker_lock _service_worker_registrations
-    _setproctitle_module _spilled_output_dirs _start_pending _stop_event
+    _spilled_output_dirs _start_pending _stop_event
     _stop_lock _strategy _strategy_started _streaming_session_info
     _streaming_session_message_id _task_context_cache _task_lifecycle
     _task_lifecycle_lock _task_observer _task_pid _task_pid_create_time
@@ -1268,7 +1304,7 @@ _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     _pong_extension_provider _queue_cache
     _queue_iterator _queue_obj _queues _resource_monitor _run_thread _running_event
     _runtime_handle _service_lane_work_items _service_worker_lock
-    _service_worker_registrations _setproctitle_module _signal_stop_requested
+    _service_worker_registrations _signal_stop_requested
     _start_pending
     _stop_event _stop_lock _strategy _strategy_started _streaming_session_info
     _streaming_session_message_id _task_context_cache _task_lifecycle

@@ -24,7 +24,6 @@ import re
 import shutil
 import signal
 import socket
-import sys
 import tempfile
 import threading
 import time
@@ -37,6 +36,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar, Literal, cast, final
 
+import weft.core.process_title
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, StopWatching
 from weft._constants import (
@@ -54,6 +54,9 @@ from weft._constants import (
     PARENT_LOSS_WAKE_INTERVAL_CEILING,
     PIPELINE_OWNER_METADATA_KEY,
     PONG_EXTENSION_KEY,
+    PROCESS_TITLE_CONTEXT_LENGTH,
+    PROCESS_TITLE_DETAILS_LENGTH,
+    PROCESS_TITLE_NAME_LENGTH,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
@@ -347,18 +350,14 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._streaming_session_info: dict[str, Any] | None = None
         self._streaming_session_message_id: int | None = None
 
-        # Cache for optional setproctitle module so we avoid repeated imports.
-        self._setproctitle_module: Any | None = None
-
         # Whether the terminal mapping snapshot has been durably appended
         # ([OBS.6a]): the terminal row is the task's last event, so its
         # publication retries across terminal reports until one write
         # succeeds.
         self._terminal_tid_mapping_published = False
 
-        self.enable_process_title = (
-            bool(getattr(taskspec.spec, "enable_process_title", True))
-            and self._check_setproctitle()
+        self.enable_process_title = bool(
+            getattr(taskspec.spec, "enable_process_title", True)
         )
         if self.enable_process_title:
             self._update_process_title("init")
@@ -1314,6 +1313,12 @@ class BaseTask(MultiQueueWatcher, ABC):
                 self._process_stopping_reactor_turn()
             else:
                 self._process_reactor_turn()
+            if (
+                self.enable_process_title
+                and not self.should_stop
+                and self.taskspec.state.status not in TERMINAL_TASK_STATUSES
+            ):
+                self._record_process_title_error(weft.core.process_title.tick())
         finally:
             finalize_manual_turn = False
             with self._task_lifecycle_lock:
@@ -1376,10 +1381,9 @@ class BaseTask(MultiQueueWatcher, ABC):
     def wait_for_activity(self, timeout: float | None) -> None:
         """Wait for queue activity or local worker-result activity.
 
-        ``MultiQueueWatcher`` remains the broker wait owner. This wrapper only
-        adds the local reactor wake rule: if worker lanes are active, bound the
-        wait so completed worker results cannot sit behind an unbounded queue
-        wait.
+        ``MultiQueueWatcher`` remains the broker wait owner. Bound the wait for
+        worker results and any pending GUI title activation so both can be
+        handled on the next drive turn.
 
         Spec:
         - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.2.1], [CC-2.5]
@@ -1392,6 +1396,18 @@ class BaseTask(MultiQueueWatcher, ABC):
                 raise RuntimeError(f"Task {self.tid} reactor wait is reentrant")
             self._wait_active = True
         try:
+            if (
+                self.enable_process_title
+                and not self.should_stop
+                and self.taskspec.state.status not in TERMINAL_TASK_STATUSES
+            ):
+                title_timeout = weft.core.process_title.seconds_until_due()
+                if title_timeout is not None:
+                    timeout = (
+                        title_timeout
+                        if timeout is None
+                        else min(timeout, title_timeout)
+                    )
             self._wait_for_reactor_activity(timeout)
         finally:
             finalize_standalone_wait = False
@@ -1718,6 +1734,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         payload: dict[str, Any] = {
             "task_status": self.taskspec.state.status,
+            "process_title_error": self.taskspec.state.process_title_error,
             "paused": self._paused,
             "should_stop": self.should_stop,
             "runner": self._current_runner_name(),
@@ -2141,67 +2158,40 @@ class BaseTask(MultiQueueWatcher, ABC):
             except Exception:  # pragma: no cover - extension hook must stay best effort
                 logger.debug("Resource monitor callback failed", exc_info=True)
 
-    _process_title_warning_emitted = False
+    def _record_process_title_error(self, error: str | None) -> None:
+        """Retain a nonfatal title diagnostic without changing task outcome.
 
-    def _check_setproctitle(self) -> bool:
-        """Return True if setproctitle is available for process-title updates.
-
-        Spec: [CC-2.4]
+        Spec: [CC-2.4], [TS-1.4]
         """
-        try:
-            import setproctitle
-
-            self._setproctitle_module = setproctitle
-            return True
-        except ImportError:
-            self._setproctitle_module = None
-            if not BaseTask._process_title_warning_emitted:
-                logger.warning(
-                    "Process titles disabled: optional dependency 'setproctitle' not "
-                    "available for interpreter %s. Install setproctitle or set "
-                    "spec.enable_process_title = False to silence this message.",
-                    sys.executable,
-                )
-                BaseTask._process_title_warning_emitted = True
-            return False
+        if error is not None:
+            self.taskspec.state.process_title_error = error
+            logger.warning("Process title update failed: %s", error)
 
     def _update_process_title(self, status: str, details: str | None = None) -> None:
-        """Update the OS process title when supported by the environment.
+        """Apply the task title on its constructing or drive-owner thread.
+
+        Native updates from worker threads are omitted. Enabled lifecycle title
+        requests belong to the drive owner.
 
         Spec: [CC-2.4], [OBS.4], [OBS.7], [OBS.8]
         """
         if not self.enable_process_title:
             return
-
-        if self._setproctitle_module is None:
-            try:
-                import setproctitle
-
-                self._setproctitle_module = setproctitle
-            except ImportError:
-                self.enable_process_title = False
-                return
-
-        try:
-            detail_value = details
-            if (
-                detail_value is None
-                and self._activity is not None
-                and status not in TERMINAL_TASK_STATUSES
-                and self._activity != status
-            ):
-                detail_value = self._activity
-            title = self._format_process_title(status, detail_value)
-            assert self._setproctitle_module is not None  # typing guard
-            self._setproctitle_module.setproctitle(title)
-            setthreadtitle = getattr(self._setproctitle_module, "setthreadtitle", None)
-            if callable(setthreadtitle):
-                try:
-                    setthreadtitle(title)
-                except (AttributeError, OSError, RuntimeError):
-                    logger.debug("Failed to update thread title", exc_info=True)
-        except (AttributeError, OSError, RuntimeError):
-            logger.debug("Failed to update process title", exc_info=True)
+        owner = self._drive_owner_thread
+        if owner is not None and owner is not threading.current_thread():
+            return
+        detail_value = details
+        if (
+            detail_value is None
+            and self._activity is not None
+            and status not in TERMINAL_TASK_STATUSES
+            and self._activity != status
+        ):
+            detail_value = self._activity
+        title = self._format_process_title(status, detail_value)
+        self._record_process_title_error(
+            weft.core.process_title.set_process_title(title)
+        )
 
     def _sanitize_process_title_segment(
         self,
@@ -2240,13 +2230,13 @@ class BaseTask(MultiQueueWatcher, ABC):
             context_short = self._sanitize_process_title_segment(
                 context_path.name or context_path.stem,
                 fallback="proj",
-                max_length=8,
+                max_length=PROCESS_TITLE_CONTEXT_LENGTH,
             )
 
         safe_name = self._sanitize_process_title_segment(
             self.taskspec.name,
             fallback="task",
-            max_length=20,
+            max_length=PROCESS_TITLE_NAME_LENGTH,
         )
         safe_status = self._sanitize_process_title_segment(status, fallback="unknown")
         parts = [
@@ -2257,7 +2247,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         if details:
             safe_details = self._sanitize_process_title_segment(
                 details,
-                max_length=15,
+                max_length=PROCESS_TITLE_DETAILS_LENGTH,
             )
             if safe_details:
                 parts.append(safe_details)

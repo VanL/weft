@@ -1,4 +1,7 @@
-"""Broker-backed integration tests for the Django package."""
+"""Broker-backed integration tests for the Django package.
+
+Fixture ownership: docs/specifications/08-Testing_Strategy.md [TS-0].
+"""
 # ruff: noqa: E402
 
 from __future__ import annotations
@@ -9,9 +12,9 @@ import io
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +23,18 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_ROOT = PROJECT_ROOT / "integrations" / "weft_django"
 FIXTURE_ROOT = PACKAGE_ROOT / "tests" / "fixture_project"
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="weft-django-tests-"))
 
 for path in (PROJECT_ROOT, PACKAGE_ROOT, FIXTURE_ROOT):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
+
+from tests.helpers.weft_harness import WeftTestHarness
+
+# Django captures these paths during setup. Allocate the owner now, but enter
+# it only in the module fixture so collection never patches process state.
+_HARNESS = WeftTestHarness()
+TEST_ROOT = _HARNESS.root
 
 pythonpath_parts = [str(PROJECT_ROOT), str(PACKAGE_ROOT), str(FIXTURE_ROOT)]
 existing_pythonpath = os.environ.get("PYTHONPATH")
@@ -33,9 +42,9 @@ if existing_pythonpath:
     pythonpath_parts.append(existing_pythonpath)
 os.environ["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "fixture_project.settings")
-os.environ.setdefault("WEFT_DJANGO_FIXTURE_BASE_DIR", str(TEST_ROOT))
-os.environ.setdefault("WEFT_DJANGO_FIXTURE_DB_PATH", str(TEST_ROOT / "django.sqlite3"))
-os.environ.setdefault("WEFT_DJANGO_FIXTURE_WEFT_CONTEXT", str(TEST_ROOT))
+os.environ["WEFT_DJANGO_FIXTURE_BASE_DIR"] = str(TEST_ROOT)
+os.environ["WEFT_DJANGO_FIXTURE_DB_PATH"] = str(TEST_ROOT / "django.sqlite3")
+os.environ["WEFT_DJANGO_FIXTURE_WEFT_CONTEXT"] = str(TEST_ROOT)
 
 import django
 
@@ -44,7 +53,7 @@ django.setup()
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import transaction
+from django.db import connections, transaction
 from django.test import Client, override_settings
 from fixture_project import authz as fixture_authz
 from fixture_project import request_id_provider
@@ -56,7 +65,7 @@ import weft_django.client as weft_django_client
 from weft._constants import SUBMIT_OVERRIDE_NAMES
 from weft.client import SpecNotFound
 from weft.commands.types import TaskTerminalSnapshot
-from weft.context import build_context
+from weft.context import WeftContext
 from weft.core.taskspec import TaskSpec
 from weft.core.taskspec.transport import validate_taskspec_payload
 from weft_django import (
@@ -79,14 +88,25 @@ from weft_django.registry import TaskRegistry, is_registered
 
 pytestmark = [pytest.mark.shared]
 
-_bootstrap_context = build_context(spec_context=TEST_ROOT)
-_bootstrap_queue = _bootstrap_context.queue("weft.test.bootstrap", persistent=False)
-try:
-    _bootstrap_queue.generate_timestamp()
-finally:
-    _bootstrap_queue.close()
+_bootstrap_context: WeftContext
 
-call_command("migrate", run_syncdb=True, verbosity=0)
+
+@pytest.fixture(scope="module", autouse=True)
+def _owned_runtime() -> Iterator[None]:
+    """Close Django connections and owned runtimes before removing their root."""
+    global _bootstrap_context
+    with _HARNESS:
+        try:
+            _bootstrap_context = _HARNESS.context
+            queue = _bootstrap_context.queue("weft.test.bootstrap", persistent=False)
+            try:
+                queue.generate_timestamp()
+            finally:
+                queue.close()
+            call_command("migrate", run_syncdb=True, verbosity=0)
+            yield
+        finally:
+            connections.close_all()
 
 
 @pytest.fixture(autouse=True)
@@ -901,7 +921,7 @@ def test_as_taskspec_for_call_rejects_invalid_values() -> None:
         ("description", "d", "d"),
         ("tags", ("a", "b"), ["a", "b"]),
         ("env", {"K": "v"}, {"DECLARED": "1", "K": "v"}),
-        ("working_dir", str(TEST_ROOT), str(TEST_ROOT)),
+        pytest.param("working_dir", str(TEST_ROOT), str(TEST_ROOT), id="working_dir"),
         ("stream_output", False, False),
         ("timeout", 5.0, 5.0),
         ("memory_mb", 512, 512),

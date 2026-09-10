@@ -935,7 +935,6 @@ class TaskMonitor(ServiceTask):
         worker._kill_requested = False
         worker._external_stop_handled = False
         worker.should_stop = False
-        worker._setproctitle_module = None
         worker._external_task_log_worker_total_emitted = 0
         worker._external_task_log_worker_total_blocked_deletions = 0
         worker._worker_result_queue = thread_queue.Queue(

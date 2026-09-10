@@ -1,6 +1,7 @@
 """Shared task event iteration helpers for CLI and Python clients.
 
 Spec references:
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/09-Implementation_Plan.md [IP-1.1]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5], [MF-6]
 - docs/specifications/10-CLI_Interface.md [CLI-1.2]
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from contextlib import ExitStack
 from dataclasses import asdict
 from typing import Any
 
@@ -235,12 +237,15 @@ def iter_task_events(
 
     normalized_tid = normalize_tid(tid)
     deadline = task_ops._deadline_from_timeout(timeout)
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    monitor = QueueChangeMonitor([log_queue], config=context.config)
-    last_timestamp: int | None = int(normalized_tid) - 1
-    terminal_seen = False
-
+    resources = ExitStack()
     try:
+        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+        resources.callback(log_queue.close)
+        monitor = QueueChangeMonitor([log_queue], config=context.config)
+        resources.callback(monitor.close)
+        last_timestamp: int | None = int(normalized_tid) - 1
+        terminal_seen = False
+
         while True:
             saw_event = False
             max_scanned_timestamp: int | None = None
@@ -281,8 +286,7 @@ def iter_task_events(
                 wait_timeout = 0.1 if remaining is None else min(0.1, remaining)
                 monitor.wait(wait_timeout)
     finally:
-        monitor.close()
-        log_queue.close()
+        resources.close()
 
 
 def follow_task_events(
@@ -398,66 +402,71 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
         yield snapshot_event
         snapshot_emitted = True
 
-    outbox_queue = context.queue(outbox_name, persistent=True)
-    ctrl_queue = context.queue(ctrl_out_name, persistent=False)
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    monitor = QueueChangeMonitor(
-        [outbox_queue, ctrl_queue, log_queue],
-        config=context.config,
-    )
+    resources = ExitStack()
+    try:
+        outbox_queue = context.queue(outbox_name, persistent=True)
+        resources.callback(outbox_queue.close)
+        ctrl_queue = context.queue(ctrl_out_name, persistent=True)
+        resources.callback(ctrl_queue.close)
+        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+        resources.callback(log_queue.close)
+        monitor = QueueChangeMonitor(
+            [outbox_queue, ctrl_queue, log_queue],
+            config=context.config,
+        )
+        resources.callback(monitor.close)
 
-    last_log_timestamp = (
-        materialized.log_last_timestamp
-        if materialized is not None
-        else int(normalized_tid) - 1
-    )
-    last_outbox_timestamp: int | None = None
-    last_ctrl_timestamp: int | None = None
-    terminal_payload: dict[str, Any] | None = (
-        materialized.terminal_event_payload if materialized is not None else None
-    )
-    terminal_observed_monotonic: float | None = (
-        time.monotonic() if terminal_payload is not None else None
-    )
-    terminal_timestamp: int | None = (
-        materialized.terminal_event_timestamp if materialized is not None else None
-    )
-    if (
-        terminal_payload is None
-        and materialized is not None
-        and materialized.terminal_status is not None
-    ):
-        terminal_payload = {
-            "tid": normalized_tid,
-            "status": materialized.terminal_status,
-        }
-        if materialized.terminal_error_message is not None:
-            terminal_payload["error"] = materialized.terminal_error_message
-        terminal_timestamp = materialized.log_last_timestamp
-    terminal_state_emitted = False
-    if terminal_payload is None and snapshot_event is not None:
-        snapshot_status = snapshot_event.payload.get("status")
-        if snapshot_status in TERMINAL_TASK_STATUSES:
+        last_log_timestamp = (
+            materialized.log_last_timestamp
+            if materialized is not None
+            else int(normalized_tid) - 1
+        )
+        last_outbox_timestamp: int | None = None
+        last_ctrl_timestamp: int | None = None
+        terminal_payload: dict[str, Any] | None = (
+            materialized.terminal_event_payload if materialized is not None else None
+        )
+        terminal_observed_monotonic: float | None = (
+            time.monotonic() if terminal_payload is not None else None
+        )
+        terminal_timestamp: int | None = (
+            materialized.terminal_event_timestamp if materialized is not None else None
+        )
+        if (
+            terminal_payload is None
+            and materialized is not None
+            and materialized.terminal_status is not None
+        ):
             terminal_payload = {
                 "tid": normalized_tid,
-                "status": snapshot_status,
+                "status": materialized.terminal_status,
             }
-            # Carry the snapshot's error text so a startup verdict that is only
-            # the manager wrapper-lost failsafe stays replaceable by a later
-            # task-authored terminal envelope [MF-5].
-            snapshot_error = snapshot_event.payload.get("error")
-            if isinstance(snapshot_error, str) and snapshot_error:
-                terminal_payload["error"] = snapshot_error
-            terminal_timestamp = snapshot_event.timestamp
-            terminal_observed_monotonic = time.monotonic()
+            if materialized.terminal_error_message is not None:
+                terminal_payload["error"] = materialized.terminal_error_message
+            terminal_timestamp = materialized.log_last_timestamp
+        terminal_state_emitted = False
+        if terminal_payload is None and snapshot_event is not None:
+            snapshot_status = snapshot_event.payload.get("status")
+            if snapshot_status in TERMINAL_TASK_STATUSES:
+                terminal_payload = {
+                    "tid": normalized_tid,
+                    "status": snapshot_status,
+                }
+                # Carry the snapshot's error text so a startup verdict that is only
+                # the manager wrapper-lost failsafe stays replaceable by a later
+                # task-authored terminal envelope [MF-5].
+                snapshot_error = snapshot_event.payload.get("error")
+                if isinstance(snapshot_error, str) and snapshot_error:
+                    terminal_payload["error"] = snapshot_error
+                terminal_timestamp = snapshot_event.timestamp
+                terminal_observed_monotonic = time.monotonic()
 
-    # Terminal proof can land on the task-local queues after the startup
-    # snapshot was taken. Re-run the shared classifier whenever those queues
-    # change so realtime observation agrees with status and result [MF-5].
-    evidence_scan_pending = True
-    outbox_stream_frames_seen = False
+        # Terminal proof can land on the task-local queues after the startup
+        # snapshot was taken. Re-run the shared classifier whenever those queues
+        # change so realtime observation agrees with status and result [MF-5].
+        evidence_scan_pending = True
+        outbox_stream_frames_seen = False
 
-    try:
         while not _is_cancelled(cancel_event):
             saw_event = False
 
@@ -678,7 +687,4 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 if monitor.wait(wait_timeout):
                     evidence_scan_pending = True
     finally:
-        monitor.close()
-        outbox_queue.close()
-        ctrl_queue.close()
-        log_queue.close()
+        resources.close()

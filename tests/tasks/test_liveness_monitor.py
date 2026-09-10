@@ -100,7 +100,8 @@ def test_full_reconcile_does_not_skip_rows_while_retiring_paginated_history(
     workdir: Path,
 ) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    # This test retains one handle while seeding and inspecting 1,200 rows.
+    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=True)
     target_tid = str(time.time_ns())
     message_ids = [
         queue.write(json.dumps(_mapping(target_tid))) for _index in range(1_200)

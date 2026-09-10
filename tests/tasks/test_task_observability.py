@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
-import types
+from typing import get_args
 
 import pytest
 
@@ -16,11 +17,21 @@ from tests.helpers.reactor_driver import drive_until
 from tests.tasks import sample_targets as targets  # noqa: F401
 from weft import helpers as weft_helpers
 from weft._constants import (
+    CONTROL_PAUSE,
     CONTROL_STOP,
+    PROCESS_TITLE_CONTEXT_LENGTH,
+    PROCESS_TITLE_DETAILS_LENGTH,
+    PROCESS_TITLE_HANDOFF_LENGTH,
+    PROCESS_TITLE_MAX_LENGTH,
+    PROCESS_TITLE_NAME_LENGTH,
+    PROCESS_TITLE_STATUSES,
+    TASK_LIFECYCLE_STATUS_VALUES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft.core import process_title
 from weft.core.control_messages import encode_control_message
+from weft.core.manager import Manager
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import tid_short_form
@@ -464,12 +475,11 @@ def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
     assert terminal_envelopes(ctrl_out, tid=unique_tid, source="task")
 
 
-def test_process_titles_update(task_factory, unique_tid) -> None:
+def test_process_titles_update(task_factory, unique_tid, monkeypatch) -> None:
     calls: list[str] = []
-    fake_module = types.SimpleNamespace(setproctitle=lambda title: calls.append(title))
+    monkeypatch.setattr(process_title, "set_process_title", calls.append)
     spec = build_function_spec(unique_tid, enable_title=False)
     task = task_factory(spec)
-    task._setproctitle_module = fake_module
     task.enable_process_title = True
     task._update_process_title("init")
     task._update_process_title("running")
@@ -483,13 +493,12 @@ def test_process_titles_update(task_factory, unique_tid) -> None:
 
 
 def test_process_title_keeps_status_token_and_uses_activity_detail(
-    task_factory, unique_tid
+    task_factory, unique_tid, monkeypatch
 ) -> None:
     calls: list[str] = []
-    fake_module = types.SimpleNamespace(setproctitle=lambda title: calls.append(title))
+    monkeypatch.setattr(process_title, "set_process_title", calls.append)
     spec = build_function_spec(unique_tid, enable_title=False)
     task = task_factory(spec)
-    task._setproctitle_module = fake_module
     task.enable_process_title = True
     task.taskspec.mark_started(pid=task._task_pid)
     task.taskspec.mark_running(pid=task._task_pid)
@@ -501,10 +510,10 @@ def test_process_title_keeps_status_token_and_uses_activity_detail(
 
 
 def test_process_title_sanitizes_dynamic_segments(
-    task_factory, unique_tid: str
+    task_factory, unique_tid: str, monkeypatch
 ) -> None:
     calls: list[str] = []
-    fake_module = types.SimpleNamespace(setproctitle=lambda title: calls.append(title))
+    monkeypatch.setattr(process_title, "set_process_title", calls.append)
     spec = build_function_spec(
         unique_tid,
         enable_title=False,
@@ -512,7 +521,6 @@ def test_process_title_sanitizes_dynamic_segments(
         context_path="/tmp/ctx;rm -rf",
     )
     task = task_factory(spec)
-    task._setproctitle_module = fake_module
     task.enable_process_title = True
 
     task._update_process_title(
@@ -820,3 +828,204 @@ def test_state_logging_respects_redaction(
 
     monkeypatch.setenv("WEFT_REDACT_TASKSPEC_FIELDS", "")
     weft_helpers.reload_config()
+
+
+def test_title_error_is_nonfatal_and_preserved(task_factory, unique_tid, monkeypatch):
+    monkeypatch.setattr(
+        process_title, "set_process_title", lambda title: "title unavailable"
+    )
+    task = task_factory(build_function_spec(unique_tid))
+    assert task.taskspec.state.process_title_error == "title unavailable"
+    assert task.taskspec.state.error is None
+    assert task.taskspec.state.status == "created"
+    assert task._control_snapshot_fields()["process_title_error"] == "title unavailable"
+    monkeypatch.setattr(process_title, "set_process_title", lambda title: None)
+    task._update_process_title("running")
+    assert task.taskspec.state.process_title_error == "title unavailable"
+
+
+def test_live_turn_ticks_without_replacing_explicit_title(
+    task_factory, unique_tid, monkeypatch
+):
+    task = task_factory(build_function_spec(unique_tid, enable_title=False))
+    calls = []
+    monkeypatch.setattr(
+        process_title, "set_process_title", lambda title: calls.append("set")
+    )
+    monkeypatch.setattr(process_title, "tick", lambda: calls.append("tick"))
+    monkeypatch.setattr(task, "_process_reactor_turn", lambda: calls.append("turn"))
+    task.enable_process_title = True
+    task.process_once()
+    assert calls == ["turn", "tick"]
+    task.enable_process_title = False
+    task.process_once()
+    assert calls == ["turn", "tick", "turn"]
+
+
+@pytest.mark.parametrize(
+    "requested, expected", [(None, 0.25), (10.0, 0.25), (0.1, 0.1)]
+)
+def test_title_deadline_caps_shared_wait(
+    task_factory, unique_tid, monkeypatch, requested, expected
+):
+    task = task_factory(build_function_spec(unique_tid, enable_title=False))
+    task.process_once()
+    waits = []
+    monkeypatch.setattr(task, "_wait_for_reactor_activity", waits.append)
+    monkeypatch.setattr(process_title, "seconds_until_due", lambda: 0.25)
+    task.enable_process_title = True
+    task.wait_for_activity(requested)
+    assert waits == [expected]
+
+
+def test_stopped_turn_does_not_activate_title(task_factory, unique_tid, monkeypatch):
+    task = task_factory(build_function_spec(unique_tid, enable_title=False))
+    calls = []
+    monkeypatch.setattr(
+        process_title, "set_process_title", lambda title: calls.append(title)
+    )
+    monkeypatch.setattr(process_title, "tick", lambda: calls.append("tick"))
+    monkeypatch.setattr(task, "_process_reactor_turn", task.stop)
+    task.enable_process_title = True
+    task.process_once()
+    assert "tick" not in calls
+
+
+def test_title_failure_does_not_prevent_success(
+    broker_env, task_factory, unique_tid, monkeypatch
+):
+    _, make_queue = broker_env
+    monkeypatch.setattr(
+        process_title, "set_process_title", lambda title: "native setter failed"
+    )
+    monkeypatch.setattr(process_title, "tick", lambda: None)
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    inbox.write("hello")
+    drive_task_until(task, lambda: task.taskspec.state.status == "completed")
+    assert task.taskspec.state.error is None
+    assert task.taskspec.state.return_code == 0
+    assert task.taskspec.state.process_title_error == "native setter failed"
+    events = [json.loads(value) for value in drain_queue(log)]
+    completed = [event for event in events if event.get("event") == "work_completed"]
+    assert completed
+    assert (
+        completed[-1]["taskspec"]["state"]["process_title_error"]
+        == "native setter failed"
+    )
+
+
+def test_off_owner_title_does_not_call_native_setter(
+    task_factory, unique_tid, monkeypatch
+):
+    task = task_factory(build_function_spec(unique_tid, enable_title=False))
+    task.process_once()
+    calls = []
+    monkeypatch.setattr(
+        process_title,
+        "set_process_title",
+        lambda title: calls.append((threading.current_thread(), title)),
+    )
+    monkeypatch.setattr(process_title, "tick", lambda: "activation failed")
+    task.enable_process_title = True
+    worker = threading.Thread(target=task._set_activity, args=("working",))
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert calls == []
+    task.process_once()
+    assert calls == []
+    assert task.taskspec.state.process_title_error == "activation failed"
+    monkeypatch.setattr(process_title, "tick", lambda: None)
+    task.process_once()
+    assert task.taskspec.state.process_title_error == "activation failed"
+
+
+def test_pause_title_survives_owner_turn(
+    broker_env, task_factory, unique_tid, monkeypatch
+):
+    _, make_queue = broker_env
+    task = task_factory(build_function_spec(unique_tid, enable_title=False))
+    task.taskspec.mark_running(pid=task._task_pid)
+    calls = []
+    monkeypatch.setattr(process_title, "set_process_title", calls.append)
+    monkeypatch.setattr(process_title, "tick", lambda: None)
+    task.enable_process_title = True
+    make_queue(task.taskspec.io.control["ctrl_in"]).write(
+        encode_control_message(CONTROL_PAUSE)
+    )
+    task.process_once()
+    assert task._paused
+    assert task.taskspec.state.status == "running"
+    assert len(calls) == 1
+    assert ":paused" in calls[0]
+    task.process_once()
+    assert len(calls) == 1
+
+
+def test_manager_drain_title_survives_owner_turn(broker_env, unique_tid, monkeypatch):
+    db_path, _ = broker_env
+    spec = build_function_spec(
+        unique_tid,
+        enable_title=False,
+        function_target="weft.core.manager:Manager",
+        name="manager",
+    )
+    manager = Manager(db_path, spec)
+    try:
+        manager.taskspec.mark_running(pid=manager._task_pid)
+        calls = []
+        monkeypatch.setattr(process_title, "set_process_title", calls.append)
+        monkeypatch.setattr(process_title, "tick", lambda: None)
+        monkeypatch.setattr(
+            manager,
+            "_process_reactor_turn",
+            lambda: manager._begin_leadership_drain(
+                leader_tid=str(int(unique_tid) - 1)
+            ),
+        )
+        manager.enable_process_title = True
+        manager.process_once()
+        assert manager._draining
+        assert manager.taskspec.state.status == "running"
+        assert len(calls) == 1
+        assert ":manager:draining" in calls[0]
+        manager.process_once()
+        assert len(calls) == 1
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_every_defined_title_status_fits_the_handoff_capacity(
+    task_factory, unique_tid: str
+) -> None:
+    """The title status bound derives from the defined status sets.
+
+    Verifies:
+    - the TaskSpec status Literal and TASK_LIFECYCLE_STATUS_VALUES agree
+    - at the widest context, name, and details, the longest defined status
+      formats to exactly PROCESS_TITLE_MAX_LENGTH, which the native handoff
+      capacity exceeds by the NUL reservation
+
+    Spec: [OBS.4]
+    """
+    literal = set(get_args(StateSection.model_fields["status"].annotation))
+    assert literal == TASK_LIFECYCLE_STATUS_VALUES
+
+    spec = build_function_spec(
+        unique_tid,
+        enable_title=False,
+        name="n" * PROCESS_TITLE_NAME_LENGTH,
+        context_path="/tmp/" + "c" * PROCESS_TITLE_CONTEXT_LENGTH,
+    )
+    task = task_factory(spec)
+    details = "d" * PROCESS_TITLE_DETAILS_LENGTH
+    titles = {
+        status: task._format_process_title(status, details)
+        for status in PROCESS_TITLE_STATUSES
+    }
+    assert max(len(title) for title in titles.values()) == PROCESS_TITLE_MAX_LENGTH
+    assert PROCESS_TITLE_MAX_LENGTH < PROCESS_TITLE_HANDOFF_LENGTH

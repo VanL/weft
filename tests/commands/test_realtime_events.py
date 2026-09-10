@@ -112,7 +112,7 @@ def _started_iterator(
     ctx: Any,
     tid: str,
     *,
-    timeout: float,
+    timeout: float | None,
     follow: bool = True,
 ) -> Iterator[TaskEvent]:
     """Return an iterator already past its snapshot and its ``running`` state.
@@ -324,10 +324,11 @@ def test_late_final_outbox_result_finishes_realtime_stream(tmp_path: Path) -> No
     assert _peek_all(ctx, f"T{tid}.ctrl_out", persistent=False) == []
 
 
+@pytest.mark.timeout(30)
 def test_persistent_stream_output_is_not_realtime_completion(tmp_path: Path) -> None:
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
     tid, _taskspec = _running_task(ctx, persistent=True)
-    iterator = _started_iterator(ctx, tid, timeout=1.5)
+    iterator = _started_iterator(ctx, tid, timeout=None)
 
     for index, chunk in enumerate(("alpha", "beta")):
         _write_queue(
@@ -343,13 +344,25 @@ def test_persistent_stream_output_is_not_realtime_completion(tmp_path: Path) -> 
             persistent=True,
         )
 
-    seen: list[TaskEvent] = []
-    with pytest.raises(TimeoutError):
-        while True:
-            seen.append(next(iterator))
+    try:
+        seen = [next(iterator), next(iterator)]
+        assert [event.event_type for event in seen] == ["stdout", "stdout"]
 
-    assert [event.event_type for event in seen] == ["stdout", "stdout"]
-    assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 2
+        # A later frame proves the final-marked work item did not end this
+        # persistent task's stream. No deadline runs while the test suspends
+        # the consumer to perform backend writes.
+        _write_queue(
+            ctx,
+            f"T{tid}.outbox",
+            {"type": "stream", "stream": "stdout", "data": "gamma", "chunk": 2},
+            persistent=True,
+        )
+        continued = next(iterator)
+        assert continued.event_type == "stdout"
+        assert continued.payload["data"] == "gamma"
+        assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 3
+    finally:
+        iterator.close()
 
 
 def test_staggered_task_terminal_replaces_wrapper_lost_verdict(
@@ -425,6 +438,7 @@ def test_staggered_task_terminal_replaces_wrapper_lost_verdict(
     assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 1
 
 
+@pytest.mark.timeout(30)
 def test_final_stream_frame_alone_is_not_realtime_completion(tmp_path: Path) -> None:
     """A one-shot streaming task's final frame is output, not terminal proof.
 
@@ -434,7 +448,7 @@ def test_final_stream_frame_alone_is_not_realtime_completion(tmp_path: Path) -> 
 
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
     tid, _taskspec = _running_task(ctx, stream_output=True)
-    iterator = _started_iterator(ctx, tid, timeout=1.5)
+    iterator = _started_iterator(ctx, tid, timeout=None)
 
     _write_queue(
         ctx,
@@ -449,10 +463,19 @@ def test_final_stream_frame_alone_is_not_realtime_completion(tmp_path: Path) -> 
         persistent=True,
     )
 
-    seen: list[TaskEvent] = []
-    with pytest.raises(TimeoutError):
-        while True:
-            seen.append(next(iterator))
-
-    assert [event.event_type for event in seen] == ["stdout"]
-    assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 1
+    try:
+        assert next(iterator).event_type == "stdout"
+        # A subsequent frame proves that the final marker alone did not
+        # terminate observation, without timing the backend writes.
+        _write_queue(
+            ctx,
+            f"T{tid}.outbox",
+            {"type": "stream", "stream": "stdout", "data": "beta", "chunk": 1},
+            persistent=True,
+        )
+        continued = next(iterator)
+        assert continued.event_type == "stdout"
+        assert continued.payload["data"] == "beta"
+        assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 2
+    finally:
+        iterator.close()

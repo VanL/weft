@@ -1,6 +1,7 @@
 """Fetch task results from Weft queues.
 
 Spec references:
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/10-CLI_Interface.md [CLI-1.2.2] (result)
 - docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -191,11 +193,14 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
     if timeout is not None:
         deadline = time.monotonic() + max(0.0, timeout)
     poll_interval = effective_result_surface_wait_interval(timeout)
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    monitor = QueueChangeMonitor([log_queue], config=context.config)
-    log_last_timestamp: int | None = None
-
+    resources = ExitStack()
     try:
+        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+        resources.callback(log_queue.close)
+        monitor = QueueChangeMonitor([log_queue], config=context.config)
+        resources.callback(monitor.close)
+        log_last_timestamp: int | None = None
+
         while True:
             taskspec_payload = _load_taskspec_payload(context, tid)
             outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
@@ -328,8 +333,7 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
             wait_timeout = min(wait_timeout, poll_interval)
             monitor.wait(wait_timeout)
     finally:
-        monitor.close()
-        log_queue.close()
+        resources.close()
 
 
 def _active_streaming_queues(context: WeftContext) -> set[str]:
@@ -458,39 +462,49 @@ def _await_single_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-109] excepti
             initial_error_message=initial_terminal_error_message,
         )
 
-    outbox_queue = context.queue(outbox_name, persistent=True)
-    ctrl_queue = context.queue(ctrl_out_name, persistent=False)
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    monitor = QueueChangeMonitor(
-        [outbox_queue, ctrl_queue, log_queue],
-        config=context.config,
-    )
-
-    log_last_timestamp: int | None = initial_log_last_timestamp
-    stream_buffer: list[str] = []
-    status = "running"
-    result_values: list[Any] = []
-    result_value: Any | None = None
-    error_message: str | None = initial_terminal_error_message
-    completed_at: float | None = (
-        time.monotonic() if initial_terminal_status == "completed" else None
-    )
-    first_pending_timestamp: int | None = None
-    latest_pending_timestamp: int | None = None
-    pending_quiet_since: float | None = None
-    boundary_timestamp: int | None = None
-    boundary_seen_at: float | None = None
-    pending_completion_timestamps: list[int] = list(initial_batch_boundary_timestamps)
-    materialized_completed = initial_terminal_status == "completed"
-    if initial_terminal_status is not None and initial_terminal_status != "completed":
-        status = initial_terminal_status
-
-    deadline = None
-    if timeout is not None:
-        deadline = time.monotonic() + max(0.0, timeout)
-    poll_interval = effective_result_surface_wait_interval(timeout)
-
+    resources = ExitStack()
     try:
+        outbox_queue = context.queue(outbox_name, persistent=True)
+        resources.callback(outbox_queue.close)
+        ctrl_queue = context.queue(ctrl_out_name, persistent=True)
+        resources.callback(ctrl_queue.close)
+        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+        resources.callback(log_queue.close)
+        monitor = QueueChangeMonitor(
+            [outbox_queue, ctrl_queue, log_queue],
+            config=context.config,
+        )
+        resources.callback(monitor.close)
+
+        log_last_timestamp: int | None = initial_log_last_timestamp
+        stream_buffer: list[str] = []
+        status = "running"
+        result_values: list[Any] = []
+        result_value: Any | None = None
+        error_message: str | None = initial_terminal_error_message
+        completed_at: float | None = (
+            time.monotonic() if initial_terminal_status == "completed" else None
+        )
+        first_pending_timestamp: int | None = None
+        latest_pending_timestamp: int | None = None
+        pending_quiet_since: float | None = None
+        boundary_timestamp: int | None = None
+        boundary_seen_at: float | None = None
+        pending_completion_timestamps: list[int] = list(
+            initial_batch_boundary_timestamps
+        )
+        materialized_completed = initial_terminal_status == "completed"
+        if (
+            initial_terminal_status is not None
+            and initial_terminal_status != "completed"
+        ):
+            status = initial_terminal_status
+
+        deadline = None
+        if timeout is not None:
+            deadline = time.monotonic() + max(0.0, timeout)
+        poll_interval = effective_result_surface_wait_interval(timeout)
+
         while True:
             while True:
                 terminal_candidates = drain_ctrl_out_stream_messages(
@@ -708,10 +722,7 @@ def _await_single_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-109] excepti
             )
             monitor.wait(wait_timeout)
     finally:
-        monitor.close()
-        outbox_queue.close()
-        ctrl_queue.close()
-        log_queue.close()
+        resources.close()
 
     return status, result_value, error_message
 

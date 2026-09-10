@@ -655,7 +655,15 @@ class _InteractiveRunLifecycle:
             on_stderr=self._on_stderr,
             on_state=self._on_state,
         )
-        self._log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+        try:
+            self._log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+        except BaseException as error:
+            try:
+                self._client.stop()
+            except BaseException as cleanup_error:
+                error.add_note(f"Interactive client cleanup failed: {cleanup_error!r}")
+                raise error from cleanup_error
+            raise
 
     def start(self) -> None:
         """Start the queue client inside the caller-owned cleanup region."""
