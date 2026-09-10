@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 203 plan files in this directory.
+There are currently 209 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,8 +23,14 @@ There are currently 203 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-09-10-weft-result-outbox-contract-plan.md`](./2026-09-10-weft-result-outbox-contract-plan.md) | Weft Result Outbox Contract Plan | `draft` | none |
 | [`2026-09-10-deferred-macos-process-title-plan.md`](./2026-09-10-deferred-macos-process-title-plan.md) | Cross-Platform Process Titles with Deferred macOS GUI Registration | `completed` | none |
 | [`2026-09-09-updated-dependency-suite-repairs-plan.md`](./2026-09-09-updated-dependency-suite-repairs-plan.md) | Updated Dependency Suite Repairs | `draft` | none |
+| [`2026-09-09-shared-service-convergence-refinement-plan.md`](./2026-09-09-shared-service-convergence-refinement-plan.md) | Shared Service Convergence Refinement Plan | `draft` | none |
+| [`2026-09-08-service-wake-model-and-heartbeat-decoupling-plan.md`](./2026-09-08-service-wake-model-and-heartbeat-decoupling-plan.md) | Service Wake Model and Heartbeat Decoupling Plan | `draft` | none |
+| [`2026-09-08-manager-reuse-flag-retirement-and-run-lifecycle-plan.md`](./2026-09-08-manager-reuse-flag-retirement-and-run-lifecycle-plan.md) | Manager Reuse Flag Retirement and Run Lifecycle Completion Plan | `draft` | none |
+| [`2026-09-08-persistent-result-output-ids-plan.md`](./2026-09-08-persistent-result-output-ids-plan.md) | Persistent Result Output IDs Plan | `draft` | [`2026-09-10-weft-result-outbox-contract-plan.md`](./2026-09-10-weft-result-outbox-contract-plan.md) |
+| [`2026-09-02-cli-process-broker-session-plan.md`](./2026-09-02-cli-process-broker-session-plan.md) | CLI Process Broker Session Plan | `draft` | none |
 | [`2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md`](./2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) | Load-Sensitive Test Lifecycle Fixes | `completed` | none |
 | [`2026-09-08-django-override-normalization-seam-plan.md`](./2026-09-08-django-override-normalization-seam-plan.md) | Django Override Normalization Seam Plan | `completed` | none |
 | [`2026-09-08-complexity-review-corrections-plan.md`](./2026-09-08-complexity-review-corrections-plan.md) | Complexity Review Corrections Plan | `completed` | none |
