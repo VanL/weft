@@ -4,6 +4,7 @@ import errno
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -11,7 +12,7 @@ from typing import Any, cast
 import pytest
 
 from simplebroker import Queue
-from tests.conftest import _register_from_json
+from tests.conftest import _register_from_json, run_cli
 from tests.helpers import weft_harness as harness_mod
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
@@ -21,6 +22,7 @@ from weft._constants import (
 )
 from weft.commands import tasks as task_cmd
 from weft.core import manager_runtime
+from weft.helpers import pid_is_live
 
 
 @pytest.mark.shared
@@ -1552,3 +1554,150 @@ def test_latest_mapping_discovery_reads_past_fixed_prefix() -> None:
     finally:
         harness._closed = True
         harness._tempdir.cleanup()
+
+
+@pytest.mark.shared
+@pytest.mark.parametrize("preserve_database", [False, True])
+def test_inline_cleanup_retains_live_driver_and_allows_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    preserve_database: bool,
+) -> None:
+    """A stopped request cannot authorize deletion beneath an active reactor."""
+    harness = WeftTestHarness()
+    entered = threading.Event()
+    release = threading.Event()
+    original_cwd = Path.cwd()
+    original_mode = os.environ.get("WEFT_TEST_MODE")
+    harness.__enter__()
+    harness.ensure_foreground_manager()
+    manager, thread, _stop = harness._inline_managers[0]
+    context = harness.context
+    marker = harness.root / "ownership-marker"
+    marker.write_text("must survive until driver closure", encoding="utf-8")
+
+    def gated_turn() -> None:
+        entered.set()
+        assert release.wait(30.0), "test failed to release reactor gate"
+
+    monkeypatch.setattr(manager, "_process_reactor_turn", gated_turn)
+    # No child processes exist. Isolate driver closure from manager STOP
+    # confirmation, which is a separate control-queue contract.
+    monkeypatch.setattr(harness, "_stop_active_managers", lambda **_kwargs: None)
+    try:
+        assert entered.wait(10.0), "inline reactor did not enter gate"
+        with pytest.raises(RuntimeError, match="inline manager"):
+            harness.cleanup(preserve_database=preserve_database)
+        assert thread.is_alive()
+        assert harness._inline_managers
+        assert not harness._closed
+        assert marker.exists()
+        assert harness.context is context
+        assert Path.cwd() == original_cwd
+        assert os.environ.get("WEFT_TEST_MODE") == original_mode
+        assert not harness._tempdir._finalizer.alive
+    finally:
+        release.set()
+        thread.join(10.0)
+        assert not thread.is_alive()
+        harness.cleanup()
+    assert harness._closed
+    assert not harness.root.exists()
+
+
+@pytest.mark.shared
+def test_harness_failure_diagnostics_survive_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnostics = tmp_path / "diagnostics"
+    monkeypatch.setenv("WEFT_TEST_DIAGNOSTICS_DIR", str(diagnostics))
+    primary = TimeoutError("result did not arrive")
+    harness = WeftTestHarness()
+    with pytest.raises(TimeoutError) as caught, harness:
+        harness.register_tid("1789000000000000001")
+        raise primary
+    assert caught.value is primary
+    assert not harness.root.exists()
+    assert any("diagnostics" in note for note in primary.__notes__)
+    files = list(diagnostics.glob("harness-*.txt"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert "1789000000000000001" in text
+    assert "thread" in text
+    assert "spawn_queue_tail" in text
+
+
+@pytest.mark.shared
+def test_harness_diagnostic_failure_preserves_primary_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    primary = TimeoutError("original timeout")
+
+    def unreadable_state() -> str:
+        raise OSError("diagnostic storage unavailable")
+
+    monkeypatch.setattr(harness, "dump_debug_state", unreadable_state)
+    with pytest.raises(TimeoutError) as caught, harness:
+        raise primary
+    assert caught.value is primary
+    assert any("diagnostic" in note.lower() for note in primary.__notes__)
+    assert not harness.root.exists()
+
+
+@pytest.mark.shared
+def test_owned_cli_manager_is_reaped_when_test_body_fails() -> None:
+    """Register ownership before assertions can bypass the explicit CLI stop."""
+    harness = WeftTestHarness()
+    manager_pid: int | None = None
+    with pytest.raises(AssertionError, match="injected test body failure"), harness:
+        rc, out, err = run_cli(
+            "manager",
+            "start",
+            "--context",
+            harness.root,
+            cwd=harness.root,
+            harness=harness,
+        )
+        assert rc == 0, (rc, out, err)
+        records = harness._list_active_manager_records()
+        assert len(records) == 1
+        manager_pid = harness._mapping_host_pids(records[0])[0]
+        assert pid_is_live(manager_pid)
+        raise AssertionError("injected test body failure")
+    assert manager_pid is not None
+    assert not pid_is_live(manager_pid)
+    assert not harness.root.exists()
+
+
+@pytest.mark.shared
+def test_original_failure_survives_blocked_inline_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    entered = threading.Event()
+    release = threading.Event()
+    primary = TimeoutError("original result deadline")
+    thread: threading.Thread | None = None
+
+    def gated_turn() -> None:
+        entered.set()
+        assert release.wait(30.0)
+
+    try:
+        with pytest.raises(TimeoutError) as caught, harness:
+            harness.ensure_foreground_manager()
+            manager, thread, _stop = harness._inline_managers[0]
+            monkeypatch.setattr(manager, "_process_reactor_turn", gated_turn)
+            assert entered.wait(10.0)
+            raise primary
+        assert caught.value is primary
+        assert any("cleanup" in note.lower() for note in primary.__notes__)
+        assert harness._inline_managers
+        assert harness.root.exists()
+        assert not harness._closed
+    finally:
+        release.set()
+        if thread is not None:
+            thread.join(10.0)
+            assert not thread.is_alive()
+        harness.cleanup()

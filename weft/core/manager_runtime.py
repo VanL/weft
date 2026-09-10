@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ from weft._constants import (
     CONTROL_SURFACE_WAIT_TIMEOUT,
     MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
+    MANAGER_LAUNCHER_POLL_INTERVAL,
     MANAGER_LAUNCHER_SIGNAL_ABORT,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS,
@@ -1024,6 +1026,88 @@ def _cleanup_startup_stderr(path: Path) -> None:
         return
 
 
+def _read_launcher_first_line(process: subprocess.Popen[str]) -> str:
+    """Bound first-event observation without creating an unowned reader thread.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+    if process.stdout is None:
+        return ""
+    descriptor = process.stdout.fileno()
+    deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
+    data = bytearray()
+    os.set_blocking(descriptor, False)
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(
+                    process.args, MANAGER_STARTUP_TIMEOUT_SECONDS
+                )
+            try:
+                chunk = os.read(descriptor, 1)
+            except BlockingIOError:
+                # Windows cannot select() on anonymous pipes. Python 3.12+
+                # supports nonblocking pipes on both supported OS families.
+                time.sleep(
+                    min(
+                        MANAGER_LAUNCHER_POLL_INTERVAL,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
+                continue
+            if not chunk:
+                return data.decode("utf-8", errors="replace")
+            data.extend(chunk)
+            if chunk == b"\n":
+                return data.decode("utf-8", errors="replace")
+    finally:
+        os.set_blocking(descriptor, True)
+
+
+def _abort_unconfirmed_launcher(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Retain launcher ownership until its child-abort protocol has settled."""
+    _send_launcher_signal(process, MANAGER_LAUNCHER_SIGNAL_ABORT)
+    try:
+        return process.communicate(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        # A launcher stalled before its input loop still owns its detached
+        # child. Terminate the owned tree, not just the wrapper process.
+        terminate_process_tree(process.pid, timeout=1.0)
+        _terminate_manager_process(process, timeout=1.0)
+        return process.communicate(timeout=1.0)
+
+
+def _await_launcher_first_line(
+    launcher_process: subprocess.Popen[str], stderr_path: Path
+) -> str:
+    """Read the initial event while retaining cleanup ownership on every exit."""
+    try:
+        return _read_launcher_first_line(launcher_process)
+    except BaseException as exc:
+        try:
+            stdout_text, stderr_text = _abort_unconfirmed_launcher(launcher_process)
+        except (OSError, subprocess.SubprocessError) as cleanup_error:
+            exc.add_note(f"Detached launcher cleanup failed: {cleanup_error}")
+            raise exc from cleanup_error
+        if not isinstance(exc, subprocess.TimeoutExpired):
+            raise
+        details = [
+            "Failed to start Manager process: timed out waiting for detached launcher first event.",
+            (
+                f"launcher_pid={launcher_process.pid}; startup_phase=first_event; "
+                f"timeout={MANAGER_STARTUP_TIMEOUT_SECONDS}; stderr_path={stderr_path}"
+            ),
+        ]
+        if stdout_text.strip():
+            details.append(stdout_text.strip())
+        if stderr_text.strip():
+            details.append(stderr_text.strip())
+        startup_stderr = _tail_startup_stderr(stderr_path)
+        if startup_stderr:
+            details.append(startup_stderr)
+        raise RuntimeError("\n".join(details)) from exc
+
+
 def _launch_detached_manager(
     context: WeftContext,
     invocation: ManagerRuntimeInvocation,
@@ -1038,23 +1122,11 @@ def _launch_detached_manager(
         encoding="utf-8",
         errors="replace",
     )
-    first_line = ""
-    if launcher_process.stdout is not None:
-        first_line = launcher_process.stdout.readline()
+    first_line = _await_launcher_first_line(launcher_process, stderr_path)
     event = _parse_launcher_event(first_line)
     if event is None or event.get("event") != "spawned":
-        _terminate_manager_process(launcher_process, timeout=1.0)
-        stdout_text = first_line
-        stderr_text = ""
-        try:
-            stdout_tail, stderr_text = launcher_process.communicate(timeout=1.0)
-            stdout_text += stdout_tail
-        except subprocess.TimeoutExpired:
-            stdout_text = stdout_text.strip()
-            stderr_text = (
-                stderr_text.strip()
-                or "Detached manager launcher produced no startup event."
-            )
+        stdout_tail, stderr_text = _abort_unconfirmed_launcher(launcher_process)
+        stdout_text = first_line + stdout_tail
         error = "Detached manager launcher did not report a spawned manager PID."
         for payload in _collect_launcher_events(stdout_text):
             if payload.get("event") == "spawn_failed":
@@ -1069,11 +1141,7 @@ def _launch_detached_manager(
 
     pid = event.get("pid")
     if not isinstance(pid, int) or pid <= 0:
-        _terminate_manager_process(launcher_process, timeout=1.0)
-        try:
-            launcher_process.communicate(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            pass
+        _abort_unconfirmed_launcher(launcher_process)
         raise RuntimeError(
             "Failed to start Manager process: detached launcher reported an invalid PID."
         )
@@ -1481,6 +1549,43 @@ def _reconcile_competing_manager_start(
     return record, False, None
 
 
+def _registry_start_timeout_message(
+    launch: DetachedManagerLaunch,
+    *,
+    manager_tid: str,
+    view: ManagerRegistryView | None,
+    child_pid_live: bool | None,
+    selected_proof: bool | None,
+) -> str:
+    """Describe the last main-loop observations without probing during failure."""
+    target = view.target_record if view is not None else None
+    target_summary = (
+        {
+            key: str(target[key])[:200]
+            for key in ("tid", "status", "role", "requests", "runtime_handle")
+            if key in target
+        }
+        if target is not None
+        else None
+    )
+    selected = view.active_manager if view is not None else None
+    observation = {
+        "manager_tid": manager_tid,
+        "launch_pid": launch.pid,
+        "launcher_pid": launch.launcher_process.pid,
+        "last_launcher_returncode": launch.launcher_process.returncode,
+        "last_child_pid_live": child_pid_live,
+        "last_selected_proof": selected_proof,
+        "last_target_record": target_summary,
+        "last_selected_tid": str(selected.get("tid"))[:200] if selected else None,
+    }
+    return (
+        "Failed to start Manager process; no stable canonical registry entry appeared.\n"
+        "startup_phase=registry_readiness; last_observation="
+        + json.dumps(observation, sort_keys=True)
+    )
+
+
 def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
     context: WeftContext,
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
@@ -1491,6 +1596,9 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
 
     deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
     competing_record: dict[str, Any] | None = None
+    last_view: ManagerRegistryView | None = None
+    last_child_pid_live: bool | None = None
+    last_selected_proof: bool | None = None
     probe_cache: dict[str, int | None] = {}
     registry_queue = _registry_queue(context)
     monitor = QueueChangeMonitor([registry_queue], config=context.config)
@@ -1503,6 +1611,8 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                 probe_cache=probe_cache,
                 queue=registry_queue,
             )
+            last_view = view
+            last_selected_proof = None
             selected_record = view.active_manager
             if selected_record is not None:
                 if selected_record.get("tid") != manager_tid:
@@ -1518,10 +1628,11 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                             record=selected_record,
                         )
                 else:
-                    if _manager_start_record_matches_launch(
+                    last_selected_proof = _manager_start_record_matches_launch(
                         selected_record,
                         launch_pid=launch.pid,
-                    ):
+                    )
+                    if last_selected_proof:
                         try:
                             _acknowledge_manager_launch_success(launch)
                         except _ManagerLaunchAcknowledgementError as exc:
@@ -1549,6 +1660,7 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                                 probe_cache=probe_cache,
                                 queue=registry_queue,
                             )
+                            last_view = view_after_ack
                             current_record = view_after_ack.target_record or (
                                 view_after_ack.active_manager
                                 if view_after_ack.active_manager is not None
@@ -1556,13 +1668,13 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                                 == manager_tid
                                 else None
                             )
-                            if not (
-                                isinstance(current_record, dict)
-                                and _manager_start_record_matches_launch(
-                                    current_record,
-                                    launch_pid=launch.pid,
-                                )
-                            ):
+                            last_selected_proof = isinstance(
+                                current_record, dict
+                            ) and _manager_start_record_matches_launch(
+                                current_record,
+                                launch_pid=launch.pid,
+                            )
+                            if not last_selected_proof:
                                 continue
                             logger.debug(
                                 "Detached manager launch for %s succeeded before "
@@ -1589,7 +1701,8 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                     message="Failed to start Manager process; detached launcher exited before startup stabilized.",
                     abort_launcher=False,
                 )
-            if not pid_is_live(launch.pid):
+            last_child_pid_live = pid_is_live(launch.pid)
+            if not last_child_pid_live:
                 if competing_record is None:
                     competing_record = _await_manager_start_settlement(
                         context,
@@ -1640,7 +1753,13 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
 
     _fail_manager_start(
         launch=launch,
-        message="Failed to start Manager process; no stable canonical registry entry appeared.",
+        message=_registry_start_timeout_message(
+            launch,
+            manager_tid=manager_tid,
+            view=last_view,
+            child_pid_live=last_child_pid_live,
+            selected_proof=last_selected_proof,
+        ),
         abort_launcher=True,
     )
 

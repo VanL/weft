@@ -14,6 +14,7 @@ import pytest
 
 from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -118,18 +119,18 @@ def test_manager_start_help_includes_replace(workdir) -> None:
     assert "--replace" in out
 
 
-def test_manager_start_and_status(workdir):
-    context_root = prepare_project_root(workdir / "manager-project")
-    build_context(spec_context=context_root)
+def test_manager_start_and_status(weft_harness: WeftTestHarness) -> None:
+    context_root = weft_harness.root
 
     rc, out, err = run_cli(
         "manager",
         "start",
         "--context",
         context_root,
-        cwd=workdir,
+        cwd=context_root,
+        harness=weft_harness,
     )
-    assert rc == 0
+    assert rc == 0, (rc, out, err)
     assert "manager" in out.lower()
     assert err == ""
 
@@ -139,9 +140,10 @@ def test_manager_start_and_status(workdir):
         "--json",
         "--context",
         context_root,
-        cwd=workdir,
+        cwd=context_root,
+        harness=weft_harness,
     )
-    assert rc == 0
+    assert rc == 0, (rc, out, err)
     assert err == ""
     records = json.loads(out or "[]")
     active = [record for record in records if record.get("status") == "active"]
@@ -153,9 +155,10 @@ def test_manager_start_and_status(workdir):
         "start",
         "--context",
         context_root,
-        cwd=workdir,
+        cwd=context_root,
+        harness=weft_harness,
     )
-    assert rc == 0
+    assert rc == 0, (rc, out, err)
     assert "already running" in out.lower()
     assert err == ""
 
@@ -166,9 +169,10 @@ def test_manager_start_and_status(workdir):
         "--context",
         context_root,
         "--json",
-        cwd=workdir,
+        cwd=context_root,
+        harness=weft_harness,
     )
-    assert rc == 0
+    assert rc == 0, (rc, out, err)
     assert err == ""
     detail = json.loads(out)
     assert detail.get("tid") == tid
@@ -179,9 +183,10 @@ def test_manager_start_and_status(workdir):
         "stop",
         "--context",
         context_root,
-        cwd=workdir,
+        cwd=context_root,
+        harness=weft_harness,
     )
-    assert rc == 0
+    assert rc == 0, (rc, out, err)
     assert err == ""
 
     rc, out, err = run_cli(
@@ -191,17 +196,20 @@ def test_manager_start_and_status(workdir):
         "--context",
         context_root,
         "--json",
-        cwd=workdir,
+        cwd=context_root,
+        harness=weft_harness,
     )
-    assert rc == 0
+    assert rc == 0, (rc, out, err)
     assert err == ""
     detail = json.loads(out)
     assert detail.get("status") == "stopped"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
-    context_root = prepare_project_root(workdir / "detached-manager")
+def test_manager_start_detaches_manager_process_group_from_cli_caller(
+    weft_harness: WeftTestHarness,
+) -> None:
+    context_root = weft_harness.root
     tid: str | None = None
     started_by_test = False
 
@@ -211,9 +219,10 @@ def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
             "start",
             "--context",
             context_root,
-            cwd=workdir,
+            cwd=context_root,
+            harness=weft_harness,
         )
-        assert rc == 0
+        assert rc == 0, (rc, out, err)
         assert err == ""
         tid, started_by_test = _parse_manager_start_output(out)
 
@@ -227,9 +236,10 @@ def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
                 "--json",
                 "--context",
                 context_root,
-                cwd=workdir,
+                cwd=context_root,
+                harness=weft_harness,
             )
-            assert rc == 0
+            assert rc == 0, (rc, out, err)
             assert err == ""
             pid = _host_pid_from_handle(json.loads(out))
             if pid is None:
@@ -245,9 +255,10 @@ def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
             "--json",
             "--context",
             context_root,
-            cwd=workdir,
+            cwd=context_root,
+            harness=weft_harness,
         )
-        assert rc == 0
+        assert rc == 0, (rc, out, err)
         assert err == ""
         detail = json.loads(out)
         assert detail.get("status") == "active"
@@ -260,7 +271,8 @@ def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
                 tid,
                 "--context",
                 context_root,
-                cwd=workdir,
+                cwd=context_root,
+                harness=weft_harness,
             )
 
 
@@ -417,9 +429,11 @@ def test_manager_list_diagnostic_shows_stale_active_manager(workdir):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_manager_start_skips_stale_manager_and_preserves_history(workdir):
-    context_root = prepare_project_root(workdir / "stale-manager-start")
-    context = build_context(spec_context=context_root)
+def test_manager_start_skips_stale_manager_and_preserves_history(
+    weft_harness: WeftTestHarness,
+) -> None:
+    context_root = weft_harness.root
+    context = weft_harness.context
     stale_tid = "1761000000000000008"
     started_tid: str | None = None
 
@@ -431,16 +445,19 @@ def test_manager_start_skips_stale_manager_and_preserves_history(workdir):
         assert create_time is not None
         process.communicate(timeout=2.0)
         registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
-        registry_queue.write(
-            json.dumps(
-                _manager_service_payload(
-                    context,
-                    tid=stale_tid,
-                    name="stale-manager",
-                    runtime_handle=_host_runtime_handle(process.pid, create_time),
+        try:
+            registry_queue.write(
+                json.dumps(
+                    _manager_service_payload(
+                        context,
+                        tid=stale_tid,
+                        name="stale-manager",
+                        runtime_handle=_host_runtime_handle(process.pid, create_time),
+                    )
                 )
             )
-        )
+        finally:
+            registry_queue.close()
     finally:
         process.wait()
 
@@ -450,9 +467,10 @@ def test_manager_start_skips_stale_manager_and_preserves_history(workdir):
             "start",
             "--context",
             context_root,
-            cwd=workdir,
+            cwd=context_root,
+            harness=weft_harness,
         )
-        assert rc == 0
+        assert rc == 0, (rc, out, err)
         assert err == ""
 
         started_tid, _started_by_test = _parse_manager_start_output(out)
@@ -464,9 +482,10 @@ def test_manager_start_skips_stale_manager_and_preserves_history(workdir):
             "--json",
             "--context",
             context_root,
-            cwd=workdir,
+            cwd=context_root,
+            harness=weft_harness,
         )
-        assert rc == 0
+        assert rc == 0, (rc, out, err)
         assert err == ""
         manager_records = json.loads(out or "[]")
         active = [
@@ -478,8 +497,8 @@ def test_manager_start_skips_stale_manager_and_preserves_history(workdir):
         try:
             payloads = [
                 json.loads(item)
-                for item, _timestamp in registry_reader.peek_many(
-                    limit=100, with_timestamps=True
+                for item, _timestamp in registry_reader.peek_generator(
+                    with_timestamps=True
                 )
             ]
         finally:
@@ -498,7 +517,8 @@ def test_manager_start_skips_stale_manager_and_preserves_history(workdir):
                 started_tid,
                 "--context",
                 context_root,
-                cwd=workdir,
+                cwd=context_root,
+                harness=weft_harness,
             )
 
 

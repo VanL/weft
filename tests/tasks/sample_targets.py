@@ -95,6 +95,15 @@ def wait_for_file(path: str, *, timeout: float = 30.0, result: str = "done") -> 
     raise TimeoutError(f"Timed out waiting for {path}")
 
 
+def signal_ready_and_wait_for_release(
+    ready_path: str, release_path: str, *, timeout: float = 60.0
+) -> str:
+    """Publish actual function entry, then await the test owner's release."""
+
+    Path(ready_path).write_text(str(os.getpid()), encoding="utf-8")
+    return wait_for_file(release_path, timeout=timeout)
+
+
 def large_output(size: int = 4_194_304, *, char: str = "x") -> str:
     """Return a repeated character string of the requested size."""
     return char * size

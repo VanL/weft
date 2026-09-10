@@ -1274,3 +1274,10 @@ index is not a dated section and does not count toward the coalescing trigger.
   of earlier approval. The correction explicitly includes that retained text in
   its review baseline. Source and tests are recorded in the
   [correction plan](plans/2026-09-08-complexity-review-corrections-plan.md).
+
+
+## 2026-09-09 Load-Sensitive Harness Ownership
+
+- A parent harness did not own the broker of a nested CLI context; a real manager survived parent cleanup after an assertion failure. The repaired manager tests use the harness-owned root and register each CLI invocation before its assertions.
+- `BaseTask.cleanup()` can return while an active reactor turn still owns resources. The harness now retains the live driver and storage, reports the failed stop, and allows retry; teardown failure does not replace an existing test exception.
+- A detached launcher that has not delivered its first event may already own a child. Killing only that launcher orphaned the child on malformed output. The repaired protocol requests abort before escalating against the owned process tree. Real first-event/EOF/cancellation regressions and 24-worker stress are recorded in the [lifecycle fix plan](plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md).

@@ -7492,12 +7492,13 @@ def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> No
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")
-def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
+def test_manager_sigterm_drains_nonpersistent_children(manager_setup, tmp_path) -> None:
     pytest.importorskip("psutil")
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    drain(log_queue)
+    ready = tmp_path / "worker-ready"
+    release = tmp_path / "worker-release"
 
     inbox_queue.write(
         json.dumps(
@@ -7505,49 +7506,71 @@ def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
                 "name": "long-running",
                 "spec": {
                     "type": "function",
-                    "function_target": "tests.tasks.sample_targets:simulate_work",
-                    "keyword_args": {"duration": 5.0},
+                    "function_target": (
+                        "tests.tasks.sample_targets:signal_ready_and_wait_for_release"
+                    ),
+                    "args": [str(ready), str(release)],
                 },
             }
         )
     )
 
-    start = time.time()
-    while not manager._child_processes and time.time() - start < 5.0:
+    def diagnostics() -> dict[str, object]:
+        return {
+            "ready": ready.exists(),
+            "released": release.exists(),
+            "draining": manager._draining,
+            "children": {
+                tid: {"pid": child.process.pid, "exitcode": child.process.exitcode}
+                for tid, child in manager._child_processes.items()
+            },
+        }
+
+    try:
+        drive_until(
+            ready.exists,
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=20.0,
+            diagnostics=diagnostics,
+        )
+        child_tid, child_info = next(iter(manager._child_processes.items()))
+        assert child_info.process.is_alive()
+        assert not release.exists()
+        manager.note_termination_signal(signal.SIGTERM)
+
+        assert list(manager._pending_termination_sources) == [
+            ("signal", signal.SIGTERM)
+        ]
+        assert manager._draining is False
+        assert manager.should_stop is False
+        assert manager.taskspec.state.status == "running"
+
         manager.process_once()
-        time.sleep(0.05)
+        assert manager._draining
+        assert child_tid in manager._drain_signaled_children
+        release.touch()
+        drive_until(
+            lambda: manager.should_stop,
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=5.0,
+            diagnostics=diagnostics,
+        )
 
-    assert manager._child_processes, "child process should be running"
-    _child_tid, child_info = next(iter(manager._child_processes.items()))
-    assert child_info.process.is_alive()
-    wait_for_log_event(
-        manager,
-        log_queue,
-        lambda event: (
-            event.get("tid") == _child_tid and event.get("event") == "work_started"
-        ),
-        timeout=30.0 if os.name == "nt" else 20.0,
-    )
-
-    manager.note_termination_signal(signal.SIGTERM)
-
-    assert list(manager._pending_termination_sources) == [("signal", signal.SIGTERM)]
-    assert manager._draining is False
-    assert manager.should_stop is False
-    assert manager.taskspec.state.status == "running"
-
-    deadline = time.time() + 5.0
-    while time.time() < deadline and not manager.should_stop:
-        manager.process_once()
-        time.sleep(0.05)
-
-    assert manager.should_stop is True
-    assert manager.taskspec.state.status == "cancelled"
-    assert not _process_running(child_info.process.pid)
-
-    events = [json.loads(item) for item in drain(log_queue)]
-    assert any(event.get("event") == "task_signal_stop" for event in events)
-    assert not any(event.get("event") == "task_signal_kill" for event in events)
+        assert manager.taskspec.state.status == "cancelled"
+        assert not _process_running(child_info.process.pid)
+        events = [json.loads(item) for item in log_queue.peek_generator()]
+        assert any(event.get("event") == "task_signal_stop" for event in events)
+        assert not any(event.get("event") == "task_signal_kill" for event in events)
+        assert any(
+            event.get("tid") == child_tid and event.get("event") == "work_started"
+            for event in events
+        ), "observing readiness must preserve child lifecycle history"
+    finally:
+        release.touch()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")

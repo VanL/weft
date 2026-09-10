@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 199 plan files in this directory.
+There are currently 200 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 199 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md`](./2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) | Load-Sensitive Test Lifecycle Fixes | `completed` | none |
 | [`2026-09-08-complexity-review-corrections-plan.md`](./2026-09-08-complexity-review-corrections-plan.md) | Complexity Review Corrections Plan | `completed` | none |
 | [`2026-08-31-short-tid-derivation-plan.md`](./2026-08-31-short-tid-derivation-plan.md) | Short TID Derivation Plan | `completed` | none |
 | [`2026-08-31-collation-store-toggle-removal-plan.md`](./2026-08-31-collation-store-toggle-removal-plan.md) | Collation Store Toggle Removal Plan | `completed` | none |

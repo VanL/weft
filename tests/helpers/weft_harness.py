@@ -1,3 +1,8 @@
+"""Isolated runtime ownership and pre-teardown failure evidence.
+
+Spec: docs/specifications/08-Testing_Strategy.md [TS-0].
+"""
+
 from __future__ import annotations
 
 import errno
@@ -5,9 +10,11 @@ import gc
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
@@ -150,7 +157,36 @@ class WeftTestHarness:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self.cleanup()
+        if exc is not None:
+            self._attach_failure_diagnostics(exc)
+        try:
+            self.cleanup()
+        except RuntimeError as cleanup_error:
+            if exc is None:
+                raise
+            exc.add_note(f"Harness cleanup also failed: {cleanup_error}")
+
+    def _attach_failure_diagnostics(self, primary: BaseException) -> None:
+        """Save pre-teardown evidence without replacing the original failure."""
+        try:
+            sections = [self.dump_debug_state()]
+            for tid in sorted(self._registered_tids - self._registered_manager_tids):
+                sections.append(self.dump_completion_timeout_state(tid))
+            directory = os.environ.get("WEFT_TEST_DIAGNOSTICS_DIR")
+            root = (
+                Path(directory).expanduser().resolve()
+                if directory
+                else Path(tempfile.mkdtemp(prefix="weft-test-failure-"))
+            )
+            root.mkdir(parents=True, exist_ok=True)
+            path = root / f"harness-{self.root.name}-{time.time_ns()}.txt"
+            path.write_text("\n\n".join(sections), encoding="utf-8")
+            primary.add_note(f"Pre-cleanup harness diagnostics: {path}")
+        except Exception as diagnostic_error:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-373] exception
+            primary.add_note(
+                "Harness diagnostic collection failed: "
+                f"{type(diagnostic_error).__name__}: {diagnostic_error}"
+            )
 
     @property
     def context(self) -> WeftContext:
@@ -415,6 +451,23 @@ class WeftTestHarness:
             f"  registered_pids={sorted(self._registered_pids)}",
         ]
 
+        frames = sys._current_frames()
+        for thread in threading.enumerate():
+            lines.append(f"  thread={thread.name!r} ident={thread.ident}")
+            frame = frames.get(thread.ident) if thread.ident is not None else None
+            if frame is not None:
+                lines.extend(traceback.format_stack(frame))
+        for manager, thread, _stop in self._inline_managers:
+            lines.append(
+                f"  inline_manager={manager.tid} driver_alive={thread.is_alive()} "
+                f"lifecycle={manager._task_lifecycle.value}"
+            )
+            for tid, child in manager._child_processes.copy().items():
+                lines.append(
+                    f"  child={tid} pid={child.process.pid} "
+                    f"exitcode={child.process.exitcode} alive={child.process.is_alive()}"
+                )
+
         context = self._context
         if context is None:
             lines.append("  context=uninitialized")
@@ -591,9 +644,9 @@ class WeftTestHarness:
     def _terminal_status_from_task_log(data: dict[str, object]) -> str | None:
         event = data.get("event")
         if isinstance(event, str):
-            status = CANONICAL_TERMINAL_TASK_EVENTS.get(event)
-            if status is not None:
-                return status
+            event_status = CANONICAL_TERMINAL_TASK_EVENTS.get(event)
+            if event_status is not None:
+                return event_status
         status = data.get("status")
         if (
             event == "task_activity"
@@ -622,8 +675,10 @@ class WeftTestHarness:
             return
 
         try:
+            # Driver closure must precede any registry or database disposal.
+            # BaseTask.cleanup() may return while an active turn still owns it.
+            self._stop_inline_managers()
             if preserve_database:
-                self._stop_inline_managers()
                 self._cleanup_preserving_database()
                 self._detach_tempdir_finalizer()
                 return
@@ -633,7 +688,6 @@ class WeftTestHarness:
                 drain_registry=True,
                 stop_tasks=True,
             )
-            self._stop_inline_managers()
             self._collect_pid_mappings()
             self._wait_for_registered_pids_to_exit()
             if not preserve_database:
@@ -645,23 +699,37 @@ class WeftTestHarness:
         finally:
             self._restore_cwd()
             self._restore_environment()
-            try:
-                if not preserve_database:
-                    self._cleanup_tempdir()
-            finally:
-                self._closed = True
+            if self._inline_managers:
+                # A failed stop retains ownership and storage for retry. Even
+                # TemporaryDirectory's GC finalizer must not remove live data.
+                self._detach_tempdir_finalizer()
+            else:
+                try:
+                    if not preserve_database:
+                        self._cleanup_tempdir()
+                finally:
+                    self._closed = True
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _stop_inline_managers(self) -> None:
-        for manager, thread, stop_event in self._inline_managers:
+        for manager, _thread, stop_event in self._inline_managers:
             stop_event.set()
-            manager.should_stop = True
+            manager.stop(join=False)
+        for manager, thread, _stop_event in self._inline_managers:
             thread.join(timeout=2.0)
             if thread.is_alive():
                 manager.cleanup()
-        self._inline_managers.clear()
+        self._inline_managers[:] = [
+            entry for entry in self._inline_managers if entry[1].is_alive()
+        ]
+        if self._inline_managers:
+            tids = [manager.tid for manager, _thread, _stop in self._inline_managers]
+            raise RuntimeError(
+                f"Failed to stop inline manager drivers {tids}; "
+                f"retaining harness storage at {self.root} for cleanup retry"
+            )
 
     def _patch_environment(self) -> None:
         overrides = {

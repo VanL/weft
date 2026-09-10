@@ -90,6 +90,7 @@ def _assert_task_result_value(
     harness: WeftTestHarness,
     expected: object,
 ) -> None:
+    harness.register_tid(task.tid)
     result = task.result(timeout=DEFAULT_TASK_COMPLETION_TIMEOUT)
     if result.value == expected:
         return
@@ -379,6 +380,7 @@ def test_submit_returns_task_with_completed_result() -> None:
                 kwargs={"suffix": "!"},
             )
         )
+        harness.register_tid(task.tid)
         result = task.result(timeout=30.0)
 
         assert result.status == "completed"
@@ -550,6 +552,7 @@ def test_prepare_snapshots_payload_before_submission() -> None:
         payload["value"] = "after"
 
         task = prepared.submit()
+        harness.register_tid(task.tid)
         result = task.result(timeout=30.0)
 
         assert prepared.name == "client-task"
@@ -963,3 +966,15 @@ def test_system_dump_load_and_tidy_are_available() -> None:
         assert export_path.exists()
         assert load_result.message
         assert tidy_result.target
+
+
+def test_prepare_snapshots_payload_without_starting_runtime() -> None:
+    """Snapshot ownership is settled at prepare, independently of scheduling."""
+    with WeftTestHarness() as harness:
+        client = WeftClient(path=harness.root)
+        payload = {"value": ["before"]}
+        prepared = client.prepare(_function_taskspec(harness.root), payload=payload)
+        payload["value"].append("after")
+        # PreparedSubmission owns this request before any runtime is launched.
+        assert prepared._request.payload == {"value": ["before"]}
+        assert harness._list_active_manager_records() == []

@@ -517,6 +517,8 @@ _Implementation mapping_:
 
 ## Bootstrap and Lifecycle [MA-3]
 
+_Implementation maintenance_: [Load-Sensitive Test Lifecycle Fixes](../plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) bounds the detached launcher first-event read and retains child cleanup ownership before registry readiness.
+
 `weft run` guarantees that a manager is available by minting a manager TaskSpec
 and launching a short-lived detached bootstrap helper when required. That
 helper starts `weft.manager_process`, then the shared lifecycle code waits for a

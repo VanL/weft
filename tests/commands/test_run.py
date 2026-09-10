@@ -2114,6 +2114,82 @@ def test_manager_start_record_matches_external_supervisor_launch_pid(
     )
 
 
+@pytest.mark.parametrize("record_seen", [False, True])
+def test_start_manager_timeout_reports_existing_observation_without_new_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_seen: bool
+) -> None:
+    context = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "9" * 19
+    launch = core_manager_runtime.DetachedManagerLaunch(
+        pid=4242,
+        stderr_path=tmp_path / "startup.stderr",
+        launcher_process=_FakePopen(poll_results=[None]),
+    )
+    target = {"tid": tid, "status": "active"} if record_seen else None
+    view = core_manager_runtime.ManagerRegistryView(
+        records={tid: target} if target is not None else {},
+        active_manager=target,
+        target_record=target,
+    )
+    probe_calls: list[int] = []
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_build_manager_runtime_invocation",
+        lambda _: core_manager_runtime.ManagerRuntimeInvocation(
+            task_cls_path="weft.core.manager.Manager", tid=tid, spec=_FakeManagerSpec()
+        ),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime, "_launch_detached_manager", lambda *_: launch
+    )
+    monkeypatch.setattr(
+        core_manager_runtime, "QueueChangeMonitor", _FakeQueueChangeMonitor
+    )
+    clock = [0.0]
+
+    def observe_view(
+        *_args: Any, **_kwargs: Any
+    ) -> core_manager_runtime.ManagerRegistryView:
+        clock[0] = 11.0
+        return view
+
+    monkeypatch.setattr(core_manager_runtime, "_registry_view", observe_view)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_start_record_matches_launch",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime, "_await_manager_start_settlement", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        core_manager_runtime, "pid_is_live", lambda pid: probe_calls.append(pid) or True
+    )
+    monkeypatch.setattr(core_manager_runtime.time, "monotonic", lambda: clock[0])
+
+    def fail_start(
+        *,
+        launch: core_manager_runtime.DetachedManagerLaunch,
+        message: str,
+        abort_launcher: bool,
+    ) -> None:
+        assert abort_launcher is True
+        raise ManagerStartFailed(message)
+
+    monkeypatch.setattr(core_manager_runtime, "_fail_manager_start", fail_start)
+    with pytest.raises(ManagerStartFailed) as caught:
+        core_manager_runtime.start_manager(context)
+
+    message = str(caught.value)
+    assert "startup_phase=registry_readiness" in message
+    observation = json.loads(message.split("last_observation=", 1)[1])
+    assert observation["launch_pid"] == 4242
+    assert observation["last_child_pid_live"] is True
+    assert observation["last_target_record"] == target
+    assert observation["last_selected_proof"] is (False if record_seen else None)
+    assert probe_calls == [4242]
+
+
 def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

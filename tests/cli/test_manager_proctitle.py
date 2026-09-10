@@ -18,30 +18,30 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-212] exception
+def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> None:
     """Verify that the manager's process title updates from 'init' to 'running'."""
-    # The harness starts a manager implicitly via `run_cli` if one isn't running.
-    # We just need to trigger an action and then find the manager process.
+    # Starting explicitly keeps the observation independent of a short task.
     rc, out, err = run_cli(
-        "run",
-        "--no-wait",
-        "--verbose",
-        "echo",
-        "hello",
+        "manager",
+        "start",
         cwd=weft_harness.root,
         harness=weft_harness,
     )
-    assert rc == 0, err
+    assert rc == 0, (rc, out, err)
+    rc, out, err = run_cli(
+        "manager",
+        "list",
+        "--json",
+        cwd=weft_harness.root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
 
-    # The output of run --verbose contains two JSON objects, one for the manager
-    # and one for the task. We need to parse them to get the manager host PID.
+    # Read the explicit manager's PID from its structured registry projection.
     manager_pid = None
-    for line in out.splitlines():
-        if not line.strip():
-            continue
+    for data in json.loads(out):
         try:
-            data = json.loads(line)
-            if isinstance(data, dict) and data.get("event") == "manager_started":
+            if isinstance(data, dict) and data.get("status") == "active":
                 handle = data.get("runtime_handle")
                 observations = (
                     handle.get("observations") if isinstance(handle, dict) else {}
@@ -67,8 +67,9 @@ def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> 
 
     # Now check that its title eventually becomes 'running'
     running_title_found = False
-    deadline = time.time() + 5
-    while time.time() < deadline:
+    title = "<not observed>"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
         try:
             # In some environments, cmdline is what we need, in others it is name.
             title = manager_process.name()
@@ -84,5 +85,5 @@ def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> 
         time.sleep(0.1)
 
     assert running_title_found, (
-        f"Manager process title did not update to 'running'. Last seen: {manager_process.name()}"
+        f"Manager process title did not update to 'running'. Last seen: {title}"
     )

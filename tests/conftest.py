@@ -22,6 +22,8 @@ from weft.ext import RunnerHandle
 
 logger = logging.getLogger(__name__)
 
+pytest_plugins = ["tests.helpers.run_diagnostics"]
+
 
 @pytest.fixture
 def thread_exception_guard() -> Iterator[list[threading.ExceptHookArgs]]:

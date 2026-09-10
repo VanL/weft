@@ -317,6 +317,8 @@ bug evidence.
 
 ## Related Plans
 
+- [Load-Sensitive Test Lifecycle Fixes](../plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) records harness driver closure, owned CLI contexts, readiness barriers, and optional run diagnostics.
+
 - [`docs/plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md`](../plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md)
 - [`docs/plans/2026-08-10-subprocess-coverage-collection-plan.md`](../plans/2026-08-10-subprocess-coverage-collection-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
