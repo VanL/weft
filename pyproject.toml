@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -27,21 +27,21 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "llm>=0.33",
-    "prompt-toolkit>=3.0.52",
-    "psutil>=7.0.0",
+    "llm>=0.35",
+    "prompt-toolkit>=3.0.53",
+    "psutil>=7.2.2",
     "processtitle>=1.2; sys_platform == 'darwin'",
-    "pydantic>=2.0.0",
-    "rich>=14.0.0",
+    "pydantic>=2.13.5",
+    "rich>=15.0.0",
     "setproctitle>=1.3.7",
-    "simplebroker>=8.0.0",
-    "typer>=0.16.0",
-    "typing-extensions>=4.0.0",
+    "simplebroker>=8.1.1",
+    "typer>=0.27.2",
+    "typing-extensions>=4.16.0",
 ]
 
 [project.optional-dependencies]
 pg = [
-    "simplebroker-pg>=4.0.0",
+    "simplebroker-pg>=4.1.1",
 ]
 docker = [
     "weft-docker>=0.9.73",
@@ -59,26 +59,26 @@ microsandbox = [
     "weft-microsandbox>=0.5.3; platform_system != 'Windows'",
 ]
 all = [
-    "simplebroker-pg>=4.0.0",
+    "simplebroker-pg>=4.1.1",
     "weft-docker>=0.9.73",
     "weft-django>=0.9.33",
     "weft-macos-sandbox>=0.6.2",
     "weft-microsandbox>=0.5.3; platform_system != 'Windows'",
 ]
 dev = [
-    "simplebroker-pg>=4.0.0",
+    "simplebroker-pg>=4.1.1",
     "weft-docker>=0.9.73",
     "weft-macos-sandbox>=0.6.2",
     "weft-microsandbox>=0.5.3; platform_system != 'Windows'",
-    "hypothesis>=6.165.10",
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-    "pytest-xdist>=3.0",
+    "hypothesis>=6.168.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
     "mypy>=2.3.1",
-    "ruff>=0.16.4",
+    "ruff>=0.16.6",
     "pytest-timeout>=2.4.0",
     "types-docker>=7.2.0.20260827",
-    "types-psutil>=5.9.5",
+    "types-psutil>=7.2.2.20260906",
 ]
 
 [project.scripts]
