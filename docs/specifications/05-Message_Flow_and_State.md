@@ -793,7 +793,13 @@ a permanent normal-cycle compatibility lane.
   snapshots, result helpers, and realtime event iteration reuse that
   interpretation instead of each inventing their own priority rules. Realtime
   iteration reuses it after its first snapshot as well, for late typed terminal
-  `ctrl_out` envelopes and eligible readable final one-shot outbox evidence
+  `ctrl_out` envelopes and eligible readable final one-shot outbox evidence.
+  Realtime observation refreshes task metadata before classifying late output.
+  When discovered metadata identifies different outbox or control routes, it
+  switches observation to those routes without consuming their contents.
+  Until one-shot task metadata is known, ordinary outbox values alone cannot
+  end realtime observation; explicit terminal log or control evidence remains
+  sufficient. Persistent and interactive work-item output is not task completion.
 - shared task evidence priority is: terminal task-log lifecycle proof, typed
   terminal `ctrl_out`, readable final one-shot outbox, live runtime evidence,
   terminal Monitor-store fallback for known full TIDs after raw task-log
@@ -867,7 +873,9 @@ replay; `weft/commands/_task_snapshot_reducer.py` pure event folding, evidence
 precedence, snapshot construction, filtering, and ordering;
 `weft/commands/result.py` materialization and completion waits;
 `weft/commands/events.py` `iter_task_realtime_events` non-consuming realtime
-observation, reusing the shared classifier for late terminal proof;
+observation, refreshing late metadata before shared terminal classification;
+`weft/commands/events.py` `_open_realtime_routes` owns observation route leases
+and monitor replacement when late metadata identifies custom queues;
 `weft/core/task_evidence.py` shared lifecycle/result evidence;
 `weft/commands/tasks.py` task control and runner-diagnostic presentation over
 `weft/core/runner_diagnostics.py`;
@@ -1540,6 +1548,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 
 - [Collation store toggle removal](../plans/2026-08-31-collation-store-toggle-removal-plan.md)
 

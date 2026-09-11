@@ -663,6 +663,11 @@ manager's own spec for spawn-request disposition ([QUEUE.6], [MF-6]).
 The field-level JSON schema documentation for these two fields carries
 the same task/manager split.
 
+Task-level requeue remains unsupported under the current task contract.
+The manager spawn queue is the only explicitly supported shared inbox.
+Reexamine task-level requeue if shared task inboxes become explicitly
+supported; configurable queue names alone do not establish that contract.
+
 See [QUEUE.6] and [MF-2] for disposition and recovery rules.
 
 Timeouts are treated as error exits for reserved-policy purposes:
@@ -676,6 +681,8 @@ predicate live in `weft/core/taskspec/model.py`; `validate_taskspec()` and
 its internal spawn-request `requeue` policy.
 
 ## Related Plans
+
+- [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 
 - [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
 

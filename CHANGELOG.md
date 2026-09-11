@@ -87,6 +87,13 @@
 
 ### Fixed
 
+- Realtime observation refreshes late task metadata and custom queue routes.
+  Persistent work-item output and outbox values with unknown task metadata no
+  longer falsely end the task stream; explicit terminal evidence still does.
+- Monitor retirement of already eligible families continues while unrelated
+  task-log ingestion is backlogged or reports an error. Summary creation and
+  per-family cleanup proofs retain their existing gates.
+
 - Realtime task observation (`weft run` in the foreground, `weft result
   --stream`, `Task.realtime_events`, and the Django SSE/Channels adapters) now
   reuses the shared task evidence classification for terminal proof that

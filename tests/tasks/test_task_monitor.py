@@ -6912,6 +6912,103 @@ def test_task_monitor_store_retires_eligible_family_despite_reserved_delete_fail
         task.stop()
 
 
+@pytest.mark.parametrize("ingest_blocker", ["backlog", "write_error"])
+@pytest.mark.parametrize(
+    "mode,task_log_owner,retirement_allowed",
+    [
+        ("delete", "collated_store", True),
+        ("report_only", "collated_store", False),
+        ("delete", "raw_external", False),
+    ],
+)
+def test_task_monitor_retires_proven_family_without_ingestion_catchup(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    ingest_blocker: str,
+    mode: str,
+    task_log_owner: str,
+    retirement_allowed: bool,
+) -> None:
+    """Unrelated ingestion cannot hold eligible rows or bypass retirement proofs."""
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": mode,
+            "WEFT_TASK_MONITOR_BATCH_SIZE": "1",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+        }
+    )
+    task = TaskMonitor(
+        db_path, make_task_monitor_taskspec("1778089999999961876"), config=config
+    )
+    eligible_tid = "1778084345905438876"
+    unproved_tid = "1778084345905438877"
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        for tid, status in ((eligible_tid, "completed"), (unproved_tid, "failed")):
+            update = update_from_task_log_payload(
+                {"event": f"work_{status}", "status": status, "tid": tid},
+                message_id=int(tid),
+            )
+            assert update is not None
+            store.record_task_log_updates(
+                WEFT_GLOBAL_LOG_QUEUE, (update,), checkpoint_message_id=None
+            )
+            store.delete_task_messages_after_raw_delete(
+                (update.message_id,), deleted_at_ns=update.message_id + 1
+            )
+            store.mark_summary_emitted(tid, update.message_id + 2)
+            store.mark_family_disposed(
+                tid, update.message_id + 3, disposition_reason="terminal"
+            )
+            store.mark_task_control_deleted(tid, update.message_id + 4)
+        unproved = store.get_task(unproved_tid)
+        assert unproved is not None
+        assert unproved.reserved_probe_needed
+        assert unproved.reserved_cleanup_checked_at_ns is None
+
+        log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+        for _ in range(2):
+            log.write(
+                json.dumps(
+                    {
+                        "event": "task_activity",
+                        "status": "running",
+                        "tid": "1778084345905438878",
+                    }
+                )
+            )
+        if ingest_blocker == "write_error":
+
+            def fail_ingest(*args: Any, **kwargs: Any) -> Any:
+                raise OSError("unrelated ingestion write failed")
+
+            monkeypatch.setattr(store, "record_task_log_updates", fail_ingest)
+
+        task._run_monitor_store_cycle(
+            now_ns=time.time_ns(),
+            task_log_owner=task_log_owner,
+            start_control_cleanup=False,
+        )
+        ingest = task._last_retained_task_log_ingest
+        assert not ingest.completed_fifo_high_water
+        if ingest_blocker == "backlog":
+            assert ingest.stop_reason == "batch_limit"
+            assert ingest.valid_ingested == 1
+        else:
+            assert ingest.store_write_errors == ("unrelated ingestion write failed",)
+        assert (store.get_task(eligible_tid) is None) is retirement_allowed
+        assert store.get_task(unproved_tid) is not None
+        assert task._last_monitor_store_families_retired == int(retirement_allowed)
+        assert task._last_collation_summaries_emitted == 0
+        assert task._last_terminal_families_disposed == 0
+    finally:
+        task.stop()
+
+
 def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budget(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,

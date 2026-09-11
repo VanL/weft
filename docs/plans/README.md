@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 209 plan files in this directory.
+There are currently 210 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 209 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-09-11-audit-regression-fixes-plan.md`](./2026-09-11-audit-regression-fixes-plan.md) | Audit Regression Fixes | `draft` | none |
 | [`2026-09-10-weft-result-outbox-contract-plan.md`](./2026-09-10-weft-result-outbox-contract-plan.md) | Weft Result Outbox Contract Plan | `draft` | none |
 | [`2026-09-10-deferred-macos-process-title-plan.md`](./2026-09-10-deferred-macos-process-title-plan.md) | Cross-Platform Process Titles with Deferred macOS GUI Registration | `completed` | none |
 | [`2026-09-09-updated-dependency-suite-repairs-plan.md`](./2026-09-09-updated-dependency-suite-repairs-plan.md) | Updated Dependency Suite Repairs | `draft` | none |

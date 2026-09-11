@@ -406,7 +406,7 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
     monkeypatch.setattr(
         events_mod,
         "_task_snapshot_event",
-        lambda context, normalized_tid: TaskEvent(
+        lambda context, normalized_tid, *, allow_outbox_completion: TaskEvent(
             tid=normalized_tid,
             event_type="snapshot",
             timestamp=1,
@@ -491,7 +491,7 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
     monkeypatch.setattr(
         events_mod,
         "_task_snapshot_event",
-        lambda context, normalized_tid: TaskEvent(
+        lambda context, normalized_tid, *, allow_outbox_completion: TaskEvent(
             tid=normalized_tid,
             event_type="snapshot",
             timestamp=100,

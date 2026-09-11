@@ -1281,3 +1281,21 @@ index is not a dated section and does not count toward the coalescing trigger.
 - A parent harness did not own the broker of a nested CLI context; a real manager survived parent cleanup after an assertion failure. The repaired manager tests use the harness-owned root and register each CLI invocation before its assertions.
 - `BaseTask.cleanup()` can return while an active reactor turn still owns resources. The harness now retains the live driver and storage, reports the failed stop, and allows retry; teardown failure does not replace an existing test exception.
 - A detached launcher that has not delivered its first event may already own a child. Killing only that launcher orphaned the child on malformed output. The repaired protocol requests abort before escalating against the owned process tree. Real first-event/EOF/cancellation regressions and 24-worker stress are recorded in the [lifecycle fix plan](plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md).
+
+
+## 2026-09-11 Cleanup Audit Boundary Corrections
+
+- The realtime late-output fix retained only startup metadata. A subscription
+  established before task metadata appeared could call the one-shot fallback
+  for a persistent work-item result; an initial outbox-derived snapshot could
+  do the same. The repair refreshes metadata and custom routes, suppresses
+  unknown-type outbox completion, and tests both snapshot and later evidence.
+- The Monitor retirement call removed as redundant covered a different branch:
+  the surviving call required global FIFO catchup. Retirement of already proved
+  families now runs separately from high-water-gated summary/disposition work.
+- Owner clarification: configurable shared task inboxes are mechanically possible
+  but not an explicitly supported contract. Task-level requeue remains removed;
+  revisit it if shared inbox support is adopted. The manager spawn queue is the
+  current supported exception.
+- Reproductions, review and verification are recorded in the
+  [audit regression fixes plan](plans/2026-09-11-audit-regression-fixes-plan.md).

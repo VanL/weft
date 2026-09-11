@@ -16,6 +16,7 @@ from dataclasses import asdict
 from typing import Any
 
 import weft.commands.tasks as task_ops
+from simplebroker import Queue
 from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
@@ -205,12 +206,21 @@ def _peek_result_value(
 def _task_snapshot_event(
     context: WeftContext,
     normalized_tid: str,
+    *,
+    allow_outbox_completion: bool,
 ) -> TaskEvent | None:
     snapshot = task_ops.task_snapshot(
         normalized_tid,
         context=context,
     )
     if snapshot is None:
+        return None
+    if (
+        not allow_outbox_completion
+        and snapshot.reconciliation is not None
+        and snapshot.reconciliation.get("classification") == "result_without_terminal"
+    ):
+        # Unknown task type cannot turn a work-item value into task completion.
         return None
     snapshot_timestamp = (
         snapshot.last_timestamp
@@ -349,6 +359,29 @@ def follow_task_events(
     )
 
 
+def _open_realtime_routes(
+    context: WeftContext,
+    outbox_name: str,
+    ctrl_out_name: str,
+    log_queue: Queue,
+) -> tuple[ExitStack, Queue, Queue, QueueChangeMonitor]:
+    """Acquire a complete observation subscription, unwinding partial failures.
+
+    Spec: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4];
+        docs/specifications/05-Message_Flow_and_State.md [MF-5].
+    """
+    with ExitStack() as resources:
+        outbox = context.queue(outbox_name, persistent=True)
+        resources.callback(outbox.close)
+        control = context.queue(ctrl_out_name, persistent=True)
+        resources.callback(control.close)
+        monitor = QueueChangeMonitor(
+            [outbox, control, log_queue], config=context.config
+        )
+        resources.callback(monitor.close)
+        return resources.pop_all(), outbox, control, monitor
+
+
 def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] exception
     context: WeftContext,
     tid: str,
@@ -395,7 +428,9 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
     )
 
     snapshot_emitted = False
-    snapshot_event = _task_snapshot_event(context, normalized_tid)
+    snapshot_event = _task_snapshot_event(
+        context, normalized_tid, allow_outbox_completion=taskspec_payload is not None
+    )
     if snapshot_event is not None:
         if _is_cancelled(cancel_event):
             return
@@ -404,17 +439,12 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
 
     resources = ExitStack()
     try:
-        outbox_queue = context.queue(outbox_name, persistent=True)
-        resources.callback(outbox_queue.close)
-        ctrl_queue = context.queue(ctrl_out_name, persistent=True)
-        resources.callback(ctrl_queue.close)
         log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
         resources.callback(log_queue.close)
-        monitor = QueueChangeMonitor(
-            [outbox_queue, ctrl_queue, log_queue],
-            config=context.config,
+        route_resources, outbox_queue, ctrl_queue, monitor = _open_realtime_routes(
+            context, outbox_name, ctrl_out_name, log_queue
         )
-        resources.callback(monitor.close)
+        resources.enter_context(route_resources)
 
         last_log_timestamp = (
             materialized.log_last_timestamp
@@ -469,6 +499,7 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
 
         while not _is_cancelled(cancel_event):
             saw_event = False
+            routes_changed = False
 
             outbox_since = (
                 None if last_outbox_timestamp is None else last_outbox_timestamp + 1
@@ -531,8 +562,42 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 saw_event = True
                 if _is_cancelled(cancel_event):
                     return
+                event_taskspec = payload.get("taskspec")
+                if isinstance(event_taskspec, dict):
+                    taskspec_payload = event_taskspec
+                    evidence_scan_pending = True
+                    new_outbox, new_control = queue_names_for_tid(
+                        normalized_tid, taskspec_payload
+                    )
+                    if (new_outbox, new_control) != (outbox_name, ctrl_out_name):
+                        replacement, new_outbox_queue, new_ctrl_queue, new_monitor = (
+                            _open_realtime_routes(
+                                context, new_outbox, new_control, log_queue
+                            )
+                        )
+                        resources.enter_context(replacement)
+                        route_resources.close()
+                        route_resources = replacement
+                        outbox_queue, ctrl_queue, monitor = (
+                            new_outbox_queue,
+                            new_ctrl_queue,
+                            new_monitor,
+                        )
+                        # Cursors and stream evidence belong to a queue, not the
+                        # subscription. Replay only routes newly discovered here.
+                        if new_outbox != outbox_name:
+                            last_outbox_timestamp = None
+                            outbox_stream_frames_seen = False
+                        if new_control != ctrl_out_name:
+                            last_ctrl_timestamp = None
+                        outbox_name, ctrl_out_name = new_outbox, new_control
+                        routes_changed = True
                 if not snapshot_emitted:
-                    snapshot_event = _task_snapshot_event(context, normalized_tid)
+                    snapshot_event = _task_snapshot_event(
+                        context,
+                        normalized_tid,
+                        allow_outbox_completion=taskspec_payload is not None,
+                    )
                     if snapshot_event is not None:
                         yield snapshot_event
                         snapshot_emitted = True
@@ -550,6 +615,11 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                         terminal_observed_monotonic = time.monotonic()
                     terminal_state_emitted = True
 
+            if routes_changed:
+                # Drain the new routes before terminal settlement or a finite
+                # snapshot returns, including frames already durable at rebind.
+                continue
+
             if evidence_scan_pending and (
                 terminal_payload is None or _is_wrapper_lost_verdict(terminal_payload)
             ):
@@ -564,7 +634,7 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                         ctrl_out_name=ctrl_out_name,
                         taskspec_payload=taskspec_payload,
                     )
-                    if streams_output
+                    if streams_output or taskspec_payload is None
                     else task_local_terminal_evidence(
                         context,
                         tid=normalized_tid,
@@ -619,7 +689,11 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                     )
                     terminal_state_emitted = True
                 if not snapshot_emitted:
-                    snapshot_event = _task_snapshot_event(context, normalized_tid)
+                    snapshot_event = _task_snapshot_event(
+                        context,
+                        normalized_tid,
+                        allow_outbox_completion=taskspec_payload is not None,
+                    )
                     if snapshot_event is not None:
                         yield snapshot_event
                         snapshot_emitted = True

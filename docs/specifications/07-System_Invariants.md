@@ -428,6 +428,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     `orphan_raw_recovery_checked_at_ns` only after proving no raw broker rows
     remain; probe/delete errors leave the family retryable, and new raw
     task-log evidence clears the marker through normal collation merge.
+    Retirement of already eligible families does not require global task-log
+    ingestion catchup. Backlog or a reported ingestion failure does not block
+    the existing per-family retirement checks in an available store. This does
+    not relax the high-water requirement for summary creation or disposition.
   - **OBS.13.5**: Reserved cleanup proof is required only for rows with
     `reserved_probe_needed`. The Monitor records
     `reserved_cleanup_checked_at_ns` after the standard `T{tid}.reserved`
@@ -737,7 +741,8 @@ the sole exact-delete executor for TID mappings),
   and `tests/core/test_monitor_store.py` fire this invariant.
 
 Monitor scheduling implementation notes: `TaskMonitor._run_monitor_store_cycle`
-owns collation-family retirement.
+owns collation-family retirement independently of ingestion catchup, using
+the existing per-family store proofs.
 `TaskMonitor._handle_control_cleanup_worker_result` owns the queue-discovery
 deadline; a skipped discovery pass preserves it, while a completed `dead_tid`
 chain advances it. Real store/worker-result cadence regressions are in
@@ -1102,6 +1107,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 
 - [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md)
 

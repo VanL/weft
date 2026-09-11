@@ -2480,35 +2480,6 @@ class TaskMonitor(ServiceTask):
                     self._apply_monitor_store_retirement_result(
                         self._delete_monitor_store_task_log_rows(store)
                     )
-                    # Sole collation-retirement owner. The SQL predicate keeps
-                    # probe-needed families until reserved cleanup is proved.
-                    family_retirement = store.retire_completed_collation_families(
-                        limit=self._monitor_config.batch_size,
-                        retired_at_ns=now_ns,
-                        retention_seconds=(
-                            self._monitor_config.task_log_retention_period_seconds
-                        ),
-                    )
-                    self._apply_monitor_store_retirement_result(family_retirement)
-                    self._last_policy_progress = (
-                        *self._last_policy_progress,
-                        PolicyProgress(
-                            policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
-                            domain="weft_monitor_task_collations",
-                            selected=family_retirement.families_retired,
-                            applied=family_retirement.families_retired,
-                            waypoint_reached=(
-                                family_retirement.families_retired
-                                >= self._monitor_config.batch_size
-                            ),
-                            base_reached=family_retirement.families_retired == 0,
-                            reason_counts={
-                                "families_retired": (
-                                    family_retirement.families_retired
-                                ),
-                            },
-                        ),
-                    )
                     orphan_recovery = self._recover_orphan_task_log_rows(
                         store,
                         now_ns=now_ns,
@@ -2518,6 +2489,33 @@ class TaskMonitor(ServiceTask):
                         orphan_recovery.rows_deleted
                     )
             if runtime_cleanup_requested:
+                # Retirement uses per-family proofs, independent of ingestion catchup
+                # ([OBS.13.4]); summary creation stays high-water gated above.
+                family_retirement = store.retire_completed_collation_families(
+                    limit=self._monitor_config.batch_size,
+                    retired_at_ns=now_ns,
+                    retention_seconds=(
+                        self._monitor_config.task_log_retention_period_seconds
+                    ),
+                )
+                self._apply_monitor_store_retirement_result(family_retirement)
+                self._last_policy_progress = (
+                    *self._last_policy_progress,
+                    PolicyProgress(
+                        policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
+                        domain="weft_monitor_task_collations",
+                        selected=family_retirement.families_retired,
+                        applied=family_retirement.families_retired,
+                        waypoint_reached=(
+                            family_retirement.families_retired
+                            >= self._monitor_config.batch_size
+                        ),
+                        base_reached=family_retirement.families_retired == 0,
+                        reason_counts={
+                            "families_retired": (family_retirement.families_retired),
+                        },
+                    ),
+                )
                 runtime_cleanup_ready = True
                 if start_control_cleanup:
                     self._maybe_start_terminal_control_cleanup_worker(now_ns=now_ns)
