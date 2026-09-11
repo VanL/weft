@@ -62,7 +62,6 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
 from weft.core.control_messages import encode_control_message
@@ -90,6 +89,7 @@ from weft.core.service_convergence import (
     build_service_owner_payload,
     manager_service_key,
 )
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_entries, tid_short_form
 
@@ -1230,7 +1230,7 @@ def _latest_tid_mapping_payload(
     make_queue: Callable[[str], Any],
     tid: str,
 ) -> dict[str, Any]:
-    queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    queue = make_queue(task_state_queue_name(tid))
     latest: tuple[int, dict[str, Any]] | None = None
     for body, timestamp in iter_queue_entries(queue):
         payload = json.loads(body)
@@ -4873,7 +4873,7 @@ def test_task_monitor_recordless_terminal_mapping_does_not_block_control_cleanup
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     ctrl_in.write("stop")
     ctrl_out.write("pong")
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
         json.dumps({"full": tid, "short": tid_short_form(tid), "terminal": True})
     )
@@ -5019,6 +5019,50 @@ def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
     assert cleanup.policy_progress[-1].base_reached is True
     assert cleanup.policy_progress[-1].waypoint_reached is False
     assert coalesce_calls == []
+
+
+@pytest.mark.parametrize("age_seconds", [60.0, 3600.0])
+def test_dead_cleanup_counts_live_data_only_families_before_age_and_retention(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    age_seconds: float,
+) -> None:
+    """Live state wins classification even when no Monitor probe is needed."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    now_ns = time.time_ns()
+    tid = str(now_ns - int(age_seconds * 1e9))
+    outbox = make_queue(f"T{tid}.outbox")
+    outbox.write("result")
+    make_queue(task_state_queue_name(tid)).write(
+        json.dumps({"full": tid, "short": tid_short_form(tid), "terminal": False})
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(now_ns + 1_000_000)),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "1",
+                "WEFT_TASK_MONITOR_MODE": "delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            }
+        ),
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_dead_task_cleanup_slice(store, now_ns=now_ns)
+    finally:
+        task.stop()
+
+    assert list(outbox.peek_generator()) == ["result"]
+    assert cleanup.dead_tids_skipped_live == 1
+    assert cleanup.dead_tids_deferred_retention == 0
+    assert cleanup.dead_tids_skipped_too_young == 0
+    assert cleanup.dead_tids_processed == 0
 
 
 def test_task_monitor_dead_task_cleanup_skips_monitor_lookup_for_deferred_only_queues(
@@ -10151,8 +10195,8 @@ def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
             "queue": f"T{live_tid}.outbox",
         },
     )
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     excluded_tid = "1770000000000000300"
+    mappings = make_queue(task_state_queue_name(excluded_tid))
     excluded_old_id = _write_json_row(
         mappings,
         {"short": "older-row", "full": excluded_tid, "name": "old"},
@@ -10162,7 +10206,7 @@ def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
         {"short": "newer-row", "full": excluded_tid, "name": "new"},
     )
     _write_json_row(
-        mappings,
+        make_queue(task_state_queue_name(live_tid)),
         {"short": tid_short_form(live_tid), "full": live_tid, "name": "live-owner"},
     )
     spec = make_task_monitor_taskspec("1778089999999961903")
@@ -10281,7 +10325,7 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     inbox.write("input")
 
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
         json.dumps(
             _tid_mapping_row(
@@ -10384,7 +10428,7 @@ def test_task_monitor_stale_open_disposal_waits_for_mapping_row_retirement(
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     inbox.write("input")
 
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(tid))
     mapping_id = _write_json_row(
         mappings,
         _tid_mapping_row(full=tid, short=tid_short_form(tid), host_processes=[]),
@@ -10536,9 +10580,9 @@ def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
     The stale_open gate must apply the tid-mapping cleanup policy's
     undecidable-means-live rule, not just positive host-PID proof: a quiet
     running task on an external/container runner carries no host-PID
-    evidence in its newest ``weft.state.tid_mappings`` row, so it never
-    appears in ``_active_runtime_tids`` -- yet B1 deliberately preserves
-    that row as undecidable-means-live. Row survival without queue
+    evidence in its newest ``weft.state.tasks.<tid>`` row, so it never
+    carries no positive host-process evidence. The row nevertheless remains
+    conservative nonterminal protection. Row survival without queue
     survival is not protection: the family must not be summarized,
     disposed, or have its queues deleted.
 
@@ -10556,7 +10600,7 @@ def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     inbox.write("input")
 
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
         json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
     )
@@ -10600,7 +10644,7 @@ def test_task_monitor_stale_open_disposal_applies_without_mapping_row(
     Companion to
     ``test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner``:
     undecidable-means-live protects evidence that exists but cannot be
-    probed. A family with no ``weft.state.tid_mappings`` row at all has no
+    probed. A family with no ``weft.state.tasks.<tid>`` row at all has no
     runtime evidence to protect, so the aged stale_open family is
     summarized, disposed, and its queues deleted.
     """
@@ -10671,7 +10715,7 @@ def test_task_monitor_delete_recheck_protects_disposed_undecidable_owner(
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     inbox.write("input")
 
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
         json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
     )
@@ -10714,7 +10758,7 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
     """Terminal proof outranks an undecidable mapping row at delete time.
 
     A family with terminal task-log proof must still get its runtime
-    queues cleaned even when its newest ``weft.state.tid_mappings`` row is
+    queues cleaned even when its newest ``weft.state.tasks.<tid>`` row is
     undecidable (non-host handle): the tid-mapping policy never deletes
     undecidable newest rows, so treating them as protection against
     terminal cleanup would block control-queue cleanup for every
@@ -10751,7 +10795,7 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
     ctrl_in.write("stop")
     ctrl_out.write("pong")
 
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
         json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
     )
@@ -11108,7 +11152,7 @@ def test_persistent_consumer_resurrects_after_ambiguous_family_cleanup(
     ctrl_in = make_queue(f"T{tid}.ctrl_in")
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     reserved = make_queue(f"T{tid}.reserved")
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(tid))
     config = (
         _stale_open_test_config()
         if mode == "delete"
@@ -11342,3 +11386,26 @@ def test_task_monitor_store_ownership_characterization(
     finally:
         task.stop()
         log.close()
+
+
+def test_task_monitor_protection_reads_only_candidate_state(
+    broker_env,
+) -> None:
+    """Candidate protection excludes unrelated valid namespace snapshots."""
+    db_path, make_queue = broker_env
+    tid = "1778084345905438991"
+    other_tid = "1778084345905438992"
+    for owner in (tid, other_tid):
+        make_queue(f"weft.state.tasks.{owner}").write(
+            json.dumps({"full": owner, "short": tid_short_form(owner)})
+        )
+    task = TaskMonitor(db_path, make_task_monitor_taskspec("1778089999999998991"))
+    try:
+        assert task._nonterminal_mapping_row_tids(task._monitor_context(), {tid}) == {
+            tid
+        }
+        assert (
+            task._nonterminal_mapping_row_tids(task._monitor_context(), set()) == set()
+        )
+    finally:
+        task.stop()

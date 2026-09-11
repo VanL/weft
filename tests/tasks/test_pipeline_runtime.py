@@ -31,12 +31,12 @@ from weft._constants import (
     WEFT_PIPELINES_STATE_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands import specs as spec_cmd
 from weft.context import build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.tasks.pipeline import PipelineEdgeTask, PipelineTask
@@ -255,7 +255,7 @@ _PIPELINE_BASE_AND_SUPPORT_ROLES = (
     "ctrl_in",
     "ctrl_out",
     "global_log",
-    "tid_mappings",
+    "task_state",
     "streaming_sessions",
     "endpoints_registry",
 )
@@ -286,7 +286,7 @@ def _pipeline_topology_role_values(payload: dict[str, Any]) -> dict[str, str]:
         "ctrl_in": payload["io"]["control"]["ctrl_in"],
         "ctrl_out": payload["io"]["control"]["ctrl_out"],
         "global_log": WEFT_GLOBAL_LOG_QUEUE,
-        "tid_mappings": WEFT_TID_MAPPINGS_QUEUE,
+        "task_state": task_state_queue_name(payload["tid"]),
         "streaming_sessions": WEFT_STREAMING_SESSIONS_QUEUE,
         "endpoints_registry": WEFT_ENDPOINTS_REGISTRY_QUEUE,
         "events": runtime["queues"]["events"],
@@ -394,7 +394,7 @@ def test_pipeline_owner_event_route_rejects_every_base_and_support_collision(
         "ctrl_in": payload["io"]["control"]["ctrl_in"],
         "ctrl_out": payload["io"]["control"]["ctrl_out"],
         "global_log": WEFT_GLOBAL_LOG_QUEUE,
-        "tid_mappings": WEFT_TID_MAPPINGS_QUEUE,
+        "task_state": task_state_queue_name(payload["tid"]),
         "streaming_sessions": WEFT_STREAMING_SESSIONS_QUEUE,
         "endpoints_registry": WEFT_ENDPOINTS_REGISTRY_QUEUE,
     }

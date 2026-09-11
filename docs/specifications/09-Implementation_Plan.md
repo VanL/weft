@@ -109,6 +109,14 @@ lazily so public imports do not initialize unrelated command capabilities.
 
 ## Public Python Client Surface [IP-1.1]
 
+Task observations use the shared per-TID runtime-state readers
+([OBS.6]); known-TID snapshots read that state queue directly. Snapshot and
+control waiters subscribe to the exact queue even before its first write;
+realtime snapshot requests remain fresh. CLI event watches remain incremental
+event streams. This storage change adds no public signature, result shape,
+iterator retention contract, or lifecycle precedence change. Python system
+status retains its unfiltered default; CLI status retains terminal filtering.
+
 The current `weft.client` package is a stable adapter over shipped command
 capabilities, not a separate runtime API.
 
@@ -209,6 +217,8 @@ That index is intentionally lightweight:
   unimplemented plans do not read like current project direction
 
 ## Related Plans
+
+- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)

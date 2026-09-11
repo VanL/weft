@@ -23,12 +23,14 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext, build_context
 from weft.core.endpoints import (
     build_endpoint_record_payload,
     list_resolved_endpoints,
+)
+from weft.core.task_state import (
+    task_state_queue_name,
 )
 from weft.core.tasks import Consumer, HeartbeatTask
 from weft.core.taskspec import TaskSpec
@@ -59,7 +61,7 @@ def _endpoint_record(
 
 
 def _mark_endpoint_owner_live(ctx: WeftContext, tid: str) -> None:
-    queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     try:
         queue.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
     finally:
@@ -615,26 +617,29 @@ def test_latest_mapping_fold_skips_malformed_newer_rows_and_keeps_valid_neighbor
     tmp_path, invalid
 ) -> None:
     context = build_context(spec_context=prepare_project_root(tmp_path))
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    queue = context.queue(
+        task_state_queue_name("1770000000000000300"), persistent=False
+    )
     valid = {"full": "1770000000000000300", "short": "0000000300", "terminal": False}
-    neighbor = {"full": "undecidable", "short": "required-display-field"}
+    neighbor = {"full": "1770000000000000301", "short": "required-display-field"}
+    neighbor_queue = context.queue(
+        task_state_queue_name(neighbor["full"]), persistent=False
+    )
     try:
         queue.write(json.dumps({**valid, "terminal": True}))
         valid_id = queue.write(json.dumps(valid))
         queue.write(invalid if isinstance(invalid, str) else json.dumps(invalid))
-        neighbor_id = queue.write(json.dumps(neighbor))
+        neighbor_id = neighbor_queue.write(json.dumps(neighbor))
         expected = {
             valid["full"]: (valid_id, valid),
             neighbor["full"]: (neighbor_id, neighbor),
         }
-        assert (
-            endpoints_module.latest_tid_mapping_rows(context, strict=True) == expected
-        )
         assert endpoints_module.latest_tid_mapping_entries_for_endpoint_resolution(
             context
         ) == {full: row for full, (_timestamp, row) in expected.items()}
     finally:
         queue.close()
+        neighbor_queue.close()
 
 
 def test_failed_endpoint_unregister_retains_claim_for_exact_retry(
@@ -685,35 +690,24 @@ def test_failed_endpoint_unregister_retains_claim_for_exact_retry(
         task.cleanup()
 
 
-@pytest.mark.parametrize("strict", [False, True])
-def test_latest_mapping_fold_preserves_explicit_read_error_contract(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, strict: bool
+def test_endpoint_owner_snapshot_read_errors_propagate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A failed read after broker acquisition is never an empty state view."""
     context = build_context(spec_context=prepare_project_root(tmp_path))
-    original_queue = WeftContext.queue
-    closed = []
+    tid = "1770000000000000300"
+    _mark_endpoint_owner_live(context, tid)
+    with context.broker() as db:
+        broker_type = type(db)
+    original = broker_type.peek_many
 
-    class ReadFailureQueue:
-        def __init__(self, delegate: Queue) -> None:
-            self.delegate = delegate
-
-        def peek_generator(self, **_kwargs: Any) -> Any:
+    def failed_peek(self: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == task_state_queue_name(tid):
             raise RuntimeError("injected mapping read failure")
+        return original(self, name, *args, **kwargs)
 
-        def close(self) -> None:
-            closed.append(True)
-            self.delegate.close()
-
-    def failed_queue(ctx: WeftContext, name: str, *, persistent: bool = False) -> Any:
-        queue = original_queue(ctx, name, persistent=persistent)
-        if ctx is context and name == WEFT_TID_MAPPINGS_QUEUE:
-            return ReadFailureQueue(queue)
-        return queue
-
-    monkeypatch.setattr(WeftContext, "queue", failed_queue)
-    if strict:
-        with pytest.raises(RuntimeError, match="injected mapping read failure"):
-            endpoints_module.latest_tid_mapping_rows(context, strict=True)
-    else:
-        assert endpoints_module.latest_tid_mapping_rows(context) == {}
-    assert closed == [True]
+    monkeypatch.setattr(broker_type, "peek_many", failed_peek)
+    with pytest.raises(RuntimeError, match="injected mapping read failure"):
+        endpoints_module.latest_tid_mapping_entries_for_endpoint_resolution(
+            context, tids=[tid]
+        )

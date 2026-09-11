@@ -36,7 +36,6 @@ from weft._constants import (
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft._constants import (
     TERMINAL_TASK_EVENTS as CANONICAL_TERMINAL_TASK_EVENTS,
@@ -51,10 +50,10 @@ from weft.core.service_convergence import (
     manager_service_key,
     project_manager_service_record,
 )
+from weft.core.task_state import iter_task_state_rows, list_task_state_tids
 from weft.ext import RunnerHandle
 from weft.helpers import (
     is_canonical_manager_record,
-    iter_queue_entries,
     iter_queue_json_entries,
     pid_is_live,
     pid_matches_create_time,
@@ -811,25 +810,15 @@ class WeftTestHarness:
         yield whatever was read; the queue handle closes on every path.
         """
 
-        queue = Queue(
-            WEFT_TID_MAPPINGS_QUEUE,
-            db_path=self.context.broker_target,
-            persistent=False,
-            config=self.context.broker_config,
-        )
         entries: list[tuple[dict[str, object], int]] = []
         try:
-            for raw, message_id in iter_queue_entries(queue):
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(data, dict):
-                    entries.append((data, int(message_id)))
+            with self.context.broker() as broker:
+                for tid in list_task_state_tids(self.context, broker=broker):
+                    for row in iter_task_state_rows(self.context, tid, broker=broker):
+                        if row.malformed_reason is None and row.payload is not None:
+                            entries.append((row.payload, row.raw.message_id))
         except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
             return entries
-        finally:
-            queue.close()
         return entries
 
     def _load_tid_mapping_payloads(self) -> list[dict[str, object]]:

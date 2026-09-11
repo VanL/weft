@@ -35,7 +35,6 @@ from weft._constants import (
     ATOMIC_WRITE_RETRY_ATTEMPTS,
     ATOMIC_WRITE_RETRY_INTERVAL,
     SUBPROCESS_POLL_INTERVAL_FLOOR,
-    TASKSPEC_TID_LENGTH,
     TASKSPEC_TID_SHORT_LENGTH,
     WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -49,6 +48,7 @@ from .container_detection import (
 from .container_detection import (
     detect_container_runtime as detect_container_runtime,
 )
+from .message_ids import is_task_tid
 
 # Load configuration once at module level for efficiency
 _config = load_config()
@@ -111,12 +111,7 @@ def tid_short_form(tid: str) -> str:
     Spec: docs/specifications/07-System_Invariants.md [OBS.5];
         docs/specifications/10-CLI_Interface.md [CLI-1.2.3].
     """
-    if (
-        not isinstance(tid, str)
-        or len(tid) != TASKSPEC_TID_LENGTH
-        or not tid.isascii()
-        or not tid.isdecimal()
-    ):
+    if not is_task_tid(tid):
         raise ValueError("tid must be a 19-digit decimal task ID")
     value = int(tid)
     grain = value >> 12

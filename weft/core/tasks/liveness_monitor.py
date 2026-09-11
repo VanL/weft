@@ -1,6 +1,6 @@
 """Manager-supervised ephemeral runtime liveness reaper.
 
-The task owns scheduling and exact TID-mapping deletion. Worker threads perform
+The task owns scheduling and exact task-state deletion. Worker threads perform
 read-only process/runtime inspection; the reactor alone touches broker state.
 
 Spec references:
@@ -30,20 +30,26 @@ from weft._constants import (
     LIVENESS_PROBE_INTERVAL_SECONDS,
     LIVENESS_PROBE_WORKER_NAME,
     LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
+    LIVENESS_STATE_REFRESH_INTERVAL_SECONDS,
     LIVENESS_UNKNOWN_TIMEOUT_SECONDS,
     TASK_REACTOR_WAKEUP_MAX_SECONDS,
-    WEFT_TID_MAPPINGS_QUEUE,
+    WEFT_TASK_STATE_QUEUE_PREFIX,
 )
 from weft._runner_plugins import get_runner_plugin
-from weft.core.queue_window import QueueWindowRow, is_old_enough
+from weft.core.queue_window import is_old_enough
+from weft.core.task_state import (
+    iter_task_state_rows,
+    list_task_state_tids,
+    read_task_state_snapshot,
+    task_state_queue_name,
+)
 from weft.core.taskspec import TaskSpec
 from weft.ext import RunnerHandle
-from weft.helpers import iter_queue_entries
+from weft.helpers import closing_queue_iterator
 from weft.liveness.analysis import analyze_liveness, runtime_generation
 from weft.liveness.models import LivenessObservation
 from weft.liveness.policy import (
     UnknownDeadlineState,
-    decode_tid_mapping_row,
     reduce_mapping_history,
     reduce_unknown_deadline,
 )
@@ -108,12 +114,12 @@ class LivenessMonitor(ServiceTask):
         self._unknown_timeout_seconds = float(unknown_timeout_seconds)
         self._mapping_min_age_seconds = float(mapping_min_age_seconds)
         self._latest_rows: dict[str, MappingRow] = {}
-        self._mapping_cursor: int | None = None
         self._deadlines: dict[str, UnknownDeadlineState] = {}
         self._in_flight: dict[str, ProbeWork] = {}
         self._due_heap: list[tuple[float, str, str]] = []
         self._due_tids: set[str] = set()
         self._next_full_reconcile_at = self._monotonic()
+        self._next_state_refresh_at = self._next_full_reconcile_at
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
         self._register_service_worker(
             ServiceWorkerSpec(
@@ -125,7 +131,7 @@ class LivenessMonitor(ServiceTask):
         )
         self._start_service_worker(LIVENESS_PROBE_WORKER_NAME)
         self._activate_service_task()
-        self._set_activity("waiting", waiting_on=WEFT_TID_MAPPINGS_QUEUE)
+        self._set_activity("waiting", waiting_on=WEFT_TASK_STATE_QUEUE_PREFIX)
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         return {
@@ -148,69 +154,111 @@ class LivenessMonitor(ServiceTask):
             return
         now = self._monotonic()
         full = now >= self._next_full_reconcile_at
-        self._reconcile_mapping_rows(full=full)
-        if full:
-            self._next_full_reconcile_at = (
-                now + LIVENESS_FULL_RECONCILE_INTERVAL_SECONDS
+        if full or now >= self._next_state_refresh_at:
+            self._reconcile_mapping_rows(full=full)
+            completed_at = self._monotonic()
+            self._next_state_refresh_at = (
+                completed_at + LIVENESS_STATE_REFRESH_INTERVAL_SECONDS
             )
-        self._schedule_due_probes(now=now)
+            if full:
+                self._next_full_reconcile_at = (
+                    completed_at + LIVENESS_FULL_RECONCILE_INTERVAL_SECONDS
+                )
+        self._schedule_due_probes(now=self._monotonic())
         self._maybe_emit_poll_report()
 
     def _reconcile_mapping_rows(self, *, full: bool) -> None:
-        """Replay new mapping rows and exact-delete old malformed/history rows."""
+        """Sample current snapshots, retaining evidence when broker reads fail.
 
-        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
-        since = None if full else self._mapping_cursor
-        original_latest = self._latest_rows
-        latest_rows: dict[str, MappingRow] = {} if full else self._latest_rows
-        newest_cursor = self._mapping_cursor
-        retire_message_ids: set[int] = set()
-        for body, message_id in iter_queue_entries(queue, since_timestamp=since):
-            newest_cursor = (
-                message_id if newest_cursor is None else max(newest_cursor, message_id)
-            )
-            decoded = decode_tid_mapping_row(
-                QueueWindowRow(
-                    queue=WEFT_TID_MAPPINGS_QUEUE,
-                    body=body,
-                    message_id=message_id,
+        Full reconciliation additionally reduces age-fenced history. Queue
+        handles belong to this pass, never the task's permanent queue cache.
+
+        Spec: [LIVENESS.R3], [LIVENESS.R4], [LIVENESS.R8], [LIVENESS.R10]
+        """
+        ctx = self._task_context()
+        try:
+            with ctx.broker() as broker:
+                tids = set(list_task_state_tids(ctx, broker=broker))
+                for missing_tid in self._latest_rows.keys() - tids:
+                    self._forget_mapping_row(missing_tid)
+                for tid in sorted(tids):
+                    try:
+                        if full:
+                            snapshot, retire_ids, _retained_ids = (
+                                self._read_mapping_history(tid, broker=broker)
+                            )
+                            for message_id in sorted(retire_ids):
+                                self._delete_mapping_message(
+                                    tid, message_id, broker=broker
+                                )
+                        else:
+                            previous = self._latest_rows.get(tid)
+                            snapshot = read_task_state_snapshot(
+                                ctx,
+                                tid,
+                                broker=broker,
+                                previous=(previous.message_id, previous.payload)
+                                if previous is not None
+                                else None,
+                            )
+                        self._adopt_mapping_snapshot(tid, snapshot)
+                    except (BrokerError, OSError, RuntimeError):
+                        logger.debug(
+                            "Failed to read task state for %s", tid, exc_info=True
+                        )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to refresh task-state namespace", exc_info=True)
+
+    def _read_mapping_history(
+        self, tid: str, *, broker: Any
+    ) -> tuple[tuple[int, dict[str, Any]] | None, set[int], set[int]]:
+        """Read all observed history before deleting any row [LIVENESS.R3]."""
+        latest: tuple[int, dict[str, Any]] | None = None
+        retire_ids: set[int] = set()
+        valid_ids: set[int] = set()
+        now_ns = time.time_ns()
+        with closing_queue_iterator(
+            iter_task_state_rows(self._task_context(), tid, broker=broker)
+        ) as rows:
+            for decoded in rows:
+                message_id = decoded.raw.message_id
+                decision = reduce_mapping_history(
+                    current_message_id=latest[0] if latest is not None else None,
+                    candidate_message_id=message_id,
+                    malformed_reason=decoded.malformed_reason,
+                    now_ns=now_ns,
+                    min_age_seconds=self._mapping_min_age_seconds,
                 )
-            )
-            payload = dict(decoded.payload or {})
-            tid_value = payload.get("full")
-            tid = tid_value if isinstance(tid_value, str) and tid_value else None
-            previous = latest_rows.get(tid) if tid is not None else None
-            history = reduce_mapping_history(
-                current_message_id=(
-                    previous.message_id if previous is not None else None
-                ),
-                candidate_message_id=message_id,
-                malformed_reason=decoded.malformed_reason,
-                now_ns=time.time_ns(),
-                min_age_seconds=self._mapping_min_age_seconds,
-            )
-            retire_message_ids.update(history.retire_message_ids)
-            if not history.adopt_candidate or tid is None:
-                continue
-            row = MappingRow(
-                tid=tid,
-                message_id=message_id,
-                payload=payload,
-                generation=runtime_generation(payload),
-            )
-            latest_rows[tid] = row
-            if not full:
-                self._activate_mapping_row(row, previous=previous)
-        for retire_message_id in sorted(retire_message_ids):
-            self._delete_mapping_message(retire_message_id)
-        if full:
-            self._latest_rows = latest_rows
-            for removed_tid in original_latest.keys() - latest_rows.keys():
-                self._deadlines.pop(removed_tid, None)
-                self._drop_due(removed_tid)
-            for tid, row in latest_rows.items():
-                self._activate_mapping_row(row, previous=original_latest.get(tid))
-        self._mapping_cursor = newest_cursor
+                retire_ids.update(decision.retire_message_ids)
+                if decoded.malformed_reason is None and decoded.payload is not None:
+                    valid_ids.add(message_id)
+                    if decision.adopt_candidate:
+                        latest = (message_id, dict(decoded.payload))
+        retained_ids = valid_ids - retire_ids
+        if latest is not None:
+            retained_ids.discard(latest[0])
+        return latest, retire_ids, retained_ids
+
+    def _adopt_mapping_snapshot(
+        self, tid: str, snapshot: tuple[int, dict[str, Any]] | None
+    ) -> None:
+        """Adopt only the sampled current generation [LIVENESS.R4]."""
+        if snapshot is None:
+            self._forget_mapping_row(tid)
+            return
+        message_id, payload = snapshot
+        previous = self._latest_rows.get(tid)
+        if previous is not None and previous.message_id == message_id:
+            return
+        row = MappingRow(tid, message_id, payload, runtime_generation(payload))
+        self._latest_rows[tid] = row
+        self._activate_mapping_row(row, previous=previous)
+
+    def _forget_mapping_row(self, tid: str) -> None:
+        """Discard missing state without releasing an in-flight probe lane."""
+        self._latest_rows.pop(tid, None)
+        self._deadlines.pop(tid, None)
+        self._drop_due(tid)
 
     def _activate_mapping_row(
         self,
@@ -429,7 +477,7 @@ class LivenessMonitor(ServiceTask):
                 time.time_ns(),
                 self._mapping_min_age_seconds,
             )
-            and self._delete_mapping_message(current.message_id)
+            and self._retire_mapping_row(current)
         ):
             hostname = current.payload.get("hostname")
             logger.info(
@@ -447,19 +495,57 @@ class LivenessMonitor(ServiceTask):
                     "message_id": current.message_id,
                 },
             )
-            self._latest_rows.pop(current.tid, None)
-            self._deadlines.pop(current.tid, None)
+            self._forget_mapping_row(current.tid)
             return
-        self._push_due(current, due_at=now + LIVENESS_PROBE_INTERVAL_SECONDS)
+        remaining = self._latest_rows.get(current.tid)
+        if remaining is not None and remaining.message_id == current.message_id:
+            self._push_due(remaining, due_at=now + LIVENESS_PROBE_INTERVAL_SECONDS)
 
-    def _delete_mapping_message(self, message_id: int) -> bool:
+    def _retire_mapping_row(self, row: MappingRow) -> bool:
+        """Verify and retire older rows before the probed latest [LIVENESS.R3]."""
         try:
-            return bool(
-                self._queue(WEFT_TID_MAPPINGS_QUEUE).delete(message_id=message_id)
+            with self._task_context().broker() as broker:
+                snapshot, retire_ids, retained_ids = self._read_mapping_history(
+                    row.tid, broker=broker
+                )
+                if snapshot is None or snapshot[0] != row.message_id:
+                    self._adopt_mapping_snapshot(row.tid, snapshot)
+                    return False
+                if retained_ids:
+                    return False
+                for message_id in sorted(retire_ids):
+                    if not self._delete_mapping_message(
+                        row.tid, message_id, broker=broker
+                    ):
+                        return False
+                return self._delete_mapping_message(
+                    row.tid, row.message_id, broker=broker
+                )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to reread task state before retiring %s",
+                row.tid,
+                exc_info=True,
+            )
+            return False
+
+    def _delete_mapping_message(
+        self, tid: str, message_id: int, *, broker: Any
+    ) -> bool:
+        """Exact-delete an observed ID; a verified missing ID is complete."""
+        try:
+            queue_name = task_state_queue_name(tid)
+            broker.delete_message_ids(queue_name, [message_id])
+            return (
+                broker.peek_one(
+                    queue_name, exact_timestamp=message_id, include_claimed=True
+                )
+                is None
             )
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
-                "Failed to exact-delete TID mapping %s",
+                "Failed to exact-delete task state %s/%s",
+                tid,
                 message_id,
                 exc_info=True,
             )
@@ -473,7 +559,11 @@ class LivenessMonitor(ServiceTask):
         now = self._monotonic()
         due = self._due_heap[0][0] - now if self._due_heap else None
         full = self._next_full_reconcile_at - now
-        values = [TASK_REACTOR_WAKEUP_MAX_SECONDS, full]
+        values = [
+            TASK_REACTOR_WAKEUP_MAX_SECONDS,
+            full,
+            self._next_state_refresh_at - now,
+        ]
         if due is not None:
             values.append(due)
         return max(0.0, min(values))

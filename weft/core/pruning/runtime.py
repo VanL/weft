@@ -49,7 +49,6 @@ from weft.core.endpoints import (
     endpoint_record_from_payload,
     endpoint_record_owner_is_live,
     latest_task_statuses_for_endpoint_resolution,
-    latest_tid_mapping_entries_for_endpoint_resolution,
 )
 from weft.core.manager_runtime import (
     manager_registry_record_liveness,
@@ -61,6 +60,7 @@ from weft.core.service_convergence import (
     parse_service_owner_row,
     plan_service_owner_history_prune,
 )
+from weft.core.task_state import latest_task_state_rows
 from weft.helpers import iter_queue_json_entries, send_log
 
 RuntimeQueueName = Literal[
@@ -478,7 +478,14 @@ def _streaming_candidates(
 ) -> tuple[list[RuntimePruneCandidate], int]:
     entries, scanned = _read_runtime_queue(ctx, WEFT_STREAMING_SESSIONS_QUEUE)
     task_statuses = _latest_task_statuses_from_log(ctx)
-    tid_mappings = latest_tid_mapping_entries_for_endpoint_resolution(ctx)
+    candidate_tids = {
+        payload["tid"]
+        for payload, message_id in entries
+        if isinstance(payload.get("tid"), str)
+        and payload["tid"]
+        and is_old_enough(message_id, now_ns, config.min_age_seconds)
+    }
+    tid_mappings = latest_task_state_rows(ctx, candidate_tids)
     grouped: dict[str, list[tuple[dict[str, Any], int]]] = defaultdict(list)
     for payload, message_id in entries:
         key = payload.get("session_id")
@@ -543,7 +550,18 @@ def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] excepti
         grouped[(record.name, record.tid)].append((payload, message_id))
 
     task_statuses = latest_task_statuses_for_endpoint_resolution(ctx)
-    tid_mappings = latest_tid_mapping_entries_for_endpoint_resolution(ctx)
+    tid_mappings = {
+        tid: payload
+        for tid, (_message_id, payload) in latest_task_state_rows(
+            ctx,
+            {
+                record.tid
+                for _payload, message_id, record in parsed
+                if record.status == "active"
+                and is_old_enough(message_id, now_ns, config.min_age_seconds)
+            },
+        ).items()
+    }
     candidates: list[RuntimePruneCandidate] = []
     superseded_ids: set[int] = set()
     for (name, tid), records in grouped.items():

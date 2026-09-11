@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,10 +20,11 @@ from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     MANAGER_STARTUP_LOG_DIRNAME,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands import tasks as task_cmd
+from weft.context import WeftContext
 from weft.core import manager_runtime
+from weft.core.task_state import task_state_queue_name
 from weft.helpers import pid_is_live
 
 
@@ -76,55 +79,43 @@ def test_queue_debug_read_failure_uses_fixed_fallback_and_closes(
 
 
 @pytest.mark.shared
-def test_mapping_read_failure_closes_queue_once(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("error", [RuntimeError, TypeError])
+def test_mapping_read_failure_closes_broker_and_preserves_error_boundary(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception]
 ) -> None:
     close_calls: list[str] = []
-
-    class FailingQueue:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def peek_generator(self, **_kwargs: object) -> list[object]:
-            raise RuntimeError("mapping read failure")
-
-        def close(self) -> None:
-            close_calls.append("close")
-
     harness = WeftTestHarness()
+    tid = "1770000000000000001"
+    queue = harness.context.queue(task_state_queue_name(tid))
     try:
-        monkeypatch.setattr(harness_mod, "Queue", FailingQueue)
-
-        assert harness._load_tid_mapping_payloads() == []
-        assert close_calls == ["close"]
+        queue.write(json.dumps({"full": tid, "short": "display"}))
     finally:
-        harness._closed = True
-        harness._tempdir.cleanup()
+        queue.close()
+    with harness.context.broker() as broker:
+        broker_type = type(broker)
+    original_broker = type(harness.context).broker
 
+    def fail_read(self: object, *args: object, **kwargs: object) -> object:
+        raise error("mapping read failure")
 
-@pytest.mark.shared
-def test_mapping_read_propagates_unexpected_programming_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    close_calls: list[str] = []
-
-    class DefectiveQueue:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def peek_generator(self, **_kwargs: object) -> list[object]:
-            raise TypeError("unexpected mapping reader defect")
-
-        def close(self) -> None:
+    @contextmanager
+    def counted_broker(self: WeftContext) -> Iterator[Any]:
+        try:
+            with original_broker(self) as opened:
+                yield opened
+        finally:
             close_calls.append("close")
 
-    harness = WeftTestHarness()
     try:
-        monkeypatch.setattr(harness_mod, "Queue", DefectiveQueue)
-
-        with pytest.raises(TypeError, match="unexpected mapping reader defect"):
-            harness._load_tid_mapping_payloads()
-        assert close_calls == ["close"]
+        with monkeypatch.context() as patch:
+            patch.setattr(broker_type, "peek_generator", fail_read)
+            patch.setattr(type(harness.context), "broker", counted_broker)
+            if error is TypeError:
+                with pytest.raises(TypeError, match="mapping read failure"):
+                    harness._load_tid_mapping_payloads()
+            else:
+                assert harness._load_tid_mapping_payloads() == []
+            assert close_calls == ["close"]
     finally:
         harness._closed = True
         harness._tempdir.cleanup()
@@ -1410,7 +1401,7 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
         manager_tid = "1775630560447778816"
         harness.register_manager_tid(manager_tid)
         mapping_queue = Queue(
-            WEFT_TID_MAPPINGS_QUEUE,
+            task_state_queue_name(tid),
             db_path=harness.context.broker_target,
             persistent=False,
             config=harness.context.broker_config,
@@ -1420,6 +1411,7 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
                 json.dumps(
                     {
                         "full": tid,
+                        "short": "display",
                         "runtime_handle": _host_runtime_handle(424242, 434343),
                     }
                 )
@@ -1559,7 +1551,7 @@ def test_latest_mapping_discovery_reads_past_fixed_prefix() -> None:
     harness = WeftTestHarness()
     try:
         queue = Queue(
-            WEFT_TID_MAPPINGS_QUEUE,
+            task_state_queue_name("1778000000000009999"),
             db_path=harness.context.broker_target,
             persistent=True,
             config=harness.context.broker_config,
@@ -1571,7 +1563,7 @@ def test_latest_mapping_discovery_reads_past_fixed_prefix() -> None:
                     json.dumps(
                         {
                             "short": f"{index:010d}",
-                            "full": f"17780000000000{index:05d}",
+                            "full": live_tid,
                         }
                     )
                 )

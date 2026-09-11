@@ -14,7 +14,8 @@ import psutil
 import pytest
 
 from tests.tasks.test_task_execution import make_function_taskspec
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks import base as base_module
 from weft.core.tasks.base import BaseTask
@@ -186,7 +187,7 @@ def test_managed_identity_merge_preserves_explicit_evidence(
             str(time.time_ns()), "tests.tasks.sample_targets:echo_payload"
         ),
     )
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(task.tid))
     try:
         monkeypatch.setattr(base_module, "process_create_time", lambda pid: recorded)
         task.register_managed_pid(worker.pid)

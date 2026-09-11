@@ -32,8 +32,12 @@ opening new `Queue(...)` handles casually.
 
 Rules:
 
-- In `BaseTask` subclasses, use `_queue()` so handles share the task's broker
-  connection pool and stop event wiring.
+- In `BaseTask` subclasses, use `_queue()` for task-owned fixed queues so
+  handles share the task's broker connection pool and stop event wiring.
+  Namespace sweeps use the shared `weft/core/task_state.py` reader and
+  short-lived facades in one broker scope; never cache every discovered TID
+  forever in `_queue()`. Watchers still own their exact subscribed handles,
+  including handles opened before the first publication ([OBS.6], [LIVENESS.R10]).
 - In `MultiQueueWatcher`, let the watcher own queue objects for watched queues.
 - Use `WeftContext.queue()` in command/helpers when you just need a
   context-bound queue.
@@ -69,7 +73,7 @@ Why:
 Many important Weft queues are append-only histories:
 
 - `weft.log.tasks`
-- `weft.state.tid_mappings`
+- `weft.state.tasks.<tid>`
 - `weft.state.services`
 - task outboxes in some CLI/result flows
 
@@ -113,7 +117,7 @@ Why:
 These queues are runtime aids, not durable application state:
 
 - `weft.state.services`
-- `weft.state.tid_mappings`
+- `weft.state.tasks.<tid>`
 - `weft.state.streaming`
 - `weft.state.endpoints`
 - `weft.state.pipelines`

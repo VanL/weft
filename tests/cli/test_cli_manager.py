@@ -20,10 +20,10 @@ from weft._constants import (
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import build_context
 from weft.core.service_convergence import build_manager_service_payload
+from weft.core.task_state import task_state_queue_name
 from weft.helpers import iter_queue_json_entries, process_create_time
 
 pytestmark = [pytest.mark.shared]
@@ -544,7 +544,7 @@ def test_manager_force_stop_without_identity_remains_unconfirmed(workdir):
     context = build_context(spec_context=context_root)
     tid = "1761000000000000001"
 
-    mapping_queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    mapping_queue = context.queue(task_state_queue_name(tid), persistent=False)
     mapping_queue.write(
         json.dumps(
             {

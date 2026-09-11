@@ -16,6 +16,7 @@ from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
 from weft.core import task_evidence
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 from weft.helpers import tid_short_form
@@ -203,7 +204,7 @@ def _write_log(ctx: Any, payload: dict[str, Any]) -> None:
 
 
 def _write_dead_runtime_mapping(ctx: Any, tid: str) -> None:
-    queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     try:
         queue.write(
             json.dumps(

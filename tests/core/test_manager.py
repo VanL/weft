@@ -78,7 +78,7 @@ from weft._constants import (
     WEFT_MANAGER_SERVE_LOG_LEVEL,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
+    WEFT_TASK_STATE_QUEUE_PREFIX,
     WRAPPER_LOST_ERROR,
     load_config,
 )
@@ -91,6 +91,7 @@ from weft.core.service_convergence import (
     project_manager_service_record,
 )
 from weft.core.spawn_requests import submit_spawn_request
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import (
     Consumer,
     HeartbeatTask,
@@ -2106,6 +2107,12 @@ def test_admission_capacity_reserves_four_slots_for_liveness_monitor() -> None:
     )
 
 
+def _write_admission_snapshot(make_queue: Callable[[str], Any], body: str) -> int:
+    """Publish test state to its actual owner's runtime namespace."""
+    tid = json.loads(body)["full"]
+    return int(make_queue(task_state_queue_name(tid)).write(body))
+
+
 def test_sqlite_admission_counts_only_live_latest_mappings(
     broker_env,
     unique_tid: str,
@@ -2124,36 +2131,41 @@ def test_sqlite_admission_counts_only_live_latest_mappings(
             }
         ),
     )
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    drain(mappings)
-    mappings.write(
+    drain(make_queue(task_state_queue_name(unique_tid)))
+    _write_admission_snapshot(
+        make_queue,
         json.dumps(
             {
-                "full": "finished",
-                "short": "finished",
+                "full": "1700000000000000001",
+                "short": "1700000000000000001",
                 "runtime_handle": _host_runtime_handle(os.getpid()),
             }
-        )
+        ),
     )
-    mappings.write(
+    _write_admission_snapshot(
+        make_queue,
         json.dumps(
             {
-                "full": "finished",
-                "short": "finished",
+                "full": "1700000000000000001",
+                "short": "1700000000000000001",
                 "runtime_handle": _host_runtime_handle(999_991),
             }
-        )
+        ),
     )
-    mappings.write(
+    _write_admission_snapshot(
+        make_queue,
         json.dumps(
             {
-                "full": "running",
-                "short": "running",
+                "full": "1700000000000000002",
+                "short": "1700000000000000002",
                 "runtime_handle": _host_runtime_handle(os.getpid()),
             }
-        )
+        ),
     )
-    mappings.write(json.dumps({"full": "undecidable", "short": "undecidable"}))
+    _write_admission_snapshot(
+        make_queue,
+        json.dumps({"full": "1700000000000000003", "short": "1700000000000000003"}),
+    )
 
     try:
         # The latest row per TID decides: "finished" ends on a dead handle
@@ -2183,24 +2195,24 @@ def test_sqlite_admission_unions_launches_and_committed_children_once(
             }
         ),
     )
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    drain(mappings)
-    mappings.write(
+    drain(make_queue(task_state_queue_name(unique_tid)))
+    _write_admission_snapshot(
+        make_queue,
         json.dumps(
             {
-                "full": "overlap",
-                "short": "overlap",
+                "full": "1700000000000000004",
+                "short": "1700000000000000004",
                 "runtime_handle": _host_runtime_handle(os.getpid()),
             }
-        )
+        ),
     )
-    manager._active_child_launches["overlap"] = cast(Any, object())
-    manager._active_child_launches["pending"] = cast(Any, object())
-    manager._child_processes["overlap"] = ManagedChild(
+    manager._active_child_launches["1700000000000000004"] = cast(Any, object())
+    manager._active_child_launches["1700000000000000005"] = cast(Any, object())
+    manager._child_processes["1700000000000000004"] = ManagedChild(
         process=FakeLaunchProcess(pid=424210),
         ctrl_queue=None,
     )
-    manager._child_processes["committed"] = ManagedChild(
+    manager._child_processes["1700000000000000006"] = ManagedChild(
         process=FakeLaunchProcess(pid=424211),
         ctrl_queue=None,
     )
@@ -2236,25 +2248,26 @@ def test_sqlite_admission_memoizes_probe_verdicts(
             }
         ),
     )
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    drain(mappings)
-    mappings.write(
+    drain(make_queue(task_state_queue_name(unique_tid)))
+    _write_admission_snapshot(
+        make_queue,
         json.dumps(
             {
-                "full": "dead",
-                "short": "dead",
+                "full": "1700000000000000007",
+                "short": "1700000000000000007",
                 "runtime_handle": _host_runtime_handle(999_991),
             }
-        )
+        ),
     )
-    mappings.write(
+    _write_admission_snapshot(
+        make_queue,
         json.dumps(
             {
-                "full": "alive",
-                "short": "alive",
+                "full": "1700000000000000008",
+                "short": "1700000000000000008",
                 "runtime_handle": _host_runtime_handle(os.getpid()),
             }
-        )
+        ),
     )
     probes = 0
     real_probe = manager_mod.mapping_row_is_live
@@ -2297,11 +2310,10 @@ def test_sqlite_admission_memo_invalidates_when_terminal_hint_changes(
             }
         ),
     )
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
-    drain(mappings)
+    drain(make_queue(task_state_queue_name(unique_tid)))
     payload = {
-        "full": "external",
-        "short": "external",
+        "full": "1700000000000000009",
+        "short": "1700000000000000009",
         "runtime_handle": {
             "runner": "external",
             "kind": "container",
@@ -2312,7 +2324,7 @@ def test_sqlite_admission_memo_invalidates_when_terminal_hint_changes(
         },
         "terminal": False,
     }
-    mappings.write(json.dumps(payload))
+    _write_admission_snapshot(make_queue, json.dumps(payload))
     probes = 0
     real_probe = manager_mod.mapping_row_is_live
 
@@ -2325,7 +2337,7 @@ def test_sqlite_admission_memo_invalidates_when_terminal_hint_changes(
 
     try:
         assert manager._observe_admission_usage() == 1
-        mappings.write(json.dumps({**payload, "terminal": True}))
+        _write_admission_snapshot(make_queue, json.dumps({**payload, "terminal": True}))
         assert manager._observe_admission_usage() == 0
         assert probes == 2
     finally:
@@ -2340,15 +2352,15 @@ def test_sqlite_admission_reconstructs_terminal_external_release_without_task_lo
     if active_test_backend() != "sqlite":
         pytest.skip("SQLite-specific usage observation")
     db_path, make_queue = broker_env
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
     task_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    drain(mappings)
+    drain(make_queue(task_state_queue_name(unique_tid)))
     drain(task_log)
-    mappings.write(
+    _write_admission_snapshot(
+        make_queue,
         json.dumps(
             {
-                "full": "completed-external",
-                "short": "external",
+                "full": "1700000000000000010",
+                "short": "1700000000000000009",
                 "runtime_handle": {
                     "runner": "external",
                     "kind": "container",
@@ -2359,7 +2371,7 @@ def test_sqlite_admission_reconstructs_terminal_external_release_without_task_lo
                 },
                 "terminal": True,
             }
-        )
+        ),
     )
 
     manager = Manager(
@@ -2640,28 +2652,29 @@ def test_sqlite_admission_fails_closed_on_expected_observer_errors(
         manager.cleanup()
 
 
-def test_sqlite_admission_fails_closed_when_mapping_generator_cannot_open(
+def test_sqlite_admission_fails_closed_when_state_namespace_cannot_be_listed(
     broker_env,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     if active_test_backend() != "sqlite":
         pytest.skip("SQLite-specific usage observation")
-    db_path, make_queue = broker_env
+    db_path, _make_queue = broker_env
     manager = Manager(
         db_path,
         make_manager_spec(unique_tid, idle_timeout=0.0),
         config=load_config({WEFT_ADMISSION_MAX_CONNECTIONS: 5}),
     )
-    queue_type = type(make_queue(WEFT_TID_MAPPINGS_QUEUE))
-    real_peek_generator = queue_type.peek_generator
+    with manager._task_context().broker() as broker:
+        broker_type = type(broker)
+    original_list = broker_type.list_queues
 
-    def fail_mapping_generator(queue: Any, *args: Any, **kwargs: Any) -> Any:
-        if queue.name == WEFT_TID_MAPPINGS_QUEUE:
-            raise BrokerError("mapping history unavailable")
-        return real_peek_generator(queue, *args, **kwargs)
+    def fail_state_listing(db: Any, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("prefix") == WEFT_TASK_STATE_QUEUE_PREFIX:
+            raise BrokerError("task state namespace unavailable")
+        return original_list(db, *args, **kwargs)
 
-    monkeypatch.setattr(queue_type, "peek_generator", fail_mapping_generator)
+    monkeypatch.setattr(broker_type, "list_queues", fail_state_listing)
 
     try:
         assert manager._observe_admission_usage() is None
@@ -6998,7 +7011,7 @@ def test_manager_tid_mapping_forces_role_manager(broker_env, unique_tid) -> None
     )
     manager = Manager(db_path, spec)
     try:
-        mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+        mapping_queue = make_queue(task_state_queue_name(manager.tid))
         entries = [json.loads(item) for item in drain(mapping_queue)]
         relevant = [entry for entry in entries if entry.get("full") == manager.tid]
         assert relevant
@@ -7010,7 +7023,7 @@ def test_manager_tid_mapping_forces_role_manager(broker_env, unique_tid) -> None
 
 def test_manager_tid_mapping_defaults_role_manager(manager_setup) -> None:
     manager, make_queue = manager_setup
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(manager.tid))
     entries = [json.loads(item) for item in drain(mapping_queue)]
     relevant = [entry for entry in entries if entry.get("full") == manager.tid]
     assert relevant
@@ -10567,7 +10580,7 @@ def test_managed_pids_for_child_excludes_create_time_mismatch(
 ) -> None:
     """Shutdown reap must not target a recycled PID (create-time mismatch).
 
-    A stale ``weft.state.tid_mappings`` row may hold a PID the OS has recycled to
+    A stale ``weft.state.tasks.<tid>`` row may hold a PID the OS has recycled to
     an unrelated process. ``_managed_pids_for_child`` feeds the forced-shutdown
     ``terminate_process_tree`` loop, so it must return only PIDs whose recorded
     creation time still matches the live process. The bare-PID path would return
@@ -10584,8 +10597,8 @@ def test_managed_pids_for_child_excludes_create_time_mismatch(
         assert actual_create_time is not None
 
         # Recycled PID: live, but the recorded create_time no longer matches.
-        stale_tid = "100000000000000001"
-        make_queue(WEFT_TID_MAPPINGS_QUEUE).write(
+        stale_tid = "1000000000000000001"
+        make_queue(task_state_queue_name(stale_tid)).write(
             json.dumps(
                 {
                     "full": stale_tid,
@@ -10599,8 +10612,8 @@ def test_managed_pids_for_child_excludes_create_time_mismatch(
         assert manager._managed_pids_for_child(stale_tid) == set()
 
         # Genuine match: same PID with its actual create_time stays targetable.
-        match_tid = "100000000000000002"
-        make_queue(WEFT_TID_MAPPINGS_QUEUE).write(
+        match_tid = "1000000000000000002"
+        make_queue(task_state_queue_name(match_tid)).write(
             json.dumps(
                 {
                     "full": match_tid,

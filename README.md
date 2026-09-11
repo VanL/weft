@@ -661,7 +661,7 @@ weft.manager.outbox      # Manager informational output
 weft.spawn.requests      # Task spawn requests to manager
 weft.spawn.internal      # Manager-owned internal service spawn requests
 weft.state.services      # Runtime service-owner registry, including managers (runtime state)
-weft.state.tid_mappings  # Short->full TID mappings (runtime state)
+weft.state.tasks.<tid>   # Per-task runtime-state snapshots
 weft.state.streaming     # Active streaming sessions (runtime state)
 weft.state.endpoints     # Active named endpoint registry (runtime state)
 weft.state.pipelines     # Active pipeline registry (runtime state)
@@ -674,11 +674,21 @@ task-lifetime JSONL handoff before cleanup.
 
 The manager also supervises a default-on `LivenessMonitor`. It periodically
 reduces task-owned runtime evidence through the broker-free `weft.liveness`
-package and is the sole deleter of `weft.state.tid_mappings`. Unknown results
-remain in memory for five minutes before proving a mapping dead; a process
-restart resets that deadline. Runtime extensions own their probes through the
+package and is the sole deleter of `weft.state.tasks.*` rows. It refreshes
+current snapshots every five seconds and reconciles history every ten minutes;
+slow refresh work can delay discovery. Unknown results remain in memory for
+five minutes before permitting retirement, still subject to the forty-minute
+minimum row age; a process restart resets that deadline. Exact deletion keeps
+newer concurrent publications intact. Short-ID resolution uses queue names;
+status and control require valid snapshots and their existing evidence checks. Runtime extensions own their probes through the
 process-local liveness registry. Disable this service with
 `WEFT_LIVENESS_MONITOR_ENABLED=0`.
+
+The task-state namespace requires a downtime upgrade: stop every task and
+service in each broker context and verify process exit before installing the
+new version. Remove the legacy flat queue with
+`weft queue delete weft.state.tid_mappings` in that context, then restart.
+There is no mixed-version support. See [upgrade and rollback notes](CHANGELOG.md).
 
 The supervised TaskMonitor also performs default-on self-maintenance on an
 hourly monotonic deadline: it vacuums claimed broker rows and conservatively

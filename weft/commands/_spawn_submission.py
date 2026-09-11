@@ -20,16 +20,15 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
 from weft.core import manager_runtime
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.helpers import iter_queue_json_entries
-from weft.liveness.policy import valid_tid_mapping_payload
+from weft.helpers.message_ids import is_task_tid
 
 _spawn_reconciliation_static_queue_specs: Final[tuple[tuple[str, bool], ...]] = (
-    (WEFT_TID_MAPPINGS_QUEUE, False),
     (WEFT_GLOBAL_LOG_QUEUE, False),
     (WEFT_SPAWN_REQUESTS_QUEUE, False),
     (WEFT_SERVICES_REGISTRY_QUEUE, False),
@@ -70,17 +69,9 @@ def _queue_contains_exact_message(
 
 
 def _mapping_exists_for_tid(context: WeftContext, tid: str) -> bool:
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-    try:
-        for payload, _timestamp in iter_queue_json_entries(
-            queue,
-            since_timestamp=int(tid) - 1,
-        ):
-            if valid_tid_mapping_payload(payload) and payload.get("full") == tid:
-                return True
-        return False
-    finally:
-        queue.close()
+    """Use valid task-local runtime evidence for spawn proof [MF-6]."""
+
+    return read_task_state_snapshot(context, tid) is not None
 
 
 def _inspect_task_log_for_tid(
@@ -164,10 +155,15 @@ def _reserved_spawn_request_queue_names(context: WeftContext) -> tuple[str, ...]
 
 def _spawn_reconciliation_queue_specs(
     context: WeftContext,
+    tid: str,
 ) -> tuple[tuple[str, bool], ...]:
-    return _spawn_reconciliation_static_queue_specs + tuple(
-        (queue_name, False)
-        for queue_name in _reserved_spawn_request_queue_names(context)
+    return (
+        (((task_state_queue_name(tid), False),) if is_task_tid(tid) else ())
+        + _spawn_reconciliation_static_queue_specs
+        + tuple(
+            (queue_name, False)
+            for queue_name in _reserved_spawn_request_queue_names(context)
+        )
     )
 
 
@@ -230,7 +226,7 @@ def reconcile_submitted_spawn(
     """
 
     deadline = time.monotonic() + max(timeout, 0.0)
-    queue_specs = _spawn_reconciliation_queue_specs(context)
+    queue_specs = _spawn_reconciliation_queue_specs(context, tid)
     monitor_queues, monitor = _open_spawn_reconciliation_monitor(context, queue_specs)
     last_reserved: SpawnSubmissionReconciliation | None = None
     try:
@@ -248,7 +244,7 @@ def reconcile_submitted_spawn(
                     return last_reserved
                 return result
 
-            current_specs = _spawn_reconciliation_queue_specs(context)
+            current_specs = _spawn_reconciliation_queue_specs(context, tid)
             if current_specs != queue_specs:
                 monitor.close()
                 for queue in monitor_queues:

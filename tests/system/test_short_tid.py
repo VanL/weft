@@ -11,9 +11,9 @@ import psutil
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_TID_MAPPINGS_QUEUE
 from weft.commands.tasks import resolve_full_tid
 from weft.context import build_context
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import IOSection, SpecSection, TaskSpec
 from weft.helpers import iter_queue_json_entries, tid_short_form
 from weft.liveness.host import inspect_host_process
@@ -71,7 +71,7 @@ def test_old_stored_short_resolves_from_full_tid(tmp_path: Path) -> None:
     tid = "1760000000123456789"
     old_short = tid[-10:]
     assert old_short != tid_short_form(tid)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
     try:
         queue.write(json.dumps({"full": tid, "short": old_short}))
         assert resolve_full_tid(context, tid_short_form(tid)) == tid
@@ -104,7 +104,7 @@ def test_consumer_publishes_and_matches_new_short_title(
     )
     task = task_factory(spec)
     _target, make_queue = broker_env
-    queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    queue = make_queue(task_state_queue_name(tid))
     rows = [
         row for row, _stamp in iter_queue_json_entries(queue) if row.get("full") == tid
     ]

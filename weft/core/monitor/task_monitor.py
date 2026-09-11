@@ -86,7 +86,6 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.control_messages import ControlRequest
-from weft.core.endpoints import latest_tid_mapping_rows
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
 from weft.core.monitor.collation import (
     MonitorTaskEventUpdate,
@@ -112,6 +111,7 @@ from weft.core.monitor.policies.dead_task import (
 from weft.core.monitor.policies.dead_task import (
     fetch_dead_task_log_coalesce_group as _fetch_dead_task_log_coalesce_group,
 )
+from weft.core.monitor.policies.dead_task import standard_task_queue_tid
 from weft.core.monitor.policies.runtime_control import RuntimeCleanupSliceKind
 from weft.core.monitor.policies.runtime_control import (
     RuntimeReservedCleanupSelection as _RuntimeReservedCleanupSelection,
@@ -198,6 +198,7 @@ from weft.core.service_convergence import (
     manager_service_key,
     reduce_latest_by_service_owner,
 )
+from weft.core.task_state import latest_task_state_rows
 from weft.core.tasks.base import TaskReactorLifecycle, TaskWorkerResult
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
 from weft.core.tasks.service import (
@@ -2771,7 +2772,13 @@ class TaskMonitor(ServiceTask):
             self._record_pre_checkpoint_recovery_progress(result)
             return result
 
-        active_tids = self._active_runtime_tids()
+        active_tids = self._active_runtime_tids(
+            {
+                row.tid
+                for row in candidate_rows
+                if row.tid is not None and row.raw.message_id in missing_ids
+            }
+        )
         selected_rows: list[QueueWindowRow] = []
         valid_updates: list[MonitorTaskEventUpdate] = []
         malformed_rows: list[QueueWindowRow] = []
@@ -3004,7 +3011,13 @@ class TaskMonitor(ServiceTask):
             # row itself). Only a family with no runtime evidence at all,
             # or whose probeable host processes are all dead, may be
             # disposed as stale_open.
-            protected_tids = self._destruction_protected_runtime_tids()
+            protected_tids = self._destruction_protected_runtime_tids(
+                {
+                    ready.record.tid
+                    for ready in candidate_tasks
+                    if ready.close_reason == "stale_open"
+                }
+            )
             ready_tasks.extend(
                 ready
                 for ready in candidate_tasks
@@ -3401,7 +3414,12 @@ class TaskMonitor(ServiceTask):
         service_read = collect_service_owner_records(service_entries)
         return reduce_latest_by_service_owner(service_read.records)
 
-    def _active_runtime_tids(self) -> set[str]:
+    def _active_runtime_tids(
+        self,
+        tids: set[str] | None = None,
+        *,
+        latest_services: Sequence[ServiceOwnerRecord] | None = None,
+    ) -> set[str]:
         """Return TIDs with current service or non-terminal mapping evidence.
 
         TaskMonitor does not probe runtime internals. LivenessMonitor owns
@@ -3411,22 +3429,27 @@ class TaskMonitor(ServiceTask):
         Spec: [OBS.13.7]
         """
 
+        if tids is not None and not tids:
+            return set()
         active_tids: set[str] = set()
         ctx = self._monitor_context()
 
-        latest_services = self._latest_service_owner_records()
+        if latest_services is None:
+            latest_services = self._latest_service_owner_records()
         active_tids.update(
             record.owner_tid
             for record in latest_services
             if record.status in LIVE_SERVICE_STATUSES
         )
 
-        active_tids.update(self._nonterminal_mapping_row_tids(ctx))
+        active_tids.update(self._nonterminal_mapping_row_tids(ctx, tids))
 
         active_tids.add(self.tid)
         return active_tids
 
-    def _destruction_protected_runtime_tids(self) -> set[str]:
+    def _destruction_protected_runtime_tids(
+        self, tids: set[str] | None = None
+    ) -> set[str]:
         """Return TIDs protected from destructive runtime cleanup.
 
         Protection uses the same row-presence evidence as
@@ -3435,15 +3458,17 @@ class TaskMonitor(ServiceTask):
         Spec: [OBS.13.7]
         """
 
-        return self._active_runtime_tids()
+        return self._active_runtime_tids(tids)
 
     @staticmethod
-    def _nonterminal_mapping_row_tids(ctx: WeftContext) -> set[str]:
+    def _nonterminal_mapping_row_tids(
+        ctx: WeftContext, tids: set[str] | None = None
+    ) -> set[str]:
         """Return TIDs whose newest valid mapping row is non-terminal."""
 
         return {
             tid
-            for tid, (_timestamp, payload) in latest_tid_mapping_rows(ctx).items()
+            for tid, (_timestamp, payload) in latest_task_state_rows(ctx, tids).items()
             if payload.get("terminal") is not True
         }
 
@@ -3465,8 +3490,10 @@ class TaskMonitor(ServiceTask):
         )
         if not candidates:
             return ()
-        active_tids = self._active_runtime_tids()
         latest_services = self._latest_service_owner_records()
+        active_tids = self._active_runtime_tids(
+            {record.tid for record in candidates}, latest_services=latest_services
+        )
         live_service_owner_tids = {
             record.owner_tid
             for record in latest_services
@@ -3819,7 +3846,7 @@ class TaskMonitor(ServiceTask):
 
         records = ready_records[:control_limit]
         family_limit_hit = len(ready_records) > len(records)
-        active_tids = self._active_runtime_tids() if records else set()
+        active_tids = self._active_runtime_tids({record.tid for record in records})
         # Terminal lifecycle proof outranks mapping-row presence. A live
         # service-registry owner remains protected, but a mapping row alone
         # cannot block definitive terminal cleanup forever.
@@ -3973,9 +4000,6 @@ class TaskMonitor(ServiceTask):
         # probeable host PID) must block reserved-queue deletion the same
         # way it blocks other destructive cleanup decisions elsewhere in
         # this module (see `_destruction_protected_runtime_tids`).
-        active_tids = (
-            self._destruction_protected_runtime_tids() if snapshot_needed else set()
-        )
         reserved_queue_names = (
             tuple(
                 sorted(
@@ -3991,6 +4015,10 @@ class TaskMonitor(ServiceTask):
             )
             if snapshot_needed
             else ()
+        )
+        active_tids = self._destruction_protected_runtime_tids(
+            {record.tid for record in records}
+            | set(_reserved_queue_tids(reserved_queue_names))
         )
         reserved_queue_name_set = set(reserved_queue_names)
         selected_record_tids = {record.tid for record in records}
@@ -4195,7 +4223,6 @@ class TaskMonitor(ServiceTask):
         if control_limit <= 0:
             return _TaskControlCleanupResult()
 
-        active_tids = self._active_runtime_tids()
         task_queue_names = self._queue_name_snapshot(
             patterns=(
                 f"T*.{QUEUE_INBOX_SUFFIX}",
@@ -4204,6 +4231,15 @@ class TaskMonitor(ServiceTask):
                 f"T*.{QUEUE_CTRL_OUT_SUFFIX}",
                 f"T*.{QUEUE_RESERVED_SUFFIX}",
             )
+        )
+        # Classify every discovered live family before age/retention gates.
+        # Monitor-record probes below remain limited to actionable families.
+        active_tids = self._active_runtime_tids(
+            {
+                tid
+                for queue_name in task_queue_names
+                if (tid := standard_task_queue_tid(queue_name)) is not None
+            }
         )
         probe_tids = _runtime_dead_task_record_probe_tids(
             task_queue_names,

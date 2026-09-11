@@ -8,15 +8,18 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_TID_MAPPINGS_QUEUE
 from weft._exceptions import CommandUsageError, InvalidTID
 from weft.client import WeftClient
 from weft.commands import system as system_cmd
 from weft.commands import task_monitor as task_monitor_cmd
 from weft.commands import tasks as task_cmd
-from weft.commands._spawn_submission import _mapping_exists_for_tid
+from weft.commands._spawn_submission import (
+    _mapping_exists_for_tid,
+    _spawn_reconciliation_queue_specs,
+)
 from weft.commands._task_snapshot_reducer import reduce_task_event
 from weft.context import WeftContext, build_context
+from weft.core.heartbeat import _heartbeat_runtime_handle_is_live
 from weft.helpers import tid_short_form
 
 pytestmark = pytest.mark.shared
@@ -28,7 +31,7 @@ def mapping_context(tmp_path: Path) -> WeftContext:
 
 
 def write_mapping(context: WeftContext, full: str, short: str, **fields: object) -> int:
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    queue = context.queue(f"weft.state.tasks.{full}", persistent=False)
     try:
         return queue.write(json.dumps({"full": full, "short": short, **fields}))
     finally:
@@ -161,3 +164,61 @@ def test_submission_mapping_proof_requires_valid_row_shape(
     assert not _mapping_exists_for_tid(mapping_context, tid)
     write_mapping(mapping_context, tid, "valid-display")
     assert _mapping_exists_for_tid(mapping_context, tid)
+
+
+@pytest.mark.parametrize("surface", ["task", "status"])
+def test_short_resolution_uses_namespace_even_with_malformed_only_rows(
+    mapping_context: WeftContext,
+    surface: str,
+) -> None:
+    """A retained namespace name reserves its short ID without JSON evidence."""
+    full = "1760000000987654321"
+    queue = mapping_context.queue(f"weft.state.tasks.{full}", persistent=False)
+    try:
+        queue.write("not-json")
+    finally:
+        queue.close()
+    short = tid_short_form(full)
+    if surface == "task":
+        assert task_cmd.resolve_full_tid(mapping_context, short) == full
+    else:
+        assert system_cmd._resolve_tid_filters(mapping_context, short) == {full}
+    assert task_cmd.mapping_for_tid(mapping_context, full) is None
+    assert not _mapping_exists_for_tid(mapping_context, full)
+
+
+def test_submission_observes_first_valid_namespace_publication(
+    mapping_context: WeftContext,
+) -> None:
+    """Spawn proof reads its exact queue, including its first publication."""
+    tid = "1760000000123456789"
+    assert not _mapping_exists_for_tid(mapping_context, tid)
+    queue = mapping_context.queue(f"weft.state.tasks.{tid}", persistent=False)
+    try:
+        queue.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
+    finally:
+        queue.close()
+    assert _mapping_exists_for_tid(mapping_context, tid)
+
+
+@pytest.mark.parametrize("tid", ["missing", "123", "１" * 19])
+def test_non_task_selectors_have_no_runtime_state_or_state_subscription(
+    mapping_context: WeftContext, tid: str
+) -> None:
+    assert not _mapping_exists_for_tid(mapping_context, tid)
+    assert not _heartbeat_runtime_handle_is_live(mapping_context, tid=tid)
+    assert task_cmd.mapping_for_tid(mapping_context, tid) is None
+    assert all(
+        not name.startswith("weft.state.tasks.")
+        for name, _persistent in _spawn_reconciliation_queue_specs(mapping_context, tid)
+    )
+
+
+@pytest.mark.parametrize("tid", ["missing", "123"])
+def test_unresolved_control_selector_omits_task_state_queue(
+    mapping_context: WeftContext, tid: str
+) -> None:
+    assert task_cmd._await_control_surface(mapping_context, tid, timeout=0.0) == (
+        None,
+        None,
+    )

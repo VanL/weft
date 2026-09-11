@@ -24,17 +24,14 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
-from weft.core.queue_window import QueueWindowRow
+from weft.core.task_state import latest_task_state_rows
 from weft.ext import RunnerHandle
 from weft.helpers import (
     handle_has_live_host_process,
-    iter_queue_entries,
     iter_queue_json_entries,
 )
-from weft.liveness.policy import decode_tid_mapping_row
 from weft.liveness.registry import runtime_liveness_from_registered_probe
 
 
@@ -249,55 +246,13 @@ def latest_task_statuses_for_endpoint_resolution(ctx: WeftContext) -> dict[str, 
     return _latest_task_statuses(ctx)
 
 
-def latest_tid_mapping_rows(
-    ctx: WeftContext,
-    *,
-    strict: bool = False,
-) -> dict[str, tuple[int, dict[str, Any]]]:
-    """Fold the newest valid mapping per full TID, retaining exact row IDs.
-
-    Row validity is owned by the same decoder as LivenessMonitor. Malformed
-    rows never shadow valid history, even for strict readers. Strict mode
-    propagates generator-open failures that the shared iterator otherwise
-    treats as an empty view; failures during iteration propagate in either mode.
-
-    Spec: docs/specifications/07-System_Invariants.md [OBS.6];
-        docs/specifications/10-CLI_Interface.md [CLI-1.2.3]
-    """
-    queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-    try:
-        latest: dict[str, tuple[int, dict[str, Any]]] = {}
-        for body, message_id in iter_queue_entries(queue, strict=strict):
-            decoded = decode_tid_mapping_row(
-                QueueWindowRow(
-                    queue=WEFT_TID_MAPPINGS_QUEUE,
-                    body=body,
-                    message_id=message_id,
-                )
-            )
-            if decoded.malformed_reason is not None or decoded.payload is None:
-                continue
-            payload = decoded.payload
-            full = cast(str, payload["full"])
-            previous = latest.get(full)
-            if previous is None or previous[0] <= message_id:
-                latest[full] = (message_id, payload)
-        return latest
-    finally:
-        queue.close()
-
-
 def latest_tid_mapping_entries_for_endpoint_resolution(
-    ctx: WeftContext,
-    *,
-    strict: bool = False,
+    ctx: WeftContext, *, tids: Iterable[str] | None = None
 ) -> dict[str, dict[str, Any]]:
-    """Return the canonical newest mapping payloads for owner liveness."""
+    """Return current candidate snapshots for owner liveness (Spec: [MF-3.1])."""
     return {
         full: payload
-        for full, (_message_id, payload) in latest_tid_mapping_rows(
-            ctx, strict=strict
-        ).items()
+        for full, (_message_id, payload) in latest_task_state_rows(ctx, tids).items()
     }
 
 
@@ -391,7 +346,9 @@ def list_resolved_endpoints(
                 latest_by_owner[(record.name, record.tid)] = record
 
         task_statuses = _latest_task_statuses(ctx)
-        tid_mappings = latest_tid_mapping_entries_for_endpoint_resolution(ctx)
+        tid_mappings = latest_tid_mapping_entries_for_endpoint_resolution(
+            ctx, tids={record.tid for record in latest_by_owner.values()}
+        )
         grouped = _classify_latest_endpoint_records(
             latest_by_owner.values(),
             task_statuses=task_statuses,
@@ -430,7 +387,6 @@ __all__ = [
     "is_reserved_internal_endpoint_name",
     "latest_task_statuses_for_endpoint_resolution",
     "latest_tid_mapping_entries_for_endpoint_resolution",
-    "latest_tid_mapping_rows",
     "list_resolved_endpoints",
     "normalize_endpoint_name",
     "resolve_endpoint",

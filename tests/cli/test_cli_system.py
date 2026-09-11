@@ -13,11 +13,11 @@ from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.cli.app import app
 from weft.commands import TaskMonitorSummary
 from weft.context import build_context
+from weft.core.task_state import task_state_queue_name
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
@@ -175,12 +175,12 @@ def test_system_prune_apply_requires_explicit_family_before_mutation(workdir) ->
     context = build_context(spec_context=workdir)
     old_id = _write_queue_json(
         context,
-        WEFT_TID_MAPPINGS_QUEUE,
+        task_state_queue_name("1770000000000000502"),
         {"short": "111", "full": "1770000000000000502"},
     )
     new_id = _write_queue_json(
         context,
-        WEFT_TID_MAPPINGS_QUEUE,
+        task_state_queue_name("1770000000000000502"),
         {"short": "222", "full": "1770000000000000502"},
     )
 
@@ -200,7 +200,10 @@ def test_system_prune_apply_requires_explicit_family_before_mutation(workdir) ->
 
     assert rc == 2
     assert "Missing option '--family'" in err
-    assert _read_queue_ids(context, WEFT_TID_MAPPINGS_QUEUE) >= {old_id, new_id}
+    assert _read_queue_ids(context, task_state_queue_name("1770000000000000502")) >= {
+        old_id,
+        new_id,
+    }
 
 
 def test_system_prune_rejects_invalid_options(workdir) -> None:

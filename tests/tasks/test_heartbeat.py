@@ -28,10 +28,10 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_QUEUE_NAMESPACE_PREFIX,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import build_context
 from weft.core.control_messages import encode_control_message
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import HeartbeatTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
@@ -349,7 +349,7 @@ def test_duplicate_heartbeat_services_converge_by_loser_exit(workdir: Path) -> N
         context.broker_target,
         make_heartbeat_taskspec(high_tid, workdir),
     )
-    mappings = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    mappings = context.queue(task_state_queue_name(high_tid), persistent=False)
 
     try:
         high_task.process_once()

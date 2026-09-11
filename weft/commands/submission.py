@@ -54,6 +54,7 @@ from weft.core.taskspec import (
     validate_taskspec_payload,
 )
 from weft.ext import SpecRunInputRequest
+from weft.helpers.message_ids import normalize_exact_message_id
 
 from ._spawn_submission import reconcile_submitted_spawn
 from .specs import resolve_named_spec, resolve_spec_reference
@@ -64,10 +65,10 @@ def normalize_tid(raw_tid: str) -> str:
 
     candidate = raw_tid.strip()
     candidate = candidate.removeprefix("T")
-    if not candidate or not candidate.isdigit() or len(candidate) != 19:
-        raise InvalidTID(f"invalid task id '{raw_tid}'")
-    if int(candidate) > 9_223_372_036_854_775_807:
-        raise InvalidTID(f"invalid task id '{raw_tid}'")
+    try:
+        normalize_exact_message_id(candidate)
+    except ValueError as exc:
+        raise InvalidTID(f"invalid task id '{raw_tid}'") from exc
     return candidate
 
 

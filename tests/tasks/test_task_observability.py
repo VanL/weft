@@ -27,11 +27,11 @@ from weft._constants import (
     PROCESS_TITLE_STATUSES,
     TASK_LIFECYCLE_STATUS_VALUES,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.core import process_title
 from weft.core.control_messages import encode_control_message
 from weft.core.manager import Manager
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import tid_short_form
@@ -141,7 +141,7 @@ def test_drive_task_until_applies_ready_result_after_wall_deadline(
 
 def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     drain_queue(mapping_queue)  # clear any previous messages
 
     spec = build_function_spec(unique_tid)
@@ -172,7 +172,7 @@ def test_tid_mapping_includes_metadata_role(
     unique_tid,
 ) -> None:
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     drain_queue(mapping_queue)
 
     spec = build_function_spec(unique_tid, metadata={"role": "manager"})
@@ -189,7 +189,7 @@ def test_tid_mapping_records_runtime_identity_from_start_hooks(
     broker_env, task_factory, unique_tid
 ) -> None:
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     drain_queue(mapping_queue)
 
     spec = build_function_spec(unique_tid)
@@ -245,7 +245,7 @@ def _forbid_mapping_history_reads(monkeypatch, queue_type):
     real_peek_many = getattr(queue_type, "peek_many", None)
 
     def poisoned_peek_generator(queue, *args, **kwargs):
-        if queue.name == WEFT_TID_MAPPINGS_QUEUE:
+        if queue.name.startswith("weft.state.tasks."):
             raise AssertionError("mapping history read attempted")
         return real_peek_generator(queue, *args, **kwargs)
 
@@ -253,7 +253,7 @@ def _forbid_mapping_history_reads(monkeypatch, queue_type):
     if real_peek_many is not None:
 
         def poisoned_peek_many(queue, *args, **kwargs):
-            if queue.name == WEFT_TID_MAPPINGS_QUEUE:
+            if queue.name.startswith("weft.state.tasks."):
                 raise AssertionError("mapping history read attempted")
             return real_peek_many(queue, *args, **kwargs)
 
@@ -271,7 +271,7 @@ def test_tid_mapping_registration_appends_without_history_read(
     """
 
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     drain_queue(mapping_queue)
     _forbid_mapping_history_reads(monkeypatch, type(mapping_queue))
 
@@ -315,7 +315,7 @@ def test_terminal_transition_publishes_mapping_exactly_once(
     """
 
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     task_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(mapping_queue)
     _forbid_mapping_history_reads(monkeypatch, type(mapping_queue))
@@ -345,7 +345,7 @@ def test_activity_transitions_publish_current_fields(
     """
 
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     drain_queue(mapping_queue)
     _forbid_mapping_history_reads(monkeypatch, type(mapping_queue))
 
@@ -374,7 +374,7 @@ def test_terminal_mapping_write_failure_retries_on_next_terminal_report(
     """
 
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     task_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(mapping_queue)
     _forbid_mapping_history_reads(monkeypatch, type(mapping_queue))
@@ -389,7 +389,7 @@ def test_terminal_mapping_write_failure_retries_on_next_terminal_report(
     fault_state = {"armed": True}
 
     def faulting_write(queue, message, *args, **kwargs):
-        if queue.name == WEFT_TID_MAPPINGS_QUEUE and fault_state["armed"]:
+        if queue.name.startswith("weft.state.tasks.") and fault_state["armed"]:
             fault_state["armed"] = False
             raise BrokerError("mapping append failed")
         return real_write(queue, message, *args, **kwargs)
@@ -418,7 +418,7 @@ def test_terminal_state_report_publishes_terminal_tid_mapping_when_activity_empt
     unique_tid,
 ) -> None:
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     drain_queue(mapping_queue)
 
     spec = build_function_spec(unique_tid)
@@ -442,7 +442,7 @@ def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, make_queue = broker_env
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
     task_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     spec = build_function_spec(unique_tid)
     task = task_factory(spec)
@@ -453,7 +453,7 @@ def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
     real_peek_generator = queue_type.peek_generator
 
     def fail_during_mapping_scan(queue, *args, **kwargs):
-        if queue.name != WEFT_TID_MAPPINGS_QUEUE:
+        if not queue.name.startswith("weft.state.tasks."):
             return real_peek_generator(queue, *args, **kwargs)
 
         def rows():

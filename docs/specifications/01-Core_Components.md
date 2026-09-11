@@ -35,6 +35,8 @@ See also:
 
 ## Related Plans
 
+- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
+
 - [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md)
 
 - [`docs/plans/2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md)
@@ -225,8 +227,8 @@ Current responsibilities:
 - translate `TaskSpec.io` into queue configs
 - manage `ctrl_in` and `ctrl_out`
 - report task lifecycle changes to `weft.log.tasks`
-- append complete best-effort TID mapping snapshots without replaying
-  shared mapping history, and maintain process titles
+- append complete best-effort runtime snapshots to the task's own
+  `weft.state.tasks.<tid>` without reading state history, and maintain process titles
 - own reserved-queue policy application
 - optionally claim and release one stable runtime endpoint name for the live task
 - expose `process_once()`, `wait_for_activity()`, `run_until_stopped()`,
@@ -249,12 +251,17 @@ Why this exists:
 - control semantics should not drift between task types
 - reserved-queue policy belongs to task ownership, not to ad hoc helper code
 
-TID mapping registration is the shared [OBS.6]/[OBS.6a] publication path.
+Task-state publication to the task's own `weft.state.tasks.<tid>` is the
+shared [OBS.6]/[OBS.6a] publication path.
 Call sites decide whether their owner-local activity, runtime handle, PID, or
 diagnostic state changed; registration itself performs one append attempt and
 does not inspect global mapping history.
 
 ### 2.2.1 Reactor Ownership and Lifecycle [CC-2.2.1]
+
+The state support route is the task's own `weft.state.tasks.<tid>`. Validate
+that exact canonical target and all role collisions before queue wiring or
+broker access ([QUEUE.7]).
 
 _Implementation mapping_: `weft/core/tasks/base.py::BaseTask` owns the declared
 role inventory (`weft/core/tasks/base.py::BaseTask._reactor_queue_roles`,
@@ -361,11 +368,16 @@ layer does not own queue readiness, service convergence, or a generic service
 turn.
 
 `LivenessMonitor` is a manager-supervised internal persistent `ServiceTask` and
-the sole custodian of `weft.state.tid_mappings`. It periodically probes the
-runtime behind each retained TID and retires mapping rows for dead or
-sustained-undecidable owners. It answers no queries and claims no endpoint.
+the sole custodian of `weft.state.tasks.*`. It samples current namespace
+snapshots every five seconds, independently of fast reactor turns, and retains
+the five-second probe cadence and 600-second whole-history reconciliation.
+Startup reconciles whole histories. Deadlines run from completion; slow work
+can delay discovery. Probes and retirement follow [LIVENESS.R3–R10], including
+sampled generations, strict failed-read preservation, minimum ages, and
+older-before-latest exact deletion. It answers no queries and claims no endpoint.
 
-The private `weft/liveness/` package owns point-in-time liveness evidence: the
+Shared broker-aware namespace reads live in `weft/core/task_state.py`.
+The private broker-free `weft/liveness/` package owns point-in-time liveness evidence: the
 process-local probe registry, generic `psutil` host inspection,
 authority-aware evidence reduction, and the single TID-mapping deletability
 policy. First-party runtime extensions own their runtime-specific probes and
@@ -656,8 +668,8 @@ Implementation plan backlinks:
 a stable project-local name.
 
 _Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
-`ResolvedEndpoint`, `latest_tid_mapping_rows()` (newest-valid owner mapping
-with exact message IDs),
+`ResolvedEndpoint`, `latest_tid_mapping_entries_for_endpoint_resolution()`
+(owner payload projection of `weft/core/task_state.py::latest_task_state_rows`),
 `weft/core/endpoints.py::_classify_latest_endpoint_records()`,
 `list_resolved_endpoints()`, `resolve_endpoint()`;
 `weft/core/tasks/base.py` — `register_endpoint_name()`,

@@ -42,6 +42,7 @@ from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
 )
+from weft.core.task_state import task_state_queue_name
 from weft.ext import RunnerRuntimeDescription
 from weft.helpers import tid_short_form
 from weft.helpers.container_detection import ContainerRuntimeDetection
@@ -499,7 +500,7 @@ def test_status_services_report_task_monitor_external_log_diagnostics(
             INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
         },
     )
-    ctx.queue("weft.state.tid_mappings", persistent=False).write(
+    ctx.queue(task_state_queue_name(tid), persistent=False).write(
         json.dumps(
             {
                 "full": tid,
@@ -880,7 +881,7 @@ def test_cmd_status_json_includes_runner_runtime_details(
     tid = "1844674407370955161"
     started = 1_762_000_000_000_000_000
     log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     log_queue.write(
         json.dumps(
             {
@@ -963,7 +964,7 @@ def test_task_status_does_not_apply_host_pid_identity_to_docker_runtime(
     tid = "1844674407370955168"
     started = 1_762_000_000_000_000_000
     docker_host_pid = 57
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -1036,7 +1037,7 @@ def test_terminal_log_status_wins_over_weak_live_host_pid(
     tid = "1844674407370955191"
     started = 1_762_000_000_000_000_000
     completed = started + 1_000_000_000
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -1193,7 +1194,7 @@ def test_status_preserves_active_manager_while_terminal_manager_row_stays_termin
         name="old-manager",
         metadata={"role": "manager"},
     )
-    ctx.queue("weft.state.tid_mappings", persistent=False).write(
+    ctx.queue(task_state_queue_name(old_tid), persistent=False).write(
         json.dumps(
             {
                 "short": tid_short_form(old_tid),
@@ -1237,7 +1238,7 @@ def test_task_status_keeps_terminal_log_state_when_task_pid_is_alive(
     tid = "1844674407370955161"
     started = 1_762_000_000_000_000_000
     completed = started + 1_000_000_000
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -1343,7 +1344,7 @@ def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task
     tid = "1844674407370955165"
     started = 1_762_000_000_000_000_000
     completed = started + 1_000_000_000
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -1452,7 +1453,7 @@ def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
     tid = "1844674407370955162"
     started = 1_762_000_000_000_000_000
     completed = started + 1_000_000_000
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -1491,7 +1492,7 @@ def test_task_status_reports_dead_host_running_snapshot_as_stale_liveness(
     ctx = build_context(spec_context=root)
     tid = "1844674407370955167"
     started = 1_762_000_000_000_000_000
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -1534,7 +1535,7 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_stale_liveness(
     ctx = build_context(spec_context=root)
     tid = "1844674407370955168"
     started = 1_762_000_000_000_000_000
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -1725,7 +1726,7 @@ def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
             INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
         },
     )
-    ctx.queue("weft.state.tid_mappings", persistent=False).write(
+    ctx.queue(task_state_queue_name(tid), persistent=False).write(
         json.dumps(
             {
                 "short": tid_short_form(tid),
@@ -2205,7 +2206,7 @@ def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
     tid = "1844674407370955163"
     started = 1_762_000_000_000_000_000
     completed = started + 1_000_000_000
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -2264,7 +2265,7 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     tid = "1844674407370955166"
     started = 1_762_000_000_000_000_000
     log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     log_queue.write(
         json.dumps(
             {
@@ -2321,7 +2322,7 @@ def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
     tid = "1844674407370955167"
     started = 1_762_000_000_000_000_000
     stale_pid = 57
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
 
     _write_task_log_entry(
         ctx=ctx,
@@ -2602,3 +2603,48 @@ def test_status_reports_heartbeat_enabled_when_task_monitor_enabled(
     services = {service["key"]: service for service in payload["services"]}
     assert services[INTERNAL_SERVICE_KEY_HEARTBEAT]["enabled"] is True
     assert services[INTERNAL_SERVICE_KEY_LIVENESS_MONITOR]["enabled"] is False
+
+
+@pytest.mark.parametrize("selected", [True, False])
+def test_status_reads_each_required_state_queue_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selected: bool,
+) -> None:
+    """Point status stays local; project projections share their state reads."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    base = time.time_ns()
+    tids = [str(base + offset) for offset in range(3)]
+    for tid in tids:
+        _write_task_log_entry(
+            ctx=ctx,
+            tid=tid,
+            event="task_completed",
+            status="completed",
+            started_at=int(tid),
+            completed_at=time.time_ns(),
+        )
+        queue = ctx.queue(task_state_queue_name(tid), persistent=False)
+        try:
+            queue.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
+        finally:
+            queue.close()
+    with ctx.broker() as db:
+        broker_type = type(db)
+    original = broker_type.peek_many
+    state_reads: list[str] = []
+
+    def observed_peek(self: Any, queue: str, *args: Any, **kwargs: Any) -> Any:
+        if queue.startswith("weft.state.tasks."):
+            state_reads.append(queue)
+        return original(self, queue, *args, **kwargs)
+
+    monkeypatch.setattr(broker_type, "peek_many", observed_peek)
+    if selected:
+        snapshot = task_cmd.task_snapshot(tids[0], context=ctx)
+        assert snapshot is not None and snapshot.tid == tids[0]
+        assert state_reads == [task_state_queue_name(tids[0])]
+    else:
+        system_snapshot = status_cmd.system_status(ctx)
+        assert {task.tid for task in system_snapshot.tasks} == set(tids)
+        assert sorted(state_reads) == sorted(task_state_queue_name(tid) for tid in tids)

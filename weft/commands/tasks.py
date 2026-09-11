@@ -35,7 +35,6 @@ from weft._constants import (
     TASK_PING_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft._exceptions import (
     CommandUsageError,
@@ -57,7 +56,6 @@ from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import send_keyed_ping_probe
-from weft.core.endpoints import latest_tid_mapping_rows
 from weft.core.monitor.store import (
     MonitorStoreNotInitialized,
     MonitorTaskCollationRecord,
@@ -65,12 +63,18 @@ from weft.core.monitor.store import (
 )
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.runner_diagnostics import diagnostic_summary
+from weft.core.task_state import (
+    latest_task_state_rows,
+    read_task_state_snapshot,
+    task_state_queue_name,
+)
 from weft.helpers import (
     iter_queue_json_entries,
     pid_is_live,
     terminate_verified_process_tree,
     tid_short_form,
 )
+from weft.helpers.message_ids import is_task_tid
 
 from ._boundary import typed_command_errors
 from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
@@ -102,16 +106,20 @@ def _coerce_context(
     return _resolve_context(context_path)
 
 
-def _read_tid_mapping_entries(ctx: WeftContext) -> list[dict[str, Any]]:
+def _read_tid_mapping_entries(
+    ctx: WeftContext, tids: Iterable[str] | None = None
+) -> list[dict[str, Any]]:
     return [
         payload
-        for _message_id, payload in sorted(latest_tid_mapping_rows(ctx).values())
+        for _message_id, payload in sorted(
+            latest_task_state_rows(ctx, tids=tids).values()
+        )
     ]
 
 
 def mapping_for_tid(ctx: WeftContext, tid: str) -> dict[str, Any] | None:
     full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
-    row = latest_tid_mapping_rows(ctx).get(full)
+    row = read_task_state_snapshot(ctx, full)
     return row[1] if row is not None else None
 
 
@@ -151,7 +159,7 @@ def resolve_full_tid(ctx: WeftContext, raw: str) -> str | None:
     candidate = raw.strip().lstrip("T")
     if not candidate:
         return None
-    if candidate.isascii() and candidate.isdecimal() and len(candidate) == 19:
+    if is_task_tid(candidate):
         return candidate
     matches = system_cmd._read_tid_mappings(ctx).get(candidate, [])
     if len(matches) > 1:
@@ -176,7 +184,7 @@ def task_tid(
     ctx = _coerce_context(context=context, context_path=context_path)
     if reverse:
         value = reverse.strip().lstrip("T")
-        if (value.isascii() and value.isdecimal()) and len(value) == 19:
+        if is_task_tid(value):
             return tid_short_form(value)
         return None
     if pid is not None:
@@ -457,7 +465,7 @@ def task_status(
     ctx = _coerce_context(context=context, context_path=context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid)
-    if ping and (full_tid.isascii() and full_tid.isdecimal()) and len(full_tid) == 19:
+    if ping and is_task_tid(full_tid):
         taskspec_payload = load_latest_taskspec_payload(ctx, full_tid)
         mapping_entry = mapping_for_tid(ctx, full_tid)
         evidence = task_evidence.known_tid_evidence(
@@ -475,7 +483,7 @@ def task_status(
                 base_snapshot=None,
                 taskspec_payload=taskspec_payload,
             )
-    if (full_tid.isascii() and full_tid.isdecimal()) and len(full_tid) == 19:
+    if is_task_tid(full_tid):
         base_snapshot = system_cmd.collect_known_tid_snapshot(
             ctx,
             full_tid,
@@ -492,11 +500,7 @@ def task_status(
         pipeline_snapshot, base_snapshot
     ):
         return _pipeline_task_snapshot(ctx, full_tid, pipeline_snapshot, base_snapshot)
-    if (
-        base_snapshot is None
-        and (full_tid.isascii() and full_tid.isdecimal())
-        and len(full_tid) == 19
-    ):
+    if base_snapshot is None and is_task_tid(full_tid):
         base_snapshot = _monitor_store_task_snapshot(
             ctx,
             full_tid,
@@ -683,9 +687,7 @@ def task_ping(
     )
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     taskspec_payload = (
-        load_latest_taskspec_payload(ctx, full_tid)
-        if (full_tid.isascii() and full_tid.isdecimal()) and len(full_tid) == 19
-        else None
+        load_latest_taskspec_payload(ctx, full_tid) if is_task_tid(full_tid) else None
     )
     ctrl_in_name, ctrl_out_name = task_evidence.control_queue_names_for_tid(
         full_tid,
@@ -892,8 +894,7 @@ def task_snapshot(
         snapshot,
         taskspec_payload=(
             _load_taskspec_payload_bounded(ctx, snapshot.tid)
-            if (snapshot.tid.isascii() and snapshot.tid.isdecimal())
-            and len(snapshot.tid) == 19
+            if is_task_tid(snapshot.tid)
             else load_latest_taskspec_payload(ctx, snapshot.tid)
         ),
     )
@@ -912,10 +913,11 @@ def watch_task_status(
     ctx = _coerce_context(context=context, context_path=context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     deadline = _deadline_from_timeout(timeout)
-    monitor_queues = [
-        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
-        ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
-    ]
+    monitor_queues = [ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)]
+    if is_task_tid(full_tid):
+        monitor_queues.append(
+            ctx.queue(task_state_queue_name(full_tid), persistent=False)
+        )
     monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
     last_seen: tuple[int | None, str | None] | None = None
     try:
@@ -1237,15 +1239,18 @@ class _ControlSurfaceResources:
         self,
         ctx: WeftContext,
         *,
+        state_queue_name: str | None,
         ctrl_out_name: str,
         pipeline_status_name: str | None,
     ) -> None:
+        self.state_queue_name = state_queue_name
         self.ctrl_out_name = ctrl_out_name
         self.pipeline_status_name = pipeline_status_name
         self._queues: list[Queue] = []
         self._monitor: QueueChangeMonitor | None = None
         try:
-            self._queues.append(ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=True))
+            if state_queue_name is not None:
+                self._queues.append(ctx.queue(state_queue_name, persistent=True))
             self._queues.append(ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True))
             self.ctrl_out_queue = ctx.queue(ctrl_out_name, persistent=True)
             self._queues.append(self.ctrl_out_queue)
@@ -1259,13 +1264,15 @@ class _ControlSurfaceResources:
     def matches(
         self,
         *,
+        state_queue_name: str | None,
         ctrl_out_name: str,
         pipeline_status_name: str | None,
     ) -> bool:
         """Return whether names still describe this observed surface."""
 
         return (
-            self.ctrl_out_name == ctrl_out_name
+            self.state_queue_name == state_queue_name
+            and self.ctrl_out_name == ctrl_out_name
             and self.pipeline_status_name == pipeline_status_name
         )
 
@@ -1384,6 +1391,7 @@ def _await_control_surface(
     Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
     """
 
+    state_queue_name = task_state_queue_name(tid) if is_task_tid(tid) else None
     deadline = time.monotonic() + timeout
     latest_entry: dict[str, Any] | None = None
     latest_snapshot: system_cmd.TaskSnapshot | None = None
@@ -1402,6 +1410,7 @@ def _await_control_surface(
     public_signal_deadline: float | None = None
     resources = _ControlSurfaceResources(
         ctx,
+        state_queue_name=state_queue_name,
         ctrl_out_name=watched_ctrl_out_queue,
         pipeline_status_name=watched_pipeline_status_queue,
     )
@@ -1418,12 +1427,14 @@ def _await_control_surface(
                 else None,
             )
             if not resources.matches(
+                state_queue_name=state_queue_name,
                 ctrl_out_name=ctrl_out_queue,
                 pipeline_status_name=pipeline_status_queue,
             ):
                 resources.close()
                 resources = _ControlSurfaceResources(
                     ctx,
+                    state_queue_name=state_queue_name,
                     ctrl_out_name=ctrl_out_queue,
                     pipeline_status_name=pipeline_status_queue,
                 )
@@ -1622,16 +1633,16 @@ def stop_tasks(
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task stop)
     """
     ctx = _coerce_context(context=context, context_path=context_path)
-    entries = _read_tid_mapping_entries(ctx)
+    resolved_tids = [
+        resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
+    ]
+    entries = _read_tid_mapping_entries(ctx, tids=resolved_tids)
     lookup: dict[str, dict[str, Any]] = {}
     for mapping_entry in entries:
         full_tid = mapping_entry.get("full")
         if isinstance(full_tid, str):
             lookup[full_tid] = mapping_entry
     count = 0
-    resolved_tids = [
-        resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
-    ]
     for full in resolved_tids:
         if not full:
             continue
@@ -1722,16 +1733,16 @@ def kill_tasks(
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task kill)
     """
     ctx = _coerce_context(context=context, context_path=context_path)
-    entries = _read_tid_mapping_entries(ctx)
+    resolved_tids = [
+        resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
+    ]
+    entries = _read_tid_mapping_entries(ctx, tids=resolved_tids)
     lookup: dict[str, dict[str, Any]] = {}
     for mapping_entry in entries:
         full_tid = mapping_entry.get("full")
         if isinstance(full_tid, str):
             lookup[full_tid] = mapping_entry
     killed = 0
-    resolved_tids = [
-        resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
-    ]
     for full in resolved_tids:
         if not full:
             continue
@@ -1863,17 +1874,13 @@ def _command_tid(
     candidate = raw.strip().lstrip("T")
     if not candidate or not (candidate.isascii() and candidate.isdecimal()):
         raise InvalidTID(f"Invalid task ID: {raw!r}")
-    if len(candidate) == 19:
+    if is_task_tid(candidate):
         if allow_unknown_full:
             return candidate
         resolved = resolve_tid(tid=candidate, context=context)
         return resolved or candidate
     resolved = resolve_tid(tid=candidate, context=context)
-    if (
-        resolved is None
-        or not (resolved.isascii() and resolved.isdecimal())
-        or len(resolved) != 19
-    ):
+    if resolved is None or not is_task_tid(resolved):
         raise TaskNotFound(f"Task {raw} not found")
     return resolved
 
@@ -2140,12 +2147,12 @@ def cmd_task_tid(
     ctx = _coerce_context(context_path=context)
     if reverse is not None:
         candidate = reverse.strip().lstrip("T")
-        if not (candidate.isascii() and candidate.isdecimal()) or len(candidate) != 19:
+        if not is_task_tid(candidate):
             raise InvalidTID(f"Invalid full task ID: {reverse!r}")
         return candidate
     resolved = resolve_tid(tid=tid, pid=pid, context=ctx)
     if resolved is None:
         raise TaskNotFound("No matching TID found")
-    if not (resolved.isascii() and resolved.isdecimal()) or len(resolved) != 19:
+    if not is_task_tid(resolved):
         raise InvalidTID(f"Invalid resolved task ID: {resolved!r}")
     return resolved

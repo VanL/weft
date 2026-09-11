@@ -16,6 +16,32 @@
 
 ### Changed
 
+- **Breaking:** task runtime state moves from `weft.state.tid_mappings` to
+  `weft.state.tasks.<tid>`. Known-TID runtime reads are local to that task;
+  short-ID resolution derives candidates from valid queue-name suffixes,
+  including malformed-only queues, and still rejects ambiguous shorts.
+  LivenessMonitor samples newest-valid state every five seconds, independently
+  of reactor turns; unseen intermediate generations may coalesce. History
+  reconciliation remains every ten minutes, and all retirement age fences
+  remain forty minutes. Bulk reads visit every retained task queue and may
+  cost more than a shallow flat history.
+
+  Upgrade each broker context during downtime: stop every task and service,
+  including managers and both monitors; verify all their processes exited;
+  install the new version; run
+  `weft queue delete weft.state.tid_mappings` in that context; then restart
+  services/tasks. Verify new namespace publication, full/short status, spawn
+  reconciliation, and eventual custodian retirement. PING does not republish
+  state. There is no migration or mixed-version support. A missed old process
+  recreates legacy rows while remaining invisible to namespace admission and
+  destruction protection: stop/restart it and repeat legacy deletion.
+
+  Rollback also requires stopping every process. Restore the prior version,
+  remove the new `weft.state.tasks.*` entries using ordinary queue tools, and
+  restart so tasks rebuild flat state. Never delete `weft.log.tasks` for either
+  procedure. Only operator override may delete whole task-state queues;
+  normal cleanup remains LivenessMonitor's exact-ID custody.
+
 - macOS task processes set Unix titles immediately and defer GUI registration
   until a live drive turn after a random deadline between one and three seconds.
   Unchanged titles skip native updates. Linux and Windows retain setproctitle.

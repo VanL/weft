@@ -21,7 +21,6 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
@@ -36,6 +35,7 @@ from weft.core.heartbeat import (
     upsert_heartbeat,
 )
 from weft.core.spawn_requests import submit_spawn_request
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -282,7 +282,7 @@ def test_heartbeat_endpoint_liveness_uses_task_process_runtime_handle(
 ) -> None:
     context = build_context(spec_context=tmp_path)
     tid = "1777000000000000903"
-    mapping_queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    mapping_queue = context.queue(task_state_queue_name(tid), persistent=False)
     try:
         mapping_queue.write(
             json.dumps(

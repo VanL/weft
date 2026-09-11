@@ -44,7 +44,6 @@ from weft._constants import (
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
     WORK_ENVELOPE_START,
 )
 from weft.core import launcher as launcher_module
@@ -53,6 +52,7 @@ from weft.core.launcher import _request_parent_loss_shutdown, _task_process_entr
 from weft.core.manager import Manager
 from weft.core.monitor.task_monitor import TaskMonitor
 from weft.core.runners import RunnerOutcome
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks import base as base_module
 from weft.core.tasks import consumer as consumer_module
@@ -2174,7 +2174,7 @@ def test_base_task_rejects_duplicate_queue_roles_before_broker_side_effects(
     ("support_role", "support_queue"),
     (
         ("global_log", WEFT_GLOBAL_LOG_QUEUE),
-        ("tid_mappings", WEFT_TID_MAPPINGS_QUEUE),
+        ("task_state", "task-state-placeholder"),
         ("streaming_sessions", WEFT_STREAMING_SESSIONS_QUEUE),
         ("endpoints_registry", WEFT_ENDPOINTS_REGISTRY_QUEUE),
     ),
@@ -2192,6 +2192,8 @@ def test_base_task_rejects_support_route_collisions_before_broker_side_effects(
     """Every BaseTask support route is protected from local role aliases [QUEUE.7]."""
 
     tid = "1778089999999999002"
+    if support_role == "task_state":
+        support_queue = task_state_queue_name(tid)
     db_path = tmp_path / f"support-{local_role}-{support_role}.sqlite3"
     spec = make_function_taskspec(
         tid,
@@ -2213,7 +2215,7 @@ def test_base_task_rejects_support_route_collisions_before_broker_side_effects(
     ("support_role", "support_queue"),
     (
         ("global_log", WEFT_GLOBAL_LOG_QUEUE),
-        ("tid_mappings", WEFT_TID_MAPPINGS_QUEUE),
+        ("task_state", "task-state-placeholder"),
         ("streaming_sessions", WEFT_STREAMING_SESSIONS_QUEUE),
         ("endpoints_registry", WEFT_ENDPOINTS_REGISTRY_QUEUE),
     ),
@@ -2226,6 +2228,8 @@ def test_base_task_rejects_derived_reserved_support_route_collision(
     """The derived reserved role participates in support validation [QUEUE.7]."""
 
     tid = "1778089999999999005"
+    if support_role == "task_state":
+        support_queue = task_state_queue_name(tid)
     db_path = tmp_path / f"support-reserved-{support_role}.sqlite3"
     spec = make_function_taskspec(
         tid,
@@ -2278,7 +2282,7 @@ def test_base_task_rejects_canonical_semantic_role_replacement(
 
 @pytest.mark.parametrize(
     "canonical_support",
-    ("global_log", "tid_mappings", "streaming_sessions", "endpoints_registry"),
+    ("global_log", "task_state", "streaming_sessions", "endpoints_registry"),
 )
 def test_base_task_rejects_canonical_support_route_replacement(
     tmp_path: Path,
@@ -2345,7 +2349,7 @@ def test_base_task_rejects_role_support_semantic_key_overlap(
         ("ctrl_in", None),
         ("ctrl_out", None),
         ("global_log", WEFT_GLOBAL_LOG_QUEUE),
-        ("tid_mappings", WEFT_TID_MAPPINGS_QUEUE),
+        ("task_state", "task-state-placeholder"),
         ("streaming_sessions", WEFT_STREAMING_SESSIONS_QUEUE),
         ("endpoints_registry", WEFT_ENDPOINTS_REGISTRY_QUEUE),
     ),
@@ -2358,6 +2362,8 @@ def test_pipeline_owned_consumer_rejects_owner_event_route_collision(
     """Pipeline owner events cannot alias Consumer task routes [QUEUE.7]."""
 
     tid = "1778089999999999009"
+    if other_role == "task_state":
+        queue_name = task_state_queue_name(tid)
     spec = make_function_taskspec(
         tid,
         "tests.tasks.sample_targets:echo_payload",

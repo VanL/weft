@@ -35,7 +35,7 @@ Global queues:
 | `weft.spawn.internal` | Manager-owned internal service spawn requests | Yes |
 | `weft.manager.outbox` | Manager informational output | Yes |
 | `weft.state.services` | Runtime service-owner registry, including managers | No (runtime state) |
-| `weft.state.tid_mappings` | Short→full TID mappings | No (runtime state) |
+| `weft.state.tasks.<tid>` | Per-task identity and runtime-state snapshots | No (runtime state) |
 | `weft.state.endpoints` | Active named endpoint registry | No (runtime state) |
 | `weft.state.streaming` | Active streaming sessions | No (runtime state) |
 | `weft.state.pipelines` | Active pipeline registry | No (runtime state) |
@@ -58,8 +58,9 @@ Notes:
   as live convergence evidence. `stopped`, `superseded`, and `terminal` are
   non-live evidence; a latest `superseded` row excludes that owner TID from
   manager leadership.
-- Task-owned `weft.state.tid_mappings` payloads include additive runtime
-  evidence. The manager-supervised `LivenessMonitor` reduces exact host
+- Each `weft.state.tasks.<tid>` queue holds one task's snapshot history; the
+  newest valid row is current. Names support discovery, not process liveness.
+  Task-owned payloads include additive runtime evidence. The manager-supervised `LivenessMonitor` reduces exact host
   identity or extension-owned probe evidence and is the sole row deleter.
   Unknown deadlines are process-local and reset after restart. See [CC-2.4],
   [OBS.13.7], and [LIVENESS.R1]-[LIVENESS.R5].
@@ -226,7 +227,8 @@ indexed here; `WEFT_MANAGER_RUNTIME_HANDLE_JSON` is documented in
 
 - Queue renames: `weft.tasks.log` → `weft.log.tasks`, `weft.workers.registry` →
   `weft.state.services`, `weft.state.process.tid_mappings` →
-  `weft.state.tid_mappings`, `weft.state.streaming.sessions` →
+  `weft.state.tid_mappings` → `weft.state.tasks.<tid>` (2026-09 downtime
+  conversion; see CHANGELOG), `weft.state.streaming.sessions` →
   `weft.state.streaming`.
 - Task state peak metrics renamed: `max_*` → `peak_*`.
 - `spec.process_target` is now a **string** (executable path). `args` are
@@ -236,6 +238,8 @@ indexed here; `WEFT_MANAGER_RUNTIME_HANDLE_JSON` is documented in
 _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* fields), `weft/core/targets.py` (argv construction).
 
 ## Related Plans
+
+- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Manager admission control plan](../plans/2026-08-25-manager-admission-control-plan.md)
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)

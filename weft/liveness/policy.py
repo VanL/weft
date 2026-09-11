@@ -1,4 +1,4 @@
-"""Canonical pure policy for ``weft.state.tid_mappings``.
+"""Canonical pure policy for ``weft.state.tasks.<tid>``.
 
 This module owns malformed/superseded history reduction, unknown-deadline
 reduction, durable-row decoding, and the conservative payload probe retained
@@ -7,7 +7,7 @@ the broker-aware LivenessMonitor is the sole exact-delete executor.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.7]
+- docs/specifications/07-System_Invariants.md [OBS.6], [OBS.13], [OBS.13.7]
 """
 
 from __future__ import annotations
@@ -134,8 +134,13 @@ def reduce_unknown_deadline(
     return state, now_monotonic >= state.deadline_monotonic
 
 
-def decode_tid_mapping_row(row: QueueWindowRow) -> DecodedQueueWindowRow:
-    """Decode and validate one TID mapping queue row."""
+def decode_tid_mapping_row(
+    row: QueueWindowRow, *, expected_tid: str | None = None
+) -> DecodedQueueWindowRow:
+    """Decode a snapshot and optionally bind its full ID to the queue suffix.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.6]
+    """
 
     try:
         payload = json.loads(row.body)
@@ -156,6 +161,10 @@ def decode_tid_mapping_row(row: QueueWindowRow) -> DecodedQueueWindowRow:
             raw=row,
             payload=payload,
             malformed_reason="invalid_tid_mapping_shape",
+        )
+    if expected_tid is not None and payload["full"] != expected_tid:
+        return DecodedQueueWindowRow(
+            raw=row, payload=payload, malformed_reason="task_state_tid_mismatch"
         )
     return DecodedQueueWindowRow(raw=row, payload=payload)
 

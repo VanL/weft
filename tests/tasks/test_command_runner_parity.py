@@ -22,12 +22,13 @@ from tests.helpers.test_backend import (
     active_test_backend,
     prepare_project_root,
 )
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft._runner_plugins import require_runner_plugin
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
 from weft.core.launcher import launch_task_process
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import (
@@ -961,7 +962,7 @@ def test_consumer_command_runners_share_basic_lifecycle(
     inbox = make_queue(spec.io.inputs["inbox"])
     outbox = make_queue(spec.io.outputs["outbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mapping_queue = make_queue(task_state_queue_name(task.tid))
     _drain(log_queue)
     _drain(mapping_queue)
 

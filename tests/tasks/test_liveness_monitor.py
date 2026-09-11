@@ -5,18 +5,21 @@ from __future__ import annotations
 import json
 import socket
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import weft.core.tasks.liveness_monitor as liveness_monitor_mod
+from simplebroker import Queue
 from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     LIVENESS_MONITOR_MAX_IN_FLIGHT_PROBES,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.liveness_monitor import (
     LivenessMonitor,
     ProbeResult,
@@ -29,6 +32,30 @@ from weft.liveness.models import LivenessObservation
 from weft.liveness.policy import UnknownDeadlineState
 
 pytestmark = [pytest.mark.shared]
+
+
+@pytest.fixture
+def namespace_case(
+    workdir: Path,
+) -> Iterator[tuple[WeftContext, LivenessMonitor, Queue, str, list[float]]]:
+    """Real namespace and a deterministic monitor clock, without probe dispatch."""
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
+    queue.write(json.dumps(_mapping(tid)))
+    now = [10.0]
+    monitor = LivenessMonitor(
+        context.broker_target,
+        _taskspec(str(time.time_ns()), workdir),
+        monotonic_clock=lambda: now[0],
+        mapping_min_age_seconds=0.0,
+    )
+    try:
+        yield context, monitor, queue, tid, now
+    finally:
+        monitor.stop(join=False)
+        monitor.cleanup()
+        queue.close()
 
 
 def _taskspec(tid: str, root: Path) -> TaskSpec:
@@ -70,12 +97,32 @@ def _mapping(tid: str) -> dict[str, object]:
     }
 
 
+def test_reconcile_discovers_task_state_namespace(workdir: Path) -> None:
+    """The custodian discovers per-task snapshots without the legacy queue."""
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
+    message_id = queue.write(json.dumps(_mapping(tid)))
+    monitor = LivenessMonitor(
+        context.broker_target,
+        _taskspec(str(time.time_ns()), workdir),
+    )
+    try:
+        monitor._reconcile_mapping_rows(full=True)
+        assert tid in monitor._latest_rows
+        assert monitor._latest_rows[tid].message_id == message_id
+    finally:
+        monitor.stop(join=False)
+        monitor.cleanup()
+        queue.close()
+
+
 def test_full_reconcile_keeps_newest_row_and_exact_deletes_superseded(
     workdir: Path,
 ) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     target_tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(target_tid), persistent=False)
     old_id = queue.write(json.dumps(_mapping(target_tid)))
     newest_id = queue.write(json.dumps(_mapping(target_tid)))
     monitor = LivenessMonitor(
@@ -101,8 +148,8 @@ def test_full_reconcile_does_not_skip_rows_while_retiring_paginated_history(
 ) -> None:
     context = build_context(spec_context=workdir)
     # This test retains one handle while seeding and inspecting 1,200 rows.
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=True)
     target_tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(target_tid), persistent=True)
     message_ids = [
         queue.write(json.dumps(_mapping(target_tid))) for _index in range(1_200)
     ]
@@ -132,9 +179,9 @@ def test_unknown_timeout_deletes_only_exact_mapping_after_completed_probe(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     unrelated = context.queue("unrelated", persistent=False)
     target_tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(target_tid), persistent=False)
     message_id = queue.write(json.dumps(_mapping(target_tid)))
     unrelated.write("keep")
     now = [10.0]
@@ -188,8 +235,8 @@ def test_unknown_timeout_deletes_only_exact_mapping_after_completed_probe(
 
 def test_not_attempted_probe_pauses_unknown_deadline(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     target_tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(target_tid), persistent=False)
     message_id = queue.write(json.dumps(_mapping(target_tid)))
     now = [10.0]
     monitor = LivenessMonitor(
@@ -237,8 +284,8 @@ def test_restart_resets_unknown_deadline(workdir: Path) -> None:
     """A replacement monitor does not inherit an expired in-memory deadline."""
 
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     target_tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(target_tid), persistent=False)
     message_id = queue.write(json.dumps(_mapping(target_tid)))
     now = [10.0]
     first = LivenessMonitor(
@@ -578,8 +625,8 @@ def test_probe_worker_discards_observation_when_budget_expires(
 
 def test_lane_saturation_pauses_existing_unknown_deadline(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
     queue.write(json.dumps(_mapping(tid)))
     monitor = LivenessMonitor(
         context.broker_target,
@@ -620,8 +667,8 @@ def test_late_probe_result_requires_current_token_and_generation(
     workdir: Path,
 ) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
     queue.write(json.dumps(_mapping(tid)))
     monitor = LivenessMonitor(
         context.broker_target,
@@ -680,8 +727,8 @@ def test_full_reconcile_preserves_unchanged_deadline_and_in_flight_probe(
     workdir: Path,
 ) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
     queue.write(json.dumps(_mapping(tid)))
     monitor = LivenessMonitor(
         context.broker_target,
@@ -716,8 +763,8 @@ def test_full_reconcile_preserves_unchanged_deadline_and_in_flight_probe(
 
 def test_same_generation_mapping_appends_replace_due_entry(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
     payload = _mapping(tid)
     queue.write(json.dumps(payload))
     monitor = LivenessMonitor(
@@ -748,8 +795,8 @@ def test_mapping_update_keeps_probe_lane_owned_until_old_result_finishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = build_context(spec_context=workdir)
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     tid = str(time.time_ns())
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
     payload = _mapping(tid)
     queue.write(json.dumps(payload))
     monitor = LivenessMonitor(
@@ -807,3 +854,360 @@ def test_mapping_update_keeps_probe_lane_owned_until_old_result_finishes(
         monitor.stop(join=False)
         monitor.cleanup()
         queue.close()
+
+
+def _complete_stale_probe(monitor: LivenessMonitor, tid: str) -> None:
+    """Deliver a completed read-only stale observation for the current row."""
+    row = monitor._latest_rows[tid]
+    work = ProbeWork(tid, row.message_id, row.payload, row.generation, "stale-token")
+    monitor._in_flight[tid] = work
+    observation = LivenessObservation(tid, "stale", "gone", True, row.generation)
+    monitor._apply_probe_result(ProbeResult(work, observation, True))
+
+
+def test_namespace_refresh_is_separate_from_fast_reactor_turns(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, monitor, queue, tid, now = namespace_case
+    refreshes: list[float] = []
+    original = liveness_monitor_mod.list_task_state_tids
+
+    def counted(ctx: WeftContext, *, broker: Any = None) -> list[str]:
+        refreshes.append(now[0])
+        return original(ctx, broker=broker)
+
+    monkeypatch.setattr(liveness_monitor_mod, "list_task_state_tids", counted)
+    monitor._process_reactor_turn()
+    initial_id = monitor._latest_rows[tid].message_id
+    latest_id = queue.write(json.dumps({**_mapping(tid), "activity": "busy"}))
+    new_tid = str(time.time_ns())
+    newcomer = context.queue(task_state_queue_name(new_tid), persistent=False)
+    try:
+        newcomer.write(json.dumps(_mapping(new_tid)))
+        for _ in range(20):
+            now[0] += 0.05
+            monitor._process_reactor_turn()
+        assert refreshes == [10.0]
+        assert monitor._latest_rows[tid].message_id == initial_id
+        assert new_tid not in monitor._latest_rows
+        now[0] = 15.0
+        monitor._process_reactor_turn()
+        assert refreshes == [10.0, 15.0]
+        assert monitor._latest_rows[tid].message_id == latest_id
+        assert new_tid in monitor._latest_rows
+    finally:
+        newcomer.close()
+
+
+def test_namespace_sampling_coalesces_unseen_generation_round_trip(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    monitor._reconcile_mapping_rows(full=True)
+    current = monitor._latest_rows[tid]
+    deadline = UnknownDeadlineState(current.generation, 100.0, None)
+    monitor._deadlines[tid] = deadline
+    changed = _mapping(tid)
+    changed["runtime_handle"] = {
+        **dict(current.payload["runtime_handle"]),
+        "id": "different-generation",
+    }
+    queue.write(json.dumps(changed))
+    newest_id = queue.write(json.dumps(_mapping(tid)))
+    monitor._reconcile_mapping_rows(full=False)
+    assert monitor._latest_rows[tid].message_id == newest_id
+    assert monitor._deadlines[tid] == deadline
+
+
+def test_namespace_disappearance_keeps_in_flight_lane_owned(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    monitor._reconcile_mapping_rows(full=True)
+    row = monitor._latest_rows[tid]
+    work = ProbeWork(tid, row.message_id, row.payload, row.generation, "pending")
+    monitor._in_flight[tid] = work
+    monitor._deadlines[tid] = UnknownDeadlineState(row.generation, 100.0, None)
+    queue.delete(message_id=row.message_id)
+    monitor._reconcile_mapping_rows(full=False)
+    assert tid not in monitor._latest_rows
+    assert tid not in monitor._deadlines
+    assert tid not in monitor._due_tids
+    assert monitor._in_flight[tid] == work
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_namespace_read_failure_retains_previous_evidence(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+    full: bool,
+) -> None:
+    _context, monitor, _queue, tid, _now = namespace_case
+    monitor._reconcile_mapping_rows(full=True)
+    row = monitor._latest_rows[tid]
+    deadline = UnknownDeadlineState(row.generation, 100.0, None)
+    monitor._deadlines[tid] = deadline
+    if full:
+        original_history = monitor._read_mapping_history
+
+        def failed_history(selected: str, *, broker: Any) -> Any:
+            if selected == tid:
+                raise OSError("injected read failure")
+            return original_history(selected, broker=broker)
+
+        monkeypatch.setattr(monitor, "_read_mapping_history", failed_history)
+    else:
+        original_snapshot = liveness_monitor_mod.read_task_state_snapshot
+
+        def failed_snapshot(ctx: WeftContext, selected: str, **kwargs: Any) -> Any:
+            if selected == tid:
+                raise OSError("injected read failure")
+            return original_snapshot(ctx, selected, **kwargs)
+
+        monkeypatch.setattr(
+            liveness_monitor_mod, "read_task_state_snapshot", failed_snapshot
+        )
+    monitor._reconcile_mapping_rows(full=full)
+    assert monitor._latest_rows[tid] == row
+    assert monitor._deadlines[tid] == deadline
+
+
+def test_namespace_listing_failure_is_not_disappearance(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _context, monitor, _queue, tid, _now = namespace_case
+    monitor._reconcile_mapping_rows(full=True)
+    row = monitor._latest_rows[tid]
+
+    def failed_listing(*args: Any, **kwargs: Any) -> list[str]:
+        raise OSError("injected listing failure")
+
+    monkeypatch.setattr(liveness_monitor_mod, "list_task_state_tids", failed_listing)
+    monitor._reconcile_mapping_rows(full=True)
+    assert monitor._latest_rows[tid] == row
+    assert tid in monitor._due_tids
+
+
+def test_retirement_rejects_newer_unobserved_publication(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    monitor._reconcile_mapping_rows(full=False)
+    newest_id = queue.write(json.dumps({**_mapping(tid), "activity": "new"}))
+    _complete_stale_probe(monitor, tid)
+    assert monitor._latest_rows[tid].message_id == newest_id
+    assert queue.peek_one(exact_timestamp=newest_id) is not None
+    assert tid in monitor._due_tids
+
+
+def test_retirement_rejects_missing_probed_row_and_adopts_older_current(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    old_row = queue.peek_one(with_timestamps=True)
+    assert old_row is not None
+    old_id = old_row[1]
+    latest_id = queue.write(json.dumps({**_mapping(tid), "terminal": True}))
+    monitor._reconcile_mapping_rows(full=False)
+    queue.delete(message_id=latest_id)
+    _complete_stale_probe(monitor, tid)
+    assert monitor._latest_rows[tid].message_id == old_id
+    assert queue.peek_one(exact_timestamp=old_id) is not None
+
+
+def test_retirement_blocks_latest_when_older_exact_delete_fails(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    old_row = queue.peek_one(with_timestamps=True)
+    assert old_row is not None
+    old_id = old_row[1]
+    latest_id = queue.write(json.dumps({**_mapping(tid), "terminal": True}))
+    monitor._reconcile_mapping_rows(full=False)
+    original = monitor._delete_mapping_message
+    attempted: list[int] = []
+
+    def fail_older(selected: str, message_id: int, *, broker: Any) -> bool:
+        attempted.append(message_id)
+        if message_id == old_id:
+            return False
+        return original(selected, message_id, broker=broker)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(monitor, "_delete_mapping_message", fail_older)
+        _complete_stale_probe(monitor, tid)
+    assert attempted == [old_id]
+    assert queue.peek_one(exact_timestamp=latest_id) is not None
+    _complete_stale_probe(monitor, tid)
+    assert queue.peek_one() is None
+    assert tid not in monitor._latest_rows
+
+
+@pytest.mark.parametrize("reported_deleted", [0, 1])
+def test_retirement_requires_observed_absence_before_deleting_latest(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+    reported_deleted: int,
+) -> None:
+    """A broker return count cannot substitute for verifying older-row absence."""
+    context, monitor, queue, tid, _now = namespace_case
+    old_row = queue.peek_one(with_timestamps=True)
+    assert old_row is not None
+    old_id = old_row[1]
+    latest_id = queue.write(json.dumps({**_mapping(tid), "terminal": True}))
+    monitor._reconcile_mapping_rows(full=False)
+    with context.broker() as broker:
+        broker_type = type(broker)
+        original_delete = broker_type.delete_message_ids
+    attempted: list[int] = []
+
+    def leave_older_present(self: Any, name: str, message_ids: list[int]) -> int:
+        if name == task_state_queue_name(tid):
+            attempted.extend(message_ids)
+            if message_ids == [old_id]:
+                return reported_deleted
+        deleted = original_delete(self, name, message_ids)
+        assert isinstance(deleted, int)
+        return deleted
+
+    with monkeypatch.context() as patch:
+        patch.setattr(broker_type, "delete_message_ids", leave_older_present)
+        _complete_stale_probe(monitor, tid)
+    assert attempted == [old_id]
+    assert queue.peek_one(exact_timestamp=old_id) is not None
+    assert queue.peek_one(exact_timestamp=latest_id) is not None
+    assert tid in monitor._latest_rows
+    _complete_stale_probe(monitor, tid)
+    assert queue.peek_one() is None
+    assert tid not in monitor._latest_rows
+
+
+def test_retirement_absence_read_failure_preserves_latest(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, monitor, queue, tid, _now = namespace_case
+    old_row = queue.peek_one(with_timestamps=True)
+    assert old_row is not None
+    old_id = old_row[1]
+    latest_id = queue.write(json.dumps({**_mapping(tid), "terminal": True}))
+    monitor._reconcile_mapping_rows(full=False)
+    with context.broker() as broker:
+        broker_type = type(broker)
+        original_peek = broker_type.peek_one
+
+    def failed_verification(self: Any, name: str, **kwargs: Any) -> Any:
+        if (
+            name == task_state_queue_name(tid)
+            and kwargs.get("exact_timestamp") == old_id
+        ):
+            raise OSError("injected absence verification failure")
+        return original_peek(self, name, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(broker_type, "peek_one", failed_verification)
+        _complete_stale_probe(monitor, tid)
+    assert queue.peek_one(exact_timestamp=old_id) is None
+    assert queue.peek_one(exact_timestamp=latest_id) is not None
+    assert tid in monitor._latest_rows
+    _complete_stale_probe(monitor, tid)
+    assert queue.peek_one() is None
+    assert tid not in monitor._latest_rows
+
+
+def test_retirement_verified_missing_older_id_and_concurrent_append_survive(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    old_row = queue.peek_one(with_timestamps=True)
+    assert old_row is not None
+    old_id = old_row[1]
+    latest_id = queue.write(json.dumps({**_mapping(tid), "terminal": True}))
+    monitor._reconcile_mapping_rows(full=False)
+    original = monitor._delete_mapping_message
+    appended: list[int] = []
+
+    def concurrent_write(selected: str, message_id: int, *, broker: Any) -> bool:
+        if message_id == old_id:
+            queue.delete(message_id=old_id)
+            appended.append(queue.write(json.dumps(_mapping(tid))))
+        return original(selected, message_id, broker=broker)
+
+    monkeypatch.setattr(monitor, "_delete_mapping_message", concurrent_write)
+    _complete_stale_probe(monitor, tid)
+    remaining = [mid for _body, mid in queue.peek_generator(with_timestamps=True)]
+    assert remaining == appended
+    assert latest_id not in remaining
+    monitor._reconcile_mapping_rows(full=False)
+    assert monitor._latest_rows[tid].message_id == appended[0]
+
+
+def test_namespace_age_fences_preserve_young_history_and_terminal(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    monitor._mapping_min_age_seconds = 2400.0
+    queue.write("malformed")
+    queue.write(json.dumps({**_mapping(tid), "terminal": True}))
+    initial = list(queue.peek_generator(with_timestamps=True))
+    monitor._reconcile_mapping_rows(full=True)
+    _complete_stale_probe(monitor, tid)
+    assert list(queue.peek_generator(with_timestamps=True)) == initial
+    assert tid in monitor._latest_rows
+
+
+def test_namespace_history_handles_do_not_accumulate_in_task_cache(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+) -> None:
+    context, monitor, _queue, _tid, _now = namespace_case
+    retired_tids: list[str] = []
+    for _ in range(10):
+        tid = str(time.time_ns())
+        queue = context.queue(task_state_queue_name(tid), persistent=False)
+        try:
+            queue.write(json.dumps({**_mapping(tid), "terminal": True}))
+            monitor._reconcile_mapping_rows(full=False)
+            _complete_stale_probe(monitor, tid)
+            assert queue.peek_one() is None
+            retired_tids.append(tid)
+        finally:
+            queue.close()
+    for tid in retired_tids:
+        assert task_state_queue_name(tid) not in monitor._queue_cache
+        assert tid not in monitor._latest_rows
+        assert tid not in monitor._due_tids
+
+
+def test_retirement_read_failure_preserves_latest_and_retries(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    monitor._reconcile_mapping_rows(full=False)
+    row = monitor._latest_rows[tid]
+
+    def failed_history(selected: str, *, broker: Any) -> Any:
+        raise OSError("injected retirement history read failure")
+
+    monkeypatch.setattr(monitor, "_read_mapping_history", failed_history)
+    _complete_stale_probe(monitor, tid)
+    assert monitor._latest_rows[tid] == row
+    assert queue.peek_one(exact_timestamp=row.message_id) is not None
+    assert tid in monitor._due_tids
+
+
+def test_retirement_missing_queue_discards_unprobed_work(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+) -> None:
+    _context, monitor, queue, tid, _now = namespace_case
+    monitor._reconcile_mapping_rows(full=False)
+    queue.delete(message_id=monitor._latest_rows[tid].message_id)
+    _complete_stale_probe(monitor, tid)
+    assert tid not in monitor._latest_rows
+    assert tid not in monitor._deadlines
+    assert tid not in monitor._due_tids
+    assert tid not in monitor._in_flight

@@ -308,7 +308,10 @@ Current rules:
   The owning task exact-deletes its own claim on clean shutdown; the
   runtime pruning engine is the sole deleter of stale claims written by
   other processes, behind its minimum-age gate
-- current liveness checks use `weft.log.tasks` plus `weft.state.tid_mappings`;
+- after matching endpoint claims, read valid snapshots only for candidate owner
+  TIDs. Empty candidate sets require no state reads; pure liveness predicates
+  receive evidence values, not broker callbacks
+- current liveness checks use `weft.log.tasks` plus `weft.state.tasks.<tid>`;
   task processes publish host-PID liveness through `runtime_handle` when no
   runner-specific handle exists, and there is no separate endpoint lease or
   heartbeat contract
@@ -490,7 +493,7 @@ Current rules:
   fields. Operational `timestamp_ns` is a Unix-clock measurement and remains
   numeric; arbitrary diagnostic mappings are not traversed.
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
-  `weft.state.tid_mappings` entries and live runtime liveness where needed; they
+  `weft.state.tasks.<tid>` entries and live runtime liveness where needed; they
   do not depend on a separate state database. Once raw `weft.log.tasks` rows are
   retired and no higher evidence remains, the public terminal answer for a known
   full TID comes from the Monitor collation store, which the shared evidence
@@ -616,7 +619,7 @@ Current rules:
   families continue to use `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` plus
   stale-open policy before summary/disposition. Runtime-state pruning runs
   in the monitor's maintenance pass
-  (`weft.state.tid_mappings` is owned by LivenessMonitor); the Monitor
+  (`weft.state.tasks.<tid>` is owned by LivenessMonitor); the Monitor
   collation store is the supervised task-log deletion authority. The manager
   owns only child supervision; it does not scan
   lifecycle queues.
@@ -783,11 +786,12 @@ a permanent normal-cycle compatibility lane.
   for public `status`; runtime liveness disagreement may be exposed through
   `reconciliation` diagnostics, but it must not rewrite a terminal task back to
   `running`
-- TID mapping publication follows [OBS.6] and [OBS.6a]. Producers append a
-  complete snapshot without first replaying the shared mapping queue, and
-  equivalent consecutive snapshots are valid. Current-state consumers reduce
-  valid rows by greatest broker message ID per full TID. This runtime-state
-  publication remains best-effort and cannot become task lifecycle authority.
+- Task-state publication follows [OBS.6] and [OBS.6a]. Producers blindly
+  append complete snapshots to their own `weft.state.tasks.<tid>`; equivalent
+  consecutive snapshots are valid. Readers select the newest suffix-bound
+  valid snapshot, paginating past malformed tails. Point and candidate reads
+  stay local to requested TIDs; names-only discovery is not valid state or
+  process proof. Publication remains best-effort and never lifecycle authority.
 - shared task evidence classification lives in
   `weft/core/task_evidence.py`; status, task inspection, known-TID terminal
   snapshots, result helpers, and realtime event iteration reuse that
@@ -897,6 +901,13 @@ Implementation plan backlink:
 
 ### 6. Manager Spawn Flow [MF-6]
 
+Spawn reconciliation observes the exact submitted `weft.state.tasks.<tid>`
+queue through a TID-specific subscription, not a static shared-state route.
+Open the lazy handle before the queue exists so its first publication wakes
+the waiter. Preserve dynamic manager-reserved subscriptions, route rebuilds,
+valid snapshot/log/queued/reserved/unknown precedence, and resource cleanup.
+A names-only entry is not spawn evidence.
+
 Managers consume `weft.spawn.requests` and, for canonical managers,
 `weft.spawn.internal`. Internal spawn requests are manager-owned service work
 and are drained before public spawn requests whenever both queues are pending.
@@ -909,7 +920,7 @@ source queue and does not enter the reserved-message lifecycle. A blocked
 source that is already known active is suppressed as ordinary wait activity
 so retained backlog cannot create a zero-timeout loop. One backend-specific
 observation supplies `used`: SQLite context-scoped observation reduces to the
-latest mapping per full TID, counts the rows the shared payload-only liveness
+newest valid snapshot per task-state queue, counts the rows the shared payload-only liveness
 probe reports live or undecidable, and unions the Manager's in-flight child
 launches and committed child processes, each full TID once; Postgres reads raw server-wide
 `numbackends` through the public helper on the Manager's existing persistent
@@ -918,10 +929,10 @@ Without that positive proof, a task-owned `terminal: true` mapping probes dead;
 other dead rows are released immediately and undecidable non-terminal rows
 remain counted. Probe verdicts are memoized against the runtime handle and
 normalized terminal hint (dead permanent per unchanged fingerprint, live for
-the recheck interval). Admission reads mapping history in strict mode so a
-generator-open, iteration, reduction, or filtering failure reaches its exact
-fail-closed exception boundary; existing non-admission history callers remain
-best effort by default. Admission does not add a liveness, cleanup, or
+the recheck interval). Admission propagates task-state snapshot read errors so a
+broker acquisition, read, reduction, or filtering failure reaches its exact
+fail-closed exception boundary. Other callers retain their own recovery policy;
+the shared task-state reader never converts backend errors into empty state. Admission does not add a liveness, cleanup, or
 freshness policy beyond the shared probe.
 Denial or observation failure remains suppressed until its universal
 one-second retry deadline; child reap or launch-worker progress may wake it
@@ -1260,13 +1271,20 @@ self-maintenance, and explicit operator commands for force and compaction:
   `WEFT_TASK_MONITOR_MAINTENANCE` and its interval setting only;
   `WEFT_TASK_MONITOR_MODE` (including `report_only`) does not suppress it
 - there is no built-in age-based output sweeper in the current contract
-- `LivenessMonitor` is the sole deleter of `weft.state.tid_mappings`.
+- `LivenessMonitor` is the sole deleter of `weft.state.tasks.<tid>`.
   TaskMonitor has no per-cycle TID-mapping cleanup, and the `tid-mappings`
   group of the runtime pruning engine and `weft system prune` does not exist.
   One policy
-  module owns malformed, superseded, and newest-row deletability. Tasks remain
+  module owns malformed, superseded, and newest-row deletability. All categories
+  retain their 2,400-second age fence. Latest retirement strictly rereads
+  history, matches the probed newest-valid ID, and verifies older valid rows
+  absent before exact-deleting latest ([LIVENESS.R3]); failures preserve latest
+  and retry. No component deletes a whole task-state queue. Tasks remain
   the only writers, and publication remains edge-triggered and append-only.
-  A newest non-terminal mapping row means "live, or not yet proven dead."
+  A newest valid non-terminal snapshot means "live, or not yet proven dead."
+  A names-only entry is insufficient; streaming protection likewise requires
+  valid snapshot presence. Candidate cleanup still discovers owners without
+  state queues and never starves eligible candidates behind protected ones.
   TaskMonitor's destruction-protection gate reads row presence plus live
   service-registry evidence and performs no host or runtime probing. If
   LivenessMonitor is down, rows persist and protection persists.
@@ -1394,10 +1412,12 @@ live in `weft/core/pruning/`; Monitor durable collation lives in
 `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`, and
 `weft/core/monitor/collation.py`; monitor cycle wiring lives in
 `weft/core/monitor/task_monitor.py`; command rendering and CLI adaptation live in
-`weft/commands/prune.py`. The single `weft.state.tid_mappings` cleanup policy
+`weft/commands/prune.py`. The single `weft.state.tasks.*` cleanup policy
 lives under `weft/liveness/`; its broker-aware executor is the peer task
 `weft/core/tasks/liveness_monitor.py`. TaskMonitor and the foreground pruning
-engine do not classify or delete that queue.
+engine do not classify or delete that namespace. Shared broker-aware
+namespace reads live in `weft/core/task_state.py`; `weft/liveness/` remains
+broker-free evidence and policy.
 
 ## Queue Management Patterns
 
@@ -1414,10 +1434,12 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 
 Current rules:
 
-- queue creation is implicit on first write
+- queue creation is implicit on first write; opening a task-state queue
+  handle and subscribing before that first write is valid and must wake on
+  publication, even while names-only listing has no entry
 - task cleanup closes task-owned handles and clears standard task-local
   `T{tid}.ctrl_in` / `T{tid}.ctrl_out` rows before closing those handles
-- `weft.state.services`, `weft.state.tid_mappings`, `weft.state.streaming`,
+- `weft.state.services`, `weft.state.tasks.<tid>`, `weft.state.streaming`,
   `weft.state.endpoints`, and `weft.state.pipelines` are runtime-only
   bookkeeping queues; they may be read for live reconciliation but are not
   durable application history
@@ -1514,7 +1536,7 @@ deletion is logged at error level when Weft logging is enabled
   — is otherwise indistinguishable from an abandoned family in the task log
   alone. The destruction-protected set covers proven-live owners (live
   host-PID `(pid, create_time)` proof, live service-registry rows) plus
-  owners whose newest `weft.state.tid_mappings` row is undecidable
+  owners whose newest `weft.state.tasks.<tid>` row is undecidable
   (non-host runner handles with no probeable host PIDs), applying the same
   undecidable-means-live rule the tid-mapping cleanup policy uses to keep
   the row itself. Delete-time rechecks apply the same standard to disposed
@@ -1524,7 +1546,7 @@ deletion is logged at error level when Weft logging is enabled
   cached external-log status, deferred-write counts, and retention settings
   only; it does not open files, scan queues, flush deferred writes, or query
   Monitor tables. The persistent TaskMonitor runtime mapping in
-  `weft.state.tid_mappings` includes the same compact external-log diagnostics
+  `weft.state.tasks.<tid>` includes the same compact external-log diagnostics
   so passive status surfaces can report external-log health without PINGing
   the monitor or touching the configured path.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
@@ -1548,6 +1570,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 

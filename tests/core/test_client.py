@@ -24,7 +24,6 @@ from weft._constants import (
     SUBMIT_OVERRIDE_NAMES,
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.client import (
     ControlRejected,
@@ -55,6 +54,7 @@ from weft.client._namespaces import (
 from weft.context import build_context
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import open_monitor_store
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import TaskSpec
 from weft.core.taskspec.transport import validate_taskspec_payload
 
@@ -518,7 +518,7 @@ def test_task_terminal_snapshot_positive_timeout_returns_within_budget(
 
     def _state_rows() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
         rows: list[list[tuple[str, int]]] = []
-        for name in (WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE):
+        for name in (WEFT_GLOBAL_LOG_QUEUE, task_state_queue_name(tid)):
             queue = context.queue(name, persistent=False)
             try:
                 rows.append(list(queue.peek_many(1000, with_timestamps=True)))

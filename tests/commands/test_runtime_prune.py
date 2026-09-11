@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Literal
 
 import psutil
 import pytest
@@ -28,15 +29,14 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands import prune as prune_commands
 from weft.commands.prune import (
     run_runtime_prune,
     write_runtime_prune_report,
 )
-from weft.context import build_context
-from weft.core import manager_runtime
+from weft.context import WeftContext, build_context
+from weft.core import manager_runtime, task_state
 from weft.core.endpoints import build_endpoint_record_payload
 from weft.core.pruning import runtime as runtime_pruning
 from weft.core.pruning.runtime import (
@@ -50,6 +50,7 @@ from weft.core.service_convergence import (
     build_service_owner_payload,
     parse_service_owner_row,
 )
+from weft.core.task_state import task_state_queue_name
 from weft.ext import RunnerHandle
 from weft.helpers import iter_queue_json_entries, reload_config, tid_short_form
 from weft.liveness import registry
@@ -99,7 +100,7 @@ def test_runtime_prune_candidate_json_formats_message_id_only(tmp_path: Path) ->
         run_id="runtime-prune:test",
         candidates=(candidate,),
         applied_candidates=(),
-        scan_stats=(RuntimeQueueScanStats(queue=WEFT_TID_MAPPINGS_QUEUE),),
+        scan_stats=(RuntimeQueueScanStats(queue=WEFT_ENDPOINTS_REGISTRY_QUEUE),),
     )
 
     report_path = tmp_path / "report.jsonl"
@@ -704,7 +705,7 @@ def test_endpoint_prune_preserves_live_duplicate_claimants(tmp_path) -> None:
         "1770000000000000033",
     ):
         _write_json(
-            ctx, WEFT_TID_MAPPINGS_QUEUE, {"full": tid, "short": tid_short_form(tid)}
+            ctx, task_state_queue_name(tid), {"full": tid, "short": tid_short_form(tid)}
         )
     _write_json(
         ctx,
@@ -908,3 +909,73 @@ def test_valid_manager_row_with_missing_identity_obeys_both_prune_windows(
         [] if deleted else [mid]
     )
     assert _read_rows(ctx, "T1770000000000000081.ctrl_in") == []
+
+
+@pytest.mark.parametrize("group", ["streaming", "endpoints"])
+def test_runtime_prune_reads_only_candidate_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    group: Literal["streaming", "endpoints"],
+) -> None:
+    """Unrelated runtime snapshots are not read by owner cleanup checks."""
+    ctx = _context(tmp_path)
+    tid = "1770000000000000091"
+    other_tid = "1770000000000000092"
+    for owner in (tid, other_tid):
+        _write_json(
+            ctx,
+            task_state_queue_name(owner),
+            {"full": owner, "short": tid_short_form(owner)},
+        )
+    if group == "streaming":
+        _write_json(
+            ctx, WEFT_STREAMING_SESSIONS_QUEUE, {"tid": tid, "session_id": "candidate"}
+        )
+    else:
+        _write_json(
+            ctx,
+            WEFT_ENDPOINTS_REGISTRY_QUEUE,
+            build_endpoint_record_payload(
+                name="candidate",
+                tid=tid,
+                inbox=f"T{tid}.inbox",
+                outbox=f"T{tid}.outbox",
+                ctrl_in=f"T{tid}.ctrl_in",
+                ctrl_out=f"T{tid}.ctrl_out",
+            ),
+        )
+    reads: list[str] = []
+    original = task_state.read_task_state_snapshot
+
+    def counted_read(
+        context: WeftContext,
+        owner: str,
+        *,
+        broker: object = None,
+        previous: tuple[int, dict[str, object]] | None = None,
+    ) -> tuple[int, dict[str, object]] | None:
+        reads.append(owner)
+        return original(context, owner, broker=broker, previous=previous)
+
+    monkeypatch.setattr(task_state, "read_task_state_snapshot", counted_read)
+    result = runtime_pruning.run_runtime_prune_for_context(
+        ctx, RuntimePruneConfig(queues=(group,), min_age_seconds=0)
+    )
+    assert result.candidates == ()
+    assert reads == [tid]
+
+
+def test_streaming_prune_requires_valid_snapshot_not_only_namespace_name(
+    tmp_path: Path,
+) -> None:
+    """A malformed-only task-state entry cannot protect an abandoned marker."""
+    ctx = _context(tmp_path)
+    tid = "1770000000000000093"
+    marker = _write_json(
+        ctx, WEFT_STREAMING_SESSIONS_QUEUE, {"tid": tid, "session_id": "orphan"}
+    )
+    _write_json(ctx, task_state_queue_name(tid), {"invalid": "snapshot"})
+    result = runtime_pruning.run_runtime_prune_for_context(
+        ctx, RuntimePruneConfig(queues=("streaming",), min_age_seconds=0)
+    )
+    assert [candidate.message_id for candidate in result.candidates] == [marker]

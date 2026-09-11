@@ -11,7 +11,7 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
+    WEFT_TASK_STATE_QUEUE_PREFIX,
 )
 
 
@@ -21,7 +21,7 @@ def test_global_queue_names_match_spec() -> None:
     assert WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE == "weft.spawn.internal"
     assert WEFT_MANAGER_OUTBOX_QUEUE == "weft.manager.outbox"
     assert WEFT_SERVICES_REGISTRY_QUEUE == "weft.state.services"
-    assert WEFT_TID_MAPPINGS_QUEUE == "weft.state.tid_mappings"
+    assert WEFT_TASK_STATE_QUEUE_PREFIX == "weft.state.tasks."
     assert WEFT_STREAMING_SESSIONS_QUEUE == "weft.state.streaming"
     assert WEFT_ENDPOINTS_REGISTRY_QUEUE == "weft.state.endpoints"
     assert WEFT_PIPELINES_STATE_QUEUE == "weft.state.pipelines"

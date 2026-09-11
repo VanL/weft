@@ -30,10 +30,10 @@ from weft.context import WeftContext
 from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.endpoints import (
     ResolvedEndpoint,
-    latest_tid_mapping_rows,
     resolve_endpoint,
 )
 from weft.core.manager_services import ServiceCandidate, summarize_service_candidates
+from weft.core.task_state import read_task_state_snapshot
 from weft.ext import RunnerHandle
 from weft.helpers import (
     handle_has_live_host_process,
@@ -97,7 +97,7 @@ def _heartbeat_runtime_handle_is_live(
     *,
     tid: str,
 ) -> bool:
-    row = latest_tid_mapping_rows(context).get(tid)
+    row = read_task_state_snapshot(context, tid)
     if row is None:
         return False
     handle_payload = row[1].get("runtime_handle")

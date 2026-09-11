@@ -119,9 +119,9 @@ from weft._constants import (
 from weft.context import WeftContext
 from weft.core.endpoints import (
     latest_tid_mapping_entries_for_endpoint_resolution,
-    latest_tid_mapping_rows,
 )
 from weft.core.manager_runtime import manager_registry_record_liveness
+from weft.core.task_state import read_task_state_snapshot
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -1720,7 +1720,6 @@ class Manager(ServiceTask):
         try:
             mappings = latest_tid_mapping_entries_for_endpoint_resolution(
                 self._task_context(),
-                strict=True,
             )
             live_tids = {
                 tid
@@ -5055,7 +5054,7 @@ class Manager(ServiceTask):
 
     def _latest_tid_runtime_handle(self, tid: str) -> RunnerHandle | None:
         """Read the canonical newest valid mapping handle ([OBS.4])."""
-        latest = latest_tid_mapping_rows(self._manager_context()).get(tid)
+        latest = read_task_state_snapshot(self._manager_context(), tid)
         if latest is None:
             return None
         _timestamp, latest_payload = latest

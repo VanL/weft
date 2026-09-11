@@ -76,7 +76,6 @@ from weft._constants import (
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
     get_weft_directory_name,
     load_config,
 )
@@ -87,6 +86,7 @@ from weft.core.endpoints import (
     build_endpoint_record_payload,
     validate_endpoint_claim_name,
 )
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
@@ -335,10 +335,10 @@ class BaseTask(MultiQueueWatcher, ABC):
         for queue_name in self._queue_names.values():
             self._queue(queue_name)
 
-        # Ensure global observability queues reuse cached handles
+        # Ensure task and global observability queues reuse cached handles
         for global_name in (
             WEFT_GLOBAL_LOG_QUEUE,
-            WEFT_TID_MAPPINGS_QUEUE,
+            task_state_queue_name(self.tid),
             WEFT_STREAMING_SESSIONS_QUEUE,
         ):
             self._queue(global_name)
@@ -428,7 +428,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         routes = {
             "global_log": WEFT_GLOBAL_LOG_QUEUE,
-            "tid_mappings": WEFT_TID_MAPPINGS_QUEUE,
+            "task_state": task_state_queue_name(self.tid),
             "streaming_sessions": WEFT_STREAMING_SESSIONS_QUEUE,
             "endpoints_registry": WEFT_ENDPOINTS_REGISTRY_QUEUE,
         }
@@ -466,7 +466,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 )
         canonical_support = {
             "global_log": WEFT_GLOBAL_LOG_QUEUE,
-            "tid_mappings": WEFT_TID_MAPPINGS_QUEUE,
+            "task_state": task_state_queue_name(self.tid),
             "streaming_sessions": WEFT_STREAMING_SESSIONS_QUEUE,
             "endpoints_registry": WEFT_ENDPOINTS_REGISTRY_QUEUE,
         }
@@ -2275,7 +2275,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
         mapping = self._build_tid_mapping_payload()
         try:
-            self._queue(WEFT_TID_MAPPINGS_QUEUE).write(json.dumps(mapping))
+            self._queue(task_state_queue_name(self.tid)).write(json.dumps(mapping))
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to register TID mapping %s", mapping, exc_info=True)
             return False

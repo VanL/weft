@@ -29,6 +29,14 @@ there, including `weft.core.*`, helpers, constants, command leaves, and
 
 ## Commands surface contract [PY-2]
 
+Task observations use the shared per-TID runtime-state readers
+([OBS.6]); known-TID snapshots read that state queue directly. Snapshot and
+control waiters subscribe to the exact queue even before its first write;
+realtime snapshot requests remain fresh. CLI event watches remain incremental
+event streams. This storage change adds no public signature, result shape,
+iterator retention contract, or lifecycle precedence change. Python system
+status retains its unfiltered default; CLI status retains terminal filtering.
+
 Every canonical CLI verb has one actual implementation exported from
 `weft.commands`: `cmd_` plus its full CLI path, joined with underscores and
 hyphens normalized to underscores. The initial bijection is 41 verbs: 4 root,
@@ -280,6 +288,8 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
+- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [Public API surface remediation plan](../plans/2026-08-12-public-api-surface-remediation.md)

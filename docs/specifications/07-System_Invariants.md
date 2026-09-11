@@ -156,7 +156,9 @@ acknowledgement and shared dispatch; direct codec coverage lives in
   launch is restored per the manager's reserved policy ([MF-6]).
 - **QUEUE.7**: a live task declares every construction-fixed reactor role and
   fixed support route that it watches, reserves into, or uses for durable task
-  or runtime output. The five BaseTask roles (`inbox`, `reserved`, `outbox`,
+  or runtime output. The task-state support route is exactly
+  `weft.state.tasks.<tid>` for that task's full TID; this canonical target is
+  validated before queue wiring or broker access. The five BaseTask roles (`inbox`, `reserved`, `outbox`,
   `ctrl_in`, `ctrl_out`), BaseTask support routes, and subtype-fixed roles are
   pairwise distinct for the task lifetime, except for explicit, subtype-owned
   semantic aliases named in code and firing tests. Runtime construction rejects
@@ -310,19 +312,39 @@ _Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py
   owns the derivation; no producer slices digits from the decimal TID.
   The form is not unique: a short form matching more than one full TID is
   an ambiguity error per [CLI-1.2.3]. Stored mapping shorts are display
-  metadata; resolution derives the current form from the full TID.
+  metadata; resolution derives the current form from valid namespace suffixes.
+  Short-ID candidates are all nonempty `weft.state.tasks.<tid>` queues with
+  a canonical 19-ASCII-decimal full-TID suffix, including queues containing
+  only malformed rows. Discovery does not read payloads and proves neither
+  snapshot validity nor process liveness. Malformed suffixes are ignored.
   Implementation plans: [Short TID derivation](../plans/2026-08-31-short-tid-derivation-plan.md),
   [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
-- **OBS.6**: Each TID mapping row is a complete runtime-observability
-  snapshot written to `weft.state.tid_mappings`. A consumer that requires
-  current state selects the valid row with the greatest broker message ID for
-  each full TID. Multiple rows for one full TID, including rows with
-  equivalent observable fields, are valid ordered history; uniqueness per TID
-  is not a queue invariant.
-- **OBS.6a**: TID mapping publication is edge-triggered: every write is a
+- **OBS.6**: Each task owns a runtime-state queue, `weft.state.tasks.<tid>`,
+  containing complete runtime-observability snapshots. Its suffix is the
+  canonical 19-ASCII-decimal full TID. A valid row is a JSON object with
+  nonempty string `full` and `short` fields, and `full` must equal the suffix.
+  Current-state readers select the greatest-message-ID valid row: peek
+  newest-first, then paginate before the last observed ID until a valid row
+  or exhaustion. No fixed malformed-row ceiling may hide valid evidence.
+  Multiple rows, including equivalent snapshots, are ordered history, not
+  an invariant violation. Names-only discovery and short-ID resolution read
+  no payloads; all runtime evidence consumers require a valid snapshot.
+  A known-TID read visits only that task's queue. Candidate reads deduplicate
+  TIDs, read only those queues, and perform no state I/O for an empty set.
+  Noncanonical TIDs encountered in candidate evidence contribute no runtime
+  snapshot and are ignored by bulk reads; direct queue-name construction
+  rejects a noncanonical TID. Invalid-only candidates perform no state I/O.
+  Full-TID spelling validation is shared through
+  `weft.helpers.message_ids.is_task_tid`; exact message-ID range validation
+  remains in `normalize_exact_message_id`, and TaskSpec additionally rejects zero.
+  Bulk reads share one broker scope and short-lived queue facades. Broker acquisition and read failures propagate to callers; existing caller-level
+  failure policies remain unchanged. Non-task point selectors return absent
+  without broker I/O; queue-name construction rejects them. Names alone
+  never substitute for valid state, lifecycle evidence, or live process proof.
+- **OBS.6a**: Task-state publication is edge-triggered: every write is a
   new fact — a state transition or a report — so a producer appends its
-  complete current snapshot without reading or reducing
-  `weft.state.tid_mappings` and without any writer-side payload comparison.
+  complete current snapshot to its own `weft.state.tasks.<tid>` without
+  reading or reducing any state queue or comparing writer-side payloads.
   Publication work is therefore independent of mapping-history depth. Edge
   detection lives at the call sites, each of which fires only when the
   owner-local state it governs actually changed (unchanged activity, an
@@ -450,7 +472,7 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   - **OBS.13.6**: Runtime-state queue cleanup is policy driven. Malformed rows
     are deletable only from Weft-owned schema queues whose policy says
     malformed rows are disposable, such as `weft.log.tasks`,
-    `weft.state.tid_mappings`, and schema-tagged `weft.state.services` rows
+    `weft.state.tasks.<tid>`, and schema-tagged `weft.state.services` rows
     that fail service-owner validation ([MF-5]). Runtime cleanup does not create new lifecycle
     evidence and remains bounded by the selected cleanup policy.
   - **OBS.13.7**: Monitor cleanup must not delete active work, ambiguous
@@ -459,11 +481,11 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     terminal task-log proof for the same TID in the cleanup pass, or non-exact
     lifecycle evidence. Manager/global/custom control queues and custom
     task-local queues are excluded from default monitor cleanup.
-    `LivenessMonitor` is the sole deleter of `weft.state.tid_mappings`; its
+    `LivenessMonitor` is the sole deleter of `weft.state.tasks.<tid>`; its
     one policy module owns malformed, superseded, and newest-row
     classification and exact deletion. TaskMonitor and explicit runtime-state
-    pruning neither classify nor delete that queue. A newest non-terminal
-    mapping row means "live, or not yet proven dead" and protects the TID from
+    pruning neither classify nor delete that namespace. A newest valid non-terminal
+    task-state snapshot means "live, or not yet proven dead" and protects the TID from
     TaskMonitor destruction. If LivenessMonitor is down, the row and its
     protection persist.
     `stale_open` classification (a non-service open family with no usable
@@ -574,18 +596,33 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
 - **LIVENESS.R2**: Liveness evidence never synthesizes, reverses, or authorizes
   a TaskSpec transition, task-log verdict, Manager ownership decision,
   admission change, process signal, or any deletion other than
-  `weft.state.tid_mappings` rows.
-- **LIVENESS.R3**: `LivenessMonitor` is the sole deleter of
-  `weft.state.tid_mappings`, and exactly one policy module defines row
-  deletability. No second implementation of malformed, superseded, or
-  newest-row rules may exist.
+  `weft.state.tasks.<tid>` rows.
+- **LIVENESS.R3**: `LivenessMonitor` is the sole component deleter within
+  `weft.state.tasks.*`; one policy module owns malformed, superseded, and
+  newest-row deletability. The existing 2,400-second minimum-age fences apply
+  to every category. Retirement deletes exact observed IDs, never a whole
+  queue. Before latest-row retirement, strictly reread that task's history
+  and require its newest-valid message ID to equal the probed ID. A mismatch
+  adopts the observed current row, even an older row, and rejects the stale
+  result; no valid row means discard that retirement work without deleting
+  unprobed rows. On an exact match, delete eligible observed older rows and
+  verify absence before deleting the eligible probed latest row. Already
+  absent older IDs count as success only after verification. If any older
+  valid row remains or absence cannot be verified, retain latest and retry;
+  younger malformed residue may remain. Close history iterators before
+  deletion. Concurrent unseen appends survive. Historical deletion failures
+  retry at full reconciliation; latest failures retry on probe scheduling.
+  Operator CLI deletion is an explicit human override; an emptied virtual
+  queue disappears naturally. No second deletion policy or writer trim exists.
 - **LIVENESS.R4**: Newest-row retirement requires minimum age plus either
   definitive staleness or a consecutively attempted-`unknown` generation whose
   in-memory deadline expired. The reducer stores generation, deadline, and an
   optional pause time. Not-attempted degradation starts one pause and never
   retires; the next attempted unknown shifts the deadline by the paused
   duration before testing it. Only an attempted, completed probe can produce
-  timeout retirement.
+  timeout retirement. Runtime generations are sampled: unseen A→B→A
+  publications do not reset the already observed A generation deadline.
+  Deadlines refer to observed generations, not every intermediate append.
 - **LIVENESS.R5**: Evidence authority follows
   `RunnerHandle.control.authority`; host identity requires `(pid, create_time)`
   with zombie rejection; extension probes are authoritative for `runner` and
@@ -595,8 +632,12 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   component adds read-before-write, periodic republish, or automatic requeue
   of salvaged rows. Self-healing rests on the owner's next append and the
   guaranteed terminal republish.
-- **LIVENESS.R7**: TaskMonitor destruction protection reads newest-row
-  presence (non-terminal) plus live service-registry evidence, with no probing.
+- **LIVENESS.R7**: TaskMonitor destruction protection reads newest-valid
+  snapshot presence (non-terminal) in each candidate task's state queue plus
+  live service-registry evidence, with no probing. A queue name alone grants
+  no protection. Candidate discovery must still find residue whose owner has
+  no state queue and must not truncate protected candidates before policy
+  application in a way that starves later eligible work.
   Post-disposal family activity clears `task_control_deleted_at_ns` so
   recreated queues re-enter terminal cleanup. Post-disposal activity means a
   broker message ID strictly newer than the record's prior
@@ -608,17 +649,29 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   mode, ambiguous family disposal salvages bounded copies of those rows into
   the pre-delete report before whole-family deletion.
 - **LIVENESS.R8**: Probe concurrency, cadence, retirement timeout,
-  reconciliation interval, minimum age, and salvage bounds are named constants
+  namespace refresh interval, reconciliation interval, minimum age, and salvage bounds are named constants
   in `weft/_constants.py`. At most one probe per TID is in flight; late results
   are discarded by token-plus-generation match; intervals coalesce.
 - **LIVENESS.R9**: For maximum `N` and reserve fraction `f`, the common modeled
   internal-lane reserve is
   `max(ceil(N * f), 3 + int(liveness_monitor_enabled))`; it models room, not
   permits.
-- **LIVENESS.R10**: Monitor memory is `O(current retained TIDs)`; capacity
-  eviction of deadline state is forbidden. Startup and reconciliation use
-  generator reads; ordinary cycles consume only rows after the in-memory
-  cursor.
+- **LIVENESS.R10**: Monitor memory is `O(current retained TIDs + bounded
+  in-flight work)`; capacity eviction of deadline state is forbidden. The
+  monitor refreshes all namespace current snapshots every five seconds,
+  separately from fast reactor turns, and performs whole-history
+  reconciliation at startup and every 600 seconds. Refresh and reconciliation
+  deadlines are scheduled from completion so overdue work coalesces. Controls
+  and completed probes remain handled between refreshes; work duration may
+  delay discovery beyond five seconds. Ordinary refresh reads current state
+  only; history reconciliation uses generator reads. Neither refresh nor
+  reconciliation assumes a fixed malformed-row peek bound. Reads are strict:
+  failed enumeration never means disappearance, and a per-queue failure
+  preserves cached evidence and cannot authorize retirement. Successful
+  absence removes retained state and due work, while an in-flight worker
+  remains owned until its result is handled. Token, message-ID, and generation
+  guards reject late results. Discovered queues use short-lived facades in a
+  shared broker scope, never permanent per-historical-TID handle caching.
 
 _Plan backlinks_:
 - [`docs/plans/2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md)
@@ -630,7 +683,8 @@ _Plan backlinks_:
 _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/core/launcher.py`,
 `weft/liveness/` (broker-free evidence, registry, deadline, and mapping-policy
-reducers), `weft/core/tasks/liveness_monitor.py` (persistent scheduling and
+reducers), `weft/core/task_state.py` (shared broker-aware namespace discovery
+and snapshot reads), `weft/core/tasks/liveness_monitor.py` (persistent scheduling and
 the sole exact-delete executor for TID mappings),
 `weft/core/manager.py`, `weft/core/monitor/task_monitor.py`,
 `weft/core/tasks/heartbeat.py`, `weft/core/runners/host.py`,
@@ -911,7 +965,7 @@ _Implementation mapping_: `weft/core/manager.py`,
   uses raw server-wide `numbackends`. Both observations are best effort and
   non-atomic. Admission owns no separate liveness probe, durable/shared cache,
   index, cleanup, permit, or freshness lifecycle. Existing history callers
-  remain best effort; admission alone requests strict mapping-history failure
+  remain best effort; admission requests strict task-state snapshot failure
   propagation and fails closed on its listed ordinary exceptions. Pipelines
   receive no special accounting or production branch. A blocked lane must not
   block control handling, cleanup, child reaping, leadership convergence,
@@ -1094,7 +1148,7 @@ delete is attempted. If both report handoff paths fail, that subject remains
 undeleted and retryable. Deferred writes are operational outbox rows only; they
 are flushed by bounded monitor work and must not become lifecycle truth, result
 authority, or a PONG-time live scan. TaskMonitor external-log diagnostics may
-be cached into the task's `weft.state.tid_mappings` runtime mapping for passive
+be cached into the task's `weft.state.tasks.<tid>` runtime mapping for passive
 status reporting, but they remain diagnostics rather than service lifecycle
 truth.
 
@@ -1107,6 +1161,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 

@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 import weft.commands.submission as submission_mod
-from weft._exceptions import CommandUsageError, SubmissionValidationError
+from weft._exceptions import CommandUsageError, InvalidTID, SubmissionValidationError
 from weft.commands._spawn_submission import SpawnSubmissionReconciliation
 from weft.commands.types import PreparedSubmissionRequest
 from weft.core import manager_runtime as core_manager_runtime
@@ -706,3 +706,11 @@ def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(
     assert captured["submit_kwargs"]["tid"] == explicit_tid
     assert captured["reconciled_tid"] == explicit_tid
     assert receipt.tid == explicit_tid
+
+
+@pytest.mark.parametrize(
+    "raw_tid", ["１" * 19, "123", "TT1777000000000000789", "9999999999999999999"]
+)
+def test_normalize_tid_uses_exact_message_id_validation(raw_tid: str) -> None:
+    with pytest.raises(InvalidTID):
+        submission_mod.normalize_tid(raw_tid)

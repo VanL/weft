@@ -23,9 +23,8 @@ from weft._constants import (
     SERVICE_STATUS_SUPERSEDED,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft._exceptions import ManagerNotRunning, WeftError
+from weft._exceptions import ControlRejected, ManagerNotRunning, WeftError
 from weft.commands import manager as manager_cmd
 from weft.commands.types import ManagerSnapshot
 from weft.context import build_context
@@ -38,6 +37,7 @@ from weft.core.service_convergence import (
     manager_service_key,
     project_manager_service_record,
 )
+from weft.core.task_state import task_state_queue_name
 from weft.helpers import iter_queue_json_entries, process_create_time
 from weft.liveness.models import HostProcessObservation, RuntimeLiveness
 
@@ -2375,7 +2375,7 @@ def test_manager_pid_lookup_uses_newest_valid_mapping_only(
 ) -> None:
     context = build_context(prepare_project_root(tmp_path / "ctx"))
     tid = "1761000000000000991"
-    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    queue = context.queue(task_state_queue_name(tid), persistent=False)
     try:
         queue.write(
             json.dumps(
@@ -2453,3 +2453,14 @@ def test_manager_registry_missing_identity_is_unknown(
     assert core_manager_runtime.manager_registry_record_liveness(record) == "unknown"
     if record is not None:
         assert Manager._manager_record_liveness(record) == "unknown"
+
+
+@pytest.mark.parametrize("tid", ["missing", "123", "１" * 19])
+def test_force_stop_noncanonical_tid_is_rejected_not_usage_error(
+    tmp_path: Path, tid: str
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    with pytest.raises(ControlRejected):
+        manager_cmd.cmd_manager_stop(
+            tid=tid, force=True, timeout=0.0, context=context_root
+        )

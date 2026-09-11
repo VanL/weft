@@ -15,7 +15,7 @@ import psutil
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import CONTROL_KILL, WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import CONTROL_KILL
 from weft._exceptions import CommandUsageError, ControlRejected, TaskNotFound
 from weft.commands import events as event_cmd
 from weft.commands import tasks as task_cmd
@@ -39,6 +39,7 @@ from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.launcher import launch_task_process
 from weft.core.monitor.store import open_monitor_store
 from weft.core.task_evidence import TaskEvidenceSnapshot
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
@@ -1379,7 +1380,7 @@ def _wait_for_registered_worker_pid(
     ctx, tid: str, timeout: float = 15.0, *, ready_path: Path
 ) -> int | None:
     deadline = time.monotonic() + timeout
-    mapping_queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     try:
         while time.monotonic() < deadline:
             ready_pid = ready_path.read_text().strip() if ready_path.exists() else ""
@@ -1598,7 +1599,7 @@ def test_await_control_surface_uses_queue_monitor(
     assert len(created_monitors) == 1
     assert Counter(created_monitors[0].queue_names) == Counter(
         [
-            "weft.state.tid_mappings",
+            task_state_queue_name(tid),
             "weft.log.tasks",
             f"T{tid}.ctrl_out",
         ]
@@ -1716,11 +1717,11 @@ def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(
     assert snapshot.name == "late-surface"
     assert len(created_monitors) == 2
     assert Counter(created_monitors[0].queue_names) == Counter(
-        [WEFT_TID_MAPPINGS_QUEUE, "weft.log.tasks", initial_ctrl_out]
+        [task_state_queue_name(tid), "weft.log.tasks", initial_ctrl_out]
     )
     assert Counter(created_monitors[1].queue_names) == Counter(
         [
-            WEFT_TID_MAPPINGS_QUEUE,
+            task_state_queue_name(tid),
             "weft.log.tasks",
             late_ctrl_out,
             late_pipeline_status,
@@ -1728,14 +1729,14 @@ def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(
     )
     assert Counter(created_monitors[0].queue_persistence) == Counter(
         [
-            (WEFT_TID_MAPPINGS_QUEUE, True),
+            (task_state_queue_name(tid), True),
             ("weft.log.tasks", True),
             (initial_ctrl_out, True),
         ]
     )
     assert Counter(created_monitors[1].queue_persistence) == Counter(
         [
-            (WEFT_TID_MAPPINGS_QUEUE, True),
+            (task_state_queue_name(tid), True),
             ("weft.log.tasks", True),
             (late_ctrl_out, True),
             (late_pipeline_status, True),
@@ -2044,7 +2045,7 @@ def test_stop_tasks_uses_runner_handle_when_available(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     ctrl_queue = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
     calls: list[tuple[str, dict[str, Any], float]] = []
 
@@ -2107,7 +2108,7 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     ctrl_queue = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
     terminate_calls: list[tuple[int, float, bool]] = []
     plugin_calls: list[tuple[str, dict[str, Any], float]] = []
@@ -2172,7 +2173,7 @@ def test_kill_tasks_uses_runner_handle_when_available(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     calls: list[tuple[str, dict[str, Any], float]] = []
 
     class FakeRunnerPlugin:
@@ -2233,7 +2234,7 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     calls: list[tuple[str, dict[str, Any], float]] = []
     force_calls: list[int] = []
     runtime_handle = _runtime_handle(
@@ -2344,7 +2345,7 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     ctrl_queue = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
     mapping_queue.write(
         json.dumps(
@@ -2419,7 +2420,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     ctrl_queue = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
     mapping_queue.write(
         json.dumps(
@@ -2475,7 +2476,7 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     mapping_queue.write(
         json.dumps(
             {
@@ -2543,7 +2544,7 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
 
 
 def _latest_mapping_entry(ctx, tid: str) -> dict[str, Any] | None:
-    mapping_queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     latest: dict[str, Any] | None = None
     latest_timestamp = -1
     for payload, timestamp in iter_queue_json_entries(mapping_queue):
@@ -2712,3 +2713,12 @@ def test_stop_and_kill_via_fallback_guard_is_defensive_and_unreachable_today(
         assert _wait_for_process_exit(target_pid)
     finally:
         _cleanup_running_task(process, worker)
+
+
+def test_snapshot_watch_unresolved_selector_keeps_timeout_behavior(
+    tmp_path: Path,
+) -> None:
+    """An unresolved selector does not become an invalid namespace queue."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    with pytest.raises(TimeoutError, match="watching task unresolved"):
+        list(task_cmd.watch_task_status("unresolved", timeout=0, context=ctx))

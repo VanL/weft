@@ -9,7 +9,7 @@ import pytest
 
 from weft._constants import (
     RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS,
-    WEFT_TID_MAPPINGS_QUEUE,
+    WEFT_TASK_STATE_QUEUE_PREFIX,
 )
 
 pytestmark = [pytest.mark.shared]
@@ -59,8 +59,11 @@ def test_liveness_evidence_facade_is_core_extension_and_broker_free() -> None:
     } == {"weft.core.queue_window"}
 
 
-def test_tid_mapping_exact_delete_has_one_task_executor() -> None:
-    assert WEFT_TID_MAPPINGS_QUEUE not in RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS.values()
+def test_task_state_exact_delete_has_one_task_executor() -> None:
+    assert not any(
+        queue.startswith(WEFT_TASK_STATE_QUEUE_PREFIX)
+        for queue in RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS.values()
+    )
     violations: list[str] = []
     allowed = WEFT / "core" / "tasks" / "liveness_monitor.py"
     for path in WEFT.rglob("*.py"):
@@ -77,8 +80,8 @@ def test_tid_mapping_exact_delete_has_one_task_executor() -> None:
                 if isinstance(child, ast.Attribute)
             }
             if (
-                "WEFT_TID_MAPPINGS_QUEUE" in names
-                and "delete" in attributes
+                names & {"WEFT_TASK_STATE_QUEUE_PREFIX", "task_state_queue_name"}
+                and attributes & {"delete", "delete_many", "delete_message_ids"}
                 and path != allowed
             ):
                 violations.append(f"{path.relative_to(ROOT)}::{node.name}")

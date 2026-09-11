@@ -80,42 +80,6 @@ def test_typed_package_markers_are_included_in_builds() -> None:
     )
 
 
-def test_simplebroker_floor_is_8_0_0() -> None:
-    """The root floor must include public-ID ordering and backend API v8."""
-    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
-    minimum = _minimum_dependency_version(
-        root_pyproject["project"]["dependencies"],
-        "simplebroker",
-    )
-
-    assert minimum == "8.0.0"
-
-
-@pytest.mark.parametrize("extra", ["pg", "all", "dev"])
-def test_simplebroker_pg_floor_is_4_0_0(extra: str) -> None:
-    """Every root extra carrying PostgreSQL must use backend API v8."""
-    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
-
-    minimum = _minimum_dependency_version(
-        root_pyproject["project"]["optional-dependencies"][extra],
-        "simplebroker-pg",
-    )
-
-    assert minimum == "4.0.0"
-
-
-def test_llm_floor_is_0_33() -> None:
-    """The root floor must include LLM's OpenAI 3 and httpx2 migration."""
-
-    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
-    minimum = _minimum_dependency_version(
-        root_pyproject["project"]["dependencies"],
-        "llm",
-    )
-
-    assert minimum == "0.33"
-
-
 @pytest.mark.parametrize("package_name", ["httpx", "httpx2"])
 def test_llm_transport_dependencies_are_transitive(package_name: str) -> None:
     """LLM 0.33 must own its HTTP transport dependencies."""

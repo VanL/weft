@@ -93,6 +93,11 @@ Removed or superseded surfaces:
 
 ### `run` - Execute a task [CLI-1.1.1]
 
+Spawn reconciliation subscribes to the submitted TID's exact state queue,
+including before its first write, alongside existing log and dynamic manager
+reserved routes. Valid snapshot evidence, not queue-name presence, participates
+in the existing mapping/log/queued/reserved/unknown evidence order ([MF-6]).
+
 `weft run` is the center of gravity for execution. It always routes work
 through the manager path rather than bypassing the runtime.
 
@@ -549,25 +554,24 @@ Current behavior:
   [SB-0.2] string; the nested PONG body, including its Unix-clock `timestamp`,
   is opaque and unchanged, and the Python command result keeps `observed_at`
   as `int | None`
-- `weft task tid` resolves short TIDs, PID lookups, or reverse lookups via the
-  TID-mapping queue
+- `weft task tid` resolves short TIDs from namespace names, PID lookups
+  from newest-valid snapshots, and full-to-short reverse lookups arithmetically.
 
-A short TID that matches more than one full TID among the valid newest
-mapping rows in `weft.state.tid_mappings` (valid per the mapping-row shape rule — a JSON object whose `full` and `short` are non-empty strings, the shape `LivenessMonitor` enforces under [LIVENESS.R3] — and with a `full` value that is a 19-digit TID — rows whose
-`full` is not derivable are skipped, never fatal; live or terminal) is
-ambiguous: resolution fails with an
-error naming the candidate full TIDs; no command selects one silently,
-and every batch control path — the CLI loops and the Python client's
-`stop_many`/`kill_many` — resolves all requested TIDs before writing any
-control message. Resolution derives each row's short form from its
-`full` TID per [OBS.5]; the stored `short` field remains required
-row shape but is not resolution authority.
+Short-ID candidates are every nonempty `weft.state.tasks.<tid>` queue with a
+canonical 19-ASCII-decimal suffix, even if its rows are all malformed. Ignore
+malformed suffixes. A short matching more than one candidate is ambiguous:
+resolution fails with the candidate full TIDs; no command silently selects one.
+Every batch control path, including Python `stop_many`/`kill_many`, resolves
+all IDs before writing any control message. Derive shorts from suffixes using
+[OBS.5]; stored `short` remains required payload shape, not resolution authority.
+A full-ID lookup goes directly to that task's state queue. Names alone grant
+neither control authorization nor runtime/lifecycle evidence.
 
 Implementation plans: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md), [Short TID derivation](../plans/2026-08-31-short-tid-derivation-plan.md).
 
 _Implementation mapping_: `weft/helpers/__init__.py::tid_short_form` owns
-short-form derivation; `weft/core/endpoints.py::latest_tid_mapping_rows` owns
-the newest-valid mapping fold; `weft/commands/tasks.py::resolve_full_tid` and
+short-form derivation; `weft/core/task_state.py` owns namespace discovery and
+suffix-bound newest-valid snapshot reads; `weft/commands/tasks.py::resolve_full_tid` and
 `weft/commands/system.py::_resolve_tid_filters` reject collisions. Task
 batch controls preflight resolution in `stop_tasks`, `kill_tasks`, and
 `_task_control_result`.
@@ -584,6 +588,12 @@ These commands exist because project-level status and task-level inspection are
 different operator questions.
 
 ## Control Commands [CLI-1.3]
+
+Control resource scopes receive the exact task-state queue even before it
+exists. Include that queue in identity and route-rebuild decisions, open its
+lazy handle for first-write wakeups, and retain dynamic pipeline/control
+routes. Initial batch reads may be candidate-scoped; escalation rereads fresh
+state and preserves existing current/initial fallback and authorization.
 
 _Implementation mapping_: `weft/commands/tasks.py`,
 `weft/commands/manager.py`.
@@ -990,7 +1000,7 @@ Current behavior:
 - `system prune --queue` accepts `managers`, `streaming`, `endpoints`,
   `pipelines`, or `all` for runtime-state pruning, and rejects unknown values.
   Migration: `tid-mappings` is no longer a prune queue group because
-  LivenessMonitor is the sole custodian of `weft.state.tid_mappings`; direct
+  LivenessMonitor is the sole custodian of `weft.state.tasks.<tid>`; direct
   `weft queue` operations remain the manual escape hatch
 - `system prune --task TID` filters retention pruning to one or more task IDs
 - `system prune --retention-class NAME` filters retention pruning to selected
@@ -1030,6 +1040,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 
 ## Related Plans
+
+- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [`SimpleBroker 8.0 Upgrade Plan`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
 - [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)

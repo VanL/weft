@@ -23,6 +23,7 @@ from weft._constants import (
 )
 from weft.context import build_context
 from weft.core.service_convergence import build_manager_service_payload
+from weft.core.task_state import task_state_queue_name
 from weft.helpers import process_create_time, tid_short_form
 
 pytestmark = [pytest.mark.shared]
@@ -322,7 +323,7 @@ def test_status_json_reports_dead_host_running_task_as_stale_liveness(workdir) -
             "taskspec": taskspec,
         },
     )
-    mapping_queue = context.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = context.queue(task_state_queue_name(tid), persistent=False)
     mapping_queue.write(
         json.dumps(
             {
@@ -378,7 +379,7 @@ def test_task_status_process_json_reports_dead_pid_stale_liveness(workdir) -> No
             "taskspec": taskspec,
         },
     )
-    mapping_queue = context.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = context.queue(task_state_queue_name(tid), persistent=False)
     mapping_queue.write(
         json.dumps(
             {
@@ -444,7 +445,7 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
             "taskspec": taskspec,
         },
     )
-    mapping_queue = context.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue = context.queue(task_state_queue_name(tid), persistent=False)
     mapping_queue.write(
         json.dumps(
             {

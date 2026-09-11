@@ -55,8 +55,8 @@ from weft.core.control_probe import (
     pong_proves_dispatch_eligible,
     send_keyed_ping_probe,
 )
-from weft.core.endpoints import latest_tid_mapping_rows
 from weft.core.spawn_requests import generate_spawn_request_timestamp
+from weft.core.task_state import read_task_state_snapshot
 from weft.core.taskspec import (
     TaskSpec,
     encode_taskspec_transport_payload,
@@ -733,7 +733,7 @@ def select_active_manager(
 
 def _lookup_manager_pid(context: WeftContext, tid: str) -> int | None:
     """Resolve control authority from only the newest valid mapping ([OBS.4])."""
-    latest = latest_tid_mapping_rows(context).get(tid)
+    latest = read_task_state_snapshot(context, tid)
     if latest is None:
         return None
     _timestamp, payload = latest

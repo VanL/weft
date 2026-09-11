@@ -595,6 +595,9 @@ LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 LIVENESS_PROBE_INTERVAL_SECONDS: Final[float] = 5.0
 """Periodic cadence for retained TID runtime probes."""
 
+LIVENESS_STATE_REFRESH_INTERVAL_SECONDS: Final[float] = LIVENESS_PROBE_INTERVAL_SECONDS
+"""Sample task-state namespace at probe cadence, separately from fast reactor turns."""
+
 LIVENESS_UNKNOWN_TIMEOUT_SECONDS: Final[float] = 300.0
 """Attempted-unknown duration before a retained mapping may be retired."""
 
@@ -1484,8 +1487,8 @@ TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
 )
 """Task monitor classifications owned by Weft task anomalies."""
 
-WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.state.tid_mappings"
-"""Global queue for TID short->full mappings for process management."""
+WEFT_TASK_STATE_QUEUE_PREFIX: Final[str] = "weft.state.tasks."
+"""Runtime snapshot namespace; append a full TID for one task state queue."""
 
 WEFT_SERVICES_REGISTRY_QUEUE: Final[str] = "weft.state.services"
 """Runtime queue where convergent services publish ownership evidence."""

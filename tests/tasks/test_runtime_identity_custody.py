@@ -11,7 +11,8 @@ import pytest
 from tests.helpers.queue_payloads import terminal_envelopes
 from tests.helpers.reactor_driver import drive_until
 from tests.tasks.test_task_execution import make_function_taskspec
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks import base as base_module
 from weft.core.taskspec import TaskSpec
@@ -38,7 +39,7 @@ def test_completed_worker_releases_identity_and_idle_control(
     task = Consumer(db_path, TaskSpec.model_validate(payload))
     inbox = make_queue(task.taskspec.io.inputs["inbox"])
     log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings = make_queue(task_state_queue_name(tid))
     ctrl_out = make_queue(task.taskspec.io.control["ctrl_out"])
     try:
         inbox.write("hello")
