@@ -482,6 +482,22 @@ You can override the metadata-directory name with `WEFT_DIRECTORY_NAME`
 (for example `.engram`). Run `weft` commands from anywhere in the project tree;
 discovery uses the configured metadata-directory name.
 
+Set `WEFT_CONTEXT` to select a fixed project root. An explicit context argument
+wins over that setting. Without either, Weft discovers the project from the
+current directory. Python embedders can supply a different discovery start:
+
+```python
+from weft.client import WeftClient
+
+client = WeftClient.from_context(fallback_root="/srv/myproject")
+```
+
+The fallback is used for discovery and becomes the root when no project is
+found. Broker settings choose the broker for that root; they do not redirect
+Weft's metadata to another directory. A supplied Config snapshot is authoritative
+and does not reload `WEFT_CONTEXT` from the environment. Empty `WEFT_CONTEXT`
+means discovery; relative paths and `~` are resolved when building the context.
+
 `weft init` follows the same targeting model as tools like `git init`: it
 defaults to the current directory, or you can pass a positional directory to
 initialize another root explicitly. It does not take `--context`; `--context`

@@ -14,7 +14,7 @@ import shlex
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +190,31 @@ def _snapshot_taskspec(taskspec: TaskSpec | Mapping[str, Any]) -> TaskSpec:
         payload,
         bundle_root=normalized.get_bundle_root(),
         template=normalized.tid is None,
+    )
+
+
+def _bind_declared_context(taskspec: TaskSpec) -> TaskSpec:
+    """Capture declared path interpretation without initializing its broker.
+
+    Only context-aware preparation calls this helper. Pure definition snapshots
+    retain the declaration text for export and later composition.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-3]
+    """
+
+    declared_root = taskspec.spec.weft_context
+    if not declared_root:
+        return taskspec
+    try:
+        expanded_root = Path(declared_root).expanduser()
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    payload = taskspec.model_dump(mode="json")
+    payload["spec"]["weft_context"] = str(expanded_root.resolve())
+    return validate_taskspec_payload(
+        payload,
+        bundle_root=taskspec.get_bundle_root(),
+        template=taskspec.tid is None,
     )
 
 
@@ -458,9 +483,13 @@ def prepare(
     payload: Any = None,
     **overrides: Any,
 ) -> PreparedSubmissionRequest:
-    """Validate, normalize, and snapshot a TaskSpec submission."""
+    """Snapshot a submission and bind its declared runtime path.
 
-    return prepare_definition(taskspec, overrides, payload=payload)
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-3]
+    """
+
+    prepared = prepare_definition(taskspec, overrides, payload=payload)
+    return replace(prepared, taskspec=_bind_declared_context(prepared.taskspec))
 
 
 def submit(
@@ -489,7 +518,10 @@ def prepare_spec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-369] exception
     persistent_override: bool | None = None,
     **overrides: Any,
 ) -> PreparedSubmissionRequest:
-    """Resolve, validate, and snapshot a stored or file-backed task spec."""
+    """Resolve a task reference and bind its runtime path before run-input.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-3]
+    """
 
     try:
         _validate_submit_overrides(overrides)
@@ -549,6 +581,11 @@ def prepare_spec(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-369] exception
         raise SubmissionValidationError(str(exc)) from exc
     except (TypeError, ValueError) as exc:
         raise CommandUsageError(str(exc)) from exc
+
+    try:
+        updated = _bind_declared_context(updated)
+    except (ValidationError, TypeError, OSError, ValueError) as exc:
+        raise SubmissionValidationError(str(exc)) from exc
 
     run_input = updated.spec.run_input
     if run_input is None:
@@ -641,7 +678,10 @@ def prepare_pipeline(
     payload: Any = None,
     **overrides: Any,
 ) -> PreparedSubmissionRequest:
-    """Resolve, compile, validate, and snapshot a pipeline submission."""
+    """Compile and snapshot a pipeline with its declared runtime path bound.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-3]
+    """
 
     _validate_submit_overrides(overrides)
     try:
@@ -675,6 +715,7 @@ def prepare_pipeline(
         source_ref=str(resolved.path),
     )
     updated = apply_submit_overrides(compiled.pipeline_taskspec, **overrides)
+    updated = _bind_declared_context(updated)
     bootstrap_payload = (
         payload if payload is not None else compiled.bootstrap_input_fallback
     )

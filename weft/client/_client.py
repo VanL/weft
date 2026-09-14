@@ -38,8 +38,12 @@ class WeftClient:
     ) -> None:
         if context is not None and path is not None:
             raise ValueError("Pass either context or path, not both")
-        self._context_explicit = context is not None or path is not None
         self.context = context or build_context(spec_context=path)
+        self._context_explicit = (
+            context is not None
+            or path is not None
+            or bool(self.context.config.get("CONTEXT"))
+        )
         self.tasks = TasksNamespace(self)
         self.queues = QueuesNamespace(self)
         self.managers = ManagersNamespace(self)
@@ -51,10 +55,20 @@ class WeftClient:
         cls,
         spec_context: str | Path | None = None,
         *,
+        fallback_root: str | Path | None = None,
         autostart: bool | None = None,
     ) -> WeftClient:
-        client = cls(build_context(spec_context=spec_context, autostart=autostart))
-        client._context_explicit = spec_context is not None
+        """Request core resolution with an optional discovery anchor [PY-1]."""
+        client = cls(
+            build_context(
+                spec_context=spec_context,
+                fallback_root=fallback_root,
+                autostart=autostart,
+            )
+        )
+        client._context_explicit = spec_context is not None or bool(
+            client.context.config.get("CONTEXT")
+        )
         return client
 
     @classmethod

@@ -195,8 +195,13 @@ Current behavior:
 - when no native activity waiter is available, Weft may perform a bounded
   positive-timeout pending precheck as the fallback polling path. Zero-timeout
   local timer wakes still return immediately without queue probes
-- queue and status command helpers also honor `WEFT_CONTEXT` as an explicit
-  project-root override before they fall back to discovery
+
+`build_context()` owns root selection: an explicit `spec_context` argument takes
+precedence over the resolved Config's `CONTEXT` (`WEFT_CONTEXT` input). In the absence
+of either, project discovery starts at `fallback_root` when supplied, otherwise CWD. A
+discovered project owns the root; if none is found, the discovery start directory is the
+root. This keyword changes the discovery anchor, not the broker-target precedence.
+Queue/status helpers retain their supported explicit environment override behavior.
 
 Automatic Weft context discovery searches upward only for the configured
 Weft-scoped broker configuration (by default `.weft/broker.toml`). If none is
@@ -506,27 +511,17 @@ _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/init.py`
 (`cmd_init`).
 
-Current discovery rules:
+Root selection follows [SB-0.4]. Explicit roots are used directly. Automatic discovery
+searches upward from the selected fallback/CWD anchor for the configured broker-config
+path and name; SQLite filenames are not discovery markers. Weft-owned metadata is
+materialized at the resulting root when requested.
 
-1. start from the current working directory or explicit `--context`
-2. discover the enclosing project root using SimpleBroker project scoping with
-   Weft's configured project-config path/name
-3. materialize Weft-owned directories under the configured Weft metadata
-   directory when needed
-4. resolve the active broker target for that project
-
-Current broker target precedence:
-
-1. choose the project root from explicit `--context` / `spec_context` or from
-   SimpleBroker auto-discovery
-2. for an explicit root, delegate to `simplebroker.target_for_directory()`:
-   the configured Weft-scoped broker config first, then env-selected
-   non-sqlite backend synthesis, then sqlite fallback rooted at that directory
-3. for auto-discovery, search upward for the configured Weft-scoped broker
-   config. If none exists, use current environment backend selection for
-   explicit-root resolution at the current working directory
-4. if auto-discovery finds nothing, Weft falls back to explicit-root resolution
-   at the current working directory
+At the selected root, delegate broker selection to
+`simplebroker.target_for_directory()`: project broker config first, then applicable
+configured backend selection, then directory-local SQLite fallback. Backend
+configuration does not independently choose a Weft artifact root. `DEFAULT_DB_LOCATION`
+and `PROJECT_SCOPE` retain the behavior of this explicit-directory API and do not choose
+or relocate the Weft root.
 
 Current boundary notes:
 
@@ -537,10 +532,10 @@ Current boundary notes:
 - Weft maps the configured metadata-directory name onto SimpleBroker's
   project-config discovery keys. By default the Weft broker config path is
   `.weft/broker.toml`, not root `.broker.toml`
-- an absolute `WEFT_PROJECT_CONFIG_PATH` selects the broker configuration and
-  target only. Without an explicit `spec_context`, the current working
-  directory remains `WeftContext.root` and owns the Weft metadata directory;
-  the absolute configuration file's parent does not become the Weft root
+- An absolute `WEFT_PROJECT_CONFIG_PATH` selects the broker configuration and target only.
+  Its parent does not become the Weft artifact root. Without an explicit root argument or
+  resolved `CONTEXT`, the selected discovery anchor (`fallback_root` or CWD) remains the
+  root for this case.
 - the metadata directory's `config.json` file is project metadata, not a broker
   target source; it may carry the project-local autostart default used by
   `build_context()`
@@ -649,6 +644,19 @@ Current contract:
 - `weft queue` and `weft status` helpers also honor `WEFT_CONTEXT` as an
   explicit project-root override before falling back to discovery
 
+`CONTEXT` is a Weft Config declaration with default `None` and external name
+`WEFT_CONTEXT`. It accepts a string or `None`; an empty string means absent. Nonempty
+path text is preserved during config loading; home expansion and relative-path
+resolution happen when building the context. Supplied Config/mapping inputs do not read
+ambient environment, including for `CONTEXT`. A supplied snapshot without `CONTEXT` has
+no root override. JSON transport restores this field using the receiver's local
+declarations, without serializing validators.
+
+`build_context(..., fallback_root=...)` accepts an optional discovery anchor. Existing
+creation flags retain their effects and do not promise side-effect-free resolution.
+Configuration and metadata errors remain errors, not reasons to select a different
+broker.
+
 ## CLI Integration and Initialization
 
 Stateful CLI commands operate within an existing project via `--context`. The
@@ -725,6 +733,8 @@ connection-pooling designs are tracked in the companion doc:
 - [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
 
 ## Related Plans
+
+- [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
 
 - [`docs/plans/2026-08-28-simplebroker-8-upgrade-plan.md`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
 - [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)

@@ -8,17 +8,23 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import io
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from weft.context import WeftContext
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_ROOT = PROJECT_ROOT / "integrations" / "weft_django"
@@ -29,6 +35,12 @@ for path in (PROJECT_ROOT, PACKAGE_ROOT, FIXTURE_ROOT):
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
+from tests.helpers.test_backend import (
+    active_test_backend,
+    cleanup_prepared_roots,
+    postgres_env_overrides_for_root,
+    prepare_project_root,
+)
 from tests.helpers.weft_harness import WeftTestHarness
 
 # Django captures these paths during setup. Allocate the owner now, but enter
@@ -62,10 +74,9 @@ from testapp.weft_tasks import declared_task, echo_current_request_id, echo_task
 
 import weft_django
 import weft_django.client as weft_django_client
-from weft._constants import SUBMIT_OVERRIDE_NAMES
-from weft.client import SpecNotFound
+from weft._constants import SUBMIT_OVERRIDE_NAMES, WEFT_CONFIG_FIELDS
+from weft.client import SpecNotFound, SubmissionValidationError, WeftClient
 from weft.commands.types import TaskTerminalSnapshot
-from weft.context import WeftContext
 from weft.core.taskspec import TaskSpec
 from weft.core.taskspec.transport import validate_taskspec_payload
 from weft_django import (
@@ -79,11 +90,7 @@ from weft_django import (
     submit_taskspec_on_commit,
 )
 from weft_django.client import get_core_client
-from weft_django.conf import (
-    CORE_CONTEXT_OVERRIDE_ENV_KEYS,
-    get_realtime_transport,
-    resolve_context_override,
-)
+from weft_django.conf import get_realtime_transport
 from weft_django.registry import TaskRegistry, is_registered
 
 pytestmark = [pytest.mark.shared]
@@ -114,6 +121,16 @@ def _clean_db() -> None:
     EventRecord.objects.all().delete()
 
 
+@pytest.fixture(autouse=True)
+def _owned_project_roots(tmp_path: Path) -> Iterator[None]:
+    """Release PostgreSQL schemas used by context-only temporary projects."""
+
+    try:
+        yield
+    finally:
+        cleanup_prepared_roots(tmp_path)
+
+
 def _fixture_weft_settings(**overrides: Any) -> dict[str, Any]:
     settings_dict: dict[str, Any] = {
         "CONTEXT": str(TEST_ROOT),
@@ -142,9 +159,77 @@ def _fixture_weft_settings(**overrides: Any) -> dict[str, Any]:
     return settings_dict
 
 
-def _clear_core_context_override_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key in CORE_CONTEXT_OVERRIDE_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
+_LEGACY_CONTEXT_SUFFIXES = (
+    "BACKEND",
+    "BACKEND_TARGET",
+    "BACKEND_HOST",
+    "BACKEND_PORT",
+    "BACKEND_USER",
+    "BACKEND_PASSWORD",
+    "BACKEND_DATABASE",
+    "BACKEND_SCHEMA",
+    "DEFAULT_DB_LOCATION",
+    "DEFAULT_DB_NAME",
+    "PROJECT_SCOPE",
+)
+
+
+def _clear_context_selection_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate external context inputs while retaining test-runtime policy."""
+
+    for prefix in ("WEFT_", "BROKER_"):
+        for suffix in _LEGACY_CONTEXT_SUFFIXES:
+            if (
+                prefix == "WEFT_"
+                and suffix == "BACKEND_PASSWORD"
+                and active_test_backend() == "postgres"
+            ):
+                # PG fixtures persist a passwordless target; the runner supplies
+                # authentication separately from the context-selection inputs.
+                continue
+            monkeypatch.delenv(prefix + suffix, raising=False)
+    for suffix in (
+        "CONTEXT",
+        "DIRECTORY_NAME",
+        "PROJECT_CONFIG_PATH",
+        "PROJECT_CONFIG_NAME",
+    ):
+        monkeypatch.delenv("WEFT_" + suffix, raising=False)
+
+
+def _deferred_family(
+    family: str,
+    *,
+    root: Path,
+    declared_context: str | None = None,
+    payload: Any = "captured",
+) -> weft_django_client.WeftDeferredSubmission:
+    """Prepare each public transaction helper through its real shared owner."""
+
+    if family == "decorated":
+        return enqueue_on_commit("testapp.echo_task", payload)
+    template = {
+        "name": "custody-task",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "weft_context": declared_context,
+        },
+    }
+    if family == "native":
+        return submit_taskspec_on_commit(template, payload=payload)
+    reference = _write_json(root / ".weft" / "tasks" / "custody-task.json", template)
+    if family == "reference":
+        return submit_spec_reference_on_commit(reference, payload=payload)
+    assert family == "pipeline"
+    pipeline = _write_json(
+        root / "custody-pipeline.json",
+        {
+            "name": "custody-pipeline",
+            "stages": [{"name": "only", "task": "custody-task"}],
+        },
+    )
+    return submit_pipeline_reference_on_commit(pipeline, payload=payload)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> Path:
@@ -519,38 +604,397 @@ def test_as_taskspec_for_call_applies_public_submit_overrides() -> None:
     assert payload["spec"]["limits"]["cpu_percent"] == 25
 
 
-@pytest.mark.shared
-def test_context_override_ignores_unrelated_weft_env(
+@pytest.mark.parametrize("suffix", (*_LEGACY_CONTEXT_SUFFIXES, "UNKNOWN_SETTING"))
+def test_legacy_broker_env_does_not_redirect_django_context(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    suffix: str,
 ) -> None:
-    base_dir = TEST_ROOT / "base-dir-context"
-    other_dir = TEST_ROOT / "other-dir-context"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    other_dir.mkdir(parents=True, exist_ok=True)
-    _clear_core_context_override_env(monkeypatch)
-    monkeypatch.setenv("WEFT_DEBUG", "1")
-    monkeypatch.chdir(other_dir)
+    _clear_context_selection_env(monkeypatch)
+    base_dir = prepare_project_root(tmp_path / "django")
+    cwd = prepare_project_root(tmp_path / "cwd")
+    monkeypatch.chdir(cwd)
+    with override_settings(
+        BASE_DIR=base_dir, WEFT_DJANGO=_fixture_weft_settings(CONTEXT=None)
+    ):
+        expected = get_core_client().context
+        monkeypatch.setenv("BROKER_" + suffix, "ignored-invalid-value")
+        actual = get_core_client().context
+
+    assert actual.root == base_dir
+    assert actual.broker_target == expected.broker_target
+    assert actual.config == expected.config
+    queue = actual.queue("weft.test.django.context", persistent=False)
+    try:
+        queue.write(suffix)
+        assert queue.read() == suffix
+    finally:
+        queue.close()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("WEFT_DEBUG", "1"),
+        ("WEFT_BACKEND", "sqlite"),
+        ("WEFT_PROJECT_SCOPE", "0"),
+        ("WEFT_PROJECT_SCOPE", "1"),
+        ("WEFT_DEFAULT_DB_LOCATION", "/unused-broker-location"),
+        ("WEFT_DEFAULT_DB_NAME", "configured.db"),
+    ],
+)
+def test_broker_settings_do_not_replace_django_fallback_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+    value: str,
+) -> None:
+    _clear_context_selection_env(monkeypatch)
+    base_dir = prepare_project_root(tmp_path / "django")
+    cwd = prepare_project_root(tmp_path / "cwd")
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv(name, value)
+    with override_settings(
+        BASE_DIR=base_dir, WEFT_DJANGO=_fixture_weft_settings(CONTEXT=None)
+    ):
+        context = get_core_client().context
+
+    assert context.root == base_dir
+    if name == "WEFT_DEFAULT_DB_NAME" and context.database_path is not None:
+        assert context.database_path.name == value
+
+
+@pytest.mark.parametrize("explicit", [None, "", "string", "path"])
+def test_django_requests_core_context_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    explicit: str | None,
+) -> None:
+    _clear_context_selection_env(monkeypatch)
+    declared = prepare_project_root(tmp_path / "explicit")
+    environment = prepare_project_root(tmp_path / "environment")
+    fallback = prepare_project_root(tmp_path / "fallback")
+    cwd = prepare_project_root(tmp_path / "cwd")
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("WEFT_CONTEXT", str(environment))
+    setting = (
+        declared
+        if explicit == "path"
+        else str(declared)
+        if explicit == "string"
+        else explicit
+    )
 
     with override_settings(
-        BASE_DIR=base_dir,
+        BASE_DIR=fallback, WEFT_DJANGO=_fixture_weft_settings(CONTEXT=setting)
+    ):
+        context = get_core_client().context
+
+    assert context.root == (declared if explicit else environment)
+
+
+@pytest.mark.parametrize("has_base_dir", [False, True])
+def test_django_discovery_starts_at_base_dir_or_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    has_base_dir: bool,
+) -> None:
+    _clear_context_selection_env(monkeypatch)
+    django_project = prepare_project_root(tmp_path / "django")
+    cwd_project = prepare_project_root(tmp_path / "cwd")
+    for root in (django_project, cwd_project):
+        config_file = root / ".weft" / "broker.toml"
+        if not config_file.exists():
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            config_file.write_text(
+                'version = 1\nbackend = "sqlite"\ntarget = '
+                + json.dumps(str(root / "project.db"))
+                + "\n",
+                encoding="utf-8",
+            )
+        (root / "web").mkdir()
+    monkeypatch.chdir(cwd_project / "web")
+    with override_settings(
+        BASE_DIR=django_project / "web" if has_base_dir else None,
         WEFT_DJANGO=_fixture_weft_settings(CONTEXT=None),
     ):
-        assert resolve_context_override() == str(base_dir)
-        assert get_core_client().context.root == base_dir.resolve()
+        context = get_core_client().context
+    assert context.root == (django_project if has_base_dir else cwd_project)
 
 
-@pytest.mark.shared
-def test_explicit_context_wins_even_with_core_env_override(
+@pytest.mark.parametrize("declared", [None, "relative-project", "~/project"])
+def test_export_copies_only_explicit_context_declaration(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    declared: str | None,
 ) -> None:
-    explicit_root = TEST_ROOT / "explicit-context"
-    explicit_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://ignored")
-
+    _clear_context_selection_env(monkeypatch)
+    monkeypatch.setenv("WEFT_CONTEXT", str(tmp_path / "environment"))
     with override_settings(
-        WEFT_DJANGO=_fixture_weft_settings(CONTEXT=str(explicit_root))
+        BASE_DIR=tmp_path, WEFT_DJANGO=_fixture_weft_settings(CONTEXT=declared)
     ):
-        assert resolve_context_override() == str(explicit_root)
+        exported = echo_task.as_taskspec_for_call("portable")
+    assert exported["spec"]["weft_context"] == declared
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("family", ["decorated", "native", "reference", "pipeline"])
+def test_deferred_families_keep_captured_context_after_settings_change(
+    monkeypatch: pytest.MonkeyPatch,
+    family: str,
+) -> None:
+    _HARNESS.ensure_foreground_manager()
+    with WeftTestHarness() as other, monkeypatch.context() as runtime_env:
+        other.ensure_foreground_manager()
+        other_client = WeftClient.from_weft_context(other.context)
+        # The old bridge can choose CWD; own that runtime too before any assertion.
+        _write_json(
+            other.root / ".weft" / "tasks" / "custody-task.json",
+            {
+                "name": "custody-task",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            },
+        )
+        runtime_env.delenv("WEFT_CONTEXT", raising=False)
+        runtime_env.setenv("WEFT_BUSY_TIMEOUT", "3210")
+        with (
+            override_settings(
+                BASE_DIR=TEST_ROOT, WEFT_DJANGO=_fixture_weft_settings(CONTEXT=None)
+            ),
+            ExitStack() as changes,
+        ):
+            with transaction.atomic():
+                deferred = _deferred_family(family, root=TEST_ROOT)
+                assert deferred.task is None
+                changes.enter_context(
+                    override_settings(
+                        BASE_DIR=other.root,
+                        WEFT_DJANGO=_fixture_weft_settings(CONTEXT=other.root),
+                    )
+                )
+                runtime_env.setenv("WEFT_CONTEXT", str(other.root))
+                runtime_env.setenv("WEFT_BUSY_TIMEOUT", "9876")
+                runtime_env.chdir(other.root)
+            assert deferred.task is not None
+            _HARNESS.register_tid(deferred.task.tid)
+            other.register_tid(deferred.task.tid)
+            result = deferred.task.result(timeout=30.0)
+            assert result.status == "completed"
+            assert deferred.task.task.context is not None
+            assert deferred.task.task.context.root == TEST_ROOT.resolve()
+            assert (
+                deferred.task.task.context.broker_target
+                == _bootstrap_context.broker_target
+            )
+            assert deferred.task.task.context.broker_config["BUSY_TIMEOUT"] == 3210
+            assert other_client.task(deferred.task.tid).snapshot() is None
+
+
+@pytest.mark.parametrize("family", ["decorated", "native", "reference", "pipeline"])
+def test_deferred_family_rollback_publishes_no_spawn_request(family: str) -> None:
+    with (
+        WeftTestHarness() as harness,
+        override_settings(WEFT_DJANGO=_fixture_weft_settings(CONTEXT=harness.root)),
+    ):
+        queue = harness.context.queue("weft.spawn.requests", persistent=False)
+        try:
+            with transaction.atomic():
+                deferred = _deferred_family(family, root=harness.root)
+                transaction.set_rollback(True)
+            assert deferred.task is None
+            assert list(queue.peek_generator()) == []
+        finally:
+            queue.close()
+
+
+@pytest.mark.parametrize("family", ["decorated", "native", "reference", "pipeline"])
+@pytest.mark.parametrize("failure", ["config", "payload"])
+def test_deferred_failures_register_no_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    family: str,
+    failure: str,
+) -> None:
+    if failure == "config":
+        monkeypatch.setenv("WEFT_MAX_MESSAGE_SIZE", "invalid-integer")
+    with transaction.atomic():
+        connection = connections["default"]
+        before = tuple(connection.run_on_commit)
+        error = (
+            SubmissionValidationError
+            if failure == "payload" and family == "reference"
+            else (TypeError, ValueError)
+        )
+        with pytest.raises(error):
+            _deferred_family(
+                family,
+                root=TEST_ROOT,
+                payload=object() if failure == "payload" else "valid",
+            )
+        assert tuple(connection.run_on_commit) == before
+
+
+@pytest.mark.parametrize("family", ["decorated", "native", "reference"])
+@pytest.mark.parametrize("home_relative", [False, True])
+def test_deferred_explicit_paths_bind_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    family: str,
+    home_relative: bool,
+) -> None:
+    _HARNESS.ensure_foreground_manager()
+    with WeftTestHarness() as other, monkeypatch.context() as runtime_env:
+        origin = TEST_ROOT.resolve()
+        declaration = ("~/" if home_relative else "") + origin.name
+        runtime_env.chdir(origin.parent)
+        runtime_env.setenv("HOME", str(origin.parent))
+        runtime_env.setenv("USERPROFILE", str(origin.parent))
+        runtime_env.delenv("WEFT_CONTEXT", raising=False)
+        with override_settings(
+            WEFT_DJANGO=_fixture_weft_settings(
+                CONTEXT=declaration if family == "decorated" else other.root
+            )
+        ):
+            with transaction.atomic():
+                deferred = _deferred_family(
+                    family, root=origin, declared_context=declaration
+                )
+                # Inspect captured work before commit: a regression must roll back
+                # before it can start an unowned runtime at a misinterpreted path.
+                callback = connections["default"].run_on_commit[-1][1]
+                prepared = inspect.getclosurevars(callback).nonlocals["prepared"]
+                assert prepared._request.taskspec.spec.weft_context == str(origin)
+                runtime_env.chdir(other.root)
+                runtime_env.setenv("HOME", str(other.root))
+                runtime_env.setenv("USERPROFILE", str(other.root))
+                runtime_env.setenv("WEFT_CONTEXT", str(other.root))
+            assert deferred.task is not None
+            _HARNESS.register_tid(deferred.task.tid)
+            result = deferred.task.result(timeout=30)
+            assert result.status == "completed"
+            assert result.value == "captured"
+            assert deferred.task.task.context is not None
+            assert deferred.task.task.context.root == origin
+            assert (
+                WeftClient.from_weft_context(other.context)
+                .task(deferred.task.tid)
+                .snapshot()
+                is None
+            )
+
+
+def test_default_django_enqueue_and_observation_use_base_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        WeftTestHarness,
+        "DEFAULT_DB_NAME",
+        WEFT_CONFIG_FIELDS["DEFAULT_DB_NAME"].default,
+    )
+    with WeftTestHarness() as harness, monkeypatch.context() as runtime_env:
+        harness.ensure_foreground_manager()
+        _clear_context_selection_env(runtime_env)
+        runtime_env.chdir(tmp_path)
+        with override_settings(
+            BASE_DIR=harness.root,
+            WEFT_DJANGO=_fixture_weft_settings(CONTEXT=None),
+        ):
+            context = get_core_client().context
+            assert context.root == harness.context.root
+            assert context.broker_target == harness.context.broker_target
+            task = echo_task.enqueue("fallback-runtime")
+            harness.register_tid(task.tid)
+            result = task.result(timeout=30)
+            assert result.status == "completed"
+            assert result.value == "fallback-runtime"
+            observed = weft_django.status(task.tid)
+            assert observed is not None
+            assert observed.status == "completed"
+            output = io.StringIO()
+            call_command("weft_task_status", task.tid, stdout=output)
+            assert task.tid in output.getvalue()
+            assert task.task.context is not None
+            assert task.task.context.root == harness.context.root
+        assert not (tmp_path / ".weft").exists()
+
+
+def test_bootstrap_and_export_ignore_hostile_runtime_configuration(
+    tmp_path: Path,
+) -> None:
+    fallback = tmp_path / "read-only"
+    fallback.mkdir()
+    env = dict(os.environ)
+    env.update(
+        WEFT_DJANGO_FIXTURE_BASE_DIR=str(fallback),
+        WEFT_CONTEXT=str(fallback),
+        WEFT_BACKEND="not-a-backend",
+        WEFT_MAX_MESSAGE_SIZE="invalid-integer",
+    )
+    env.pop("WEFT_DJANGO_FIXTURE_WEFT_CONTEXT", None)
+    fallback.chmod(0o500)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json; import django; django.setup(); from weft_django.registry import is_registered; from testapp.weft_tasks import echo_task; print(json.dumps({'registered': is_registered('testapp.echo_task'), 'context': echo_task.as_taskspec_for_call('x')['spec']['weft_context']}))",
+            ],
+            env=env,
+            cwd=fallback,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        fallback.chmod(0o700)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"registered": True, "context": None}
+    assert not list(fallback.iterdir())
+
+
+@pytest.mark.skipif(
+    active_test_backend() != "postgres", reason="PostgreSQL target proof"
+)
+def test_django_postgres_environment_target_keeps_base_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = WeftTestHarness()
+    with monkeypatch.context() as runtime_env:
+        for key, value in postgres_env_overrides_for_root(harness.root).items():
+            runtime_env.setenv(key, value)
+        runtime_env.delenv("WEFT_CONTEXT", raising=False)
+        with harness, runtime_env.context() as cwd_env:
+            config_file = harness.context.weft_dir / "broker.toml"
+            project_config = config_file.read_text(encoding="utf-8")
+            config_file.unlink()
+            try:
+                harness.ensure_foreground_manager()
+                cwd_env.chdir(tmp_path)
+                with override_settings(
+                    BASE_DIR=harness.root,
+                    WEFT_DJANGO=_fixture_weft_settings(CONTEXT=None),
+                ):
+                    context = get_core_client().context
+                    assert context.root == harness.context.root
+                    assert context.database_path is None
+                    assert context.config["BACKEND"] == "postgres"
+                    task = echo_task.enqueue("postgres-environment")
+                    harness.register_tid(task.tid)
+                    result = task.result(timeout=30)
+                    assert result.status == "completed"
+                    assert result.value == "postgres-environment"
+                    observed = weft_django.status(task.tid)
+                    assert observed is not None
+                    assert observed.status == "completed"
+                assert not (tmp_path / ".weft").exists()
+            finally:
+                # Harness cleanup discovers its owned schema through this file.
+                config_file.write_text(project_config, encoding="utf-8")
+                config_file.chmod(0o600)
 
 
 @pytest.mark.shared
@@ -960,26 +1404,26 @@ def test_as_taskspec_for_call_applies_every_override_like_prepare(
 
 
 @pytest.mark.shared
+@pytest.mark.parametrize("declared_context", [None, "relative-project", "~/project"])
 def test_as_taskspec_for_call_is_pure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    declared_context: str | None,
 ) -> None:
     """The export builds no context, reads no config, opens no broker, writes nothing.
 
     Verifies:
-    - With no configured `CONTEXT`, `resolve_context_override()` resolves to a
-      read-only `BASE_DIR`, so a regression would have to build there
+    - Only an explicit raw declaration is copied despite environment and BASE_DIR
     - Tripwires on `build_context`, `resolve_runtime_config`, `open_broker`, and
       `get_core_client` never fire, and nothing is written anywhere
     """
 
     with override_settings(
-        WEFT_DJANGO=_fixture_weft_settings(CONTEXT=None),
+        WEFT_DJANGO=_fixture_weft_settings(CONTEXT=declared_context),
         BASE_DIR=tmp_path,
     ):
-        _clear_core_context_override_env(monkeypatch)
-        monkeypatch.delenv("WEFT_CONTEXT", raising=False)
-        assert resolve_context_override() == str(tmp_path)
+        _clear_context_selection_env(monkeypatch)
+        monkeypatch.setenv("WEFT_CONTEXT", str(tmp_path / "environment"))
 
         def _forbidden(*args: Any, **kwargs: Any) -> Any:
             raise AssertionError("forbidden on the export path")
@@ -991,8 +1435,12 @@ def test_as_taskspec_for_call_is_pure(
 
         weft_dir = TEST_ROOT / ".weft"
         listing_before = sorted(path.name for path in weft_dir.iterdir())
-        database_path = Path(_bootstrap_context.database_path)
-        db_stat_before = database_path.stat()
+        database_path = _bootstrap_context.database_path
+        db_stat_before = (
+            database_path.stat()
+            if database_path is not None and database_path.exists()
+            else None
+        )
 
         monkeypatch.chdir(tmp_path)
         tmp_path.chmod(0o500)
@@ -1007,10 +1455,13 @@ def test_as_taskspec_for_call_is_pure(
         assert list(tmp_path.iterdir()) == []
         assert not (tmp_path / ".weft").exists()
         assert sorted(path.name for path in weft_dir.iterdir()) == listing_before
-        db_stat_after = database_path.stat()
-        assert db_stat_after.st_size == db_stat_before.st_size
-        assert db_stat_after.st_mtime == db_stat_before.st_mtime
+        if db_stat_before is not None and database_path is not None:
+            db_stat_after = database_path.stat()
+            assert db_stat_after.st_size == db_stat_before.st_size
+            assert db_stat_after.st_mtime == db_stat_before.st_mtime
         assert exported["spec"]["timeout"] == 30.0
+
+        assert exported["spec"]["weft_context"] == declared_context
 
 
 @pytest.mark.shared

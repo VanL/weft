@@ -49,7 +49,7 @@ from simplebroker import (
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.99"
+__version__: Final[str] = "0.9.100"
 """Current version of Weft."""
 
 # ==============================================================================
@@ -2573,6 +2573,12 @@ def _parse_weft_logs_dir(value: str) -> str | None:
     return path or None
 
 
+def _parse_weft_context(value: str) -> str | None:
+    """Preserve root path text until context resolution [SB-0.4]."""
+
+    return value or None
+
+
 def _config_has_non_empty_value(config: Mapping[str, Any], *keys: str) -> bool:
     """Return whether any named config key is set to a non-empty value."""
 
@@ -2716,6 +2722,15 @@ def _normalize_optional_number_override(
 # Only Weft-owned additions and changes are declared here. Every other field,
 # including its validator and default, comes directly from SimpleBroker.
 WEFT_CONFIG_FIELDS: Final[Mapping[str, ConfigField]] = {
+    "CONTEXT": ConfigField(
+        DEFAULT_WEFT_CONTEXT,
+        "a project-root path string or None; an empty string means discovery",
+        partial(
+            _normalize_optional_string_override,
+            WEFT_CONTEXT_ENV,
+            parser=_parse_weft_context,
+        ),
+    ),
     "DEBUG": ConfigField(
         False,
         "a boolean or value interpreted by Weft truthiness",

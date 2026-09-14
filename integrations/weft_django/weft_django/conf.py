@@ -1,8 +1,10 @@
-"""Django settings helpers for the Weft integration."""
+"""Django settings helpers for the Weft integration.
+
+Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-13.2].
+"""
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Mapping
 from importlib import import_module
 from pathlib import Path
@@ -15,30 +17,6 @@ from django.utils.module_loading import import_string
 DEFAULT_AUTODISCOVER_MODULE = "weft_tasks"
 DEFAULT_REALTIME_TRANSPORT = "sse"
 VALID_REALTIME_TRANSPORTS: Final[set[str]] = {"none", "sse", "channels"}
-CORE_CONTEXT_OVERRIDE_ENV_KEYS: Final[set[str]] = {
-    "WEFT_BACKEND",
-    "WEFT_BACKEND_TARGET",
-    "WEFT_BACKEND_HOST",
-    "WEFT_BACKEND_PORT",
-    "WEFT_BACKEND_USER",
-    "WEFT_BACKEND_PASSWORD",
-    "WEFT_BACKEND_DATABASE",
-    "WEFT_BACKEND_SCHEMA",
-    "WEFT_DEFAULT_DB_LOCATION",
-    "WEFT_DEFAULT_DB_NAME",
-    "WEFT_PROJECT_SCOPE",
-    "BROKER_BACKEND",
-    "BROKER_BACKEND_TARGET",
-    "BROKER_BACKEND_HOST",
-    "BROKER_BACKEND_PORT",
-    "BROKER_BACKEND_USER",
-    "BROKER_BACKEND_PASSWORD",
-    "BROKER_BACKEND_DATABASE",
-    "BROKER_BACKEND_SCHEMA",
-    "BROKER_DEFAULT_DB_LOCATION",
-    "BROKER_DEFAULT_DB_NAME",
-    "BROKER_PROJECT_SCOPE",
-}
 
 
 def _import_ref(ref: str) -> Any:
@@ -83,23 +61,27 @@ def get_default_task_settings() -> dict[str, Any]:
     return dict(defaults)
 
 
-def _has_core_context_override() -> bool:
-    for key in CORE_CONTEXT_OVERRIDE_ENV_KEYS:
-        value = os.environ.get(key)
-        if value not in (None, ""):
-            return True
-    return False
+def get_explicit_context() -> str | Path | None:
+    """Return only the explicit Django declaration, without resolving it.
 
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-13.2]
+    """
 
-def resolve_context_override() -> str | Path | None:
     settings_dict = _settings_dict()
     explicit = settings_dict.get("CONTEXT")
     if explicit:
         if isinstance(explicit, Path):
             return explicit
         return str(explicit)
-    if _has_core_context_override():
-        return None
+    return None
+
+
+def get_context_fallback_root() -> str | None:
+    """Return Django's discovery anchor for the core context owner.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-13.2]
+    """
+
     base_dir = getattr(settings, "BASE_DIR", None)
     if base_dir is None:
         return None

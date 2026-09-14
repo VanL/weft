@@ -15,10 +15,10 @@ Key behaviours
   :func:`weft._constants.load_config` into an unprefixed Config. The same
   snapshot is reused when constructing `simplebroker.Queue` instances.
 * **Broker resolution** – When a task or CLI command does not specify
-  `weft_context`, we search upward for SimpleBroker's configured Weft-scoped
-  project config (by default `.weft/broker.toml`). If none exists, the current
-  working directory is the explicit project root. Parent SQLite files are not
-  discovery markers.
+  `weft_context` or Config `CONTEXT`, we search upward from the supplied
+  fallback directory (otherwise CWD) for SimpleBroker's configured Weft-scoped
+  project config (by default `.weft/broker.toml`). If none exists, that anchor
+  is the project root. Parent SQLite files are not discovery markers.
 * **Explicit overrides** – If `weft_context` *is* provided we treat it as the
   authoritative project root, expand the path, and ask SimpleBroker for the
   Weft-scoped target rooted at that directory.
@@ -230,6 +230,7 @@ def _strip_backend_target_secret(target: str) -> str:
 def build_context(
     spec_context: str | os.PathLike[str] | None = None,
     *,
+    fallback_root: str | os.PathLike[str] | None = None,
     config: Mapping[str, Any] | None = None,
     create_dirs: bool = True,
     create_database: bool = True,
@@ -239,8 +240,11 @@ def build_context(
 
     Args:
         spec_context: Optional override for the project root (equivalent to
-            TaskSpec.spec.weft_context).  When omitted we discover an existing
-            project by searching upward from :func:`Path.cwd`.
+            TaskSpec.spec.weft_context). When omitted, the resolved Config's
+            CONTEXT selects an explicit root before project discovery.
+        fallback_root: Directory from which to discover a project when neither
+            explicit root is set. Defaults to :func:`Path.cwd`. If discovery
+            finds no project, this directory becomes the root.
         config: Optional preloaded Weft config mapping. When omitted, the
             current process environment is loaded through `load_config()`.
         create_dirs: When True (default) ensure the configured Weft metadata
@@ -260,6 +264,7 @@ def build_context(
     root, broker_target, discovered = _resolve_root_and_target(
         spec_context,
         resolved_config,
+        fallback_root=fallback_root,
     )
     database_path = broker_target.target_path
     weft_dir_name = get_weft_directory_name(resolved_config)
@@ -396,13 +401,21 @@ def _tighten_project_broker_config_path(config_path: Path | None) -> None:
 def _resolve_root_and_target(
     spec_context: str | os.PathLike[str] | None,
     config: Mapping[str, Any],
+    *,
+    fallback_root: str | os.PathLike[str] | None = None,
 ) -> tuple[Path, BrokerTarget, bool]:
-    """Determine the project root and broker target."""
+    """Select the root, then delegate broker selection to SimpleBroker [SB-0.4]."""
+    if spec_context is None:
+        spec_context = config.get("CONTEXT") or None
     if spec_context is not None:
         root = Path(spec_context).expanduser().resolve()
         return root, resolve_context_broker_target(root, config=config), False
 
-    start_dir = Path.cwd().resolve()
+    start_dir = (
+        (Path(fallback_root) if fallback_root is not None else Path.cwd())
+        .expanduser()
+        .resolve()
+    )
     project_config_path = find_broker_project_config(
         start_dir,
         config=resolve_runtime_config(config),

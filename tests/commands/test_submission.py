@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import weft.commands.submission as submission_mod
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._exceptions import CommandUsageError, InvalidTID, SubmissionValidationError
+from weft.client import normalize_taskspec_payload
 from weft.commands._spawn_submission import SpawnSubmissionReconciliation
 from weft.commands.types import PreparedSubmissionRequest
 from weft.core import manager_runtime as core_manager_runtime
-from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
+from weft.core.taskspec import (
+    TaskSpec,
+    resolve_taskspec_payload,
+    validate_taskspec_payload,
+)
 
 pytestmark = [pytest.mark.shared]
 
@@ -57,6 +64,20 @@ def capture_run_input_context(request: Any) -> dict[str, Any]:
     """Expose the resolved adapter context for seam-order assertions."""
 
     return {"context_root": request.context_root}
+
+
+def materialize_declared_context(request: Any) -> dict[str, Any]:
+    """Select a runtime root through the real parameterization adapter path."""
+
+    payload: dict[str, Any] = request.taskspec_payload
+    payload["spec"]["weft_context"] = request.arguments["root"]
+    return payload
+
+
+def capture_run_input_context_and_name(request: Any) -> dict[str, Any]:
+    """Expose both runtime binding and submit-override ordering."""
+
+    return {"context_root": request.context_root, "name": request.spec_name}
 
 
 def fail_run_input_with_missing_file(request: Any) -> dict[str, Any]:
@@ -255,6 +276,232 @@ def test_prepare_spec_expands_home_in_runtime_context(
     prepared = submission_mod.prepare_spec(weft_harness.context, spec_path)
 
     assert prepared.payload == {"context_root": str(runtime_root.resolve())}
+
+
+@pytest.mark.parametrize("declared_root", ["runtime", "~/runtime"])
+@pytest.mark.parametrize("resolved", [False, True])
+def test_prepare_binds_declared_context_without_mutating_definition(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    declared_root: str,
+    resolved: bool,
+) -> None:
+    """Runtime preparation freezes path interpretation, while exports stay pure."""
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    destination = origin / "runtime"
+    monkeypatch.chdir(origin)
+    monkeypatch.setenv("HOME", str(origin))
+    monkeypatch.setenv("USERPROFILE", str(origin))
+    payload = {
+        "name": "bound-context",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "weft_context": declared_root,
+        },
+    }
+    if resolved:
+        payload = resolve_taskspec_payload(payload, tid="1777000000000000812")
+    original = validate_taskspec_payload(
+        payload, template=not resolved, bundle_root=origin
+    )
+    original_json = original.model_dump(mode="json")
+    work_payload = {"value": ["before"]}
+
+    exported = normalize_taskspec_payload(original, name="overridden")
+    prepared = submission_mod.prepare(
+        weft_harness.context, original, payload=work_payload, name="overridden"
+    )
+
+    assert not destination.exists(), "Binding must not initialize an alternate root"
+    assert exported["spec"]["weft_context"] == declared_root
+    assert original.model_dump(mode="json") == original_json
+    assert prepared.taskspec is not original
+    assert prepared.taskspec.spec.weft_context == str(destination)
+    assert prepared.taskspec.tid == original.tid
+    assert prepared.taskspec.io == original.io
+    assert prepared.taskspec.get_bundle_root() == original.get_bundle_root()
+    assert prepared.name == prepared.taskspec.name == "overridden"
+    assert prepared.seed_start_envelope is True
+    assert prepared.allow_internal_runtime is False
+    work_payload["value"].append("after")
+    assert prepared.payload == {"value": ["before"]}
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("HOME", str(elsewhere))
+    monkeypatch.setenv("USERPROFILE", str(elsewhere))
+    assert prepared.taskspec.spec.weft_context == str(destination)
+    assert not destination.exists()
+
+
+def test_prepare_leaves_absent_declared_context_unset(
+    weft_harness: WeftTestHarness,
+) -> None:
+    prepared = submission_mod.prepare(
+        weft_harness.context,
+        {
+            "name": "portable-context",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+    )
+
+    assert prepared.taskspec.spec.weft_context is None
+
+
+@pytest.mark.parametrize("declared_root", ["runtime", "~/runtime"])
+def test_prepare_spec_binds_materialized_context_before_run_input(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    declared_root: str,
+) -> None:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    monkeypatch.chdir(origin)
+    monkeypatch.setenv("HOME", str(origin))
+    monkeypatch.setenv("USERPROFILE", str(origin))
+    destination = origin / "runtime"
+    source_payload = {
+        "name": "materialized-context",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "weft_context": "discarded-by-parameterization",
+            "parameterization": {
+                "adapter_ref": (
+                    "tests.commands.test_submission:materialize_declared_context"
+                ),
+                "arguments": {"root": {"type": "string"}},
+            },
+            "run_input": {
+                "adapter_ref": (
+                    "tests.commands.test_submission:capture_run_input_context_and_name"
+                ),
+                "arguments": {},
+            },
+        },
+    }
+    source = weft_harness.root / "materialized-context.json"
+    source.write_text(json.dumps(source_payload), encoding="utf-8")
+
+    prepared = submission_mod.prepare_spec(
+        weft_harness.context,
+        source,
+        spec_args=("--root", declared_root),
+        name="overridden",
+    )
+
+    assert prepared.taskspec.spec.weft_context == str(destination)
+    assert prepared.payload == {"context_root": str(destination), "name": "overridden"}
+    assert prepared.taskspec.spec.parameterization is None
+    assert json.loads(source.read_text(encoding="utf-8")) == source_payload
+    assert not destination.exists()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("HOME", str(elsewhere))
+    monkeypatch.setenv("USERPROFILE", str(elsewhere))
+    assert prepared.taskspec.spec.weft_context == prepared.payload["context_root"]
+
+
+def test_prepare_pipeline_preserves_compiled_root_and_request_flags(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stage = weft_harness.context.weft_dir / "tasks" / "declared-stage.json"
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    stage.write_text(
+        json.dumps(
+            {
+                "name": "declared-stage",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "weft_context": "stage-runtime",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    pipeline = weft_harness.root / "pipeline.json"
+    pipeline.write_text(
+        json.dumps(
+            {
+                "name": "declared-pipeline",
+                "stages": [{"name": "only", "task": "declared-stage"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    prepared = submission_mod.prepare_pipeline(
+        weft_harness.context, pipeline, payload={"value": "initial"}, name="overridden"
+    )
+
+    taskspec = prepared.taskspec
+    runtime = taskspec.metadata["_weft_pipeline_runtime"]
+    assert taskspec.spec.weft_context == str(weft_harness.context.root)
+    assert taskspec.tid == runtime["pipeline_tid"]
+    assert taskspec.io.inputs["inbox"] == runtime["queues"]["inbox"]
+    assert taskspec.io.outputs["outbox"] == runtime["queues"]["outbox"]
+    assert runtime["stages"][0]["taskspec"]["spec"]["weft_context"] == "stage-runtime"
+    assert prepared.name == "overridden"
+    assert prepared.payload == {"value": "initial"}
+    assert prepared.seed_start_envelope is False
+    assert prepared.allow_internal_runtime is True
+
+
+@pytest.mark.parametrize(
+    "declared_context",
+    [
+        "invalid\u0000context",
+        pytest.param(
+            "~weft_nonexistent_context_user/project",
+            marks=pytest.mark.skipif(
+                os.name == "nt",
+                reason="Windows expands unknown user homes without lookup",
+            ),
+        ),
+    ],
+)
+def test_prepare_spec_rejects_invalid_context_before_run_input(
+    weft_harness: WeftTestHarness,
+    declared_context: str,
+) -> None:
+    source = weft_harness.root / "invalid-context.json"
+    source.write_text(
+        json.dumps(
+            {
+                "name": "invalid-context",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "weft_context": declared_context,
+                    "run_input": {
+                        "adapter_ref": (
+                            "tests.commands.test_submission:fail_run_input_with_runtime_error"
+                        ),
+                        "arguments": {},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SubmissionValidationError) as caught:
+        submission_mod.prepare_spec(weft_harness.context, source)
+
+    assert type(caught.value.__cause__) is ValueError
 
 
 def test_prepare_spec_rejects_stdin_when_run_input_declares_no_stdin(

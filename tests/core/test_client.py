@@ -21,6 +21,7 @@ from tests.helpers.weft_harness import (
 from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
 from weft import commands
 from weft._constants import (
+    SPEC_ENTRY_FILES,
     SUBMIT_OVERRIDE_NAMES,
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -1357,3 +1358,73 @@ def test_client_prepare_spec_translates_invalid_override_value() -> None:
             client.prepare_spec(spec_path, memory_mb=0)
         with pytest.raises(exception_types.SubmissionValidationError):
             client.submit_spec(spec_path, memory_mb=0)
+
+
+@pytest.mark.parametrize(
+    "construction",
+    ["default", "factory", "connect", "path", "object", "fallback", "discovery"],
+)
+def test_client_context_policy_reaches_parameterized_spec(
+    construction: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An embedder fallback must not replace the declaration an adapter sees."""
+    root = prepare_project_root(tmp_path / "selected")
+    declared = tmp_path / "declared"
+    cwd = tmp_path / "unrelated"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("WEFT_CONTEXT", raising=False)
+    if construction in {"default", "factory", "connect"}:
+        monkeypatch.setenv("WEFT_CONTEXT", str(root))
+    bundle = root / ".weft" / "tasks" / "context-policy"
+    bundle.mkdir(parents=True)
+    adapter_name = f"client_context_policy_{construction}"
+    (bundle / f"{adapter_name}.py").write_text(
+        "def materialize(request):\n"
+        "    payload = dict(request.taskspec_payload)\n"
+        "    payload['metadata'] = {'selected_context': request.context_root}\n"
+        "    return payload\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        bundle / SPEC_ENTRY_FILES["task"],
+        {
+            "name": "context-policy",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "weft_context": str(declared),
+                "parameterization": {
+                    "adapter_ref": f"{adapter_name}:materialize",
+                    "arguments": {},
+                },
+            },
+        },
+    )
+    if construction == "default":
+        client = WeftClient()
+    elif construction == "factory":
+        client = WeftClient.from_context()
+    elif construction == "connect":
+        client = connect()
+    elif construction == "path":
+        client = WeftClient(path=root)
+    elif construction == "object":
+        context = build_context(root)
+        client = WeftClient.from_weft_context(context)
+        assert client.context is context
+    elif construction == "fallback":
+        client = WeftClient.from_context(fallback_root=root)
+    else:
+        monkeypatch.chdir(root)
+        client = WeftClient()
+
+    prepared = client.prepare_spec("context-policy")
+
+    assert client.context.root == root.resolve()
+    expected = declared if construction in {"fallback", "discovery"} else root
+    assert prepared._request.taskspec.metadata["selected_context"] == str(
+        expected.resolve()
+    )
+    assert prepared._request.taskspec.spec.weft_context == str(declared.resolve())
+    assert not declared.exists(), "preparation must not initialize an alternate context"

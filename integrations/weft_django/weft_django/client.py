@@ -1,4 +1,7 @@
-"""Django-facing client helpers layered over the public `weft.client` surface."""
+"""Django-facing client helpers layered over the public `weft.client` surface.
+
+Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.1], [DJ-8.4], [DJ-13.2].
+"""
 
 from __future__ import annotations
 
@@ -21,9 +24,10 @@ from weft.client import (
     normalize_taskspec_payload,
 )
 from weft_django.conf import (
+    get_context_fallback_root,
     get_default_task_settings,
+    get_explicit_context,
     merge_metadata,
-    resolve_context_override,
 )
 from weft_django.registry import get_task
 
@@ -147,7 +151,14 @@ class DjangoWeftClient:
 
 
 def get_core_client() -> WeftClient:
-    return WeftClient.from_context(resolve_context_override())
+    """Request a resolved context from Weft using Django's settings inputs.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-13.2]
+    """
+
+    return WeftClient.from_context(
+        get_explicit_context(), fallback_root=get_context_fallback_root()
+    )
 
 
 def get_client() -> DjangoWeftClient:
@@ -239,6 +250,11 @@ def build_registered_task_taskspec(
     envelope: Mapping[str, Any],
     embed_envelope: bool,
 ) -> dict[str, Any]:
+    """Build a portable declaration, copying only an explicit Django context.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.1], [DJ-13.2]
+    """
+
     default_task_settings = get_default_task_settings()
     metadata = merge_metadata(
         default_task_settings.get("metadata"),
@@ -296,7 +312,7 @@ def build_registered_task_taskspec(
         },
         "metadata": metadata,
     }
-    context_override = resolve_context_override()
+    context_override = get_explicit_context()
     if context_override is not None:
         spec_payload["spec"]["weft_context"] = str(context_override)
     if timeout is not None:
@@ -341,6 +357,11 @@ def submit_registered_task_on_commit(
     kwargs: dict[str, Any],
     overrides: Mapping[str, Any] | None = None,
 ) -> WeftDeferredSubmission:
+    """Capture the client and decorated call before registering the callback.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.4]
+    """
+
     if overrides and overrides.get("wait"):
         raise ValueError("enqueue_on_commit(..., wait=True) is not supported")
     _validate_decorated_task_overrides(overrides)
@@ -380,6 +401,8 @@ def export_registered_task_taskspec(
     Weft configuration, opens no broker, writes nothing (README "Composition
     Export"). Overrides travel unchanged so `wait` and `payload` reach core and
     raise like any other name outside the override vocabulary.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.1]
     """
 
     _validate_decorated_task_overrides(overrides)
@@ -419,6 +442,11 @@ def submit_taskspec_on_commit(
     payload: Any = None,
     **overrides: Any,
 ) -> WeftDeferredSubmission:
+    """Capture a native TaskSpec and its client before registering the callback.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.4]
+    """
+
     _reject_legacy_payload_names(overrides)
     if overrides.get("wait"):
         raise ValueError("submit_taskspec_on_commit(..., wait=True) is not supported")
@@ -473,6 +501,11 @@ def submit_spec_reference_on_commit(
     payload: Any = None,
     **overrides: Any,
 ) -> WeftDeferredSubmission:
+    """Resolve and prepare a task reference before registering the callback.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.4]
+    """
+
     _reject_legacy_payload_names(overrides)
     if overrides.get("wait"):
         raise ValueError(
@@ -527,6 +560,11 @@ def submit_pipeline_reference_on_commit(
     payload: Any = None,
     **overrides: Any,
 ) -> WeftDeferredSubmission:
+    """Compile and prepare a pipeline before registering the callback.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.4]
+    """
+
     _reject_legacy_payload_names(overrides)
     if overrides.get("wait"):
         raise ValueError(

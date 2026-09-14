@@ -1158,3 +1158,30 @@ def test_private_serve_marker_is_not_an_environment_setting() -> None:
             ]
             is True
         )
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", "relative/project", "~/project", " project with spaces "]
+)
+def test_context_config_loads_without_resolving_paths(value: str | None) -> None:
+    """The declared root is data until the context owner resolves it [SB-0.4]."""
+    with patch.dict(os.environ, {}, clear=True):
+        assert load_config()["CONTEXT"] is None
+        assert load_config({"WEFT_CONTEXT": value})["CONTEXT"] == (value or None)
+    if value is not None:
+        with patch.dict(os.environ, {"WEFT_CONTEXT": value}, clear=True):
+            assert load_config()["CONTEXT"] == (value or None)
+
+
+@pytest.mark.parametrize("value", [1, False, Path("project"), ["project"]])
+def test_context_config_rejects_non_string_values(value: object) -> None:
+    """A context override cannot smuggle a live object into Config JSON."""
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        pytest.warns(UserWarning, match="WEFT_CONTEXT"),
+        pytest.raises(
+            InvalidConfigError,
+            match="a project-root path string or None; an empty string means discovery",
+        ),
+    ):
+        load_config({"WEFT_CONTEXT": value})

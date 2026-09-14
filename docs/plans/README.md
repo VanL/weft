@@ -23,7 +23,7 @@ There are currently 213 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-09-14-django-core-context-resolution-plan.md`](./2026-09-14-django-core-context-resolution-plan.md) | Django Context Resolution Owned by Weft | `draft` | none |
+| [`2026-09-14-django-core-context-resolution-plan.md`](./2026-09-14-django-core-context-resolution-plan.md) | Django Context Resolution Owned by Weft | `completed` | none |
 | [`2026-09-14-simplebroker-8-2-configuration-plan.md`](./2026-09-14-simplebroker-8-2-configuration-plan.md) | SimpleBroker 8.2 Configuration Migration | `completed` | none |
 | [`2026-09-11-bounded-status-and-monitor-work-plan.md`](./2026-09-11-bounded-status-and-monitor-work-plan.md) | Bounded Status Reconstruction and Monitor Work Plan | `draft` | none |
 | [`2026-09-11-per-tid-task-state-namespace-plan.md`](./2026-09-11-per-tid-task-state-namespace-plan.md) | Per-TID Task State Namespace Plan | `completed` | none |

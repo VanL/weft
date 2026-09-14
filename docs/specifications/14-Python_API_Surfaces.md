@@ -35,6 +35,19 @@ values does not reconfigure live handles.
 Implementation: `weft/context.py:WeftContext` owns the context snapshot.
 Related plan: [SimpleBroker configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
 
+`WeftClient.from_context(spec_context=None, *, fallback_root=None, autostart=None)`
+requests a resolved context from the core context owner. `fallback_root` follows
+[SB-0.4] and is not an explicit override of a parameterized TaskSpec reference's
+declared context. An explicit path argument, caller-supplied `WeftContext`, or resolved
+Config `CONTEXT` is explicit. Direct `WeftClient()` construction and the factory agree
+about this policy. Clients preserve supplied contexts and use their resolved Config
+snapshots; the Django adapter does not set core's context-precedence bookkeeping.
+
+_Implementation mapping_: `weft/client/_client.py::WeftClient.__init__`,
+`weft/client/_client.py::WeftClient.from_context`, `weft/context.py::build_context`,
+`weft/client/__init__.py`, `weft/commands/__init__.py`, `weft/ext.py`,
+`weft/core/taskspec/model.py`, `tests/core/test_client.py`.
+
 ## Commands surface contract [PY-2]
 
 Task observations use the shared per-TID runtime-state readers
@@ -263,14 +276,15 @@ a value the TaskSpec schema rejects raises the schema's validation error (a
 `prepare_spec(...)`; a `name` in the reserved `_weft.` namespace raises
 `ValueError`. Each `submit(...)`, `submit_spec(...)`, and `submit_pipeline(...)`
 raises exactly what its `prepare*` counterpart raises.
-`weft.client.normalize_taskspec_payload(taskspec, **overrides)` runs that same
-contract without a client or context and returns the validated, normalized
-TaskSpec definition as a fresh JSON-compatible `dict`: the pre-transport
-snapshot `prepare(...)` would hold for the same inputs — overrides applied,
-re-validated, JSON round-tripped — before any submission-time transport
-encoding or reserved-metadata handling. It accepts a `TaskSpec` or a
+`weft.client.normalize_taskspec_payload(taskspec, **overrides)` runs the shared
+definition-normalization contract without a client or context and returns the validated,
+normalized TaskSpec definition as a fresh JSON-compatible `dict`: the definition
+snapshot used by `prepare(...)` before runtime-context binding, submission-time
+transport encoding, or reserved-metadata handling. Overrides are applied, re-validated,
+and JSON round-tripped. Pure normalization preserves a relative or home-relative
+`spec.weft_context` declaration as text. It accepts a `TaskSpec` or a
 JSON-compatible mapping (a mapping without `tid` is validated as a template),
-raises what `prepare(...)` raises, constructs no Weft context, reads no
+raises the errors from `prepare(...)`'s shared definition-normalization stage, constructs no Weft context, reads no
 configuration, resolves no project root, opens no broker, and writes nothing.
 Every keyword argument is an override name: `payload` is not part of the
 override vocabulary and raises `TypeError` here. The mapping carries no
@@ -280,8 +294,23 @@ TaskSpec validation, and the result drops it. Embedders that need a TaskSpec
 definition for composition rather than submission call it; there is no second
 normalization path.
 
-Implementation: `weft/client/_client.py::normalize_taskspec_payload` over
-`weft/commands/submission.py::prepare_definition`.
+Context-aware `prepare()`, `prepare_spec()`, and `prepare_pipeline()` bind a nonempty
+declared `spec.weft_context` to an absolute path using the preparation-time CWD and home
+expansion. Binding occurs after parameterization and overrides and before any run-input
+adapter observes the runtime root. An absent declaration stays unset and uses the
+captured client's root at submission. Binding copies and validates the TaskSpec without
+mutating its input, TID, `io`, bundle provenance, or request flags. It opens no
+alternate broker; broker selection for an explicit alternate root remains at submission
+using captured Config. Pure `normalize_taskspec_payload()` does not perform
+runtime-context binding.
+
+_Implementation mapping_: `weft/client/_client.py::normalize_taskspec_payload` over
+`weft/commands/submission.py::prepare_definition`. Runtime context binding is owned by
+`weft/commands/submission.py::_bind_declared_context`,
+`weft/commands/submission.py::prepare`, `weft/commands/submission.py::prepare_spec`,
+and `weft/commands/submission.py::prepare_pipeline`. Related preparation input and
+error contracts are covered by `weft/ext.py`, `tests/core/test_client.py`, and
+`tests/commands/test_submission.py`.
 
 ## Layering [PY-4]
 
@@ -296,6 +325,8 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+- [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
+
 
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 

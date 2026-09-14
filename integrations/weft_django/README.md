@@ -55,6 +55,38 @@ result = submission.result(timeout=30)
 assert result.status == "completed"
 ```
 
+## Project Context
+
+Django requests its runtime context from Weft. With no explicit context setting,
+Weft discovers the nearest project starting at Django's `BASE_DIR`, using that
+directory itself when discovery finds nothing:
+
+```python
+# settings.py
+INSTALLED_APPS += ["weft_django"]
+WEFT_DJANGO = {}
+```
+
+To pin a project explicitly, set `WEFT_DJANGO = {"CONTEXT": BASE_DIR}`. The explicit
+Django setting wins over `WEFT_CONTEXT`. Otherwise `WEFT_CONTEXT` selects the root
+before discovery from `BASE_DIR`. Without `BASE_DIR`, Weft uses its ordinary CWD
+discovery. Explicit roots are used directly; they are not discovery anchors.
+
+Broker settings such as `WEFT_BACKEND_TARGET` select the broker while preserving
+this project-root policy. For example, a PostgreSQL target does not move Weft's
+artifact directory to the web worker's CWD. Project broker configuration retains
+its existing precedence. `BROKER_*` variables do not configure Weft.
+
+Settings import and task discovery do not initialize Weft. Runtime operations
+acquire a client with a resolved context and Config snapshot; a retained client
+keeps that snapshot, while a later acquisition can observe new settings.
+
+After upgrading, stray `BROKER_*` or default-valued broker settings no longer
+redirect Django's artifacts to CWD. If an installation used that former
+destination, pin `CONTEXT` to its existing root before upgrading. The integration
+does not move existing tasks or artifacts. Restart long-lived Django processes
+to pick up the new code and settings.
+
 ## Submission Handle
 
 `enqueue(...)` and the native submission helpers return `WeftSubmission`.
@@ -91,10 +123,17 @@ and unserializable payloads fail before the app transaction commits. Mutating
 args, kwargs, or payload objects after helper call time does not change the work
 submitted at commit.
 
+The helpers also capture the core client before registering the callback.
+Changing Django settings, environment, CWD, or HOME before commit does not
+redirect prepared work. Core preparation binds an explicit relative or
+home-relative TaskSpec context to its absolute path. An explicitly different
+TaskSpec root still has its broker selected at submission using captured Config;
+broker project files are not snapshotted.
+
 ## Composition Export
 
 `task.as_taskspec_for_call(*args, _overrides=None, **kwargs)` returns the
-validated, normalized TaskSpec payload Weft would submit for that call, with the
+validated, normalized TaskSpec definition for that call, with the
 call envelope embedded in `spec.args`, for manual composition into ordinary Weft
 task or pipeline specs. It does not submit anything, builds no Weft context,
 reads no Weft configuration, opens no broker, and writes nothing (the configured
@@ -106,6 +145,13 @@ semantics: `None` values are ignored, unknown names (including `wait`) raise
 `TypeError`, and invalid values raise the TaskSpec validation error. The export
 is `weft.client.normalize_taskspec_payload(...)` applied to the generated
 template; the package applies no overrides of its own.
+
+An explicit Django `CONTEXT` is copied into `spec.weft_context` as declared,
+including relative or home-relative text. With no explicit setting, the field
+remains unset: the export does not capture `BASE_DIR`, environment, or a
+discovered project. Such exports inherit their destination from the receiving
+Weft context when submitted or composed. This makes exports portable; set
+`CONTEXT` explicitly when the declaration must name a particular project.
 
 ## Native Helpers
 

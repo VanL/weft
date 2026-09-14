@@ -14,9 +14,10 @@ from typing import Any, cast
 
 import pytest
 
-from simplebroker import Config, ConfigField, resolve_config
+from simplebroker import Config, ConfigField, resolve_config, serialize_config
 from simplebroker.ext import InvalidConfigError
-from weft._constants import WEFT_CONFIG_DEFAULTS, load_config
+from weft._constants import WEFT_CONFIG_DEFAULTS, load_config, resolve_runtime_config
+from weft.context import build_context
 from weft.core.launcher import launch_task_process
 from weft.core.taskspec import TaskSpec, validate_taskspec_payload
 from weft.helpers import is_debug_enabled, is_logging_enabled
@@ -47,6 +48,9 @@ class ConfigSnapshotProbeTask:
             "batch_size": self.config["TASK_MONITOR_BATCH_SIZE"],
             "max_interval": self.config["MAX_INTERVAL"],
             "custom_value": self.config["TRANSPORT_PROBE_VALUE"],
+            "context_root": str(
+                build_context(config=self.config, create_database=False).root
+            ),
             "child_environment": os.environ["WEFT_TASK_MONITOR_BATCH_SIZE"],
             "helper_debug": is_debug_enabled(),
             "helper_logging": is_logging_enabled(),
@@ -81,6 +85,7 @@ def test_fresh_spawn_preserves_config_snapshot_and_weft_validators(
     monkeypatch.delenv("WEFT_MAX_INTERVAL", raising=False)
     loaded = load_config(
         {
+            "WEFT_CONTEXT": str(tmp_path / "parent-context"),
             "WEFT_CACHE_MB": 17,
             "WEFT_TASK_MONITOR_BATCH_SIZE": 37,
             "WEFT_DEBUG": True,
@@ -100,6 +105,7 @@ def test_fresh_spawn_preserves_config_snapshot_and_weft_validators(
         override={f"WEFT_{key}": value for key, value in loaded.items()},
     )
     default_interval = config["MAX_INTERVAL"]
+    monkeypatch.setenv("WEFT_CONTEXT", str(tmp_path / "wrong-child-context"))
     monkeypatch.setenv("WEFT_CACHE_MB", "invalid-child-ambient")
     monkeypatch.setenv("WEFT_TASK_MONITOR_BATCH_SIZE", "invalid-child-ambient")
     monkeypatch.setenv("WEFT_DEBUG", "0")
@@ -146,6 +152,7 @@ def test_fresh_spawn_preserves_config_snapshot_and_weft_validators(
         "batch_size": 37,
         "max_interval": default_interval,
         "custom_value": "sender-resolved",
+        "context_root": str((tmp_path / "parent-context").resolve()),
         "child_environment": "invalid-child-ambient",
         "helper_debug": True,
         "helper_logging": False,
@@ -154,3 +161,30 @@ def test_fresh_spawn_preserves_config_snapshot_and_weft_validators(
     }
     assert observation["pid"] != os.getpid()
     assert config["CACHE_MB"] == 17
+
+
+@pytest.mark.parametrize("include_context", [True, False])
+def test_context_json_snapshot_uses_local_declaration_without_ambient_reload(
+    include_context: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both current and older Config snapshots keep their own root selection."""
+    fields = dict(WEFT_CONFIG_DEFAULTS)
+    overrides = {}
+    if include_context:
+        overrides["WEFT_CONTEXT"] = str(tmp_path / "captured")
+    else:
+        fields.pop("CONTEXT", None)
+    original = resolve_config("WEFT", defaults=fields, override=overrides)
+    monkeypatch.setenv("WEFT_CONTEXT", str(tmp_path / "ambient"))
+    monkeypatch.setenv("WEFT_CACHE_MB", "invalid-ambient")
+
+    restored = resolve_runtime_config(serialize_config(original))
+
+    assert restored.get("CONTEXT") == (
+        str(tmp_path / "captured") if include_context else None
+    )
+    with (
+        pytest.warns(UserWarning, match="WEFT_CONTEXT"),
+        pytest.raises(InvalidConfigError, match="WEFT_CONTEXT"),
+    ):
+        resolve_config(config=restored, override={"WEFT_CONTEXT": 9})

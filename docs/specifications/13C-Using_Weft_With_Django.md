@@ -665,6 +665,17 @@ unsupported scheduling kwargs such as `eta` or `countdown`.
 - the integration applies no overrides itself; it calls
   `weft.client.normalize_taskspec_payload(...)`
 
+Pure decorated-task export copies an explicitly configured Django `CONTEXT` path into
+`spec.weft_context` without resolving it. Otherwise the template leaves
+`spec.weft_context` unset; it does not capture `BASE_DIR`, environment configuration, or
+project discovery. Such a template inherits its runtime destination when submitted
+through Weft. The same declaration rule applies to the generated template used by
+`enqueue()`.
+
+_Implementation mapping_: `integrations/weft_django/weft_django/client.py`,
+`integrations/weft_django/weft_django/decorators.py`, and
+`integrations/weft_django/tests/test_weft_django.py`.
+
 This split avoids collisions between user task parameters and TaskSpec override
 names.
 
@@ -740,6 +751,10 @@ Implementation plan backlinks:
 
 ### Submission Overrides [DJ-8.4]
 
+_Implementation mapping_: `integrations/weft_django/weft_django/client.py`,
+`integrations/weft_django/weft_django/decorators.py`, and
+`integrations/weft_django/tests/test_weft_django.py`.
+
 Per-call submission kwargs should support:
 
 - `spec_args`
@@ -794,6 +809,16 @@ Snapshot rule:
   captured at helper-call time
 - later mutation of those Python objects must not change the work submitted at
   transaction commit
+
+Every deferred helper acquires its core client and prepares its work before registering
+the commit callback. The callback submits the captured `PreparedSubmission` without
+reacquiring Django settings or loading ambient Weft configuration. Later changes to
+`BASE_DIR`, Django `CONTEXT`, environment, or CWD must not redirect a submission using
+the captured runtime root. Core runtime preparation expands home-relative and relative
+explicit TaskSpec context paths once, preserving their absolute interpretation through
+commit. An explicitly different TaskSpec runtime root continues to have its broker
+resolved by core with the captured Config; this rule does not snapshot broker project
+files.
 
 ## Transaction Hooks [DJ-9]
 
@@ -1078,18 +1103,36 @@ Configuration precedence should be:
 
 ### Context selection [DJ-13.2]
 
-Rule:
+Django supplies an optional explicit `WEFT_DJANGO["CONTEXT"]` and an optional
+`settings.BASE_DIR` fallback to the public `WeftClient.from_context(...,
+fallback_root=...)` entry point. Weft owns configuration loading, validation, project
+discovery, broker selection, and `WeftContext` construction. The bridge must not
+maintain a list of core environment keys, inspect those variables to choose a root, or
+construct `WeftContext` itself.
 
-- explicit `WEFT_DJANGO["CONTEXT"]` wins when present
-- otherwise the integration should fall through to ordinary Weft core context
-  resolution, including `WEFT_*` environment overrides
-- if neither an explicit Django setting nor a Weft core override is present,
-  the integration should default to `settings.BASE_DIR`
+Root selection is explicit Django context, then resolved `WEFT_CONTEXT`, then Weft
+project discovery starting at `BASE_DIR`, then `BASE_DIR` itself when discovery finds
+nothing. Without `BASE_DIR`, discovery starts at the process CWD. Explicit roots are
+used directly rather than as discovery starts. Broker settings select the broker using
+core/SimpleBroker precedence; they do not suppress `BASE_DIR` or turn CWD into the
+artifact root. `BROKER_*` variables do not affect Weft configuration or context
+selection.
 
-Reason:
+A fallback or discovered root is not an explicit context override for parameterized
+spec-reference preparation. Explicit Django context and resolved `WEFT_CONTEXT` are
+explicit. This distinction belongs to core, not the bridge.
 
-- web workers and management commands should not rely on the current working
-  directory as the primary context signal
+Context resolution occurs when a core client is acquired for a runtime operation.
+Importing settings, discovering task declarations in `AppConfig.ready()`, and exporting
+a TaskSpec must not resolve a context. A retained client uses its resolved context and
+Config snapshot; acquiring another client can observe changed settings. The integration
+does not cache contexts globally.
+
+_Implementation mapping_: `integrations/weft_django/weft_django/conf.py::get_explicit_context`,
+`integrations/weft_django/weft_django/conf.py::get_context_fallback_root`,
+`integrations/weft_django/weft_django/client.py::get_core_client`,
+`integrations/weft_django/weft_django/client.py::build_registered_task_taskspec`,
+and `integrations/weft_django/tests/test_weft_django.py`.
 
 ### `DJANGO_SETTINGS_MODULE` propagation [DJ-13.3]
 
@@ -1345,6 +1388,8 @@ Once the package is split into a sibling repo:
   provide the required public client API
 
 ## Backlinks
+
+- [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
 
 - [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
 - [Public API surface remediation plan](../plans/2026-08-12-public-api-surface-remediation.md)

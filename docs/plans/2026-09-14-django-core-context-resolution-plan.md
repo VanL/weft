@@ -1,12 +1,12 @@
 # Django Context Resolution Owned by Weft
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/13C-Using_Weft_With_Django.md [DJ-2], [DJ-3], [DJ-8.1], [DJ-8.4], [DJ-9.1], [DJ-13.2]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]; docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-3]
 Superseded by: none
 
 Class: 5. This changes the public context-resolution contract and the Django/core ownership boundary. Hardening applies because resolution controls submission destinations and crosses the deferred-submission boundary.
 
-Plan type: implementation with spec revision. This document is the planning deliverable; it does not authorize or record completed runtime implementation.
+Plan type: implementation with spec revision. The user authorized implementation of the reviewed plan on 2026-09-14. The execution record below distinguishes the original planning evidence from implementation verification.
 
 ## Goal
 
@@ -18,13 +18,16 @@ The important distinction is between a **project root** and a **broker target**.
 
 - `e35b0a274766867f23739e5f3e69593477d30104`: baseline for [Django integration](../specifications/13C-Using_Weft_With_Django.md), [SimpleBroker integration](../specifications/04-SimpleBroker_Integration.md), and [Python API surfaces](../specifications/14-Python_API_Surfaces.md).
 - The baseline requires SimpleBroker 8.2.2 and simplebroker-pg 4.2.1. The completed [8.2 configuration migration](./2026-09-14-simplebroker-8-2-configuration-plan.md) supplies immutable, unprefixed Config values and JSON transport. Its separate Django follow-up is the starting problem here; the migration itself is not reopened.
-- Promotion baseline: to be recorded by the implementer after the spec-promotion slice, using a commit SHA or a saved diff against the baseline above. Until promotion, the existing specs remain normative.
+- Promotion baseline: implementation starts from `e8fe9bf5`. The approved delta was promoted on 2026-09-14 before runtime edits; exact SHA-256 identifiers of the promoted files are recorded below. These promoted specs govern implementation.
+  - `docs/specifications/13C-Using_Weft_With_Django.md`: `715e674d891c9786cbf59d448f541f1c37e32c661142708c3ea37c9255136012`
+  - `docs/specifications/04-SimpleBroker_Integration.md`: `75d44b0b0f43a467bab964a6701a1a000df16e7cfb2978c510711ebca074dadd`
+  - `docs/specifications/14-Python_API_Surfaces.md`: `29872ab271272491e28f67649e9ec0a4622990610d6887c5386a65bf1f36e7c8`
 
 Read the [architecture](../specifications/00-Overview_and_Architecture.md), [system invariants](../specifications/07-System_Invariants.md), and [testing strategy](../specifications/08-Testing_Strategy.md) [TS-0], [TS-3] before implementation. Follow [AGENTS.md](../../AGENTS.md), the [decision hierarchy](../agent-context/decision-hierarchy.md) [DOM-15], [engineering principles](../agent-context/engineering-principles.md), and these runbooks: [runtime/context patterns](../agent-context/runbooks/runtime-and-context-patterns.md), [testing patterns](../agent-context/runbooks/testing-patterns.md), [writing plans](../agent-context/runbooks/writing-plans.md), [hardening](../agent-context/runbooks/hardening-plans.md), [review loops](../agent-context/runbooks/review-loops-and-agent-bootstrap.md), and [acceptance probes](../agent-context/runbooks/adversarial-acceptance-probes.md). Consult [lessons](../lessons.md), especially configuration restoration and context custody.
 
 The public-client contract expansion also touches `weft/context.py`, `weft/client/_client.py`, and [PY-1]. Reconcile overlapping edits when implementing; this plan requires only the already-public `WeftClient`. It does not depend on adding `build_context` or `WeftContext` to `weft.client.__all__` and does not absorb unrelated exports.
 
-## Current Structure and Evidence
+## Starting Structure and Evidence
 
 | Owner / file | Current responsibility and coupling |
 |---|---|
@@ -266,7 +269,7 @@ For traceability use the repository's installed backstitch, for example:
 ../backstitch/.venv/bin/backstitch check --repo-root /Users/van/Developer/weft --no-config --spec-root docs/specifications --plan-root docs/plans --code-root weft --code-root tests --format json --output /tmp/weft-django-context-trace.json
 ```
 
-Capture the baseline with the identical command and compare diagnostic identity, not only counts. Fix all findings introduced by this change. Report pre-existing debt separately rather than claiming an absolute clean gate. Check every new Markdown link target and the plan-index count in both the working tree and the commit candidate. For this plan-only deliverable run documentation gates; runtime gates belong to implementation.
+Capture the baseline with the identical command and compare diagnostic identity, not only counts. Fix all findings introduced by this change. Report pre-existing debt separately rather than claiming an absolute clean gate. Check every new Markdown link target and the plan-index count in both the working tree and the commit candidate. During planning run documentation gates; implementation also runs the runtime gates above.
 
 ## Rollout and Rollback
 
@@ -301,7 +304,7 @@ Independent review must read this plan, its exact proposed spec delta, baseline 
 |---|---|---|
 | R1, 2026-09-14 | Accepted F1 adds declared-path binding to the three core runtime preparation owners and [PY-3]; this makes the promised transaction custody true for relative paths. Classification remains 5, with the same submission boundary and purity constraints. | Focused independent verification of F1 and defects introduced by its fix. |
 
-Planning verification and implementation evidence are recorded separately. No runtime implementation is claimed by this draft.
+Planning verification and implementation evidence are recorded separately below.
 
 
 ### Planning verification, 2026-09-14
@@ -309,3 +312,85 @@ Planning verification and implementation evidence are recorded separately. No ru
 - Plan metadata and spec hygiene passed: 8 tests against the isolated `e35b0a27` plus plan/index candidate; 6 tests with the repository's separate test-audit changes. All 17 local Markdown links in the plan resolve. Plan counts and row status match each tested corpus.
 - Backstitch comparison against the identical isolated baseline produced exactly the same diagnostics: 28 errors, 1,101 warnings, and 593 informational findings. No diagnostics were introduced. This is baseline parity, not a claim that pre-existing traceability debt is cleared.
 - Fresh-eyes review and independent R1 verification are complete. Runtime code, normative specs, and dependency versions have not been changed by this planning deliverable; their checks belong to the implementation slices above.
+
+### Implementation execution, 2026-09-14
+
+All four slices implement the promoted contracts. Core declares `CONTEXT` once with
+SimpleBroker's native Config field, description, and local validator. Root resolution
+uses the supplied Config and optional fallback anchor. The client preserves the
+explicit-versus-discovered distinction, and runtime preparation binds declared paths
+without changing pure normalization or opening another broker.
+
+Django now supplies settings inputs to the public core factory. It no longer owns
+an environment-key catalog or resolves a root. The four deferred families submit
+captured prepared work, and exports copy only explicit Django declarations. No
+project-file snapshot or new context lifetime was introduced.
+
+Release compatibility was updated through `bin/release.py::write_target_version`:
+core 0.9.100, bridge 0.9.34, bridge minimum `weft>=0.9.100`, and root Django extras
+minimum 0.9.34. `uv sync --all-extras` updated only these editable-package versions
+and the required core floor. Nothing was published or pushed.
+
+| Review | Finding and disposition | Result |
+|---|---|---|
+| Spec promotion | Independent reviewer verified all 15 proposed paragraphs and recorded promotion hashes before runtime edits. Fixed one Markdown paragraph boundary. | PASS. |
+| Core C1 | Unknown POSIX `~user` raised an untyped `RuntimeError` during path expansion. Added a narrow expansion-only conversion, preserving the cause and the public `SubmissionValidationError` boundary; regression reproduced red then passed. The user-lookup row is POSIX-only because Windows does not perform that lookup. | PASS after focused review. |
+| Core C2 | Invalid-value coverage checked the field name but not its description. Added an assertion for accepted types and empty-string discovery semantics. | PASS after focused review. |
+| Django D1 | Observation tests compared a terminal snapshot directly to a status string. Fixed both default and PostgreSQL tests to inspect the existing `.status` contract. | PASS after independent rerun. |
+| Candidate C3 | A new harness annotation relied on an import supplied by separate uncommitted typing work. Included only the required harness import; likewise made the new context tests' Config resolver import explicit. | Full candidate lint passed; mypy adds no diagnostics to clean HEAD. |
+| PostgreSQL fixture | The test isolation helper removed the supplemental password required by passwordless project targets. A real connection failed with `fe_sendauth: no password supplied`. Preserve that credential only in active PG tests; the same row then passed before the full PG rerun. | 187 core and 112 Django tests passed, zero skips; temporary containers removed. |
+
+Replacement coverage removes `test_context_override_ignores_unrelated_weft_env`
+and `test_explicit_context_wins_even_with_core_env_override`. Their replacements
+exercise all 11 historical `BROKER_*` suffixes plus an unknown name, broker knobs,
+BASE_DIR/CWD discovery, and absent/empty/string/Path explicit settings through real
+client acquisition. The old catalog-clearing test helper was replaced by a test-only
+isolation helper. Export, rollback, snapshot, non-default Config, and real task/result
+coverage were retained and strengthened. Production drops the 22-key catalog,
+`_has_core_context_override()`, `resolve_context_override()`, and its `os` import;
+two settings-only accessors replace that policy.
+
+The working tree contained a separate public-API expansion and broad test typing/
+correctness work before this implementation. The commit candidate is assembled from
+clean `e8fe9bf5` plus only this task's changes. It excludes those public exports,
+helpers, test files, and plan-index rows. The working-tree full mypy command passed
+422 source files. Clean HEAD and the isolated candidate each have the same 2,150
+pre-existing mypy errors in 133 files, with zero added or removed diagnostic identities.
+Those typing fixes remain in the separate working-tree change rather than being
+silently included here.
+
+Traceability checks include `--code-root integrations/weft_django` in addition to
+the planned `weft` and `tests` roots, on both sides of each comparison. The working
+baseline has 28 errors / 1,119 warnings / 601 infos; the implementation has
+28 / 1,099 / 596. Clean HEAD has 28 / 1,101 / 594; the isolated candidate has
+28 / 1,090 / 589. Neither comparison introduces a diagnostic identity. Existing
+traceability debt is unchanged in scope; these are baseline comparisons, not an
+absolute clean result. Django mapping notes cover export, deferred submission, and
+context acquisition, including code outside the default trace roots.
+
+
+The first complete working-tree run exercised slow tests: 4,895 passed, 25 skipped,
+and two Ruff policy checks failed because a new annotation-only Django test import
+added a suppressed late-import diagnostic. Moved that import into `TYPE_CHECKING`
+before bootstrap instead of adding a suppression or changing the registry. The full
+policy module and hostile-bootstrap regression passed after that correction: 44 tests,
+including both failures from the complete run. Final working-tree mypy, Ruff, and
+format checks passed (422 source files and 40 formatting targets).
+
+
+Final isolated-candidate verification exercised the complete suite including slow
+tests: 4,913 passed, 25 skipped, and three lint-policy checks initially failed on the
+C3 missing harness import. After the narrow import correction, an independent rerun
+of the entire lint-policy module and hostile-bootstrap test passed. No additional
+runtime failure appeared. The isolated Django suite passed 111 tests with its one
+PG-only row skipped; the separate real PostgreSQL run passed all 112 Django tests.
+The 25 root-suite skips are backend-specific connection probes or opt-in live-provider
+tests; the required PostgreSQL context/submission proofs all executed successfully.
+
+Final review disposition: the independent reviewer passed the promoted specs, core
+slice, Django slice, PostgreSQL fixture correction, targeted import fixes, and
+candidate isolation. All discovered failures are resolved. No product behavior
+deviates from the approved plan; the expanded trace roots and temporary isolated
+checkout are verification changes only. Broker project files retain their documented
+submission-time lifetime. Documentation gates, local-link targets, plan count/status,
+and the final scoped commit are verified at closeout.
