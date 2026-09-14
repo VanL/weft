@@ -80,7 +80,6 @@ from weft._constants import (
     TASK_MONITOR_SCHEMA_VERSION,
     TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
@@ -1327,7 +1326,7 @@ class TaskMonitor(ServiceTask):
         now_ns = time.time_ns()
         interval_seconds = float(
             self._weft_config.get(
-                WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
+                "MANAGER_SERVE_LOG_INTERVAL_SECONDS",
                 WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
             )
         )

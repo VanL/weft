@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from simplebroker import Queue
+from simplebroker import Queue, serialize_config
 from tests.helpers.queue_payloads import terminal_envelopes
 from tests.helpers.reactor_driver import drive_until
 from tests.tasks import (
@@ -45,6 +45,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
     WORK_ENVELOPE_START,
+    resolve_runtime_config,
 )
 from weft.core import launcher as launcher_module
 from weft.core.control_messages import encode_control_message
@@ -4358,7 +4359,7 @@ def test_task_process_entry_waits_through_activity_seam(
         f"{LauncherWaitTask.__module__}.{LauncherWaitTask.__qualname__}",
         db_path,
         spec.model_dump_json(),
-        None,
+        serialize_config(resolve_runtime_config({})),
         0.125,
     )
 
@@ -4385,7 +4386,7 @@ def test_task_process_entry_does_not_wait_after_terminal_turn(
         f"{LauncherTerminalTask.__module__}.{LauncherTerminalTask.__qualname__}",
         db_path,
         spec.model_dump_json(),
-        None,
+        serialize_config(resolve_runtime_config({})),
         0.125,
     )
 
@@ -4434,7 +4435,7 @@ def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
         f"{LauncherTerminalTask.__module__}.{LauncherTerminalTask.__qualname__}",
         db_path,
         spec.model_dump_json(),
-        None,
+        serialize_config(resolve_runtime_config({})),
         0.125,
         True,
     )

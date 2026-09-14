@@ -921,7 +921,7 @@ def open_monitor_store(
     store_config = MonitorStoreConfig(
         write_batch_size=int(
             (config or {}).get(
-                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
+                "TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
                 WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
             )
         )

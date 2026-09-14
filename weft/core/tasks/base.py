@@ -78,6 +78,7 @@ from weft._constants import (
     WEFT_STREAMING_SESSIONS_QUEUE,
     get_weft_directory_name,
     load_config,
+    resolve_runtime_config,
 )
 from weft._runner_plugins import require_runner_plugin
 from weft.context import WeftContext, build_context
@@ -306,9 +307,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._validate_reactor_topology()
         queue_configs = self._build_queue_configs()
 
-        config_dict = dict(config) if config is not None else load_config()
-        self._weft_config = dict(config_dict)
-        redaction_setting = config_dict.get("WEFT_REDACT_TASKSPEC_FIELDS", "")
+        resolved_config = resolve_runtime_config(config)
+        self._weft_config = dict(resolved_config)
+        redaction_setting = resolved_config.get("REDACT_TASKSPEC_FIELDS", "")
         self._taskspec_redaction_paths: tuple[str, ...] = tuple(
             part.strip() for part in str(redaction_setting).split(",") if part.strip()
         )
@@ -328,7 +329,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             db=db,
             stop_event=stop_event,
             persistent=True,
-            config=config_dict,
+            config=resolved_config,
         )
 
         # Pre-register canonical queues so they share the watcher's connection pool

@@ -1510,6 +1510,8 @@ def test_build_manager_process_command_preserves_bundle_transport_provenance(
     decoded = decode_taskspec_transport_payload(payload)
     assert decoded.get_bundle_root() == str(bundle_root.resolve())
     assert TASKSPEC_BUNDLE_ROOT_FIELD not in taskspec.model_dump(mode="json")
+    config_payload = json.loads(base64.b64decode(command[6]).decode("utf-8"))
+    assert config_payload == {"prefix": "WEFT", "values": dict(context.config)}
 
 
 class _FakePopen:

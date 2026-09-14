@@ -11,10 +11,9 @@ and docs/specifications/03-Manager_Architecture.md [MA-3].
 
 Key behaviours
 --------------
-* **Environment translation** – We read WEFT_* variables via
-  :func:`weft._constants.load_config`, which already maps supported values to
-  the corresponding BROKER_* keys.  The returned configuration is embedded in
-  the context and reused when constructing `simplebroker.Queue` instances.
+* **Configuration** – We resolve WEFT_* inputs via
+  :func:`weft._constants.load_config` into an unprefixed Config. The same
+  snapshot is reused when constructing `simplebroker.Queue` instances.
 * **Broker resolution** – When a task or CLI command does not specify
   `weft_context`, we search upward for SimpleBroker's configured Weft-scoped
   project config (by default `.weft/broker.toml`). If none exists, the current
@@ -56,9 +55,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 from simplebroker import (
     BrokerTarget,
+    Config,
     Queue,
-    ResolvedConfig,
     open_broker,
+    resolve_config,
     target_for_directory,
 )
 from simplebroker.ext import (
@@ -71,10 +71,8 @@ from weft._constants import (
     WEFT_AUTOSTART_DIRECTORY_NAME,
     WEFT_AUTOSTART_TASKS_DEFAULT,
     WEFT_BROKER_PROJECT_CONFIG_FILENAME,
-    apply_weft_simplebroker_defaults,
-    freeze_broker_config,
     get_weft_directory_name,
-    load_config,
+    resolve_runtime_config,
 )
 from weft.helpers import ensure_owner_only_dir, write_json_atomically
 
@@ -90,7 +88,14 @@ __all__ = [
 
 @dataclass(frozen=True)
 class WeftContext:
-    """Resolved context information for a Weft project (Spec: [SB-0], [SB-0.1], [MA-3])."""
+    """Resolved context information for a Weft project.
+
+    Configuration fields are immutable snapshots; use a new context to change
+    configuration.
+
+    Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3];
+    docs/specifications/14-Python_API_Surfaces.md [PY-1].
+    """
 
     root: Path
     """Project root directory."""
@@ -113,10 +118,10 @@ class WeftContext:
     database_path: Path | None
     """Filesystem path for file-backed targets, else ``None``."""
 
-    config: dict[str, Any]
-    """Complete configuration dictionary (WEFT_* and BROKER_* keys)."""
+    config: Config
+    """Read-only configuration with canonical unprefixed keys."""
 
-    broker_config: ResolvedConfig
+    broker_config: Config
     """Immutable ambient-free SimpleBroker configuration."""
 
     project_config: dict[str, Any]
@@ -132,13 +137,15 @@ class WeftContext:
     """True when auto-start templates should be considered during manager boot."""
 
     def __post_init__(self) -> None:
-        """Preserve the ambient-free marker for manually constructed contexts."""
+        """Normalize mappings in manually constructed contexts without ambient reads."""
 
-        if not isinstance(self.broker_config, ResolvedConfig):
+        if not isinstance(self.config, Config):
+            object.__setattr__(self, "config", resolve_runtime_config(self.config))
+        if not isinstance(self.broker_config, Config):
             object.__setattr__(
                 self,
                 "broker_config",
-                freeze_broker_config(self.broker_config),
+                resolve_runtime_config(self.broker_config),
             )
 
     def queue(self, name: str, *, persistent: bool = False) -> Queue:
@@ -249,11 +256,7 @@ def build_context(
 
     Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3]
     """
-    resolved_config = dict(config) if config is not None else dict(load_config())
-    apply_weft_simplebroker_defaults(
-        resolved_config,
-        weft_directory_name=get_weft_directory_name(resolved_config),
-    )
+    resolved_config = resolve_runtime_config(config)
     root, broker_target, discovered = _resolve_root_and_target(
         spec_context,
         resolved_config,
@@ -262,7 +265,7 @@ def build_context(
     weft_dir_name = get_weft_directory_name(resolved_config)
     weft_dir = (root / weft_dir_name).resolve(strict=False)
     outputs_dir = weft_dir / "outputs"
-    logs_dir = _resolve_logs_dir(root, weft_dir, resolved_config.get("WEFT_LOGS_DIR"))
+    logs_dir = _resolve_logs_dir(root, weft_dir, resolved_config.get("LOGS_DIR"))
     config_path = weft_dir / "config.json"
     autostart_dir = weft_dir / WEFT_AUTOSTART_DIRECTORY_NAME
     project_config = _load_project_config(config_path)
@@ -276,16 +279,21 @@ def build_context(
             if project_autostart is not None
             else bool(
                 resolved_config.get(
-                    "WEFT_AUTOSTART_TASKS",
+                    "AUTOSTART_TASKS",
                     WEFT_AUTOSTART_TASKS_DEFAULT,
                 )
             )
         )
     )
-    resolved_config["WEFT_AUTOSTART_TASKS"] = autostart_enabled
-    resolved_config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    resolved_config = resolve_config(
+        config=resolved_config,
+        override={
+            f"{resolved_config.prefix}_AUTOSTART_TASKS": autostart_enabled,
+            f"{resolved_config.prefix}_AUTOSTART_DIR": str(autostart_dir),
+        },
+    )
 
-    broker_config = freeze_broker_config(resolved_config)
+    broker_config = resolve_runtime_config(resolved_config)
 
     if create_dirs:
         # Weft-owned metadata dirs are owner-only. User-relocatable paths
@@ -332,7 +340,7 @@ def resolve_context_broker_target(
     """
 
     resolved_root = Path(root).expanduser().resolve()
-    broker_config = freeze_broker_config(config)
+    broker_config = resolve_runtime_config(config)
     _tighten_project_broker_config_path(
         project_config_path_for_directory(resolved_root, config=broker_config)
     )
@@ -387,7 +395,7 @@ def _tighten_project_broker_config_path(config_path: Path | None) -> None:
 
 def _resolve_root_and_target(
     spec_context: str | os.PathLike[str] | None,
-    config: dict[str, Any],
+    config: Mapping[str, Any],
 ) -> tuple[Path, BrokerTarget, bool]:
     """Determine the project root and broker target."""
     if spec_context is not None:
@@ -397,7 +405,7 @@ def _resolve_root_and_target(
     start_dir = Path.cwd().resolve()
     project_config_path = find_broker_project_config(
         start_dir,
-        config=freeze_broker_config(config),
+        config=resolve_runtime_config(config),
     )
     _tighten_project_broker_config_path(project_config_path)
     if project_config_path is not None:
@@ -429,14 +437,14 @@ def _root_for_discovered_project_config(
 ) -> Path:
     """Derive Weft's root from a discovered project config path."""
 
-    config_path_prefix = Path(str(config.get("BROKER_PROJECT_CONFIG_PATH", "")))
+    config_path_prefix = Path(str(config.get("PROJECT_CONFIG_PATH", "")))
     if config_path_prefix.is_absolute():
         return start_dir
 
     config_name = Path(
         str(
             config.get(
-                "BROKER_PROJECT_CONFIG_NAME",
+                "PROJECT_CONFIG_NAME",
                 WEFT_BROKER_PROJECT_CONFIG_FILENAME,
             )
         )
@@ -452,7 +460,7 @@ def _root_for_discovered_project_config(
 
 def _ensure_database(
     broker_target: BrokerTarget,
-    broker_config: ResolvedConfig,
+    broker_config: Config,
     *,
     database_path: Path | None,
 ) -> None:

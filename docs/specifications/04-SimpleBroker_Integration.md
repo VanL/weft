@@ -24,6 +24,8 @@ See also:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 - SimpleBroker 7.5.1 compatibility plan:
   [`docs/plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md`](../plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md)
+- SimpleBroker 8.2 configuration plan:
+  [`docs/plans/2026-09-14-simplebroker-8-2-configuration-plan.md`](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md)
 - SimpleBroker 8.0 upgrade plan:
   [`docs/plans/2026-08-28-simplebroker-8-upgrade-plan.md`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
 - cleanup policy convergence plan:
@@ -41,12 +43,12 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 8.0.0 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 4.0.0 or newer. These coordinated
+Weft requires SimpleBroker 8.2.1 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 4.2.1 or newer. These coordinated
 floors provide backend API v8, ascending public-message-ID default selection,
 surrogate-free SQL schema v6, bounded dump watermarks, immutable
 invocation/handle configuration snapshots, typed queue result overloads,
-public closeable queue iterator types, and the synchronized watcher lifecycle
+public closeable queue iterator types, ID-cursor live peek pagination, and the synchronized watcher lifecycle
 contract used by Weft.
 
 Upgrading a SQLite or PostgreSQL target from the v7 package line to v8 is a
@@ -147,7 +149,16 @@ _Implementation mapping_: `weft/context.py` (`build_context`,
 `weft/core/tasks/multiqueue_watcher.py` (exact activity signatures,
 `_apply_topology_mutation_on_owner()`, and
 `PollingStrategy.replace_activity_waiter(...)` ownership),
-`weft/core/queue_wait.py`; native acceptance coverage is
+`weft/core/queue_wait.py`; configuration declarations and restoration in
+`weft/_constants.py` (WEFT_CONFIG_FIELDS, load_config,
+_resolve_weft_config, resolve_runtime_config); JSON process transport in
+`weft/core/launcher.py` (launch_task_process, _task_process_entry),
+`weft/core/manager_runtime.py` (_build_manager_process_command), and
+`weft/manager_process.py` (main, run_manager_process); process helper logging
+configuration in `weft/helpers/__init__.py` (reload_config). Configuration
+acceptance coverage is in `tests/system/test_constants.py`,
+`tests/system/test_config_transport.py`, `tests/system/test_manager_process.py`,
+and `tests/context/test_context.py`; native waiter acceptance coverage is
 `test_postgres_background_dynamic_membership_rebinds_native_waiter` in
 `tests/tasks/test_multiqueue_watcher.py`.
 
@@ -519,14 +530,14 @@ Current broker target precedence:
 
 Current boundary notes:
 
-- `WEFT_*` broker aliases are translated through `load_config()` once and then
-  reused by Weft-owned context resolution
+- `WEFT_*` inputs are resolved through `load_config()` once into unprefixed
+  configuration keys and reused by Weft-owned context resolution
 - `WEFT_DIRECTORY_NAME` sets the Weft-owned metadata directory name before
   discovery; `.weft/` remains the default when it is unset
 - Weft maps the configured metadata-directory name onto SimpleBroker's
   project-config discovery keys. By default the Weft broker config path is
   `.weft/broker.toml`, not root `.broker.toml`
-- an absolute `BROKER_PROJECT_CONFIG_PATH` selects the broker configuration and
+- an absolute `WEFT_PROJECT_CONFIG_PATH` selects the broker configuration and
   target only. Without an explicit `spec_context`, the current working
   directory remains `WeftContext.root` and owns the Weft metadata directory;
   the absolute configuration file's parent does not become the Weft root
@@ -592,7 +603,10 @@ Related plan:
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `WeftContext.queue`, `WeftContext.broker`); `weft/_constants.py`
-(`freeze_broker_config`); `weft/commands/init.py`;
+(load_config, resolve_runtime_config, WEFT_CONFIG_FIELDS);
+`weft/core/launcher.py` (launch_task_process, _task_process_entry);
+`weft/core/manager_runtime.py` (_build_manager_process_command);
+`weft/manager_process.py` (main, run_manager_process); `weft/commands/init.py`;
 `weft/commands/interactive.py`;
 `weft/core/manager.py`; `weft/core/pipelines.py`; `weft/core/queue_wait.py`;
 `weft/core/spawn_requests.py`; `weft/core/tasks/base.py`;
@@ -606,28 +620,11 @@ Current contract:
 - `build_context(..., config=...)` lets an embedding app reuse a preloaded
   Weft config instead of forcing a fresh environment read
 - `load_config(overrides=...)` is the canonical way for an embedding app to
-  compile explicit `WEFT_*` and `BROKER_*` overrides into the same canonical
+  compile explicit `WEFT_*` overrides into the same canonical
   config shape that CLI and env-driven Weft use
-- Weft's SimpleBroker embedding config is complete and enumerable. Every
-  public SimpleBroker config key has a Weft-owned default or a mapped
-  `WEFT_*` value before the config is passed down. Valid ambient `BROKER_*`
-  values therefore do not tune Weft, and compiling Weft config does not mutate
-  process environment or standalone SimpleBroker configuration. Mapping
-  coverage must fail closed when SimpleBroker adds a public config key. The
-  small group that selects or constrains Weft's broker is kept distinct from
-  the larger group of named storage/retry constants. Most of the latter are
-  not directly relevant to Weft; their explicit defaults exist to isolate the
-  embedded broker from standalone SimpleBroker tuning.
-- Weft resolves that complete mapping with SimpleBroker 8.0.0's public
-  `resolve_isolated_config()` and preserves or recreates the immutable
-  `ResolvedConfig` marker at every config-consuming lower-layer handoff. Weft
-  does not opt into opaque extra keys. A SimpleBroker handle or invocation that
-  accepts config retains that snapshot for its lower-layer lifetime and does
-  not reread ambient `BROKER_*`, including malformed values.
-- Weft watcher subclasses retain runtime policy in a distinct complete
-  picklable ordinary mapping while leaving BaseWatcher's inherited config slot
-  as its owned `ResolvedConfig`. Process transport uses only the ordinary
-  mapping and recreates the marker at the child SimpleBroker handoff.
+- Weft extends SimpleBroker's `DEFAULT_CONFIG` with `ConfigField` entries for its added or changed settings, each carrying a default, description, and validator. `load_config()` calls the public `resolve_config()` with prefix `WEFT`; broker defaults and validators that Weft does not change belong to SimpleBroker. New upstream fields require no mirrored Weft inventory or schema guard. Ambient `BROKER_*` values never tune Weft, and resolution does not mutate the environment or upstream declarations.
+- In-process configuration is a read-only `Config` with uppercase unprefixed keys. Explicit overrides and environment inputs use `WEFT_*` names; the former `BROKER_*` override aliases and prefixed runtime keys are removed. Invalid earlier source values warn and may be replaced by valid later overrides; invalid final values raise `InvalidConfigError`. Weft retains its own cross-field project-path, external-log-mode, and PostgreSQL target-shape rules.
+- Contexts and SimpleBroker handles share the resolved Config snapshot. Mutable runtime policy copies retain the same unprefixed keys. Process transport uses SimpleBroker's public `serialize_config()` JSON representation. Receiving processes use `deserialize_config(..., defaults=WEFT_CONFIG_DEFAULTS)` through `resolve_runtime_config()` to restore read-only values and namespace with locally imported declarations, without rereading environment or TOML. Validator callables and their import paths are not part of the JSON payload. Weft retains its PostgreSQL target-shape check after restoration. Omitted launch config is resolved in the parent before spawning. Receiving imports must not resolve ambient configuration; the task entry binds helper logging/debug policy from the restored snapshot before loading the task class. Standalone helpers may load their configuration lazily on first use. The private manager serve-active flag is not loaded from the environment.
 - SimpleBroker owns serialized watcher startup/stop cleanup and treats an
   ordinary exception raised by an error handler as terminal after cleanup.
   Weft does not swallow or replace that terminal callback failure and does not

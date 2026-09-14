@@ -1299,3 +1299,16 @@ index is not a dated section and does not count toward the coalescing trigger.
   current supported exception.
 - Reproductions, review and verification are recorded in the
   [audit regression fixes plan](plans/2026-09-11-audit-regression-fixes-plan.md).
+
+## 2026-09-14: Configuration custody includes process imports
+
+A data-only Config decoder did not prevent a spawned task from reading ambient
+configuration: the receiver imported helpers that eagerly called load_config
+before decoding. A separate broker setup snippet in bin/pytest-pg also retained
+the removed dict input API. For configuration migrations, the integration owner
+must check the complete receiver import path and generated subprocess code, not
+only direct call sites. Keep receiving imports free of environment reads, bind
+process helper policy from the restored snapshot before loading task classes,
+and prove custody with a real spawn under invalid child environment values and
+a sender-local validator that cannot be pickled. See the [migration plan](plans/2026-09-14-simplebroker-8-2-configuration-plan.md)
+and `tests/system/test_config_transport.py`.

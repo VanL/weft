@@ -1190,7 +1190,7 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
     )
 
     taskspec = validate_taskspec_payload(template_dict, template=True)
-    reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
+    reuse_enabled = bool(context.config.get("MANAGER_REUSE_ENABLED", True))
 
     def _wait_for_inline_completion(tid: str) -> tuple[str, Any, str | None]:
         resolved_spec = validate_taskspec_payload(
@@ -1304,7 +1304,7 @@ def _execute_spec_via_manager(
         )
     )
     work_payload = prepared.payload
-    reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
+    reuse_enabled = bool(context.config.get("MANAGER_REUSE_ENABLED", True))
 
     def _wait_for_spec_completion(tid: str) -> tuple[str, Any, str | None]:
         resolved_spec = validate_taskspec_payload(
@@ -1400,7 +1400,7 @@ def _execute_pipeline(
         else compiled.bootstrap_input_fallback
     )
 
-    reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
+    reuse_enabled = bool(context.config.get("MANAGER_REUSE_ENABLED", True))
 
     execution = _run_with_managed_execution(
         context=context,

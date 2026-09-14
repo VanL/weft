@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 import weft.commands.init as init_cmd
-from simplebroker import ResolvedConfig
+from simplebroker import Config
 from tests.conftest import run_cli
 from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
@@ -88,7 +88,7 @@ def test_cmd_init_reports_ordinary_backend_plugin_failure(
         ),
     )
 
-    monkeypatch.setattr(init_cmd, "load_config", lambda: {"BROKER_BACKEND": "postgres"})
+    monkeypatch.setattr(init_cmd, "load_config", lambda: {"BACKEND": "postgres"})
 
     with pytest.raises(CommandExecutionError, match="backend detail"):
         cmd_init(tmp_path)
@@ -191,7 +191,7 @@ def test_cmd_init_accepts_in_process_config_overrides(
         lambda: load_config(
             {
                 "WEFT_DIRECTORY_NAME": ".engram",
-                "BROKER_DEFAULT_DB_NAME": "broker.db",
+                "WEFT_DEFAULT_DB_NAME": "broker.db",
             }
         ),
     )
@@ -367,7 +367,7 @@ def test_cmd_init_preserves_backend_install_error_for_missing_plugin(
         "weft.commands.init.resolve_context_broker_target", _raise_missing_plugin
     )
     monkeypatch.setattr(
-        "weft.commands.init.load_config", lambda: {"BROKER_BACKEND": "postgres"}
+        "weft.commands.init.load_config", lambda: {"BACKEND": "postgres"}
     )
 
     with pytest.raises(CommandExecutionError) as exc_info:
@@ -419,7 +419,7 @@ def test_cmd_init_prefers_project_postgres_target_over_env_target(
     assert broker_target.backend_name == "postgres"
     assert broker_target.target == "postgresql://toml-user@toml-host/toml-db"
     assert broker_target.backend_options == {"schema": "toml_schema"}
-    assert isinstance(captured["config"], ResolvedConfig)
+    assert isinstance(captured["config"], Config)
 
 
 def test_cmd_init_ignores_root_simplebroker_config(
@@ -459,7 +459,7 @@ def test_cmd_init_ignores_root_simplebroker_config(
     assert broker_target.backend_name == "sqlite"
     assert broker_target.target_path == (project_root / ".weft" / "broker.db").resolve()
     assert broker_target.config_path is None
-    assert isinstance(captured["config"], ResolvedConfig)
+    assert isinstance(captured["config"], Config)
 
 
 @pytest.mark.parametrize("ambient_cache_mb", ["17", "not-an-integer"])
@@ -489,5 +489,5 @@ def test_cmd_init_passes_isolated_config_to_simplebroker(
 
     assert isinstance(result, InitResult)
     broker_config = captured["config"]
-    assert isinstance(broker_config, ResolvedConfig)
-    assert broker_config["BROKER_CACHE_MB"] == 10
+    assert isinstance(broker_config, Config)
+    assert broker_config["CACHE_MB"] == 10

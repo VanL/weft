@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from simplebroker import Queue, ResolvedConfig
+from simplebroker import Config, Queue
 from weft.core import queue_wait
 from weft.core.queue_wait import QueueChangeMonitor
 
@@ -114,7 +114,7 @@ def test_queue_change_monitor_falls_back_to_queue_watchers(
     monitor.close()
 
     assert created == queues
-    assert all(isinstance(config, ResolvedConfig) for config in watcher_configs)
+    assert all(isinstance(config, Config) for config in watcher_configs)
     assert stopped == 2
 
 

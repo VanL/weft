@@ -2592,7 +2592,7 @@ def test_monitor_store_batch_ingest_updates_tasks_and_checkpoint(tmp_path) -> No
     ctx = _context(tmp_path)
     store = open_monitor_store(
         ctx,
-        config={"WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": 1},
+        config={"TASK_MONITOR_STORE_WRITE_BATCH_SIZE": 1},
     )
     store.ensure_schema()
     first_tid = "1779000000000000010"

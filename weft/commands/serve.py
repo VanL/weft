@@ -37,7 +37,7 @@ def cmd_manager_serve(
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
     """
 
-    overrides: dict[str, object] = {MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True}
+    overrides: dict[str, object] = {f"WEFT_{MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY}": True}
     if level is not None:
         overrides[WEFT_MANAGER_SERVE_LOG_LEVEL] = level
     if log_interval is not None:

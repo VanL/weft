@@ -26,7 +26,6 @@ from weft._constants import (
     MANAGER_SERVE_LOG_QUEUE_SIZE,
     MANAGER_SERVE_LOG_SCHEMA,
     MANAGER_SERVE_LOG_SCHEMA_VERSION,
-    WEFT_MANAGER_SERVE_LOG_LEVEL,
     WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT,
 )
 
@@ -41,11 +40,7 @@ def serve_log_level(config: Mapping[str, Any]) -> str:
     if not bool(config.get(MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY, False)):
         return WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT
     level = (
-        str(
-            config.get(
-                WEFT_MANAGER_SERVE_LOG_LEVEL, WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT
-            )
-        )
+        str(config.get("MANAGER_SERVE_LOG_LEVEL", WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT))
         .strip()
         .lower()
     )

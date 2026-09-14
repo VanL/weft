@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from simplebroker.ext import InvalidConfigError
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
@@ -310,50 +311,50 @@ def test_runtime_config_rejects_custom_mode_without_processor() -> None:
     [
         (
             {
-                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": 0,
-                "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": 0,
+                "TASK_MONITOR_INTERVAL_SECONDS": 0,
+                "TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": 0,
             },
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS",
         ),
         (
             {
-                "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": 0,
-                "WEFT_TASK_MONITOR_BATCH_SIZE": 0,
+                "TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": 0,
+                "TASK_MONITOR_BATCH_SIZE": 0,
             },
             "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
         ),
         (
             {
-                "WEFT_TASK_MONITOR_MODE": "invalid",
-                "WEFT_LOG_TASKS_EXTERNAL_MODE": "invalid",
+                "TASK_MONITOR_MODE": "invalid",
+                "LOG_TASKS_EXTERNAL_MODE": "invalid",
             },
             "WEFT_TASK_MONITOR_MODE",
         ),
         (
             {
-                "WEFT_LOG_TASKS_EXTERNAL_MODE": "invalid",
-                "WEFT_TASK_MONITOR_PROCESSOR": "invalid",
+                "LOG_TASKS_EXTERNAL_MODE": "invalid",
+                "TASK_MONITOR_PROCESSOR": "invalid",
             },
             "WEFT_LOG_TASKS_EXTERNAL_MODE",
         ),
         (
             {
-                "WEFT_TASK_MONITOR_PROCESSOR": "invalid",
-                "WEFT_TASK_MONITOR_LOG_SINK": "invalid",
+                "TASK_MONITOR_PROCESSOR": "invalid",
+                "TASK_MONITOR_LOG_SINK": "invalid",
             },
             "WEFT_TASK_MONITOR_PROCESSOR",
         ),
         (
             {
-                "WEFT_TASK_MONITOR_LOG_SINK": "invalid",
-                "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": 0,
+                "TASK_MONITOR_LOG_SINK": "invalid",
+                "TASK_MONITOR_RESTART_BACKOFF_SECONDS": 0,
             },
             "WEFT_TASK_MONITOR_LOG_SINK",
         ),
         (
             {
-                "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": 0,
-                "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+                "TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": 0,
+                "TASK_MONITOR_MODE": "jsonl_then_delete",
             },
             "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
         ),
@@ -371,8 +372,12 @@ def test_runtime_config_reports_invalid_settings_in_resolution_order(
 
 @pytest.mark.parametrize("mode_name", ["delete", "report_only", "jsonl_then_delete"])
 def test_load_config_rejects_builtin_mode_in_processor_config(mode_name: str) -> None:
-    with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_MODE"):
+    with (
+        pytest.warns(UserWarning, match="WEFT_TASK_MONITOR_PROCESSOR"),
+        pytest.raises(InvalidConfigError, match="module:function") as exc_info,
+    ):
         load_config({"WEFT_TASK_MONITOR_PROCESSOR": mode_name})
+    assert exc_info.value.key == "WEFT_TASK_MONITOR_PROCESSOR"
 
 
 @pytest.mark.parametrize(
@@ -392,10 +397,10 @@ def test_task_monitor_operational_log_emits_config_and_cycle(
     config.update(
         {
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
-            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
-            "WEFT_TASK_MONITOR_ENABLED": True,
-            "WEFT_TASK_MONITOR_MODE": "report_only",
-            "WEFT_TASK_MONITOR_BATCH_SIZE": 5,
+            "MANAGER_SERVE_LOG_LEVEL": "info",
+            "TASK_MONITOR_ENABLED": True,
+            "TASK_MONITOR_MODE": "report_only",
+            "TASK_MONITOR_BATCH_SIZE": 5,
         }
     )
     spec = make_task_monitor_taskspec("1778089999999999001")
@@ -434,12 +439,12 @@ def test_task_monitor_operational_log_warns_for_unhealthy_external_log_on_startu
     config.update(
         {
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
-            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
-            "WEFT_TASK_MONITOR_ENABLED": True,
-            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
-            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": True,
-            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
-            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "MANAGER_SERVE_LOG_LEVEL": "info",
+            "TASK_MONITOR_ENABLED": True,
+            "TASK_MONITOR_MODE": "jsonl_then_delete",
+            "LOG_TASKS_EXTERNAL_ENABLED": True,
+            "LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "LOG_TASKS_EXTERNAL_MODE": "collated",
         }
     )
     monitor = TaskMonitor(
@@ -481,12 +486,12 @@ def test_task_monitor_operational_log_warns_when_external_log_regresses_on_cycle
     config.update(
         {
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
-            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
-            "WEFT_TASK_MONITOR_ENABLED": True,
-            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
-            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": True,
-            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
-            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "MANAGER_SERVE_LOG_LEVEL": "info",
+            "TASK_MONITOR_ENABLED": True,
+            "TASK_MONITOR_MODE": "jsonl_then_delete",
+            "LOG_TASKS_EXTERNAL_ENABLED": True,
+            "LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "LOG_TASKS_EXTERNAL_MODE": "collated",
         }
     )
     monitor = TaskMonitor(
@@ -526,9 +531,9 @@ def test_task_monitor_operational_log_off_is_silent(
     config.update(
         {
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
-            "WEFT_MANAGER_SERVE_LOG_LEVEL": "off",
-            "WEFT_TASK_MONITOR_ENABLED": True,
-            "WEFT_TASK_MONITOR_MODE": "report_only",
+            "MANAGER_SERVE_LOG_LEVEL": "off",
+            "TASK_MONITOR_ENABLED": True,
+            "TASK_MONITOR_MODE": "report_only",
         }
     )
     spec = make_task_monitor_taskspec("1778089999999999002")
@@ -558,9 +563,9 @@ def test_task_monitor_operational_log_failure_warns_without_exposing_error(
     config.update(
         {
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
-            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
-            "WEFT_TASK_MONITOR_ENABLED": True,
-            "WEFT_TASK_MONITOR_MODE": "report_only",
+            "MANAGER_SERVE_LOG_LEVEL": "info",
+            "TASK_MONITOR_ENABLED": True,
+            "TASK_MONITOR_MODE": "report_only",
         }
     )
     monitor = TaskMonitor(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import stat
 from pathlib import Path
 
 import pytest
@@ -13,7 +12,7 @@ from tests.conftest import run_cli
 pytestmark = [pytest.mark.sqlite_only]
 
 
-def test_cli_init_missing_default_db_config(workdir: Path, weft_harness) -> None:
+def test_cli_init_rejects_empty_default_db_config(workdir: Path, weft_harness) -> None:
     project_root = workdir / "no-default"
     env = os.environ.copy()
     env["WEFT_DEFAULT_DB_NAME"] = ""
@@ -28,10 +27,12 @@ def test_cli_init_missing_default_db_config(workdir: Path, weft_harness) -> None
 
     assert rc == 1
     assert out == ""
-    assert "cannot initialize project" in err
+    assert "WEFT_DEFAULT_DB_NAME" in err
+    assert "Traceback" not in err
+    assert not (project_root / ".weft" / "broker.db").exists()
 
 
-def test_cli_init_allows_configured_project_file_without_default_db(
+def test_cli_init_rejects_empty_default_db_with_configured_project_file(
     workdir: Path,
     weft_harness,
 ) -> None:
@@ -42,6 +43,7 @@ def test_cli_init_allows_configured_project_file_without_default_db(
         ('version = 1\nbackend = "sqlite"\ntarget = "broker.db"\n'),
         encoding="utf-8",
     )
+    original_config = config_path.read_bytes()
     env = os.environ.copy()
     env["WEFT_DEFAULT_DB_NAME"] = ""
 
@@ -54,9 +56,9 @@ def test_cli_init_allows_configured_project_file_without_default_db(
         prepare_root=False,
     )
 
-    assert rc == 0
-    assert "Initialized Weft project" in out
-    assert err == ""
-    if os.name != "nt":
-        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
-    assert (project_root / ".weft" / "broker.db").is_file()
+    assert rc == 1
+    assert out == ""
+    assert "WEFT_DEFAULT_DB_NAME" in err
+    assert "Traceback" not in err
+    assert config_path.read_bytes() == original_config
+    assert not (project_root / ".weft" / "broker.db").exists()

@@ -70,7 +70,7 @@ def _positive_int_config(
     """Read one positive integer monitor setting."""
     value = int(config.get(key, default))
     if value <= 0:
-        raise ValueError(f"{key} must be positive")
+        raise ValueError(f"WEFT_{key} must be positive")
     return value
 
 
@@ -82,7 +82,7 @@ def _positive_float_config(
     """Read one positive floating-point monitor setting."""
     value = float(config.get(key, default))
     if value <= 0:
-        raise ValueError(f"{key} must be positive")
+        raise ValueError(f"WEFT_{key} must be positive")
     return value
 
 
@@ -100,7 +100,7 @@ def _choice_config(
         value = value.lower()
     if value not in allowed_values:
         allowed = ", ".join(sorted(allowed_values))
-        raise ValueError(f"{key} must be one of: {allowed}")
+        raise ValueError(f"WEFT_{key} must be one of: {allowed}")
     return value
 
 
@@ -111,7 +111,7 @@ def _monitor_processor_config(
     """Resolve and validate the optional custom monitor processor."""
     processor_value = str(
         config.get(
-            "WEFT_TASK_MONITOR_PROCESSOR",
+            "TASK_MONITOR_PROCESSOR",
             WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
         )
     ).strip()
@@ -210,11 +210,11 @@ class TaskMonitorRuntimeConfig:
         """Build typed runtime config from a loaded Weft config mapping."""
 
         enabled = bool(
-            config.get("WEFT_TASK_MONITOR_ENABLED", WEFT_TASK_MONITOR_ENABLED_DEFAULT)
+            config.get("TASK_MONITOR_ENABLED", WEFT_TASK_MONITOR_ENABLED_DEFAULT)
         )
         interval_seconds = int(
             config.get(
-                "WEFT_TASK_MONITOR_INTERVAL_SECONDS",
+                "TASK_MONITOR_INTERVAL_SECONDS",
                 WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
             )
         )
@@ -226,42 +226,42 @@ class TaskMonitorRuntimeConfig:
 
         catchup_interval_seconds = _positive_float_config(
             config,
-            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
+            "TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
             WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
         )
         batch_size = _positive_int_config(
             config,
-            "WEFT_TASK_MONITOR_BATCH_SIZE",
+            "TASK_MONITOR_BATCH_SIZE",
             WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
         )
         task_log_scan_limit = _positive_int_config(
             config,
-            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT",
+            "TASK_MONITOR_TASK_LOG_SCAN_LIMIT",
             WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
         )
         store_write_batch_size = _positive_int_config(
             config,
-            "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
+            "TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
             WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
         )
         stale_open_family_seconds = _positive_float_config(
             config,
-            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
+            "TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
             WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
         )
         control_queue_delete_limit = _positive_int_config(
             config,
-            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
+            "TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
             WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
         )
         task_log_retention_period_seconds = _positive_float_config(
             config,
-            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
+            "LOG_TASKS_RETENTION_PERIOD_SECONDS",
             WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
         )
 
         reserved_gate_value = config.get(
-            "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"
+            "TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"
         )
         if reserved_gate_value is None:
             # Not explicitly set: derive from the CONFIGURED task-log
@@ -280,7 +280,7 @@ class TaskMonitorRuntimeConfig:
 
         mode = _choice_config(
             config,
-            "WEFT_TASK_MONITOR_MODE",
+            "TASK_MONITOR_MODE",
             WEFT_TASK_MONITOR_MODE_DEFAULT,
             WEFT_TASK_MONITOR_MODES,
             lowercase=True,
@@ -288,19 +288,19 @@ class TaskMonitorRuntimeConfig:
 
         task_log_external_path = str(
             config.get(
-                "WEFT_LOG_TASKS_EXTERNAL_PATH",
+                "LOG_TASKS_EXTERNAL_PATH",
                 WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT,
             )
         ).strip()
         task_log_external_enabled = bool(
             config.get(
-                "WEFT_LOG_TASKS_EXTERNAL_ENABLED",
+                "LOG_TASKS_EXTERNAL_ENABLED",
                 mode == "jsonl_then_delete",
             )
         )
         task_log_external_mode = _choice_config(
             config,
-            "WEFT_LOG_TASKS_EXTERNAL_MODE",
+            "LOG_TASKS_EXTERNAL_MODE",
             WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
             WEFT_LOG_TASKS_EXTERNAL_MODES,
             lowercase=True,
@@ -315,26 +315,26 @@ class TaskMonitorRuntimeConfig:
 
         log_sink = _choice_config(
             config,
-            "WEFT_TASK_MONITOR_LOG_SINK",
+            "TASK_MONITOR_LOG_SINK",
             WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
             WEFT_TASK_MONITOR_LOG_SINKS,
         )
 
         restart_backoff_seconds = _positive_float_config(
             config,
-            "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
+            "TASK_MONITOR_RESTART_BACKOFF_SECONDS",
             WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
         )
 
         maintenance_enabled = bool(
             config.get(
-                "WEFT_TASK_MONITOR_MAINTENANCE",
+                "TASK_MONITOR_MAINTENANCE",
                 WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT,
             )
         )
         maintenance_interval_seconds = _positive_float_config(
             config,
-            "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
+            "TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
             WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS,
         )
         _validate_jsonl_then_delete_config(

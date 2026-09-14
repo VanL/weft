@@ -51,7 +51,7 @@ def test_queue_write_oversized_argv_is_usage_error(
 ) -> None:
     monkeypatch.setattr(
         "weft.commands.queue._context",
-        lambda: SimpleNamespace(config={"BROKER_MAX_MESSAGE_SIZE": 4}),
+        lambda: SimpleNamespace(config={"MAX_MESSAGE_SIZE": 4}),
     )
 
     result = CliRunner().invoke(app, ["queue", "write", "jobs", "hello"])
@@ -77,7 +77,7 @@ def test_queue_stdin_uses_read_only_resolved_context_limit(
 
     def fake_context(*args: object, **kwargs: object) -> object:
         observed.update(context_args=args, context_kwargs=kwargs)
-        return SimpleNamespace(config={"BROKER_MAX_MESSAGE_SIZE": 4})
+        return SimpleNamespace(config={"MAX_MESSAGE_SIZE": 4})
 
     monkeypatch.setattr("weft.cli.app.build_context", fake_context)
     monkeypatch.setattr(

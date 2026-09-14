@@ -100,14 +100,11 @@ from weft._constants import (
     TASK_CLEANUP_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_STATUSES,
-    WEFT_ADMISSION_MAX_CONNECTIONS,
-    WEFT_ADMISSION_RESERVE_FRACTION,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
-    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -385,10 +382,10 @@ class Manager(ServiceTask):
         self._child_processes: dict[str, ManagedChild] = {}
         self._active_child_launches: dict[str, _ManagerChildLaunchRequest] = {}
         self._admission_max_connections = int(
-            self._weft_config.get(WEFT_ADMISSION_MAX_CONNECTIONS, 0)
+            self._weft_config.get("ADMISSION_MAX_CONNECTIONS", 0)
         )
         self._admission_reserve_fraction = float(
-            self._weft_config.get(WEFT_ADMISSION_RESERVE_FRACTION, 0.1)
+            self._weft_config.get("ADMISSION_RESERVE_FRACTION", 0.1)
         )
         self._admission_blocked_lanes: set[AdmissionLane] = set()
         self._admission_retry_after_ns = 0
@@ -403,7 +400,7 @@ class Manager(ServiceTask):
             taskspec.metadata.get(
                 "idle_timeout",
                 self._weft_config.get(
-                    "WEFT_MANAGER_LIFETIME_TIMEOUT",
+                    "MANAGER_LIFETIME_TIMEOUT",
                     WEFT_MANAGER_LIFETIME_TIMEOUT,
                 ),
             )
@@ -431,10 +428,8 @@ class Manager(ServiceTask):
         self._serve_log_last_emit_ns: dict[str, int] = {}
         self._serve_log_last_state: dict[str, str] = {}
         self._serve_log_runtime_handle_id = self._resolve_serve_log_runtime_handle_id()
-        self._autostart_enabled = bool(
-            self._weft_config.get("WEFT_AUTOSTART_TASKS", True)
-        )
-        autostart_dir = self._weft_config.get("WEFT_AUTOSTART_DIR")
+        self._autostart_enabled = bool(self._weft_config.get("AUTOSTART_TASKS", True))
+        autostart_dir = self._weft_config.get("AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
         self._autostart_sources: set[str] = set()
         self._managed_service_state: dict[str, ManagedServiceState] = {}
@@ -444,15 +439,15 @@ class Manager(ServiceTask):
         self._autostart_last_scan_ns = 0
         self._autostart_scan_interval_ns = 1_000_000_000
         self._task_monitor_enabled = bool(
-            self._weft_config.get("WEFT_TASK_MONITOR_ENABLED", True)
+            self._weft_config.get("TASK_MONITOR_ENABLED", True)
         )
         self._liveness_monitor_enabled = bool(
-            self._weft_config.get("WEFT_LIVENESS_MONITOR_ENABLED", True)
+            self._weft_config.get("LIVENESS_MONITOR_ENABLED", True)
         )
         self._task_monitor_restart_backoff_ns = int(
             float(
                 self._weft_config.get(
-                    "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
+                    "TASK_MONITOR_RESTART_BACKOFF_SECONDS",
                     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
                 )
             )
@@ -580,7 +575,7 @@ class Manager(ServiceTask):
         now_ns = time.time_ns()
         interval_seconds = float(
             self._weft_config.get(
-                WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
+                "MANAGER_SERVE_LOG_INTERVAL_SECONDS",
                 WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
             )
         )
@@ -2355,7 +2350,7 @@ class Manager(ServiceTask):
 
     def _manager_runtime_handle(self) -> RunnerHandle:
         config = getattr(self, "_weft_config", {})
-        raw_handle = config.get(WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV)
+        raw_handle = config.get("MANAGER_RUNTIME_HANDLE_JSON")
         if isinstance(raw_handle, str) and raw_handle.strip():
             try:
                 payload = json.loads(raw_handle)

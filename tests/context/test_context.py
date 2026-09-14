@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from simplebroker import BrokerTarget, ResolvedConfig
+from simplebroker import BrokerTarget, Config
 from tests.helpers.test_backend import prepare_project_root
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from weft._constants import compile_config, load_config  # noqa: E402
+from weft._constants import load_config  # noqa: E402
 from weft.context import WeftContext, build_context, service_context_key  # noqa: E402
 
 context_module = sys.modules["weft.context"]
@@ -306,10 +306,10 @@ def test_build_context_absolute_broker_config_keeps_working_directory_as_root(
     )
     working_directory = (tmp_path / "working-directory").resolve()
     working_directory.mkdir()
-    config = compile_config(
+    config = load_config(
         {
-            "BROKER_PROJECT_CONFIG_PATH": str(broker_config_path.parent),
-            "BROKER_PROJECT_CONFIG_NAME": broker_config_path.name,
+            "WEFT_PROJECT_CONFIG_PATH": str(broker_config_path.parent),
+            "WEFT_PROJECT_CONFIG_NAME": broker_config_path.name,
         }
     )
     monkeypatch.chdir(working_directory)
@@ -328,31 +328,31 @@ def test_build_context_absolute_broker_config_keeps_working_directory_as_root(
     assert ctx.discovered is True
 
 
-def test_environment_translation(
+def test_environment_resolves_canonical_broker_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """WEFT_* environment variables are mapped onto BROKER_* settings."""
+    """WEFT_* environment variables resolve to typed unprefixed Config values."""
     monkeypatch.setenv("WEFT_BUSY_TIMEOUT", "2500")
     monkeypatch.setenv("WEFT_PROJECT_SCOPE", "1")
 
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
 
-    assert ctx.broker_config["BROKER_BUSY_TIMEOUT"] == 2500
-    assert isinstance(ctx.broker_config["BROKER_BUSY_TIMEOUT"], int)
-    assert ctx.broker_config["BROKER_PROJECT_SCOPE"] is True
-    assert ctx.broker_config["BROKER_PROJECT_CONFIG_PATH"] == ".weft"
-    assert ctx.broker_config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
-    assert ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
-    assert isinstance(ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"], int)
-    assert isinstance(ctx.broker_config, ResolvedConfig)
+    assert ctx.broker_config["BUSY_TIMEOUT"] == 2500
+    assert isinstance(ctx.broker_config["BUSY_TIMEOUT"], int)
+    assert ctx.broker_config["PROJECT_SCOPE"] is True
+    assert ctx.broker_config["PROJECT_CONFIG_PATH"] == ".weft"
+    assert ctx.broker_config["PROJECT_CONFIG_NAME"] == "broker.toml"
+    assert ctx.broker_config["AUTO_VACUUM_INTERVAL"] == 100
+    assert isinstance(ctx.broker_config["AUTO_VACUUM_INTERVAL"], int)
+    assert isinstance(ctx.broker_config, Config)
 
 
 def test_context_queue_ignores_invalid_ambient_broker_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The nominal config marker survives target, Queue, and broker boundaries."""
+    """The Config snapshot survives target, Queue, and broker boundaries."""
 
     monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
     monkeypatch.setenv("BROKER_DEFAULT_DB_NAME", "../unsafe.db")
@@ -374,7 +374,7 @@ def test_project_discovery_ignores_invalid_ambient_broker_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Automatic project discovery receives the nominal isolated marker."""
+    """Automatic project discovery receives the same resolved Config."""
 
     root = prepare_project_root(tmp_path)
     initial = build_context(spec_context=root)
@@ -447,13 +447,13 @@ def test_build_context_accepts_supplied_config_override(tmp_path: Path) -> None:
     """Embedded callers may override the Weft metadata directory in-process."""
 
     root = prepare_project_root(tmp_path)
-    config = compile_config({"WEFT_DIRECTORY_NAME": ".engram"})
+    config = load_config({"WEFT_DIRECTORY_NAME": ".engram"})
 
     ctx = build_context(spec_context=root, config=config, create_database=False)
 
     assert ctx.root == root.resolve()
     assert ctx.weft_dir == (root / ".engram").resolve()
-    assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
+    assert config["DEFAULT_DB_NAME"] == ".engram/broker.db"
     if ctx.is_file_backed:
         assert ctx.database_path == (root / ".engram" / "broker.db").resolve()
     else:

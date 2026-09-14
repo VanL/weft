@@ -821,17 +821,31 @@ _Implementation mapping_: `weft/commands/queue.py` `cmd_queue_resolve()`,
 
 _Implementation mapping_: `weft/bootstrap.py`,
 `weft/_constants.py` `load_config()`, `weft/context.py` `build_context()`.
+Configuration acceptance coverage: `tests/system/test_constants.py`,
+`tests/cli/test_env_file_bootstrap.py`, `tests/cli/test_cli_init_sqlite_only.py`.
 
 Current configuration domains:
 
 - bootstrap env-file loading through `WEFT_ENV_FILE`, applied before the full
   CLI imports
-- environment variables for Weft defaults and broker alias translation
+- environment variables in the WEFT namespace for the shared configuration resolver
 - Weft-scoped `broker.toml` under the configured Weft metadata directory
   (default `.weft/broker.toml`) for project-scoped broker target selection
 - Weft project metadata and agent settings under the configured Weft metadata
   directory (default `.weft/`), including the optional project-local autostart
   default in its `config.json`
+
+Weft numeric configuration values must be finite; NaN and infinity fail
+at configuration loading, before process transport.
+
+Broker settings follow SimpleBroker 8.2 value rules. `WEFT_VACUUM_THRESHOLD`
+is a percentage from 0 to 100 for both numeric and string inputs: the default
+is 10, and 0.1 means 0.1%. SQLite database-name components accept only ASCII
+letters, digits, dot, dash, and underscore; an explicitly empty database name
+is invalid even when selecting another backend. Omit an irrelevant SQLite name
+when configuring PostgreSQL.
+
+Related plan: [SimpleBroker 8.2 configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
 
 TaskMonitor cleanup behavior is configured through the same `load_config()` and
 `build_context()` path as other Weft settings. `WEFT_TASK_MONITOR_MODE` selects
@@ -969,8 +983,8 @@ Current behavior:
   destination high-water to at least the header floor, including for
   header-only dumps. SimpleBroker's default future-clock-skew warning and
   refusal apply during import; Weft exposes the limit as
-  `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS`, mapped to
-  `BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS`, but does not expose the upstream
+  `WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS`, resolved as
+  `LOAD_MAX_FUTURE_SKEW_SECONDS`, but does not expose the upstream
   `force` override. Invalid recognized broker configuration is rendered as one
   safe CLI error with no traceback before broker target creation.
 - `system task-monitor` scans `weft.log.tasks` without consuming broker

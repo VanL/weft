@@ -66,8 +66,8 @@ uv add 'weft[all]'
 Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
 selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
-Weft requires SimpleBroker 8.0.0 or newer; the Postgres extra requires the
-paired `simplebroker-pg` 4.0.0 or newer. Broker message IDs stay integers in
+Weft requires SimpleBroker 8.2.1 or newer; the Postgres extra requires the
+paired `simplebroker-pg` 4.2.1 or newer. Broker message IDs stay integers in
 Python and relational storage, while external JSON and owned exact-ID fields
 inside Monitor table JSON render them as 19-digit strings.
 
@@ -1335,13 +1335,27 @@ Environment variables:
 - `WEFT_MANAGER_REUSE_ENABLED` - Keep manager running (default: true)
 - `WEFT_AUTOSTART_TASKS` - Enable autostart (default: true)
 
-Weft uses `WEFT_*` names for embedded SimpleBroker settings and passes a
-complete typed broker config to the lower layer. Valid ambient `BROKER_*`
-settings do not tune Weft, and Weft does not change the process environment.
-SimpleBroker 8.0.0's immutable `ResolvedConfig` snapshots carry that isolation
-through config-consuming queue, project, init, watcher, broker, and load
-boundaries. Invalid ambient `BROKER_*` settings are ignored by Weft; invalid
-mapped `WEFT_*` settings still fail with a safe configuration error.
+Weft inherits SimpleBroker's configuration declarations and adds only its own
+settings and changed defaults in `weft/_constants.py:WEFT_CONFIG_FIELDS`. Each
+entry defines its default, description, and validator. Environment variables
+and `load_config(overrides=...)` use `WEFT_*` names; ambient `BROKER_*` variables
+do not affect Weft. A valid explicit override can replace an invalid environment
+value, which emits a warning. Invalid final values fail configuration loading.
+
+`load_config()` returns an immutable SimpleBroker `Config` with unprefixed keys
+(for example, `config["MAX_MESSAGE_SIZE"]`). Contexts and broker handles share
+this snapshot. Manager and task processes receive SimpleBroker's data-only JSON
+representation and restore it using local field declarations and validators,
+without rereading environment or TOML. Mutable policy copies use `dict(config)`.
+Existing callers using `BROKER_*` overrides or prefixed runtime keys must migrate
+to `WEFT_*` overrides and unprefixed lookups.
+
+Numeric settings must be finite; NaN and infinity fail configuration loading.
+`WEFT_VACUUM_THRESHOLD` is a percentage from 0 to 100 for numeric and string
+inputs: the default is 10, and 0.1 means 0.1%. Database-name components accept
+only ASCII letters, digits, dot, dash, and underscore. An explicitly empty
+`WEFT_DEFAULT_DB_NAME` is invalid, including for PostgreSQL; omit an irrelevant
+SQLite name instead.
 
 ## License
 

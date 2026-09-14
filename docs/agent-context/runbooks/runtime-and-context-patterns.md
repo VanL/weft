@@ -21,9 +21,17 @@ Why:
 - Context resolution now delegates to SimpleBroker's public project API.
 - The returned context already carries:
   - the resolved broker target,
-  - translated `BROKER_*` config,
+  - a read-only SimpleBroker `Config` with unprefixed keys (inputs use `WEFT_*`),
   - Weft-specific directories such as `.weft/outputs/` and `.weft/logs/`,
   - and the autostart directory/config.
+
+Configuration declarations belong in `weft/_constants.py:WEFT_CONFIG_FIELDS`:
+add only Weft's new or changed defaults, descriptions, and validators. Unchanged
+fields come from SimpleBroker's `DEFAULT_CONFIG`. For process transport, use
+SimpleBroker's Config JSON API and restore with the local combined declarations
+through `resolve_runtime_config()`. Receiver imports must not load ambient
+configuration before that restoration. The task entry binds helper logging to
+the restored snapshot before constructing the task.
 
 ## 2. Reuse Queue Handles on Live Task Paths
 

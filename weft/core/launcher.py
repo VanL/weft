@@ -2,6 +2,7 @@
 
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-1.2], [MA-3]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 """
 
 from __future__ import annotations
@@ -14,15 +15,18 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from multiprocessing.process import BaseProcess
 from typing import Any, cast
 
-from simplebroker import BrokerTarget
+from simplebroker import BrokerTarget, serialize_config
 from weft._constants import (
     PARENT_LOSS_WAKE_INTERVAL_CEILING,
     PARENT_LOSS_WAKE_INTERVAL_FLOOR,
     TASK_PROCESS_POLL_INTERVAL,
+    resolve_runtime_config,
 )
+from weft.helpers import reload_config
 
 from .taskspec import (
     TaskSpec,
@@ -113,7 +117,7 @@ def _task_process_entry(
     task_cls_path: str,
     db_path: BrokerTarget | str,
     spec_json: str,
-    config: dict[str, Any] | None,
+    config: str,
     poll_interval: float,
     hard_exit_on_return: bool = False,
     detach_stdio: bool = False,
@@ -131,9 +135,11 @@ def _task_process_entry(
     if detach_stdio:
         _redirect_standard_streams_to_devnull()
 
+    resolved_config = resolve_runtime_config(config)
+    reload_config(resolved_config)
     task_cls = _load_task_class(task_cls_path)
     spec = decode_taskspec_transport_payload(json.loads(spec_json))
-    task = task_cls(db_path, spec, config=config)
+    task = task_cls(db_path, spec, config=resolved_config)
     _install_signal_handlers(task)
     initial_parent_pid = os.getppid()
     stop_with_parent = _is_foreground_serve_task(task)
@@ -155,13 +161,16 @@ def launch_task_process(
     db_path: BrokerTarget | str,
     spec: TaskSpec,
     *,
-    config: dict[str, Any] | None = None,
+    config: Mapping[str, Any] | None = None,
     poll_interval: float = TASK_PROCESS_POLL_INTERVAL,
     detach_stdio: bool = True,
 ) -> BaseProcess:
     """Launch *task_cls* in a new spawn-process and return the Process object.
 
-    Spec: [MA-1.2], [MA-3]
+    Configuration is resolved in the parent and crosses spawn as data-only JSON;
+    the child supplies its own declarations and validators.
+
+    Spec: [MA-1.2], [MA-3], [SB-0.4]
     """
 
     ctx = multiprocessing.get_context("spawn")
@@ -173,7 +182,7 @@ def launch_task_process(
             task_cls_path,
             db_path,
             json.dumps(encode_taskspec_transport_payload(spec)),
-            config,
+            serialize_config(resolve_runtime_config(config)),
             poll_interval,
             True,
             detach_stdio,

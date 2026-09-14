@@ -101,10 +101,9 @@ def main() -> int | None:
             sys.stderr.write(f"{exc}\n")
             return 2
 
-    # Weft's broader import graph resolves mapped WEFT_* broker configuration
-    # while building the CLI. Keep that failure inside this import-light
-    # boundary and render SimpleBroker's public safe diagnostic without a
-    # traceback; isolated resolution ignores ambient BROKER_* entirely.
+    # CLI context loading validates WEFT_* configuration. Keep that failure
+    # inside this bootstrap boundary and render SimpleBroker's public safe
+    # diagnostic without a traceback; ambient BROKER_* is ignored.
     from simplebroker.ext import InvalidConfigError
 
     try:

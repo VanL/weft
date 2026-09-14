@@ -10,11 +10,11 @@ from pathlib import Path
 import psutil
 import pytest
 
+from simplebroker import resolve_config
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     MANAGER_PONG_LIVE_AT_KEY,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
-    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft._exceptions import CommandExecutionError, WeftError
@@ -501,7 +501,10 @@ def test_client_serve_preserves_explicit_context(
     original = build_context(prepare_project_root(tmp_path / "project"))
     context = replace(
         original,
-        config={**original.config, WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS: 137.0},
+        config=resolve_config(
+            config=original.config,
+            override={"WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 137.0},
+        ),
     )
     seen: list[WeftContext] = []
 
@@ -515,7 +518,7 @@ def test_client_serve_preserves_explicit_context(
     assert result is None
     assert len(seen) == 1
     assert seen[0] is context
-    assert seen[0].config[WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS] == 137.0
+    assert seen[0].config["MANAGER_SERVE_LOG_INTERVAL_SECONDS"] == 137.0
     assert seen[0].broker_target is context.broker_target
 
 

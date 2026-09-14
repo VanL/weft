@@ -17,7 +17,7 @@ Usage:
 
     # Load configuration once at module level
     _config = load_config()
-    use_logging = _config["WEFT_LOGGING_ENABLED"]
+    use_logging = _config["LOGGING_ENABLED"]
 
 Spec references:
     - docs/specifications/00-Quick_Reference.md
@@ -33,12 +33,17 @@ import math
 import os
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import replace
+from functools import partial
 from typing import Any, Final
 
-from simplebroker import ResolvedConfig, resolve_isolated_config
-from simplebroker.ext import InvalidConfigError
+from simplebroker import (
+    DEFAULT_CONFIG,
+    Config,
+    ConfigField,
+    deserialize_config,
+    resolve_config,
+)
 
 # ==============================================================================
 # VERSION INFORMATION
@@ -1380,7 +1385,7 @@ LIVE_SERVICE_STATUSES: Final[frozenset[str]] = frozenset(
 )
 """Service-owner statuses that count as live convergence evidence."""
 
-MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: Final[str] = "_WEFT_MANAGER_SERVE_LOG_ACTIVE"
+MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: Final[str] = "MANAGER_SERVE_LOG_ACTIVE"
 """Internal config key proving the current process is a foreground serve invocation."""
 
 WEFT_MANAGER_SERVE_LOG_LEVEL: Final[str] = "WEFT_MANAGER_SERVE_LOG_LEVEL"
@@ -2247,198 +2252,6 @@ DOCKERIZED_AGENT_CLAUDE_ENVIRONMENT_PROFILE_REF: Final[str] = (
 """Claude-specific environment-profile hook for the Dockerized agent builtin."""
 
 
-# ==============================================================================
-# SIMPLEBROKER INTEGRATION MAPPINGS
-# ==============================================================================
-
-# Mapping of WEFT_* environment variables to BROKER_* equivalents
-# This allows weft to use SimpleBroker configuration without conflicts
-SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
-    "WEFT_BUSY_TIMEOUT": "BROKER_BUSY_TIMEOUT",
-    "WEFT_CACHE_MB": "BROKER_CACHE_MB",
-    "WEFT_SYNC_MODE": "BROKER_SYNC_MODE",
-    "WEFT_WAL_AUTOCHECKPOINT": "BROKER_WAL_AUTOCHECKPOINT",
-    "WEFT_MAX_MESSAGE_SIZE": "BROKER_MAX_MESSAGE_SIZE",
-    "WEFT_READ_COMMIT_INTERVAL": "BROKER_READ_COMMIT_INTERVAL",
-    "WEFT_GENERATOR_BATCH_SIZE": "BROKER_GENERATOR_BATCH_SIZE",
-    "WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS": "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS",
-    "WEFT_AUTO_VACUUM": "BROKER_AUTO_VACUUM",
-    "WEFT_AUTO_VACUUM_INTERVAL": "BROKER_AUTO_VACUUM_INTERVAL",
-    "WEFT_VACUUM_THRESHOLD": "BROKER_VACUUM_THRESHOLD",
-    "WEFT_VACUUM_BATCH_SIZE": "BROKER_VACUUM_BATCH_SIZE",
-    "WEFT_SKIP_IDLE_CHECK": "BROKER_SKIP_IDLE_CHECK",
-    "WEFT_JITTER_FACTOR": "BROKER_JITTER_FACTOR",
-    "WEFT_INITIAL_CHECKS": "BROKER_INITIAL_CHECKS",
-    "WEFT_MAX_INTERVAL": "BROKER_MAX_INTERVAL",
-    "WEFT_BURST_SLEEP": "BROKER_BURST_SLEEP",
-    "WEFT_DEFAULT_DB_LOCATION": "BROKER_DEFAULT_DB_LOCATION",
-    "WEFT_DEFAULT_DB_NAME": "BROKER_DEFAULT_DB_NAME",
-    "WEFT_PROJECT_CONFIG_PATH": "BROKER_PROJECT_CONFIG_PATH",
-    "WEFT_PROJECT_CONFIG_NAME": "BROKER_PROJECT_CONFIG_NAME",
-    "WEFT_PROJECT_SCOPE": "BROKER_PROJECT_SCOPE",
-    "WEFT_BACKEND": "BROKER_BACKEND",
-    "WEFT_BACKEND_HOST": "BROKER_BACKEND_HOST",
-    "WEFT_BACKEND_PORT": "BROKER_BACKEND_PORT",
-    "WEFT_BACKEND_USER": "BROKER_BACKEND_USER",
-    "WEFT_BACKEND_PASSWORD": "BROKER_BACKEND_PASSWORD",
-    "WEFT_BACKEND_DATABASE": "BROKER_BACKEND_DATABASE",
-    "WEFT_BACKEND_SCHEMA": "BROKER_BACKEND_SCHEMA",
-    "WEFT_BACKEND_TARGET": "BROKER_BACKEND_TARGET",
-}
-
-# Values that directly select or constrain Weft's embedded broker.
-WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS: Final[dict[str, Any]] = {
-    "BROKER_MAX_MESSAGE_SIZE": 10 * 1024 * 1024,
-    "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS": 300,
-    "BROKER_DEFAULT_DB_LOCATION": "",
-    "BROKER_PROJECT_SCOPE": True,
-    "BROKER_BACKEND": "sqlite",
-    "BROKER_BACKEND_HOST": "localhost",
-    "BROKER_BACKEND_PORT": 5432,
-    "BROKER_BACKEND_USER": "postgres",
-    "BROKER_BACKEND_PASSWORD": "",
-    "BROKER_BACKEND_DATABASE": "simplebroker",
-    "BROKER_BACKEND_SCHEMA": "simplebroker_pg_v1",
-    "BROKER_BACKEND_TARGET": "",
-}
-
-# These are named SimpleBroker storage/retry constants, not Weft policy knobs.
-# Weft normally has no direct interest in them. Their explicit defaults seal
-# the embedding boundary so ambient BROKER_* tuning cannot affect Weft.
-SIMPLEBROKER_STORAGE_ISOLATION_DEFAULTS: Final[dict[str, Any]] = {
-    "BROKER_BUSY_TIMEOUT": 5000,
-    "BROKER_CACHE_MB": 10,
-    "BROKER_SYNC_MODE": "FULL",
-    "BROKER_WAL_AUTOCHECKPOINT": 1000,
-    "BROKER_READ_COMMIT_INTERVAL": 1,
-    "BROKER_GENERATOR_BATCH_SIZE": 100,
-    "BROKER_AUTO_VACUUM": 1,
-    "BROKER_AUTO_VACUUM_INTERVAL": 100,
-    "BROKER_VACUUM_THRESHOLD": 0.1,
-    "BROKER_VACUUM_BATCH_SIZE": 1000,
-    "BROKER_SKIP_IDLE_CHECK": False,
-    "BROKER_JITTER_FACTOR": 0.15,
-    "BROKER_INITIAL_CHECKS": 100,
-    "BROKER_MAX_INTERVAL": 0.1,
-    "BROKER_BURST_SLEEP": 0.00001,
-}
-
-# Complete defaults owned by the Weft embedding boundary. The three dynamic
-# project-path defaults are applied below from WEFT_DIRECTORY_NAME.
-WEFT_SIMPLEBROKER_DEFAULTS: Final[dict[str, Any]] = {
-    **WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS,
-    **SIMPLEBROKER_STORAGE_ISOLATION_DEFAULTS,
-}
-
-SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR: Final[str] = (
-    "incompatible SimpleBroker configuration schema: "
-    "Weft's complete configuration mapping must be updated"
-)
-_UNKNOWN_BROKER_KEY_EXPECTED: Final[str] = (
-    "a recognized canonical BROKER_* configuration key"
-)
-WEFT_SIMPLEBROKER_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
-    {*SIMPLEBROKER_ENV_MAPPING.values(), "BROKER_DEBUG", "BROKER_LOGGING_ENABLED"}
-)
-
-REMOVED_SIMPLEBROKER_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
-    {
-        "WEFT_VACUUM_LOCK_TIMEOUT",
-        "BROKER_VACUUM_LOCK_TIMEOUT",
-    }
-)
-"""SimpleBroker 5.0 removed these config keys; do not surface them in Weft config."""
-
-
-def _default_broker_default_db_name(weft_directory_name: str) -> str:
-    """Return the default sqlite broker path rooted under the Weft metadata directory."""
-
-    return f"{weft_directory_name}/broker.db"
-
-
-def _translate_weft_config_vars(config: Mapping[str, Any]) -> dict[str, Any]:
-    """Translate raw WEFT_* config values to BROKER_* equivalents."""
-
-    translated: dict[str, Any] = {}
-
-    for weft_key, broker_key in SIMPLEBROKER_ENV_MAPPING.items():
-        if weft_key not in config:
-            continue
-        value = config[weft_key]
-        if value is not None:
-            translated[broker_key] = value
-
-    return translated
-
-
-def apply_weft_simplebroker_defaults(
-    config: dict[str, Any], *, weft_directory_name: str
-) -> None:
-    """Apply weft-specific defaults for SimpleBroker integration.
-
-    Args:
-        config: Configuration dictionary to modify in-place
-    """
-    for key, default_value in WEFT_SIMPLEBROKER_DEFAULTS.items():
-        config.setdefault(key, default_value)
-    config.setdefault(
-        "BROKER_DEFAULT_DB_NAME",
-        _default_broker_default_db_name(weft_directory_name),
-    )
-    config.setdefault("BROKER_PROJECT_CONFIG_PATH", weft_directory_name)
-    config.setdefault("BROKER_PROJECT_CONFIG_NAME", WEFT_BROKER_PROJECT_CONFIG_FILENAME)
-
-
-def _resolve_weft_broker_config(
-    config: Mapping[str, Any],
-    *,
-    base_broker_config: Mapping[str, Any] | None = None,
-    explicit_broker_overrides: Mapping[str, Any] | None = None,
-) -> ResolvedConfig:
-    """Return the complete typed SimpleBroker config for the supplied Weft config."""
-
-    broker_overrides = dict(base_broker_config or {})
-    broker_overrides.update(_translate_weft_config_vars(config))
-    if explicit_broker_overrides is not None:
-        broker_overrides.update(explicit_broker_overrides)
-    apply_weft_simplebroker_defaults(
-        broker_overrides,
-        weft_directory_name=get_weft_directory_name(config),
-    )
-    broker_overrides["BROKER_DEBUG"] = config["WEFT_DEBUG"]
-    broker_overrides["BROKER_LOGGING_ENABLED"] = config["WEFT_LOGGING_ENABLED"]
-    _validate_postgres_backend_config_shape(broker_overrides)
-    try:
-        resolved = resolve_isolated_config(broker_overrides)
-    except InvalidConfigError as exc:
-        if exc.expected == _UNKNOWN_BROKER_KEY_EXPECTED:
-            raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR) from exc
-        raise
-    if set(resolved) != set(broker_overrides):
-        raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR)
-    return resolved
-
-
-def freeze_broker_config(config: Mapping[str, Any]) -> ResolvedConfig:
-    """Recreate a complete ambient-free broker config at an ownership boundary."""
-
-    broker_values = {
-        key: value for key, value in config.items() if key.startswith("BROKER_")
-    }
-    expected = WEFT_SIMPLEBROKER_CONFIG_KEYS
-    if set(broker_values) != expected:
-        raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR)
-    try:
-        resolved = resolve_isolated_config(broker_values)
-    except InvalidConfigError as exc:
-        if exc.expected == _UNKNOWN_BROKER_KEY_EXPECTED:
-            raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR) from exc
-        raise
-    if set(resolved) != expected:
-        raise RuntimeError(SIMPLEBROKER_CONFIG_COMPATIBILITY_ERROR)
-    return resolved
-
-
 def _parse_bool(value: str | None) -> bool:
     """Parse a boolean value from environment variable string.
 
@@ -2458,29 +2271,41 @@ def _parse_bool(value: str | None) -> bool:
 
 
 def _parse_non_negative_float(value: str, *, name: str) -> float:
-    """Parse a non-negative float environment value."""
+    """Parse a finite non-negative float environment value.
+
+    Spec: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4];
+    docs/specifications/10-CLI_Interface.md [CLI-5].
+    """
 
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise ValueError(f"{name} must be a non-negative float, got {value!r}") from exc
+        raise ValueError(
+            f"{name} must be a finite non-negative float, got {value!r}"
+        ) from exc
 
-    if parsed < 0:
-        raise ValueError(f"{name} must be a non-negative float, got {value!r}")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"{name} must be a finite non-negative float, got {value!r}")
 
     return parsed
 
 
 def _parse_positive_float(value: str, *, name: str) -> float:
-    """Parse a positive float environment value."""
+    """Parse a finite positive float environment value.
+
+    Spec: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4];
+    docs/specifications/10-CLI_Interface.md [CLI-5].
+    """
 
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise ValueError(f"{name} must be a positive float, got {value!r}") from exc
+        raise ValueError(
+            f"{name} must be a finite positive float, got {value!r}"
+        ) from exc
 
-    if parsed <= 0:
-        raise ValueError(f"{name} must be a positive float, got {value!r}")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"{name} must be a finite positive float, got {value!r}")
 
     return parsed
 
@@ -2748,20 +2573,6 @@ def _parse_weft_logs_dir(value: str) -> str | None:
     return path or None
 
 
-def _load_weft_env_value(
-    name: str,
-    *,
-    default: Any,
-    parser: Callable[[str], Any],
-) -> Any:
-    """Load and normalize one Weft-owned environment value."""
-
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    return parser(raw_value)
-
-
 def _config_has_non_empty_value(config: Mapping[str, Any], *keys: str) -> bool:
     """Return whether any named config key is set to a non-empty value."""
 
@@ -2777,15 +2588,6 @@ def _config_has_non_empty_value(config: Mapping[str, Any], *keys: str) -> bool:
     return False
 
 
-POSTGRES_BACKEND_PART_DEFAULTS: Final[dict[str, Any]] = {
-    "BROKER_BACKEND_HOST": "localhost",
-    "BROKER_BACKEND_PORT": 5432,
-    "BROKER_BACKEND_USER": "postgres",
-    "BROKER_BACKEND_DATABASE": "simplebroker",
-}
-"""SimpleBroker's implicit Postgres connection-part defaults."""
-
-
 def _config_has_non_default_postgres_part(
     config: Mapping[str, Any],
     key: str,
@@ -2794,272 +2596,36 @@ def _config_has_non_default_postgres_part(
 
     if not _config_has_non_empty_value(config, key):
         return False
-    return bool(config.get(key) != POSTGRES_BACKEND_PART_DEFAULTS[key])
+    return bool(config.get(key) != DEFAULT_CONFIG[key].default)
 
 
 def _validate_postgres_backend_config_shape(config: Mapping[str, Any]) -> None:
     """Reject ambiguous Postgres backend configuration shapes."""
 
-    backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
+    backend_name = str(config.get("BACKEND", "sqlite")).strip().lower()
     if backend_name != "postgres":
         return
 
-    if not _config_has_non_empty_value(config, "BROKER_BACKEND_TARGET"):
+    if not _config_has_non_empty_value(config, "BACKEND_TARGET"):
         return
 
     conflicting_parts: list[str] = []
-    if _config_has_non_default_postgres_part(config, "BROKER_BACKEND_HOST"):
+    if _config_has_non_default_postgres_part(config, "BACKEND_HOST"):
         conflicting_parts.append("host")
-    if _config_has_non_default_postgres_part(config, "BROKER_BACKEND_PORT"):
+    if _config_has_non_default_postgres_part(config, "BACKEND_PORT"):
         conflicting_parts.append("port")
-    if _config_has_non_default_postgres_part(config, "BROKER_BACKEND_USER"):
+    if _config_has_non_default_postgres_part(config, "BACKEND_USER"):
         conflicting_parts.append("user")
-    if _config_has_non_default_postgres_part(config, "BROKER_BACKEND_DATABASE"):
+    if _config_has_non_default_postgres_part(config, "BACKEND_DATABASE"):
         conflicting_parts.append("database")
 
     if conflicting_parts:
         parts = ", ".join(conflicting_parts)
         raise ValueError(
             "Postgres backend configuration is ambiguous: set "
-            "WEFT/BROKER_BACKEND_TARGET or WEFT/BROKER_BACKEND_HOST/PORT/USER/"
+            "WEFT_BACKEND_TARGET or WEFT_BACKEND_HOST/PORT/USER/"
             f"DATABASE, not both (conflicting parts: {parts})"
         )
-
-
-def _load_weft_env_vars() -> dict[str, Any]:
-    """Load weft-specific configuration from environment variables.
-
-    Returns:
-        Dict with WEFT_* configuration values
-    """
-    removed_task_monitor_env = {
-        "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": (
-            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED was removed; "
-            "the collation store is always enabled; use "
-            "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
-        ),
-        "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": (
-            "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS was removed; use "
-            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"
-        ),
-        "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": (
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED was removed; use "
-            "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
-        ),
-        "WEFT_TASK_MONITOR_CLEANUP_WORKERS": (
-            "WEFT_TASK_MONITOR_CLEANUP_WORKERS was removed; TaskMonitor runtime "
-            "cleanup uses bounded reactor-launched worker slices"
-        ),
-    }
-    for env_name, message in removed_task_monitor_env.items():
-        if env_name in os.environ:
-            raise ValueError(message)
-    task_monitor_mode = _load_weft_env_value(
-        "WEFT_TASK_MONITOR_MODE",
-        default=WEFT_TASK_MONITOR_MODE_DEFAULT,
-        parser=_parse_task_monitor_mode,
-    )
-    external_task_log_path = _load_weft_env_value(
-        "WEFT_LOG_TASKS_EXTERNAL_PATH",
-        default=WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT,
-        parser=_parse_log_tasks_external_path,
-    )
-    external_task_log_enabled = _load_weft_env_value(
-        "WEFT_LOG_TASKS_EXTERNAL_ENABLED",
-        default=(task_monitor_mode == "jsonl_then_delete"),
-        parser=_parse_bool,
-    )
-    env_vars = {
-        "WEFT_DEBUG": _load_weft_env_value(
-            "WEFT_DEBUG",
-            default=False,
-            parser=_parse_bool,
-        ),
-        "WEFT_LOGGING_ENABLED": _load_weft_env_value(
-            "WEFT_LOGGING_ENABLED",
-            default=False,
-            parser=_parse_bool,
-        ),
-        "WEFT_LOGS_DIR": _load_weft_env_value(
-            "WEFT_LOGS_DIR",
-            default=None,
-            parser=_parse_weft_logs_dir,
-        ),
-        "WEFT_REDACT_TASKSPEC_FIELDS": _load_weft_env_value(
-            "WEFT_REDACT_TASKSPEC_FIELDS",
-            default="",
-            parser=str,
-        ),
-        "WEFT_LOG_TASKS_EXTERNAL_PATH": external_task_log_path,
-        "WEFT_LOG_TASKS_EXTERNAL_ENABLED": external_task_log_enabled,
-        "WEFT_LOG_TASKS_EXTERNAL_MODE": _load_weft_env_value(
-            "WEFT_LOG_TASKS_EXTERNAL_MODE",
-            default=WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
-            parser=_parse_log_tasks_external_mode,
-        ),
-        "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": _load_weft_env_value(
-            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
-            default=WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
-            parser=_parse_log_tasks_retention_period_seconds,
-        ),
-        "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
-            # None means "not explicitly set": the runtime config derives the
-            # effective gate from the CONFIGURED task-log retention period so
-            # the two gates agree even when only retention is overridden
-            # ([OBS.13.5]). An explicitly set value always wins.
-            default=None,
-            parser=_parse_task_monitor_reserved_cleanup_min_age_seconds,
-        ),
-        "WEFT_DIRECTORY_NAME": _load_weft_env_value(
-            "WEFT_DIRECTORY_NAME",
-            default=WEFT_DIRECTORY_NAME_DEFAULT,
-            parser=_parse_weft_directory_name,
-        ),
-        "WEFT_MANAGER_LIFETIME_TIMEOUT": _load_weft_env_value(
-            "WEFT_MANAGER_LIFETIME_TIMEOUT",
-            default=WEFT_MANAGER_LIFETIME_TIMEOUT,
-            parser=_parse_manager_lifetime_timeout,
-        ),
-        "WEFT_MANAGER_REUSE_ENABLED": _load_weft_env_value(
-            "WEFT_MANAGER_REUSE_ENABLED",
-            default=WEFT_MANAGER_REUSE_ENABLED,
-            parser=_parse_bool,
-        ),
-        WEFT_ADMISSION_MAX_CONNECTIONS: _load_weft_env_value(
-            WEFT_ADMISSION_MAX_CONNECTIONS,
-            default=WEFT_ADMISSION_MAX_CONNECTIONS_DEFAULT,
-            parser=_parse_admission_max_connections,
-        ),
-        WEFT_ADMISSION_RESERVE_FRACTION: _load_weft_env_value(
-            WEFT_ADMISSION_RESERVE_FRACTION,
-            default=WEFT_ADMISSION_RESERVE_FRACTION_DEFAULT,
-            parser=_parse_admission_reserve_fraction,
-        ),
-        "WEFT_MANAGER_RUNTIME_HANDLE_JSON": _load_weft_env_value(
-            WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
-            default=None,
-            parser=lambda value: value,
-        ),
-        "WEFT_AUTOSTART_TASKS": _load_weft_env_value(
-            "WEFT_AUTOSTART_TASKS",
-            default=WEFT_AUTOSTART_TASKS_DEFAULT,
-            parser=_parse_bool,
-        ),
-        "WEFT_TASK_MONITOR_ENABLED": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_ENABLED",
-            default=WEFT_TASK_MONITOR_ENABLED_DEFAULT,
-            parser=_parse_bool,
-        ),
-        "WEFT_LIVENESS_MONITOR_ENABLED": _load_weft_env_value(
-            "WEFT_LIVENESS_MONITOR_ENABLED",
-            default=LIVENESS_MONITOR_ENABLED_DEFAULT,
-            parser=_parse_bool,
-        ),
-        "WEFT_TASK_MONITOR_INTERVAL_SECONDS": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_INTERVAL_SECONDS",
-            default=WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
-            parser=_parse_task_monitor_interval_seconds,
-        ),
-        "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
-            default=WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
-            parser=_parse_task_monitor_catchup_interval_seconds,
-        ),
-        "WEFT_TASK_MONITOR_BATCH_SIZE": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_BATCH_SIZE",
-            default=WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
-            parser=_parse_task_monitor_batch_size,
-        ),
-        "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT",
-            default=WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
-            parser=_parse_task_monitor_task_log_scan_limit,
-        ),
-        "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
-            default=WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
-            parser=_parse_task_monitor_store_write_batch_size,
-        ),
-        "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
-            default=WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
-            parser=_parse_task_monitor_stale_open_family_seconds,
-        ),
-        "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
-            default=WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
-            parser=_parse_task_monitor_control_queue_delete_limit,
-        ),
-        "WEFT_TASK_MONITOR_MODE": task_monitor_mode,
-        "WEFT_TASK_MONITOR_PROCESSOR": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_PROCESSOR",
-            default=WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
-            parser=_parse_task_monitor_processor,
-        ),
-        "WEFT_TASK_MONITOR_LOG_SINK": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_LOG_SINK",
-            default=WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
-            parser=_parse_task_monitor_log_sink,
-        ),
-        "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
-            default=WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
-            parser=_parse_task_monitor_restart_backoff_seconds,
-        ),
-        "WEFT_TASK_MONITOR_MAINTENANCE": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_MAINTENANCE",
-            default=WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT,
-            parser=_parse_bool,
-        ),
-        "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
-            default=WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS,
-            parser=_parse_task_monitor_maintenance_interval_seconds,
-        ),
-        WEFT_MANAGER_SERVE_LOG_LEVEL: _load_weft_env_value(
-            WEFT_MANAGER_SERVE_LOG_LEVEL,
-            default=WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT,
-            parser=_parse_manager_serve_log_level,
-        ),
-        WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS: _load_weft_env_value(
-            WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
-            default=WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
-            parser=_parse_manager_serve_log_interval,
-        ),
-    }
-    for weft_key in SIMPLEBROKER_ENV_MAPPING:
-        if weft_key in env_vars:
-            continue
-        raw_value = os.environ.get(weft_key)
-        if raw_value is not None:
-            env_vars[weft_key] = raw_value
-    return env_vars
-
-
-def _add_simplebroker_env_vars(config: dict[str, Any]) -> None:
-    """Add SimpleBroker configuration to weft config dictionary.
-
-    Args:
-        config: Configuration dictionary to modify in-place
-
-    This function:
-    1. Translates WEFT_* environment variables to BROKER_* equivalents
-    2. Applies weft-specific defaults for SimpleBroker integration
-    """
-    config.update(_resolve_weft_broker_config(config))
-
-
-class _OverrideKind(Enum):
-    """Named input categories for explicit in-process overrides."""
-
-    BOOLISH = "boolish"
-    BOOL_OR_STRING = "bool_or_string"
-    OPTIONAL_STRING = "optional_string"
-    STRING = "string"
-    INTEGER_OR_STRING = "integer_or_string"
-    NUMBER_OR_STRING = "number_or_string"
-    REMOVED = "removed"
 
 
 def _normalize_boolish_override(value: Any, parser: Callable[[str], Any]) -> Any:
@@ -3136,368 +2702,411 @@ def _normalize_number_or_string_override(
     raise TypeError(f"{name} override must be int, float, or str")
 
 
-@dataclass(frozen=True, slots=True)
-class _OverrideRule:
-    """One validated explicit in-process override contract."""
-
-    kind: _OverrideKind
-    parser: Callable[[str], Any] | None = None
-    removed_message: str | None = None
-
-    def __post_init__(self) -> None:
-        """Reject internally inconsistent rule declarations at import time."""
-
-        if self.kind is _OverrideKind.REMOVED:
-            if self.parser is not None or not self.removed_message:
-                raise ValueError("removed override rules require only a reason")
-            return
-        if self.removed_message is not None:
-            raise ValueError("live override rules cannot carry a removal reason")
-        if self.kind is not _OverrideKind.STRING and self.parser is None:
-            raise ValueError(f"{self.kind.value} override rules require a parser")
-
-    def normalize(self, name: str, value: Any) -> Any:
-        """Apply the named category while preserving parser precedence."""
-
-        if self.kind is _OverrideKind.BOOLISH:
-            return _normalize_boolish_override(value, self._required_parser(name))
-        if self.kind is _OverrideKind.BOOL_OR_STRING:
-            return _normalize_bool_or_string_override(
-                name, value, self._required_parser(name)
-            )
-        if self.kind is _OverrideKind.OPTIONAL_STRING:
-            return _normalize_optional_string_override(
-                name, value, self._required_parser(name)
-            )
-        if self.kind is _OverrideKind.STRING:
-            return _normalize_string_override(name, value, self.parser)
-        if self.kind is _OverrideKind.INTEGER_OR_STRING:
-            return _normalize_integer_or_string_override(
-                name, value, self._required_parser(name)
-            )
-        if self.kind is _OverrideKind.NUMBER_OR_STRING:
-            return _normalize_number_or_string_override(
-                name, value, self._required_parser(name)
-            )
-        if self.removed_message is None:  # pragma: no cover - validated invariant
-            raise AssertionError(f"{name} removed rule has no reason")
-        raise ValueError(self.removed_message)
-
-    def _required_parser(self, name: str) -> Callable[[str], Any]:
-        """Return the parser guaranteed by the validated rule declaration."""
-
-        if self.parser is None:  # pragma: no cover - validated invariant
-            raise AssertionError(f"{name} live rule has no parser")
-        return self.parser
+def _normalize_optional_number_override(
+    name: str, value: Any, parser: Callable[[str], Any]
+) -> Any:
+    """Preserve an unset derived numeric policy value."""
+    return (
+        None
+        if value is None
+        else _normalize_number_or_string_override(name, value, parser)
+    )
 
 
-_WEFT_OVERRIDE_RULES: Final[dict[str, _OverrideRule]] = {
-    "WEFT_DEBUG": _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
+# Only Weft-owned additions and changes are declared here. Every other field,
+# including its validator and default, comes directly from SimpleBroker.
+WEFT_CONFIG_FIELDS: Final[Mapping[str, ConfigField]] = {
+    "DEBUG": ConfigField(
+        False,
+        "a boolean or value interpreted by Weft truthiness",
+        partial(_normalize_boolish_override, parser=_parse_bool),
     ),
-    "WEFT_LOGGING_ENABLED": _OverrideRule(
-        kind=_OverrideKind.BOOL_OR_STRING,
-        parser=_parse_bool,
-    ),
-    "WEFT_LOGS_DIR": _OverrideRule(
-        kind=_OverrideKind.OPTIONAL_STRING,
-        parser=_parse_weft_logs_dir,
-    ),
-    "WEFT_REDACT_TASKSPEC_FIELDS": _OverrideRule(
-        kind=_OverrideKind.STRING,
-    ),
-    "WEFT_LOG_TASKS_EXTERNAL_PATH": _OverrideRule(
-        kind=_OverrideKind.STRING,
-        parser=_parse_log_tasks_external_path,
-    ),
-    "WEFT_LOG_TASKS_EXTERNAL_ENABLED": _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
-    ),
-    "WEFT_LOG_TASKS_EXTERNAL_MODE": _OverrideRule(
-        kind=_OverrideKind.STRING,
-        parser=_parse_log_tasks_external_mode,
-    ),
-    "WEFT_TASK_MONITOR_MODE": _OverrideRule(
-        kind=_OverrideKind.STRING,
-        parser=_parse_task_monitor_mode,
-    ),
-    "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_log_tasks_retention_period_seconds,
-    ),
-    "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_task_monitor_reserved_cleanup_min_age_seconds,
-    ),
-    "WEFT_DIRECTORY_NAME": _OverrideRule(
-        kind=_OverrideKind.STRING,
-        parser=_parse_weft_directory_name,
-    ),
-    "WEFT_MANAGER_LIFETIME_TIMEOUT": _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_manager_lifetime_timeout,
-    ),
-    "WEFT_MANAGER_REUSE_ENABLED": _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
-    ),
-    WEFT_ADMISSION_MAX_CONNECTIONS: _OverrideRule(
-        kind=_OverrideKind.INTEGER_OR_STRING,
-        parser=_parse_admission_max_connections,
-    ),
-    WEFT_ADMISSION_RESERVE_FRACTION: _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_admission_reserve_fraction,
-    ),
-    "WEFT_AUTOSTART_TASKS": _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
-    ),
-    "WEFT_TASK_MONITOR_ENABLED": _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
-    ),
-    "WEFT_LIVENESS_MONITOR_ENABLED": _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
-    ),
-    "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": _OverrideRule(
-        kind=_OverrideKind.REMOVED,
-        removed_message=(
-            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED was removed; "
-            "the collation store is always enabled; use "
-            "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
+    "LOGGING_ENABLED": ConfigField(
+        False,
+        "a bool or string using Weft boolean values",
+        partial(
+            _normalize_bool_or_string_override,
+            "WEFT_LOGGING_ENABLED",
+            parser=_parse_bool,
         ),
     ),
-    "WEFT_TASK_MONITOR_MAINTENANCE": _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
+    "LOGS_DIR": ConfigField(
+        None,
+        "a directory path string or None",
+        partial(
+            _normalize_optional_string_override,
+            "WEFT_LOGS_DIR",
+            parser=_parse_weft_logs_dir,
+        ),
     ),
-    "WEFT_TASK_MONITOR_INTERVAL_SECONDS": _OverrideRule(
-        kind=_OverrideKind.INTEGER_OR_STRING,
-        parser=_parse_task_monitor_interval_seconds,
+    "REDACT_TASKSPEC_FIELDS": ConfigField(
+        "",
+        "a comma-separated string of TaskSpec field paths",
+        partial(_normalize_string_override, "WEFT_REDACT_TASKSPEC_FIELDS", parser=None),
     ),
-    "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_task_monitor_catchup_interval_seconds,
+    "LOG_TASKS_EXTERNAL_PATH": ConfigField(
+        WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT,
+        "a string path to the external task log",
+        partial(
+            _normalize_string_override,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH",
+            parser=_parse_log_tasks_external_path,
+        ),
     ),
-    "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_task_monitor_maintenance_interval_seconds,
+    "LOG_TASKS_EXTERNAL_ENABLED": ConfigField(
+        False,
+        "a boolean using Weft truthiness",
+        partial(_normalize_boolish_override, parser=_parse_bool),
     ),
-    "WEFT_TASK_MONITOR_BATCH_SIZE": _OverrideRule(
-        kind=_OverrideKind.INTEGER_OR_STRING,
-        parser=_parse_task_monitor_batch_size,
+    "LOG_TASKS_EXTERNAL_MODE": ConfigField(
+        WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
+        "one of: collated, raw",
+        partial(
+            _normalize_string_override,
+            "WEFT_LOG_TASKS_EXTERNAL_MODE",
+            parser=_parse_log_tasks_external_mode,
+        ),
     ),
-    "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": _OverrideRule(
-        kind=_OverrideKind.INTEGER_OR_STRING,
-        parser=_parse_task_monitor_task_log_scan_limit,
+    "LOG_TASKS_RETENTION_PERIOD_SECONDS": ConfigField(
+        WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
+        "a finite positive number of seconds",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
+            parser=_parse_log_tasks_retention_period_seconds,
+        ),
     ),
-    "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": _OverrideRule(
-        kind=_OverrideKind.INTEGER_OR_STRING,
-        parser=_parse_task_monitor_store_write_batch_size,
+    "TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": ConfigField(
+        None,
+        "a finite non-negative number of seconds or None to derive from retention",
+        partial(
+            _normalize_optional_number_override,
+            "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
+            parser=_parse_task_monitor_reserved_cleanup_min_age_seconds,
+        ),
     ),
-    "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_task_monitor_stale_open_family_seconds,
+    "DIRECTORY_NAME": ConfigField(
+        WEFT_DIRECTORY_NAME_DEFAULT,
+        "a non-empty directory name, not a path, dot, or dot-dot",
+        partial(
+            _normalize_string_override,
+            "WEFT_DIRECTORY_NAME",
+            parser=_parse_weft_directory_name,
+        ),
     ),
-    "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": _OverrideRule(
-        kind=_OverrideKind.INTEGER_OR_STRING,
-        parser=_parse_task_monitor_control_queue_delete_limit,
+    "MANAGER_LIFETIME_TIMEOUT": ConfigField(
+        WEFT_MANAGER_LIFETIME_TIMEOUT,
+        "a finite non-negative number of seconds",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_MANAGER_LIFETIME_TIMEOUT",
+            parser=_parse_manager_lifetime_timeout,
+        ),
     ),
-    "WEFT_TASK_MONITOR_PROCESSOR": _OverrideRule(
-        kind=_OverrideKind.STRING,
-        parser=_parse_task_monitor_processor,
+    "MANAGER_REUSE_ENABLED": ConfigField(
+        WEFT_MANAGER_REUSE_ENABLED,
+        "a boolean using Weft truthiness",
+        partial(_normalize_boolish_override, parser=_parse_bool),
     ),
-    "WEFT_TASK_MONITOR_LOG_SINK": _OverrideRule(
-        kind=_OverrideKind.STRING,
-        parser=_parse_task_monitor_log_sink,
+    "ADMISSION_MAX_CONNECTIONS": ConfigField(
+        WEFT_ADMISSION_MAX_CONNECTIONS_DEFAULT,
+        "0 or a positive integer",
+        partial(
+            _normalize_integer_or_string_override,
+            "WEFT_ADMISSION_MAX_CONNECTIONS",
+            parser=_parse_admission_max_connections,
+        ),
     ),
-    "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_task_monitor_restart_backoff_seconds,
+    "ADMISSION_RESERVE_FRACTION": ConfigField(
+        WEFT_ADMISSION_RESERVE_FRACTION_DEFAULT,
+        "a finite number satisfying 0 <= value < 1",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_ADMISSION_RESERVE_FRACTION",
+            parser=_parse_admission_reserve_fraction,
+        ),
     ),
-    WEFT_MANAGER_SERVE_LOG_LEVEL: _OverrideRule(
-        kind=_OverrideKind.STRING,
-        parser=_parse_manager_serve_log_level,
+    "MANAGER_RUNTIME_HANDLE_JSON": ConfigField(
+        None,
+        "a JSON string or None",
+        partial(
+            _normalize_optional_string_override,
+            "WEFT_MANAGER_RUNTIME_HANDLE_JSON",
+            parser=str,
+        ),
+        sensitive=True,
     ),
-    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS: _OverrideRule(
-        kind=_OverrideKind.NUMBER_OR_STRING,
-        parser=_parse_manager_serve_log_interval,
+    "AUTOSTART_TASKS": ConfigField(
+        WEFT_AUTOSTART_TASKS_DEFAULT,
+        "a boolean using Weft truthiness",
+        partial(_normalize_boolish_override, parser=_parse_bool),
     ),
-    MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: _OverrideRule(
-        kind=_OverrideKind.BOOLISH,
-        parser=_parse_bool,
+    "TASK_MONITOR_ENABLED": ConfigField(
+        WEFT_TASK_MONITOR_ENABLED_DEFAULT,
+        "a boolean using Weft truthiness",
+        partial(_normalize_boolish_override, parser=_parse_bool),
     ),
-    "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": _OverrideRule(
-        kind=_OverrideKind.REMOVED,
-        removed_message="WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS was removed; use WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
+    "LIVENESS_MONITOR_ENABLED": ConfigField(
+        LIVENESS_MONITOR_ENABLED_DEFAULT,
+        "a boolean using Weft truthiness",
+        partial(_normalize_boolish_override, parser=_parse_bool),
     ),
-    "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": _OverrideRule(
-        kind=_OverrideKind.REMOVED,
-        removed_message="WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED was removed; use WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup",
+    "TASK_MONITOR_INTERVAL_SECONDS": ConfigField(
+        WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
+        "an integer number of seconds at least 60",
+        partial(
+            _normalize_integer_or_string_override,
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS",
+            parser=_parse_task_monitor_interval_seconds,
+        ),
     ),
-    "WEFT_TASK_MONITOR_CLEANUP_WORKERS": _OverrideRule(
-        kind=_OverrideKind.REMOVED,
-        removed_message="WEFT_TASK_MONITOR_CLEANUP_WORKERS was removed; TaskMonitor runtime cleanup uses bounded reactor-launched worker slices",
+    "TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": ConfigField(
+        WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
+        "a finite positive number of seconds",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
+            parser=_parse_task_monitor_catchup_interval_seconds,
+        ),
+    ),
+    "TASK_MONITOR_BATCH_SIZE": ConfigField(
+        WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
+        "a positive integer count",
+        partial(
+            _normalize_integer_or_string_override,
+            "WEFT_TASK_MONITOR_BATCH_SIZE",
+            parser=_parse_task_monitor_batch_size,
+        ),
+    ),
+    "TASK_MONITOR_TASK_LOG_SCAN_LIMIT": ConfigField(
+        WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
+        "a positive integer count",
+        partial(
+            _normalize_integer_or_string_override,
+            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT",
+            parser=_parse_task_monitor_task_log_scan_limit,
+        ),
+    ),
+    "TASK_MONITOR_STORE_WRITE_BATCH_SIZE": ConfigField(
+        WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
+        "a positive integer count",
+        partial(
+            _normalize_integer_or_string_override,
+            "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
+            parser=_parse_task_monitor_store_write_batch_size,
+        ),
+    ),
+    "TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": ConfigField(
+        WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
+        "a finite positive number of seconds",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
+            parser=_parse_task_monitor_stale_open_family_seconds,
+        ),
+    ),
+    "TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": ConfigField(
+        WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
+        "a positive integer count",
+        partial(
+            _normalize_integer_or_string_override,
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
+            parser=_parse_task_monitor_control_queue_delete_limit,
+        ),
+    ),
+    "TASK_MONITOR_MODE": ConfigField(
+        WEFT_TASK_MONITOR_MODE_DEFAULT,
+        "one of: custom, delete, jsonl_then_delete, report_only",
+        partial(
+            _normalize_string_override,
+            "WEFT_TASK_MONITOR_MODE",
+            parser=_parse_task_monitor_mode,
+        ),
+    ),
+    "TASK_MONITOR_PROCESSOR": ConfigField(
+        WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
+        "empty or a module:function reference, not a built-in mode",
+        partial(
+            _normalize_string_override,
+            "WEFT_TASK_MONITOR_PROCESSOR",
+            parser=_parse_task_monitor_processor,
+        ),
+    ),
+    "TASK_MONITOR_LOG_SINK": ConfigField(
+        WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
+        "one of: disk, none, stdout",
+        partial(
+            _normalize_string_override,
+            "WEFT_TASK_MONITOR_LOG_SINK",
+            parser=_parse_task_monitor_log_sink,
+        ),
+    ),
+    "TASK_MONITOR_RESTART_BACKOFF_SECONDS": ConfigField(
+        WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
+        "a finite positive number of seconds",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
+            parser=_parse_task_monitor_restart_backoff_seconds,
+        ),
+    ),
+    "TASK_MONITOR_MAINTENANCE": ConfigField(
+        WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT,
+        "a boolean using Weft truthiness",
+        partial(_normalize_boolish_override, parser=_parse_bool),
+    ),
+    "TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": ConfigField(
+        WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS,
+        "a finite positive number of seconds",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
+            parser=_parse_task_monitor_maintenance_interval_seconds,
+        ),
+    ),
+    "MANAGER_SERVE_LOG_LEVEL": ConfigField(
+        WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT,
+        "one of: debug, info, off, trace",
+        partial(
+            _normalize_string_override,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL",
+            parser=_parse_manager_serve_log_level,
+        ),
+    ),
+    "MANAGER_SERVE_LOG_INTERVAL_SECONDS": ConfigField(
+        WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
+        "a finite positive number of seconds",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS",
+            parser=_parse_manager_serve_log_interval,
+        ),
+    ),
+    "DEFAULT_DB_NAME": replace(
+        DEFAULT_CONFIG["DEFAULT_DB_NAME"], default=".weft/broker.db"
+    ),
+    "PROJECT_CONFIG_PATH": replace(
+        DEFAULT_CONFIG["PROJECT_CONFIG_PATH"], default=".weft"
+    ),
+    "PROJECT_CONFIG_NAME": replace(
+        DEFAULT_CONFIG["PROJECT_CONFIG_NAME"],
+        default=WEFT_BROKER_PROJECT_CONFIG_FILENAME,
+    ),
+    "PROJECT_SCOPE": replace(DEFAULT_CONFIG["PROJECT_SCOPE"], default=True),
+    "MANAGER_SERVE_LOG_ACTIVE": ConfigField(
+        False,
+        "whether foreground serve logging is active",
+        partial(_normalize_boolish_override, parser=_parse_bool),
     ),
 }
-
-
-def _normalize_weft_override_value(name: str, value: Any) -> Any:
-    """Normalize one explicit in-process config override."""
-
-    rule = _WEFT_OVERRIDE_RULES.get(name)
-    return rule.normalize(name, value) if rule is not None else value
-
-
-def _normalize_weft_overrides(overrides: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize explicit in-process config overrides."""
-
-    return {
-        key: _normalize_weft_override_value(key, value)
-        for key, value in overrides.items()
-        if key not in REMOVED_SIMPLEBROKER_CONFIG_KEYS
+WEFT_CONFIG_DEFAULTS: Final[Mapping[str, ConfigField]] = {
+    **DEFAULT_CONFIG,
+    **WEFT_CONFIG_FIELDS,
+}
+REMOVED_WEFT_CONFIG: Final[Mapping[str, str]] = {
+    "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED was removed; "
+    "the collation store is always enabled; use "
+    "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup",
+    "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS was removed; use WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
+    "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED was removed; use WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup",
+    "WEFT_TASK_MONITOR_CLEANUP_WORKERS": "WEFT_TASK_MONITOR_CLEANUP_WORKERS was removed; TaskMonitor runtime cleanup uses bounded reactor-launched worker slices",
+}
+IGNORED_CONFIG_INPUTS: Final[frozenset[str]] = frozenset(
+    {
+        "WEFT_VACUUM_LOCK_TIMEOUT",
+        "BROKER_VACUUM_LOCK_TIMEOUT",
     }
+)
 
 
-def load_environment() -> dict[str, Any]:
-    """Load configuration from environment variables.
+def _resolve_weft_config(
+    *, env: Mapping[str, str] | None = None, override: Mapping[str, Any] | None = None
+) -> Config:
+    """Resolve one declared namespace, then derive Weft cross-field defaults.
 
-    This function reads all Weft environment variables and returns
-    a configuration dictionary with validated values. It's designed to be
-    called once at module initialization to avoid repeated environment lookups.
-
-    Returns:
-        dict: Configuration dictionary with the following keys:
-
-        Weft-specific:
-            WEFT_DEBUG (bool): Enable debug output.
-                Default: False
-                Shows additional diagnostic information.
-                False for: empty, "0", "f", "false", "none", or "null"
-                (case-insensitive)
-                True for: any other non-empty value (e.g., "1", "true", "yes")
-
-            WEFT_LOGGING_ENABLED (bool): Enable logging output.
-                Default: False (disabled)
-                False for: empty, "0", "f", "false", "none", or "null"
-                (case-insensitive)
-                True for: any other non-empty value (e.g., "1", "true", "yes")
-                When enabled, logs will be written using Python's logging module.
-                Configure logging levels and handlers in your application as needed.
-
-            WEFT_MANAGER_SERVE_LOG_LEVEL (str): Enable structured JSONL
-                operational logs for `weft manager serve`.
-                Default: "off"; allowed: "off", "info", "debug", "trace".
-
-            WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS (float): Minimum interval
-                for repeated foreground manager operational-log events.
-                Default: 5.0.
-
-        SimpleBroker integration:
-            BROKER_* keys translated from WEFT_* environment variables
-            for seamless SimpleBroker API integration without conflicts.
-
+    Spec: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4];
+    docs/specifications/10-CLI_Interface.md [CLI-5].
     """
-    env_vars = _load_weft_env_vars()
-    _add_simplebroker_env_vars(env_vars)
-    return env_vars
-
-
-def compile_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Compile canonical Weft config from env plus optional in-process overrides.
-
-    Args:
-        overrides: Optional mapping of explicit WEFT_* and/or BROKER_* overrides.
-
-    Returns:
-        A fresh configuration dictionary containing resolved WEFT_* and BROKER_* keys.
-    """
-
-    base_config = load_environment()
-    if overrides is None:
-        return base_config
-
-    normalized_overrides = _normalize_weft_overrides(overrides)
-    resolved_config = dict(base_config)
-    resolved_config.update(normalized_overrides)
-    if (
-        "WEFT_TASK_MONITOR_MODE" in normalized_overrides
-        and "WEFT_LOG_TASKS_EXTERNAL_ENABLED" not in normalized_overrides
-    ):
-        resolved_config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] = (
-            resolved_config["WEFT_TASK_MONITOR_MODE"] == "jsonl_then_delete"
-        )
-
-    base_broker_config = {
-        key: value for key, value in base_config.items() if key.startswith("BROKER_")
+    for source in (env or {}, override or {}):
+        for name, message in REMOVED_WEFT_CONFIG.items():
+            if name in source:
+                raise ValueError(message)
+    # These are internal process inputs, not arbitrary ambient Weft variables.
+    # Field names still come from the merged declarations, never a second catalog.
+    selected_env = {
+        name: value
+        for name, value in (env or {}).items()
+        if name.startswith("WEFT_")
+        and name.removeprefix("WEFT_") in WEFT_CONFIG_DEFAULTS
+        and name != "WEFT_MANAGER_SERVE_LOG_ACTIVE"
     }
-    explicit_broker_overrides = {
-        key: value
-        for key, value in normalized_overrides.items()
-        if key.startswith("BROKER_")
+    selected_override = {
+        name: value
+        for name, value in (override or {}).items()
+        if name not in IGNORED_CONFIG_INPUTS
     }
-    if (
-        "WEFT_DIRECTORY_NAME" in normalized_overrides
-        and "WEFT_DEFAULT_DB_NAME" not in normalized_overrides
-        and "BROKER_DEFAULT_DB_NAME" not in explicit_broker_overrides
-    ):
-        base_broker_config.pop("BROKER_DEFAULT_DB_NAME", None)
-    if (
-        "WEFT_DIRECTORY_NAME" in normalized_overrides
-        and "WEFT_PROJECT_CONFIG_PATH" not in normalized_overrides
-        and "BROKER_PROJECT_CONFIG_PATH" not in explicit_broker_overrides
-    ):
-        base_broker_config.pop("BROKER_PROJECT_CONFIG_PATH", None)
-    resolved_config.update(
-        _resolve_weft_broker_config(
-            resolved_config,
-            base_broker_config=base_broker_config,
-            explicit_broker_overrides=explicit_broker_overrides,
-        )
+    resolved = resolve_config(
+        prefix="WEFT",
+        defaults=WEFT_CONFIG_DEFAULTS,
+        env=selected_env,
+        override=selected_override,
     )
-    return resolved_config
+    supplied = selected_env.keys() | selected_override.keys()
+    derived: dict[str, Any] = {}
+    directory = resolved["DIRECTORY_NAME"]
+    if "WEFT_DEFAULT_DB_NAME" not in supplied:
+        derived["WEFT_DEFAULT_DB_NAME"] = f"{directory}/broker.db"
+    if "WEFT_PROJECT_CONFIG_PATH" not in supplied:
+        derived["WEFT_PROJECT_CONFIG_PATH"] = directory
+    if "WEFT_LOG_TASKS_EXTERNAL_ENABLED" not in supplied or (
+        "WEFT_TASK_MONITOR_MODE" in selected_override
+        and "WEFT_LOG_TASKS_EXTERNAL_ENABLED" not in selected_override
+    ):
+        derived["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] = (
+            resolved["TASK_MONITOR_MODE"] == "jsonl_then_delete"
+        )
+    resolved = resolve_config(config=resolved, override=derived)
+    _validate_postgres_backend_config_shape(resolved)
+    return resolved
 
 
-def load_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Public entry point for retrieving the current configuration.
+def load_config(overrides: Mapping[str, Any] | None = None) -> Config:
+    """Load the WEFT namespace into one immutable, unprefixed configuration.
 
-    Args:
-        overrides: Optional explicit WEFT_* and/or BROKER_* overrides to
-            compile on top of the current process environment.
+    Extend WEFT_CONFIG_FIELDS to declare added or changed defaults, descriptions,
+    and validators. Unchanged broker declarations are inherited from DEFAULT_CONFIG.
+    Explicit WEFT_* overrides take precedence over WEFT_* environment values.
+    Invalid earlier values warn; only invalid final values prevent resolution.
 
-    Returns:
-        A fresh configuration dictionary containing both WEFT_* and BROKER_* keys.
-
-    Notes:
-        The returned dictionary is not cached; callers should cache it themselves
-        if repeated lookups are required.
+    Spec: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4];
+    docs/specifications/10-CLI_Interface.md [CLI-5].
     """
-    return compile_config(overrides)
+    return _resolve_weft_config(env=os.environ, override=overrides)
+
+
+def resolve_runtime_config(config: Mapping[str, Any] | str | None = None) -> Config:
+    """Preserve a Config or restore canonical runtime values or Config JSON.
+
+    Supplied values never trigger environment or TOML reads. JSON restoration
+    binds the receiver-owned field declarations and preserves the namespace.
+    Mutable policy copies use the same unprefixed keys.
+
+    Spec: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4].
+    """
+    if config is None:
+        return load_config()
+    if isinstance(config, str):
+        restored = deserialize_config(config, defaults=WEFT_CONFIG_DEFAULTS)
+        _validate_postgres_backend_config_shape(restored)
+        return restored
+    if isinstance(config, Config):
+        return resolve_config(config=config)
+    return _resolve_weft_config(
+        override={f"WEFT_{key}": value for key, value in config.items()}
+    )
 
 
 def get_weft_directory_name(config: Mapping[str, Any] | None = None) -> str:
     """Return the configured Weft metadata directory name."""
-
     source = config if config is not None else load_config()
-    value = source.get("WEFT_DIRECTORY_NAME")
-    if isinstance(value, str) and value.strip():
-        return value
-    return WEFT_DIRECTORY_NAME_DEFAULT
-
-
-def reload_environment(config: dict[str, Any]) -> dict[str, Any]:
-    """Reload the environment variables and update the configuration.
-
-    Args:
-        config: The current configuration dictionary.
-
-    Returns:
-        The updated configuration dictionary with reloaded environment variables.
-    """
-    new_env_vars = load_environment()
-    config.update(new_env_vars)
-    return config
+    return str(source.get("DIRECTORY_NAME", WEFT_DIRECTORY_NAME_DEFAULT))

@@ -15,7 +15,6 @@ from typing import Any
 from simplebroker.commands import cmd_init as sb_cmd_init
 from weft._constants import (
     WEFT_BROKER_PROJECT_CONFIG_FILENAME,
-    freeze_broker_config,
     load_config,
 )
 from weft._exceptions import CommandExecutionError
@@ -31,11 +30,11 @@ from weft.context import (
 def _project_config_path(root: Path, config: Mapping[str, Any]) -> Path:
     """Return the configured SimpleBroker project config path for a Weft root."""
 
-    path_prefix = Path(str(config.get("BROKER_PROJECT_CONFIG_PATH", "")))
+    path_prefix = Path(str(config.get("PROJECT_CONFIG_PATH", "")))
     config_name = Path(
         str(
             config.get(
-                "BROKER_PROJECT_CONFIG_NAME",
+                "PROJECT_CONFIG_NAME",
                 WEFT_BROKER_PROJECT_CONFIG_FILENAME,
             )
         )
@@ -67,16 +66,7 @@ def cmd_init(
     """
     config = load_config()
     root = Path(directory or Path.cwd()).expanduser().resolve()
-    backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
     project_broker_config_path = _project_config_path(root, config)
-    if (
-        backend_name == "sqlite"
-        and not config.get("BROKER_DEFAULT_DB_NAME")
-        and not project_broker_config_path.is_file()
-    ):
-        raise CommandExecutionError(
-            "BROKER_DEFAULT_DB_NAME not set in global config; cannot initialize project"
-        )
     created = not project_broker_config_path.is_file()
     try:
         _tighten_existing_project_broker_config(project_broker_config_path)
@@ -85,7 +75,7 @@ def cmd_init(
             sb_cmd_init(
                 broker_target,
                 quiet=True,
-                config=freeze_broker_config(config),
+                config=config,
             )
         )
     except Exception as exc:

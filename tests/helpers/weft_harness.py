@@ -33,7 +33,6 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
-    WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
@@ -257,7 +256,7 @@ class WeftTestHarness:
             metadata={"supervisor": "weft-test-harness"},
         )
         manager_config = dict(context.config)
-        manager_config[WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV] = json.dumps(
+        manager_config["MANAGER_RUNTIME_HANDLE_JSON"] = json.dumps(
             manager_runtime_handle.to_dict()
         )
         manager = Manager(context.broker_target, spec, config=manager_config)

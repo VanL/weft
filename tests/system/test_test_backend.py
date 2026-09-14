@@ -9,7 +9,6 @@ from unittest.mock import Mock, patch
 import pytest
 
 import tests.helpers.test_backend as test_backend_module
-from simplebroker import ResolvedConfig
 from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
     cleanup_prepared_roots,
@@ -71,9 +70,7 @@ def test_cleanup_prepared_roots_logs_failure_and_continues(
         _dsn: str,
         *,
         backend_options: dict[str, str],
-        config: ResolvedConfig,
     ) -> None:
-        assert isinstance(config, ResolvedConfig)
         if backend_options["schema"] == "failed_schema":
             raise RuntimeError(private_error)
 
@@ -168,31 +165,6 @@ def test_prepare_project_root_supports_context_queue_roundtrip(tmp_path: Path) -
         assert queue.read() == "hello"
     finally:
         cleanup_prepared_roots(root.parent)
-
-
-def test_prepare_project_root_provisioning_ignores_invalid_ambient_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plugin = Mock()
-    env = {
-        "BROKER_TEST_BACKEND": "postgres",
-        "WEFT_PG_TEST_DSN": "postgresql://test.invalid/weft",
-    }
-    monkeypatch.setenv("BROKER_CACHE_MB", "not-an-integer")
-    monkeypatch.setattr(test_backend_module, "_PREPARED_POSTGRES_ROOTS", set())
-
-    with patch(
-        "tests.helpers.test_backend.get_backend_plugin",
-        return_value=plugin,
-    ):
-        prepare_project_root(tmp_path / "isolated", env=env)
-
-    plugin.initialize_target.assert_called_once()
-    assert isinstance(
-        plugin.initialize_target.call_args.kwargs["config"],
-        ResolvedConfig,
-    )
 
 
 def test_prepare_project_root_isolates_distinct_roots(tmp_path: Path) -> None:

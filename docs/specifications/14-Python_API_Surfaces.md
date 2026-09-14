@@ -27,6 +27,14 @@ there, including `weft.core.*`, helpers, constants, command leaves, and
 `CommandExecutionError`, `SubmissionError`, `SubmissionValidationError`,
 `SubmissionManagerError`, and `normalize_taskspec_payload`.
 
+Contexts used by the client carry immutable SimpleBroker `Config` snapshots
+with uppercase unprefixed keys in `config` and `broker_config`, as specified in
+[SB-0.4]. Create a new context to apply changed configuration; copying its
+values does not reconfigure live handles.
+
+Implementation: `weft/context.py:WeftContext` owns the context snapshot.
+Related plan: [SimpleBroker configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
+
 ## Commands surface contract [PY-2]
 
 Task observations use the shared per-TID runtime-state readers

@@ -200,7 +200,7 @@ def test_public_queue_writes_use_resolved_context_message_limit(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
-    context = SimpleNamespace(config={"BROKER_MAX_MESSAGE_SIZE": 4})
+    context = SimpleNamespace(config={"MAX_MESSAGE_SIZE": 4})
     monkeypatch.setattr(
         queue_cmd,
         "_public_command_context",

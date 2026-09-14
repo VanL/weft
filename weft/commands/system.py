@@ -1086,10 +1086,8 @@ def _service_enabled(ctx: WeftContext, key: str) -> bool:
     Spec: [MA-1] item 7
     """
 
-    task_monitor_enabled = bool(ctx.config.get("WEFT_TASK_MONITOR_ENABLED", True))
-    liveness_monitor_enabled = bool(
-        ctx.config.get("WEFT_LIVENESS_MONITOR_ENABLED", True)
-    )
+    task_monitor_enabled = bool(ctx.config.get("TASK_MONITOR_ENABLED", True))
+    liveness_monitor_enabled = bool(ctx.config.get("LIVENESS_MONITOR_ENABLED", True))
     if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
         return task_monitor_enabled
     if key == INTERNAL_SERVICE_KEY_HEARTBEAT:

@@ -3503,7 +3503,7 @@ def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
     external_path.rmdir()
     external_path.write_text("", encoding="utf-8")
     flush_config = dict(config)
-    flush_config["WEFT_TASK_MONITOR_BATCH_SIZE"] = 1
+    flush_config["TASK_MONITOR_BATCH_SIZE"] = 1
     flush_task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999961"),
@@ -8565,18 +8565,20 @@ def _jsonl_lifecycle_config(
     backlog spans multiple ingest windows like production's multi-day one.
     """
 
-    return load_config(
-        {
-            "WEFT_TASK_MONITOR_ENABLED": "1",
-            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_BATCH_SIZE": batch_size,
-            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": scan_limit,
-            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": retention_seconds,
-            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
-            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
-            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
-            "WEFT_TASK_MONITOR_LOG_SINK": "none",
-        }
+    return dict(
+        load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "1",
+                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+                "WEFT_TASK_MONITOR_BATCH_SIZE": batch_size,
+                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": scan_limit,
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": retention_seconds,
+                "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+                "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+                "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            }
+        )
     )
 
 
@@ -9305,7 +9307,7 @@ def test_retirement_backlog_identifies_binding_stage(  # noqa: C901 approved [TS
     # for retirement under a nonzero gate. Retirement-scale binding-stage
     # identification is this test's concern, not reserved-KEEP inspection
     # timing, so the gate is set to an explicit zero here.
-    config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] = 0.0
+    config["TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] = 0.0
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     base_tid = time.time_ns()
     tids = tuple(str(base_tid + offset) for offset in range(120))
@@ -10530,16 +10532,18 @@ def _drain_queue(queue: Any) -> None:
 def _stale_open_test_config() -> dict[str, Any]:
     """Shared TaskMonitor config for the stale-open liveness-gate tests."""
 
-    return load_config(
-        {
-            "WEFT_TASK_MONITOR_ENABLED": "1",
-            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": "5",
-            "WEFT_TASK_MONITOR_MODE": "delete",
-            "WEFT_TASK_MONITOR_LOG_SINK": "none",
-        }
+    return dict(
+        load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "1",
+                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+                "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+                "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": "5",
+                "WEFT_TASK_MONITOR_MODE": "delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            }
+        )
     )
 
 

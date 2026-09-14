@@ -1141,7 +1141,7 @@ def test_normalize_taskspec_payload_is_pure(
     """The seam builds no context, reads no config, opens no broker, writes nothing.
 
     Verifies:
-    - Tripwires on `build_context`, `load_config`, and `open_broker` at their
+    - Tripwires on `build_context`, `resolve_runtime_config`, and `open_broker` at their
       use-site bindings (by-name imports make the defining module the wrong
       patch target) never fire
     - No file appears in a read-only cwd and no new `.weft` anywhere up the chain
@@ -1156,7 +1156,7 @@ def test_normalize_taskspec_payload_is_pure(
         raise AssertionError("forbidden on the export path")
 
     monkeypatch.setattr("weft.client._client.build_context", _forbidden)
-    monkeypatch.setattr("weft.context.load_config", _forbidden)
+    monkeypatch.setattr("weft.context.resolve_runtime_config", _forbidden)
     monkeypatch.setattr("weft.context.open_broker", _forbidden)
 
     parents = [tmp_path, *tmp_path.parents]

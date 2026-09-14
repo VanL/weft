@@ -22,7 +22,7 @@ from typing import Any
 
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
-from weft._constants import freeze_broker_config
+from weft._constants import resolve_runtime_config
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
@@ -61,8 +61,8 @@ class InteractiveStreamClient:
         on_state: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._db_path = db_path
-        self._config = dict(config)
-        self._broker_config = freeze_broker_config(config)
+        self._config = resolve_runtime_config(config)
+        self._broker_config = self._config
         self._tid = tid
         self._inbox_name = inbox
         self._outbox_name = outbox

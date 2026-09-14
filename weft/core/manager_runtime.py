@@ -3,6 +3,7 @@
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.4], [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-3.1], [MF-7]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 
-from simplebroker import Queue, serialize_broker_target
+from simplebroker import Queue, serialize_broker_target, serialize_config
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_SURFACE_WAIT_TIMEOUT,
@@ -869,7 +870,7 @@ def build_manager_spec(
         if idle_timeout_override is not None
         else float(
             context.config.get(
-                "WEFT_MANAGER_LIFETIME_TIMEOUT", WEFT_MANAGER_LIFETIME_TIMEOUT
+                "MANAGER_LIFETIME_TIMEOUT", WEFT_MANAGER_LIFETIME_TIMEOUT
             )
         )
     )
@@ -936,7 +937,7 @@ def _build_manager_process_command(
 
     spec_json = json.dumps(encode_taskspec_transport_payload(invocation.spec))
     broker_target_json = serialize_broker_target(context.broker_target)
-    config_json = json.dumps(context.config)
+    config_json = serialize_config(context.config)
 
     broker_target_b64 = base64.b64encode(broker_target_json.encode("utf-8")).decode(
         "ascii"

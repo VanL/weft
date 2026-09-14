@@ -3,13 +3,16 @@
 import ast
 import os
 import re
+from collections.abc import MutableMapping
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 
 import weft._constants as constants
-from simplebroker import ResolvedConfig, resolve_config
+from simplebroker import Config, resolve_config
+from simplebroker.ext import InvalidConfigError
 from weft._constants import (
     ADMISSION_SERVICE_RESERVE_SLOTS,
     AGENT_SESSION_READY_TIMEOUT_SECONDS,
@@ -76,12 +79,9 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_ADMISSION_MAX_CONNECTIONS,
     WEFT_ADMISSION_RESERVE_FRACTION,
-    WEFT_AUTOSTART_TASKS_DEFAULT,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_DIRECTORY_NAME_DEFAULT,
     WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT,
-    WEFT_MANAGER_LIFETIME_TIMEOUT,
-    WEFT_MANAGER_REUSE_ENABLED,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
     WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
@@ -94,33 +94,8 @@ from weft._constants import (
     WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
     __version__,
-    compile_config,
     load_config,
 )
-
-
-def _explicit_normalizer_keys() -> set[str]:
-    return set(constants._WEFT_OVERRIDE_RULES)
-
-
-def test_env_loader_and_explicit_override_normalizer_keys_stay_in_parity() -> None:
-    """Default-backed loader keys and explicit normalizers differ only by policy."""
-
-    with patch.dict(os.environ, {}, clear=True):
-        loader_keys = set(constants._load_weft_env_vars())
-    normalizer_keys = _explicit_normalizer_keys()
-    loader_only = {"WEFT_MANAGER_RUNTIME_HANDLE_JSON"}
-    normalizer_only = {
-        "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
-        "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED",
-        "WEFT_TASK_MONITOR_CLEANUP_WORKERS",
-        "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
-        constants.MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
-    }
-
-    assert loader_keys - normalizer_keys == loader_only
-    assert normalizer_keys - loader_keys == normalizer_only
-    assert loader_keys - loader_only == normalizer_keys - normalizer_only
 
 
 @pytest.mark.parametrize(
@@ -137,7 +112,7 @@ def test_env_loader_and_explicit_override_normalizer_keys_stay_in_parity() -> No
         ("WEFT_TASK_MONITOR_INTERVAL_SECONDS", 60, 60),
         ("WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS", 0.5, 0.5),
         ("WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS", 0.25, 0.25),
-        ("UNRECOGNIZED_EMBEDDER_VALUE", object(), None),
+        ("WEFT_CUSTOM_VALUE", object(), None),
     ],
 )
 def test_explicit_override_normalization_preserves_input_contract(
@@ -147,50 +122,86 @@ def test_explicit_override_normalization_preserves_input_contract(
 ) -> None:
     """Representative override categories retain their exact coercion contract."""
 
-    result = constants._normalize_weft_override_value(name, value)
+    with patch.dict(os.environ, {}, clear=True):
+        result = load_config({name: value})[name.removeprefix("WEFT_")]
 
-    if name == "UNRECOGNIZED_EMBEDDER_VALUE":
+    if name == "WEFT_CUSTOM_VALUE":
         assert result is value
     else:
         assert result == expected
 
 
 @pytest.mark.parametrize(
-    ("name", "value", "error_type", "message"),
+    ("name", "value", "expected_error"),
     [
-        ("WEFT_LOGGING_ENABLED", 1, TypeError, "must be bool or str"),
-        ("WEFT_LOGS_DIR", Path("logs"), TypeError, "must be str or None"),
-        ("WEFT_TASK_MONITOR_INTERVAL_SECONDS", 1.5, TypeError, "must be int or str"),
+        ("WEFT_LOGGING_ENABLED", 1, InvalidConfigError),
+        ("WEFT_LOGS_DIR", Path("logs"), InvalidConfigError),
+        ("WEFT_TASK_MONITOR_INTERVAL_SECONDS", 1.5, InvalidConfigError),
         (
             "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
             "1",
             ValueError,
-            "was removed",
         ),
         (
             WEFT_ADMISSION_MAX_CONNECTIONS,
             1.5,
-            TypeError,
-            "must be int or str",
+            InvalidConfigError,
         ),
         (
             WEFT_ADMISSION_RESERVE_FRACTION,
             object(),
-            TypeError,
-            "must be int, float, or str",
+            InvalidConfigError,
         ),
     ],
 )
 def test_explicit_override_normalization_preserves_error_contract(
     name: str,
     value: object,
-    error_type: type[Exception],
-    message: str,
+    expected_error: type[Exception],
 ) -> None:
     """Override category and removed-setting failures keep their public shape."""
 
-    with pytest.raises(error_type, match=message):
-        constants._normalize_weft_override_value(name, value)
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        pytest.raises(expected_error, match=name),
+    ):
+        load_config({name: value})
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "WEFT_MANAGER_LIFETIME_TIMEOUT",
+        "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
+        "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
+        "WEFT_ADMISSION_RESERVE_FRACTION",
+        "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
+        "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
+        "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
+        "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
+        "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS",
+    ],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("source", ["environment", "override"])
+def test_weft_float_config_rejects_nonfinite_values(
+    name: str,
+    value: float,
+    source: str,
+) -> None:
+    """Weft float fields reject non-JSON numbers at loading [SB-0.4], [CLI-5]."""
+    environment = {name: str(value)} if source == "environment" else {}
+    overrides = {name: value} if source == "override" else None
+    with (
+        patch.dict(os.environ, environment, clear=True),
+        pytest.warns(UserWarning, match=name),
+        pytest.raises(InvalidConfigError, match=name) as exc_info,
+    ):
+        load_config(overrides)
+
+    assert exc_info.value.key == name
+    assert exc_info.value.source == source
+    assert "finite" in exc_info.value.expected
 
 
 _RUNTIME_OBJECT_ALLOWLIST = {
@@ -452,73 +463,67 @@ class TestLoadConfig:
             config = load_config()
 
             # Debug
-            assert config["WEFT_DEBUG"] is False
+            assert config["DEBUG"] is False
 
             # Logging
-            assert config["WEFT_LOGGING_ENABLED"] is False
+            assert config["LOGGING_ENABLED"] is False
             assert (
-                config["WEFT_MANAGER_SERVE_LOG_LEVEL"]
+                config["MANAGER_SERVE_LOG_LEVEL"]
                 == WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT
             )
             assert (
-                config["WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS"]
+                config["MANAGER_SERVE_LOG_INTERVAL_SECONDS"]
                 == WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT
             )
 
             # Weft project directory
-            assert config["WEFT_DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
-            assert config["WEFT_LOGS_DIR"] is None
-            assert config["WEFT_TASK_MONITOR_ENABLED"] is (
-                WEFT_TASK_MONITOR_ENABLED_DEFAULT
-            )
-            assert config["WEFT_LIVENESS_MONITOR_ENABLED"] is (
+            assert config["DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
+            assert config["LOGS_DIR"] is None
+            assert config["TASK_MONITOR_ENABLED"] is (WEFT_TASK_MONITOR_ENABLED_DEFAULT)
+            assert config["LIVENESS_MONITOR_ENABLED"] is (
                 LIVENESS_MONITOR_ENABLED_DEFAULT
             )
             assert (
-                config["WEFT_TASK_MONITOR_INTERVAL_SECONDS"]
+                config["TASK_MONITOR_INTERVAL_SECONDS"]
                 == WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT
             )
             assert (
-                config["WEFT_TASK_MONITOR_BATCH_SIZE"]
+                config["TASK_MONITOR_BATCH_SIZE"]
                 == WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT
             )
             assert (
-                config["WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"]
+                config["TASK_MONITOR_TASK_LOG_SCAN_LIMIT"]
                 == WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT
             )
             assert (
-                config["WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"]
+                config["TASK_MONITOR_STORE_WRITE_BATCH_SIZE"]
                 == WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT
             )
-            assert config["WEFT_TASK_MONITOR_MODE"] == WEFT_TASK_MONITOR_MODE_DEFAULT
+            assert config["TASK_MONITOR_MODE"] == WEFT_TASK_MONITOR_MODE_DEFAULT
             assert (
-                config["WEFT_TASK_MONITOR_PROCESSOR"]
-                == WEFT_TASK_MONITOR_PROCESSOR_DEFAULT
+                config["TASK_MONITOR_PROCESSOR"] == WEFT_TASK_MONITOR_PROCESSOR_DEFAULT
             )
             assert (
-                config["WEFT_LOG_TASKS_EXTERNAL_PATH"]
+                config["LOG_TASKS_EXTERNAL_PATH"]
                 == WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT
             )
-            assert config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] is False
+            assert config["LOG_TASKS_EXTERNAL_ENABLED"] is False
+            assert config["TASK_MONITOR_LOG_SINK"] == WEFT_TASK_MONITOR_LOG_SINK_DEFAULT
             assert (
-                config["WEFT_TASK_MONITOR_LOG_SINK"]
-                == WEFT_TASK_MONITOR_LOG_SINK_DEFAULT
-            )
-            assert (
-                config["WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS"]
+                config["TASK_MONITOR_RESTART_BACKOFF_SECONDS"]
                 == WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT
             )
 
             # Broker config should be complete and typed.
-            assert config["BROKER_PROJECT_SCOPE"] is True
-            assert config["BROKER_DEFAULT_DB_NAME"] == ".weft/broker.db"
-            assert config["BROKER_PROJECT_CONFIG_PATH"] == ".weft"
-            assert config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
-            assert config["BROKER_AUTO_VACUUM"] == 1
-            assert config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
-            assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
-            assert config["BROKER_MAX_MESSAGE_SIZE"] > 0
-            assert isinstance(config["BROKER_MAX_MESSAGE_SIZE"], int)
+            assert config["PROJECT_SCOPE"] is True
+            assert config["DEFAULT_DB_NAME"] == ".weft/broker.db"
+            assert config["PROJECT_CONFIG_PATH"] == ".weft"
+            assert config["PROJECT_CONFIG_NAME"] == "broker.toml"
+            assert config["AUTO_VACUUM"] == 1
+            assert config["AUTO_VACUUM_INTERVAL"] == 100
+            assert isinstance(config["AUTO_VACUUM_INTERVAL"], int)
+            assert config["MAX_MESSAGE_SIZE"] > 0
+            assert isinstance(config["MAX_MESSAGE_SIZE"], int)
 
     def test_task_monitor_config_normalization(self) -> None:
         """Task-monitor env values normalize to runtime types."""
@@ -546,28 +551,30 @@ class TestLoadConfig:
         ):
             config = load_config()
 
-        assert config["WEFT_TASK_MONITOR_ENABLED"] is False
-        assert config["WEFT_TASK_MONITOR_INTERVAL_SECONDS"] == (
+        assert config["TASK_MONITOR_ENABLED"] is False
+        assert config["TASK_MONITOR_INTERVAL_SECONDS"] == (
             HEARTBEAT_MIN_INTERVAL_SECONDS
         )
-        assert config["WEFT_TASK_MONITOR_BATCH_SIZE"] == 42
-        assert config["WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"] == 420
-        assert config["WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"] == 7
-        assert config["WEFT_LOG_TASKS_EXTERNAL_PATH"] == "task-log.jsonl"
-        assert config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] is False
-        assert config["WEFT_LOG_TASKS_EXTERNAL_MODE"] == "raw"
-        assert config["WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"] == 172800.0
-        assert config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] == 3600.0
-        assert config["WEFT_TASK_MONITOR_MODE"] == "custom"
+        assert config["TASK_MONITOR_BATCH_SIZE"] == 42
+        assert config["TASK_MONITOR_TASK_LOG_SCAN_LIMIT"] == 420
+        assert config["TASK_MONITOR_STORE_WRITE_BATCH_SIZE"] == 7
+        assert config["LOG_TASKS_EXTERNAL_PATH"] == "task-log.jsonl"
+        assert config["LOG_TASKS_EXTERNAL_ENABLED"] is False
+        assert config["LOG_TASKS_EXTERNAL_MODE"] == "raw"
+        assert config["LOG_TASKS_RETENTION_PERIOD_SECONDS"] == 172800.0
+        assert config["TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] == 3600.0
+        assert config["TASK_MONITOR_MODE"] == "custom"
         assert (
-            config["WEFT_TASK_MONITOR_PROCESSOR"]
-            == "tests.core.test_task_monitoring:noop"
+            config["TASK_MONITOR_PROCESSOR"] == "tests.core.test_task_monitoring:noop"
         )
-        assert config["WEFT_TASK_MONITOR_LOG_SINK"] == "disk"
-        assert config["WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS"] == 2.5
+        assert config["TASK_MONITOR_LOG_SINK"] == "disk"
+        assert config["TASK_MONITOR_RESTART_BACKOFF_SECONDS"] == 2.5
 
-    def test_reserved_cleanup_min_age_unset_is_none_for_derivation(self) -> None:
-        """Absent reserved-gate env resolves to None, not a baked-in float.
+    @pytest.mark.parametrize("explicit_unset", [False, True])
+    def test_reserved_cleanup_min_age_unset_is_none_for_derivation(
+        self, explicit_unset: bool
+    ) -> None:
+        """An absent or explicitly unset reserved gate remains None for derivation.
 
         None is the contract that lets ``TaskMonitorRuntimeConfig`` derive
         the effective gate from the configured task-log retention so the
@@ -576,9 +583,13 @@ class TestLoadConfig:
         """
 
         with patch.dict(os.environ, {}, clear=True):
-            config = load_config()
+            config = load_config(
+                {"WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": None}
+                if explicit_unset
+                else None
+            )
 
-        assert config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] is None
+        assert config["TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] is None
 
     def test_reserved_cleanup_min_age_rejects_negative(self) -> None:
         with (
@@ -689,7 +700,7 @@ class TestLoadConfig:
         ):
             config = load_config()
 
-        assert config["WEFT_MANAGER_SERVE_LOG_LEVEL"] == level
+        assert config["MANAGER_SERVE_LOG_LEVEL"] == level
 
     def test_manager_serve_log_level_rejects_unknown(self) -> None:
         with (
@@ -715,17 +726,17 @@ class TestLoadConfig:
             load_config()
 
     def test_manager_serve_log_overrides_normalize(self) -> None:
-        config = compile_config(
+        config = load_config(
             {
-                MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: "true",
+                f"WEFT_{MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY}": "true",
                 "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
                 "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 0.25,
             }
         )
 
         assert config[MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] is True
-        assert config["WEFT_MANAGER_SERVE_LOG_LEVEL"] == "debug"
-        assert config["WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS"] == 0.25
+        assert config["MANAGER_SERVE_LOG_LEVEL"] == "debug"
+        assert config["MANAGER_SERVE_LOG_INTERVAL_SECONDS"] == 0.25
 
     def test_debug_setting(self) -> None:
         """Test debug environment variable."""
@@ -733,64 +744,62 @@ class TestLoadConfig:
         for value in ["1", "true", "yes", "debug", "TRUE", "Y"]:
             with patch.dict(os.environ, {"WEFT_DEBUG": value}):
                 config = load_config()
-                assert config["WEFT_DEBUG"] is True, (
-                    f"Expected True for WEFT_DEBUG={value}"
-                )
+                assert config["DEBUG"] is True, f"Expected True for WEFT_DEBUG={value}"
 
         # Values that should disable debug
         for value in ["", "0", "f", "F", "false", "False", "FALSE"]:
             with patch.dict(os.environ, {"WEFT_DEBUG": value}):
                 config = load_config()
-                assert config["WEFT_DEBUG"] is False, (
+                assert config["DEBUG"] is False, (
                     f"Expected False for WEFT_DEBUG={value}"
                 )
 
         # Missing should be False
         with patch.dict(os.environ, {}, clear=True):
             config = load_config()
-            assert config["WEFT_DEBUG"] is False
+            assert config["DEBUG"] is False
 
     def test_logging_setting(self) -> None:
         """Test logging environment variable."""
         for value in ["1", "true", "yes", "enabled", "off"]:
             with patch.dict(os.environ, {"WEFT_LOGGING_ENABLED": value}):
                 config = load_config()
-                assert config["WEFT_LOGGING_ENABLED"] is True
+                assert config["LOGGING_ENABLED"] is True
 
         for value in ["", "0", "f", "false", "none", "null"]:
             with patch.dict(os.environ, {"WEFT_LOGGING_ENABLED": value}):
                 config = load_config()
-                assert config["WEFT_LOGGING_ENABLED"] is False
+                assert config["LOGGING_ENABLED"] is False
 
         # Missing should be False
         with patch.dict(os.environ, {}, clear=True):
             config = load_config()
-            assert config["WEFT_LOGGING_ENABLED"] is False
+            assert config["LOGGING_ENABLED"] is False
 
     def test_manager_reuse_env(self) -> None:
         with patch.dict(os.environ, {"WEFT_MANAGER_REUSE_ENABLED": "0"}):
             config = load_config()
-            assert config["WEFT_MANAGER_REUSE_ENABLED"] is False
+            assert config["MANAGER_REUSE_ENABLED"] is False
 
         with patch.dict(os.environ, {"WEFT_MANAGER_REUSE_ENABLED": "true"}):
             config = load_config()
-            assert config["WEFT_MANAGER_REUSE_ENABLED"] is True
+            assert config["MANAGER_REUSE_ENABLED"] is True
 
     def test_liveness_monitor_enabled_env(self) -> None:
         with patch.dict(os.environ, {"WEFT_LIVENESS_MONITOR_ENABLED": "0"}):
             config = load_config()
-            assert config["WEFT_LIVENESS_MONITOR_ENABLED"] is False
+            assert config["LIVENESS_MONITOR_ENABLED"] is False
 
         with patch.dict(os.environ, {"WEFT_LIVENESS_MONITOR_ENABLED": "true"}):
             config = load_config()
-            assert config["WEFT_LIVENESS_MONITOR_ENABLED"] is True
+            assert config["LIVENESS_MONITOR_ENABLED"] is True
 
     def test_admission_config_defaults_are_disabled(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             config = load_config()
 
-        assert config[WEFT_ADMISSION_MAX_CONNECTIONS] == 0
-        assert config[WEFT_ADMISSION_RESERVE_FRACTION] == 0.1
+        assert config["ADMISSION_MAX_CONNECTIONS"] == 0
+        assert config["ADMISSION_RESERVE_FRACTION"] == 0.1
         assert ADMISSION_SERVICE_RESERVE_SLOTS == 3
         assert MANAGER_ADMISSION_RECHECK_SECONDS == 1.0
 
@@ -812,7 +821,7 @@ class TestLoadConfig:
         with patch.dict(os.environ, {name: value}, clear=True):
             config = load_config()
 
-        assert config[name] == expected
+        assert config[name.removeprefix("WEFT_")] == expected
 
     @pytest.mark.parametrize(
         ("name", "value"),
@@ -837,24 +846,24 @@ class TestLoadConfig:
             load_config()
 
     def test_admission_explicit_overrides_use_the_same_parsers(self) -> None:
-        config = compile_config(
+        config = load_config(
             {
                 WEFT_ADMISSION_MAX_CONNECTIONS: 3,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.2,
             }
         )
 
-        assert config[WEFT_ADMISSION_MAX_CONNECTIONS] == 3
-        assert config[WEFT_ADMISSION_RESERVE_FRACTION] == 0.2
+        assert config["ADMISSION_MAX_CONNECTIONS"] == 3
+        assert config["ADMISSION_RESERVE_FRACTION"] == 0.2
 
     def test_weft_directory_name_env(self) -> None:
         with patch.dict(os.environ, {"WEFT_DIRECTORY_NAME": ".engram"}, clear=True):
             config = load_config()
 
-        assert config["WEFT_DIRECTORY_NAME"] == ".engram"
-        assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
-        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".engram"
-        assert config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
+        assert config["DIRECTORY_NAME"] == ".engram"
+        assert config["DEFAULT_DB_NAME"] == ".engram/broker.db"
+        assert config["PROJECT_CONFIG_PATH"] == ".engram"
+        assert config["PROJECT_CONFIG_NAME"] == "broker.toml"
 
     @pytest.mark.parametrize("value", ["", ".", "..", "foo/bar", "foo\\bar"])
     def test_weft_directory_name_env_rejects_invalid_values(self, value: str) -> None:
@@ -868,13 +877,13 @@ class TestLoadConfig:
         with patch.dict(os.environ, {"WEFT_LOGS_DIR": "var/weft-logs"}, clear=True):
             config = load_config()
 
-        assert config["WEFT_LOGS_DIR"] == "var/weft-logs"
+        assert config["LOGS_DIR"] == "var/weft-logs"
 
     def test_weft_logs_dir_env_blanks_to_default(self) -> None:
         with patch.dict(os.environ, {"WEFT_LOGS_DIR": "   "}, clear=True):
             config = load_config()
 
-        assert config["WEFT_LOGS_DIR"] is None
+        assert config["LOGS_DIR"] is None
 
     def test_explicit_default_db_name_beats_directory_name_default(self) -> None:
         with patch.dict(
@@ -887,9 +896,9 @@ class TestLoadConfig:
         ):
             config = load_config()
 
-        assert config["WEFT_DIRECTORY_NAME"] == ".engram"
-        assert config["BROKER_DEFAULT_DB_NAME"] == ".custom/weft.db"
-        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".engram"
+        assert config["DIRECTORY_NAME"] == ".engram"
+        assert config["DEFAULT_DB_NAME"] == ".custom/weft.db"
+        assert config["PROJECT_CONFIG_PATH"] == ".engram"
 
     def test_explicit_project_config_path_beats_directory_name_default(self) -> None:
         with patch.dict(
@@ -903,104 +912,24 @@ class TestLoadConfig:
         ):
             config = load_config()
 
-        assert config["WEFT_DIRECTORY_NAME"] == ".engram"
-        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".custom"
-        assert config["BROKER_PROJECT_CONFIG_NAME"] == "queues.toml"
+        assert config["DIRECTORY_NAME"] == ".engram"
+        assert config["PROJECT_CONFIG_PATH"] == ".custom"
+        assert config["PROJECT_CONFIG_NAME"] == "queues.toml"
 
-    def test_compile_config_recomputes_broker_defaults_for_weft_overrides(self) -> None:
+    def test_load_config_recomputes_broker_defaults_for_weft_overrides(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            config = compile_config({"WEFT_DIRECTORY_NAME": ".engram"})
+            config = load_config({"WEFT_DIRECTORY_NAME": ".engram"})
 
-        assert config["WEFT_DIRECTORY_NAME"] == ".engram"
-        assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
-        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".engram"
+        assert config["DIRECTORY_NAME"] == ".engram"
+        assert config["DEFAULT_DB_NAME"] == ".engram/broker.db"
+        assert config["PROJECT_CONFIG_PATH"] == ".engram"
 
     def test_fractional_string_vacuum_threshold_reaches_broker_resolver(self) -> None:
         """A WEFT percentage string keeps SimpleBroker's string semantics."""
         with patch.dict(os.environ, {}, clear=True):
-            config = compile_config({"WEFT_VACUUM_THRESHOLD": "0.5"})
+            config = load_config({"WEFT_VACUUM_THRESHOLD": "0.5"})
 
-        assert config["BROKER_VACUUM_THRESHOLD"] == 0.005
-
-    def test_simplebroker_embedding_mapping_covers_every_public_config_key(
-        self,
-    ) -> None:
-        """A SimpleBroker release cannot add a silently ambient-backed key."""
-
-        with patch.dict(os.environ, {}, clear=True):
-            broker_defaults = resolve_config()
-            weft_config = load_config()
-
-        mapped_keys = set(constants.SIMPLEBROKER_ENV_MAPPING.values()) | {
-            "BROKER_DEBUG",
-            "BROKER_LOGGING_ENABLED",
-        }
-        assert mapped_keys == set(broker_defaults)
-
-        weft_owned_project_defaults = {
-            "BROKER_DEFAULT_DB_NAME",
-            "BROKER_PROJECT_CONFIG_PATH",
-            "BROKER_PROJECT_CONFIG_NAME",
-            "BROKER_PROJECT_SCOPE",
-        }
-        for key, default in broker_defaults.items():
-            if key not in weft_owned_project_defaults:
-                assert weft_config[key] == default, key
-
-    def test_ambient_simplebroker_values_do_not_change_weft_broker_config(
-        self,
-    ) -> None:
-        """Unset WEFT settings use embedder defaults, not ambient BROKER values."""
-
-        with patch.dict(os.environ, {}, clear=True):
-            expected = {
-                key: value
-                for key, value in load_config().items()
-                if key.startswith("BROKER_")
-            }
-
-        ambient_broker_config = {
-            "BROKER_BUSY_TIMEOUT": "6123",
-            "BROKER_CACHE_MB": "17",
-            "BROKER_SYNC_MODE": "NORMAL",
-            "BROKER_WAL_AUTOCHECKPOINT": "2000",
-            "BROKER_MAX_MESSAGE_SIZE": "999",
-            "BROKER_READ_COMMIT_INTERVAL": "2",
-            "BROKER_GENERATOR_BATCH_SIZE": "7",
-            "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS": "9",
-            "BROKER_AUTO_VACUUM": "0",
-            "BROKER_AUTO_VACUUM_INTERVAL": "8",
-            "BROKER_VACUUM_THRESHOLD": "20",
-            "BROKER_VACUUM_BATCH_SIZE": "12",
-            "BROKER_SKIP_IDLE_CHECK": "1",
-            "BROKER_JITTER_FACTOR": "0.25",
-            "BROKER_INITIAL_CHECKS": "5",
-            "BROKER_MAX_INTERVAL": "0.2",
-            "BROKER_BURST_SLEEP": "0.001",
-            "BROKER_DEBUG": "1",
-            "BROKER_LOGGING_ENABLED": "1",
-            "BROKER_DEFAULT_DB_LOCATION": "/tmp",
-            "BROKER_DEFAULT_DB_NAME": "ambient.db",
-            "BROKER_PROJECT_CONFIG_PATH": "ambient",
-            "BROKER_PROJECT_CONFIG_NAME": "ambient.toml",
-            "BROKER_PROJECT_SCOPE": "0",
-            "BROKER_BACKEND": "sqlite",
-            "BROKER_BACKEND_HOST": "ambient.example",
-            "BROKER_BACKEND_PORT": "6543",
-            "BROKER_BACKEND_USER": "ambient-user",
-            "BROKER_BACKEND_PASSWORD": "ambient-secret",
-            "BROKER_BACKEND_DATABASE": "ambient-db",
-            "BROKER_BACKEND_SCHEMA": "ambient-schema",
-            "BROKER_BACKEND_TARGET": "",
-        }
-        with patch.dict(os.environ, ambient_broker_config, clear=True):
-            actual = {
-                key: value
-                for key, value in load_config().items()
-                if key.startswith("BROKER_")
-            }
-
-        assert actual == expected
+        assert config["VACUUM_THRESHOLD"] == 0.5
 
     def test_weft_broker_values_do_not_change_standalone_simplebroker_config(
         self,
@@ -1014,107 +943,8 @@ class TestLoadConfig:
 
             assert dict(os.environ) == before_environment
 
-        assert weft_config["BROKER_CACHE_MB"] == 17
-        assert standalone_config["BROKER_CACHE_MB"] == 10
-
-    @pytest.mark.parametrize(
-        "broker_key",
-        [
-            "BROKER_BUSY_TIMEOUT",
-            "BROKER_CACHE_MB",
-            "BROKER_WAL_AUTOCHECKPOINT",
-            "BROKER_MAX_MESSAGE_SIZE",
-            "BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS",
-            "BROKER_AUTO_VACUUM_INTERVAL",
-            "BROKER_VACUUM_THRESHOLD",
-            "BROKER_BACKEND_PORT",
-            "BROKER_DEFAULT_DB_LOCATION",
-            "BROKER_DEFAULT_DB_NAME",
-            "BROKER_PROJECT_CONFIG_PATH",
-            "BROKER_PROJECT_CONFIG_NAME",
-        ],
-    )
-    def test_invalid_ambient_simplebroker_values_do_not_affect_weft(
-        self,
-        broker_key: str,
-    ) -> None:
-        """The isolated resolver never parses ambient SimpleBroker values."""
-
-        with patch.dict(os.environ, {}, clear=True):
-            expected = load_config()
-        with patch.dict(os.environ, {broker_key: "../not-a-valid-value"}, clear=True):
-            actual = load_config()
-
-        assert actual == expected
-
-    def test_freeze_broker_config_returns_nominal_ambient_free_mapping(self) -> None:
-        """Lower-layer handoffs retain SimpleBroker's isolation marker."""
-
-        with patch.dict(os.environ, {"BROKER_CACHE_MB": "invalid"}, clear=True):
-            resolved = constants.freeze_broker_config(load_config())
-
-        assert isinstance(resolved, ResolvedConfig)
-        assert resolved["BROKER_CACHE_MB"] == 10
-
-    def test_freeze_broker_config_rejects_incomplete_mapping(self) -> None:
-        """Ownership handoffs cannot silently fill missing keys upstream."""
-
-        with pytest.raises(
-            RuntimeError,
-            match="incompatible SimpleBroker configuration schema",
-        ):
-            constants.freeze_broker_config({"BROKER_CACHE_MB": 17})
-
-    @pytest.mark.parametrize("drift", ("addition", "removal", "rename"))
-    def test_broker_schema_drift_fails_closed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        drift: str,
-    ) -> None:
-        """A changed upstream key set requires an explicit Weft mapping update."""
-
-        real_resolver = constants.resolve_isolated_config
-
-        def drifted(config: dict[str, object]) -> dict[str, object]:
-            resolved = dict(real_resolver(config))
-            if drift == "addition":
-                resolved["BROKER_NEW_SETTING"] = "new"
-                return resolved
-            value = resolved.pop("BROKER_BUSY_TIMEOUT")
-            if drift == "rename":
-                resolved["BROKER_RENAMED_BUSY_TIMEOUT"] = value
-            return resolved
-
-        monkeypatch.setattr(constants, "resolve_isolated_config", drifted)
-
-        with pytest.raises(
-            RuntimeError,
-            match="incompatible SimpleBroker configuration schema",
-        ):
-            load_config()
-
-    def test_freeze_rejects_upstream_removed_key(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Unknown-key rejection at a handoff is a schema compatibility error."""
-
-        config = load_config()
-        real_resolver = constants.resolve_isolated_config
-
-        def removed_field(values: dict[str, object]) -> ResolvedConfig:
-            altered = dict(values)
-            value = altered.pop("BROKER_BUSY_TIMEOUT")
-            altered["BROKER_REMOVED_BUSY_TIMEOUT"] = value
-            return real_resolver(altered)
-
-        monkeypatch.setattr(constants, "resolve_isolated_config", removed_field)
-
-        with pytest.raises(
-            RuntimeError,
-            match="incompatible SimpleBroker configuration schema",
-        ):
-            constants.freeze_broker_config(config)
+        assert weft_config["CACHE_MB"] == 17
+        assert standalone_config["CACHE_MB"] == 10
 
     def test_removed_simplebroker_vacuum_lock_timeout_env_is_ignored(self) -> None:
         with patch.dict(
@@ -1134,7 +964,7 @@ class TestLoadConfig:
         self,
     ) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            config = compile_config(
+            config = load_config(
                 {
                     "WEFT_VACUUM_LOCK_TIMEOUT": "10",
                     "BROKER_VACUUM_LOCK_TIMEOUT": "10",
@@ -1144,12 +974,12 @@ class TestLoadConfig:
         assert "WEFT_VACUUM_LOCK_TIMEOUT" not in config
         assert "BROKER_VACUUM_LOCK_TIMEOUT" not in config
 
-    def test_compile_config_rejects_ambiguous_postgres_override_shapes(self) -> None:
+    def test_load_config_rejects_ambiguous_postgres_override_shapes(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
             pytest.raises(ValueError, match="ambiguous"),
         ):
-            compile_config(
+            load_config(
                 {
                     "WEFT_BACKEND": "postgres",
                     "WEFT_BACKEND_TARGET": "postgresql://broker@db.example.com/simplebroker",
@@ -1161,7 +991,7 @@ class TestLoadConfig:
         """Manager timeout honours the environment variable."""
         with patch.dict(os.environ, {"WEFT_MANAGER_LIFETIME_TIMEOUT": "42.5"}):
             config = load_config()
-            assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == 42.5
+            assert config["MANAGER_LIFETIME_TIMEOUT"] == 42.5
 
     @pytest.mark.parametrize(
         "value",
@@ -1191,16 +1021,16 @@ class TestLoadConfig:
         ):
             config = load_config()
 
-        assert config["BROKER_BACKEND"] == "postgres"
-        assert config["BROKER_BACKEND_HOST"] == "db.example.com"
-        assert config["BROKER_BACKEND_PORT"] == 5433
-        assert config["BROKER_BACKEND_USER"] == "broker"
-        assert config["BROKER_BACKEND_PASSWORD"] == "secret"
-        assert config["BROKER_BACKEND_DATABASE"] == "simplebroker_app"
-        assert config["BROKER_BACKEND_SCHEMA"] == "broker_schema"
-        assert config["BROKER_BACKEND_TARGET"] == ""
-        assert config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
-        assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
+        assert config["BACKEND"] == "postgres"
+        assert config["BACKEND_HOST"] == "db.example.com"
+        assert config["BACKEND_PORT"] == 5433
+        assert config["BACKEND_USER"] == "broker"
+        assert config["BACKEND_PASSWORD"] == "secret"
+        assert config["BACKEND_DATABASE"] == "simplebroker_app"
+        assert config["BACKEND_SCHEMA"] == "broker_schema"
+        assert config["BACKEND_TARGET"] == ""
+        assert config["AUTO_VACUUM_INTERVAL"] == 100
+        assert isinstance(config["AUTO_VACUUM_INTERVAL"], int)
 
     def test_backend_env_translation_from_target(self) -> None:
         with patch.dict(
@@ -1214,12 +1044,12 @@ class TestLoadConfig:
         ):
             config = load_config()
 
-        assert config["BROKER_BACKEND"] == "postgres"
+        assert config["BACKEND"] == "postgres"
         assert (
-            config["BROKER_BACKEND_TARGET"]
+            config["BACKEND_TARGET"]
             == "postgresql://broker@db.example.com/simplebroker"
         )
-        assert config["BROKER_BACKEND_SCHEMA"] == "broker_schema"
+        assert config["BACKEND_SCHEMA"] == "broker_schema"
 
     def test_backend_env_rejects_target_plus_parts(self) -> None:
         with (
@@ -1238,68 +1068,23 @@ class TestLoadConfig:
         ):
             load_config()
 
-    def test_all_config_keys_present(self) -> None:
-        """Test that Weft returns its own keys plus a full broker config."""
-        config = load_config()
-
-        weft_keys = {
-            "WEFT_DEBUG",
-            "WEFT_LOGGING_ENABLED",
-            "WEFT_REDACT_TASKSPEC_FIELDS",
-            "WEFT_DIRECTORY_NAME",
-            "WEFT_LOGS_DIR",
-            "WEFT_MANAGER_REUSE_ENABLED",
-            "WEFT_MANAGER_LIFETIME_TIMEOUT",
-            "WEFT_AUTOSTART_TASKS",
-        }
-
-        broker_keys = {
-            "BROKER_PROJECT_SCOPE",
-            "BROKER_DEFAULT_DB_NAME",
-            "BROKER_PROJECT_CONFIG_PATH",
-            "BROKER_PROJECT_CONFIG_NAME",
-            "BROKER_DEBUG",
-            "BROKER_LOGGING_ENABLED",
-            "BROKER_AUTO_VACUUM",
-            "BROKER_AUTO_VACUUM_INTERVAL",
-            "BROKER_MAX_MESSAGE_SIZE",
-            "BROKER_BACKEND",
-            "BROKER_BACKEND_PORT",
-        }
-
-        assert weft_keys.issubset(config.keys())
-        assert broker_keys.issubset(config.keys())
-        assert config["BROKER_PROJECT_SCOPE"] is True
-        assert config["BROKER_DEFAULT_DB_NAME"] == ".weft/broker.db"
-        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".weft"
-        assert config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
-        assert config["BROKER_DEBUG"] == config["WEFT_DEBUG"]
-        assert config["BROKER_LOGGING_ENABLED"] == config["WEFT_LOGGING_ENABLED"]
-        assert isinstance(config["BROKER_AUTO_VACUUM"], int)
-        assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
-        assert isinstance(config["BROKER_MAX_MESSAGE_SIZE"], int)
-        assert isinstance(config["BROKER_BACKEND_PORT"], int)
-        assert config["WEFT_REDACT_TASKSPEC_FIELDS"] == ""
-        assert config["WEFT_DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
-        assert config["WEFT_LOGS_DIR"] is None
-        assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
-        assert config["WEFT_MANAGER_REUSE_ENABLED"] == WEFT_MANAGER_REUSE_ENABLED
-        assert config["WEFT_AUTOSTART_TASKS"] == WEFT_AUTOSTART_TASKS_DEFAULT
-
     def test_config_immutability(self) -> None:
         """Test that modifying returned config doesn't affect subsequent calls."""
         config1 = load_config()
-        original_debug = config1["WEFT_DEBUG"]
+        original_debug = config1["DEBUG"]
 
-        # Modify the returned config
-        config1["WEFT_DEBUG"] = not original_debug
+        # The canonical snapshot itself cannot be edited.
+        with pytest.raises(TypeError):
+            cast(MutableMapping[str, object], config1)["DEBUG"] = not original_debug
+        edited = dict(config1)
+        edited["DEBUG"] = not original_debug
 
         # Get a new config
         config2 = load_config()
 
         # Should have original value, not modified one
-        assert config2["WEFT_DEBUG"] == original_debug
-        assert config2["WEFT_DEBUG"] != config1["WEFT_DEBUG"]
+        assert config2["DEBUG"] == original_debug
+        assert config2["DEBUG"] != edited["DEBUG"]
 
 
 @pytest.mark.parametrize("source", ["environment", "override"])
@@ -1321,3 +1106,55 @@ def test_removed_collation_store_toggle_fails_with_migration_message(
     ):
         load_config({name: value} if source == "override" else None)
     assert str(caught.value) == expected
+
+
+def test_config_uses_unprefixed_percentage_values() -> None:
+    """The new broker contract returns percentage units and canonical names."""
+    with patch.dict(os.environ, {}, clear=True):
+        result = load_config({"WEFT_VACUUM_THRESHOLD": "0.5"})
+    assert result["VACUUM_THRESHOLD"] == 0.5
+
+
+def test_weft_config_isolated_namespace_and_runtime_snapshot() -> None:
+    with patch.dict(
+        os.environ, {"BROKER_CACHE_MB": "invalid", "WEFT_CACHE_MB": "17"}, clear=True
+    ):
+        config = load_config()
+    assert isinstance(config, Config)
+    assert config.prefix == "WEFT"
+    assert config["CACHE_MB"] == 17
+    snapshot = dict(config)
+    with patch.dict(os.environ, {"WEFT_CACHE_MB": "99"}, clear=True):
+        restored = constants.resolve_runtime_config(snapshot)
+    assert restored["CACHE_MB"] == 17
+    assert constants.resolve_runtime_config(restored) is restored
+
+
+def test_later_valid_override_repairs_invalid_environment() -> None:
+    with (
+        patch.dict(os.environ, {"WEFT_CACHE_MB": "invalid"}, clear=True),
+        pytest.warns(UserWarning, match="WEFT_CACHE_MB"),
+    ):
+        config = load_config({"WEFT_CACHE_MB": 17})
+    assert config["CACHE_MB"] == 17
+
+
+def test_runtime_partial_config_uses_declared_defaults_without_environment() -> None:
+    with patch.dict(os.environ, {"WEFT_CACHE_MB": "99"}, clear=True):
+        config = constants.resolve_runtime_config(
+            {"CACHE_MB": 17, "DIRECTORY_NAME": ".custom"}
+        )
+    assert config["CACHE_MB"] == 17
+    assert config["DEFAULT_DB_NAME"] == ".custom/broker.db"
+    assert config["PROJECT_CONFIG_PATH"] == ".custom"
+
+
+def test_private_serve_marker_is_not_an_environment_setting() -> None:
+    with patch.dict(os.environ, {"WEFT_MANAGER_SERVE_LOG_ACTIVE": "true"}, clear=True):
+        assert load_config()["MANAGER_SERVE_LOG_ACTIVE"] is False
+        assert (
+            load_config({"WEFT_MANAGER_SERVE_LOG_ACTIVE": True})[
+                "MANAGER_SERVE_LOG_ACTIVE"
+            ]
+            is True
+        )

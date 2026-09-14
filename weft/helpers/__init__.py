@@ -29,16 +29,15 @@ from typing import Any, TextIO, cast
 
 import psutil
 
-from simplebroker import Queue
+from simplebroker import DEFAULT_CONFIG, Config, Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     ATOMIC_WRITE_RETRY_ATTEMPTS,
     ATOMIC_WRITE_RETRY_INTERVAL,
     SUBPROCESS_POLL_INTERVAL_FLOOR,
     TASKSPEC_TID_SHORT_LENGTH,
-    WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    load_config,
+    resolve_runtime_config,
 )
 from weft.ext import RunnerHandle
 
@@ -50,8 +49,8 @@ from .container_detection import (
 )
 from .message_ids import is_task_tid
 
-# Load configuration once at module level for efficiency
-_config = load_config()
+# Receiver imports must not read ambient config before JSON restoration.
+_config: Config | None = None
 
 # Set up module logger
 logger = logging.getLogger(__name__)
@@ -139,16 +138,16 @@ def handle_has_live_host_process(handle: RunnerHandle) -> bool:
 
 def resolve_broker_max_message_size(config: Mapping[str, Any]) -> int:
     """Return the effective broker message-size limit for the active context."""
-    raw_value = config.get("BROKER_MAX_MESSAGE_SIZE")
+    raw_value = config.get("MAX_MESSAGE_SIZE")
     if raw_value in (None, ""):
-        raw_value = WEFT_APPLICABLE_SIMPLEBROKER_DEFAULTS["BROKER_MAX_MESSAGE_SIZE"]
+        raw_value = DEFAULT_CONFIG["MAX_MESSAGE_SIZE"].default
 
     try:
         max_bytes = int(str(raw_value))
     except (TypeError, ValueError) as exc:
-        raise ValueError("BROKER_MAX_MESSAGE_SIZE must be a positive integer") from exc
+        raise ValueError("WEFT_MAX_MESSAGE_SIZE must be a positive integer") from exc
     if max_bytes <= 0:
-        raise ValueError("BROKER_MAX_MESSAGE_SIZE must be a positive integer")
+        raise ValueError("WEFT_MAX_MESSAGE_SIZE must be a positive integer")
     return max_bytes
 
 
@@ -616,7 +615,7 @@ def send_log(
         >>> send_log("Error occurred", level=logging.ERROR, exc_info=True)
         >>> send_log("Custom logger message", logger_name="weft.tasks")
     """
-    if not _config["WEFT_LOGGING_ENABLED"]:
+    if not is_logging_enabled():
         return
 
     # Get the appropriate logger
@@ -653,7 +652,7 @@ def debug_print(
         >>> debug_print("Debug:", "Task ID =", task_id)
         >>> debug_print("Values:", x, y, z, sep=", ")
     """
-    if not _config["WEFT_DEBUG"]:
+    if not is_debug_enabled():
         return
 
     # Default to stderr for debug output
@@ -742,7 +741,7 @@ def is_logging_enabled() -> bool:
     Returns:
         True if logging is enabled, False otherwise
     """
-    return bool(_config["WEFT_LOGGING_ENABLED"])
+    return bool(_logging_config()["LOGGING_ENABLED"])
 
 
 def is_debug_enabled() -> bool:
@@ -751,7 +750,7 @@ def is_debug_enabled() -> bool:
     Returns:
         True if debug mode is enabled, False otherwise
     """
-    return bool(_config["WEFT_DEBUG"])
+    return bool(_logging_config()["DEBUG"])
 
 
 def write_file_atomically(
@@ -971,14 +970,24 @@ def redact_taskspec_dump(
     return redacted
 
 
-def reload_config() -> None:
-    """Reload configuration from environment variables.
+def _logging_config() -> Config:
+    """Load standalone helper policy on first use, after import has completed."""
+    global _config
+    if _config is None:
+        _config = resolve_runtime_config()
+    return _config
 
-    This function is primarily useful for testing or when environment
-    variables might have changed during runtime.
+
+def reload_config(config: Mapping[str, Any] | None = None) -> None:
+    """Bind a process snapshot, or explicitly reload standalone environment policy.
+
+    Task entry supplies its restored Config before loading the task class, so
+    logging and debug helpers use the parent snapshot without ambient reads.
+
+    Spec: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4].
     """
     global _config
-    _config = load_config()
+    _config = resolve_runtime_config(config)
 
 
 def format_byte_size(size: int, *, precision: int = 1) -> str:

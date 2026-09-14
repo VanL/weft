@@ -27,8 +27,8 @@ from typing import Any, cast
 
 from simplebroker import (
     BrokerTarget,
+    Config,
     Queue,
-    ResolvedConfig,
     create_activity_waiter_for_queues,
 )
 from simplebroker.ext import (
@@ -40,8 +40,7 @@ from simplebroker.ext import (
 from weft._constants import (
     QUEUE_PRIORITY_NORMAL,
     TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS,
-    freeze_broker_config,
-    load_config,
+    resolve_runtime_config,
 )
 from weft.context import resolve_context_broker_target
 
@@ -155,7 +154,7 @@ class MultiQueueWatcher(BaseWatcher):
                 queue discovery probes when no native activity hint is pending.
             default_error_handler_fn: Fallback error handler when queue config
                 does not supply one (defaults to SimpleBroker's default)
-            config: Optional SimpleBroker configuration dictionary. If omitted,
+            config: Optional resolved Config or canonical runtime mapping. If omitted,
                 :func:`weft._constants.load_config` is used.
 
         Spec: [CC-2.1], [SB-0.4]
@@ -163,11 +162,8 @@ class MultiQueueWatcher(BaseWatcher):
         if not queue_configs:
             raise ValueError("queue_configs cannot be empty")
 
-        config_dict: dict[str, Any] = (
-            dict(config) if config is not None else load_config()
-        )
-        self._weft_config: dict[str, Any] = config_dict
-        broker_config = freeze_broker_config(config_dict)
+        broker_config = resolve_runtime_config(config)
+        self._weft_config: dict[str, Any] = dict(broker_config)
 
         self._persistent = persistent
         self._yield_strategy = yield_strategy
@@ -180,7 +176,7 @@ class MultiQueueWatcher(BaseWatcher):
         first_queue_name = next(iter(queue_configs.keys()))
         shared_target = _resolve_db_target(
             db,
-            resolve_context_broker_target(Path.cwd(), config=self._weft_config),
+            resolve_context_broker_target(Path.cwd(), config=broker_config),
         )
         # Direct Queue ok here: MultiQueueWatcher is creating its owned primary
         # handle; see runtime-and-context-patterns.md section 2.
@@ -307,7 +303,7 @@ class MultiQueueWatcher(BaseWatcher):
         self._ensure_multi_activity_waiter()
 
     @property
-    def _broker_config(self) -> ResolvedConfig:
+    def _broker_config(self) -> Config:
         """Return the retained SimpleBroker watcher configuration snapshot."""
 
         return self._config

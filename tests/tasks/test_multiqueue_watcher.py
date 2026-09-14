@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from simplebroker import (
-    ResolvedConfig,
+    Config,
 )
 from simplebroker import (
     create_activity_waiter_for_queues as real_create_activity_waiter,
@@ -119,15 +119,15 @@ def test_watcher_retains_broker_snapshot_separate_from_weft_policy(
     )
 
     try:
-        assert isinstance(watcher._config, ResolvedConfig)
+        assert isinstance(watcher._config, Config)
         assert type(watcher._weft_config) is dict
-        assert watcher._config["BROKER_CACHE_MB"] == 17
+        assert watcher._config["CACHE_MB"] == 17
 
-        watcher._weft_config["BROKER_CACHE_MB"] = 23
+        watcher._weft_config["CACHE_MB"] = 23
         monkeypatch.setenv("BROKER_CACHE_MB", "29")
 
-        assert watcher._config["BROKER_CACHE_MB"] == 17
-        assert watcher._broker_config["BROKER_CACHE_MB"] == 17
+        assert watcher._config["CACHE_MB"] == 17
+        assert watcher._broker_config["CACHE_MB"] == 17
     finally:
         watcher.stop(join=False)
 

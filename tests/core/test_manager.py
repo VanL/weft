@@ -75,7 +75,6 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
-    WEFT_MANAGER_SERVE_LOG_LEVEL,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TASK_STATE_QUEUE_PREFIX,
@@ -1759,7 +1758,7 @@ def test_manager_operational_log_emits_metadata_and_honors_level(
         {
             "WEFT_TASK_MONITOR_ENABLED": "0",
             "WEFT_LIVENESS_MONITOR_ENABLED": "0",
-            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_ACTIVE": True,
             "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
             "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 0.1,
         }
@@ -1803,7 +1802,7 @@ def test_manager_operational_log_off_is_silent(
         {
             "WEFT_TASK_MONITOR_ENABLED": "0",
             "WEFT_LIVENESS_MONITOR_ENABLED": "0",
-            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_ACTIVE": True,
             "WEFT_MANAGER_SERVE_LOG_LEVEL": "off",
         }
     )
@@ -1855,7 +1854,7 @@ def test_manager_service_convergence_operational_log_shows_task_monitor_start(
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
-            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_ACTIVE": True,
             "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
         }
     )
@@ -3779,11 +3778,13 @@ def test_manager_autostart_due_bypasses_convergence_throttle(
     db_path, _make_queue = broker_env
     autostart_dir = tmp_path / "autostart"
     autostart_dir.mkdir()
-    config = load_config(
-        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    config = dict(
+        load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        )
     )
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
     manager = Manager(
         db_path,
         make_manager_spec(unique_tid, idle_timeout=0.0),
@@ -3866,7 +3867,7 @@ def test_manager_clears_dispatch_stall_timer_when_backlog_drains(
     monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
     _prime_manager_next_wait_baseline(manager, now_ns)
     manager._weft_config[MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] = True
-    manager._weft_config[WEFT_MANAGER_SERVE_LOG_LEVEL] = "info"
+    manager._weft_config["MANAGER_SERVE_LOG_LEVEL"] = "info"
     manager._last_public_dispatch_stall_log_ns = now_ns - int(
         (MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS + 1.0) * 1_000_000_000
     )
@@ -6123,8 +6124,8 @@ def test_manager_bootstrap_discards_v1_registry_rows(
     db_path, make_queue = broker_env
     registry = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     registry.write(json.dumps({"schema": "weft.service_owner.v1"}))
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = False
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = False
 
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     try:
@@ -6147,8 +6148,8 @@ def test_manager_bootstrap_rejects_future_schema_before_v1_discard(
     registry = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     v1_id = registry.write(json.dumps({"schema": "weft.service_owner.v1"}))
     future_id = registry.write(json.dumps({"schema": "weft.service_owner.v3"}))
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = False
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = False
 
     with pytest.raises(ValueError, match="future service-owner schema"):
         Manager(db_path, make_manager_spec(unique_tid), config=config)
@@ -9160,9 +9161,9 @@ def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> 
         duration=0.2,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     inbox = f"manager.{unique_tid}.inbox"
     ctrl_in = f"manager.{unique_tid}.ctrl_in"
@@ -9601,9 +9602,9 @@ def test_manager_autostart_skips_active_templates(
         runtime_handle=_host_runtime_handle(os.getpid()),
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     inbox = f"manager.{unique_tid}.inbox"
     ctrl_in = f"manager.{unique_tid}.ctrl_in"
@@ -9632,9 +9633,9 @@ def test_manager_autostart_active_sources_include_tracked_children(
         mode="ensure",
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=0.0)
     manager = Manager(db_path, spec, config=config)
@@ -9678,9 +9679,9 @@ def test_manager_autostart_prunes_deleted_manifest_state(
     autostart_dir = tmp_path / "autostart"
     autostart_dir.mkdir()
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -9715,9 +9716,9 @@ def test_manager_autostart_ensure_restarts(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -9775,9 +9776,9 @@ def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -9820,9 +9821,9 @@ def test_manager_idle_shutdown_waits_for_autostart_ensure_restart_budget(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=0.2)
     manager = Manager(db_path, spec, config=config)
@@ -9860,9 +9861,9 @@ def test_manager_autostart_stale_active_log_without_liveness_is_not_active(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -9928,9 +9929,9 @@ def test_manager_autostart_pipeline_target_launches_pipeline_run(
         pipeline_bundle=True,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -9970,9 +9971,9 @@ def test_manager_autostart_pipeline_compile_broker_error_is_retryable(
         max_restarts=1,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     def fail_compile(*args: object, **kwargs: object) -> object:
         del args, kwargs
@@ -10006,9 +10007,9 @@ def test_manager_autostart_pipeline_ensure_restarts(
         manifest_input="restart-me",
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -10053,9 +10054,9 @@ def test_manager_autostart_ensure_enqueue_failure_does_not_advance_state(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = False
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = False
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -10095,9 +10096,9 @@ def test_manager_autostart_pending_spawn_blocks_duplicate_restart(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = False
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = False
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -10149,9 +10150,9 @@ def test_manager_autostart_active_launch_blocks_duplicate_restart(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = False
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = False
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -10205,9 +10206,9 @@ def test_manager_autostart_spoofed_public_metadata_does_not_claim_manifest(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = False
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = False
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -10272,9 +10273,9 @@ def test_manager_autostart_ensure_allows_one_restart_after_initial_launch(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -10351,9 +10352,9 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -10426,9 +10427,9 @@ def test_manager_autostart_backoff_rescan_uses_due_time(
         duration=0.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = False
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = False
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
@@ -10489,9 +10490,9 @@ def test_manager_autostart_ensure_restarts_after_abrupt_child_kill(
         duration=10.0,
     )
 
-    config = load_config()
-    config["WEFT_AUTOSTART_TASKS"] = True
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    config = dict(load_config())
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
 
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)

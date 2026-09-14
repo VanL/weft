@@ -586,7 +586,7 @@ def test_weft_skew_setting_changes_load_refusal_behavior(
     )
 
     monkeypatch.setenv("WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS", "0")
-    assert load_config()["BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS"] == 0
+    assert load_config()["LOAD_MAX_FUTURE_SKEW_SECONDS"] == 0
     with (
         pytest.warns(DumpClockSkewWarning),
         pytest.raises(CommandExecutionError) as caught,
@@ -600,7 +600,7 @@ def test_weft_skew_setting_changes_load_refusal_behavior(
         assert "future-alias" not in dict(broker.list_aliases())
 
     monkeypatch.setenv("WEFT_LOAD_MAX_FUTURE_SKEW_SECONDS", "3")
-    assert load_config()["BROKER_LOAD_MAX_FUTURE_SKEW_SECONDS"] == 3
+    assert load_config()["LOAD_MAX_FUTURE_SKEW_SECONDS"] == 3
     with pytest.warns(DumpClockSkewWarning):
         accepted_result = cmd_system_load(input=str(export_path), context=root)
     assert isinstance(accepted_result, SystemLoadResult)

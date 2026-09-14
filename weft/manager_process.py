@@ -3,6 +3,7 @@
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-7]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 """
 
 from __future__ import annotations
@@ -10,9 +11,11 @@ from __future__ import annotations
 import base64
 import json
 import sys
+from collections.abc import Mapping
 from typing import Any
 
-from simplebroker import BrokerTarget, deserialize_broker_target
+from simplebroker import BrokerTarget, deserialize_broker_target, serialize_config
+from weft._constants import resolve_runtime_config
 from weft.core.launcher import _task_process_entry
 from weft.core.taskspec import (
     TaskSpec,
@@ -25,7 +28,7 @@ def run_manager_process(
     task_cls_path: str,
     broker_target: BrokerTarget | str,
     spec: TaskSpec,
-    config: dict[str, Any] | None,
+    config: Mapping[str, Any] | None,
     poll_interval: float,
     *,
     hard_exit_on_return: bool = False,
@@ -36,7 +39,7 @@ def run_manager_process(
         task_cls_path,
         broker_target,
         json.dumps(encode_taskspec_transport_payload(spec)),
-        config,
+        serialize_config(resolve_runtime_config(config)),
         poll_interval,
         hard_exit_on_return,
     )
@@ -58,10 +61,15 @@ def main(argv: list[str] | None = None) -> int:
         broker_target = deserialize_broker_target(broker_target_json)
         spec_json = base64.b64decode(spec_b64).decode("utf-8")
         config_json = base64.b64decode(config_b64).decode("utf-8")
-        config = json.loads(config_json)
         poll_interval = float(poll_interval_s)
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"Invalid manager arguments: {exc}\n")
+        return 2
+
+    try:
+        config = resolve_runtime_config(config_json)
+    except (TypeError, ValueError) as exc:
+        sys.stderr.write(f"Invalid manager config: {exc}\n")
         return 2
 
     try:
