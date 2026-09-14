@@ -206,7 +206,7 @@ Unrelated public API, typing-audit, dependency, and tooling edits are excluded.
 - Exact candidate, 23 configuration/context/process/runtime/CLI/spec test modules,
   four workers: **1,469 passed, 5 skipped, 1 failed**, 161.70 seconds. The sole
   failure is `test_every_plan_has_normalized_metadata`: the existing
-  `2026-09-08-persistent-result-output-ids-plan.md` links to the untracked
+  `2026-09-08-persistent-result-output-ids-plan.md` links to the deleted
   `2026-09-10-weft-result-outbox-contract-plan.md`. Running that test against an
   export of unchanged HEAD reproduces the same failure. It is outside this
   commit; no migration test failed. Evidence: `candidate-pytest.log` and

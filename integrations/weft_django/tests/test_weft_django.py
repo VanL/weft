@@ -969,7 +969,7 @@ def test_as_taskspec_for_call_is_pure(
     Verifies:
     - With no configured `CONTEXT`, `resolve_context_override()` resolves to a
       read-only `BASE_DIR`, so a regression would have to build there
-    - Tripwires on `build_context`, `load_config`, `open_broker`, and
+    - Tripwires on `build_context`, `resolve_runtime_config`, `open_broker`, and
       `get_core_client` never fire, and nothing is written anywhere
     """
 
@@ -985,7 +985,7 @@ def test_as_taskspec_for_call_is_pure(
             raise AssertionError("forbidden on the export path")
 
         monkeypatch.setattr("weft.client._client.build_context", _forbidden)
-        monkeypatch.setattr("weft.context.load_config", _forbidden)
+        monkeypatch.setattr("weft.context.resolve_runtime_config", _forbidden)
         monkeypatch.setattr("weft.context.open_broker", _forbidden)
         monkeypatch.setattr(weft_django_client, "get_core_client", _forbidden)
 
