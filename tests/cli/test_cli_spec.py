@@ -21,7 +21,7 @@ def _write_json(path: Path, payload: dict) -> None:
 )
 @pytest.mark.parametrize("command", ["validate", "create"])
 def test_spec_rejects_task_requeue_without_traceback(
-    workdir, field: str, command: str
+    workdir: Path, field: str, command: str
 ) -> None:
     spec_path = workdir / "requeue.json"
     _write_json(
@@ -47,7 +47,7 @@ def test_spec_rejects_task_requeue_without_traceback(
     assert "Traceback" not in err
 
 
-def test_spec_create_list_show_delete(workdir) -> None:
+def test_spec_create_list_show_delete(workdir: Path) -> None:
     spec_path = workdir / "task.json"
     _write_json(
         spec_path,
@@ -119,7 +119,7 @@ def test_spec_create_list_show_delete(workdir) -> None:
     assert err == ""
 
 
-def test_spec_validate_and_generate(workdir) -> None:
+def test_spec_validate_and_generate(workdir: Path) -> None:
     spec_path = workdir / "task.json"
     _write_json(
         spec_path,
@@ -146,7 +146,7 @@ def test_spec_validate_and_generate(workdir) -> None:
     assert err == ""
 
 
-def test_spec_create_list_show_delete_agent(workdir) -> None:
+def test_spec_create_list_show_delete_agent(workdir: Path) -> None:
     spec_path = workdir / "agent_task.json"
     payload = taskspec_fixtures.create_valid_agent_taskspec(
         tid=taskspec_fixtures.VALID_TEST_TID,
@@ -226,7 +226,7 @@ def test_spec_create_list_show_delete_agent(workdir) -> None:
     assert err == ""
 
 
-def test_spec_list_and_show_builtin_task_spec(workdir) -> None:
+def test_spec_list_and_show_builtin_task_spec(workdir: Path) -> None:
     rc, out, err = run_cli(
         "spec",
         "list",
@@ -283,7 +283,7 @@ def test_spec_list_and_show_builtin_task_spec(workdir) -> None:
     assert err == ""
 
 
-def test_spec_show_builtin_dockerized_agent(workdir) -> None:
+def test_spec_show_builtin_dockerized_agent(workdir: Path) -> None:
     rc, out, err = run_cli(
         "spec",
         "list",
@@ -347,7 +347,7 @@ def test_spec_show_builtin_dockerized_agent(workdir) -> None:
     assert err == ""
 
 
-def test_spec_delete_rejects_builtin_only_spec(workdir) -> None:
+def test_spec_delete_rejects_builtin_only_spec(workdir: Path) -> None:
     rc, out, err = run_cli(
         "spec",
         "delete",
@@ -364,7 +364,7 @@ def test_spec_delete_rejects_builtin_only_spec(workdir) -> None:
     assert "read-only" in err
 
 
-def test_spec_list_and_show_prefer_local_shadow_over_builtin(workdir) -> None:
+def test_spec_list_and_show_prefer_local_shadow_over_builtin(workdir: Path) -> None:
     wrapper = write_provider_cli_wrapper(workdir, "codex")
     source_path = workdir / "local_probe_agents.json"
     _write_json(

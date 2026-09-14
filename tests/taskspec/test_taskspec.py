@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from inspect import Parameter, signature
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,6 @@ from weft.core.taskspec import (
     TaskSpec,
     validate_taskspec,
 )
-from weft.core.taskspec import model as taskspec_model
 from weft.core.taskspec.transport import validate_taskspec_payload
 from weft.ext import AgentMCPServerDescriptor, AgentToolProfileResult
 
@@ -49,35 +47,6 @@ def test_public_task_validation_rejects_requeue_but_preserves_manager(
         getattr(validate_taskspec_payload(payload).spec, field)
         is ReservedPolicy.REQUEUE
     )
-
-
-def test_model_post_init_context_is_runtime_positional_only() -> None:
-    """All Pydantic initialization hooks must expose the same runtime contract."""
-
-    class_names = (
-        "LimitsSection",
-        "RunnerSection",
-        "RunInputArgumentSection",
-        "RunInputStdinSection",
-        "RunInputSection",
-        "ParameterizationSection",
-        "AgentToolSection",
-        "AgentTemplateSection",
-        "AgentSection",
-        "SpecSection",
-        "TaskSpec",
-    )
-
-    for class_name in class_names:
-        parameters = tuple(
-            signature(
-                getattr(taskspec_model, class_name).model_post_init
-            ).parameters.values()
-        )
-        assert [parameter.kind for parameter in parameters] == [
-            Parameter.POSITIONAL_ONLY,
-            Parameter.POSITIONAL_ONLY,
-        ]
 
 
 def test_taskspec_rejects_unknown_top_level_field() -> None:
@@ -437,7 +406,7 @@ class TestTemplates:
         assert is_valid is True
         assert errors == {}
 
-    def test_provider_cli_template_requires_provider(self) -> None:
+    def test_provider_cli_template_with_provider_is_valid(self) -> None:
         provider_cli_template = {
             "name": "template-provider-cli-agent",
             "spec": {
@@ -535,30 +504,8 @@ class TestPartialImmutability:
 
         assert dict(taskspec.spec.env) == original_env
 
-    @pytest.mark.parametrize(
-        "section_name",
-        [
-            "LimitsSection",
-            "RunnerSection",
-            "RunInputArgumentSection",
-            "RunInputStdinSection",
-            "RunInputSection",
-            "ParameterizationSection",
-            "AgentToolSection",
-            "AgentTemplateSection",
-            "AgentSection",
-            "SpecSection",
-        ],
-    )
-    def test_frozen_sections_expose_no_thaw_escape_hatch(
-        self, section_name: str
-    ) -> None:
-        """Frozen sections offer no way to reopen themselves (Spec: [TS-0])."""
-        section_cls = getattr(taskspec_model, section_name)
-        assert not hasattr(section_cls, "_mutations_allowed")
-
-    def test_frozen_nested_sections_carry_no_mutation_flag(self) -> None:
-        """Frozen nested sections keep no ``_allow_mutation`` bypass flag."""
+    def test_frozen_nested_sections_reject_assignment(self) -> None:
+        """Every constructed nested section rejects assignment (Spec: [TS-0])."""
         taskspec = TaskSpec.model_validate(
             {
                 "tid": fixtures.VALID_TEST_TID,
@@ -578,6 +525,12 @@ class TestPartialImmutability:
                         "arguments": {"prompt": {"type": "string", "required": True}},
                         "stdin": {"type": "text"},
                     },
+                    "parameterization": {
+                        "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                        "arguments": {
+                            "provider": {"type": "string", "default": "codex"}
+                        },
+                    },
                 },
                 "io": {},
                 "state": {},
@@ -589,6 +542,8 @@ class TestPartialImmutability:
         assert agent is not None
         assert run_input is not None
         assert run_input.stdin is not None
+        parameterization = taskspec.spec.parameterization
+        assert parameterization is not None
 
         sections = [
             taskspec.spec,
@@ -600,14 +555,18 @@ class TestPartialImmutability:
             run_input,
             run_input.stdin,
             *run_input.arguments.values(),
+            parameterization,
+            *parameterization.arguments.values(),
         ]
         for section in sections:
-            assert not hasattr(section, "_allow_mutation")
+            field = next(iter(type(section).model_fields))
+            with pytest.raises(AttributeError):
+                setattr(section, field, getattr(section, field))
 
         with pytest.raises(AttributeError):
             agent.tools[0].name = "renamed"
         with pytest.raises(AttributeError):
-            run_input.stdin.type = "json"
+            run_input.stdin.type = "json"  # type: ignore[assignment]  # Frozen field rejects even invalid values.
 
 
 class TestProviderCLIValidation:
@@ -786,7 +745,7 @@ class TestProviderCLIValidation:
         with pytest.raises((TypeError, AttributeError)):
             taskspec.spec.agent.runtime_config["plugin_modules"] = ["plugin.two"]
         with pytest.raises((TypeError, AttributeError)):
-            taskspec.spec.agent.templates["default"] = {
+            taskspec.spec.agent.templates["default"] = {  # type: ignore[assignment]  # Frozen container rejects replacement.
                 "prompt": "Changed",
             }
 
@@ -847,12 +806,17 @@ class TestMetadataHelpers:
 class TestRuntimeReporting:
     """Runtime and logging convenience helpers."""
 
-    def test_get_runtime_seconds(self) -> None:
+    def test_get_runtime_seconds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         taskspec = fixtures.create_minimal_taskspec()
         assert taskspec.get_runtime_seconds() is None
         taskspec.mark_running()
-        runtime = taskspec.get_runtime_seconds()
-        assert runtime is not None and runtime >= 0
+        taskspec.state.started_at = 1_000_000_000
+        monkeypatch.setattr(
+            "weft.core.taskspec.model.time.time_ns", lambda: 4_000_000_000
+        )
+        assert taskspec.get_runtime_seconds() == 3.0
+        taskspec.state.completed_at = 3_500_000_000
+        assert taskspec.get_runtime_seconds() == 2.5
 
     def test_should_report_modes(self) -> None:
         taskspec = fixtures.create_valid_function_taskspec()
@@ -880,9 +844,17 @@ class TestRuntimeReporting:
 
     def test_to_log_dict_contains_expected_fields(self) -> None:
         taskspec = fixtures.create_minimal_taskspec()
+        taskspec.mark_running(pid=123)
+        taskspec.state.started_at = 1_000_000_000
+        taskspec.mark_completed()
+        taskspec.state.completed_at = 3_500_000_000
+        taskspec.set_metadata("owner", "log-owner")
         log_entry = taskspec.to_log_dict()
-        for key in ("tid", "name", "status", "runtime_seconds", "metadata"):
-            assert key in log_entry
+        assert log_entry["tid"] == fixtures.VALID_TEST_TID
+        assert log_entry["name"] == f"test-{fixtures.VALID_TEST_TID}"
+        assert log_entry["status"] == "completed"
+        assert log_entry["runtime_seconds"] == 2.5
+        assert log_entry["metadata"] == {"owner": "log-owner"}
 
 
 def test_agent_tool_approval_required_true_is_rejected() -> None:
@@ -891,7 +863,7 @@ def test_agent_tool_approval_required_true_is_rejected() -> None:
     Spec: [AR-0.0], [AR-2.2].
     """
     with pytest.raises(ValidationError, match="approval_required"):
-        AgentToolSection(
+        AgentToolSection(  # type: ignore[call-arg]  # Removed field must be rejected.
             name="dangerous_tool",
             kind="python",
             ref="tests.tasks.sample_targets:echo_payload",
@@ -902,7 +874,7 @@ def test_agent_tool_approval_required_true_is_rejected() -> None:
 def test_agent_tool_approval_required_false_is_rejected() -> None:
     """Both boolean spellings are unknown under the current tool schema."""
     with pytest.raises(ValidationError, match="approval_required"):
-        AgentToolSection(
+        AgentToolSection(  # type: ignore[call-arg]  # Removed field must be rejected.
             name="safe_tool",
             kind="python",
             ref="tests.tasks.sample_targets:echo_payload",

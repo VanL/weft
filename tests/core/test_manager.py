@@ -21,19 +21,22 @@ import threading
 import time
 import traceback
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, Literal, cast
 
 import pytest
 
 import weft.core.manager as manager_mod
 import weft.core.manager_runtime as manager_runtime_mod
 import weft.core.tasks.base as base_task_mod
+from simplebroker import Queue
 from simplebroker.ext import BrokerError, DatabaseError
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
+from tests.helpers.typing import BrokerEnv, record_and_return
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_PING,
@@ -81,8 +84,10 @@ from weft._constants import (
     WRAPPER_LOST_ERROR,
     load_config,
 )
+from weft.context import WeftContext
 from weft.core.control_messages import encode_control_message
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
+from weft.core.manager_services import ManagedServiceSpec
 from weft.core.monitor.task_monitor import TaskMonitor
 from weft.core.service_convergence import (
     build_manager_service_payload,
@@ -118,7 +123,7 @@ def unique_tid() -> str:
     return str(time.time_ns())
 
 
-def drain(queue):
+def drain(queue: Queue) -> list[str]:
     items = []
     while True:
         value = queue.read_one()
@@ -136,7 +141,7 @@ def serve_log_events(capsys: pytest.CaptureFixture[str]) -> list[dict[str, objec
     ]
 
 
-def pending_timestamps(queue) -> list[int]:
+def pending_timestamps(queue: Queue) -> list[int]:
     timestamps: list[int] = []
     for entry in queue.peek_generator(with_timestamps=True):
         if not isinstance(entry, tuple) or len(entry) != 2:
@@ -166,7 +171,9 @@ def _write_managed_service_owner(
     service_key: str,
     tid: str,
     runtime_handle: dict[str, object] | None = None,
-    status: str = "active",
+    status: Literal[
+        "active", "draining", "stopped", "superseded", "terminal", "uncertain"
+    ] = "active",
     ctrl_in: str | None = None,
     ctrl_out: str | None = None,
 ) -> None:
@@ -207,7 +214,7 @@ def _manager_service_payload(
     *,
     tid: str,
     name: str = "manager",
-    status: str = "active",
+    status: Literal["active", "draining", "stopped", "superseded"] = "active",
     runtime_handle: dict[str, object] | None = None,
     requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
     ctrl_in: str | None = None,
@@ -306,7 +313,9 @@ def make_manager_spec(
     weft_context: str | None = None,
     reserved_policy_on_error: ReservedPolicy = ReservedPolicy.KEEP,
 ) -> TaskSpec:
-    metadata = {"capabilities": ["tests.tasks.sample_targets:large_output"]}
+    metadata: dict[str, object] = {
+        "capabilities": ["tests.tasks.sample_targets:large_output"]
+    }
     if idle_timeout is not None:
         metadata["idle_timeout"] = idle_timeout
     if role is not None:
@@ -571,7 +580,7 @@ def write_autostart_fixture(
 def test_manager_autostart_root_dir_uses_configured_weft_directory_name(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _ = broker_env
@@ -587,7 +596,7 @@ def test_manager_autostart_root_dir_uses_configured_weft_directory_name(
 
 def test_manager_context_is_cached_by_base_task(
     tmp_path: Path,
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -595,10 +604,22 @@ def test_manager_context_is_cached_by_base_task(
     calls: list[bool | None] = []
     real_build_context = base_task_mod.build_context
 
-    def counted_build_context(*args: object, **kwargs: object) -> Any:
-        value = kwargs.get("create_database")
-        calls.append(value if isinstance(value, bool) else None)
-        return real_build_context(*args, **kwargs)
+    def counted_build_context(
+        spec_context: str | os.PathLike[str] | None = None,
+        *,
+        config: Mapping[str, Any] | None = None,
+        create_dirs: bool = True,
+        create_database: bool = True,
+        autostart: bool | None = None,
+    ) -> WeftContext:
+        calls.append(create_database)
+        return real_build_context(
+            spec_context,
+            config=config,
+            create_dirs=create_dirs,
+            create_database=create_database,
+            autostart=autostart,
+        )
 
     monkeypatch.setattr(base_task_mod, "build_context", counted_build_context)
     spec = make_manager_spec(
@@ -642,7 +663,7 @@ def test_manager_atexit_callback_silences_shutdown_cleanup_failure(
 def test_manager_cleanup_unregisters_registered_atexit_callback(
     unregister_fails: bool,
     tmp_path: Path,
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -783,14 +804,14 @@ def _pipeline_status_queue_name(child_taskspec: dict[str, object]) -> str | None
 
 def _wait_for_autostart_pipeline_result(
     manager: Manager,
-    log_queue,
-    make_queue,
+    log_queue: Queue,
+    make_queue: Callable[[str], Queue],
     *,
     source: str,
     timeout: float = AUTOSTART_PIPELINE_RESULT_TIMEOUT,
-) -> tuple[dict[str, object], object]:
+) -> tuple[dict[str, Any], object]:
     deadline = time.monotonic() + timeout
-    spawn_event: dict[str, object] | None = None
+    spawn_event: dict[str, Any] | None = None
     outbox_queue = None
     status_queue = None
     event_tail: list[dict[str, object]] = []
@@ -799,7 +820,7 @@ def _wait_for_autostart_pipeline_result(
     while time.monotonic() < deadline:
         manager.process_once()
         for item in drain(log_queue):
-            event = json.loads(item)
+            event: dict[str, Any] = json.loads(item)
             event_tail.append(event)
             event_tail = event_tail[-12:]
             if (
@@ -836,7 +857,9 @@ def _wait_for_autostart_pipeline_result(
 
 
 @pytest.fixture
-def manager_setup(broker_env, unique_tid):
+def manager_setup(
+    broker_env: BrokerEnv, unique_tid: str
+) -> Iterator[tuple[Manager, Callable[[str], Queue]]]:
     db_path, make_queue = broker_env
     inbox = f"manager.{unique_tid}.inbox"
     ctrl_in = f"manager.{unique_tid}.ctrl_in"
@@ -858,7 +881,9 @@ def wait_for_children(manager: Manager, timeout: float = 5.0) -> None:
         time.sleep(0.05)
 
 
-def test_manager_idle_probe_uses_newest_pending_timestamp(manager_setup) -> None:
+def test_manager_idle_probe_uses_newest_pending_timestamp(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     """The manager's idle probe must observe its newest pending input."""
 
     manager, make_queue = manager_setup
@@ -872,11 +897,12 @@ def test_manager_idle_probe_uses_newest_pending_timestamp(manager_setup) -> None
 
 def wait_for_log_event(
     manager: Manager,
-    log_queue: Any,
+    log_queue: Queue,
     predicate: Callable[[dict[str, object]], bool],
     *,
     timeout: float = 8.0,
-) -> dict[str, object]:
+) -> dict[str, Any]:
+    # Queue JSON carries nested TaskSpec payloads whose shape is validated by the runtime.
     deadline = time.monotonic() + timeout
     event_tail: list[dict[str, object]] = []
     while time.monotonic() < deadline:
@@ -885,7 +911,7 @@ def wait_for_log_event(
             item = log_queue.read_one()
             if item is None:
                 break
-            event = json.loads(item)
+            event: dict[str, Any] = json.loads(item)
             event_tail.append(event)
             event_tail = event_tail[-10:]
             if predicate(event):
@@ -933,6 +959,8 @@ def drive_manager_until(
     )
 
 
+# Partial process doubles below are cast only where injected into ManagedChild.
+# They model lifecycle evidence without spawning unrelated operating-system processes.
 class FakeLaunchProcess:
     def __init__(self, *, pid: int | None = 424242, alive: bool = True) -> None:
         self.pid = pid
@@ -954,14 +982,15 @@ class FakeLaunchProcess:
         self.exitcode = -getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
-def _process_running(pid: int) -> bool:
+def _process_running(pid: int | None) -> bool:
+    assert pid is not None
     psutil = pytest.importorskip("psutil")
     try:
         process = psutil.Process(pid)
     except psutil.Error:
         return False
     try:
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+        return bool(process.is_running() and process.status() != psutil.STATUS_ZOMBIE)
     except psutil.NoSuchProcess:
         return False
 
@@ -1099,7 +1128,7 @@ def _wait_for_pid_exit(pid: int, *, timeout: float) -> bool:
 
 
 def test_manager_spawns_child(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -1138,7 +1167,7 @@ def test_manager_spawns_child(
             break
         manager._cleanup_children()
         for item in drain(log_queue):
-            event = json.loads(item)
+            event: dict[str, Any] = json.loads(item)
             events.append(event)
             if event.get("tid") == child_tid:
                 child_events.append(event)
@@ -1155,7 +1184,7 @@ def test_manager_spawns_child(
 
 
 def test_manager_reactor_answers_ping_while_child_launch_is_active(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -1206,11 +1235,13 @@ def test_manager_reactor_answers_ping_while_child_launch_is_active(
     assert not manager._active_child_launches
 
 
-def test_manager_reactor_answers_ping_while_draining(manager_setup) -> None:
+def test_manager_reactor_answers_ping_while_draining(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     manager, make_queue = manager_setup
     child_tid = "1777000000000000104"
     manager._child_processes[child_tid] = ManagedChild(
-        process=FakeLaunchProcess(pid=424244),
+        process=cast(BaseProcess, FakeLaunchProcess(pid=424244)),
         ctrl_queue=f"T{child_tid}.ctrl_in",
         persistent=False,
     )
@@ -1230,7 +1261,7 @@ def test_manager_reactor_answers_ping_while_draining(manager_setup) -> None:
 
 
 def test_manager_child_launch_admission_failure_is_returned_locally(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -1259,7 +1290,7 @@ def test_manager_child_launch_admission_failure_is_returned_locally(
 
 
 def test_manager_stale_child_launch_retry_failure_is_returned_locally(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -1299,7 +1330,7 @@ def test_manager_stale_child_launch_retry_failure_is_returned_locally(
 
 
 def test_manager_child_launch_worker_transports_fatal_exit_identity(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -1334,7 +1365,7 @@ def test_manager_child_launch_worker_transports_fatal_exit_identity(
 
 
 def test_manager_launch_worker_success_commits_once_on_main_thread(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -1359,7 +1390,7 @@ def test_manager_launch_worker_success_commits_once_on_main_thread(
 
     def committed_once() -> bool:
         for item in drain(log_queue):
-            event = json.loads(item)
+            event: dict[str, Any] = json.loads(item)
             if event.get("event") == "task_spawned":
                 spawn_events.append(event)
         return bool(spawn_events)
@@ -1381,7 +1412,7 @@ def test_manager_launch_worker_success_commits_once_on_main_thread(
 
 
 def test_manager_launch_worker_failure_applies_reserved_policy(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -1411,7 +1442,7 @@ def test_manager_launch_worker_failure_applies_reserved_policy(
 
 
 def test_manager_launches_consumer_when_no_internal_task_class_is_set(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, _make_queue = manager_setup
     child_spec = manager._build_child_spec(make_child_spec(), int(time.time_ns()))
@@ -1421,7 +1452,7 @@ def test_manager_launches_consumer_when_no_internal_task_class_is_set(
 
 
 def test_manager_resolves_implicit_spawn_from_committed_message_id(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     tmp_path: Path,
 ) -> None:
     manager, make_queue = manager_setup
@@ -1477,7 +1508,7 @@ def test_manager_resolves_implicit_spawn_from_committed_message_id(
 
 
 def test_manager_launches_pipeline_task_for_reserved_internal_class(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, _make_queue = manager_setup
     child_spec = TaskSpec(
@@ -1564,7 +1595,9 @@ def test_manager_launches_pipeline_task_for_reserved_internal_class(
     assert manager._resolve_child_task_class(liveness_spec) is LivenessMonitor
 
 
-def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:
+def test_manager_rejects_unknown_internal_task_class(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     manager, make_queue = manager_setup
     child_spec = TaskSpec(
         tid=str(time.time_ns()),
@@ -1591,8 +1624,8 @@ def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:
 
 
 def test_manager_enqueues_one_internal_task_monitor_spawn(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     config = load_config({"WEFT_TASK_MONITOR_ENABLED": "1"})
@@ -1621,8 +1654,8 @@ def test_manager_enqueues_one_internal_task_monitor_spawn(
 
 
 def test_manager_enqueues_liveness_monitor_when_independently_enabled(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     config = load_config(
@@ -1661,8 +1694,8 @@ def test_manager_enqueues_liveness_monitor_when_independently_enabled(
 
 
 def test_manager_service_enqueue_forces_next_internal_queue_probe(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     config = load_config(
@@ -1698,8 +1731,8 @@ def test_manager_service_enqueue_forces_next_internal_queue_probe(
 
 
 def test_manager_convergence_drains_pending_internal_spawn_work(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -1749,8 +1782,8 @@ def test_manager_convergence_drains_pending_internal_spawn_work(
 
 
 def test_manager_operational_log_emits_metadata_and_honors_level(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     db_path, _make_queue = broker_env
@@ -1793,8 +1826,8 @@ def test_manager_operational_log_emits_metadata_and_honors_level(
 
 
 def test_manager_operational_log_off_is_silent(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     db_path, _make_queue = broker_env
@@ -1820,8 +1853,8 @@ def test_manager_operational_log_off_is_silent(
 
 
 def test_manager_operational_log_env_without_serve_active_is_silent(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     db_path, _make_queue = broker_env
@@ -1846,8 +1879,8 @@ def test_manager_operational_log_env_without_serve_active_is_silent(
 
 
 def test_manager_service_convergence_operational_log_shows_task_monitor_start(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     db_path, _make_queue = broker_env
@@ -1884,8 +1917,8 @@ def test_manager_service_convergence_operational_log_shows_task_monitor_start(
 
 
 def test_manager_does_not_enqueue_task_monitor_when_disabled(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     config = load_config(
@@ -1919,8 +1952,8 @@ def test_manager_does_not_enqueue_task_monitor_when_disabled(
 
 
 def test_manager_enqueues_heartbeat_through_service_path(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     config = load_config({"WEFT_TASK_MONITOR_ENABLED": "1"})
@@ -1953,8 +1986,8 @@ def test_manager_enqueues_heartbeat_through_service_path(
 
 
 def test_manager_processes_internal_spawn_before_public_spawn(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2113,7 +2146,7 @@ def _write_admission_snapshot(make_queue: Callable[[str], Any], body: str) -> in
 
 
 def test_sqlite_admission_counts_only_live_latest_mappings(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     if active_test_backend() != "sqlite":
@@ -2177,7 +2210,7 @@ def test_sqlite_admission_counts_only_live_latest_mappings(
 
 
 def test_sqlite_admission_unions_launches_and_committed_children_once(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     if active_test_backend() != "sqlite":
@@ -2208,11 +2241,11 @@ def test_sqlite_admission_unions_launches_and_committed_children_once(
     manager._active_child_launches["1700000000000000004"] = cast(Any, object())
     manager._active_child_launches["1700000000000000005"] = cast(Any, object())
     manager._child_processes["1700000000000000004"] = ManagedChild(
-        process=FakeLaunchProcess(pid=424210),
+        process=cast(BaseProcess, FakeLaunchProcess(pid=424210)),
         ctrl_queue=None,
     )
     manager._child_processes["1700000000000000006"] = ManagedChild(
-        process=FakeLaunchProcess(pid=424211),
+        process=cast(BaseProcess, FakeLaunchProcess(pid=424211)),
         ctrl_queue=None,
     )
 
@@ -2229,7 +2262,7 @@ def test_sqlite_admission_unions_launches_and_committed_children_once(
 
 
 def test_sqlite_admission_memoizes_probe_verdicts(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2291,7 +2324,7 @@ def test_sqlite_admission_memoizes_probe_verdicts(
 
 
 def test_sqlite_admission_memo_invalidates_when_terminal_hint_changes(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2345,7 +2378,7 @@ def test_sqlite_admission_memo_invalidates_when_terminal_hint_changes(
 
 
 def test_sqlite_admission_reconstructs_terminal_external_release_without_task_log(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     if active_test_backend() != "sqlite":
@@ -2394,7 +2427,7 @@ def test_sqlite_admission_reconstructs_terminal_external_release_without_task_lo
 
 
 def test_manager_admission_retains_public_while_internal_can_launch(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2425,7 +2458,9 @@ def test_manager_admission_retains_public_while_internal_can_launch(
     monkeypatch.setattr(
         manager,
         "_launch_child_task",
-        lambda child_spec, *_args, **_kwargs: launched.append(child_spec.name) or True,
+        lambda child_spec, *_args, **_kwargs: record_and_return(
+            launched, child_spec.name, True
+        ),
     )
 
     try:
@@ -2436,14 +2471,16 @@ def test_manager_admission_retains_public_while_internal_can_launch(
         assert internal_reserved.peek_one() is None
         assert public_queue.peek_one() is not None
         assert public_reserved.peek_one() is None
-        assert manager.next_wait_timeout() > 0.0
+        wait_timeout = manager.next_wait_timeout()
+        assert wait_timeout is not None
+        assert wait_timeout > 0.0
     finally:
         manager.stop(join=False)
         manager.cleanup()
 
 
 def test_manager_admission_retains_both_lanes_at_internal_limit(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2495,7 +2532,7 @@ def test_manager_admission_retains_both_lanes_at_internal_limit(
 
 
 def test_manager_admission_rechecks_retained_row_on_deadline_without_activity(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2531,7 +2568,9 @@ def test_manager_admission_rechecks_retained_row_on_deadline_without_activity(
     monkeypatch.setattr(
         manager,
         "_launch_child_task",
-        lambda child_spec, *_args, **_kwargs: launched.append(child_spec.name) or True,
+        lambda child_spec, *_args, **_kwargs: record_and_return(
+            launched, child_spec.name, True
+        ),
     )
 
     try:
@@ -2555,7 +2594,7 @@ def test_manager_admission_rechecks_retained_row_on_deadline_without_activity(
 
 
 def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2597,14 +2636,16 @@ def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
 
         assert public_queue.peek_one() is not None
         assert public_reserved.peek_one() is None
-        assert manager.next_wait_timeout() > 0.0
+        wait_timeout = manager.next_wait_timeout()
+        assert wait_timeout is not None
+        assert wait_timeout > 0.0
 
         launched: list[str] = []
         monkeypatch.setattr(
             manager,
             "_launch_child_task",
-            lambda child_spec, *_args, **_kwargs: (
-                launched.append(child_spec.name) or True
+            lambda child_spec, *_args, **_kwargs: record_and_return(
+                launched, child_spec.name, True
             ),
         )
         manager.process_once()
@@ -2625,7 +2666,7 @@ def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
     [BrokerError("unavailable"), OSError("unavailable"), RuntimeError("unavailable")],
 )
 def test_sqlite_admission_fails_closed_on_expected_observer_errors(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     failure: Exception,
     monkeypatch: pytest.MonkeyPatch,
@@ -2652,7 +2693,7 @@ def test_sqlite_admission_fails_closed_on_expected_observer_errors(
 
 
 def test_sqlite_admission_fails_closed_when_state_namespace_cannot_be_listed(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2683,7 +2724,7 @@ def test_sqlite_admission_fails_closed_when_state_namespace_cannot_be_listed(
 
 
 def test_sqlite_admission_fails_closed_when_mapping_filter_raises(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2716,7 +2757,7 @@ def test_sqlite_admission_fails_closed_when_mapping_filter_raises(
 
 
 def test_sqlite_admission_does_not_swallow_base_exception(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2743,7 +2784,7 @@ def test_sqlite_admission_does_not_swallow_base_exception(
 
 
 def test_disabled_admission_dispatches_without_observing_backend(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2775,7 +2816,9 @@ def test_disabled_admission_dispatches_without_observing_backend(
     monkeypatch.setattr(
         manager,
         "_launch_child_task",
-        lambda child_spec, *_args, **_kwargs: launched.append(child_spec.name) or True,
+        lambda child_spec, *_args, **_kwargs: record_and_return(
+            launched, child_spec.name, True
+        ),
     )
 
     try:
@@ -2787,7 +2830,7 @@ def test_disabled_admission_dispatches_without_observing_backend(
 
 
 def test_postgres_admission_uses_real_connection_stats_and_retains_tight_row(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     if active_test_backend() != "postgres":
@@ -2828,7 +2871,7 @@ def test_postgres_admission_uses_real_connection_stats_and_retains_tight_row(
     [DatabaseError("unavailable"), ValueError("invalid stats")],
 )
 def test_postgres_admission_fails_closed_on_expected_observer_errors(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     failure: Exception,
     monkeypatch: pytest.MonkeyPatch,
@@ -2855,8 +2898,8 @@ def test_postgres_admission_fails_closed_on_expected_observer_errors(
 
 
 def test_manager_stops_spawn_drain_after_child_launch_starts(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2904,8 +2947,8 @@ def test_manager_stops_spawn_drain_after_child_launch_starts(
 
 
 def test_custom_inbox_manager_does_not_consume_internal_spawn_queue(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2934,7 +2977,9 @@ def test_custom_inbox_manager_does_not_consume_internal_spawn_queue(
     monkeypatch.setattr(
         manager,
         "_launch_child_task",
-        lambda child_spec, *_args, **_kwargs: launched.append(child_spec.name) or True,
+        lambda child_spec, *_args, **_kwargs: record_and_return(
+            launched, child_spec.name, True
+        ),
     )
 
     try:
@@ -2947,8 +2992,8 @@ def test_custom_inbox_manager_does_not_consume_internal_spawn_queue(
 
 
 def test_internal_spawn_launch_failure_keeps_internal_reserved_until_shutdown(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -3004,8 +3049,8 @@ def test_internal_spawn_launch_failure_keeps_internal_reserved_until_shutdown(
 
 
 def test_internal_reserved_spawn_counts_as_pending_service(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     config = load_config(
@@ -3035,8 +3080,8 @@ def test_internal_reserved_spawn_counts_as_pending_service(
 
 
 def test_terminal_service_child_retries_reserved_spawn_ack(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -3050,7 +3095,7 @@ def test_terminal_service_child_retries_reserved_spawn_ack(
     message_id = pending_timestamps(internal_reserved)[0]
     child_tid = "1779000000000000042"
     manager._child_processes[child_tid] = ManagedChild(
-        process=FakeLaunchProcess(pid=4242, alive=False),
+        process=cast(BaseProcess, FakeLaunchProcess(pid=4242, alive=False)),
         ctrl_queue=f"T{child_tid}.ctrl_in",
         ctrl_out_queue=f"T{child_tid}.ctrl_out",
         internal_role=INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
@@ -3080,7 +3125,7 @@ def test_terminal_service_child_retries_reserved_spawn_ack(
 
 
 def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, _make_queue = manager_setup
     payload = manager._build_task_monitor_spawn_payload()
@@ -3104,7 +3149,7 @@ def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
 
 
 def test_manager_task_monitor_supervision_ignores_dispatch_ownership(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -3134,7 +3179,7 @@ def test_manager_task_monitor_supervision_ignores_dispatch_ownership(
 
 
 def test_manager_restarts_dead_task_monitor_after_backoff(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3157,7 +3202,7 @@ def test_manager_restarts_dead_task_monitor_after_backoff(
     manager._task_monitor_tid = "monitor-child"
     manager._task_monitor_restart_backoff_ns = 1_000_000_000
     manager._child_processes["monitor-child"] = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
         persistent=True,
         internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
@@ -3171,7 +3216,7 @@ def test_manager_restarts_dead_task_monitor_after_backoff(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._cleanup_children()
@@ -3187,7 +3232,7 @@ def test_manager_restarts_dead_task_monitor_after_backoff(
 
 
 def test_manager_restarts_dead_liveness_monitor_after_backoff(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3209,7 +3254,7 @@ def test_manager_restarts_dead_liveness_monitor_after_backoff(
     manager._liveness_monitor_tid = tid
     manager._task_monitor_restart_backoff_ns = 1_000_000_000
     manager._child_processes[tid] = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
         persistent=True,
         internal_role=INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
@@ -3223,7 +3268,7 @@ def test_manager_restarts_dead_liveness_monitor_after_backoff(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._cleanup_children()
@@ -3239,7 +3284,7 @@ def test_manager_restarts_dead_liveness_monitor_after_backoff(
 
 
 def test_task_monitor_terminal_tracked_child_allows_restart(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -3277,7 +3322,7 @@ def test_task_monitor_terminal_tracked_child_allows_restart(
     manager._task_monitor_tid = old_tid
     manager._task_monitor_restart_backoff_ns = 0
     manager._child_processes[old_tid] = ManagedChild(
-        process=FakeLiveProcess(),
+        process=cast(BaseProcess, FakeLiveProcess()),
         ctrl_queue=f"T{old_tid}.ctrl_in",
         ctrl_out_queue=ctrl_out,
         persistent=True,
@@ -3292,7 +3337,7 @@ def test_task_monitor_terminal_tracked_child_allows_restart(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services()
@@ -3302,7 +3347,7 @@ def test_task_monitor_terminal_tracked_child_allows_restart(
 
 
 def test_stable_managed_service_convergence_uses_audit_interval(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3315,7 +3360,7 @@ def test_stable_managed_service_convergence_uses_audit_interval(
     monkeypatch.setattr(
         manager,
         "_cleanup_children",
-        lambda: calls.append("cleanup") and False,
+        lambda: record_and_return(calls, "cleanup", None),
     )
 
     def reconcile(*, include_autostart: bool = True) -> None:
@@ -3334,7 +3379,7 @@ def test_stable_managed_service_convergence_uses_audit_interval(
 
 
 def test_active_managed_service_convergence_uses_active_interval(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3348,7 +3393,7 @@ def test_active_managed_service_convergence_uses_active_interval(
     monkeypatch.setattr(
         manager,
         "_cleanup_children",
-        lambda: calls.append("cleanup") and False,
+        lambda: record_and_return(calls, "cleanup", None),
     )
     monkeypatch.setattr(
         manager,
@@ -3369,7 +3414,7 @@ def test_active_managed_service_convergence_uses_active_interval(
 
 
 def test_managed_service_convergence_active_reasons_are_stable(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3401,7 +3446,7 @@ def test_managed_service_convergence_active_reasons_are_stable(
 
 
 def test_spawn_pending_internal_service_with_active_tid_remains_unsettled(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, _make_queue = manager_setup
     manager._managed_service_state.clear()
@@ -3418,7 +3463,7 @@ def test_spawn_pending_internal_service_with_active_tid_remains_unsettled(
 
 
 def test_throttled_managed_service_convergence_skips_broker_work(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3431,22 +3476,22 @@ def test_throttled_managed_service_convergence_skips_broker_work(
     monkeypatch.setattr(
         manager,
         "_internal_spawn_pending",
-        lambda: calls.append("internal_pending") or False,
+        lambda: record_and_return(calls, "internal_pending", False),
     )
     monkeypatch.setattr(
         manager,
         "_cleanup_children",
-        lambda: calls.append("cleanup") or False,
+        lambda: record_and_return(calls, "cleanup", False),
     )
     monkeypatch.setattr(
         manager,
         "_pending_service_keys",
-        lambda _keys, **_kwargs: calls.append("pending_keys") or set(),
+        lambda _keys, **_kwargs: record_and_return(calls, "pending_keys", set()),
     )
     monkeypatch.setattr(
         manager,
         "_observed_service_candidates_by_key",
-        lambda _keys, **_kwargs: calls.append("observed") or {},
+        lambda _keys, **_kwargs: record_and_return(calls, "observed", {}),
     )
 
     manager._run_managed_service_convergence(include_autostart=False)
@@ -3455,7 +3500,7 @@ def test_throttled_managed_service_convergence_skips_broker_work(
 
 
 def test_managed_service_convergence_reuses_internal_pending_probe_per_pass(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3491,7 +3536,7 @@ def test_managed_service_convergence_reuses_internal_pending_probe_per_pass(
 
 
 def test_manager_leadership_yield_rate_gate_precedes_actionable_work(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3512,8 +3557,8 @@ def test_manager_leadership_yield_rate_gate_precedes_actionable_work(
 
 
 def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -3608,7 +3653,7 @@ def _prime_manager_next_wait_baseline(manager: Manager, now_ns: int) -> None:
 
 
 def test_manager_next_wait_timeout_returns_nearest_due_source(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3659,7 +3704,7 @@ def test_manager_next_wait_timeout_returns_nearest_due_source(
 
     _prime_manager_next_wait_baseline(manager, now_ns)
     child = ManagedChild(
-        process=SimpleNamespace(pid=1234),
+        process=cast(BaseProcess, SimpleNamespace(pid=1234)),
         ctrl_queue="Tchild.ctrl_in",
         ctrl_out_queue="Tchild.ctrl_out",
         service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
@@ -3674,7 +3719,7 @@ def test_manager_next_wait_timeout_returns_nearest_due_source(
 
 
 def test_manager_next_wait_timeout_ignores_broker_probe_when_idle_disabled(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3685,11 +3730,13 @@ def test_manager_next_wait_timeout_ignores_broker_probe_when_idle_disabled(
     manager._idle_timeout = 0.0
     manager._last_broker_probe_ns = now_ns - manager._broker_probe_interval_ns - 1
 
-    assert manager.next_wait_timeout() > 0.0
+    wait_timeout = manager.next_wait_timeout()
+    assert wait_timeout is not None
+    assert wait_timeout > 0.0
 
 
 def test_manager_init_skips_initial_broker_probe_when_idle_disabled(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3721,7 +3768,7 @@ def test_manager_init_skips_initial_broker_probe_when_idle_disabled(
 
 
 def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3729,7 +3776,7 @@ def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services
     monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
     _prime_manager_next_wait_baseline(manager, now_ns)
     child = ManagedChild(
-        process=SimpleNamespace(pid=1234),
+        process=cast(BaseProcess, SimpleNamespace(pid=1234)),
         ctrl_queue="Tchild.ctrl_in",
         ctrl_out_queue="Tchild.ctrl_out",
         persistent=True,
@@ -3738,7 +3785,9 @@ def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services
     )
     manager._child_processes["1777000000000000052"] = child
     try:
-        assert manager.next_wait_timeout() > MANAGER_CHILD_EXIT_POLL_INTERVAL
+        wait_timeout = manager.next_wait_timeout()
+        assert wait_timeout is not None
+        assert wait_timeout > MANAGER_CHILD_EXIT_POLL_INTERVAL
     finally:
         manager._child_processes.pop("1777000000000000052", None)
 
@@ -3756,7 +3805,7 @@ def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services
     ],
 )
 def test_manager_next_wait_timeout_returns_zero_for_immediate_work(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
     attribute: str,
     value: object,
@@ -3772,7 +3821,7 @@ def test_manager_next_wait_timeout_returns_zero_for_immediate_work(
 
 def test_manager_autostart_due_bypasses_convergence_throttle(
     tmp_path: Path,
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -3813,7 +3862,7 @@ def test_manager_autostart_due_bypasses_convergence_throttle(
 
 
 def test_manager_unscanned_autostart_is_due_without_reading_clock(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3836,7 +3885,7 @@ def test_manager_unscanned_autostart_is_due_without_reading_clock(
 
 
 def test_manager_disabled_autostart_is_not_due_without_reading_clock(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3859,7 +3908,7 @@ def test_manager_disabled_autostart_is_not_due_without_reading_clock(
 
 
 def test_manager_clears_dispatch_stall_timer_when_backlog_drains(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3877,11 +3926,13 @@ def test_manager_clears_dispatch_stall_timer_when_backlog_drains(
     manager._maybe_log_public_dispatch_stall(manager._queue_names["inbox"])
 
     assert manager._last_public_dispatch_stall_log_ns == 0
-    assert manager.next_wait_timeout() > 0.0
+    wait_timeout = manager.next_wait_timeout()
+    assert wait_timeout is not None
+    assert wait_timeout > 0.0
 
 
 def test_manager_wait_for_activity_passes_timeout_to_shared_waiter(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3904,7 +3955,7 @@ def test_manager_wait_for_activity_passes_timeout_to_shared_waiter(
 
 
 def test_manager_wait_for_activity_fallback_honors_timeout(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -3933,7 +3984,7 @@ def test_manager_wait_for_activity_fallback_honors_timeout(
     monkeypatch.setattr(
         manager, "_reset_multi_activity_waiter", lambda: reset_calls.append(True)
     )
-    manager._stop_event = FakeStopEvent()
+    manager._stop_event = cast(threading.Event, FakeStopEvent())
 
     manager._wait_for_reactor_activity(timeout=0.2)
 
@@ -3942,7 +3993,7 @@ def test_manager_wait_for_activity_fallback_honors_timeout(
 
 
 def test_manager_fallback_wait_suppresses_only_blocked_spawn_source(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3987,7 +4038,7 @@ def test_manager_fallback_wait_suppresses_only_blocked_spawn_source(
         lambda: FailingWaiter(),
     )
     monkeypatch.setattr(manager, "_reset_multi_activity_waiter", lambda: None)
-    manager._stop_event = FakeStopEvent()
+    manager._stop_event = cast(threading.Event, FakeStopEvent())
 
     try:
         manager._wait_for_reactor_activity(timeout=0.2)
@@ -4002,7 +4053,7 @@ def test_manager_fallback_wait_suppresses_only_blocked_spawn_source(
 
 
 def test_manager_leadership_self_owner_skips_actionable_scan_per_turn(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -4043,7 +4094,7 @@ def test_manager_leadership_self_owner_skips_actionable_scan_per_turn(
 
 
 def test_manager_leadership_lower_owner_checks_actionable_work_before_yield(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -4077,12 +4128,12 @@ def test_manager_leadership_lower_owner_checks_actionable_work_before_yield(
 
 
 def test_tracked_service_candidate_uses_live_child_without_terminal_scan(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
     child = ManagedChild(
-        process=SimpleNamespace(pid=1234),
+        process=cast(BaseProcess, SimpleNamespace(pid=1234)),
         ctrl_queue="Tchild.ctrl_in",
         ctrl_out_queue="Tchild.ctrl_out",
         service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
@@ -4108,7 +4159,7 @@ def test_tracked_service_candidate_uses_live_child_without_terminal_scan(
 
 
 def test_reconcile_reuses_tracked_service_candidates(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -4149,7 +4200,7 @@ def test_reconcile_reuses_tracked_service_candidates(
 
 
 def test_reconcile_clears_duplicate_scan_after_live_tracked_evidence(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -4238,7 +4289,7 @@ def test_managed_service_progress_reasons_are_coarse_and_stable() -> None:
 
 
 def test_task_monitor_terminal_log_overrides_tracked_live_child(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4289,7 +4340,7 @@ def test_task_monitor_terminal_log_overrides_tracked_live_child(
     manager._task_monitor_tid = old_tid
     manager._task_monitor_restart_backoff_ns = 0
     manager._child_processes[old_tid] = ManagedChild(
-        process=FakeLiveProcess(),
+        process=cast(BaseProcess, FakeLiveProcess()),
         ctrl_queue=f"T{old_tid}.ctrl_in",
         ctrl_out_queue=f"T{old_tid}.ctrl_out",
         persistent=True,
@@ -4304,7 +4355,7 @@ def test_task_monitor_terminal_log_overrides_tracked_live_child(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -4314,7 +4365,7 @@ def test_task_monitor_terminal_log_overrides_tracked_live_child(
 
 
 def test_task_monitor_manager_spawned_pid_counts_as_live_owner(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4336,7 +4387,7 @@ def test_task_monitor_manager_spawned_pid_counts_as_live_owner(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services()
@@ -4346,7 +4397,7 @@ def test_task_monitor_manager_spawned_pid_counts_as_live_owner(
 
 
 def test_task_monitor_terminal_tracked_child_does_not_hide_new_live_owner(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4384,14 +4435,14 @@ def test_task_monitor_terminal_tracked_child_does_not_hide_new_live_owner(
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     manager._task_monitor_tid = new_tid
     manager._child_processes[old_tid] = ManagedChild(
-        process=FakeLiveProcess(),
+        process=cast(BaseProcess, FakeLiveProcess()),
         ctrl_queue=f"T{old_tid}.ctrl_in",
         ctrl_out_queue=old_ctrl_out,
         persistent=True,
         internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     )
     manager._child_processes[new_tid] = ManagedChild(
-        process=FakeLiveProcess(),
+        process=cast(BaseProcess, FakeLiveProcess()),
         ctrl_queue=f"T{new_tid}.ctrl_in",
         ctrl_out_queue=f"T{new_tid}.ctrl_out",
         persistent=True,
@@ -4406,7 +4457,7 @@ def test_task_monitor_terminal_tracked_child_does_not_hide_new_live_owner(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services()
@@ -4416,7 +4467,7 @@ def test_task_monitor_terminal_tracked_child_does_not_hide_new_live_owner(
 
 
 def test_task_monitor_stale_log_without_liveness_does_not_block_restart(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4458,7 +4509,7 @@ def test_task_monitor_stale_log_without_liveness_does_not_block_restart(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -4470,7 +4521,7 @@ def test_task_monitor_stale_log_without_liveness_does_not_block_restart(
 
 
 def test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4491,7 +4542,7 @@ def test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -4515,14 +4566,14 @@ def _desired_internal_service_keys(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
     manager._tick_internal_services(force=True)
     return enqueued
 
 
 def test_liveness_monitor_only_does_not_desire_heartbeat(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """LivenessMonitor is not a heartbeat dependent, so it must not pull it in."""
@@ -4537,7 +4588,7 @@ def test_liveness_monitor_only_does_not_desire_heartbeat(
 
 
 def test_task_monitor_only_desires_heartbeat_and_task_monitor(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """TaskMonitor registers with heartbeat, so heartbeat stays desired with it."""
@@ -4553,7 +4604,7 @@ def test_task_monitor_only_desires_heartbeat_and_task_monitor(
 
 
 def test_both_internal_monitors_disabled_desires_no_internal_service(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no enabled dependent, heartbeat is not run as standalone work."""
@@ -4566,7 +4617,7 @@ def test_both_internal_monitors_disabled_desires_no_internal_service(
 
 
 def test_liveness_monitor_only_convergence_ignores_missing_heartbeat(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Idle shutdown must not wait on a heartbeat no enabled dependent needs."""
@@ -4594,7 +4645,7 @@ def test_liveness_monitor_only_convergence_ignores_missing_heartbeat(
 
 
 def test_managed_service_pong_probe_is_nonblocking(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
@@ -4654,7 +4705,7 @@ def test_service_candidate_pid_prefers_positive_non_boolean_child_pid(
 
 
 def test_managed_service_pong_probe_timeout_deletes_exact_ping(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
@@ -4702,7 +4753,7 @@ def test_managed_service_pong_probe_timeout_deletes_exact_ping(
 
 
 def test_managed_service_pong_probe_timeout_sweeps_own_keyed_reply(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     """A timed-out service probe retires ctrl_out replies keyed to it.
 
@@ -4769,7 +4820,7 @@ def test_managed_service_pong_probe_timeout_sweeps_own_keyed_reply(
 
 
 def test_managed_service_observation_preserves_other_owner_history(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     first_tid = "1777000000000000600"
@@ -4806,7 +4857,7 @@ def test_managed_service_observation_preserves_other_owner_history(
 
 
 def test_managed_service_dead_registered_pid_is_terminal_without_recent_grace(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4833,7 +4884,7 @@ def test_managed_service_dead_registered_pid_is_terminal_without_recent_grace(
 
 
 def test_task_monitor_duplicate_live_candidates_get_kill_signal(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4857,13 +4908,13 @@ def test_task_monitor_duplicate_live_candidates_get_kill_signal(
     monkeypatch.setattr(
         manager_mod,
         "kill_process_tree",
-        lambda pid, *, timeout=0.5: killed.append(pid) or {pid},
+        lambda pid, *, timeout=0.5: record_and_return(killed, pid, {pid}),
     )
     enqueued: list[str] = []
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -4877,7 +4928,7 @@ def test_task_monitor_duplicate_live_candidates_get_kill_signal(
 
 
 def test_liveness_monitor_duplicate_live_candidates_converge(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -4897,7 +4948,7 @@ def test_liveness_monitor_duplicate_live_candidates_converge(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -4977,7 +5028,7 @@ def test_internal_service_trust_preserves_endpoint_asymmetry() -> None:
 
 
 def test_task_monitor_duplicate_manager_spawned_candidates_do_not_force_kill_raw_pid(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5014,7 +5065,7 @@ def test_task_monitor_duplicate_manager_spawned_candidates_do_not_force_kill_raw
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -5028,7 +5079,7 @@ def test_task_monitor_duplicate_manager_spawned_candidates_do_not_force_kill_raw
 
 
 def test_task_monitor_duplicate_tracked_child_force_kills_owned_process(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5052,7 +5103,7 @@ def test_task_monitor_duplicate_tracked_child_force_kills_owned_process(
             pass
 
     manager._child_processes[duplicate_tid] = ManagedChild(
-        process=FakeLiveProcess(duplicate_pid),
+        process=cast(BaseProcess, FakeLiveProcess(duplicate_pid)),
         ctrl_queue=f"T{duplicate_tid}.ctrl_in",
         ctrl_out_queue=f"T{duplicate_tid}.ctrl_out",
         persistent=True,
@@ -5092,7 +5143,7 @@ def test_task_monitor_duplicate_tracked_child_force_kills_owned_process(
 
 
 def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5141,7 +5192,7 @@ def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
 
 
 def test_task_monitor_internal_pending_spawn_request_blocks_duplicate_restart(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5161,7 +5212,7 @@ def test_task_monitor_internal_pending_spawn_request_blocks_duplicate_restart(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -5171,7 +5222,7 @@ def test_task_monitor_internal_pending_spawn_request_blocks_duplicate_restart(
 
 
 def test_task_monitor_public_pending_spawn_request_does_not_block_internal_restart(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5191,7 +5242,7 @@ def test_task_monitor_public_pending_spawn_request_does_not_block_internal_resta
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -5204,7 +5255,7 @@ def test_task_monitor_public_pending_spawn_request_does_not_block_internal_resta
 
 
 def test_task_monitor_spoofed_pending_spawn_without_internal_envelope_does_not_block(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5238,7 +5289,7 @@ def test_task_monitor_spoofed_pending_spawn_without_internal_envelope_does_not_b
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -5251,7 +5302,7 @@ def test_task_monitor_spoofed_pending_spawn_without_internal_envelope_does_not_b
 
 
 def test_process_once_reconciles_internal_services_before_user_spawn_work(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5280,7 +5331,7 @@ def test_process_once_reconciles_internal_services_before_user_spawn_work(
         manager._task_monitor_tid = old_tid
         manager._task_monitor_restart_backoff_ns = 0
         manager._child_processes[old_tid] = ManagedChild(
-            process=FakeDeadProcess(),
+            process=cast(BaseProcess, FakeDeadProcess()),
             ctrl_queue=f"T{old_tid}.ctrl_in",
             ctrl_out_queue=f"T{old_tid}.ctrl_out",
             persistent=True,
@@ -5321,7 +5372,7 @@ def test_process_once_reconciles_internal_services_before_user_spawn_work(
 
         order: list[str] = []
 
-        def record_service_enqueue(service) -> bool:
+        def record_service_enqueue(service: ManagedServiceSpec) -> bool:
             order.append(f"service:{service.key}")
             return True
 
@@ -5351,7 +5402,7 @@ def test_process_once_reconciles_internal_services_before_user_spawn_work(
 
 
 def test_process_once_launches_service_spawn_in_same_reconcile_turn(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5389,7 +5440,7 @@ def test_process_once_launches_service_spawn_in_same_reconcile_turn(
 
 
 def test_task_monitor_spoofed_public_metadata_does_not_claim_singleton(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5429,7 +5480,7 @@ def test_task_monitor_spoofed_public_metadata_does_not_claim_singleton(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -5442,7 +5493,7 @@ def test_task_monitor_spoofed_public_metadata_does_not_claim_singleton(
 
 
 def test_task_monitor_latest_terminal_log_overrides_older_running_evidence(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5499,7 +5550,7 @@ def test_task_monitor_latest_terminal_log_overrides_older_running_evidence(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -5512,7 +5563,7 @@ def test_task_monitor_latest_terminal_log_overrides_older_running_evidence(
 
 
 def test_task_monitor_matching_pong_blocks_duplicate_restart(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -5534,7 +5585,7 @@ def test_task_monitor_matching_pong_blocks_duplicate_restart(
     monkeypatch.setattr(
         manager,
         "_enqueue_managed_service_request",
-        lambda service: enqueued.append(service.key) or True,
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
     manager._tick_internal_services(force=True)
@@ -5544,8 +5595,8 @@ def test_task_monitor_matching_pong_blocks_duplicate_restart(
 
 
 def test_internal_task_monitor_child_does_not_block_idle_shutdown(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -5570,7 +5621,7 @@ def test_internal_task_monitor_child_does_not_block_idle_shutdown(
 
     try:
         manager._child_processes["monitor-child"] = ManagedChild(
-            process=FakeProcess(),
+            process=cast(BaseProcess, FakeProcess()),
             ctrl_queue=None,
             persistent=True,
             internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
@@ -5592,8 +5643,8 @@ def test_internal_task_monitor_child_does_not_block_idle_shutdown(
 
 
 def test_manager_idle_shutdown_waits_for_missing_internal_service(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -5623,7 +5674,7 @@ def test_manager_idle_shutdown_waits_for_missing_internal_service(
 
 
 def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5662,7 +5713,7 @@ def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
 
 
 def test_manager_closes_seeded_child_inbox_queue(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -5696,7 +5747,7 @@ def test_manager_closes_seeded_child_inbox_queue(
     seed_queue = FakeSeedQueue()
     original_get_queue = manager.get_queue
 
-    def fake_get_queue(name: str):
+    def fake_get_queue(name: str) -> Queue | FakeSeedQueue | None:
         if name == "seeded.inbox":
             return seed_queue
         return original_get_queue(name)
@@ -5729,7 +5780,7 @@ def test_manager_closes_seeded_child_inbox_queue(
 
 
 def test_manager_cleanup_waits_for_active_child_launch_worker(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -5803,6 +5854,7 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
         cleanup_thread.join(timeout=5.0)
 
     if cleanup_thread.is_alive():
+        assert cleanup_thread.ident is not None
         frame = sys._current_frames().get(cleanup_thread.ident)
         stack = (
             "".join(traceback.format_stack(frame, limit=24))
@@ -5814,7 +5866,7 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
 
 
 def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -5967,6 +6019,7 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
 
     assert stop_thread is not None
     if stop_thread.is_alive():
+        assert stop_thread.ident is not None
         frame = sys._current_frames().get(stop_thread.ident)
         stack = (
             "".join(traceback.format_stack(frame, limit=24))
@@ -5979,7 +6032,7 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
 
 
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -5996,7 +6049,9 @@ def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
             self.closed = False
             FakeTerminalQueue.instances.append(self)
 
-        def peek_generator(self, *, with_timestamps: bool = False):
+        def peek_generator(
+            self, *, with_timestamps: bool = False
+        ) -> Iterator[tuple[str, int]]:
             del with_timestamps
             return iter(())
 
@@ -6018,7 +6073,7 @@ def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
 
     monkeypatch.setattr(manager_mod, "Queue", FakeTerminalQueue)
     child = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
         ctrl_out_queue=child_ctrl_out,
     )
@@ -6042,7 +6097,7 @@ def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
 
 
 def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -6069,7 +6124,9 @@ def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
             self.closed = False
             FakeTerminalQueue.instances.append(self)
 
-        def peek_generator(self, *, with_timestamps: bool = False):
+        def peek_generator(
+            self, *, with_timestamps: bool = False
+        ) -> Iterator[tuple[str, int]]:
             del with_timestamps
             return iter(((terminal_payload, time.time_ns()),))
 
@@ -6091,7 +6148,7 @@ def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
 
     monkeypatch.setattr(manager_mod, "Queue", FakeTerminalQueue)
     child = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
         ctrl_out_queue=child_ctrl_out,
     )
@@ -6103,7 +6160,9 @@ def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
     assert FakeTerminalQueue.instances[0].closed is True
 
 
-def test_manager_registry_entries(manager_setup) -> None:
+def test_manager_registry_entries(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     entries = [json.loads(item) for item in drain(registry_queue)]
@@ -6118,7 +6177,7 @@ def test_manager_registry_entries(manager_setup) -> None:
 
 
 def test_manager_bootstrap_discards_v1_registry_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -6141,7 +6200,7 @@ def test_manager_bootstrap_discards_v1_registry_rows(
 
 
 def test_manager_bootstrap_rejects_future_schema_before_v1_discard(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -6159,8 +6218,8 @@ def test_manager_bootstrap_rejects_future_schema_before_v1_discard(
 
 
 def test_manager_refreshes_active_registry_heartbeat(
-    manager_setup,
-    monkeypatch,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -6180,7 +6239,7 @@ def test_manager_refreshes_active_registry_heartbeat(
 
 
 def test_manager_supersedes_fresh_higher_tid_active_refresh(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -6249,8 +6308,8 @@ def test_manager_supersedes_fresh_higher_tid_active_refresh(
 
 
 def test_manager_registry_refresh_preserves_expired_peer_and_malformed_rows(
-    manager_setup,
-    monkeypatch,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -6305,8 +6364,8 @@ def test_manager_registry_refresh_preserves_expired_peer_and_malformed_rows(
 
 
 def test_manager_publishes_inactive_when_recent_lower_canonical_manager_exists(
-    manager_setup,
-    monkeypatch,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -6332,8 +6391,8 @@ def test_manager_publishes_inactive_when_recent_lower_canonical_manager_exists(
 
 
 def test_manager_registers_when_lower_canonical_manager_is_stale(
-    manager_setup,
-    monkeypatch,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -6371,7 +6430,7 @@ def test_manager_registers_when_lower_canonical_manager_is_stale(
 
 
 def test_manager_leadership_ping_probe_is_nonblocking(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -6385,8 +6444,6 @@ def test_manager_leadership_ping_probe_is_nonblocking(
         ctrl_in=ctrl_in_name,
         ctrl_out=ctrl_out_name,
     )
-
-    assert not hasattr(manager_mod, "send_keyed_ping_probe")
 
     proof = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
 
@@ -6414,7 +6471,7 @@ def test_manager_leadership_ping_probe_is_nonblocking(
 
 
 def test_manager_leadership_ping_probe_timeout_deletes_exact_ping(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     lower_tid = str(int(manager.tid) - 1)
@@ -6450,7 +6507,7 @@ def test_manager_leadership_ping_probe_timeout_deletes_exact_ping(
 
 
 def test_manager_leadership_probe_timeout_sweeps_own_keyed_reply(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     """A timed-out leadership probe retires ctrl_out replies keyed to it.
 
@@ -6516,7 +6573,7 @@ def test_manager_leadership_probe_timeout_sweeps_own_keyed_reply(
 
 
 def test_manager_leadership_probe_abandonment_sweeps_own_keyed_reply(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     """An abandoned leadership probe retires ctrl_out replies keyed to it.
 
@@ -6566,7 +6623,7 @@ def test_manager_leadership_probe_abandonment_sweeps_own_keyed_reply(
 
 
 def test_manager_leadership_ping_probe_accepts_later_pong(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -6580,8 +6637,6 @@ def test_manager_leadership_ping_probe_accepts_later_pong(
         ctrl_in=ctrl_in_name,
         ctrl_out=ctrl_out_name,
     )
-
-    assert not hasattr(manager_mod, "send_keyed_ping_probe")
 
     initial = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
     assert initial.reason == "ping_pending"
@@ -6616,7 +6671,7 @@ def test_manager_leadership_ping_probe_accepts_later_pong(
 
 
 def test_manager_leadership_keeps_namespace_ambiguous_host_row_after_ping_timeout(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -6664,8 +6719,8 @@ def test_manager_leadership_keeps_namespace_ambiguous_host_row_after_ping_timeou
 
 
 def test_manager_unknown_lower_owner_does_not_suppress_or_yield(
-    manager_setup,
-    monkeypatch,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -6702,8 +6757,8 @@ def test_manager_unknown_lower_owner_does_not_suppress_or_yield(
 
 
 def test_manager_strong_live_lower_owner_can_trigger_immediate_yield(
-    manager_setup,
-    monkeypatch,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -6729,7 +6784,7 @@ def test_manager_strong_live_lower_owner_can_trigger_immediate_yield(
 
 
 def test_manager_pong_from_draining_candidate_is_not_dispatch_eligible(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, _make_queue = manager_setup
     record = _manager_service_record(
@@ -6757,8 +6812,8 @@ def test_manager_pong_from_draining_candidate_is_not_dispatch_eligible(
 
 
 def test_manager_leadership_drain_resumes_when_leader_proof_disappears(
-    manager_setup,
-    monkeypatch,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
     lower_tid = str(int(manager.tid) - 1)
@@ -6773,7 +6828,7 @@ def test_manager_leadership_drain_resumes_when_leader_proof_disappears(
 
 
 def test_manager_liveness_keeps_expired_external_supervisor_unknown(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         manager_mod,
@@ -6794,7 +6849,7 @@ def test_manager_liveness_keeps_expired_external_supervisor_unknown(
 
 
 def test_manager_liveness_rejects_missing_docker_supervisor_record(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         manager_runtime_mod,
@@ -6825,7 +6880,7 @@ def test_manager_liveness_rejects_missing_docker_supervisor_record(
 
 
 def test_manager_liveness_uses_supervisor_probe_before_host_pid_identity(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         manager_runtime_mod,
@@ -6863,7 +6918,7 @@ def test_manager_liveness_uses_supervisor_probe_before_host_pid_identity(
 
 
 def test_manager_liveness_rejects_host_pid_identity_mismatch(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         manager_runtime_mod,
@@ -6934,8 +6989,8 @@ def test_manager_liveness_treats_host_pid_miss_as_unknown_inside_container(
 
 
 def test_manager_runtime_handle_uses_external_supervisor_in_container(
-    manager_setup,
-    monkeypatch,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
     monkeypatch.setattr(
@@ -6963,6 +7018,7 @@ def test_manager_runtime_handle_uses_external_supervisor_in_container(
 
 def test_manager_unregister_registry_broker_error_is_best_effort(
     unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FailingRegistryQueue:
         def generate_timestamp(self) -> int:
@@ -6992,8 +7048,8 @@ def test_manager_unregister_registry_broker_error_is_best_effort(
         "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
         "reserved": f"T{unique_tid}.reserved",
     }
-    manager._queue = lambda _name: _FailingRegistryQueue()
-    manager._latest_registry_entry = lambda _queue, _tid: None
+    monkeypatch.setattr(manager, "_queue", lambda _name: _FailingRegistryQueue())
+    monkeypatch.setattr(manager, "_latest_registry_entry", lambda _queue, _tid: None)
 
     manager._unregister_manager()
 
@@ -7001,7 +7057,9 @@ def test_manager_unregister_registry_broker_error_is_best_effort(
     assert manager._registry_message_id is None
 
 
-def test_manager_tid_mapping_forces_role_manager(broker_env, unique_tid) -> None:
+def test_manager_tid_mapping_forces_role_manager(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_manager_spec(
         unique_tid,
@@ -7022,7 +7080,9 @@ def test_manager_tid_mapping_forces_role_manager(broker_env, unique_tid) -> None
         manager.cleanup()
 
 
-def test_manager_tid_mapping_defaults_role_manager(manager_setup) -> None:
+def test_manager_tid_mapping_defaults_role_manager(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     manager, make_queue = manager_setup
     mapping_queue = make_queue(task_state_queue_name(manager.tid))
     entries = [json.loads(item) for item in drain(mapping_queue)]
@@ -7031,7 +7091,9 @@ def test_manager_tid_mapping_defaults_role_manager(manager_setup) -> None:
     assert relevant[-1]["role"] == "manager"
 
 
-def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
+def test_manager_cleanup_reaps_running_children(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     pytest.importorskip("psutil")
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
@@ -7059,27 +7121,16 @@ def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
     )
 
     assert manager._child_processes, "child process should be running"
-    child_tid, child_info = next(iter(manager._child_processes.items()))
-    ctrl_queue = make_queue(child_info.ctrl_queue or f"T{child_tid}.ctrl_in")
+    child_info = next(iter(manager._child_processes.values()))
     assert child_info.process.is_alive()
 
     manager.cleanup()
 
-    messages: list[str] = []
-    while True:
-        raw = ctrl_queue.read_one()
-        if raw is None:
-            break
-        messages.append(raw)
-
-    assert messages == [] or any(
-        message == encode_control_message(CONTROL_STOP) for message in messages
-    )
     assert not _process_running(child_info.process.pid)
 
 
 def test_manager_cleanup_terminates_worker_descendants(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     tmp_path: Path,
 ) -> None:
     psutil = pytest.importorskip("psutil")
@@ -7180,7 +7231,7 @@ def _spawn_sigterm_trapping_process(ready_file: Path) -> subprocess.Popen[bytes]
 
 
 def test_manager_terminate_children_kills_sigterm_trapping_managed_pid(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7206,7 +7257,7 @@ def test_manager_terminate_children_kills_sigterm_trapping_managed_pid(
             return None
 
     manager._child_processes["trapping"] = ManagedChild(
-        process=ExitedChild(),
+        process=cast(BaseProcess, ExitedChild()),
         ctrl_queue=None,
         persistent=False,
     )
@@ -7233,7 +7284,7 @@ def test_manager_terminate_children_kills_sigterm_trapping_managed_pid(
 
 
 def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-214] exception
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7270,7 +7321,7 @@ def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(  # n
             parent.kill()
 
     manager._child_processes["tree"] = ManagedChild(
-        process=PopenChild(),
+        process=cast(BaseProcess, PopenChild()),
         ctrl_queue=None,
         persistent=False,
     )
@@ -7302,7 +7353,8 @@ def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(  # n
 
 
 def test_manager_cleanup_terminates_reaped_child_managed_pids(
-    manager_setup, monkeypatch: pytest.MonkeyPatch
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
 
@@ -7317,7 +7369,7 @@ def test_manager_cleanup_terminates_reaped_child_managed_pids(
             return None
 
     manager._child_processes["child"] = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
         persistent=False,
     )
@@ -7354,7 +7406,7 @@ def test_manager_cleanup_terminates_reaped_child_managed_pids(
 
 
 def test_manager_cleanup_retains_live_managed_pid_after_wrapper_exit(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Managed survivors remain diagnosable after their wrapper exits [IMPL.10]."""
@@ -7372,7 +7424,7 @@ def test_manager_cleanup_retains_live_managed_pid_after_wrapper_exit(
             return None
 
     manager._child_processes["child"] = ManagedChild(
-        process=ExitedProcess(),
+        process=cast(BaseProcess, ExitedProcess()),
         ctrl_queue=None,
         persistent=False,
     )
@@ -7403,7 +7455,7 @@ def test_manager_cleanup_retains_live_managed_pid_after_wrapper_exit(
 
 
 def test_manager_child_termination_uses_one_deadline_for_multiple_children(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -7418,7 +7470,7 @@ def test_manager_child_termination_uses_one_deadline_for_multiple_children(
 
     for index in range(3):
         manager._child_processes[f"child-{index}"] = ManagedChild(
-            process=StubbornProcess(pid=424240 + index, alive=True),
+            process=cast(BaseProcess, StubbornProcess(pid=424240 + index, alive=True)),
             ctrl_queue=None,
             persistent=False,
         )
@@ -7451,7 +7503,9 @@ def test_manager_child_termination_uses_one_deadline_for_multiple_children(
     assert sum(join_timeouts) <= 0.12
 
 
-def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> None:
+def test_manager_stop_command_drains_nonpersistent_children(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     pytest.importorskip("psutil")
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
@@ -7506,7 +7560,9 @@ def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> No
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")
-def test_manager_sigterm_drains_nonpersistent_children(manager_setup, tmp_path) -> None:
+def test_manager_sigterm_drains_nonpersistent_children(
+    manager_setup: tuple[Manager, Callable[[str], Queue]], tmp_path: Path
+) -> None:
     pytest.importorskip("psutil")
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
@@ -7588,7 +7644,9 @@ def test_manager_sigterm_drains_nonpersistent_children(manager_setup, tmp_path) 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")
-def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
+def test_foreground_serve_sigterm_uses_async_drain_path(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     """Foreground serve SIGTERM must not do broker work in the signal handler."""
 
     manager, _make_queue = manager_setup
@@ -7597,12 +7655,12 @@ def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
     original_terminate_children = manager._terminate_children
     original_begin_shutdown_drain = manager._begin_shutdown_drain
 
-    def fail_if_signal_handler_starts_drain(*args, **kwargs) -> None:
+    def fail_if_signal_handler_starts_drain(*args: object, **kwargs: object) -> None:
         nonlocal drain_started
         drain_started = True
         raise AssertionError("signal handler must not synchronously start draining")
 
-    def fail_if_signal_handler_terminates_children(_deadline: float) -> None:
+    def fail_if_signal_handler_terminates_children(deadline: float) -> None:
         raise AssertionError("signal handler must not synchronously terminate children")
 
     try:
@@ -7630,7 +7688,7 @@ def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
 
 
 def test_manager_drain_timeout_force_finishes_stubborn_children(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -7650,7 +7708,7 @@ def test_manager_drain_timeout_force_finishes_stubborn_children(
             return None
 
     manager._child_processes["stubborn-child"] = ManagedChild(
-        process=StubbornProcess(),  # type: ignore[arg-type]
+        process=cast(BaseProcess, StubbornProcess()),
         ctrl_queue=ctrl_queue_name,
         persistent=False,
     )
@@ -7681,7 +7739,9 @@ def test_manager_drain_timeout_force_finishes_stubborn_children(
     os.name == "nt" or getattr(signal, "SIGUSR1", None) is None,
     reason="SIGUSR1 not available",
 )
-def test_manager_sigusr1_keeps_kill_semantics(manager_setup) -> None:
+def test_manager_sigusr1_keeps_kill_semantics(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
     """SIGUSR1 should stay on the immediate kill path and emit task_signal_kill."""
 
     pytest.importorskip("psutil")
@@ -7729,7 +7789,7 @@ def test_manager_sigusr1_keeps_kill_semantics(manager_setup) -> None:
     reason="SIGUSR1 not available",
 )
 def test_manager_sigusr1_outranks_pending_parent_loss(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -7752,7 +7812,7 @@ def test_manager_sigusr1_outranks_pending_parent_loss(
 
 
 def test_manager_parent_loss_enters_graceful_drain_with_live_children(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Parent loss alone drains gracefully, never generic-cancels [IMPL.10].
@@ -7782,7 +7842,7 @@ def test_manager_parent_loss_enters_graceful_drain_with_live_children(
 
     child_ctrl_queue = "T616161.ctrl_in"
     manager._child_processes["616161"] = ManagedChild(
-        process=LiveChild(),
+        process=cast(BaseProcess, LiveChild()),
         ctrl_queue=child_ctrl_queue,
         persistent=False,
     )
@@ -7823,7 +7883,7 @@ def test_manager_parent_loss_enters_graceful_drain_with_live_children(
     reason="SIGUSR1 not available",
 )
 def test_manager_sigusr1_arriving_during_parent_snapshot_is_not_lost(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -7836,10 +7896,10 @@ def test_manager_sigusr1_arriving_during_parent_snapshot_is_not_lost(
     )
     manager.note_parent_loss()
 
-    class InjectingDeque(deque[tuple[str, int | None]]):
+    class InjectingDeque(deque[tuple[Literal["signal", "parent_loss"], int | None]]):
         injected = False
 
-        def popleft(self) -> tuple[str, int | None]:
+        def popleft(self) -> tuple[Literal["signal", "parent_loss"], int | None]:
             source = super().popleft()
             if not self.injected:
                 self.injected = True
@@ -7863,7 +7923,7 @@ def test_manager_sigusr1_arriving_during_parent_snapshot_is_not_lost(
 
 
 def test_manager_stop_command_does_not_launch_new_children_after_stop(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
@@ -7914,7 +7974,7 @@ def test_manager_stop_command_does_not_launch_new_children_after_stop(
 
 
 def test_manager_drain_reissues_stop_for_child_added_after_stop(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     ctrl_queue_name = "manager.late-child.ctrl_in"
@@ -7932,7 +7992,7 @@ def test_manager_drain_reissues_stop_for_child_added_after_stop(
 
     manager._begin_graceful_shutdown(message_id=None)
     manager._child_processes["late-child"] = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=ctrl_queue_name,
         persistent=False,
     )
@@ -7943,7 +8003,8 @@ def test_manager_drain_reissues_stop_for_child_added_after_stop(
 
 
 def test_manager_stop_mid_handler_requeues_reserved_work_unlaunched(
-    manager_setup, monkeypatch: pytest.MonkeyPatch
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
@@ -7985,7 +8046,7 @@ def test_manager_stop_mid_handler_requeues_reserved_work_unlaunched(
 
 @pytest.mark.parametrize("active_records", [None, {}])
 def test_manager_public_dispatch_steals_work_when_registry_ownership_is_unproved(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
     active_records: dict[str, dict[str, object]] | None,
@@ -8037,7 +8098,7 @@ def test_manager_public_dispatch_steals_work_when_registry_ownership_is_unproved
 
 
 def test_manager_leadership_yields_when_only_public_backlog_is_pending(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8100,7 +8161,7 @@ def test_manager_leadership_yields_when_only_public_backlog_is_pending(
 
 
 def test_manager_leadership_requeues_reserved_public_work_before_yield(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8150,7 +8211,7 @@ def test_manager_leadership_requeues_reserved_public_work_before_yield(
 
 
 def test_manager_leadership_waits_while_child_launch_is_in_flight(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -8170,7 +8231,7 @@ def test_manager_leadership_waits_while_child_launch_is_in_flight(
 
 
 def test_manager_services_successfully_reserved_public_work(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8229,7 +8290,7 @@ def test_manager_services_successfully_reserved_public_work(
 
 
 def test_manager_does_not_probe_inactive_public_spawn_queue(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8277,7 +8338,7 @@ def test_manager_does_not_probe_inactive_public_spawn_queue(
 
 
 def test_manager_pending_precheck_activates_public_spawn_queue(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8325,7 +8386,7 @@ def test_manager_pending_precheck_activates_public_spawn_queue(
 
 
 def test_manager_idle_discovery_skips_reserved_queues(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8359,7 +8420,7 @@ def test_manager_idle_discovery_skips_reserved_queues(
 
 
 def test_manager_spawn_drains_require_pending_evidence(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8425,7 +8486,7 @@ def test_manager_spawn_drains_require_pending_evidence(
 
 
 def test_manager_cleanup_clears_own_internal_reserved_even_without_cleanup_on_exit(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -8451,7 +8512,7 @@ def test_manager_cleanup_clears_own_internal_reserved_even_without_cleanup_on_ex
 
 
 def test_manager_deletes_stale_internal_reserved_for_inactive_manager(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8494,7 +8555,7 @@ def test_manager_deletes_stale_internal_reserved_for_inactive_manager(
 
 
 def test_manager_keeps_internal_reserved_when_manager_liveness_unknown(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8518,7 +8579,7 @@ def test_manager_keeps_internal_reserved_when_manager_liveness_unknown(
 
 
 def test_manager_service_convergence_advances_without_dispatch_ownership(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8570,7 +8631,7 @@ def test_manager_service_convergence_advances_without_dispatch_ownership(
 
 
 def test_manager_self_registry_record_is_live_without_external_liveness_probe(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8598,7 +8659,8 @@ def test_manager_self_registry_record_is_live_without_external_liveness_probe(
 
 
 def test_manager_leadership_yield_drains_nonpersistent_children(
-    manager_setup, monkeypatch: pytest.MonkeyPatch
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     ctrl_queue_name = "manager.leadership-child.ctrl_in"
@@ -8620,7 +8682,7 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
             return None
 
     manager._child_processes["child"] = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=ctrl_queue_name,
         persistent=False,
     )
@@ -8682,7 +8744,8 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
 
 
 def test_manager_leadership_yield_waits_while_persistent_children_exist(
-    manager_setup, monkeypatch: pytest.MonkeyPatch
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
 
@@ -8697,7 +8760,7 @@ def test_manager_leadership_yield_waits_while_persistent_children_exist(
             return None
 
     manager._child_processes["child"] = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
         persistent=True,
     )
@@ -8715,7 +8778,7 @@ def test_manager_leadership_yield_waits_while_persistent_children_exist(
 
 
 def test_manager_lower_leader_blocks_active_heartbeat_with_persistent_child(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -8741,7 +8804,7 @@ def test_manager_lower_leader_blocks_active_heartbeat_with_persistent_child(
         )
     )
     manager._child_processes["persistent-child"] = ManagedChild(
-        process=FakeProcess(),
+        process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
         persistent=True,
     )
@@ -8764,7 +8827,7 @@ def test_manager_lower_leader_blocks_active_heartbeat_with_persistent_child(
 
 
 def test_manager_leadership_ignores_noncanonical_lower_manager(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -8791,7 +8854,7 @@ def test_manager_leadership_ignores_noncanonical_lower_manager(
 
 
 def test_manager_leadership_yields_to_canonical_lower_manager(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -8822,7 +8885,7 @@ def test_manager_leadership_yields_to_canonical_lower_manager(
 
 
 def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -8842,8 +8905,6 @@ def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
         "handle_has_live_host_process",
         lambda _handle: False,
     )
-
-    assert not hasattr(manager_mod, "send_keyed_ping_probe")
 
     assert manager._maybe_yield_leadership(force=True) is False
     pending = manager._leader_probe_pending[lower_tid]
@@ -8874,7 +8935,7 @@ def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
 
 
 def test_manager_superseded_self_record_stops_without_republishing_active(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
@@ -8900,7 +8961,7 @@ def test_manager_superseded_self_record_stops_without_republishing_active(
 
 
 def test_manager_superseded_self_record_drains_children_without_stopping(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -8920,7 +8981,7 @@ def test_manager_superseded_self_record_drains_children_without_stopping(
 
 
 def test_manager_leadership_observes_superseded_services_row_without_spawn_probe(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -8953,7 +9014,7 @@ def test_manager_leadership_observes_superseded_services_row_without_spawn_probe
 
 
 def test_manager_active_heartbeat_race_preserves_superseded_record(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-231] exception
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -8990,8 +9051,18 @@ def test_manager_active_heartbeat_race_preserves_superseded_record(  # noqa: C90
                 registry_queue.write(superseded_payload)
             return registry_queue.write(payload)
 
-        def peek_generator(self, *args: object, **kwargs: object) -> object:
-            return registry_queue.peek_generator(*args, **kwargs)
+        def peek_generator(
+            self,
+            *,
+            with_timestamps: bool = False,
+            after_timestamp: int | None = None,
+            before_timestamp: int | None = None,
+        ) -> Iterator[str | tuple[str, int]]:
+            return registry_queue.peek_generator(
+                with_timestamps=with_timestamps,
+                after_timestamp=after_timestamp,
+                before_timestamp=before_timestamp,
+            )
 
         def delete(self, *args: object, **kwargs: object) -> object:
             return registry_queue.delete(*args, **kwargs)
@@ -9015,7 +9086,8 @@ def test_manager_active_heartbeat_race_preserves_superseded_record(  # noqa: C90
 
 
 def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
-    manager_setup, monkeypatch: pytest.MonkeyPatch
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
 
@@ -9034,7 +9106,7 @@ def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
 
     fake_process = FakeProcess()
     manager._child_processes["child"] = ManagedChild(
-        process=fake_process,
+        process=cast(BaseProcess, fake_process),
         ctrl_queue=None,
         persistent=False,
     )
@@ -9053,7 +9125,7 @@ def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
 
 
 def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
@@ -9076,7 +9148,7 @@ def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(
     now_ns = 2_000_000_000_000
     fake_process = FakeProcess()
     child = ManagedChild(
-        process=fake_process,
+        process=cast(BaseProcess, fake_process),
         ctrl_queue=None,
         ctrl_out_queue=ctrl_out,
         launched_ns=now_ns - 1,
@@ -9107,7 +9179,7 @@ def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(
 
 
 def test_child_has_exited_trusts_live_host_pid_before_process_view(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -9124,11 +9196,14 @@ def test_child_has_exited_trusts_live_host_pid_before_process_view(
 
     monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: pid == 424243)
 
-    assert manager._child_has_exited(ManagedChild(FakeProcess(), None)) is False
+    assert (
+        manager._child_has_exited(ManagedChild(cast(BaseProcess, FakeProcess()), None))
+        is False
+    )
 
 
 def test_child_has_exited_allows_startup_liveness_visibility_grace(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -9145,12 +9220,16 @@ def test_child_has_exited_allows_startup_liveness_visibility_grace(
 
     monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: False)
 
-    child = ManagedChild(FakeProcess(), None, launched_ns=time.time_ns())
+    child = ManagedChild(
+        cast(BaseProcess, FakeProcess()), None, launched_ns=time.time_ns()
+    )
 
     assert manager._child_has_exited(child) is False
 
 
-def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> None:
+def test_manager_autostart_templates(
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
 
     autostart_dir, template_path = write_autostart_fixture(
@@ -9192,7 +9271,7 @@ def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> 
 
 
 def test_manager_control_drain_yields_when_peek_message_does_not_advance(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
     ctrl_name = manager._queue_names["ctrl_in"]
@@ -9205,7 +9284,7 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
         def __init__(self) -> None:
             self.delete_calls = 0
 
-        def peek_one(self, *, with_timestamps: bool = False):
+        def peek_one(self, *, with_timestamps: bool = False) -> str | tuple[str, int]:
             payload = encode_control_message(CONTROL_PING, request_id="stuck-control")
             if with_timestamps:
                 return payload, stuck_timestamp
@@ -9223,15 +9302,17 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
             pass
 
     stuck_queue = StuckControlQueue()
-    manager._queue_cache[ctrl_name] = stuck_queue
-    manager._queues[ctrl_name].queue = stuck_queue
+    manager._queue_cache[ctrl_name] = cast(Queue, stuck_queue)
+    manager._queues[ctrl_name].queue = cast(Queue, stuck_queue)
 
     start = time.monotonic()
     manager._drain_control_queue_first()
 
     assert time.monotonic() - start < 2.0
     assert stuck_queue.delete_calls == 1
-    response = json.loads(ctrl_out.read_one())
+    raw_response = ctrl_out.read_one()
+    assert raw_response is not None
+    response = json.loads(raw_response)
     assert response["command"] == CONTROL_PING
     assert response["request_id"] == "stuck-control"
     assert manager._stalled_control_message_id == stuck_timestamp
@@ -9244,7 +9325,7 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
     assert manager._control_allows_child_launch() is True
 
 
-def test_manager_idle_shutdown(broker_env, unique_tid) -> None:
+def test_manager_idle_shutdown(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, _make_queue = broker_env
     inbox = f"manager.{unique_tid}.inbox"
     ctrl_in = f"manager.{unique_tid}.ctrl_in"
@@ -9269,7 +9350,7 @@ def test_manager_idle_shutdown(broker_env, unique_tid) -> None:
 
 
 def test_build_child_spec_propagates_unexpected_resolution_error(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
@@ -9288,8 +9369,8 @@ def test_build_child_spec_propagates_unexpected_resolution_error(
 
 
 def test_manager_idle_timeout_ignores_unrelated_broker_activity(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     inbox = f"manager.{unique_tid}.inbox"
@@ -9320,8 +9401,8 @@ def test_manager_idle_timeout_ignores_unrelated_broker_activity(
 
 
 def test_manager_idle_pending_work_includes_reserved_spawn_rows(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_manager_spec(unique_tid, idle_timeout=0.2)
@@ -9340,7 +9421,9 @@ def test_manager_idle_pending_work_includes_reserved_spawn_rows(
         manager.cleanup()
 
 
-def test_manager_overrides_supplied_tid(manager_setup, unique_tid) -> None:
+def test_manager_overrides_supplied_tid(
+    manager_setup: tuple[Manager, Callable[[str], Queue]], unique_tid: str
+) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -9393,7 +9476,7 @@ def test_manager_overrides_supplied_tid(manager_setup, unique_tid) -> None:
 
 
 def test_manager_idle_timeout_waits_for_active_child_to_finish(
-    broker_env, unique_tid, tmp_path: Path
+    broker_env: BrokerEnv, unique_tid: str, tmp_path: Path
 ) -> None:
     db_path, make_queue = broker_env
     inbox = f"manager.{unique_tid}.inbox"
@@ -9468,8 +9551,8 @@ def test_manager_idle_timeout_waits_for_active_child_to_finish(
 
 
 def test_manager_does_not_launch_child_when_initial_inbox_seed_fails(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -9499,7 +9582,7 @@ def test_manager_does_not_launch_child_when_initial_inbox_seed_fails(
 
     original_queue = manager._queue
 
-    def fake_queue(name: str):
+    def fake_queue(name: str) -> Queue | FailingQueue:
         if name == child.io.inputs["inbox"]:
             return FailingQueue()
         return original_queue(name)
@@ -9516,7 +9599,7 @@ def test_manager_does_not_launch_child_when_initial_inbox_seed_fails(
 
 
 def test_manager_idle_timeout_does_not_kill_persistent_child(
-    broker_env, unique_tid
+    broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     inbox = f"manager.{unique_tid}.inbox"
@@ -9580,8 +9663,8 @@ def test_manager_idle_timeout_does_not_kill_persistent_child(
 
 def test_manager_autostart_skips_active_templates(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -9623,7 +9706,7 @@ def test_manager_autostart_skips_active_templates(
 
 
 def test_manager_autostart_active_sources_include_tracked_children(
-    tmp_path: Path, broker_env, unique_tid
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     autostart_dir, _manifest_path = write_autostart_fixture(
@@ -9654,7 +9737,7 @@ def test_manager_autostart_active_sources_include_tracked_children(
 
     try:
         manager._child_processes["tracked-child"] = ManagedChild(
-            process=FakeProcess(),
+            process=cast(BaseProcess, FakeProcess()),
             ctrl_queue=None,
             persistent=False,
             autostart_source=source,
@@ -9672,8 +9755,8 @@ def test_manager_autostart_active_sources_include_tracked_children(
 
 def test_manager_autostart_prunes_deleted_manifest_state(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
     autostart_dir = tmp_path / "autostart"
@@ -9702,7 +9785,7 @@ def test_manager_autostart_prunes_deleted_manifest_state(
 
 
 def test_manager_autostart_ensure_restarts(
-    tmp_path: Path, broker_env, unique_tid
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
 
@@ -9762,7 +9845,7 @@ def test_manager_autostart_ensure_restarts(
 
 
 def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
-    tmp_path: Path, broker_env, unique_tid
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, _make_queue = broker_env
 
@@ -9790,7 +9873,7 @@ def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
         assert child.is_alive() is False
 
         manager._child_processes["child"] = ManagedChild(
-            process=child,
+            process=cast(BaseProcess, child),
             ctrl_queue=None,
             persistent=False,
             autostart_source=str(manifest_path.resolve()),
@@ -9807,8 +9890,8 @@ def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
 
 def test_manager_idle_shutdown_waits_for_autostart_ensure_restart_budget(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
     autostart_dir, manifest_path = write_autostart_fixture(
@@ -9846,8 +9929,8 @@ def test_manager_idle_shutdown_waits_for_autostart_ensure_restart_budget(
 
 def test_manager_autostart_stale_active_log_without_liveness_is_not_active(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
 
@@ -9878,7 +9961,7 @@ def test_manager_autostart_stale_active_log_without_liveness_is_not_active(
         assert child.is_alive() is False
 
         manager._child_processes[child_tid] = ManagedChild(
-            process=child,
+            process=cast(BaseProcess, child),
             ctrl_queue=None,
             persistent=False,
             autostart_source=source,
@@ -9913,8 +9996,8 @@ def test_manager_autostart_stale_active_log_without_liveness_is_not_active(
 
 def test_manager_autostart_pipeline_target_launches_pipeline_run(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     autostart_dir, manifest_path = write_autostart_pipeline_fixture(
@@ -9957,8 +10040,8 @@ def test_manager_autostart_pipeline_target_launches_pipeline_run(
 
 def test_manager_autostart_pipeline_compile_broker_error_is_retryable(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -9991,8 +10074,8 @@ def test_manager_autostart_pipeline_compile_broker_error_is_retryable(
 
 def test_manager_autostart_pipeline_ensure_restarts(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     autostart_dir, manifest_path = write_autostart_pipeline_fixture(
@@ -10039,8 +10122,8 @@ def test_manager_autostart_pipeline_ensure_restarts(
 
 def test_manager_autostart_ensure_enqueue_failure_does_not_advance_state(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -10081,8 +10164,8 @@ def test_manager_autostart_ensure_enqueue_failure_does_not_advance_state(
 
 def test_manager_autostart_pending_spawn_blocks_duplicate_restart(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -10122,7 +10205,7 @@ def test_manager_autostart_pending_spawn_blocks_duplicate_restart(
         monkeypatch.setattr(
             manager,
             "_enqueue_managed_service_request",
-            lambda service: enqueued.append(service) or True,
+            lambda service: record_and_return(enqueued, service, True),
         )
 
         manager._tick_autostart(force=True)
@@ -10135,8 +10218,8 @@ def test_manager_autostart_pending_spawn_blocks_duplicate_restart(
 
 def test_manager_autostart_active_launch_blocks_duplicate_restart(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -10177,7 +10260,7 @@ def test_manager_autostart_active_launch_blocks_duplicate_restart(
         monkeypatch.setattr(
             manager,
             "_enqueue_managed_service_request",
-            lambda service: enqueued.append(service) or True,
+            lambda service: record_and_return(enqueued, service, True),
         )
 
         manager._tick_autostart(force=True)
@@ -10191,8 +10274,8 @@ def test_manager_autostart_active_launch_blocks_duplicate_restart(
 
 def test_manager_autostart_spoofed_public_metadata_does_not_claim_manifest(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -10246,7 +10329,7 @@ def test_manager_autostart_spoofed_public_metadata_does_not_claim_manifest(
         monkeypatch.setattr(
             manager,
             "_enqueue_managed_service_request",
-            lambda service: enqueued.append(service) or True,
+            lambda service: record_and_return(enqueued, service, True),
         )
         manager._autostart_enabled = True
 
@@ -10259,8 +10342,8 @@ def test_manager_autostart_spoofed_public_metadata_does_not_claim_manifest(
 
 def test_manager_autostart_ensure_allows_one_restart_after_initial_launch(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     autostart_dir, manifest_path = write_autostart_fixture(
@@ -10324,7 +10407,7 @@ def test_manager_autostart_ensure_allows_one_restart_after_initial_launch(
             manager.process_once()
             time.sleep(0.05)
             for item in drain(log_queue):
-                event = json.loads(item)
+                event: dict[str, Any] = json.loads(item)
                 if (
                     event.get("event") == "task_spawned"
                     and event.get("autostart_source") == source
@@ -10338,8 +10421,8 @@ def test_manager_autostart_ensure_allows_one_restart_after_initial_launch(
 
 def test_manager_autostart_ensure_applies_backoff_to_restart_only(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     autostart_dir, manifest_path = write_autostart_fixture(
@@ -10389,13 +10472,13 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
         wait_for_children(manager, timeout=20.0 if os.name == "nt" else 10.0)
         assert not manager._user_work_children()
 
-        restart_events = []
+        restart_events: list[dict[str, object]] = []
         deadline = time.time() + 8.0
         while not restart_events and time.time() < deadline:
             manager.process_once()
             time.sleep(0.05)
             for item in drain(log_queue):
-                event = json.loads(item)
+                event: dict[str, Any] = json.loads(item)
                 if (
                     event.get("event") == "task_spawned"
                     and event.get("autostart_source") == source
@@ -10412,8 +10495,8 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
 
 def test_manager_autostart_backoff_rescan_uses_due_time(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -10476,8 +10559,8 @@ def test_manager_autostart_backoff_rescan_uses_due_time(
 
 def test_manager_autostart_ensure_restarts_after_abrupt_child_kill(
     tmp_path: Path,
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     autostart_dir, manifest_path = write_autostart_fixture(
@@ -10507,7 +10590,7 @@ def test_manager_autostart_ensure_restarts_after_abrupt_child_kill(
             manager.process_once()
             time.sleep(0.05)
             for item in drain(log_queue):
-                event = json.loads(item)
+                event: dict[str, Any] = json.loads(item)
                 event_tail.append(event)
                 event_tail = event_tail[-10:]
                 if (
@@ -10576,7 +10659,7 @@ def _host_runtime_handle_with_create_time(
 
 def test_managed_pids_for_child_excludes_create_time_mismatch(
     tmp_path: Path,
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     """Shutdown reap must not target a recycled PID (create-time mismatch).
@@ -10632,7 +10715,7 @@ def test_managed_pids_for_child_excludes_create_time_mismatch(
 
 
 def test_failed_launch_clear_policy_preserves_failed_delete_residue(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -10699,7 +10782,7 @@ def test_failed_launch_clear_policy_preserves_failed_delete_residue(
 
 @pytest.mark.parametrize("age_seconds", [30, 120])
 def test_manager_leadership_unknown_expiry_controls_ping_without_changing_evidence(
-    manager_setup,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
     age_seconds: int,
 ) -> None:
@@ -10739,3 +10822,19 @@ def test_manager_leadership_unknown_expiry_controls_ping_without_changing_eviden
                 "request_id": manager._leader_probe_pending[tid].request_id,
             }
         ]
+
+
+@pytest.mark.parametrize("child_tid", ["unresolved", "123"])
+def test_child_launch_invalid_state_tid_still_checks_durable_log(
+    tmp_path: Path, child_tid: str
+) -> None:
+    manager = Manager(tmp_path / "manager.db", make_manager_spec(str(time.time_ns())))
+    try:
+        assert manager._latest_tid_runtime_handle(child_tid) is None
+        assert not manager._child_launch_runtime_evidence_seen(child_tid)
+        manager._queue(WEFT_GLOBAL_LOG_QUEUE).write(
+            json.dumps({"event": "task_spawned", "child_tid": child_tid})
+        )
+        assert manager._child_launch_runtime_evidence_seen(child_tid)
+    finally:
+        manager.cleanup()

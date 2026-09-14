@@ -24,13 +24,14 @@ from weft.core.agents.provider_cli.execution import (
     prepare_provider_cli_execution,
 )
 from weft.core.agents.runtime import normalize_agent_work_item
-from weft.core.runners import RunnerOutcome
 from weft.core.runners.subprocess_runner import prepare_command_invocation
-from weft.core.tasks.runner import AgentSession, CommandSession
 from weft.core.taskspec import AgentSection
 from weft.ext import (
+    AgentSessionProtocol,
+    CommandSessionProtocol,
     RunnerCapabilities,
     RunnerHandle,
+    RunnerOutcome,
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
@@ -123,10 +124,10 @@ class MicrosandboxRunner:
             on_stderr_chunk=on_stderr_chunk,
         )
 
-    def start_session(self) -> CommandSession:
+    def start_session(self) -> CommandSessionProtocol:
         raise ValueError("Microsandbox runner does not support interactive sessions")
 
-    def start_agent_session(self) -> AgentSession:
+    def start_agent_session(self) -> AgentSessionProtocol:
         raise ValueError("Microsandbox runner does not support agent sessions")
 
     def _run_tool(

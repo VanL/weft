@@ -67,7 +67,9 @@ def _status_payload(
         timeout=30.0,
     )
     assert rc == 0, err
-    return json.loads(out)
+    payload = json.loads(out)
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _assert_single_active_manager(

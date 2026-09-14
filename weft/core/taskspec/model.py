@@ -1133,10 +1133,15 @@ class TaskSpec(BaseModel):
 
     Spec: [CC-1]; docs/specifications/02-TaskSpec.md [TS-1].
 
-    Args (via model_validate or __init__):
-        auto_expand: If True (default), resolves defaults before model
-            construction for non-template TaskSpecs. Set to False to skip
-            resolved-task expansion.
+    Publicly available from ``weft.client`` for construction, validation,
+    field inspection, and serialization. Lifecycle and transport helpers
+    remain runtime internals. Submission commits the task and its TID.
+
+    Normal construction resolves task defaults. For an unresolved template,
+    use ``model_validate(payload, context={"template": True,
+    "auto_expand": False})``.
+
+    Public contract: docs/specifications/14-Python_API_Surfaces.md [PY-1].
     """
 
     tid: str | None = Field(

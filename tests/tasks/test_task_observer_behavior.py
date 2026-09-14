@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     CONTROL_STOP,
     QUEUE_CTRL_IN_SUFFIX,
@@ -42,7 +43,7 @@ def make_observer_spec(tid: str) -> TaskSpec:
     )
 
 
-def test_observer_peek_without_ack(broker_env) -> None:
+def test_observer_peek_without_ack(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000000")
     inbox = make_queue(spec.io.inputs["inbox"])
@@ -57,7 +58,7 @@ def test_observer_peek_without_ack(broker_env) -> None:
     assert inbox.peek_one() == "sample"
 
 
-def test_selective_consumer_consumes_when_selector_true(broker_env) -> None:
+def test_selective_consumer_consumes_when_selector_true(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000001")
     inbox = make_queue(spec.io.inputs["inbox"])
@@ -73,7 +74,7 @@ def test_selective_consumer_consumes_when_selector_true(broker_env) -> None:
     assert inbox.peek_one() is None
 
 
-def test_selective_consumer_leaves_when_selector_false(broker_env) -> None:
+def test_selective_consumer_leaves_when_selector_false(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000003")
     inbox = make_queue(spec.io.inputs["inbox"])
@@ -89,7 +90,7 @@ def test_selective_consumer_leaves_when_selector_false(broker_env) -> None:
     assert inbox.peek_one() == "sample"
 
 
-def test_monitor_forwards_message(broker_env) -> None:
+def test_monitor_forwards_message(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000100")
     inbox = make_queue(spec.io.inputs["inbox"])
@@ -105,7 +106,7 @@ def test_monitor_forwards_message(broker_env) -> None:
     assert seen == ["sample"]
 
 
-def test_monitor_custom_target_queue(broker_env) -> None:
+def test_monitor_custom_target_queue(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000200")
     inbox = make_queue(spec.io.inputs["inbox"])
@@ -165,7 +166,7 @@ def test_monitor_rejects_unsafe_downstream_alias_before_broker_side_effects(
     assert db_path.exists() is False
 
 
-def test_monitor_stop_command(broker_env) -> None:
+def test_monitor_stop_command(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000300")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
@@ -188,7 +189,9 @@ def test_monitor_stop_command(broker_env) -> None:
     assert terminal["status"] == "cancelled"
 
 
-def test_sampling_observer_interval(broker_env, monkeypatch) -> None:
+def test_sampling_observer_interval(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000400")
     inbox = make_queue(spec.io.inputs["inbox"])
@@ -224,7 +227,7 @@ def test_sampling_observer_interval(broker_env, monkeypatch) -> None:
     assert calls == ["sample-1", "sample-2"]
 
 
-def test_observer_handles_stop(broker_env) -> None:
+def test_observer_handles_stop(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000002")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])

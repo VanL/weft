@@ -8,7 +8,8 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 import pytest
 
@@ -21,7 +22,7 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_state import task_state_queue_name
 from weft.helpers import iter_queue_json_entries, process_create_time
@@ -61,10 +62,10 @@ def _host_pid_from_handle(payload: dict[str, Any]) -> int | None:
 
 
 def _manager_service_payload(
-    context,
+    context: WeftContext,
     *,
     tid: str,
-    status: str = "active",
+    status: Literal["active", "draining", "stopped", "superseded"] = "active",
     name: str = "manager",
     runtime_handle: dict[str, Any] | None = None,
     requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
@@ -94,7 +95,7 @@ def _parse_manager_start_output(output: str) -> tuple[str, bool]:
     return match.group(1), False
 
 
-def _task_log_payloads(context, tid: str) -> list[dict[str, Any]]:
+def _task_log_payloads(context: WeftContext, tid: str) -> list[dict[str, Any]]:
     queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     try:
         payloads: list[dict[str, Any]] = []
@@ -106,7 +107,7 @@ def _task_log_payloads(context, tid: str) -> list[dict[str, Any]]:
         queue.close()
 
 
-def test_manager_start_help_includes_replace(workdir) -> None:
+def test_manager_start_help_includes_replace(workdir: Path) -> None:
     rc, out, err = run_cli(
         "manager",
         "start",
@@ -276,7 +277,7 @@ def test_manager_start_detaches_manager_process_group_from_cli_caller(
             )
 
 
-def test_manager_stop_missing_tid(workdir):
+def test_manager_stop_missing_tid(workdir: Path) -> None:
     context_root = prepare_project_root(workdir / "missing-manager")
     build_context(spec_context=context_root)
 
@@ -295,7 +296,7 @@ def test_manager_stop_missing_tid(workdir):
     assert "did not stop" in combined or "not found" in combined
 
 
-def test_manager_stop_without_tid_noops_when_no_manager(workdir):
+def test_manager_stop_without_tid_noops_when_no_manager(workdir: Path) -> None:
     context_root = prepare_project_root(workdir / "stop-active-empty")
     build_context(spec_context=context_root)
 
@@ -312,7 +313,7 @@ def test_manager_stop_without_tid_noops_when_no_manager(workdir):
     assert err == ""
 
 
-def test_manager_list_empty(workdir):
+def test_manager_list_empty(workdir: Path) -> None:
     context_root = prepare_project_root(workdir / "empty-manager")
     build_context(spec_context=context_root)
 
@@ -329,7 +330,7 @@ def test_manager_list_empty(workdir):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_manager_list_and_status_agree_on_stale_active_manager(workdir):
+def test_manager_list_and_status_agree_on_stale_active_manager(workdir: Path) -> None:
     context_root = prepare_project_root(workdir / "stale-manager")
     context = build_context(spec_context=context_root)
     tid = "1761000000000000007"
@@ -380,7 +381,7 @@ def test_manager_list_and_status_agree_on_stale_active_manager(workdir):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_manager_list_diagnostic_shows_stale_active_manager(workdir):
+def test_manager_list_diagnostic_shows_stale_active_manager(workdir: Path) -> None:
     context_root = prepare_project_root(workdir / "diagnostic-stale-manager")
     context = build_context(spec_context=context_root)
     tid = "1761000000000000021"
@@ -522,7 +523,7 @@ def test_manager_start_skips_stale_manager_and_preserves_history(
             )
 
 
-def test_manager_status_missing(workdir):
+def test_manager_status_missing(workdir: Path) -> None:
     context_root = prepare_project_root(workdir / "status-manager")
     build_context(spec_context=context_root)
 
@@ -539,7 +540,7 @@ def test_manager_status_missing(workdir):
     assert "not found" in combined.lower()
 
 
-def test_manager_force_stop_without_identity_remains_unconfirmed(workdir):
+def test_manager_force_stop_without_identity_remains_unconfirmed(workdir: Path) -> None:
     context_root = prepare_project_root(workdir / "force-manager")
     context = build_context(spec_context=context_root)
     tid = "1761000000000000001"

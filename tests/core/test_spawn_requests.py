@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.typing import BrokerEnv
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -38,7 +40,7 @@ def _template_taskspec(bundle_root: Path) -> TaskSpec:
 
 
 def test_implicit_spawn_returns_committed_write_id_without_preallocation(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The durable spawn row allocates and returns its own authoritative TID."""
@@ -76,7 +78,7 @@ def test_implicit_spawn_returns_committed_write_id_without_preallocation(
     assert payload["taskspec"]["spec"]["weft_context"] == str(context.root)
 
 
-def test_explicit_spawn_keeps_supplied_exact_id(weft_harness) -> None:
+def test_explicit_spawn_keeps_supplied_exact_id(weft_harness: WeftTestHarness) -> None:
     """Callers that already own a TID retain exact-ID insertion semantics."""
 
     context = weft_harness.context
@@ -112,7 +114,7 @@ def test_explicit_spawn_keeps_supplied_exact_id(weft_harness) -> None:
 
 
 def test_pre_context_spawn_ignores_invalid_ambient_broker_config(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:

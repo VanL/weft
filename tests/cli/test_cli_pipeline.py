@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from tests.conftest import run_cli
+from tests.helpers.weft_harness import WeftTestHarness
 from weft.context import build_context
 
 PIPELINE_CLI_TIMEOUT = 120.0
 
 
-def _write_json(path, payload) -> None:
+def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def test_pipeline_run_sequential(workdir, weft_harness) -> None:
+def test_pipeline_run_sequential(workdir: Path, weft_harness: WeftTestHarness) -> None:
     weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"
@@ -75,7 +77,7 @@ def test_pipeline_run_sequential(workdir, weft_harness) -> None:
 
 
 def test_pipeline_run_reads_piped_stdin_when_input_omitted(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
@@ -137,7 +139,7 @@ def test_pipeline_run_reads_piped_stdin_when_input_omitted(
 
 
 def test_pipeline_run_first_stage_defaults_input_does_not_override_input_flag(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
@@ -188,7 +190,7 @@ def test_pipeline_run_first_stage_defaults_input_does_not_override_input_flag(
 
 
 def test_pipeline_run_stage_can_be_bundle_backed_task_spec(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
@@ -238,7 +240,9 @@ def test_pipeline_run_stage_can_be_bundle_backed_task_spec(
     assert err == ""
 
 
-def test_pipeline_run_no_wait_returns_pipeline_tid(workdir, weft_harness) -> None:
+def test_pipeline_run_no_wait_returns_pipeline_tid(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"
@@ -313,7 +317,7 @@ def test_pipeline_run_no_wait_returns_pipeline_tid(workdir, weft_harness) -> Non
 
 
 def test_pipeline_stage_failure_returns_nonzero_and_names_failing_stage(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
@@ -371,7 +375,9 @@ def test_pipeline_stage_failure_returns_nonzero_and_names_failing_stage(
     assert "two" in combined
 
 
-def test_pipeline_rejects_input_flag_with_piped_stdin(workdir, weft_harness) -> None:
+def test_pipeline_rejects_input_flag_with_piped_stdin(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)

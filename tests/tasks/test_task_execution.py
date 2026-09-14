@@ -21,13 +21,14 @@ import time
 import traceback
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from simplebroker import Queue, serialize_config
 from tests.helpers.queue_payloads import terminal_envelopes
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.typing import BrokerEnv
 from tests.tasks import (
     sample_targets as targets,  # noqa: F401 - ensure module importable
 )
@@ -188,7 +189,7 @@ class ErrorRecordingReactorTestTask(ReactorTestTask):
 
 
 def test_base_task_process_once_rejects_a_second_drive_thread_before_policy(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -225,7 +226,7 @@ def test_base_task_process_once_rejects_a_second_drive_thread_before_policy(
 
 
 def test_base_task_simultaneous_process_callers_choose_one_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     barrier = threading.Barrier(3)
@@ -272,7 +273,7 @@ def test_base_task_simultaneous_process_callers_choose_one_owner(
 
 
 def test_base_task_process_entry_publishes_turn_active_with_owner_claim(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
@@ -348,7 +349,7 @@ def test_base_task_process_entry_publishes_turn_active_with_owner_claim(
 
 
 def test_base_task_run_loop_entry_publishes_active_with_owner_claim(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
@@ -420,7 +421,7 @@ def test_base_task_run_loop_entry_publishes_active_with_owner_claim(
 
 
 def test_base_task_rejects_reentrant_same_owner_turn(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     nested_errors: list[BaseException] = []
@@ -452,7 +453,7 @@ def test_base_task_rejects_reentrant_same_owner_turn(
 
 
 def test_base_task_foreign_wait_rejects_before_waiter_effects(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -503,7 +504,7 @@ def test_base_task_foreign_wait_rejects_before_waiter_effects(
 
 
 def test_base_task_foreign_stop_finalizes_idle_manual_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -527,7 +528,7 @@ def test_base_task_foreign_stop_finalizes_idle_manual_owner(
 
 
 def test_base_task_foreign_stop_defers_cleanup_during_owned_standalone_wait(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -541,7 +542,7 @@ def test_base_task_foreign_stop_defers_cleanup_during_owned_standalone_wait(
     wait_entered = threading.Event()
     release_wait = threading.Event()
 
-    def blocking_wait(_timeout: float | None) -> None:
+    def blocking_wait(timeout: float | None) -> None:
         wait_entered.set()
         assert release_wait.wait(timeout=2.0)
 
@@ -572,7 +573,7 @@ def test_base_task_rejects_public_process_once_override() -> None:
     with pytest.raises(TypeError, match="process_once"):
 
         class InvalidProcessOverride(ReactorTestTask):
-            def process_once(self) -> None:
+            def process_once(self) -> None:  # type: ignore[misc]  # Deliberately violate final method contract to test runtime rejection.
                 return
 
 
@@ -583,7 +584,7 @@ def test_base_task_rejects_public_template_override_in_left_hand_mixin() -> None
 
     with pytest.raises(TypeError, match="process_once"):
 
-        class InvalidMixinOverride(ProcessOverrideMixin, ReactorTestTask):
+        class InvalidMixinOverride(ProcessOverrideMixin, ReactorTestTask):  # type: ignore[misc]  # Deliberately test runtime final-method rejection.
             pass
 
 
@@ -595,7 +596,7 @@ def test_base_task_rejects_other_public_template_overrides(method_name: str) -> 
 
 
 def test_base_task_wait_for_activity_requires_an_established_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -614,7 +615,7 @@ def test_base_task_wait_for_activity_requires_an_established_owner(
 
 
 def test_base_task_run_until_stopped_finalizes_on_iteration_limit(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -665,7 +666,7 @@ def test_stopping_turn_policy_is_shared_by_all_concrete_task_families() -> None:
 
 
 def test_base_task_repeated_stop_does_not_duplicate_cleanup(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     """A second stop()/cleanup() re-runs no cleanup phase [IMPL.10].
@@ -719,7 +720,7 @@ def test_base_task_repeated_stop_does_not_duplicate_cleanup(
 
 
 def test_base_task_run_until_stopped_finalizes_when_turn_raises(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     class FailingTurnTask(ReactorTestTask):
@@ -744,7 +745,7 @@ def test_base_task_run_until_stopped_finalizes_when_turn_raises(
 
 @pytest.mark.parametrize("initial_exit", ["terminal", "stop_event", "max_zero"])
 def test_base_task_run_loop_skips_turn_for_initial_exit_state(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     initial_exit: str,
 ) -> None:
@@ -775,7 +776,7 @@ def test_base_task_run_loop_skips_turn_for_initial_exit_state(
 
 
 def test_base_task_stop_join_false_defers_cleanup_to_active_driver(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     entered = threading.Event()
@@ -810,7 +811,7 @@ def test_base_task_stop_join_false_defers_cleanup_to_active_driver(
 
 
 def test_base_task_stop_timeout_leaves_resources_for_driver_finally(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     entered = threading.Event()
@@ -847,7 +848,7 @@ def test_base_task_stop_timeout_leaves_resources_for_driver_finally(
 
 
 def test_base_task_cleanup_error_does_not_skip_shared_finalization(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     cleanup_calls = 0
@@ -881,7 +882,7 @@ def test_base_task_cleanup_error_does_not_skip_shared_finalization(
 
 
 def test_base_task_finalizer_runs_subtype_cleanup_before_base_cleanup(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -925,7 +926,7 @@ def test_base_task_finalizer_runs_subtype_cleanup_before_base_cleanup(
 
 
 def test_base_task_background_start_uses_task_loop_and_wakes_for_input(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
@@ -959,7 +960,7 @@ def test_base_task_background_start_uses_task_loop_and_wakes_for_input(
 
 
 def test_base_task_background_start_rejects_existing_manual_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
@@ -981,7 +982,7 @@ def test_base_task_background_start_rejects_existing_manual_owner(
 
 
 def test_base_task_worker_result_wakes_background_reactor_after_real_wait(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
@@ -1026,7 +1027,7 @@ def test_base_task_worker_result_wakes_background_reactor_after_real_wait(
 
 
 def test_base_task_background_start_failure_rolls_back_owner_state(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
@@ -1054,7 +1055,7 @@ def test_base_task_background_start_failure_rolls_back_owner_state(
 
 
 def test_base_task_stop_waits_for_starting_interlock(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
@@ -1110,7 +1111,7 @@ def test_base_task_stop_waits_for_starting_interlock(
 
 
 def test_base_task_owner_stop_inside_turn_finalizes_after_unwind(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     cleanup_observations: list[bool] = []
@@ -1141,7 +1142,7 @@ def test_base_task_owner_stop_inside_turn_finalizes_after_unwind(
 
 
 def test_base_task_strategy_and_finalizer_close_once(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1180,7 +1181,7 @@ def test_base_task_strategy_and_finalizer_close_once(
 
 
 def test_base_task_cleanup_covers_primary_watcher_queue_handle(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     class AuxiliaryWatchedTask(ReactorTestTask):
@@ -1217,7 +1218,7 @@ def test_base_task_cleanup_covers_primary_watcher_queue_handle(
 
 
 def test_consumer_cleanup_propagates_one_deadline_to_owned_sessions(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1932,7 +1933,7 @@ def test_command_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
 
 
 def test_base_task_direct_run_forever_sigint_handler_only_records(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     handler_observations: list[tuple[bool, tuple[tuple[str, int | None], ...]]] = []
@@ -2021,7 +2022,7 @@ class RoleSupportKeyOverlapReactorTestTask(ReactorTestTask):
         return routes
 
 
-def drain_queue(queue) -> list[str]:
+def drain_queue(queue: Queue) -> list[str]:
     messages: list[str] = []
     while True:
         value = queue.read_one()
@@ -2476,31 +2477,30 @@ def test_base_task_rejects_runtime_queue_mutation(tmp_path: Path) -> None:
         task.cleanup()
 
 
-def _instrument_streaming_queue(monkeypatch):
+def _instrument_streaming_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[dict[str, object]], list[int | str]]:
     writes: list[dict[str, object]] = []
-    deletes: list[int | None] = []
+    deletes: list[int | str] = []
     original_queue = BaseTask._queue
-    proxies: dict[int, Queue] = {}
+    proxies: dict[int, QueueProxy] = {}
 
     class QueueProxy:
         def __init__(self, delegate: Queue) -> None:
             self._delegate = delegate
 
-        def write(self, message: str) -> None:
+        def write(self, message: str) -> int:
             writes.append(json.loads(message))
             return self._delegate.write(message)
 
-        def delete(self, *args, **kwargs) -> None:
-            message_id = kwargs.get("message_id")
-            if message_id is None and args:
-                message_id = args[0]
+        def delete(self, message_id: int | str) -> bool:
             deletes.append(message_id)
-            return self._delegate.delete(*args, **kwargs)
+            return self._delegate.delete(message_id=message_id)
 
-        def __getattr__(self, attr: str):
+        def __getattr__(self, attr: str) -> object:
             return getattr(self._delegate, attr)
 
-    def instrument(self, name: str) -> Queue:
+    def instrument(self: BaseTask, name: str) -> Queue:
         queue = original_queue(self, name)
         if name != WEFT_STREAMING_SESSIONS_QUEUE:
             return queue
@@ -2508,7 +2508,9 @@ def _instrument_streaming_queue(monkeypatch):
         if proxy is None:
             proxy = QueueProxy(queue)
             proxies[id(queue)] = proxy
-        return proxy
+        return cast(
+            Queue, proxy
+        )  # Queue facade delegates all operations except recorded writes/deletes.
 
     monkeypatch.setattr(BaseTask, "_queue", instrument, raising=False)
     return writes, deletes
@@ -2523,7 +2525,7 @@ def unique_tid() -> str:
 
 
 def test_task_processes_function_target_and_writes_outbox(
-    broker_env, unique_tid: str
+    broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
@@ -2566,7 +2568,7 @@ def test_task_processes_function_target_and_writes_outbox(
 
 
 def test_task_routes_work_through_custom_inbox_and_outbox(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2606,7 +2608,7 @@ def test_task_routes_work_through_custom_inbox_and_outbox(
         task.cleanup()
 
 
-def test_run_work_item_executes_payload(broker_env, unique_tid: str) -> None:
+def test_run_work_item_executes_payload(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -2622,7 +2624,9 @@ def test_run_work_item_executes_payload(broker_env, unique_tid: str) -> None:
     task.cleanup()
 
 
-def test_run_work_item_spills_large_output(broker_env, unique_tid: str) -> None:
+def test_run_work_item_spills_large_output(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -2638,13 +2642,15 @@ def test_run_work_item_spills_large_output(broker_env, unique_tid: str) -> None:
     assert len(result) == size
 
     outbox = make_queue(spec.io.outputs["outbox"])
-    reference = json.loads(outbox.read_one())
+    raw_reference = outbox.read_one()
+    assert raw_reference is not None
+    reference = json.loads(raw_reference)
     assert reference["type"] == "large_output"
     task.cleanup()
 
 
 def test_run_work_item_deferred_stop_without_active_message_preserves_reserved_queue(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2686,7 +2692,7 @@ def test_run_work_item_deferred_stop_without_active_message_preserves_reserved_q
 
 
 def test_deferred_stop_finalizes_before_timeout_outcome(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2770,7 +2776,7 @@ def test_deferred_stop_finalizes_before_timeout_outcome(
 
 
 def test_deferred_kill_finalizes_before_limit_outcome(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2859,7 +2865,7 @@ def test_deferred_kill_finalizes_before_limit_outcome(
 )
 @pytest.mark.parametrize("outcome_status", ("error", "cancelled"))
 def test_deferred_control_wins_over_error_and_cancelled_outcomes(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
     command: str,
@@ -2976,7 +2982,7 @@ def test_deferred_control_wins_over_error_and_cancelled_outcomes(
     ((CONTROL_STOP, "cancelled"), (CONTROL_KILL, "killed")),
 )
 def test_structured_active_stop_kill_defers_until_finalize(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     command: str,
     expected_status: str,
@@ -3013,7 +3019,7 @@ def test_structured_active_stop_kill_defers_until_finalize(
 
 
 def test_active_consumer_acks_invalid_control_then_defers_later_valid_stop(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     """An invalid active-control head cannot block a later canonical request."""
@@ -3054,7 +3060,7 @@ def test_active_consumer_acks_invalid_control_then_defers_later_valid_stop(
 )
 @pytest.mark.parametrize("ack_fails", [False, True])
 def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
     command: str,
@@ -3172,7 +3178,7 @@ def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
 
 
 def test_deferred_stop_finalizes_one_shot_task_without_double_terminal_emission(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3268,7 +3274,7 @@ def test_deferred_stop_finalizes_one_shot_task_without_double_terminal_emission(
 
 
 def test_runner_error_diagnostics_are_written_to_terminal_task_log(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3313,7 +3319,9 @@ def test_runner_error_diagnostics_are_written_to_terminal_task_log(
     task.cleanup()
 
 
-def test_task_failure_leaves_message_in_reserved(broker_env, unique_tid: str) -> None:
+def test_task_failure_leaves_message_in_reserved(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -3362,7 +3370,7 @@ def test_consumer_start_token_truth_table(raw: str | None, expected: bool) -> No
     assert Consumer._is_start_token(raw) is expected
 
 
-def test_start_token_cleared_on_failure(broker_env, unique_tid: str) -> None:
+def test_start_token_cleared_on_failure(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_command_taskspec(
         unique_tid,
@@ -3396,7 +3404,9 @@ def test_start_token_cleared_on_failure(broker_env, unique_tid: str) -> None:
     assert terminal["status"] == "failed"
 
 
-def test_task_handles_stop_control_message(broker_env, unique_tid: str) -> None:
+def test_task_handles_stop_control_message(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -3416,7 +3426,7 @@ def test_task_handles_stop_control_message(broker_env, unique_tid: str) -> None:
 
 
 def test_task_run_until_stopped_honors_pending_stop_control(
-    broker_env, unique_tid: str
+    broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
@@ -3440,9 +3450,9 @@ def test_task_run_until_stopped_honors_pending_stop_control(
 
 
 def test_task_run_until_stopped_waits_through_activity_seam(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     spec = make_function_taskspec(
@@ -3464,7 +3474,7 @@ def test_task_run_until_stopped_waits_through_activity_seam(
 
 
 def test_task_run_until_stopped_uses_next_wait_timeout(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3489,7 +3499,7 @@ def test_task_run_until_stopped_uses_next_wait_timeout(
 
 
 def test_task_run_until_stopped_waits_for_zero_next_timeout(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3548,7 +3558,7 @@ def _consumer_worker_stacks(task: Consumer) -> list[str]:
     for thread in threading.enumerate():
         if not thread.name.startswith(f"weft-worker-{task.tid_short}-"):
             continue
-        frame = frames.get(thread.ident)
+        frame = frames.get(thread.ident) if thread.ident is not None else None
         if frame is None:
             continue
         stack = "".join(traceback.format_stack(frame, limit=12))
@@ -3557,7 +3567,7 @@ def _consumer_worker_stacks(task: Consumer) -> list[str]:
 
 
 def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -3608,7 +3618,7 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
 
 
 def test_consumer_reactor_stop_cancels_active_command_on_main_thread(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -3649,7 +3659,7 @@ def test_consumer_reactor_stop_cancels_active_command_on_main_thread(
 
 
 def test_consumer_worker_constructs_runner_without_broker_context(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3696,7 +3706,7 @@ def test_consumer_worker_constructs_runner_without_broker_context(
 
 
 def test_consumer_active_wait_activity_ignores_reserved_work_queue(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3755,7 +3765,7 @@ def test_consumer_active_wait_activity_ignores_reserved_work_queue(
 
 
 def test_consumer_keeps_one_inflight_item_and_commits_in_source_order(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3823,7 +3833,7 @@ def test_consumer_keeps_one_inflight_item_and_commits_in_source_order(
 
 
 def test_consumer_active_control_gets_turn_while_stream_events_remain(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3892,7 +3902,7 @@ def test_consumer_active_control_gets_turn_while_stream_events_remain(
 
 
 def test_base_task_applies_worker_result_on_main_thread(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -3926,7 +3936,7 @@ def test_base_task_applies_worker_result_on_main_thread(
 
 
 def test_base_task_worker_lane_applies_result_on_main_thread(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -3960,7 +3970,7 @@ def test_base_task_worker_lane_applies_result_on_main_thread(
 
 
 def test_base_task_worker_lane_delivers_errors_on_main_thread(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -3994,7 +4004,7 @@ def test_base_task_worker_lane_delivers_errors_on_main_thread(
 
 
 def test_base_task_wait_for_activity_caps_wait_while_worker_is_active(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4034,7 +4044,7 @@ def test_base_task_wait_for_activity_caps_wait_while_worker_is_active(
 
 
 def test_base_task_worker_result_drain_is_budgeted(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4064,7 +4074,7 @@ def test_base_task_worker_result_drain_is_budgeted(
 
 
 def test_base_task_process_once_spends_one_worker_result_budget_per_turn(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4094,7 +4104,7 @@ def test_base_task_process_once_spends_one_worker_result_budget_per_turn(
 
 
 def test_base_task_worker_result_queue_backpressures_when_full(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4135,7 +4145,7 @@ def test_base_task_worker_result_queue_backpressures_when_full(
 
 
 def test_base_task_cleanup_stops_worker_lane(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -4162,7 +4172,7 @@ def test_base_task_cleanup_stops_worker_lane(
 
 
 def test_base_task_worker_error_is_raised_on_main_thread(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -4194,7 +4204,7 @@ def test_base_task_worker_error_is_raised_on_main_thread(
 
 
 def test_base_task_worker_lane_transports_fatal_exit_identity(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -4229,7 +4239,7 @@ def test_base_task_worker_lane_transports_fatal_exit_identity(
 
 
 def test_consumer_worker_result_preserves_ordinary_failure_and_fatal_identity(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4280,7 +4290,7 @@ def test_consumer_worker_result_preserves_ordinary_failure_and_fatal_identity(
 
 
 def test_runtime_summary_contains_plugin_failure_but_propagates_fatal_exit(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4342,7 +4352,7 @@ def test_runtime_summary_contains_plugin_failure_but_propagates_fatal_exit(
 
 
 def test_task_process_entry_waits_through_activity_seam(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     global _launcher_process_calls, _launcher_run_calls
@@ -4369,7 +4379,7 @@ def test_task_process_entry_waits_through_activity_seam(
 
 
 def test_task_process_entry_does_not_wait_after_terminal_turn(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     global _launcher_process_calls, _launcher_run_calls
@@ -4396,7 +4406,7 @@ def test_task_process_entry_does_not_wait_after_terminal_turn(
 
 
 def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4462,7 +4472,7 @@ def test_parent_loss_shutdown_records_without_setting_task_stop_event() -> None:
 
 
 def test_parent_loss_is_observed_after_bounded_owner_wait(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4516,7 +4526,9 @@ def test_parent_loss_is_observed_after_bounded_owner_wait(
         task.stop()
 
 
-def test_task_ignores_unknown_control_message(broker_env, unique_tid: str) -> None:
+def test_task_ignores_unknown_control_message(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -4534,7 +4546,9 @@ def test_task_ignores_unknown_control_message(broker_env, unique_tid: str) -> No
     assert ctrl_in.read_one() is None
 
 
-def test_command_target_executes_process(broker_env, unique_tid: str) -> None:
+def test_command_target_executes_process(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_command_taskspec(
         unique_tid,
@@ -4555,7 +4569,9 @@ def test_command_target_executes_process(broker_env, unique_tid: str) -> None:
     assert outbox.read_one() == "command-done"
 
 
-def test_large_output_spills_to_disk(tmp_path, broker_env, unique_tid: str) -> None:
+def test_large_output_spills_to_disk(
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     context_root = tmp_path / "project"
 
@@ -4582,7 +4598,9 @@ def test_large_output_spills_to_disk(tmp_path, broker_env, unique_tid: str) -> N
     )
 
     outbox = make_queue(spec.io.outputs["outbox"])
-    reference = json.loads(outbox.read_one())
+    raw_reference = outbox.read_one()
+    assert raw_reference is not None
+    reference = json.loads(raw_reference)
     assert reference["type"] == "large_output"
     output_path = Path(reference["path"])
     assert output_path.exists()
@@ -4599,8 +4617,8 @@ def test_large_output_spills_to_disk(tmp_path, broker_env, unique_tid: str) -> N
 
 def test_large_output_spills_to_custom_weft_directory_name(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    broker_env,
+    tmp_path: Path,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4626,7 +4644,9 @@ def test_large_output_spills_to_custom_weft_directory_name(
     )
 
     outbox = make_queue(spec.io.outputs["outbox"])
-    reference = json.loads(outbox.read_one())
+    raw_reference = outbox.read_one()
+    assert raw_reference is not None
+    reference = json.loads(raw_reference)
     expected_path = (
         Path(context_root) / ".engram" / "outputs" / unique_tid / "output.dat"
     )
@@ -4636,7 +4656,9 @@ def test_large_output_spills_to_custom_weft_directory_name(
     assert expected_path.read_bytes() == b"x" * output_size
 
 
-def test_large_output_cleanup_on_exit(tmp_path, broker_env, unique_tid: str) -> None:
+def test_large_output_cleanup_on_exit(
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     context_root = tmp_path / "project"
 
@@ -4662,7 +4684,9 @@ def test_large_output_cleanup_on_exit(tmp_path, broker_env, unique_tid: str) -> 
     assert not expected_path.exists()
 
 
-def test_stream_output_writes_chunks(tmp_path, broker_env, unique_tid: str) -> None:
+def test_stream_output_writes_chunks(
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     context_root = tmp_path / "project"
 
@@ -4712,7 +4736,9 @@ def test_stream_output_writes_chunks(tmp_path, broker_env, unique_tid: str) -> N
     assert completed["result_bytes"] == output_size
 
 
-def test_stream_output_small_payload_single_chunk(broker_env, unique_tid: str) -> None:
+def test_stream_output_small_payload_single_chunk(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -4739,7 +4765,7 @@ def test_stream_output_small_payload_single_chunk(broker_env, unique_tid: str) -
 
 
 def test_live_command_streaming_persists_stderr_after_control_cleanup(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4773,7 +4799,7 @@ def test_live_command_streaming_persists_stderr_after_control_cleanup(
 
 
 def test_streaming_session_records_and_clears(
-    monkeypatch, broker_env, unique_tid: str
+    monkeypatch: pytest.MonkeyPatch, broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     writes, deletes = _instrument_streaming_queue(monkeypatch)
 
@@ -4799,6 +4825,7 @@ def test_streaming_session_records_and_clears(
     assert session["tid"] == unique_tid
     assert session["mode"] == "stream"
     assert session["queue"] == spec.io.outputs["outbox"]
+    assert isinstance(session["session_id"], str)
     assert session["session_id"].startswith(
         f"{unique_tid}:{spec.io.outputs['outbox']}:"
     )
@@ -4806,8 +4833,8 @@ def test_streaming_session_records_and_clears(
 
 
 def test_persistent_live_command_streaming_clears_session_before_waiting(
-    monkeypatch,
-    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     writes, deletes = _instrument_streaming_queue(monkeypatch)
@@ -4833,7 +4860,7 @@ def test_persistent_live_command_streaming_clears_session_before_waiting(
 
 
 def test_persistent_work_item_success_does_not_emit_terminal_envelope(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4860,7 +4887,9 @@ def test_persistent_work_item_success_does_not_emit_terminal_envelope(
         task.cleanup()
 
 
-def test_cleanup_on_exit_removes_output_queue(broker_env, unique_tid: str) -> None:
+def test_cleanup_on_exit_preserves_function_output(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -4878,10 +4907,13 @@ def test_cleanup_on_exit_removes_output_queue(broker_env, unique_tid: str) -> No
         lambda: task.taskspec.state.status == "completed",
     )
 
-    assert make_queue(spec.io.outputs["outbox"]).has_pending() is True
+    task.cleanup()
+    assert make_queue(spec.io.outputs["outbox"]).read_one() == "payload"
 
 
-def test_cleanup_on_exit_process_target(broker_env, unique_tid: str) -> None:
+def test_cleanup_on_exit_preserves_command_output(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_command_taskspec(
         unique_tid,
@@ -4900,11 +4932,12 @@ def test_cleanup_on_exit_process_target(broker_env, unique_tid: str) -> None:
         lambda: task.taskspec.state.status == "completed",
     )
 
-    assert make_queue(spec.io.outputs["outbox"]).has_pending() is True
+    task.cleanup()
+    assert make_queue(spec.io.outputs["outbox"]).read_one() == "done" + "X" * 1024
 
 
 def test_task_cleanup_removes_standard_control_queues_after_success(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4939,7 +4972,7 @@ def test_task_cleanup_removes_standard_control_queues_after_success(
 
 
 def test_task_cleanup_removes_standard_control_queues_after_stop(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4965,7 +4998,7 @@ def test_task_cleanup_removes_standard_control_queues_after_stop(
     assert ctrl_out.stats().total == 0
 
 
-def test_reserved_policy_keep_on_stop(broker_env, unique_tid: str) -> None:
+def test_reserved_policy_keep_on_stop(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -4984,7 +5017,7 @@ def test_reserved_policy_keep_on_stop(broker_env, unique_tid: str) -> None:
     assert reserved.has_pending() is True
 
 
-def test_reserved_policy_clear_on_stop(broker_env, unique_tid: str) -> None:
+def test_reserved_policy_clear_on_stop(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -5004,7 +5037,7 @@ def test_reserved_policy_clear_on_stop(broker_env, unique_tid: str) -> None:
 
 
 def test_stop_with_default_cleanup_preserves_reserved_when_keep(
-    broker_env, unique_tid: str
+    broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     """cleanup_on_exit=True must not override the KEEP reserved policy on STOP."""
     db_path, make_queue = broker_env
@@ -5040,7 +5073,7 @@ def test_stop_with_default_cleanup_preserves_reserved_when_keep(
     assert reserved.has_pending() is True
 
 
-def test_reserved_policy_keep_on_error(broker_env, unique_tid: str) -> None:
+def test_reserved_policy_keep_on_error(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -5062,7 +5095,7 @@ def test_reserved_policy_keep_on_error(broker_env, unique_tid: str) -> None:
     assert task.taskspec.state.status == "failed"
 
 
-def test_reserved_policy_clear_on_error(broker_env, unique_tid: str) -> None:
+def test_reserved_policy_clear_on_error(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,

@@ -54,6 +54,10 @@ def test_drive_until_allows_only_the_turn_paired_with_a_boundary_wait(
     )
     calls: list[object] = []
 
+    def pending_work() -> bool:
+        calls.append("pending")
+        return False
+
     with pytest.raises(AssertionError, match="turns=2"):
         drive_until(
             lambda: calls.append("observe"),
@@ -62,7 +66,7 @@ def test_drive_until_allows_only_the_turn_paired_with_a_boundary_wait(
             wait=lambda *, timeout: calls.append(("wait", timeout)),
             timeout=1.0,
             wait_slice=0.75,
-            pending_work=(lambda: calls.append("pending") or False,),
+            pending_work=(pending_work,),
         )
 
     assert calls == [

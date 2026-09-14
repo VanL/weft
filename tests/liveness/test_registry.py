@@ -82,9 +82,11 @@ def test_registry_miss_exception_and_invalid_result_are_unknown(
     assert registry.attempt_runtime_liveness_from_registered_probe(_handle()) is None
     assert registry.runtime_liveness_from_registered_probe(_handle()) == "unknown"
 
-    registry.register_runtime_liveness_probe(  # type: ignore[arg-type]
-        "example", lambda _handle, _budget: "invalid"
-    )
+    def invalid(_handle: RunnerHandle, _budget: float) -> str:
+        return "invalid"
+
+    # A third-party probe can violate its declared result contract.
+    registry.register_runtime_liveness_probe("example", invalid)  # type: ignore[arg-type]
     assert registry.attempt_runtime_liveness_from_registered_probe(_handle()) is None
     assert registry.runtime_liveness_from_registered_probe(_handle()) == "unknown"
 

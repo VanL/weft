@@ -15,7 +15,6 @@ import queue
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
@@ -53,7 +52,7 @@ from weft.core.terminal_handoff_transport import (
     poll_terminal_payload,
     receive_terminal_payload,
 )
-from weft.ext import RunnerHandle
+from weft.ext import RunnerHandle, SessionExecutionResult
 from weft.helpers import safe_cancel, terminate_process_tree
 
 logger = logging.getLogger(__name__)
@@ -215,17 +214,6 @@ class CommandSession:
     @property
     def last_metrics(self) -> ResourceMetrics | None:
         return self._last_metrics
-
-
-@dataclass(slots=True)
-class SessionExecutionResult:
-    """Result envelope returned by a long-lived session worker."""
-
-    status: str
-    value: Any | None
-    error: str | None
-    metrics: ResourceMetrics | None = None
-    diagnostics: dict[str, Any] | None = None
 
 
 class AgentSession:

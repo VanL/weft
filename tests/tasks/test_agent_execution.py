@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Callable
+from pathlib import Path
 from typing import Final
 
 import pytest
@@ -17,6 +19,7 @@ from tests.fixtures.provider_cli_fixture import (
     write_provider_cli_wrapper,
 )
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.typing import BrokerEnv, QueueFactory
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
@@ -50,7 +53,7 @@ _LIVE_PROVIDER_DEFAULT_MODELS: Final[dict[str, str]] = {
 
 def _drive_consumer_until(
     task: Consumer,
-    predicate,
+    predicate: Callable[[], bool],
     *,
     timeout: float = 30.0,
 ) -> None:
@@ -116,8 +119,10 @@ def unique_tid() -> str:
     return str(time.time_ns())
 
 
-def _agent_spec_payload(*, tools: tuple[dict[str, object], ...] = (), **overrides):
-    payload = {
+def _agent_spec_payload(
+    *, tools: tuple[dict[str, object], ...] = (), **overrides: object
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "runtime": "llm",
         "model": TEST_MODEL_ID,
         "runtime_config": {"plugin_modules": ["tests.fixtures.llm_test_models"]},
@@ -292,12 +297,13 @@ def test_task_runner_executes_agent_successfully() -> None:
     outcome = runner.run("hello")
 
     assert outcome.ok
+    assert outcome.value is not None
     assert outcome.value.aggregate_public_output() == "text:hello"
 
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_task_runner_executes_provider_cli_agent_successfully(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     runner = make_agent_runner(
@@ -312,6 +318,7 @@ def test_task_runner_executes_provider_cli_agent_successfully(
     outcome = runner.run("hello")
 
     assert outcome.ok
+    assert outcome.value is not None
     payload = json.loads(outcome.value.aggregate_public_output())
     assert payload["provider"] == provider_name
     assert payload["cwd"] == str(tmp_path)
@@ -328,14 +335,16 @@ def test_task_runner_executes_provider_cli_agent_successfully(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_task_runner_executes_provider_cli_agent_with_structured_tool_profile(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     overrides = _provider_agent_overrides(
         provider_name=provider_name,
         executable=str(write_provider_cli_wrapper(tmp_path, provider_name)),
     )
-    runtime_config = dict(overrides["runtime_config"])
+    raw_runtime_config = overrides["runtime_config"]
+    assert isinstance(raw_runtime_config, dict)
+    runtime_config = dict(raw_runtime_config)
     runtime_config["tool_profile_ref"] = (
         "tests.fixtures.runtime_profiles_fixture:structured_tool_profile"
     )
@@ -348,6 +357,7 @@ def test_task_runner_executes_provider_cli_agent_with_structured_tool_profile(
     outcome = runner.run("hello")
 
     assert outcome.ok
+    assert outcome.value is not None
     payload = json.loads(outcome.value.aggregate_public_output())
     if provider_name == "codex":
         assert payload["options"]["sandbox"] == "read-only"
@@ -372,7 +382,7 @@ def test_task_runner_executes_provider_cli_agent_with_structured_tool_profile(
     ),
 )
 def test_task_runner_executes_explicit_bounded_provider_cli_agent_successfully(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
     expected_option: str,
     expected_value: str,
@@ -391,6 +401,7 @@ def test_task_runner_executes_explicit_bounded_provider_cli_agent_successfully(
     outcome = runner.run("hello")
 
     assert outcome.ok
+    assert outcome.value is not None
     payload = json.loads(outcome.value.aggregate_public_output())
     assert payload["provider"] == provider_name
     assert payload["options"][expected_option] == expected_value
@@ -422,7 +433,7 @@ def test_task_runner_agent_timeout() -> None:
 
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
-def test_task_runner_provider_cli_timeout(tmp_path, provider_name: str) -> None:
+def test_task_runner_provider_cli_timeout(tmp_path: Path, provider_name: str) -> None:
     runner = make_agent_runner(
         timeout=0.2,
         agent_overrides=_provider_agent_overrides(
@@ -439,7 +450,7 @@ def test_task_runner_provider_cli_timeout(tmp_path, provider_name: str) -> None:
 
 
 def test_task_runner_construction_does_not_probe_provider_cli_startup(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PROVIDER_CLI_FIXTURE_FAIL_PROBE", "1")
@@ -504,7 +515,7 @@ def test_task_runner_agent_can_be_cancelled() -> None:
 
 
 def test_consumer_processes_agent_and_writes_outbox(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -524,7 +535,7 @@ def test_consumer_processes_agent_and_writes_outbox(
 
 
 def test_consumer_creates_and_exercises_agent_task_from_payload(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -569,7 +580,7 @@ def test_consumer_creates_and_exercises_agent_task_from_payload(
 
 
 def test_consumer_persistent_agent_per_message_processes_multiple_messages(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -591,7 +602,9 @@ def test_consumer_persistent_agent_per_message_processes_multiple_messages(
 
     inbox.write("inspect_json:first")
     _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
-    first = json.loads(outbox.read_one())
+    raw_first = outbox.read_one()
+    assert raw_first is not None
+    first = json.loads(raw_first)
 
     assert first["task"] == "first"
     assert first["system"] == "persistent instructions"
@@ -601,7 +614,9 @@ def test_consumer_persistent_agent_per_message_processes_multiple_messages(
 
     inbox.write("inspect_json:second")
     _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
-    second = json.loads(outbox.read_one())
+    raw_second = outbox.read_one()
+    assert raw_second is not None
+    second = json.loads(raw_second)
 
     assert second["task"] == "second"
     assert second["system"] == "persistent instructions"
@@ -613,7 +628,7 @@ def test_consumer_persistent_agent_per_message_processes_multiple_messages(
 
 
 def test_consumer_persistent_agent_per_task_continues_conversation(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -647,7 +662,7 @@ def test_consumer_persistent_agent_per_task_continues_conversation(
 
 
 def test_consumer_agent_messages_output_writes_json_messages(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -665,17 +680,21 @@ def test_consumer_agent_messages_output_writes_json_messages(
 
     _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
 
-    result = json.loads(outbox.read_one())
+    raw_result = outbox.read_one()
+
+    assert raw_result is not None
+
+    result = json.loads(raw_result)
     assert result == {"role": "assistant", "content": "text:hello"}
     assert task.taskspec.state.status == "completed"
 
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_consumer_processes_provider_cli_and_logs_agent_execution(
-    broker_env,
-    queue_factory,
+    broker_env: BrokerEnv,
+    queue_factory: QueueFactory,
     unique_tid: str,
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -699,7 +718,11 @@ def test_consumer_processes_provider_cli_and_logs_agent_execution(
 
     _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
 
-    payload = json.loads(outbox.read_one())
+    raw_payload = outbox.read_one()
+
+    assert raw_payload is not None
+
+    payload = json.loads(raw_payload)
     assert payload["provider"] == provider_name
     assert payload["cwd"] == str(tmp_path)
     assert payload["env_value"] == "fixture-env"
@@ -723,9 +746,9 @@ def test_consumer_processes_provider_cli_and_logs_agent_execution(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_consumer_persistent_provider_cli_per_task_continues_conversation(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -751,7 +774,9 @@ def test_consumer_persistent_provider_cli_per_task_continues_conversation(
 
     inbox.write("remember:phase2-token")
     _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
-    first = json.loads(outbox.read_one())
+    raw_first = outbox.read_one()
+    assert raw_first is not None
+    first = json.loads(raw_first)
 
     assert first["provider"] == provider_name
     assert first["turn_index"] == 1
@@ -759,7 +784,9 @@ def test_consumer_persistent_provider_cli_per_task_continues_conversation(
 
     inbox.write("recall")
     _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
-    second = json.loads(outbox.read_one())
+    raw_second = outbox.read_one()
+    assert raw_second is not None
+    second = json.loads(raw_second)
 
     assert second["provider"] == provider_name
     assert second["turn_index"] == 2
@@ -772,9 +799,9 @@ def test_consumer_persistent_provider_cli_per_task_continues_conversation(
 
 
 def test_consumer_processes_provider_cli_with_explicit_mcp_tool_profile(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     agent_overrides = _provider_agent_overrides(
@@ -782,7 +809,9 @@ def test_consumer_processes_provider_cli_with_explicit_mcp_tool_profile(
         executable=str(write_provider_cli_wrapper(tmp_path, "claude_code")),
         include_profiles=False,
     )
-    runtime_config = dict(agent_overrides["runtime_config"])
+    raw_runtime_config = agent_overrides["runtime_config"]
+    assert isinstance(raw_runtime_config, dict)
+    runtime_config = dict(raw_runtime_config)
     runtime_config["tool_profile_ref"] = (
         "tests.fixtures.runtime_profiles_fixture:claude_stdio_mcp_tool_profile"
     )
@@ -805,7 +834,11 @@ def test_consumer_processes_provider_cli_with_explicit_mcp_tool_profile(
 
     _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
 
-    payload = json.loads(outbox.read_one())
+    raw_payload = outbox.read_one()
+
+    assert raw_payload is not None
+
+    payload = json.loads(raw_payload)
     assert payload["provider"] == "claude_code"
     assert payload["mcp_result"] == "phase3-mcp-token"
     assert call_marker.read_text(encoding="utf-8") == "phase3-mcp-token"
@@ -813,7 +846,7 @@ def test_consumer_processes_provider_cli_with_explicit_mcp_tool_profile(
 
 
 def test_consumer_applies_reserved_policy_on_agent_failure(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -842,9 +875,9 @@ def test_consumer_applies_reserved_policy_on_agent_failure(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_consumer_applies_reserved_policy_on_provider_cli_failure(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -923,9 +956,9 @@ def test_live_provider_selection_fails_when_selected_executable_is_missing(
 @pytest.mark.slow
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_consumer_live_provider_cli_smoke(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     executable = _require_live_provider_executable(provider_name)
@@ -964,9 +997,9 @@ def test_consumer_live_provider_cli_smoke(
 @pytest.mark.slow
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_consumer_live_provider_cli_persistent_smoke(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     executable = _require_live_provider_executable(provider_name)
@@ -1022,9 +1055,9 @@ def test_consumer_live_provider_cli_persistent_smoke(
 
 @pytest.mark.slow
 def test_consumer_live_provider_cli_mcp_smoke(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     executable = _require_live_provider_executable(
         "claude_code",
@@ -1035,7 +1068,9 @@ def test_consumer_live_provider_cli_mcp_smoke(
         provider_name="claude_code",
         executable=executable,
     )
-    runtime_config = dict(agent_overrides["runtime_config"])
+    raw_runtime_config = agent_overrides["runtime_config"]
+    assert isinstance(raw_runtime_config, dict)
+    runtime_config = dict(raw_runtime_config)
     runtime_config["tool_profile_ref"] = (
         "tests.fixtures.runtime_profiles_fixture:claude_stdio_mcp_tool_profile"
     )

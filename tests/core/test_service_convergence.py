@@ -78,7 +78,9 @@ def test_select_canonical_live_owner_uses_numeric_tid_order() -> None:
         _record("2", timestamp=101),
     )
 
-    assert select_canonical_live_owner(records).owner_tid == "2"
+    owner = select_canonical_live_owner(records)
+    assert owner is not None
+    assert owner.owner_tid == "2"
 
 
 def test_superseded_owner_is_accepted_but_not_live() -> None:
@@ -160,6 +162,7 @@ def test_reduce_service_ownership_prunes_expired_and_older_self_rows() -> None:
 
     assert decision.expired_message_ids == (10,)
     assert decision.older_self_message_ids == (100,)
+    assert decision.canonical_live is not None
     assert decision.canonical_live.owner_tid == "5"
 
 
@@ -230,6 +233,7 @@ def test_recent_lower_live_owner_suppresses_higher_owner() -> None:
     )
 
     assert decision.recent_lower_live_owner is True
+    assert decision.canonical_live is not None
     assert decision.canonical_live.owner_tid == "2"
     assert {record.status for record in decision.records} <= LIVE_SERVICE_STATUSES
 
@@ -461,7 +465,7 @@ def test_service_registry_surfaces_propagate_future_schema(
 
 
 def test_discard_v1_rows_scans_claimed_and_preserves_other_rows(tmp_path: Path) -> None:
-    queue = Queue("weft.state.services", db_path=tmp_path / "weft.db")
+    queue = Queue("weft.state.services", db_path=str(tmp_path / "weft.db"))
     v1_pending = _write_schema_row(queue, "weft.service_owner.v1")
     v1_claimed = _write_schema_row(queue, "weft.service_owner.v1")
     assert queue.read_one(exact_timestamp=v1_claimed) is not None
@@ -494,7 +498,7 @@ def test_discard_v1_rows_fails_if_v1_reappears_during_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    queue = Queue("weft.state.services", db_path=tmp_path / "weft.db")
+    queue = Queue("weft.state.services", db_path=str(tmp_path / "weft.db"))
     _write_schema_row(queue, "weft.service_owner.v1")
     original_delete_many = Queue.delete_many
     reappeared_id: int | None = None
@@ -524,7 +528,7 @@ def test_discard_v1_rows_fails_if_v1_reappears_during_verification(
 def test_discard_v1_rows_rejects_future_schema_before_any_delete(
     tmp_path: Path,
 ) -> None:
-    queue = Queue("weft.state.services", db_path=tmp_path / "weft.db")
+    queue = Queue("weft.state.services", db_path=str(tmp_path / "weft.db"))
     v1_id = _write_schema_row(queue, "weft.service_owner.v1")
     future_id = _write_schema_row(queue, "weft.service_owner.v3")
 

@@ -8,7 +8,7 @@ import importlib.util
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -47,7 +47,9 @@ def _load_worker_count_module() -> ModuleType:
 
 
 class _FakeProcess:
-    def __init__(self, wait_events: list[object], *, pid: int = 43210) -> None:
+    def __init__(
+        self, wait_events: list[int | BaseException], *, pid: int = 43210
+    ) -> None:
         self._wait_events = list(wait_events)
         self.pid = pid
         self.returncode: int | None = None
@@ -84,7 +86,7 @@ def test_send_pytest_interrupt_contains_os_failure_and_uses_terminate(
     pytest_pg = _load_pytest_pg_module()
     process = _FakeProcess([])
     calls: list[str] = []
-    monkeypatch.setattr(pytest_pg.os, "name", "posix")
+    monkeypatch.setattr(pytest_pg, "os", SimpleNamespace(name="posix", killpg=None))
     monkeypatch.setattr(
         pytest_pg.os,
         "killpg",
@@ -103,7 +105,7 @@ def test_send_pytest_interrupt_propagates_unexpected_signal_defect(
 ) -> None:
     pytest_pg = _load_pytest_pg_module()
     process = _FakeProcess([])
-    monkeypatch.setattr(pytest_pg.os, "name", "posix")
+    monkeypatch.setattr(pytest_pg, "os", SimpleNamespace(name="posix", killpg=None))
     monkeypatch.setattr(
         pytest_pg.os,
         "killpg",
@@ -120,20 +122,24 @@ def test_send_pytest_interrupt_contains_terminate_os_failure(
 ) -> None:
     pytest_pg = _load_pytest_pg_module()
     process = _FakeProcess([])
-    monkeypatch.setattr(pytest_pg.os, "name", "posix")
+    monkeypatch.setattr(pytest_pg, "os", SimpleNamespace(name="posix", killpg=None))
     monkeypatch.setattr(
         pytest_pg.os,
         "killpg",
         lambda *_args: (_ for _ in ()).throw(OSError("signal failed")),
         raising=False,
     )
-    monkeypatch.setattr(
-        process,
-        "terminate",
-        lambda: (_ for _ in ()).throw(OSError("process already exited")),
-    )
+    attempts: list[str] = []
+
+    def fail_terminate() -> None:
+        attempts.append("terminate")
+        raise OSError("process already exited")
+
+    monkeypatch.setattr(process, "terminate", fail_terminate)
 
     pytest_pg._send_pytest_interrupt(process)
+
+    assert attempts == ["terminate"]
 
 
 def test_send_pytest_interrupt_propagates_unexpected_terminate_defect(
@@ -141,7 +147,7 @@ def test_send_pytest_interrupt_propagates_unexpected_terminate_defect(
 ) -> None:
     pytest_pg = _load_pytest_pg_module()
     process = _FakeProcess([])
-    monkeypatch.setattr(pytest_pg.os, "name", "posix")
+    monkeypatch.setattr(pytest_pg, "os", SimpleNamespace(name="posix", killpg=None))
     monkeypatch.setattr(
         pytest_pg.os,
         "killpg",
@@ -214,13 +220,17 @@ def test_pytest_process_tree_helpers_contain_fallback_os_failure(
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fail_helpers_import)
-    monkeypatch.setattr(
-        process,
-        process_method,
-        lambda: (_ for _ in ()).throw(OSError("process already exited")),
-    )
+    attempts: list[str] = []
+
+    def fail_process_method() -> None:
+        attempts.append(process_method)
+        raise OSError("process already exited")
+
+    monkeypatch.setattr(process, process_method, fail_process_method)
 
     getattr(pytest_pg, helper_name)(process)
+
+    assert attempts == [process_method]
 
 
 @pytest.mark.parametrize(
@@ -322,7 +332,7 @@ def test_main_reports_unexpected_cli_boundary_failure(
 
 
 def test_launch_pytest_process_isolates_ctrl_c_on_current_platform(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The helper should launch pytest in its own process group/session."""
 
@@ -344,7 +354,10 @@ def test_launch_pytest_process_isolates_ctrl_c_on_current_platform(
     assert recorded["kwargs"]["env"] == {"A": "1"}
     assert recorded["kwargs"]["close_fds"] is True
     if pytest_pg.os.name == "nt":
-        assert "creationflags" in recorded["kwargs"]
+        flags = recorded["kwargs"]["creationflags"]
+        group_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", None)
+        assert isinstance(group_flag, int)
+        assert flags & group_flag
     else:
         assert recorded["kwargs"]["start_new_session"] is True
 
@@ -597,8 +610,8 @@ def test_print_container_logs_includes_stdout_and_stderr(
 
 
 def test_run_pytest_command_forwards_first_interrupt_and_returns_130(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A first Ctrl-C should forward SIGINT and preserve the wrapper exit code."""
 
@@ -647,8 +660,8 @@ def test_run_pytest_command_forwards_first_interrupt_and_returns_130(
 
 
 def test_run_pytest_command_escalates_after_interrupt_timeout(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """If pytest ignores the interrupt, the helper should terminate then kill."""
 

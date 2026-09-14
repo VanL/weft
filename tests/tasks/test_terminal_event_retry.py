@@ -31,13 +31,13 @@ import json
 import logging
 import sys
 import time
-from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
+from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import make_command_taskspec
 from weft._constants import (
     TERMINAL_EVENT_WRITE_RETRIES,
@@ -63,7 +63,7 @@ class _FailNTimesQueueProxy:
         self._fail_times = fail_times
         self.write_attempts = 0
 
-    def write(self, message: str) -> Any:
+    def write(self, message: str) -> int:
         self.write_attempts += 1
         if self.write_attempts <= self._fail_times:
             raise BrokerError("simulated transient broker write failure")
@@ -79,7 +79,7 @@ def unique_tid_terminal_retry() -> str:
 
 
 def _make_completed_consumer(
-    broker_env: tuple[object, Callable[[str], Queue]],
+    broker_env: BrokerEnv,
     tid: str,
 ) -> Consumer:
     db_path, _make_queue = broker_env
@@ -92,7 +92,7 @@ def _make_completed_consumer(
 
 
 def test_terminal_state_write_retries_and_warns_then_completes_shutdown(
-    broker_env: tuple[object, Callable[[str], Queue]],
+    broker_env: BrokerEnv,
     unique_tid_terminal_retry: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -111,7 +111,9 @@ def test_terminal_state_write_retries_and_warns_then_completes_shutdown(
         proxy = _FailNTimesQueueProxy(
             real_log_queue, fail_times=TERMINAL_EVENT_WRITE_RETRIES + 5
         )
-        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = proxy
+        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = cast(
+            Queue, proxy
+        )  # Delegates every Queue operation except injected write failures.
 
         with caplog.at_level(logging.WARNING, logger="weft.core.tasks.base"):
             # Should not raise -- non-fatal after retries exhaust.
@@ -128,7 +130,7 @@ def test_terminal_state_write_retries_and_warns_then_completes_shutdown(
 
 
 def test_terminal_envelope_write_retries_and_warns_then_completes_shutdown(
-    broker_env: tuple[object, Callable[[str], Queue]],
+    broker_env: BrokerEnv,
     unique_tid_terminal_retry: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -154,7 +156,7 @@ def test_terminal_envelope_write_retries_and_warns_then_completes_shutdown(
 
 
 def test_terminal_state_write_transient_failure_then_success_emits_exactly_one(
-    broker_env: tuple[object, Callable[[str], Queue]],
+    broker_env: BrokerEnv,
     unique_tid_terminal_retry: str,
 ) -> None:
     """One transient failure followed by success lands exactly one event.
@@ -169,7 +171,9 @@ def test_terminal_state_write_transient_failure_then_success_emits_exactly_one(
         # Fail once, then delegate to the real queue -- well within budget.
         assert TERMINAL_EVENT_WRITE_RETRIES > 1
         proxy = _FailNTimesQueueProxy(real_log_queue, fail_times=1)
-        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = proxy
+        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = cast(
+            Queue, proxy
+        )  # Delegates every Queue operation except injected write failures.
 
         task._report_state_change("work_completed")
 
@@ -192,7 +196,7 @@ def test_terminal_state_write_transient_failure_then_success_emits_exactly_one(
 
 
 def test_non_terminal_state_write_failure_is_single_attempt_debug_only(
-    broker_env: tuple[object, Callable[[str], Queue]],
+    broker_env: BrokerEnv,
     unique_tid_terminal_retry: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -213,7 +217,9 @@ def test_non_terminal_state_write_failure_is_single_attempt_debug_only(
 
         real_log_queue = task._queue(WEFT_GLOBAL_LOG_QUEUE)
         proxy = _FailNTimesQueueProxy(real_log_queue, fail_times=100)
-        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = proxy
+        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = cast(
+            Queue, proxy
+        )  # Delegates every Queue operation except injected write failures.
 
         with caplog.at_level(logging.DEBUG, logger="weft.core.tasks.base"):
             task._report_state_change("task_progress")

@@ -12,13 +12,15 @@ import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 import weft.core.tasks.pipeline as pipeline_module
+from simplebroker import Queue
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -43,7 +45,7 @@ from weft.core.tasks.pipeline import PipelineEdgeTask, PipelineTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 
-def _drain(queue) -> list[str]:
+def _drain(queue: Queue) -> list[str]:
     values: list[str] = []
     while True:
         value = queue.read_one()
@@ -52,7 +54,7 @@ def _drain(queue) -> list[str]:
         values.append(value)
 
 
-def _drain_json(queue) -> list[dict[str, Any]]:
+def _drain_json(queue: Queue) -> list[dict[str, Any]]:
     return [json.loads(item) for item in _drain(queue)]
 
 
@@ -640,7 +642,7 @@ def test_pipeline_task_rejects_duplicate_precompiled_child_control_routes(
 
 
 def test_pipeline_owned_stage_emits_success_owner_event_after_outbox_write(
-    broker_env,
+    broker_env: BrokerEnv,
 ) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
@@ -667,7 +669,7 @@ def test_pipeline_owned_stage_emits_success_owner_event_after_outbox_write(
     )
 
 
-def test_pipeline_owned_stage_emits_failure_owner_event(broker_env) -> None:
+def test_pipeline_owned_stage_emits_failure_owner_event(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     task = Consumer(
@@ -691,7 +693,7 @@ def test_pipeline_owned_stage_emits_failure_owner_event(broker_env) -> None:
     )
 
 
-def test_non_pipeline_task_emits_no_owner_event(broker_env) -> None:
+def test_non_pipeline_task_emits_no_owner_event(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     task = TaskSpec(
@@ -717,7 +719,9 @@ def test_non_pipeline_task_emits_no_owner_event(broker_env) -> None:
     assert make_queue("P1775000000000000000.events").read_one() is None
 
 
-def test_entry_edge_moves_pipeline_input_and_emits_checkpoint(broker_env) -> None:
+def test_entry_edge_moves_pipeline_input_and_emits_checkpoint(
+    broker_env: BrokerEnv,
+) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     edge = PipelineEdgeTask(db_path, _entry_edge_spec(tid))
@@ -733,7 +737,7 @@ def test_entry_edge_moves_pipeline_input_and_emits_checkpoint(broker_env) -> Non
 
 
 def test_stage_output_edge_uses_override_payload_when_downstream_defaults_input_is_set(
-    broker_env,
+    broker_env: BrokerEnv,
 ) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
@@ -750,7 +754,7 @@ def test_stage_output_edge_uses_override_payload_when_downstream_defaults_input_
 
 
 def test_stage_output_edge_moves_single_payload_without_rewriting_it(
-    broker_env,
+    broker_env: BrokerEnv,
 ) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
@@ -765,7 +769,7 @@ def test_stage_output_edge_moves_single_payload_without_rewriting_it(
 
 
 def test_stage_output_edge_fails_when_source_has_extra_payload(
-    broker_env,
+    broker_env: BrokerEnv,
 ) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
@@ -785,7 +789,7 @@ def test_stage_output_edge_fails_when_source_has_extra_payload(
 
 
 def test_pipeline_edge_maps_unexpected_ordinary_handoff_failure_to_failure(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unclassified ordinary handoff failure remains an edge result."""
@@ -818,7 +822,7 @@ def test_pipeline_edge_maps_unexpected_ordinary_handoff_failure_to_failure(
 
 
 def test_pipeline_edge_does_not_map_fatal_handoff_exit_to_failure(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Control-flow exits escape the ordinary edge-failure boundary unchanged."""
@@ -851,7 +855,7 @@ def test_pipeline_edge_does_not_map_fatal_handoff_exit_to_failure(
 
 
 def test_edge_keeps_successful_handoff_when_checkpoint_emit_fails(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -861,22 +865,24 @@ def test_edge_keeps_successful_handoff_when_checkpoint_emit_fails(
 
     original_queue = edge._queue
 
-    def broken_queue(name: str):
+    def broken_queue(name: str) -> Queue:
         queue = original_queue(name)
         if name != "P1775000000000000000.events":
             return queue
 
         class QueueProxy:
-            def __init__(self, delegate) -> None:
+            def __init__(self, delegate: Queue) -> None:
                 self._delegate = delegate
 
-            def write(self, *_args, **_kwargs):
+            def write(self, *_args: object, **_kwargs: object) -> None:
                 raise RuntimeError("boom")
 
-            def __getattr__(self, attr: str):
+            def __getattr__(self, attr: str) -> object:
                 return getattr(self._delegate, attr)
 
-        return QueueProxy(queue)
+        return cast(
+            Queue, QueueProxy(queue)
+        )  # Delegates Queue operations except injected write failure.
 
     monkeypatch.setattr(edge, "_queue", broken_queue)
 

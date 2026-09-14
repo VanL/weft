@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from tests.conftest import run_cli
 from weft.context import build_context
 
 
-def test_tidy_runs_backend_native_compaction_twice(workdir):
+def test_tidy_runs_backend_native_compaction_twice(workdir: Path) -> None:
     ctx = build_context(spec_context=workdir)
 
     # Do a trivial queue write so the database exists and has WAL state.

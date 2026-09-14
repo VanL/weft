@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from tests.conftest import run_cli
+from tests.helpers.weft_harness import WeftTestHarness
 from weft.helpers import tid_short_form
 
 
-def _submit_task(workdir, harness) -> str:
+def _submit_task(workdir: Path, harness: WeftTestHarness) -> str:
     rc, out, err = run_cli(
         "run",
         "--no-wait",
@@ -27,7 +29,9 @@ def _submit_task(workdir, harness) -> str:
     return tid
 
 
-def test_task_list_and_task_status(workdir, weft_harness) -> None:
+def test_task_list_and_task_status(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     tid = _submit_task(workdir, weft_harness)
     weft_harness.wait_for_completion(tid)
 
@@ -57,7 +61,7 @@ def test_task_list_and_task_status(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_task_tid_reverse(workdir, weft_harness) -> None:
+def test_task_tid_reverse(workdir: Path, weft_harness: WeftTestHarness) -> None:
     tid = _submit_task(workdir, weft_harness)
     weft_harness.wait_for_completion(tid)
 
@@ -67,7 +71,9 @@ def test_task_tid_reverse(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_task_ping_outputs_extended_pong_json(workdir, weft_harness) -> None:
+def test_task_ping_outputs_extended_pong_json(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     weft_harness.ensure_foreground_manager()
     rc, out, err = run_cli(
         "run",

@@ -7,7 +7,9 @@ import time
 
 import pytest
 
+from simplebroker import Queue
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.typing import BrokerEnv
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -38,7 +40,7 @@ def _build_spec(tid: str) -> TaskSpec:
     )
 
 
-def _drain(queue) -> list[str]:
+def _drain(queue: Queue) -> list[str]:
     items: list[str] = []
     while True:
         message = queue.read_one()
@@ -60,7 +62,7 @@ def _drive_task_until_complete(task: Consumer, *, timeout: float = 5.0) -> None:
     )
 
 
-def test_work_spawning_logged(broker_env, unique_tid: str) -> None:
+def test_work_spawning_logged(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     _drain(log_queue)
@@ -70,10 +72,11 @@ def test_work_spawning_logged(broker_env, unique_tid: str) -> None:
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    _drive_task_until_complete(task)
-
-    task.stop(join=False)
-    task.cleanup()
+    try:
+        _drive_task_until_complete(task)
+    finally:
+        task.stop(join=False)
+        task.cleanup()
 
     records = [json.loads(msg) for msg in _drain(log_queue)]
     events = [record.get("event") for record in records]

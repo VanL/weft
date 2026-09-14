@@ -7,7 +7,9 @@ import os
 import stat
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -86,7 +88,7 @@ def test_service_context_key_strips_non_file_backend_password(tmp_path: Path) ->
         broker_target=target,
         database_path=None,
         config=config,
-        broker_config=config,
+        broker_config=resolve_runtime_config(config),
         project_config={},
         discovered=True,
         autostart_dir=tmp_path / ".weft" / "autostart",
@@ -118,7 +120,7 @@ def test_broker_display_target_redacts_non_file_backend_password(
         broker_target=target,
         database_path=None,
         config=config,
-        broker_config=config,
+        broker_config=resolve_runtime_config(config),
         project_config={},
         discovered=True,
         autostart_dir=tmp_path / ".weft" / "autostart",
@@ -573,7 +575,7 @@ def test_build_context_preserves_backend_install_error_for_missing_plugin(
 ) -> None:
     """Postgres backend selection should preserve public backend guidance."""
 
-    def _raise_missing_plugin(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def _raise_missing_plugin(*args: object, **kwargs: object) -> None:
         raise RuntimeError(
             "Requested backend 'postgres' is not available. Install simplebroker-pg."
         )
@@ -761,6 +763,28 @@ def test_build_context_tightens_preexisting_loose_weft_dir(tmp_path: Path) -> No
     os.chmod(loose, 0o775)
     build_context(spec_context=root)
     assert stat.S_IMODE(loose.stat().st_mode) == 0o700
+
+
+def test_manual_context_normalizes_plain_broker_config_without_ambient_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Manual construction preserves the isolated snapshot at the broker handoff."""
+    original = build_context(spec_context=prepare_project_root(tmp_path))
+    config = dict(original.broker_config)
+    config["BUSY_TIMEOUT"] = 3210
+    monkeypatch.setenv("BROKER_BUSY_TIMEOUT", "not-an-integer")
+    # The constructor normalizes plain mappings although its stored field is Config.
+    ctx = replace(original, broker_config=cast(Config, config))
+    assert isinstance(ctx.broker_config, Config)
+    assert ctx.broker_config["BUSY_TIMEOUT"] == 3210
+    config["BUSY_TIMEOUT"] = 9876
+    assert ctx.broker_config["BUSY_TIMEOUT"] == 3210
+    queue = ctx.queue("manual-context-normalization")
+    try:
+        queue.write("isolated")
+        assert queue.read_one() == "isolated"
+    finally:
+        queue.close()
 
 
 @pytest.mark.parametrize(

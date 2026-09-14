@@ -49,7 +49,6 @@ def test_transport_round_trip_keeps_bundle_root_private(tmp_path: Path) -> None:
     assert encoded[TASKSPEC_BUNDLE_ROOT_FIELD] == str(bundle_root.resolve())
     assert decoded.get_bundle_root() == str(bundle_root.resolve())
     assert decoded.model_dump(mode="json") == taskspec.model_dump(mode="json")
-    assert encoded[TASKSPEC_BUNDLE_ROOT_FIELD] == str(bundle_root.resolve())
 
 
 @pytest.mark.parametrize("bundle_root", ["", 1, False, []])
@@ -79,7 +78,7 @@ def test_taskspec_bundle_root_setter_rejects_non_path_types(
     taskspec = validate_taskspec_payload(_template_payload(), template=True)
 
     with pytest.raises(TypeError, match="bundle_root"):
-        taskspec.set_bundle_root(bundle_root)  # type: ignore[arg-type]
+        taskspec.set_bundle_root(bundle_root)  # type: ignore[arg-type]  # Deliberately invalid path type at the public boundary.
 
 
 @pytest.mark.parametrize(
@@ -96,7 +95,7 @@ def test_bundle_root_guards_share_exact_errors(
 ) -> None:
     taskspec = validate_taskspec_payload(_template_payload(), template=True)
     with pytest.raises(error_type) as setter_error:
-        taskspec.set_bundle_root(bundle_root)  # type: ignore[arg-type]
+        taskspec.set_bundle_root(bundle_root)  # type: ignore[arg-type]  # Deliberately invalid path type at the public boundary.
 
     payload = _template_payload()
     payload[TASKSPEC_BUNDLE_ROOT_FIELD] = bundle_root

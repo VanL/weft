@@ -7,9 +7,11 @@ import os
 import subprocess
 import sys
 import types
+from typing import cast
 
 import pytest
 
+from tests.helpers.typing import record_and_return
 from weft.core import deferred, process_title
 from weft.core.taskspec import StateSection, TaskSpec
 
@@ -52,7 +54,7 @@ def test_deadline_handoff_uses_latest_and_bypasses_memoization(
         "get_processtitle",
         lambda: types.SimpleNamespace(
             prepare=lambda **kw: calls.append(("prepare", kw)),
-            set_to=lambda title: calls.append(("unix", title)) or True,
+            set_to=lambda title: record_and_return(calls, ("unix", title), True),
         ),
     )
 
@@ -132,7 +134,7 @@ def test_partial_import_failure_stops_writes(monkeypatch: pytest.MonkeyPatch) ->
         "get_processtitle",
         lambda: types.SimpleNamespace(
             prepare=lambda **kw: None,
-            set_to=lambda title: calls.append(title) or True,
+            set_to=lambda title: record_and_return(calls, title, True),
         ),
     )
 
@@ -309,12 +311,15 @@ def test_diagnostic_roundtrip_and_summary_preserve_execution_error() -> None:
     assert StateSection().process_title_error is None
     assert StateSection.model_validate_json(state.model_dump_json()) == state
     summary = TaskSpec.to_log_dict(
-        types.SimpleNamespace(
-            tid="1234567890123456789",
-            name="test",
-            state=state,
-            get_runtime_seconds=lambda: None,
-            metadata={},
+        cast(
+            TaskSpec,
+            types.SimpleNamespace(
+                tid="1234567890123456789",
+                name="test",
+                state=state,
+                get_runtime_seconds=lambda: None,
+                metadata={},
+            ),
         )
     )
     assert summary["error"] == "execution error"

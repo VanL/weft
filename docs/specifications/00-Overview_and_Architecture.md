@@ -168,8 +168,10 @@ SimpleBroker queues and broker target
 
 _Implementation mapping per layer_:
 
-- **Public package facades**: lazy compatibility exports in `weft/__init__.py`,
-  `weft/commands/__init__.py`, and `weft/core/__init__.py`
+- **Public Python surfaces**: application client and task construction in
+  `weft/client/`, CLI-equivalent capabilities in `weft/commands/`, and extension
+  contracts in `weft/ext.py`; `weft/__init__.py` exposes package metadata only.
+  See [Python API surfaces](14-Python_API_Surfaces.md) [PY-1].
 - **CLI and client adapters**: `weft/cli/`, `weft/client/`
 - **Shared application capabilities**: `weft/commands/`
 - **Context resolution**: `weft/context.py`

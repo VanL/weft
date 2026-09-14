@@ -33,7 +33,7 @@ _QUEUE = "weft.log.tasks"
 _TID = "1780000000000000000"
 
 
-def _seed_rows(ctx, count: int) -> list[int]:
+def _seed_rows(ctx: WeftContext, count: int) -> list[int]:
     queue = ctx.queue(_QUEUE, persistent=False)
     try:
         for index in range(count):
@@ -44,7 +44,7 @@ def _seed_rows(ctx, count: int) -> list[int]:
     return message_ids
 
 
-def _remaining_rows(ctx) -> list[tuple[str, int]]:
+def _remaining_rows(ctx: WeftContext) -> list[tuple[str, int]]:
     queue = ctx.queue(_QUEUE, persistent=False)
     try:
         return list(iter_queue_entries(queue))
@@ -55,7 +55,7 @@ def _remaining_rows(ctx) -> list[tuple[str, int]]:
 @pytest.mark.parametrize("count", [1, 3])
 @pytest.mark.parametrize("exact_status", [True, False])
 def test_exact_id_apply_deletes_present_rows(
-    tmp_path, count: int, exact_status: bool
+    tmp_path: Path, count: int, exact_status: bool
 ) -> None:
     """Present rows must be physically deleted and reported deleted.
 
@@ -87,7 +87,7 @@ def test_exact_id_apply_deletes_present_rows(
 
 
 def test_exact_id_apply_reconcile_verifies_per_id_on_batch_under_deletion(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Batch under-deletion must fall back to per-ID verification.
 
@@ -134,7 +134,7 @@ def test_exact_id_apply_reconcile_verifies_per_id_on_batch_under_deletion(
     assert _remaining_rows(ctx) == []
 
 
-def test_exact_id_apply_reports_missing_rows_without_reconcile(tmp_path) -> None:
+def test_exact_id_apply_reports_missing_rows_without_reconcile(tmp_path: Path) -> None:
     """Absent rows report deleted=False when reconcile_missing is off."""
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

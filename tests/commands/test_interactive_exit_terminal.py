@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.test_task_interactive import make_interactive_spec
 from weft._constants import INTERACTIVE_STOP_COMPLETION_TIMEOUT
 from weft.commands import run as run_commands
@@ -21,7 +23,7 @@ pytestmark = pytest.mark.shared
 
 
 def test_interactive_exit_uses_terminal_proof_without_waiting_for_ack(
-    weft_harness, monkeypatch: pytest.MonkeyPatch
+    weft_harness: WeftTestHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Real client observes STOP completion even when no ack has arrived."""
     context = weft_harness.context
@@ -67,7 +69,9 @@ def test_interactive_exit_uses_terminal_proof_without_waiting_for_ack(
 
 @pytest.mark.parametrize("ack_after", [None, 1.5])
 def test_interactive_exit_uses_full_stop_budget_before_escalation(
-    weft_harness, monkeypatch: pytest.MonkeyPatch, ack_after: float | None
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    ack_after: float | None,
 ) -> None:
     """A controlled clock pins the STOP deadline without a wall-clock sleep."""
     context = weft_harness.context
@@ -111,7 +115,7 @@ def test_interactive_exit_uses_full_stop_budget_before_escalation(
 
 
 def test_interactive_exit_waits_for_real_eof_ignoring_child(
-    weft_harness, tmp_path, monkeypatch: pytest.MonkeyPatch
+    weft_harness: WeftTestHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """STOP may need its two-second grace; do not enqueue a premature KILL."""
     script = tmp_path / "ignore_eof.py"

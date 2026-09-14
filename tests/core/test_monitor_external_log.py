@@ -7,10 +7,12 @@ Spec references:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -24,7 +26,7 @@ class _CleanupSignal(BaseException):
     """Non-Exception failure used to prove final writer cleanup semantics."""
 
 
-def test_external_task_log_sink_writes_raw_jsonl(tmp_path) -> None:
+def test_external_task_log_sink_writes_raw_jsonl(tmp_path: Path) -> None:
     path = tmp_path / "task-log.jsonl"
     sink = ExternalTaskLogSink(
         path=path,
@@ -52,7 +54,9 @@ def test_external_task_log_sink_writes_raw_jsonl(tmp_path) -> None:
     assert sink.status().last_emitted == 1
 
 
-def test_external_task_log_sink_probe_creates_missing_parent_path(tmp_path) -> None:
+def test_external_task_log_sink_probe_creates_missing_parent_path(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "missing" / "nested" / "weft.log"
     sink = ExternalTaskLogSink(
         path=path,
@@ -69,16 +73,20 @@ def test_external_task_log_sink_probe_creates_missing_parent_path(tmp_path) -> N
 
 def test_external_task_log_sink_probe_tracks_permission_transitions(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     path = tmp_path / "permission.jsonl"
     original_handler = external_log_mod._RaisingRotatingFileHandler
     fail_open = True
 
-    def handler_factory(*args, **kwargs):
+    def handler_factory(
+        filename: Path, *, maxBytes: int, backupCount: int, encoding: str
+    ) -> RotatingFileHandler:
         if fail_open:
             raise PermissionError("permission denied")
-        return original_handler(*args, **kwargs)
+        return original_handler(
+            filename, maxBytes=maxBytes, backupCount=backupCount, encoding=encoding
+        )
 
     monkeypatch.setattr(
         external_log_mod,
@@ -106,7 +114,7 @@ def test_external_task_log_sink_probe_tracks_permission_transitions(
     assert "permission denied" in str(sink.status().last_error)
 
 
-def test_external_task_log_sink_uses_rotating_file_handler(tmp_path) -> None:
+def test_external_task_log_sink_uses_rotating_file_handler(tmp_path: Path) -> None:
     path = tmp_path / "rotating.jsonl"
     sink = ExternalTaskLogSink(
         path=path,
@@ -122,7 +130,7 @@ def test_external_task_log_sink_uses_rotating_file_handler(tmp_path) -> None:
 
 
 def test_external_task_log_sinks_share_one_path_writer_but_not_counters(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Same-path facades lease one writer and retain local diagnostics [IMPL.11]."""
 
@@ -177,7 +185,7 @@ def test_external_task_log_sinks_share_one_path_writer_but_not_counters(
 
 def test_external_task_log_active_alias_is_not_resolved_again(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Target creation cannot change an active alias into a second writer key."""
 
@@ -235,7 +243,9 @@ def test_external_task_log_active_alias_is_not_resolved_again(
     assert alias not in external_log_mod._PATH_WRITER_ALIAS_REGISTRY
 
 
-def test_external_task_log_distinct_aliases_share_resolved_writer(tmp_path) -> None:
+def test_external_task_log_distinct_aliases_share_resolved_writer(
+    tmp_path: Path,
+) -> None:
     """Lexically distinct aliases keep coalescing through the resolved registry."""
 
     nested = tmp_path / "nested"
@@ -268,7 +278,7 @@ def test_external_task_log_distinct_aliases_share_resolved_writer(tmp_path) -> N
 
 def test_external_task_log_concurrent_first_alias_resolution_rechecks_registry(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Concurrent first resolutions cannot admit two keys for one active alias."""
 
@@ -316,7 +326,7 @@ def test_external_task_log_concurrent_first_alias_resolution_rechecks_registry(
 
 def test_external_task_log_final_close_blocks_replacement_writer(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """A replacement lease cannot overlap the prior writer's final close."""
 
@@ -386,7 +396,7 @@ def test_external_task_log_final_close_blocks_replacement_writer(
 
 
 def test_external_task_log_sink_reacquires_writer_after_close_then_probe(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Close/reuse never leaves a handler detached from the path registry."""
 
@@ -423,7 +433,7 @@ def test_external_task_log_sink_reacquires_writer_after_close_then_probe(
 @pytest.mark.parametrize("failure", ["flush", "close"])
 def test_external_task_log_final_writer_close_failure_allows_fresh_acquire(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
     failure: str,
 ) -> None:
     """A failed final release removes poisoned writer state before retry."""
@@ -491,7 +501,7 @@ def test_external_task_log_final_writer_close_failure_allows_fresh_acquire(
 
 
 def test_external_task_log_writer_close_attempts_both_cleanup_steps_and_raises_first(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Flush has priority, but its BaseException cannot skip handler close."""
 
@@ -510,8 +520,8 @@ def test_external_task_log_writer_close_attempts_both_cleanup_steps_and_raises_f
 
     writer = external_log_mod._PathWriter(tmp_path / "cleanup.jsonl")
     handler = FailingHandler()
-    writer.handler = handler
-    writer.logger.addHandler(handler)
+    writer.handler = cast(logging.Handler, handler)
+    writer.logger.addHandler(cast(logging.Handler, handler))
 
     with pytest.raises(_CleanupSignal) as exc_info:
         writer._close_handler_locked()
@@ -524,7 +534,7 @@ def test_external_task_log_writer_close_attempts_both_cleanup_steps_and_raises_f
 
 def test_external_task_log_same_path_concurrent_facades_rotate_complete_rows(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Concurrent first leases serialize one real rotating handler [IMPL.11]."""
 
@@ -598,7 +608,7 @@ def test_external_task_log_same_path_concurrent_facades_rotate_complete_rows(
         for sink in sinks:
             sink.close()
 
-    records = []
+    records: list[dict[str, object]] = []
     for output_path in sorted(tmp_path.glob("concurrent.jsonl*")):
         records.extend(
             json.loads(line)
@@ -610,7 +620,7 @@ def test_external_task_log_same_path_concurrent_facades_rotate_complete_rows(
     }
 
 
-def test_external_task_log_sink_writes_collated_jsonl(tmp_path) -> None:
+def test_external_task_log_sink_writes_collated_jsonl(tmp_path: Path) -> None:
     path = tmp_path / "task-summary.jsonl"
     sink = ExternalTaskLogSink(
         path=path,
@@ -644,7 +654,7 @@ def test_external_task_log_sink_writes_collated_jsonl(tmp_path) -> None:
 
 
 def test_external_task_log_sink_projects_lifetime_ids_after_report_identity(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     path = tmp_path / "task-lifetime.jsonl"
     sink = ExternalTaskLogSink(
@@ -673,6 +683,7 @@ def test_external_task_log_sink_projects_lifetime_ids_after_report_identity(
 
     record = json.loads(path.read_text(encoding="utf-8"))
     assert record["schema_version"] == 2
+    assert isinstance(report["subject"], dict)
     assert report["subject"]["message_id"] == 1779100000000000025
     assert record["report_id"] == "task-lifetime:stable"
     assert record["subject"]["message_id"] == "1779100000000000025"
@@ -685,8 +696,8 @@ def test_external_task_log_sink_projects_lifetime_ids_after_report_identity(
 
 @pytest.mark.parametrize("schema_version", [None, 1, 2.0, 3, "2", True])
 def test_external_task_log_sink_rejects_noncurrent_lifetime_schema(
-    tmp_path,
-    schema_version,
+    tmp_path: Path,
+    schema_version: float | str | None,
 ) -> None:
     sink = ExternalTaskLogSink(
         path=tmp_path / "old-lifetime.jsonl",
@@ -707,7 +718,7 @@ def test_external_task_log_sink_rejects_noncurrent_lifetime_schema(
     assert not (tmp_path / "old-lifetime.jsonl").exists()
 
 
-def test_external_task_log_sink_surfaces_service_classification(tmp_path) -> None:
+def test_external_task_log_sink_surfaces_service_classification(tmp_path: Path) -> None:
     path = tmp_path / "service-summary.jsonl"
     sink = ExternalTaskLogSink(
         path=path,
@@ -738,7 +749,9 @@ def test_external_task_log_sink_surfaces_service_classification(tmp_path) -> Non
     assert record["task"]["tid"] == "1779100000000000014"
 
 
-def test_external_task_log_sink_represents_malformed_raw_payload(tmp_path) -> None:
+def test_external_task_log_sink_represents_malformed_raw_payload(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "malformed.jsonl"
     sink = ExternalTaskLogSink(
         path=path,
@@ -761,7 +774,7 @@ def test_external_task_log_sink_represents_malformed_raw_payload(tmp_path) -> No
     assert record["raw_body_preview"] == "{not-json"
 
 
-def test_external_task_log_sink_fails_closed_for_directory_path(tmp_path) -> None:
+def test_external_task_log_sink_fails_closed_for_directory_path(tmp_path: Path) -> None:
     sink = ExternalTaskLogSink(
         path=tmp_path,
         mode="raw",

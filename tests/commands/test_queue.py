@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Never, cast
 
 import pytest
 
+from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import WEFT_ENDPOINTS_REGISTRY_QUEUE
@@ -37,7 +38,9 @@ pytestmark = [pytest.mark.shared]
 
 
 class _FakeQueueChangeMonitor:
-    def __init__(self, queues, *, config=None) -> None:
+    def __init__(
+        self, queues: Sequence[Queue], *, config: Config | None = None
+    ) -> None:
         del config
         self.queue_names = [queue.name for queue in queues]
         self.wait_calls: list[float | None] = []
@@ -62,7 +65,7 @@ class _FakeWatchQueue:
         with_timestamps: bool,
         after_timestamp: int | None = None,
         before_timestamp: int | None = None,
-    ):
+    ) -> Iterator[str | tuple[str, int]]:
         del after_timestamp, before_timestamp
         batch = self._batches.pop(0) if self._batches else []
         if with_timestamps:
@@ -75,7 +78,7 @@ class _FakeWatchQueue:
         with_timestamps: bool,
         after_timestamp: int | None = None,
         before_timestamp: int | None = None,
-    ):
+    ) -> Iterator[str | tuple[str, int]]:
         del after_timestamp, before_timestamp
         return self.read_generator(
             with_timestamps=with_timestamps,
@@ -88,7 +91,7 @@ class _FakeWatchQueue:
         with_timestamps: bool,
         after_timestamp: int | None = None,
         before_timestamp: int | None = None,
-    ):
+    ) -> Iterator[str | tuple[str, int]]:
         del after_timestamp, before_timestamp
         return self.read_generator(
             with_timestamps=with_timestamps,
@@ -103,7 +106,7 @@ class _ClosableIterator:
         self._rows = iter(rows)
         self.closed = False
 
-    def __iter__(self):
+    def __iter__(self) -> _ClosableIterator:
         return self
 
     def __next__(self) -> tuple[str, int]:
@@ -124,7 +127,7 @@ class _ClosableWatchQueue(_FakeWatchQueue):
         with_timestamps: bool,
         after_timestamp: int | None = None,
         before_timestamp: int | None = None,
-    ):
+    ) -> _ClosableIterator:
         del with_timestamps, after_timestamp, before_timestamp
         batch = self._batches.pop(0) if self._batches else []
         generator = _ClosableIterator(batch)
@@ -133,7 +136,7 @@ class _ClosableWatchQueue(_FakeWatchQueue):
 
 
 def test_public_queue_commands_return_structured_values(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -165,7 +168,7 @@ def test_public_queue_commands_return_structured_values(
 
 
 def test_public_queue_metadata_alias_and_broadcast_commands(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -175,7 +178,9 @@ def test_public_queue_metadata_alias_and_broadcast_commands(
 
     listed = queue_cmd.cmd_queue_list(stats=True)
     assert all(isinstance(info, QueueInfo) for info in listed)
-    assert next(info for info in listed if info.name == "public.target").messages == 1
+    target_info = next(info for info in listed if info.name == "public.target")
+    assert isinstance(target_info, QueueInfo)
+    assert target_info.messages == 1
     assert queue_cmd.cmd_queue_exists("public.target") is True
     assert queue_cmd.cmd_queue_stats("public.target").total_messages == 1
 
@@ -192,7 +197,10 @@ def test_public_queue_metadata_alias_and_broadcast_commands(
 
     broadcast_result = queue_cmd.cmd_queue_broadcast("payload", pattern="public.*")
     assert isinstance(broadcast_result, QueueBroadcastReceipt)
-    assert broadcast_result.target_count >= 1
+    assert broadcast_result.target_count == 1
+    assert [
+        entry.message for entry in queue_cmd.cmd_queue_read("public.target", all=True)
+    ] == ["payload"]
 
 
 @pytest.mark.parametrize("operation", ["write", "broadcast"])
@@ -215,7 +223,7 @@ def test_public_queue_writes_use_resolved_context_message_limit(
 
 
 def test_public_queue_endpoint_commands_return_endpoint_records(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -243,12 +251,16 @@ def test_public_queue_endpoint_commands_return_endpoint_records(
             endpoint="public-endpoint",
         )
         assert receipt.queue == resolved.inbox
+        assert [
+            entry.message
+            for entry in queue_cmd.cmd_queue_read(resolved.inbox, all=True)
+        ] == ["endpoint payload"]
     finally:
         task.cleanup()
 
 
 def test_public_queue_delete_reports_exact_and_queue_counts(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -287,7 +299,7 @@ def test_public_queue_watch_returns_closable_structured_stream(
             self.config: dict[str, Any] = {}
             self._queues = [data_queue, monitor_queue]
 
-        def queue(self, _name: str, *, persistent: bool = True):
+        def queue(self, _name: str, *, persistent: bool = True) -> _FakeWatchQueue:
             del persistent
             return self._queues.pop(0)
 
@@ -335,13 +347,15 @@ def test_public_queue_watch_returns_closable_structured_stream(
         ),
     ],
 )
-def test_public_queue_commands_raise_typed_usage_errors(invoke, message: str) -> None:
+def test_public_queue_commands_raise_typed_usage_errors(
+    invoke: Callable[[], object], message: str
+) -> None:
     with pytest.raises(CommandUsageError, match=message):
         invoke()
 
 
 def test_public_queue_resolve_raises_typed_error_for_missing_endpoint(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -353,7 +367,7 @@ def test_public_queue_resolve_raises_typed_error_for_missing_endpoint(
 
 
 def test_public_queue_commands_do_not_read_stdin_or_write_process_output(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -379,7 +393,7 @@ def test_public_queue_backend_failures_are_typed_and_chained(
 ) -> None:
     failure = OSError("broker unavailable")
 
-    def fail_context():
+    def fail_context() -> Never:
         raise failure
 
     monkeypatch.setattr(queue_cmd, "_context", fail_context)
@@ -391,7 +405,7 @@ def test_public_queue_backend_failures_are_typed_and_chained(
     assert caught.value.__cause__ is failure
 
 
-def test_read_and_write_messages(tmp_path):
+def test_read_and_write_messages(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "unit.queue", "hello")
@@ -400,7 +414,7 @@ def test_read_and_write_messages(tmp_path):
     assert [m.body for m in messages] == ["hello"]
 
 
-def test_peek_messages_preserves_queue(tmp_path):
+def test_peek_messages_preserves_queue(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "peek.queue", "foo")
@@ -412,7 +426,7 @@ def test_peek_messages_preserves_queue(tmp_path):
     assert [m.body for m in second] == ["foo"]
 
 
-def test_move_queue_entries_moves_every_message_with_all(tmp_path):
+def test_move_queue_entries_moves_every_message_with_all(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "from.queue", "a")
@@ -438,10 +452,11 @@ def _seed_move_source(ctx: WeftContext, name: str) -> list[int]:
 
     for index in range(3):
         queue_cmd.write_message(ctx, name, f"m{index}")
-    return [
-        int(entry.timestamp)
-        for entry in queue_cmd.peek_queue(ctx, name, all_messages=True)
-    ]
+    ids: list[int] = []
+    for entry in queue_cmd.peek_queue(ctx, name, all_messages=True):
+        assert entry.timestamp is not None
+        ids.append(entry.timestamp)
+    return ids
 
 
 def _move_via_command(
@@ -532,7 +547,10 @@ def test_queue_move_selection_matches_across_command_and_client_surfaces(
     assert all(
         entry.queue == f"{case}.command.source" for entry in command_result.entries
     )
-    timestamps = [int(entry.timestamp) for entry in command_result.entries]
+    timestamps: list[int] = []
+    for entry in command_result.entries:
+        assert entry.timestamp is not None
+        timestamps.append(entry.timestamp)
     assert timestamps == sorted(timestamps)
     assert set(timestamps) <= set(command_ids)
     client_count = _move_via_client(
@@ -546,6 +564,12 @@ def test_queue_move_selection_matches_across_command_and_client_surfaces(
     for surface in ("command", "client"):
         moved = queue_cmd.read_queue(ctx, f"{case}.{surface}.dest", all_messages=True)
         assert [entry.message for entry in moved] == expected
+        remaining = queue_cmd.read_queue(
+            ctx, f"{case}.{surface}.source", all_messages=True
+        )
+        assert [entry.message for entry in remaining] == [
+            f"m{index}" for index in range(3) if f"m{index}" not in expected
+        ]
 
 
 @pytest.mark.parametrize(
@@ -606,7 +630,7 @@ def test_queue_move_rejects_the_same_selections_on_both_surfaces(
 
 
 def test_queue_move_rejects_identical_source_and_destination_on_both_surfaces(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both surfaces refuse a move whose source and destination are the same."""
@@ -634,7 +658,7 @@ def test_queue_move_rejects_identical_source_and_destination_on_both_surfaces(
     ],
 )
 def test_queue_move_from_empty_source_reports_nothing_on_both_surfaces(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
     selection: dict[str, Any],
@@ -657,7 +681,7 @@ def test_queue_move_from_empty_source_reports_nothing_on_both_surfaces(
     assert _move_via_client(client, f"{case}.source", f"{case}.dest", **selection) == 0
 
 
-def test_list_queues(tmp_path):
+def test_list_queues(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "list.queue", "item")
@@ -667,7 +691,7 @@ def test_list_queues(tmp_path):
     assert "list.queue" in names
 
 
-def test_list_queues_supports_prefix(tmp_path):
+def test_list_queues_supports_prefix(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "alpha.one", "item")
@@ -679,7 +703,7 @@ def test_list_queues_supports_prefix(tmp_path):
 
 
 def test_delete_queue_messages_rejects_message_with_all_queues_without_deleting(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -700,7 +724,7 @@ def test_delete_queue_messages_rejects_message_with_all_queues_without_deleting(
 
 
 def test_delete_queue_messages_requires_explicit_target_without_deleting(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -717,7 +741,7 @@ def test_delete_queue_messages_requires_explicit_target_without_deleting(
 
 
 def test_delete_queue_messages_rejects_queue_name_with_all_queues_without_deleting(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -740,12 +764,16 @@ def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> No
     calls: list[tuple[str, object]] = []
 
     class _ExactQueue:
-        def read_one(self, *, exact_timestamp: object, with_timestamps: bool):
+        def read_one(
+            self, *, exact_timestamp: object, with_timestamps: bool
+        ) -> tuple[str, int]:
             assert with_timestamps is True
             calls.append(("read", exact_timestamp))
             return "read", message_id
 
-        def peek_one(self, *, exact_timestamp: object, with_timestamps: bool):
+        def peek_one(
+            self, *, exact_timestamp: object, with_timestamps: bool
+        ) -> tuple[str, int]:
             assert with_timestamps is True
             calls.append(("peek", exact_timestamp))
             return "peek", message_id
@@ -758,7 +786,7 @@ def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> No
             after_timestamp: object,
             before_timestamp: object,
             all_messages: bool,
-        ):
+        ) -> dict[str, object]:
             assert (after_timestamp, before_timestamp, all_messages) == (
                 None,
                 None,
@@ -779,7 +807,7 @@ def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> No
             del persistent
             return _ExactQueue()
 
-    context = _ExactContext()
+    context = cast(WeftContext, _ExactContext())  # Exact-ID adapter double.
     canonical = "1779600000000000001"
 
     read_entry = queue_cmd.read_queue(context, "source", message_id=canonical)[0]
@@ -808,7 +836,7 @@ def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> No
     assert delete_receipt.deleted_count == 1
 
 
-def test_watch_queue(tmp_path):
+def test_watch_queue(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "watch.queue", "payload")
@@ -844,11 +872,13 @@ def test_watch_queue_uses_queue_monitor(
             self.config: dict[str, Any] = {}
             self._queues = [data_queue, monitor_queue]
 
-        def queue(self, _name: str, *, persistent: bool = True):
+        def queue(self, _name: str, *, persistent: bool = True) -> _FakeWatchQueue:
             del persistent
             return self._queues.pop(0)
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _FakeQueueChangeMonitor:
         monitor = _FakeQueueChangeMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
@@ -857,7 +887,7 @@ def test_watch_queue_uses_queue_monitor(
 
     messages = list(
         queue_cmd.watch_queue(
-            _FakeContext(),
+            cast(WeftContext, _FakeContext()),  # Deterministic watch queues.
             "watch.queue",
             interval=0.25,
             max_messages=1,
@@ -884,19 +914,17 @@ def test_watch_queue_closes_generator_when_limit_stops_iteration(
             self.config: dict[str, Any] = {}
             self._queues = [data_queue, monitor_queue]
 
-        def queue(self, _name: str, *, persistent: bool = True):
+        def queue(self, _name: str, *, persistent: bool = True) -> _FakeWatchQueue:
             del persistent
             return self._queues.pop(0)
 
     first_context = _FakeContext()
-    second_context = _FakeContext()
-    assert first_context.config is not second_context.config
 
     monkeypatch.setattr(queue_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
 
     messages = list(
         queue_cmd.watch_queue(
-            first_context,
+            cast(WeftContext, first_context),  # Deterministic watch queues.
             "watch.queue",
             interval=0.25,
             max_messages=1,
@@ -935,7 +963,7 @@ def test_broadcast_command_rejects_omitted_message_without_reading_stdin(
 
 
 def test_resolve_command_returns_registered_endpoint_details(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -966,7 +994,7 @@ def test_resolve_command_returns_registered_endpoint_details(
     [("low", "high"), ("high", "low")],
 )
 def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(
-    tmp_path,
+    tmp_path: Path,
     registration_order: tuple[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1015,7 +1043,7 @@ def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(
 
 
 def test_resolve_command_filters_stale_endpoint_records_without_deleting(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

@@ -19,7 +19,9 @@ from weft.context import build_context
 pytestmark = pytest.mark.shared
 
 
-def test_cmd_status_text_output(tmp_path, capsys):
+def test_cmd_status_text_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue = ctx.queue("status.queue", persistent=True)
@@ -268,7 +270,9 @@ def test_watch_task_events_json_formats_broker_message_id(
     assert set(payload) == {"tid", "event_type", "timestamp", "payload"}
 
 
-def test_status_service_health_warnings_are_rendered(capsys):
+def test_status_service_health_warnings_are_rendered(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     service = types.ServiceSnapshot(
         key="task_monitor",
         name="monitor",

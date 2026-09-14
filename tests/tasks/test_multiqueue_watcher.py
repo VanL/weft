@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
+from typing import TypedDict, Unpack, cast
 
 import pytest
 
 from simplebroker import (
+    ActivityWaiter,
     Config,
+    Queue,
 )
 from simplebroker import (
     create_activity_waiter_for_queues as real_create_activity_waiter,
@@ -21,13 +26,25 @@ from simplebroker import (
 from simplebroker.ext import PollingStrategy
 from tests.helpers import multiqueue_sigint_probe
 from tests.helpers.test_backend import POSTGRES_TEST_BACKEND, active_test_backend
+from tests.helpers.typing import BrokerEnv
 from weft._constants import QUEUE_PRIORITY_INTERNAL, QUEUE_PRIORITY_NORMAL, load_config
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
     QueueMessageContext,
     QueueMode,
+    QueueRuntimeConfig,
     _TopologyMutation,
 )
+
+
+class _TopologyUpdate(TypedDict):
+    mapping: dict[str, QueueRuntimeConfig]
+    generation: int
+    signature: tuple[str, ...]
+    waiter: ActivityWaiter | None
+    active_queues: list[str]
+    queue_iterator: itertools.cycle[str]
+    force_discovery: bool
 
 
 def run_single_drain(watcher: MultiQueueWatcher) -> None:
@@ -100,12 +117,49 @@ class RaisingCloseWaiter(BlockingWaiter):
         raise self.error_type("injected close failure")
 
 
-def test_multi_queue_watcher_uses_base_retry_loop() -> None:
-    assert "_run_with_retries" not in MultiQueueWatcher.__dict__
+def test_multi_queue_watcher_recovers_from_transient_drain_failure(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recoverable infrastructure failure must not lose queued work [CC-2.1]."""
+    db_path, make_queue = broker_env
+    inbox = make_queue("retry.work")
+    inbox.write("retained work")
+    seen: list[str] = []
+    stop = threading.Event()
+
+    def handle(message: str, _timestamp: int, _context: QueueMessageContext) -> None:
+        seen.append(message)
+        stop.set()
+
+    watcher = MultiQueueWatcher(
+        queue_configs={"retry.work": {"handler": handle}},
+        db=db_path,
+        stop_event=stop,
+    )
+    original_drain = watcher._drain_queue
+    failed = False
+
+    def fail_once_then_drain() -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("transient infrastructure failure")
+        original_drain()
+
+    monkeypatch.setattr(watcher, "_drain_queue", fail_once_then_drain)
+    # Eliminate backoff time; the real inherited run loop still owns retries.
+    monkeypatch.setattr(watcher, "_handle_retry", lambda *_args: True)
+    try:
+        watcher.run_forever()
+        assert seen == ["retained work"]
+        assert inbox.peek_one() is None
+    finally:
+        watcher.stop(join=False)
 
 
 def test_watcher_retains_broker_snapshot_separate_from_weft_policy(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The inherited watcher slot must remain an immutable broker snapshot."""
@@ -132,7 +186,9 @@ def test_watcher_retains_broker_snapshot_separate_from_weft_policy(
         watcher.stop(join=False)
 
 
-def test_error_handler_failure_is_terminal_after_sync_cleanup(broker_env) -> None:
+def test_error_handler_failure_is_terminal_after_sync_cleanup(
+    broker_env: BrokerEnv,
+) -> None:
     """A sync run re-raises the error-handler failure with the handler cause."""
 
     class HandlerFailure(Exception):
@@ -171,7 +227,7 @@ def test_error_handler_failure_is_terminal_after_sync_cleanup(broker_env) -> Non
 
 
 def test_error_handler_failure_reaches_background_excepthook(
-    broker_env, monkeypatch
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A background run exposes the terminal callback failure after cleanup."""
 
@@ -215,7 +271,7 @@ def test_error_handler_failure_reaches_background_excepthook(
 
 
 def test_processed_message_stops_without_probing_queue_again(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -250,8 +306,8 @@ def test_processed_message_stops_without_probing_queue_again(
 
 
 def test_background_add_queue_rebinds_exact_set_on_drive_owner(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A foreign add waits for the drive owner to replace the native waiter."""
@@ -259,7 +315,9 @@ def test_background_add_queue_rebinds_exact_set_on_drive_owner(
     db_path, _make_queue = broker_env
     created: list[tuple[tuple[str, ...], BlockingWaiter, int]] = []
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
         del stop_event
         waiter = BlockingWaiter()
         created.append(
@@ -314,8 +372,8 @@ def test_background_add_queue_rebinds_exact_set_on_drive_owner(
 
 
 def test_background_remove_queue_rebinds_exact_remaining_set(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A foreign remove publishes only after the exact waiter is installed."""
@@ -323,7 +381,9 @@ def test_background_remove_queue_rebinds_exact_remaining_set(
     db_path, _make_queue = broker_env
     created: list[tuple[tuple[str, ...], BlockingWaiter, int]] = []
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
         del stop_event
         waiter = BlockingWaiter()
         created.append(
@@ -374,8 +434,8 @@ def test_background_remove_queue_rebinds_exact_remaining_set(
 
 
 def test_background_topology_mutations_linearize_in_request_order(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """Explicit enqueue order is the owner publication order."""
@@ -383,7 +443,9 @@ def test_background_topology_mutations_linearize_in_request_order(
     db_path, _make_queue = broker_env
     created: list[tuple[tuple[str, ...], BlockingWaiter]] = []
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
         del stop_event
         waiter = BlockingWaiter()
         created.append((tuple(queue.name for queue in queues), waiter))
@@ -445,8 +507,8 @@ def test_background_topology_mutations_linearize_in_request_order(
 
 
 def test_background_mutation_after_drive_reservation_waits_for_owner_claim(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A reserved drive prevents caller-thread topology effects before claim."""
@@ -462,7 +524,9 @@ def test_background_mutation_after_drive_reservation_waits_for_owner_claim(
             assert release.wait(timeout=2.0)
             super().run_forever()
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
         del stop_event
         waiter_creations.append(
             (tuple(queue.name for queue in queues), threading.get_ident())
@@ -508,8 +572,8 @@ def test_background_mutation_after_drive_reservation_waits_for_owner_claim(
 
 
 def test_background_rebind_before_first_strategy_start_closes_unbound_cached_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """First-start rebind closes the constructor cache that strategy never owned."""
@@ -520,12 +584,14 @@ def test_background_rebind_before_first_strategy_start_closes_unbound_cached_wai
     created: list[tuple[tuple[str, ...], BlockingWaiter, int]] = []
 
     class StartGatedWatcher(MultiQueueWatcher):
-        def _create_activity_waiter(self, queue):
+        def _create_activity_waiter(self, queue: Queue) -> ActivityWaiter | None:
             gate_entered.set()
             assert gate_release.wait(timeout=2.0)
             return super()._create_activity_waiter(queue)
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
         del stop_event
         waiter = BlockingWaiter()
         created.append(
@@ -573,7 +639,7 @@ def test_background_rebind_before_first_strategy_start_closes_unbound_cached_wai
 
 
 def test_background_startup_mutation_applies_before_initial_drain(
-    broker_env,
+    broker_env: BrokerEnv,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """The drain-entry safe point publishes queued startup mutations first."""
@@ -585,7 +651,7 @@ def test_background_startup_mutation_applies_before_initial_drain(
     observed_membership: list[list[str]] = []
 
     class StartupGatedWatcher(MultiQueueWatcher):
-        def _create_activity_waiter(self, queue):
+        def _create_activity_waiter(self, queue: Queue) -> ActivityWaiter | None:
             waiter = super()._create_activity_waiter(queue)
             waiter_created.set()
             assert release_startup.wait(timeout=2.0)
@@ -593,7 +659,7 @@ def test_background_startup_mutation_applies_before_initial_drain(
 
     watcher: StartupGatedWatcher
 
-    def handle_a(*_args) -> None:
+    def handle_a(*_args: object) -> None:
         observed_membership.append(watcher.list_queues())
         handled.set()
 
@@ -624,7 +690,7 @@ def test_background_startup_mutation_applies_before_initial_drain(
 
 @pytest.mark.parametrize("second_entry", ["run", "run_in_thread"])
 def test_background_topology_second_drive_entry_is_rejected_without_replacing_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     second_entry: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
@@ -660,8 +726,8 @@ def test_background_topology_second_drive_entry_is_rejected_without_replacing_ow
 
 
 def test_background_topology_thread_start_failure_rolls_back_drive_reservation(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A failed Thread.start clears only its own reservation and weak reference."""
@@ -697,8 +763,8 @@ def test_background_topology_thread_start_failure_rolls_back_drive_reservation(
 
 
 def test_background_add_with_preexisting_message_forces_immediate_discovery(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A newly added queue's existing backlog is drained without a second wake."""
@@ -707,7 +773,9 @@ def test_background_add_with_preexisting_message_forces_immediate_discovery(
     handled = threading.Event()
     created: list[BlockingWaiter] = []
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
         del queues, stop_event
         waiter = BlockingWaiter()
         created.append(waiter)
@@ -755,8 +823,8 @@ def test_background_add_with_preexisting_message_forces_immediate_discovery(
 
 @pytest.mark.parametrize("fallback", ["none", "raise"])
 def test_background_rebind_unavailable_falls_back_then_later_generation_restores_native_wait(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     fallback: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
@@ -767,7 +835,9 @@ def test_background_rebind_unavailable_falls_back_then_later_generation_restores
     calls: list[tuple[str, ...]] = []
     native_waiters: list[BlockingWaiter] = []
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
         del stop_event
         signature = tuple(queue.name for queue in queues)
         calls.append(signature)
@@ -824,8 +894,8 @@ def test_background_rebind_unavailable_falls_back_then_later_generation_restores
 
 
 def test_background_queue_open_failure_preserves_old_generation(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A real Queue construction failure leaves the live generation unchanged."""
@@ -849,10 +919,10 @@ def test_background_queue_open_failure_preserves_old_generation(
         "weft.core.tasks.multiqueue_watcher", fromlist=["Queue"]
     ).Queue
 
-    def fail_c(name, *args, **kwargs):
+    def fail_c(name: str, *args: object, **kwargs: object) -> Queue:
         if name == "open.c":
             raise OSError("injected queue open failure")
-        return original_queue(name, *args, **kwargs)
+        return cast(Queue, original_queue(name, *args, **kwargs))
 
     monkeypatch.setattr("weft.core.tasks.multiqueue_watcher.Queue", fail_c)
     drive = watcher.run_in_thread()
@@ -884,8 +954,8 @@ def test_background_queue_open_failure_preserves_old_generation(
 
 
 def test_background_strategy_replacement_failure_fails_request_and_retries_drive(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """An exception-atomic replacement failure rolls back candidate resources."""
@@ -901,17 +971,31 @@ def test_background_strategy_replacement_failure_fails_request_and_retries_drive
             self.fail_next_replace = True
             self.start_calls = 0
 
-        def start(self, *args, **kwargs) -> None:
+        def start(
+            self,
+            data_version_provider: Callable[[], int | None] | None = None,
+            *,
+            on_data_version_change: Callable[[], None] | None = None,
+            activity_waiter: ActivityWaiter | None = None,
+        ) -> None:
             self.start_calls += 1
-            super().start(*args, **kwargs)
+            super().start(
+                data_version_provider,
+                on_data_version_change=on_data_version_change,
+                activity_waiter=activity_waiter,
+            )
 
-        def replace_activity_waiter(self, activity_waiter):
+        def replace_activity_waiter(
+            self, activity_waiter: ActivityWaiter | None
+        ) -> ActivityWaiter | None:
             if self.fail_next_replace:
                 self.fail_next_replace = False
                 raise RuntimeError("injected replacement failure")
             return super().replace_activity_waiter(activity_waiter)
 
-    def create_waiter(_queues, *, stop_event):
+    def create_waiter(
+        _queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         del stop_event
         waiter: FakeWaiter
         if not waiters:
@@ -972,8 +1056,8 @@ def test_background_strategy_replacement_failure_fails_request_and_retries_drive
 
 
 def test_background_post_replace_publication_failure_restores_old_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """Publication failure restores strategy ownership before request failure."""
@@ -990,13 +1074,15 @@ def test_background_post_replace_publication_failure_restores_old_waiter(
             self.start_calls += 1
             super()._start_strategy()
 
-        def _publish_topology_locked(self, **kwargs) -> None:
+        def _publish_topology_locked(self, **kwargs: Unpack[_TopologyUpdate]) -> None:
             if self.fail_publication:
                 self.fail_publication = False
                 raise RuntimeError("injected publication failure")
             super()._publish_topology_locked(**kwargs)
 
-    def create_waiter(_queues, *, stop_event):
+    def create_waiter(
+        _queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         del stop_event
         waiter: FakeWaiter = BlockingWaiter() if not waiters else FakeWaiter()
         waiters.append(waiter)
@@ -1049,8 +1135,8 @@ def test_background_post_replace_publication_failure_restores_old_waiter(
 
 
 def test_background_mutation_racing_stop_never_binds_after_owner_close(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """Stop-first rejects in-flight and queued mutations before replacement."""
@@ -1062,7 +1148,9 @@ def test_background_mutation_racing_stop_never_binds_after_owner_close(
     candidate = FakeWaiter()
     calls = 0
 
-    def create_waiter(_queues, *, stop_event):
+    def create_waiter(
+        _queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         nonlocal calls
         del stop_event
         calls += 1
@@ -1126,8 +1214,8 @@ def test_background_mutation_racing_stop_never_binds_after_owner_close(
 
 @pytest.mark.parametrize("previously_driven", [False, True])
 def test_mutation_after_stop_is_rejected_before_effects(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     previously_driven: bool,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
@@ -1136,7 +1224,9 @@ def test_mutation_after_stop_is_rejected_before_effects(
     db_path, _make_queue = broker_env
     factory_calls = 0
 
-    def create_waiter(_queues, *, stop_event):
+    def create_waiter(
+        _queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         nonlocal factory_calls
         del stop_event
         factory_calls += 1
@@ -1176,8 +1266,8 @@ def test_mutation_after_stop_is_rejected_before_effects(
 
 
 def test_background_mutation_committed_before_stop_returns_success(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A commit holding the serialization lock linearizes before public stop."""
@@ -1190,12 +1280,16 @@ def test_background_mutation_committed_before_stop_returns_success(
     waiters: list[BlockingWaiter] = []
 
     class GatedReplaceStrategy(PollingStrategy):
-        def replace_activity_waiter(self, activity_waiter):
+        def replace_activity_waiter(
+            self, activity_waiter: ActivityWaiter | None
+        ) -> ActivityWaiter | None:
             replace_entered.set()
             assert replace_release.wait(timeout=2.0)
             return super().replace_activity_waiter(activity_waiter)
 
-    def create_waiter(_queues, *, stop_event):
+    def create_waiter(
+        _queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         del stop_event
         waiter = BlockingWaiter()
         waiters.append(waiter)
@@ -1250,9 +1344,9 @@ def test_background_mutation_committed_before_stop_returns_success(
 
 @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
 def test_waiter_close_failure_is_logged_once_and_not_retried(
-    broker_env,
-    monkeypatch,
-    caplog,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     error_type: type[Exception],
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
@@ -1298,8 +1392,8 @@ def test_waiter_close_failure_is_logged_once_and_not_retried(
 
 
 def test_no_owner_stop_closes_attached_cached_waiter_once(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A legal no-drive attached cache is detached before inherited cleanup."""
     db_path, _make_queue = broker_env
@@ -1327,8 +1421,8 @@ def test_no_owner_stop_closes_attached_cached_waiter_once(
 
 
 def test_background_remove_last_queue_uses_empty_waiter_shortcut_then_add_restores_native(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """Empty membership uses polling without invoking the waiter factory."""
@@ -1338,7 +1432,9 @@ def test_background_remove_last_queue_uses_empty_waiter_shortcut_then_add_restor
     calls: list[tuple[str, ...]] = []
     waiters: list[BlockingWaiter] = []
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
         del stop_event
         signature = tuple(queue.name for queue in queues)
         assert signature
@@ -1383,8 +1479,8 @@ def test_background_remove_last_queue_uses_empty_waiter_shortcut_then_add_restor
 
 
 def test_manual_wait_excludes_drive_start_mutation_and_second_manual_wait(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """One direct wait temporarily excludes all other watcher ownership."""
@@ -1433,15 +1529,17 @@ def test_manual_wait_excludes_drive_start_mutation_and_second_manual_wait(
 
 
 def test_manual_wait_nonpositive_and_stopped_calls_have_no_effects(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-positive and stopped direct waits return before waiter ownership."""
     db_path, _make_queue = broker_env
     waiter = FakeWaiter()
     factory_calls = 0
 
-    def create_waiter(_queues, *, stop_event):
+    def create_waiter(
+        _queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         nonlocal factory_calls
         del stop_event
         factory_calls += 1
@@ -1471,8 +1569,8 @@ def test_manual_wait_nonpositive_and_stopped_calls_have_no_effects(
 
 
 def test_stop_during_manual_wait_leaves_close_to_manual_owner(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """Concurrent stop signals a manual wait but never closes across threads."""
@@ -1511,7 +1609,7 @@ def test_stop_during_manual_wait_leaves_close_to_manual_owner(
 
 @pytest.mark.parametrize("entry", ["run", "run_in_thread"])
 def test_drive_start_after_public_stop_is_rejected_before_thread_creation(
-    broker_env,
+    broker_env: BrokerEnv,
     entry: str,
 ) -> None:
     """A stopped watcher cannot reserve or claim a new drive."""
@@ -1540,7 +1638,7 @@ def test_drive_start_after_public_stop_is_rejected_before_thread_creation(
 
 
 def test_synchronous_run_registers_and_clears_drive_thread_for_stop(
-    broker_env,
+    broker_env: BrokerEnv,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """Direct run publishes its owner weakref and clears it before returning."""
@@ -1581,8 +1679,8 @@ def test_synchronous_run_registers_and_clears_drive_thread_for_stop(
 
 
 def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-220] exception
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fatal owner exit releases every synchronous topology caller."""
     db_path, _make_queue = broker_env
@@ -1606,7 +1704,9 @@ def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [
 
     fatal = FatalMutation()
 
-    def create_waiter(_queues, *, stop_event):
+    def create_waiter(
+        _queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         nonlocal calls
         del stop_event
         calls += 1
@@ -1671,7 +1771,7 @@ def test_owner_fatal_exit_signals_every_queued_mutator(  # noqa: C901 approved [
 
 
 def test_unexpected_ordinary_topology_failure_is_local_and_fifo_continues(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unclassified ordinary request defect does not strand later requests."""
@@ -1717,7 +1817,7 @@ def test_unexpected_ordinary_topology_failure_is_local_and_fifo_continues(
 
 
 def test_fatal_topology_failure_precedes_deferred_sigint_after_cleanup(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fatal transaction outcome wins after deferred SIGINT requests stop."""
@@ -1734,7 +1834,7 @@ def test_fatal_topology_failure_precedes_deferred_sigint_after_cleanup(
     fatal = FatalMutation()
 
     class FatalPriorityWatcher(MultiQueueWatcher):
-        def _publish_topology_locked(self, **kwargs) -> None:
+        def _publish_topology_locked(self, **kwargs: Unpack[_TopologyUpdate]) -> None:
             assert self._topology_sigint_critical is True
             self._sigint_handler(2, None)
             raise fatal
@@ -1806,8 +1906,8 @@ def test_fatal_topology_failure_precedes_deferred_sigint_after_cleanup(
 
 
 def test_same_waiter_replacement_publication_failure_preserves_installed_owner(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A same-object replacement failure never closes pre-existing ownership."""
@@ -1818,7 +1918,7 @@ def test_same_waiter_replacement_publication_failure_preserves_installed_owner(
     class PublishFailWatcher(MultiQueueWatcher):
         fail_publication = True
 
-        def _publish_topology_locked(self, **kwargs) -> None:
+        def _publish_topology_locked(self, **kwargs: Unpack[_TopologyUpdate]) -> None:
             if self.fail_publication:
                 self.fail_publication = False
                 raise RuntimeError("same-object publication failure")
@@ -1909,9 +2009,13 @@ def test_sigint_probe_reports_fatal_mutation_failure_from_thread(
         def __init__(self, **_kwargs: object) -> None:
             self.mutation_called = threading.Event()
             waiter = multiqueue_sigint_probe.watcher_module.create_activity_waiter_for_queues(
-                [SimpleNamespace(name="sigint.a"), SimpleNamespace(name="sigint.b")],
+                [
+                    cast(Queue, SimpleNamespace(name="sigint.a")),
+                    cast(Queue, SimpleNamespace(name="sigint.b")),
+                ],  # Probe factory reads only queue names.
                 stop_event=threading.Event(),
             )
+            assert isinstance(waiter, multiqueue_sigint_probe.RecordingWaiter)
             waiter.wait_entered.set()
 
         def add_queue(self, _name: str, _handler: object) -> None:
@@ -1946,8 +2050,8 @@ def test_sigint_probe_reports_fatal_mutation_failure_from_thread(
 
 
 def test_stop_join_timeout_does_not_block_on_owner_finalization_lock(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A bounded public join returns while owner-only close is still blocked."""
@@ -1995,8 +2099,8 @@ def test_stop_join_timeout_does_not_block_on_owner_finalization_lock(
 
 
 def test_postgres_background_dynamic_membership_rebinds_native_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """Real LISTEN/NOTIFY follows added and removed queue membership."""
@@ -2006,7 +2110,9 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
     db_path, make_queue = broker_env
 
     class RecordingProxy:
-        def __init__(self, signature: tuple[str, ...], delegate) -> None:
+        def __init__(
+            self, signature: tuple[str, ...], delegate: ActivityWaiter
+        ) -> None:
             self.signature = signature
             self.delegate = delegate
             self.true_count = 0
@@ -2015,6 +2121,7 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
 
         def wait(self, timeout: float | None) -> bool:
             self.wait_entered.set()
+            assert timeout is not None
             result = self.delegate.wait(timeout)
             if result:
                 self.true_count += 1
@@ -2026,7 +2133,9 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
 
     proxies: dict[tuple[str, ...], RecordingProxy] = {}
 
-    def create_proxy(queues, *, stop_event):
+    def create_proxy(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         queue_list = list(queues)
         signature = tuple(queue.name for queue in queue_list)
         delegate = real_create_activity_waiter(
@@ -2048,7 +2157,7 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
     handler_errors: list[str] = []
     c_calls = 0
 
-    def handle_c(*_args) -> None:
+    def handle_c(*_args: object) -> None:
         nonlocal c_calls
         c_calls += 1
         expected = (
@@ -2101,7 +2210,7 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
 
 
 def test_background_mutation_from_handler_is_rejected_before_effects(
-    broker_env,
+    broker_env: BrokerEnv,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """Dispatch callbacks cannot synchronously mutate their own drive topology."""
@@ -2112,7 +2221,7 @@ def test_background_mutation_from_handler_is_rejected_before_effects(
     handler_errors: list[BaseException] = []
     watcher: MultiQueueWatcher
 
-    def handler(*_args) -> None:
+    def handler(*_args: object) -> None:
         try:
             watcher.add_queue("dynamic.forbidden", lambda *_inner: None)
         except RuntimeError as exc:  # pragma: no cover - asserted below
@@ -2144,7 +2253,7 @@ def test_background_mutation_from_handler_is_rejected_before_effects(
 
 @pytest.mark.parametrize("mutation", ["duplicate_add", "missing_remove"])
 def test_background_membership_errors_return_to_requesting_thread(
-    broker_env,
+    broker_env: BrokerEnv,
     mutation: str,
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
@@ -2186,7 +2295,7 @@ def test_background_membership_errors_return_to_requesting_thread(
         drive.join(timeout=2.0)
 
 
-def test_peek_mode_ack_removes_message(broker_env) -> None:
+def test_peek_mode_ack_removes_message(broker_env: BrokerEnv) -> None:
     """Control queue (peek) handlers should see message and remove only when acked."""
     db_path, make_queue = broker_env
     queue_name = "T123.ctrl_in"
@@ -2216,8 +2325,8 @@ def test_peek_mode_ack_removes_message(broker_env) -> None:
 
 
 def test_wait_for_activity_uses_simplebroker_multi_queue_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     received: dict[str, object] = {}
@@ -2231,7 +2340,9 @@ def test_wait_for_activity_uses_simplebroker_multi_queue_waiter(
     ) -> None:
         raise AssertionError("wait_for_activity must not drain messages")
 
-    def fake_create(queues, *, stop_event):
+    def fake_create(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         received["queues"] = queues
         received["stop_event"] = stop_event
         return fake_waiter
@@ -2255,14 +2366,17 @@ def test_wait_for_activity_uses_simplebroker_multi_queue_waiter(
     finally:
         watcher.stop(join=False)
 
-    assert [queue.name for queue in received["queues"]] == ["wait.one", "wait.two"]
+    assert [queue.name for queue in cast(Sequence[Queue], received["queues"])] == [
+        "wait.one",
+        "wait.two",
+    ]
     assert received["stop_event"] is stop_event
     assert fake_waiter.wait_calls == [0.25]
 
 
 def test_start_strategy_uses_multi_queue_activity_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     received: dict[str, object] = {}
@@ -2275,7 +2389,9 @@ def test_start_strategy_uses_multi_queue_activity_waiter(
     ) -> None:
         pass
 
-    def fake_create(queues, *, stop_event):
+    def fake_create(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         received["queues"] = queues
         received["stop_event"] = stop_event
         return fake_waiter
@@ -2296,7 +2412,7 @@ def test_start_strategy_uses_multi_queue_activity_waiter(
     try:
         watcher._start_strategy()
 
-        assert [queue.name for queue in received["queues"]] == [
+        assert [queue.name for queue in cast(Sequence[Queue], received["queues"])] == [
             "strategy.one",
             "strategy.two",
         ]
@@ -2307,8 +2423,8 @@ def test_start_strategy_uses_multi_queue_activity_waiter(
 
 
 def test_reset_multi_activity_waiter_detaches_strategy_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     fake_waiter = FakeWaiter()
@@ -2343,8 +2459,8 @@ def test_reset_multi_activity_waiter_detaches_strategy_waiter(
 
 
 def test_wait_for_activity_positive_timeout_uses_waiter_without_precheck(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
     queue = make_queue("pending.one")
@@ -2359,7 +2475,9 @@ def test_wait_for_activity_positive_timeout_uses_waiter_without_precheck(
     ) -> None:
         raise AssertionError("wait_for_activity must not drain messages")
 
-    def fake_create(queues, *, stop_event):
+    def fake_create(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         nonlocal create_calls
         del queues, stop_event
         create_calls += 1
@@ -2385,8 +2503,8 @@ def test_wait_for_activity_positive_timeout_uses_waiter_without_precheck(
 
 
 def test_wait_for_activity_zero_timeout_does_not_probe_queues(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
 
@@ -2414,8 +2532,8 @@ def test_wait_for_activity_zero_timeout_does_not_probe_queues(
 
 
 def test_native_waiter_activity_forces_inactive_queue_probe(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
     queue = make_queue("native-precheck.two")
@@ -2454,8 +2572,8 @@ def test_native_waiter_activity_forces_inactive_queue_probe(
 
 
 def test_native_waiter_timeout_does_not_probe_inactive_queues_before_deadline(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     fake_waiter = FakeWaiter(result=False)
@@ -2494,7 +2612,7 @@ def test_native_waiter_timeout_does_not_probe_inactive_queues_before_deadline(
 
 
 def test_inactive_queue_discovery_is_time_bounded(
-    broker_env,
+    broker_env: BrokerEnv,
 ) -> None:
     db_path, make_queue = broker_env
     queue = make_queue("periodic-discovery.two")
@@ -2530,8 +2648,8 @@ def test_inactive_queue_discovery_is_time_bounded(
 
 
 def test_wait_for_activity_falls_back_when_helper_returns_none(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
 
@@ -2551,19 +2669,22 @@ def test_wait_for_activity_falls_back_when_helper_returns_none(
         db=db_path,
     )
 
+    waits: list[float | None] = []
+    monkeypatch.setattr(
+        watcher._stop_event, "wait", lambda timeout: waits.append(timeout)
+    )
     try:
-        start = time.monotonic()
         watcher.wait_for_activity(timeout=0.01)
     finally:
         watcher.stop(join=False)
 
-    assert time.monotonic() - start >= 0
+    assert waits == [0.01]
 
 
 @pytest.mark.parametrize("reuse_id", [False, True])
 def test_queue_set_changes_close_stale_multi_queue_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
     reuse_id: bool,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -2581,7 +2702,9 @@ def test_queue_set_changes_close_stale_multi_queue_waiter(
     ) -> None:
         pass
 
-    def fake_create(queues, *, stop_event):
+    def fake_create(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
         del queues, stop_event
         waiter = FakeWaiter()
         waiters.append(waiter)
@@ -2610,8 +2733,8 @@ def test_queue_set_changes_close_stale_multi_queue_waiter(
 
 
 def test_stop_closes_multi_queue_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     fake_waiter = FakeWaiter()
@@ -2639,8 +2762,8 @@ def test_stop_closes_multi_queue_waiter(
 
 
 def test_wait_for_activity_falls_back_when_waiter_raises(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     fake_waiter = FakeWaiter(raises=True)
@@ -2671,8 +2794,8 @@ def test_wait_for_activity_falls_back_when_waiter_raises(
 
 
 def test_background_watcher_path_uses_multi_queue_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     fake_waiter = FakeWaiter()
@@ -2705,7 +2828,7 @@ def test_background_watcher_path_uses_multi_queue_waiter(
         thread.join(timeout=1.0)
 
 
-def test_priority_queue_drains_before_lower_priority(broker_env) -> None:
+def test_priority_queue_drains_before_lower_priority(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     internal_name = "priority.internal"
     public_name = "priority.public"
@@ -2763,7 +2886,9 @@ def test_priority_queue_drains_before_lower_priority(broker_env) -> None:
     assert public.peek_one() == "public-2"
 
 
-def test_equal_priority_preserves_existing_round_robin_behavior(broker_env) -> None:
+def test_equal_priority_preserves_existing_round_robin_behavior(
+    broker_env: BrokerEnv,
+) -> None:
     db_path, make_queue = broker_env
     first_name = "priority.equal.first"
     second_name = "priority.equal.second"
@@ -2810,7 +2935,9 @@ def test_equal_priority_preserves_existing_round_robin_behavior(broker_env) -> N
     assert make_queue(second_name).peek_one() == "second-2"
 
 
-def test_priority_drain_stops_when_high_priority_queue_is_empty(broker_env) -> None:
+def test_priority_drain_stops_when_high_priority_queue_is_empty(
+    broker_env: BrokerEnv,
+) -> None:
     db_path, make_queue = broker_env
     internal_name = "priority.empty.internal"
     public_name = "priority.empty.public"
@@ -2854,7 +2981,7 @@ def test_priority_drain_stops_when_high_priority_queue_is_empty(broker_env) -> N
     assert public.peek_one() == "public-2"
 
 
-def test_peek_mode_without_ack_leaves_message(broker_env) -> None:
+def test_peek_mode_without_ack_leaves_message(broker_env: BrokerEnv) -> None:
     """Peek mode should leave messages available if handler skips ack."""
     db_path, make_queue = broker_env
     queue_name = "T124.ctrl_in"
@@ -2883,7 +3010,7 @@ def test_peek_mode_without_ack_leaves_message(broker_env) -> None:
     assert peeked[0] == "PAUSE"
 
 
-def test_reserve_mode_moves_then_ack_clears_reserved(broker_env) -> None:
+def test_reserve_mode_moves_then_ack_clears_reserved(broker_env: BrokerEnv) -> None:
     """Reserve mode should move messages before handler and allow ack from reserved queue."""
     db_path, make_queue = broker_env
     inbox_name = "T125.inbox"
@@ -2923,7 +3050,7 @@ def test_reserve_mode_moves_then_ack_clears_reserved(broker_env) -> None:
     assert reserved.peek_one() is None
 
 
-def test_read_mode_consumes_message_without_ack(broker_env) -> None:
+def test_read_mode_consumes_message_without_ack(broker_env: BrokerEnv) -> None:
     """Read mode should consume messages immediately, ack becomes a no-op."""
     db_path, make_queue = broker_env
     queue_name = "T126.custom"
@@ -2950,7 +3077,7 @@ def test_read_mode_consumes_message_without_ack(broker_env) -> None:
 
 
 def test_watcher_ignores_invalid_ambient_broker_config(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Watcher-owned Queue and dispatch handoffs retain isolated config."""

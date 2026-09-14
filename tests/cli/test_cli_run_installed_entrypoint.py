@@ -207,7 +207,9 @@ def ping() -> dict[str, bool]:
         assert payload["status"] == "completed"
         assert payload["result"] == {"ok": True}
         for record in harness._list_active_manager_records():
-            handle = RunnerHandle.from_dict(record["runtime_handle"])
+            runtime_handle = record["runtime_handle"]
+            assert isinstance(runtime_handle, dict)
+            handle = RunnerHandle.from_dict(runtime_handle)
             managers.extend(psutil.Process(pid) for pid in handle.scoped_host_pids())
         assert managers, "acceptance test must observe its real manager before cleanup"
 

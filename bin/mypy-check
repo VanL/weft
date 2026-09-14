@@ -14,6 +14,7 @@ fi
 exec "$PYTHON_BIN" -m mypy \
   --config-file="$CONFIG_FILE" \
   "$ROOT/weft" \
+  "$ROOT/tests" \
   "$ROOT/bin" \
   "$ROOT/integrations/weft_django/weft_django" \
   "$ROOT/extensions/weft_docker/weft_docker" \

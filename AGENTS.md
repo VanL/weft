@@ -686,7 +686,7 @@ uv sync --all-extras             # Install dev tools into the repo env
 ./.venv/bin/python -m pytest     # Fast tests only
 ./.venv/bin/python -m pytest -m ""  # All tests including slow
 ./.venv/bin/python -m pytest tests/cli/ -v  # Specific directory
-./.venv/bin/mypy weft bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml  # Type check (matches CI)
+./.venv/bin/mypy weft tests bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml  # Type check (matches CI)
 ./.venv/bin/ruff check .         # Lint
 ```
 
@@ -790,7 +790,7 @@ weft task list --json | jq '.[] | select(.status=="completed")'
 
 **Before claiming "done"**:
 - [ ] Tests pass (`uv run pytest`)
-- [ ] Type check passes (`uv run mypy weft bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml`)
+- [ ] Type check passes (`uv run mypy weft tests bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml`)
 - [ ] Lint passes (`uv run ruff check .`)
 - [ ] Changes are minimal (no drive-by refactoring)
 - [ ] Every enumerable contract element the change touches (exit codes, queue

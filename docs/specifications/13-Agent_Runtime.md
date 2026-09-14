@@ -376,7 +376,8 @@ Submission note:
 _Implementation mapping:_ `weft/core/agents/runtime.py` --
 `normalize_agent_work_item`, `_normalize_content_and_instructions`,
 `_normalize_messages`, `_normalize_tool_overrides`. Messages are preserved as
-`NormalizedAgentMessage` tuples; flattening to a prompt string happens only
+`weft/ext.py::NormalizedAgentMessage` tuples in
+`weft/ext.py::NormalizedAgentWorkItem`; flattening to a prompt string happens only
 inside the `llm` adapter (`LLMBackend._content_to_prompt`).
 
 ## Public Output Semantics [AR-4]
@@ -885,6 +886,8 @@ This slice does not attempt to:
   `extensions/weft_microsandbox/weft_microsandbox/plugin.py`
 
 ## Related Plans
+
+- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
 
 - [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
 - [`docs/plans/2026-08-24-llm-0-33-compatibility-plan.md`](../plans/2026-08-24-llm-0-33-compatibility-plan.md)

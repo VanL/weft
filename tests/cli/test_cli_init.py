@@ -5,17 +5,18 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Never
 
 import pytest
 
 import weft.commands.init as init_cmd
-from simplebroker import Config
+from simplebroker import BrokerTarget, Config
 from tests.conftest import run_cli
 from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
     postgres_env_overrides_for_root,
 )
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import load_config
 from weft._exceptions import CommandExecutionError
 from weft.commands.init import cmd_init
@@ -119,7 +120,7 @@ def test_cmd_init_propagates_fatal_backend_plugin_signal(
     assert captured.err == ""
 
 
-def test_cli_init_creates_project(workdir: Path, weft_harness) -> None:
+def test_cli_init_creates_project(workdir: Path, weft_harness: WeftTestHarness) -> None:
     project_root = workdir / "project"
 
     rc, out, err = run_cli(
@@ -147,7 +148,7 @@ def test_cli_init_creates_project(workdir: Path, weft_harness) -> None:
 def test_cli_init_honors_weft_directory_name_env(
     monkeypatch: pytest.MonkeyPatch,
     workdir: Path,
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     project_root = workdir / "custom-weft-dir-project"
     env = os.environ.copy()
@@ -207,7 +208,9 @@ def test_cmd_init_accepts_in_process_config_overrides(
     assert (weft_dir / "config.json").is_file()
 
 
-def test_cli_init_defaults_to_current_directory(workdir: Path, weft_harness) -> None:
+def test_cli_init_defaults_to_current_directory(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     project_root = workdir / "cwd-project"
     project_root.mkdir()
 
@@ -225,7 +228,7 @@ def test_cli_init_defaults_to_current_directory(workdir: Path, weft_harness) -> 
 
 
 def test_cli_init_help_describes_positional_directory(
-    workdir: Path, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     rc, out, err = run_cli(
         "init",
@@ -242,7 +245,9 @@ def test_cli_init_help_describes_positional_directory(
     assert "--context" not in out
 
 
-def test_cli_init_quiet_suppresses_output(workdir: Path, weft_harness) -> None:
+def test_cli_init_quiet_suppresses_output(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     project_root = workdir / "quiet-project"
 
     rc, out, err = run_cli(
@@ -258,7 +263,9 @@ def test_cli_init_quiet_suppresses_output(workdir: Path, weft_harness) -> None:
     assert err == ""
 
 
-def test_cli_init_existing_project_returns_success(workdir: Path, weft_harness) -> None:
+def test_cli_init_existing_project_returns_success(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     project_root = workdir / "existing"
     project_root.mkdir()
 
@@ -283,7 +290,7 @@ def test_cli_init_existing_project_returns_success(workdir: Path, weft_harness) 
 
 def test_cli_init_no_autostart_persists_project_default(
     workdir: Path,
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     project_root = workdir / "no-autostart-project"
 
@@ -314,7 +321,7 @@ def test_cli_init_no_autostart_persists_project_default(
 def test_cli_init_supports_env_only_postgres_configuration(
     monkeypatch: pytest.MonkeyPatch,
     workdir: Path,
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     project_root = workdir / "env-only-postgres"
     env = os.environ.copy()
@@ -358,7 +365,7 @@ def test_cmd_init_preserves_backend_install_error_for_missing_plugin(
 ) -> None:
     """Init should preserve the public backend plugin guidance."""
 
-    def _raise_missing_plugin(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def _raise_missing_plugin(*args: object, **kwargs: object) -> Never:
         raise RuntimeError(
             "Requested backend 'postgres' is not available. Install simplebroker-pg."
         )
@@ -404,7 +411,12 @@ def test_cmd_init_prefers_project_postgres_target_over_env_target(
 
     captured: dict[str, object] = {}
 
-    def _fake_init(target, quiet=False, *, config=None):  # type: ignore[no-untyped-def]
+    def _fake_init(
+        target: BrokerTarget,
+        quiet: bool = False,
+        *,
+        config: Config | None = None,
+    ) -> int:
         captured["target"] = target
         captured["quiet"] = quiet
         captured["config"] = config
@@ -416,6 +428,7 @@ def test_cmd_init_prefers_project_postgres_target_over_env_target(
 
     assert isinstance(result, InitResult)
     broker_target = captured["target"]
+    assert isinstance(broker_target, BrokerTarget)
     assert broker_target.backend_name == "postgres"
     assert broker_target.target == "postgresql://toml-user@toml-host/toml-db"
     assert broker_target.backend_options == {"schema": "toml_schema"}
@@ -444,7 +457,12 @@ def test_cmd_init_ignores_root_simplebroker_config(
 
     captured: dict[str, object] = {}
 
-    def _fake_init(target, quiet=False, *, config=None):  # type: ignore[no-untyped-def]
+    def _fake_init(
+        target: BrokerTarget,
+        quiet: bool = False,
+        *,
+        config: Config | None = None,
+    ) -> int:
         captured["target"] = target
         captured["quiet"] = quiet
         captured["config"] = config
@@ -456,6 +474,7 @@ def test_cmd_init_ignores_root_simplebroker_config(
 
     assert isinstance(result, InitResult)
     broker_target = captured["target"]
+    assert isinstance(broker_target, BrokerTarget)
     assert broker_target.backend_name == "sqlite"
     assert broker_target.target_path == (project_root / ".weft" / "broker.db").resolve()
     assert broker_target.config_path is None

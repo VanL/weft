@@ -102,8 +102,8 @@ def test_cleanup_prepared_roots_logs_failure_and_continues(
     assert len(caplog.records) == 1
     record = caplog.records[0]
     assert record.message == "Failed to clean Postgres test schema"
-    assert record.schema == "failed_schema"
-    assert record.config_path == str(failed_config)
+    assert record.__dict__["schema"] == "failed_schema"
+    assert record.__dict__["config_path"] == str(failed_config)
     assert record.exc_info is None
     assert private_error not in caplog.text
     assert "postgresql://test.invalid/weft" not in caplog.text
@@ -148,7 +148,7 @@ def test_cleanup_postgres_schema_for_root_logs_private_failure(
     expected_schema = plugin.cleanup_target.call_args.kwargs["backend_options"][
         "schema"
     ]
-    assert caplog.records[0].schema == expected_schema
+    assert caplog.records[0].__dict__["schema"] == expected_schema
     assert cache_key in prepared_roots
     assert caplog.records[0].exc_info is None
     assert str(project_root) not in caplog.text
@@ -161,8 +161,11 @@ def test_prepare_project_root_supports_context_queue_roundtrip(tmp_path: Path) -
     try:
         context = build_context(spec_context=root)
         queue = context.queue("backend.helper.roundtrip", persistent=True)
-        queue.write("hello")
-        assert queue.read() == "hello"
+        try:
+            queue.write("hello")
+            assert queue.read() == "hello"
+        finally:
+            queue.close()
     finally:
         cleanup_prepared_roots(root.parent)
 
@@ -176,9 +179,13 @@ def test_prepare_project_root_isolates_distinct_roots(tmp_path: Path) -> None:
         target = build_context(spec_context=target_root)
 
         source_queue = source.queue("backend.helper.isolation", persistent=True)
-        source_queue.write("payload")
-
         target_queue = target.queue("backend.helper.isolation", persistent=True)
-        assert target_queue.peek_one() is None
+        try:
+            source_queue.write("payload")
+            assert source_queue.peek_one() == "payload"
+            assert target_queue.peek_one() is None
+        finally:
+            source_queue.close()
+            target_queue.close()
     finally:
         cleanup_prepared_roots(tmp_path)

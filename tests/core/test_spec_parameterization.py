@@ -202,17 +202,6 @@ def test_materialize_taskspec_template_request_payload_is_json_like_copy(
     )
 
 
-def test_spec_parameterization_request_is_constructible() -> None:
-    request = SpecParameterizationRequest(
-        arguments={"provider": "codex"},
-        context_root="/tmp",
-        spec_name="example",
-        taskspec_payload={"name": "example"},
-    )
-
-    assert request.arguments == {"provider": "codex"}
-
-
 def test_parameterization_adapter_rejects_non_mapping_result_as_value_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

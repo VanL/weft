@@ -351,7 +351,13 @@ Global raw-`noqa` inventory: `PYI036=3`
     generated = spec.read_text(encoding="utf-8")
     # Class-qualified: a bare "__exit__" would collide across classes.
     assert "`probe.py::Context.__exit__`" in generated
-    assert "`PYI036=3`" in generated
+    generated_index = generated.split(
+        "<!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->", 1
+    )[1].split("<!-- END GENERATED RUFF SUPPRESSION INDEX -->", 1)[0]
+    assert (
+        "| `RUFF-SUP-001` | `probe.py::Context.__exit__` | 1 | `PYI036=3` |"
+        in generated_index
+    )
 
 
 def test_malformed_source_marker_fails_closed(tmp_path: Path) -> None:

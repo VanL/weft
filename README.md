@@ -166,6 +166,39 @@ assert result.status == "completed"
 assert "hello" in (result.stdout or str(result.value))
 ```
 
+Task definitions and resolved contexts also have public imports. Use template
+validation to construct a definition without assigning a task ID:
+
+```python
+from weft.client import TaskSpec, WeftClient, build_context
+
+context = build_context(".")  # Resolves config and initializes local storage.
+client = WeftClient(context=context)
+definition = TaskSpec.model_validate(
+    {
+        "name": "hello",
+        "spec": {"type": "command", "process_target": "echo", "args": ["hello"]},
+    },
+    context={"template": True, "auto_expand": False},
+)
+prepared = client.prepare(definition)
+```
+
+`SpecSection`, `IOSection`, resource limits, runner settings, and the other
+TaskSpec section models are available from `weft.client` for typed construction.
+`build_context(..., create_dirs=False, create_database=False)` resolves a
+context without requesting metadata-directory or broker initialization; resolution
+can still create the project root. Close queues
+obtained from `context.queue()`; use `context.broker()` as a context manager.
+
+`weft.commands` exposes CLI-equivalent operations with structured outcomes.
+`weft.ext` exposes runner results, resource metrics, agent request values, and
+structural session protocols for extension authors. Concrete process sessions
+and core runtime classes remain private. These extension contracts do not yet
+constitute a complete standalone third-party runner SDK. See the
+[public API contract](docs/specifications/14-Python_API_Surfaces.md) for the
+supported inventories and ownership rules.
+
 Stored specs and pipelines use the same reference grammar as
 `weft run --spec NAME|PATH` and `weft run --pipeline NAME|PATH`:
 
@@ -1126,7 +1159,7 @@ uv sync --all-extras
 # Static checks
 ./.venv/bin/ruff check .
 ./.venv/bin/ruff format weft tests
-./.venv/bin/mypy weft extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
+./.venv/bin/mypy weft tests extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
 
 # Build
 uv build

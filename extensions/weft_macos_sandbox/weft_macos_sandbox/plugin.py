@@ -18,15 +18,16 @@ from typing import Any
 
 from simplebroker import BrokerTarget
 from weft._constants import MACOS_SANDBOX_BASE_ENV_PASSTHROUGH
-from weft.core.runners import RunnerOutcome
 from weft.core.runners.subprocess_runner import (
     prepare_command_invocation,
     run_monitored_subprocess,
 )
-from weft.core.tasks.runner import AgentSession, CommandSession
 from weft.ext import (
+    AgentSessionProtocol,
+    CommandSessionProtocol,
     RunnerCapabilities,
     RunnerHandle,
+    RunnerOutcome,
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
@@ -191,10 +192,10 @@ class MacOSSandboxRunner:
             worker_pid=process.pid,
         )
 
-    def start_session(self) -> CommandSession:
+    def start_session(self) -> CommandSessionProtocol:
         raise ValueError("macOS sandbox runner does not support interactive sessions")
 
-    def start_agent_session(self) -> AgentSession:
+    def start_agent_session(self) -> AgentSessionProtocol:
         raise ValueError("macOS sandbox runner does not support agent sessions")
 
 

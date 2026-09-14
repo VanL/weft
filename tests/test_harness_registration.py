@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import gc
 import json
 import logging
 import os
@@ -8,8 +9,10 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
+from weakref import ref
 
 import pytest
 
@@ -20,11 +23,13 @@ from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     MANAGER_STARTUP_LOG_DIRNAME,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext
 from weft.core import manager_runtime
 from weft.core.task_state import task_state_queue_name
+from weft.ext import RunnerHandle
 from weft.helpers import pid_is_live
 
 
@@ -229,7 +234,7 @@ def test_harness_force_termination_targets_managed_pids_only(
     harness = WeftTestHarness()
     terminated: list[int] = []
     try:
-        harness._context = cast(Any, SimpleNamespace(backend_name="postgres"))
+        harness._context = cast(WeftContext, SimpleNamespace(backend_name="postgres"))
         harness.register_pid(101, kind="owner")
         harness.register_pid(202, kind="managed")
         harness.register_pid(303, kind="managed")
@@ -386,12 +391,12 @@ def test_harness_cleanup_retries_transient_tempdir_not_empty(
             "sleep",
             lambda seconds: sleep_calls.append(seconds),
         )
-        harness._tempdir = cast(Any, stub)
+        harness._tempdir = cast(TemporaryDirectory[str], stub)
 
         harness.cleanup()
 
         assert stub.calls == 2
-        assert sleep_calls == [0.05]
+        assert len(sleep_calls) == 1 and sleep_calls[0] > 0
     finally:
         os.chdir(repo_cwd)
         original_tempdir.cleanup()
@@ -440,12 +445,12 @@ def test_harness_cleanup_extends_windows_tempdir_retry_budget(
         monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
         monkeypatch.setattr(harness_mod.time, "time", fake_time)
         monkeypatch.setattr(harness_mod.time, "sleep", fake_sleep)
-        harness._tempdir = cast(Any, stub)
+        harness._tempdir = cast(TemporaryDirectory[str], stub)
 
         harness._cleanup_tempdir()
 
         assert stub.calls == 8
-        assert sleep_calls == [0.05] * 7
+        assert len(sleep_calls) == 7 and all(delay > 0 for delay in sleep_calls)
     finally:
         os.chdir(repo_cwd)
         harness._closed = True
@@ -538,6 +543,7 @@ def test_harness_cleanup_closes_live_queues_before_database_probe() -> None:
 
         harness._close_live_database_queues()
 
+        assert queue.conn is not None
         assert len(queue.conn._connection_registry) == 0
         assert not hasattr(queue.conn._thread_local, "db")
     finally:
@@ -556,7 +562,7 @@ def test_harness_queue_cleanup_does_not_resolve_lazy_objects(
     resolved: list[bool] = []
 
     class LazyObject:
-        @property
+        @property  # type: ignore[misc]  # Deliberate read-only lazy proxy descriptor.
         def __class__(self) -> type:
             resolved.append(True)
             return object
@@ -578,6 +584,7 @@ def test_harness_queue_cleanup_does_not_resolve_lazy_objects(
                 patch.setattr(harness_mod.gc, "get_objects", lambda: [proxy, queue])
                 harness._close_live_database_queues()
             assert not resolved, "cleanup evaluated an unrelated lazy object"
+            assert queue.conn is not None
             assert len(queue.conn._connection_registry) == 0
         finally:
             queue.close()
@@ -691,7 +698,7 @@ def test_harness_cleanup_preserves_windows_tempdir_when_database_stays_locked(
             "WINDOWS_TEMP_DIR_CLEANUP_TIMEOUT_SECONDS",
             0.0,
         )
-        harness._tempdir = cast(Any, _TempdirStub())
+        harness._tempdir = cast(TemporaryDirectory[str], _TempdirStub())
 
         harness.cleanup()
 
@@ -716,9 +723,9 @@ def test_locked_database_cleanup_accepts_windows_short_path(
         short_path = harness.root / "RUNNER~1" / "weft-tests.db"
         realpath = harness_mod.os.path.realpath
 
-        def fake_realpath(path: object, *args: object, **kwargs: object) -> str:
+        def fake_realpath(path: str | os.PathLike[str], *, strict: bool = False) -> str:
             text = os.fspath(path).replace("RUNNER~1", "RunnerAdmin")
-            return realpath(text, *args, **kwargs)
+            return realpath(text, strict=strict)
 
         monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
         monkeypatch.setattr(harness_mod.os.path, "realpath", fake_realpath)
@@ -847,14 +854,15 @@ def test_harness_stop_active_managers_skips_terminal_task_tids(
     try:
         harness.__enter__()
         monkeypatch.setattr(harness, "_list_active_manager_records", list)
-        harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
-            {
-                "full": "1775630560739303424",
-                "pid": 424242,
-                "task_pid": 424242,
-                "managed_pids": [],
-            }
-        ]
+        mapping: dict[str, object] = {
+            "full": "1775630560739303424",
+            "runtime_handle": _host_runtime_handle(424242),
+        }
+        monkeypatch.setattr(
+            harness, "_load_tid_mapping_entries", lambda: [(mapping, 1)]
+        )
+        assert harness._latest_tid_mapping_payloads() == {mapping["full"]: mapping}
+        assert harness._cleanup_candidate_task_tids() == ["1775630560739303424"]
         monkeypatch.setattr(
             harness,
             "_latest_task_events",
@@ -909,14 +917,14 @@ def test_harness_stop_active_managers_does_not_fan_out_worker_tid_as_task(
             "_list_active_manager_records",
             lambda: [{"tid": "1775630560447778816", "status": "active"}],
         )
-        harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
-            {
-                "full": "1775630560447778816",
-                "pid": 424242,
-                "task_pid": 424242,
-                "managed_pids": [],
-            }
-        ]
+        mapping: dict[str, object] = {
+            "full": "1775630560447778816",
+            "runtime_handle": _host_runtime_handle(424242),
+        }
+        monkeypatch.setattr(
+            harness, "_load_tid_mapping_entries", lambda: [(mapping, 1)]
+        )
+        assert harness._latest_tid_mapping_payloads() == {mapping["full"]: mapping}
         monkeypatch.setattr(
             harness,
             "_wait_for_registered_pids_to_exit",
@@ -969,12 +977,14 @@ def test_harness_stop_active_managers_does_not_fan_out_in_process_task_tid(
     try:
         harness.__enter__()
         monkeypatch.setattr(harness, "_list_active_manager_records", list)
-        harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
-            {
-                "full": "1775630561555555555",
-                "runtime_handle": _host_runtime_handle(harness._self_pid),
-            }
-        ]
+        mapping: dict[str, object] = {
+            "full": "1775630561555555555",
+            "runtime_handle": _host_runtime_handle(harness._self_pid),
+        }
+        monkeypatch.setattr(
+            harness, "_load_tid_mapping_entries", lambda: [(mapping, 1)]
+        )
+        assert harness._latest_tid_mapping_payloads() == {mapping["full"]: mapping}
         monkeypatch.setattr(
             harness,
             "_wait_for_registered_pids_to_exit",
@@ -1115,7 +1125,7 @@ def test_harness_cleanup_preserve_database_detaches_tempdir_finalizer(
         harness.__enter__()
         monkeypatch.setattr(harness, "_stop_inline_managers", lambda: None)
         monkeypatch.setattr(harness, "_cleanup_preserving_database", lambda: None)
-        harness._tempdir = cast(Any, _TempdirStub())
+        harness._tempdir = cast(TemporaryDirectory[str], _TempdirStub())
 
         harness.cleanup(preserve_database=True)
 
@@ -1273,23 +1283,33 @@ def test_live_task_tids_ignore_manager_role_mappings() -> None:
 
 
 @pytest.mark.sqlite_only
-def test_live_task_tids_ignore_terminal_log_events() -> None:
+def test_live_task_tids_ignore_terminal_log_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     harness = WeftTestHarness()
+    tid = "1775630560739303424"
+    queue = harness.context.queue(task_state_queue_name(tid))
     try:
-        harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
-            {
-                "full": "1775630560739303424",
-                "task_pid": 424242,
-                "pid": 424242,
-                "managed_pids": [],
-            }
-        ]
-        harness._latest_task_events = lambda: {  # type: ignore[method-assign]
-            "1775630560739303424": "work_completed"
-        }
-        harness._pid_alive = lambda pid: pid == 424242  # type: ignore[method-assign]
-        harness._should_skip_pid = lambda pid: False  # type: ignore[method-assign]
-
+        queue.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": "testtid",
+                    "runtime_handle": _host_runtime_handle(424242),
+                }
+            )
+        )
+    finally:
+        queue.close()
+    try:
+        monkeypatch.setattr(harness, "_pid_alive", lambda pid: pid == 424242)
+        monkeypatch.setattr(harness, "_should_skip_pid", lambda pid: False)
+        monkeypatch.setattr(harness, "_latest_task_events", dict)
+        # Prove the mapping was read and would otherwise be considered live.
+        assert harness._live_task_tids_from_mappings() == [tid]
+        monkeypatch.setattr(
+            harness, "_latest_task_events", lambda: {tid: "work_completed"}
+        )
         assert harness._live_task_tids_from_mappings() == []
     finally:
         harness._closed = True
@@ -1622,7 +1642,7 @@ def test_inline_cleanup_retains_live_driver_and_allows_retry(
         assert harness.context is context
         assert Path.cwd() == original_cwd
         assert os.environ.get("WEFT_TEST_MODE") == original_mode
-        assert not harness._tempdir._finalizer.alive
+        assert not harness._tempdir._finalizer.alive  # type: ignore[attr-defined]  # CPython finalizer must be disarmed while the reactor owns storage.
     finally:
         release.set()
         thread.join(10.0)
@@ -1630,6 +1650,184 @@ def test_inline_cleanup_retains_live_driver_and_allows_retry(
         harness.cleanup()
     assert harness._closed
     assert not harness.root.exists()
+
+
+@pytest.mark.shared
+def test_inline_manager_does_not_own_test_worker_process_title() -> None:
+    """Inline manager fixtures must not invoke native title services."""
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        manager, _thread, _stop = harness._inline_managers[0]
+
+        assert manager.taskspec.spec.enable_process_title is False
+        assert manager.enable_process_title is False
+
+
+@pytest.mark.shared
+def test_inline_manager_exposes_supervisor_liveness_without_ping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Harness registry reads use the owned driver lifetime, not a timed PING."""
+    with WeftTestHarness() as harness:
+        record = harness.ensure_foreground_manager()
+        monkeypatch.setattr(
+            manager_runtime,
+            "send_keyed_ping_probe",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("live harness supervisor must not require PING")
+            ),
+        )
+
+        records = manager_runtime.list_manager_records(harness.context)
+
+        assert [item["tid"] for item in records] == [record["tid"]]
+
+
+def _inline_runtime_handle(tid: str) -> RunnerHandle:
+    return RunnerHandle(
+        runner="host",
+        kind="supervised-process",
+        id=str(os.getpid()),
+        control={"authority": "external-supervisor"},
+        observations={
+            "host_pids": [os.getpid()],
+            "liveness_provider": harness_mod.TEST_HARNESS_LIVENESS_PROVIDER,
+        },
+        metadata={"supervisor": "weft-test-harness", "manager_tid": tid},
+    )
+
+
+@pytest.mark.shared
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("missing", "unknown"),
+        ("not_started", "unknown"),
+        ("live", "live"),
+        ("finished", "stale"),
+    ],
+)
+def test_inline_liveness_observes_real_thread_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    expected: str,
+) -> None:
+    """A blocked driver is live; only a known finished driver is stale."""
+    tid = "1789427890000000001"
+    handle = _inline_runtime_handle(tid)
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, daemon=True)
+    try:
+        if state != "not_started":
+            thread.start()
+        if state != "missing":
+            monkeypatch.setitem(harness_mod._inline_manager_threads, tid, thread)
+        if state == "finished":
+            release.set()
+            thread.join(10.0)
+            assert not thread.is_alive()
+
+        assert pid_is_live(os.getpid())
+        assert harness_mod._test_harness_runtime_liveness(handle, 0.0) == expected
+    finally:
+        release.set()
+        if thread.ident is not None:
+            thread.join(10.0)
+            assert not thread.is_alive()
+
+
+@pytest.mark.shared
+def test_inline_liveness_requires_manager_tid() -> None:
+    handle = RunnerHandle.from_dict(_host_runtime_handle(os.getpid()))
+
+    assert harness_mod._test_harness_runtime_liveness(handle, 0.0) == "unknown"
+
+
+@pytest.mark.shared
+def test_inline_liveness_registry_does_not_retain_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1789427890000000002"
+    handle = _inline_runtime_handle(tid)
+    thread = threading.Thread()
+    thread.start()
+    thread.join(10.0)
+    assert not thread.is_alive()
+    monkeypatch.setitem(harness_mod._inline_manager_threads, tid, thread)
+    assert harness_mod._test_harness_runtime_liveness(handle, 0.0) == "stale"
+    retained = ref(thread)
+
+    del thread
+    gc.collect()
+
+    assert retained() is None
+    assert tid not in harness_mod._inline_manager_threads
+    assert harness_mod._test_harness_runtime_liveness(handle, 0.0) == "unknown"
+
+
+@pytest.mark.shared
+def test_inline_managers_sharing_pid_have_independent_liveness() -> None:
+    with WeftTestHarness() as first, WeftTestHarness() as second:
+        first_record = first.ensure_foreground_manager()
+        second_record = second.ensure_foreground_manager()
+        first_handle = first._mapping_runtime_handle(first_record)
+        second_handle = second._mapping_runtime_handle(second_record)
+        assert first_handle is not None and second_handle is not None
+        assert first_handle.id == second_handle.id == str(os.getpid())
+        assert first_handle.scoped_host_pids() == second_handle.scoped_host_pids()
+        assert first_handle.metadata["manager_tid"] == first_record["tid"]
+        assert second_handle.metadata["manager_tid"] == second_record["tid"]
+        assert first_record["tid"] != second_record["tid"]
+        assert manager_runtime.manager_registry_record_liveness(first_record) == "live"
+        assert manager_runtime.manager_registry_record_liveness(second_record) == "live"
+
+        _manager, first_thread, stop = first._inline_managers[0]
+        stop.set()
+        first_thread.join(10.0)
+
+        assert not first_thread.is_alive()
+        assert second._inline_managers[0][1].is_alive()
+        assert pid_is_live(os.getpid())
+        assert manager_runtime.manager_registry_record_liveness(first_record) == "stale"
+        assert manager_runtime.manager_registry_record_liveness(second_record) == "live"
+
+
+@pytest.mark.shared
+@pytest.mark.parametrize("forget_owner", [False, True])
+def test_inline_active_record_cannot_reuse_dead_driver(
+    monkeypatch: pytest.MonkeyPatch, forget_owner: bool
+) -> None:
+    """An old active row cannot borrow the still-live pytest worker's PID."""
+    with WeftTestHarness() as harness:
+        record = harness.ensure_foreground_manager()
+        manager, thread, stop = harness._inline_managers[0]
+        assert harness._list_active_manager_records()
+        payload = record["_service_owner_payload"]
+        assert isinstance(payload, dict) and payload["status"] == "active"
+        stop.set()
+        thread.join(10.0)
+        assert not thread.is_alive()
+        if forget_owner:
+            monkeypatch.delitem(harness_mod._inline_manager_threads, manager.tid)
+        assert manager_runtime.manager_registry_record_liveness(record) == (
+            "unknown" if forget_owner else "stale"
+        )
+
+        # Replay a real owner publication after producer closure to model a
+        # missing terminal row without mocking the broker or manager lifecycle.
+        queue = harness.context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+        try:
+            queue.write(json.dumps(payload))
+        finally:
+            queue.close()
+
+        assert pid_is_live(os.getpid())
+        assert harness._list_active_manager_records() == []
+        replacement = harness.ensure_foreground_manager()
+        assert replacement["tid"] != record["tid"]
+        assert [row["tid"] for row in harness._list_active_manager_records()] == [
+            replacement["tid"]
+        ]
 
 
 @pytest.mark.shared

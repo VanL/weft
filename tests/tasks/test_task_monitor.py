@@ -10,24 +10,27 @@ from __future__ import annotations
 import base64
 import gc
 import json
+import os
 import signal
 import sys
 import threading
 import time
 import traceback
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from types import BuiltinFunctionType, FunctionType, SimpleNamespace
-from typing import Any
+from typing import Any, Literal, cast
 
 import pytest
 
 import weft.core.monitor.task_monitor as task_monitor_mod
 import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.service as service_task_mod
-from simplebroker.ext import BrokerError
+from simplebroker import Queue
+from simplebroker.ext import BrokerConnection, BrokerError
+from tests.helpers.typing import BrokerEnv, TaskFactory
 from weft._constants import (
     _WORKER_SNAPSHOT_EXPECTED_FIELDS,
     _WORKER_SNAPSHOT_EXPLICIT_SHARE_FIELDS,
@@ -64,8 +67,10 @@ from weft._constants import (
     WEFT_STREAMING_SESSIONS_QUEUE,
     load_config,
 )
+from weft.context import WeftContext
 from weft.core.control_messages import encode_control_message
 from weft.core.monitor.collation import update_from_task_log_payload
+from weft.core.monitor.policies.dead_task import DeadTaskLogCoalesceGroup
 from weft.core.monitor.runtime import (
     TaskMonitorProcessorRequest,
     TaskMonitorProcessorResult,
@@ -75,6 +80,7 @@ from weft.core.monitor.store import (
     MonitorStoreIngestResult,
     MonitorSummaryReadyTask,
     MonitorTaskCollationRecord,
+    MonitorTaskEventUpdate,
 )
 from weft.core.monitor.task_monitor import (
     TaskMonitor,
@@ -150,7 +156,9 @@ class _MonitorStoreSetupFailureProxy(_CloseRecordingProxy):
     def get_checkpoint(self, queue_name: str) -> int | None:
         if self._failure_stage == "get_checkpoint":
             raise RuntimeError("store checkpoint boom")
-        return self._delegate.get_checkpoint(queue_name)
+        checkpoint = self._delegate.get_checkpoint(queue_name)
+        assert checkpoint is None or isinstance(checkpoint, int)
+        return checkpoint
 
 
 class _StatefulObserver:
@@ -221,7 +229,7 @@ def test_task_monitor_rejects_service_registry_alias_for_derived_reserved_role(
 
 
 def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-222] exception
-    broker_env,
+    broker_env: BrokerEnv,
     tmp_path: Path,
 ) -> None:
     """Maintenance workers own snapshots and facades, not reactor state [IMPL.11]."""
@@ -388,6 +396,7 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
         close_errors = worker._close_worker_local_resources()
         assert close_errors == ()
 
+        assert task._external_task_log_sink is not None
         task._external_task_log_sink.emit_json_text(
             '{"owner":"reactor"}',
             emitted_at_ns=1778089999999999403,
@@ -403,7 +412,7 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
 
 @pytest.mark.parametrize("failure_stage", ["ensure_schema", "get_checkpoint"])
 def test_task_monitor_builtin_worker_closes_store_and_fails_report_only_cycle_when_setup_fails(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str,
 ) -> None:
@@ -458,7 +467,7 @@ def test_task_monitor_builtin_worker_closes_store_and_fails_report_only_cycle_wh
 
 
 def test_task_monitor_store_setup_failure_reports_close_failure(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Store setup keeps its primary error while exposing close failure."""
@@ -510,7 +519,7 @@ def test_task_monitor_store_setup_failure_reports_close_failure(
 
 @pytest.mark.parametrize("resource", [[], _StatefulObserver()])
 def test_task_monitor_worker_snapshot_rejects_unclassified_stateful_field(
-    broker_env,
+    broker_env: BrokerEnv,
     resource: Any,
 ) -> None:
     """New mutable or callable state requires an explicit snapshot policy."""
@@ -521,18 +530,18 @@ def test_task_monitor_worker_snapshot_rejects_unclassified_stateful_field(
         make_task_monitor_taskspec("1778089999999999403"),
         observer=lambda _queue, _message, _timestamp: None,
     )
-    task._unknown_worker_resource = resource
+    task.__dict__["_unknown_worker_resource"] = resource
     try:
         with pytest.raises(RuntimeError, match="unclassified fields") as exc_info:
             task._worker_local_monitor_clone()
         assert "_unknown_worker_resource" in str(exc_info.value)
     finally:
-        del task._unknown_worker_resource
+        delattr(task, "_unknown_worker_resource")
         task.stop()
 
 
 def test_task_monitor_worker_snapshot_rejects_misclassified_shared_fields(
-    broker_env,
+    broker_env: BrokerEnv,
 ) -> None:
     """Declared shared fields must retain their snapshot-safe runtime shapes."""
 
@@ -545,7 +554,9 @@ def test_task_monitor_worker_snapshot_rejects_misclassified_shared_fields(
     original_error_handler = task._default_error_handler
     original_db_path = task._db_path
     try:
-        task._default_error_handler = _StatefulObserver()
+        task.__dict__["_default_error_handler"] = (
+            _StatefulObserver()
+        )  # Deliberately invalid shared callback.
         with pytest.raises(RuntimeError) as exc_info:
             task._worker_local_monitor_clone()
         assert type(exc_info.value) is RuntimeError
@@ -555,7 +566,7 @@ def test_task_monitor_worker_snapshot_rejects_misclassified_shared_fields(
         )
         task._default_error_handler = original_error_handler
 
-        task._db_path = lambda: None
+        task.__dict__["_db_path"] = lambda: None  # Deliberately invalid broker target.
         with pytest.raises(RuntimeError) as exc_info:
             task._worker_local_monitor_clone()
         assert type(exc_info.value) is RuntimeError
@@ -569,7 +580,7 @@ def test_task_monitor_worker_snapshot_rejects_misclassified_shared_fields(
 
 
 def test_task_monitor_worker_close_attempts_all_resources_and_reports_failure(
-    broker_env,
+    broker_env: BrokerEnv,
     tmp_path: Path,
 ) -> None:
     """A worker close failure is typed and does not skip later closes [IMPL.11]."""
@@ -596,21 +607,30 @@ def test_task_monitor_worker_close_attempts_all_resources_and_reports_failure(
     )
     store.ensure_schema()
     assert worker._external_task_log_sink is not None
-    worker._monitor_store = _CloseRecordingProxy(
-        store,
-        name="store",
-        events=events,
+    worker._monitor_store = cast(
+        MonitorStore,
+        _CloseRecordingProxy(
+            store,
+            name="store",
+            events=events,
+        ),
     )
-    worker._external_task_log_sink = _CloseRecordingProxy(
-        worker._external_task_log_sink,
-        name="sink",
-        events=events,
-        fail=True,
+    worker._external_task_log_sink = cast(
+        task_monitor_mod.ExternalTaskLogSink,
+        _CloseRecordingProxy(
+            worker._external_task_log_sink,
+            name="sink",
+            events=events,
+            fail=True,
+        ),
     )
-    worker._queue_cache["worker.close"] = _CloseRecordingProxy(
-        make_queue("worker.close"),
-        name="queue",
-        events=events,
+    worker._queue_cache["worker.close"] = cast(
+        Queue,
+        _CloseRecordingProxy(
+            make_queue("worker.close"),
+            name="queue",
+            events=events,
+        ),
     )
 
     try:
@@ -620,6 +640,7 @@ def test_task_monitor_worker_close_attempts_all_resources_and_reports_failure(
         assert len(close_errors) == 1
         assert "sink close boom" in close_errors[0]
 
+        assert task._external_task_log_sink is not None
         task._external_task_log_sink.emit_json_text(
             '{"owner":"still-open"}',
             emitted_at_ns=1778089999999999405,
@@ -634,7 +655,7 @@ def test_task_monitor_worker_close_attempts_all_resources_and_reports_failure(
 
 
 def test_task_monitor_builtin_worker_close_failure_replaces_success(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -659,11 +680,14 @@ def test_task_monitor_builtin_worker_close_failure_replaces_success(
     def clone_with_failing_sink_close() -> TaskMonitor:
         worker = real_clone()
         assert worker._external_task_log_sink is not None
-        worker._external_task_log_sink = _CloseRecordingProxy(
-            worker._external_task_log_sink,
-            name="sink",
-            events=[],
-            fail=True,
+        worker._external_task_log_sink = cast(
+            task_monitor_mod.ExternalTaskLogSink,
+            _CloseRecordingProxy(
+                worker._external_task_log_sink,
+                name="sink",
+                events=[],
+                fail=True,
+            ),
         )
         return worker
 
@@ -691,7 +715,7 @@ def test_task_monitor_builtin_worker_close_failure_replaces_success(
 
 
 def test_task_monitor_builtin_worker_transports_unexpected_failure_and_closes_resources(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -717,15 +741,21 @@ def test_task_monitor_builtin_worker_transports_unexpected_failure_and_closes_re
     def recording_clone() -> TaskMonitor:
         worker = real_clone()
         assert worker._external_task_log_sink is not None
-        worker._external_task_log_sink = _CloseRecordingProxy(
-            worker._external_task_log_sink,
-            name="sink",
-            events=events,
+        worker._external_task_log_sink = cast(
+            task_monitor_mod.ExternalTaskLogSink,
+            _CloseRecordingProxy(
+                worker._external_task_log_sink,
+                name="sink",
+                events=events,
+            ),
         )
-        worker._queue_cache["worker.failure"] = _CloseRecordingProxy(
-            make_queue("worker.failure"),
-            name="queue",
-            events=events,
+        worker._queue_cache["worker.failure"] = cast(
+            Queue,
+            _CloseRecordingProxy(
+                make_queue("worker.failure"),
+                name="queue",
+                events=events,
+            ),
         )
         return worker
 
@@ -763,7 +793,7 @@ def test_task_monitor_builtin_worker_transports_unexpected_failure_and_closes_re
 
 
 def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -789,16 +819,22 @@ def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
     def clone_with_failing_sink_close() -> TaskMonitor:
         worker = real_clone()
         assert worker._external_task_log_sink is not None
-        worker._external_task_log_sink = _CloseRecordingProxy(
-            worker._external_task_log_sink,
-            name="sink",
-            events=events,
-            fail=True,
+        worker._external_task_log_sink = cast(
+            task_monitor_mod.ExternalTaskLogSink,
+            _CloseRecordingProxy(
+                worker._external_task_log_sink,
+                name="sink",
+                events=events,
+                fail=True,
+            ),
         )
-        worker._queue_cache["runtime-close.queue"] = _CloseRecordingProxy(
-            make_queue("runtime-close.queue"),
-            name="queue",
-            events=events,
+        worker._queue_cache["runtime-close.queue"] = cast(
+            Queue,
+            _CloseRecordingProxy(
+                make_queue("runtime-close.queue"),
+                name="queue",
+                events=events,
+            ),
         )
         return worker
 
@@ -831,6 +867,7 @@ def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
         assert result.cleanup.pending is True
         assert result.cleanup.next_slice_kind is None
         assert len(result.close_errors) == 1
+        assert result.monitor_status is not None
         assert result.monitor_status.available is False
         assert result.monitor_status.error == "unexpected runtime worker boom"
         assert result.cleanup.errors[0] == "unexpected runtime worker boom"
@@ -843,7 +880,7 @@ def test_task_monitor_runtime_cleanup_close_failure_is_retryable(
 
 
 def test_task_monitor_control_cleanup_deferred_status_survives_refresh(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -940,7 +977,7 @@ def test_task_monitor_control_cleanup_deferred_status_survives_refresh(
 @pytest.mark.parametrize("worker_kind", ["builtin", "runtime"])
 @pytest.mark.parametrize("failed_resource", ["store", "sink", "queue"])
 def test_task_monitor_worker_entry_close_failure_matrix_is_retryable(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     worker_kind: str,
@@ -983,17 +1020,23 @@ def test_task_monitor_worker_entry_close_failure_matrix_is_retryable(
         clone_threads.append(threading.current_thread())
         worker = real_clone()
         assert worker._external_task_log_sink is not None
-        worker._external_task_log_sink = _CloseRecordingProxy(
-            worker._external_task_log_sink,
-            name="sink",
-            events=events,
-            fail=fail_close["enabled"] and failed_resource == "sink",
+        worker._external_task_log_sink = cast(
+            task_monitor_mod.ExternalTaskLogSink,
+            _CloseRecordingProxy(
+                worker._external_task_log_sink,
+                name="sink",
+                events=events,
+                fail=fail_close["enabled"] and failed_resource == "sink",
+            ),
         )
-        worker._queue_cache["worker.close.matrix"] = _CloseRecordingProxy(
-            make_queue("worker.close.matrix"),
-            name="queue",
-            events=events,
-            fail=fail_close["enabled"] and failed_resource == "queue",
+        worker._queue_cache["worker.close.matrix"] = cast(
+            Queue,
+            _CloseRecordingProxy(
+                make_queue("worker.close.matrix"),
+                name="queue",
+                events=events,
+                fail=fail_close["enabled"] and failed_resource == "queue",
+            ),
         )
         return worker
 
@@ -1184,7 +1227,7 @@ def _task_monitor_idle_diagnostics(task: TaskMonitor) -> str:
     for thread in threading.enumerate():
         if not thread.name.startswith(f"weft-worker-{task.tid_short}-"):
             continue
-        frame = frames.get(thread.ident)
+        frame = frames.get(thread.ident) if thread.ident is not None else None
         if frame is None:
             continue
         stack = "".join(traceback.format_stack(frame, limit=12))
@@ -1495,17 +1538,29 @@ def _drive_consumer_until(
 
 
 def test_task_monitor_uses_cached_base_task_context(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     calls: list[bool | None] = []
     real_build_context = base_task_mod.build_context
 
-    def counted_build_context(*args: object, **kwargs: object) -> object:
-        value = kwargs.get("create_database")
-        calls.append(value if isinstance(value, bool) else None)
-        return real_build_context(*args, **kwargs)
+    def counted_build_context(
+        spec_context: str | os.PathLike[str] | None = None,
+        *,
+        config: Mapping[str, Any] | None = None,
+        create_dirs: bool = True,
+        create_database: bool = True,
+        autostart: bool | None = None,
+    ) -> WeftContext:
+        calls.append(create_database)
+        return real_build_context(
+            spec_context,
+            config=config,
+            create_dirs=create_dirs,
+            create_database=create_database,
+            autostart=autostart,
+        )
 
     monkeypatch.setattr(base_task_mod, "build_context", counted_build_context)
     task = TaskMonitor(
@@ -1522,7 +1577,7 @@ def test_task_monitor_uses_cached_base_task_context(
 
 
 def test_task_monitor_scan_once_peeks_task_log_without_consuming(
-    broker_env,
+    broker_env: BrokerEnv,
 ) -> None:
     db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -1563,7 +1618,7 @@ def test_task_monitor_scan_once_peeks_task_log_without_consuming(
 
 
 def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -1616,7 +1671,7 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
 
 
 def test_task_monitor_public_turn_applies_pending_sources_once(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -1648,7 +1703,7 @@ def test_task_monitor_public_turn_applies_pending_sources_once(
 
 
 def test_task_monitor_builtin_delete_removes_cleanup_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -1686,7 +1741,7 @@ def test_task_monitor_builtin_delete_removes_cleanup_rows(
 
 
 def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -1725,7 +1780,7 @@ def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
 
 
 def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -1755,7 +1810,7 @@ def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
 
 
 def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -1793,7 +1848,7 @@ def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
 
 
 def test_task_monitor_disabled_uses_wait_cap_without_scanning(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -1837,7 +1892,7 @@ def test_task_monitor_disabled_uses_wait_cap_without_scanning(
 
 
 def test_task_monitor_ping_includes_health_and_preserves_task_log(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -1894,7 +1949,10 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["last_cleanup_queue_stats"] == []
     assert pong["last_cleanup_policy_stats"] == []
     assert pong["last_policy_progress"]
-    extended = pong[PONG_EXTENSION_KEY]["task_monitor"]
+    extension = pong[PONG_EXTENSION_KEY]
+    assert isinstance(extension, dict)
+    extended = extension["task_monitor"]
+    assert isinstance(extended, dict)
     assert extended["enabled"] is True
     assert extended["mode"] == "persistent"
     assert extended["task_monitor_mode"] == "report_only"
@@ -1950,7 +2008,7 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
 
 
 def test_task_monitor_ping_includes_cached_collation_store_status(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2015,13 +2073,17 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
         if response["command"] == CONTROL_PING and response.get("request_id") == "store"
     )
     assert "collation_store_enabled" not in pong
-    assert "collation_store_enabled" not in pong[PONG_EXTENSION_KEY]["task_monitor"]
-    store = pong[PONG_EXTENSION_KEY]["task_monitor"]["collation_store"]
+    extension = pong[PONG_EXTENSION_KEY]
+    assert isinstance(extension, dict)
+    task_monitor_payload = extension["task_monitor"]
+    assert isinstance(task_monitor_payload, dict)
+    assert "collation_store_enabled" not in task_monitor_payload
+    store = task_monitor_payload["collation_store"]
     assert "enabled" not in store
     assert store["available"] is True
     assert store["schema_version"] == WEFT_MONITOR_SCHEMA_VERSION
     assert store["checkpoint"] is not None
-    last_cycle = pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"]
+    last_cycle = task_monitor_payload["last_cycle"]
     assert last_cycle["collation_rows_processed"] >= 1
     assert last_cycle["collation_tasks_updated"] >= 1
     assert last_cycle["collation_terminal_tasks"] >= 1
@@ -2030,7 +2092,7 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
 
 
 def test_task_monitor_processor_delete_requires_delete_processor(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2076,7 +2138,7 @@ def test_task_monitor_processor_delete_requires_delete_processor(
 
 
 def test_task_monitor_processor_delete_removes_exact_task_log_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2125,7 +2187,7 @@ def test_task_monitor_processor_delete_removes_exact_task_log_rows(
 
 
 def test_task_monitor_delete_retains_terminal_rows_until_retention_age(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2180,7 +2242,7 @@ def test_task_monitor_delete_retains_terminal_rows_until_retention_age(
 
 
 def test_task_monitor_retained_ingest_batches_store_and_delete_work(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2193,7 +2255,7 @@ def test_task_monitor_retained_ingest_batches_store_and_delete_work(
     def record_updates(
         self: MonitorStore,
         queue_name: str,
-        updates,
+        updates: Sequence[MonitorTaskEventUpdate],
         *,
         checkpoint_message_id: int | None,
     ) -> MonitorStoreIngestResult:
@@ -2268,7 +2330,7 @@ def test_task_monitor_retained_ingest_batches_store_and_delete_work(
 
 
 def test_task_monitor_retained_ingest_handles_own_tid_before_checkpoint(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2340,7 +2402,7 @@ def test_task_monitor_retained_ingest_handles_own_tid_before_checkpoint(
 
 
 def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2407,7 +2469,7 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
 
 
 def test_task_monitor_retained_ingest_batch_limit_counts_valid_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2466,7 +2528,7 @@ def test_task_monitor_retained_ingest_batch_limit_counts_valid_rows(
 
 
 def test_task_monitor_retained_ingest_resumes_after_store_checkpoint(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2520,15 +2582,17 @@ def test_task_monitor_retained_ingest_resumes_after_store_checkpoint(
         drive_task_monitor_until_idle(task)
 
         assert task._last_retained_task_log_ingest.selected >= 2
-        assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) >= message_ids[4]
+        checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
+        assert checkpoint is not None
+        assert checkpoint >= message_ids[4]
     finally:
         task.stop()
 
 
 def test_task_monitor_jsonl_then_delete_recovers_precheckpoint_service_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -2658,7 +2722,7 @@ def test_task_monitor_jsonl_then_delete_recovers_precheckpoint_service_rows(
 
 
 def test_task_monitor_processor_delete_reconciles_already_absent_exact_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2735,7 +2799,7 @@ def test_task_monitor_processor_delete_reconciles_already_absent_exact_rows(
 
 
 def test_task_monitor_recovers_orphan_raw_task_log_rows_after_bad_raw_mark(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -2824,7 +2888,7 @@ def test_task_monitor_recovers_orphan_raw_task_log_rows_after_bad_raw_mark(
 
 
 def test_task_monitor_marks_orphan_recovery_checked_when_raw_rows_absent(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -2901,7 +2965,7 @@ def test_task_monitor_marks_orphan_recovery_checked_when_raw_rows_absent(
 
 
 def test_task_monitor_orphan_recovery_leaves_failed_probe_retryable(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -2975,7 +3039,7 @@ def test_task_monitor_orphan_recovery_leaves_failed_probe_retryable(
 
 
 def test_task_monitor_orphan_recovery_reports_bounded_waypoint(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -3050,7 +3114,7 @@ def test_task_monitor_orphan_recovery_reports_bounded_waypoint(
 
 
 def test_task_monitor_failed_summary_disposition_blocks_processor_delete(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -3111,9 +3175,9 @@ def test_task_monitor_failed_summary_disposition_blocks_processor_delete(
 
 
 def test_task_monitor_collated_external_log_precedes_processor_delete(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -3171,9 +3235,9 @@ def test_task_monitor_collated_external_log_precedes_processor_delete(
 
 
 def test_task_monitor_jsonl_then_delete_uses_project_default_log_path(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, _make_queue = broker_env
     monkeypatch.setattr(
@@ -3205,9 +3269,9 @@ def test_task_monitor_jsonl_then_delete_uses_project_default_log_path(
 
 
 def test_task_monitor_external_log_probe_recovers_on_monitor_cadence(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -3251,9 +3315,9 @@ def test_task_monitor_external_log_probe_recovers_on_monitor_cadence(
 
 
 def test_task_monitor_external_log_probe_reports_regression_on_monitor_cadence(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -3299,9 +3363,9 @@ def test_task_monitor_external_log_probe_reports_regression_on_monitor_cadence(
 
 
 def test_task_monitor_jsonl_then_delete_emits_lifetime_report_before_delete(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -3362,9 +3426,9 @@ def test_task_monitor_jsonl_then_delete_emits_lifetime_report_before_delete(
 
 
 def test_task_monitor_jsonl_then_delete_defers_external_failure_and_deletes(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -3441,9 +3505,9 @@ def test_task_monitor_jsonl_then_delete_defers_external_failure_and_deletes(
 
 
 def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -3547,7 +3611,7 @@ def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
 
 
 def test_task_monitor_deferred_output_retries_on_same_instance_after_transient_failure(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3607,18 +3671,15 @@ def test_task_monitor_deferred_output_retries_on_same_instance_after_transient_f
         "emit_json_text",
         fail_once,
     )
-    instance_id = id(task)
     try:
         task.process_once()
         drive_task_monitor_until_idle(task)
-        assert id(task) == instance_id
         assert store.deferred_write_status().pending == 1
         assert external_path.read_text(encoding="utf-8") == ""
 
         task._next_cycle_due_monotonic = 0.0
         task.process_once()
         drive_task_monitor_until_idle(task)
-        assert id(task) == instance_id
         assert store.deferred_write_status().pending == 0
     finally:
         task.stop()
@@ -3631,9 +3692,9 @@ def test_task_monitor_deferred_output_retries_on_same_instance_after_transient_f
 
 
 def test_task_monitor_jsonl_then_delete_blocks_when_external_and_deferred_fail(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -3694,7 +3755,7 @@ def test_task_monitor_jsonl_then_delete_blocks_when_external_and_deferred_fail(
 
 
 def test_task_monitor_emits_service_summary_for_service_collation(
-    broker_env,
+    broker_env: BrokerEnv,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     db_path, _make_queue = broker_env
@@ -3765,7 +3826,7 @@ def test_task_monitor_emits_service_summary_for_service_collation(
 
 
 def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -3857,7 +3918,7 @@ def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
 
 
 def test_task_monitor_deletes_controls_for_already_disposed_family(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -3948,7 +4009,7 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
 
 
 def test_task_monitor_terminal_control_cleanup_does_not_wait_for_retention(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4026,7 +4087,7 @@ def test_task_monitor_terminal_control_cleanup_does_not_wait_for_retention(
 
 
 def test_task_monitor_control_cleanup_does_not_mark_when_queue_delete_fails(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4068,13 +4129,13 @@ def test_task_monitor_control_cleanup_does_not_mark_when_queue_delete_fails(
     )
     with task._monitor_context().broker() as broker:
         broker_type = type(broker)
-    original_delete_from_queues = broker_type.delete_from_queues
+    original_delete_from_queues: Callable[..., int] = broker_type.delete_from_queues
 
     def failing_control_delete(
-        self,
-        queue_names,
+        self: BrokerConnection,
+        queue_names: Sequence[str],
         *,
-        before_timestamp=None,
+        before_timestamp: int | None = None,
     ) -> int:
         if f"T{tid}.ctrl_out" in queue_names:
             raise RuntimeError("control delete failed")
@@ -4127,7 +4188,7 @@ def test_task_monitor_control_cleanup_does_not_mark_when_queue_delete_fails(
 
 
 def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_disposition(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -4211,7 +4272,7 @@ def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_dispositi
 
 
 def test_task_monitor_delete_preserves_stale_reserved_queue_without_terminal_proof(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4246,7 +4307,7 @@ def test_task_monitor_delete_preserves_stale_reserved_queue_without_terminal_pro
 
 
 def test_task_monitor_preserves_ambiguous_reserved_during_batch_limited_ingest(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4302,7 +4363,7 @@ def test_task_monitor_preserves_ambiguous_reserved_during_batch_limited_ingest(
 
 
 def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4356,7 +4417,7 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
 
 
 def test_task_monitor_reserved_cleanup_marks_absent_reserved_probe_checked(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -4424,7 +4485,7 @@ def test_task_monitor_reserved_cleanup_marks_absent_reserved_probe_checked(
 
 
 def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4489,7 +4550,7 @@ def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
 
 
 def test_task_monitor_reserved_cleanup_respects_min_age_gate(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A KEEP-policy reserved row must survive until the age gate elapses.
@@ -4580,7 +4641,7 @@ def test_task_monitor_reserved_cleanup_respects_min_age_gate(
 
 
 def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4604,7 +4665,7 @@ def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
         config=config,
     )
 
-    def fail_delete(queue_name: str):
+    def fail_delete(queue_name: str) -> task_monitor_mod._TaskControlCleanupResult:
         del queue_name
         return task_monitor_mod._TaskControlCleanupResult(
             pending=True,
@@ -4663,7 +4724,7 @@ def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
 
 
 def test_task_monitor_reserved_cleanup_reports_bounded_waypoint(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -4737,7 +4798,7 @@ def test_task_monitor_reserved_cleanup_reports_bounded_waypoint(
 
 
 def test_task_monitor_reserved_cleanup_batches_fallback_record_lookup(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4787,7 +4848,9 @@ def test_task_monitor_reserved_cleanup_batches_fallback_record_lookup(
         assert store is not None
         batch_store = BatchOnlyStore(store)
         cleanup = task._run_reserved_cleanup_slice(
-            batch_store,
+            cast(
+                MonitorStore, batch_store
+            ),  # Facade delegates every non-instrumented store operation.
             now_ns=now_ns,
         )
     finally:
@@ -4802,7 +4865,7 @@ def test_task_monitor_reserved_cleanup_batches_fallback_record_lookup(
 
 
 def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4859,7 +4922,7 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
 
 
 def test_task_monitor_recordless_terminal_mapping_does_not_block_control_cleanup(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A terminal mapping row is not live proof for a record-less family."""
@@ -4903,7 +4966,7 @@ def test_task_monitor_recordless_terminal_mapping_does_not_block_control_cleanup
 
 
 def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_retention(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4958,7 +5021,7 @@ def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_reten
 
 
 def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -4984,7 +5047,9 @@ def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
     reserved.write("reserved")
     coalesce_calls: list[str] = []
 
-    def counted_coalesce(ctx, tid_arg: str, *, chunk_limit: int):
+    def counted_coalesce(
+        ctx: WeftContext, tid_arg: str, *, chunk_limit: int
+    ) -> DeadTaskLogCoalesceGroup:
         del ctx, chunk_limit
         coalesce_calls.append(tid_arg)
         raise AssertionError("retention-deferred dead TID should not coalesce logs")
@@ -5023,7 +5088,7 @@ def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
 
 @pytest.mark.parametrize("age_seconds", [60.0, 3600.0])
 def test_dead_cleanup_counts_live_data_only_families_before_age_and_retention(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     age_seconds: float,
 ) -> None:
@@ -5066,7 +5131,7 @@ def test_dead_cleanup_counts_live_data_only_families_before_age_and_retention(
 
 
 def test_task_monitor_dead_task_cleanup_skips_monitor_lookup_for_deferred_only_queues(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -5116,7 +5181,9 @@ def test_task_monitor_dead_task_cleanup_skips_monitor_lookup_for_deferred_only_q
         assert store is not None
         batch_store = BatchOnlyStore(store)
         cleanup = task._run_dead_task_cleanup_slice(
-            batch_store,
+            cast(
+                MonitorStore, batch_store
+            ),  # Facade delegates every non-instrumented store operation.
             now_ns=now_ns,
         )
     finally:
@@ -5133,7 +5200,7 @@ def test_task_monitor_dead_task_cleanup_skips_monitor_lookup_for_deferred_only_q
 
 
 def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -5186,7 +5253,9 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
         coalesce_calls: list[str] = []
         real_coalesce = task_monitor_mod._fetch_dead_task_log_coalesce_group
 
-        def counted_coalesce(ctx, tid_arg: str, *, chunk_limit: int):
+        def counted_coalesce(
+            ctx: WeftContext, tid_arg: str, *, chunk_limit: int
+        ) -> DeadTaskLogCoalesceGroup:
             coalesce_calls.append(tid_arg)
             return real_coalesce(
                 ctx,
@@ -5219,7 +5288,7 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
 
 
 def test_task_monitor_dead_task_cleanup_skips_live_service_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -5274,7 +5343,7 @@ def test_task_monitor_dead_task_cleanup_skips_live_service_owner(
 
 
 def test_task_monitor_dead_task_cleanup_is_oldest_first_and_bounded(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -5330,7 +5399,7 @@ def test_task_monitor_dead_task_cleanup_is_oldest_first_and_bounded(
 
 
 def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -5409,7 +5478,7 @@ def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue
 
 
 def test_task_monitor_skips_ambiguous_old_service_owner_collation(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -5482,7 +5551,7 @@ def test_task_monitor_skips_ambiguous_old_service_owner_collation(
 
 
 def test_task_monitor_disposes_old_stale_service_owner_collation(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -5582,7 +5651,7 @@ def test_task_monitor_disposes_old_stale_service_owner_collation(
     ],
 )
 def test_stale_service_owner_key_recovers_degraded_liveness_metadata(
-    broker_env,
+    broker_env: BrokerEnv,
     role: str | None,
     metadata: dict[str, str],
 ) -> None:
@@ -5626,9 +5695,9 @@ def test_stale_service_owner_key_recovers_degraded_liveness_metadata(
 
 
 def test_task_monitor_jsonl_then_delete_disposes_stale_service_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Stale service-owner disposition must fire in jsonl_then_delete mode.
 
@@ -5767,9 +5836,9 @@ def test_task_monitor_jsonl_then_delete_disposes_stale_service_owner(
 
 
 def test_stale_service_owner_disposes_after_maintenance_prune(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Disposition still fires after maintenance pruned the old-owner row.
 
@@ -5937,9 +6006,9 @@ def test_stale_service_owner_disposes_after_maintenance_prune(
 
 
 def test_stale_service_owner_disposes_only_after_retention_window(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """The retention window gates stale service-owner disposition timing.
 
@@ -6133,7 +6202,7 @@ def test_stale_service_owner_disposes_only_after_retention_window(
 
 
 def test_task_monitor_stale_service_owner_cleanup_deletes_only_control_queues(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -6234,7 +6303,7 @@ def test_task_monitor_stale_service_owner_cleanup_deletes_only_control_queues(
 
 
 def test_task_monitor_stale_service_owner_cleanup_skips_active_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -6337,7 +6406,7 @@ def test_task_monitor_stale_service_owner_cleanup_skips_active_owner(
 
 
 def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -6461,7 +6530,7 @@ def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
 
 
 def test_task_monitor_runtime_cleanup_runs_control_before_reserved_work(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -6568,7 +6637,7 @@ def test_task_monitor_runtime_cleanup_runs_control_before_reserved_work(
 
 
 def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -6665,7 +6734,7 @@ def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
 
 
 def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -6686,7 +6755,7 @@ def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
         config=config,
     )
 
-    def fail_snapshot(*args, **kwargs):
+    def fail_snapshot(*args: object, **kwargs: object) -> set[str]:
         del args
         del kwargs
         raise AssertionError("queue snapshot should not run")
@@ -6708,7 +6777,7 @@ def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
 
 
 def test_task_monitor_discovery_cadence_survives_frequent_store_cycles(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real cleanup chains stay bounded and eventually discover newly orphaned queues."""
@@ -6822,7 +6891,7 @@ def test_task_monitor_discovery_cadence_survives_frequent_store_cycles(
 @pytest.mark.parametrize("slice_kind", ["terminal_control", "reserved", "dead_tid"])
 @pytest.mark.parametrize("failed", [False, True])
 def test_task_monitor_pending_cleanup_retains_catchup_deadline(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     slice_kind: task_monitor_mod.RuntimeCleanupSliceKind,
     failed: bool,
@@ -6875,7 +6944,7 @@ def test_task_monitor_pending_cleanup_retains_catchup_deadline(
 
 
 def test_task_monitor_store_retires_eligible_family_despite_reserved_delete_failure(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An erroring reserved family cannot retain an unrelated eligible collation."""
@@ -6966,7 +7035,7 @@ def test_task_monitor_store_retires_eligible_family_despite_reserved_delete_fail
     ],
 )
 def test_task_monitor_retires_proven_family_without_ingestion_catchup(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     ingest_blocker: str,
     mode: str,
@@ -7054,7 +7123,7 @@ def test_task_monitor_retires_proven_family_without_ingestion_catchup(
 
 
 def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budget(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -7140,7 +7209,7 @@ def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budge
 
 
 def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -7180,9 +7249,9 @@ def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
     )
     real_snapshot = task._queue_name_snapshot
 
-    def slow_snapshot(*args, **kwargs):
+    def slow_snapshot(*, patterns: tuple[str, ...]) -> set[str]:
         nonlocal current_monotonic
-        names = real_snapshot(*args, **kwargs)
+        names = real_snapshot(patterns=patterns)
         current_monotonic += 2.0
         return names
 
@@ -7203,7 +7272,7 @@ def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
 
 
 def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -7299,7 +7368,7 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
 
 
 def test_task_monitor_raw_store_delete_reconciles_ingested_open_refs(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -7375,7 +7444,7 @@ def test_task_monitor_raw_store_delete_reconciles_ingested_open_refs(
 
 
 def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -7470,7 +7539,7 @@ def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
 
 
 def test_task_monitor_trims_manager_task_spawned_rows_without_closing_manager_family(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -7537,6 +7606,7 @@ def test_task_monitor_trims_manager_task_spawned_rows_without_closing_manager_fa
         assert record.disposition_at_ns is None
         assert list(manager_ctrl_in.peek_generator()) == ["control-row"]
         progress = task._last_policy_progress[-1]
+        assert progress.reason_counts is not None
         assert progress.policy == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
         assert progress.reason_counts["manager_task_spawned_refs_deleted"] == 3
         assert {progress.policy} <= set(TASK_MONITOR_CLEANUP_POLICY_NAMES)
@@ -7545,9 +7615,9 @@ def test_task_monitor_trims_manager_task_spawned_rows_without_closing_manager_fa
 
 
 def test_task_monitor_jsonl_then_delete_reports_manager_task_spawned_before_trim(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -7632,9 +7702,9 @@ def test_task_monitor_jsonl_then_delete_reports_manager_task_spawned_before_trim
 
 
 def test_task_monitor_jsonl_then_delete_blocks_manager_task_spawned_trim(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -7693,6 +7763,7 @@ def test_task_monitor_jsonl_then_delete_blocks_manager_task_spawned_trim(
         assert old_spawned_ids <= remaining_raw_ids
         assert store.missing_task_message_ids(tuple(old_spawned_ids)) == ()
         progress = task._last_policy_progress[-1]
+        assert progress.reason_counts is not None
         assert progress.policy == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
         assert progress.blocked_reason is not None
         assert "deferred table unavailable" in progress.blocked_reason
@@ -7704,9 +7775,9 @@ def test_task_monitor_jsonl_then_delete_blocks_manager_task_spawned_trim(
 
 
 def test_task_monitor_jsonl_then_delete_reconciles_missing_manager_spawned_ref(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -7762,6 +7833,7 @@ def test_task_monitor_jsonl_then_delete_reconciles_missing_manager_spawned_ref(
             old_spawned_ids
         )
         progress = task._last_policy_progress[-1]
+        assert progress.reason_counts is not None
         assert progress.reason_counts["manager_task_spawned_already_missing"] == 1
         assert progress.reason_counts["manager_task_spawned_reported"] == 2
         record = store.get_task(manager_tid)
@@ -7783,7 +7855,7 @@ def test_task_monitor_jsonl_then_delete_reconciles_missing_manager_spawned_ref(
 
 
 def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -7907,7 +7979,7 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
 
 
 def test_task_monitor_ignores_service_worker_sentinel_before_cleanup_result(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -7970,7 +8042,7 @@ def test_task_monitor_ignores_service_worker_sentinel_before_cleanup_result(
 
 
 def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -7998,10 +8070,16 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
     release = threading.Event()
     real_cleanup = task._run_monitor_store_cycle
 
-    def slow_cleanup(*args: object, **kwargs: object) -> bool:
+    def slow_cleanup(
+        *, now_ns: int, task_log_owner: str, start_control_cleanup: bool = True
+    ) -> bool:
         started.set()
         assert release.wait(timeout=5.0)
-        return real_cleanup(*args, **kwargs)
+        return real_cleanup(
+            now_ns=now_ns,
+            task_log_owner=task_log_owner,
+            start_control_cleanup=start_control_cleanup,
+        )
 
     monkeypatch.setattr(task, "_run_monitor_store_cycle", slow_cleanup)
     try:
@@ -8054,7 +8132,7 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
 
 
 def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -8101,7 +8179,7 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
     )
     real_delete = task._delete_terminal_control_queues
 
-    def fail_delete(record, **kwargs):
+    def fail_delete(record: MonitorTaskCollationRecord, **kwargs: object) -> None:
         del record
         del kwargs
         raise RuntimeError("control delete boom")
@@ -8160,9 +8238,9 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
 
 
 def test_task_monitor_collated_external_failure_blocks_processor_delete(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -8217,9 +8295,9 @@ def test_task_monitor_collated_external_failure_blocks_processor_delete(
 
 
 def test_task_monitor_raw_external_logs_and_deletes_without_store(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -8280,7 +8358,7 @@ def test_task_monitor_raw_external_logs_and_deletes_without_store(
 
 
 def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -8334,16 +8412,20 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
         task.stop()
 
     assert pong is not None
+    extension = pong[PONG_EXTENSION_KEY]
+    assert isinstance(extension, dict)
+    task_monitor_payload = extension["task_monitor"]
+    assert isinstance(task_monitor_payload, dict)
     assert pong["last_cleanup_policy_stats"] == cached_policy_stats
     assert (
-        pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"]["cleanup_policy_stats"]
+        task_monitor_payload["last_cycle"]["cleanup_policy_stats"]
         == cached_policy_stats
     )
-    assert "policy_progress" in pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"]
+    assert "policy_progress" in task_monitor_payload["last_cycle"]
 
 
 def test_task_monitor_slow_custom_processor_does_not_block_ping(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -8421,7 +8503,7 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
 
 
 def test_task_monitor_failed_processor_does_not_advance_checkpoint(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -8457,7 +8539,7 @@ def test_task_monitor_failed_processor_does_not_advance_checkpoint(
 
 
 def test_task_monitor_custom_processor_exception_is_a_failed_cycle(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An open-taxonomy processor failure stays inside its worker cycle."""
@@ -8496,7 +8578,7 @@ def test_task_monitor_custom_processor_exception_is_a_failed_cycle(
 
 
 def test_task_monitor_heartbeat_failure_records_health_but_still_cycles(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
@@ -8833,9 +8915,9 @@ def _assert_jsonl_lifecycle_converged(
 
 
 def test_task_monitor_jsonl_backlog_lifecycle_keeps_raw_deleted_invariant(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Rung 2a: multi-window backlog of terminal families, oracle per cycle.
 
@@ -8897,9 +8979,9 @@ def test_task_monitor_jsonl_backlog_lifecycle_keeps_raw_deleted_invariant(
 
 
 def test_task_monitor_jsonl_backlog_lifecycle_survives_monitor_restart(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Rung 2b: monitor restart mid-backlog with a persisted checkpoint.
 
@@ -8976,9 +9058,9 @@ def test_task_monitor_jsonl_backlog_lifecycle_survives_monitor_restart(
 
 
 def test_task_monitor_jsonl_lifecycle_handles_families_older_than_retention(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Rung 2c: families already older than the retention window.
 
@@ -9053,9 +9135,9 @@ def test_task_monitor_jsonl_lifecycle_handles_families_older_than_retention(
 
 
 def test_task_monitor_jsonl_lifecycle_deletes_terminal_family_despite_clock_lag(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Clock lag cannot stall the post-terminal lifecycle behind message IDs.
 
@@ -9145,9 +9227,9 @@ def test_task_monitor_jsonl_lifecycle_deletes_terminal_family_despite_clock_lag(
 
 
 def test_task_monitor_jsonl_lifecycle_with_interleaved_writer_load(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Rung 4: continuous writer load interleaved with delete cycles.
 
@@ -9255,9 +9337,9 @@ def test_task_monitor_jsonl_lifecycle_with_interleaved_writer_load(
 
 
 def test_retirement_backlog_identifies_binding_stage(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-238] exception
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Characterize which retirable-predicate arm binds a terminal backlog.
 
@@ -9379,7 +9461,8 @@ def test_retirement_backlog_identifies_binding_stage(  # noqa: C901 approved [TS
             if record is None:
                 continue
             unretired.append(tid)
-            has_live_refs = store.has_task_messages(tid)
+            with store._sidecar_session() as session:
+                has_live_refs = store._access(session).has_task_messages(tid)
             coalesced = record.completed_at_ns
             if coalesced is None:
                 coalesced = record.last_seen_at_ns
@@ -9528,9 +9611,9 @@ def _run_quiet_store_cycle(task: TaskMonitor, *, cycle: str) -> None:
 
 
 def test_task_monitor_never_marks_family_with_uningested_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """A4(a): a family whose rows ingest has not reached is never marked.
 
@@ -9611,9 +9694,9 @@ def test_task_monitor_never_marks_family_with_uningested_rows(
 
 
 def test_task_monitor_non_high_water_cycle_marks_nothing(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """A4(c): a cycle that does not complete high-water marks no family.
 
@@ -9686,9 +9769,9 @@ def test_task_monitor_non_high_water_cycle_marks_nothing(
 
 
 def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """A4: ingest-path malformed-row deletion cannot mark live families.
 
@@ -9780,9 +9863,9 @@ def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_row
 
 @pytest.mark.parametrize("disposed", [False, True])
 def test_task_monitor_orphan_path_exports_summary_before_deleting_rows(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
     disposed: bool,
 ) -> None:
     """A5(3): orphan-path audit pin — summary/JSONL before raw deletion.
@@ -9886,7 +9969,7 @@ def _read_status_reply(
 
 
 def test_status_reply_helper_drives_past_zero_timeout_local_turn(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A due local turn cannot make a pending STATUS request disappear."""
@@ -9934,7 +10017,9 @@ def _maintenance_service_owner_payload(
     *,
     service_key: str,
     tid: str,
-    status: str,
+    status: Literal[
+        "active", "draining", "stopped", "superseded", "terminal", "uncertain"
+    ],
 ) -> dict[str, Any]:
     """Mirror the CLI runtime-prune fixtures for service-owner registry rows."""
 
@@ -9986,7 +10071,7 @@ def _queue_json_rows(queue: Any) -> dict[int, dict[str, Any]]:
 
 
 def test_task_monitor_maintenance_vacuums_claimed_rows_on_monotonic_deadline(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """D1: monitor maintenance vacuums claimed rows on its monotonic cadence.
@@ -10077,7 +10162,7 @@ def test_task_monitor_maintenance_vacuums_claimed_rows_on_monotonic_deadline(
 
 
 def test_task_monitor_maintenance_opt_out_skips_vacuum(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """D1: WEFT_TASK_MONITOR_MAINTENANCE=0 disables the maintenance slice."""
@@ -10126,7 +10211,7 @@ def test_task_monitor_maintenance_opt_out_skips_vacuum(
 
 
 def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """D2: maintenance auto-prunes superseded runtime-state rows conservatively.
@@ -10288,7 +10373,7 @@ def _tid_mapping_row(
 
 @pytest.mark.parametrize("malformed_newest", [False, True])
 def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     malformed_newest: bool,
 ) -> None:
@@ -10395,7 +10480,7 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
 
 
 def test_task_monitor_stale_open_disposal_waits_for_mapping_row_retirement(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """TaskMonitor uses row presence and never probes runtime internals.
@@ -10576,7 +10661,7 @@ def _ingest_quiet_running_family(
 
 
 def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A live non-host quiet task is protected without host-PID evidence.
@@ -10640,7 +10725,7 @@ def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
 
 
 def test_task_monitor_stale_open_disposal_applies_without_mapping_row(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No mapping row means no protection: the stale family still disposes.
@@ -10694,7 +10779,7 @@ def test_task_monitor_stale_open_disposal_applies_without_mapping_row(
 
 
 def test_task_monitor_delete_recheck_protects_disposed_undecidable_owner(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Delete-time recheck protects a pre-disposed undecidable owner.
@@ -10756,7 +10841,7 @@ def test_task_monitor_delete_recheck_protects_disposed_undecidable_owner(
 
 
 def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Terminal proof outranks an undecidable mapping row at delete time.
@@ -10844,7 +10929,7 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
 
 
 def test_task_monitor_task_local_salvage_is_bounded_and_exact(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Salvage orders rows, truncates bytes, and counts overflow by role."""
@@ -10937,7 +11022,7 @@ def test_task_monitor_task_local_salvage_is_bounded_and_exact(
 
 
 def test_task_monitor_task_local_salvage_streams_overflow_rows_with_bounded_memory(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Overflow scanning retains only the report cap plus merge-frontier rows."""
@@ -10992,7 +11077,7 @@ def test_task_monitor_task_local_salvage_streams_overflow_rows_with_bounded_memo
 
 
 def test_task_monitor_bare_delete_preserves_ambiguous_data_queues(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No-record cleanup removes controls but leaves all task data intact."""
@@ -11039,7 +11124,7 @@ def test_task_monitor_bare_delete_preserves_ambiguous_data_queues(
 
 
 def test_task_monitor_salvage_failure_blocks_ambiguous_family_delete(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -11085,7 +11170,7 @@ def test_task_monitor_salvage_failure_blocks_ambiguous_family_delete(
 
 
 def test_task_monitor_jsonl_salvages_before_ambiguous_family_delete(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -11137,8 +11222,8 @@ def test_task_monitor_jsonl_salvages_before_ambiguous_family_delete(
 
 @pytest.mark.parametrize("mode", ["delete", "jsonl_then_delete"])
 def test_persistent_consumer_resurrects_after_ambiguous_family_cleanup(
-    broker_env,
-    task_factory,
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mode: str,
@@ -11255,7 +11340,7 @@ def test_persistent_consumer_resurrects_after_ambiguous_family_cleanup(
     ],
 )
 def test_task_monitor_store_ownership_characterization(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mode: str,
@@ -11393,7 +11478,7 @@ def test_task_monitor_store_ownership_characterization(
 
 
 def test_task_monitor_protection_reads_only_candidate_state(
-    broker_env,
+    broker_env: BrokerEnv,
 ) -> None:
     """Candidate protection excludes unrelated valid namespace snapshots."""
     db_path, make_queue = broker_env

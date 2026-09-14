@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from typing import cast
 
 import pytest
 
 from weft.core.agents.runtime import (
     AgentExecutionResult,
+    AgentRuntimeAdapter,
     NormalizedAgentMessage,
+    NormalizedAgentWorkItem,
     clear_agent_runtime_registry,
     execute_agent_target,
     get_agent_runtime,
@@ -16,13 +20,22 @@ from weft.core.agents.runtime import (
     register_agent_runtime,
     start_agent_runtime_session,
 )
+from weft.core.agents.tools import ResolvedAgentTool
 from weft.core.taskspec import AgentSection
 
 
 class EchoRuntime:
     """Small real runtime used to verify registry and execution plumbing."""
 
-    def execute(self, *, agent, work_item, tools, tid):
+    def execute(
+        self,
+        *,
+        agent: AgentSection,
+        work_item: NormalizedAgentWorkItem,
+        tools: Sequence[ResolvedAgentTool],
+        tid: str | None,
+        bundle_root: str | None = None,
+    ) -> AgentExecutionResult:
         del tid
         return AgentExecutionResult(
             runtime=agent.runtime,
@@ -39,13 +52,32 @@ class EchoRuntime:
         )
 
 
+class EchoRuntimeWithoutBundleRoot:
+    """Adapter using the supported execute signature without bundle provenance."""
+
+    def execute(
+        self,
+        *,
+        agent: AgentSection,
+        work_item: NormalizedAgentWorkItem,
+        tools: Sequence[ResolvedAgentTool],
+        tid: str | None,
+    ) -> AgentExecutionResult:
+        return EchoRuntime().execute(
+            agent=agent, work_item=work_item, tools=tools, tid=tid
+        )
+
+
 @pytest.fixture(autouse=True)
 def clear_runtime_registry() -> None:
     clear_agent_runtime_registry()
 
 
-def make_agent_section(**overrides) -> AgentSection:
-    payload = {"runtime": "echo", "instructions": "default instructions"}
+def make_agent_section(**overrides: object) -> AgentSection:
+    payload: dict[str, object] = {
+        "runtime": "echo",
+        "instructions": "default instructions",
+    }
     payload.update(overrides)
     return AgentSection.model_validate(payload)
 
@@ -173,8 +205,17 @@ def test_normalize_work_item_rejects_message_without_role() -> None:
         )
 
 
-def test_execute_agent_target_returns_internal_execution_result() -> None:
-    register_agent_runtime("echo", EchoRuntime())
+@pytest.mark.parametrize("supports_bundle_root", [True, False])
+def test_execute_agent_target_returns_internal_execution_result(
+    supports_bundle_root: bool,
+) -> None:
+    runtime = (
+        EchoRuntime()
+        if supports_bundle_root
+        # Runtime signature introspection accepts this narrower adapter contract [AR-5].
+        else cast(AgentRuntimeAdapter, EchoRuntimeWithoutBundleRoot())
+    )
+    register_agent_runtime("echo", runtime)
     result = execute_agent_target(
         AgentSection(
             runtime="echo",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ def surround_payload(
     return f"{prefix}{payload}{suffix}"
 
 
-def fail_payload(*args, **kwargs) -> None:
+def fail_payload(*args: object, **kwargs: object) -> None:
     """Raise an exception to simulate task failure."""
     raise RuntimeError("intentional failure for testing")
 
@@ -36,7 +36,7 @@ def abrupt_exit(code: int = 73) -> None:
     os._exit(code)
 
 
-def return_unpicklable() -> Any:
+def return_unpicklable() -> Callable[[], None]:
     """Return a local callable that cannot cross a spawn transport."""
 
     return lambda: None
@@ -51,11 +51,11 @@ def _raise_during_unpickle() -> None:
 class _UnreadablePickledResult:
     """Serialize successfully, then fail when reconstructed by the parent."""
 
-    def __reduce__(self) -> tuple[Any, tuple[()]]:
+    def __reduce__(self) -> tuple[Callable[[], None], tuple[()]]:
         return _raise_during_unpickle, ()
 
 
-def return_unreadable_pickled_result() -> Any:
+def return_unreadable_pickled_result() -> _UnreadablePickledResult:
     """Return a value that exercises receiver-side terminal decode failure."""
 
     return _UnreadablePickledResult()

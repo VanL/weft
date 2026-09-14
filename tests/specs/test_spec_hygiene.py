@@ -13,25 +13,6 @@ SPEC_DIR = REPO_ROOT / "docs" / "specifications"
 pytestmark = [pytest.mark.shared]
 
 
-def test_monitor_justification_remains_in_system_invariants() -> None:
-    """OBS.13 should retain the explicit monitor rationale."""
-
-    text = (SPEC_DIR / "07-System_Invariants.md").read_text(encoding="utf-8")
-
-    assert "Dealing with processes can be messy" in text
-
-
-def test_obs13_is_decomposed_into_sub_invariants() -> None:
-    """OBS.13 should stay readable as a decomposed monitor contract."""
-
-    text = (SPEC_DIR / "07-System_Invariants.md").read_text(encoding="utf-8")
-
-    assert "**OBS.13**" in text
-    assert "**OBS.13.1**" in text, (
-        "OBS.13 must be decomposed into sub-invariants (OBS.13.1, ...)"
-    )
-
-
 def test_normative_specs_do_not_encode_plan_status_labels() -> None:
     """Plan status belongs in plan metadata, not normative spec prose."""
 

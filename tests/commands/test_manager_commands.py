@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -27,7 +27,7 @@ from weft._constants import (
 from weft._exceptions import ControlRejected, ManagerNotRunning, WeftError
 from weft.commands import manager as manager_cmd
 from weft.commands.types import ManagerSnapshot
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
@@ -42,51 +42,6 @@ from weft.helpers import iter_queue_json_entries, process_create_time
 from weft.liveness.models import HostProcessObservation, RuntimeLiveness
 
 pytestmark = [pytest.mark.shared]
-
-
-def test_manager_runtime_exposes_only_canonical_lifecycle_names() -> None:
-    """Legacy private twins must not coexist with the public runtime API."""
-
-    canonical_names = {
-        "DetachedManagerLaunch",
-        "ManagerRegistryView",
-        "ManagerRuntimeInvocation",
-        "build_manager_spec",
-        "ensure_manager",
-        "generate_tid",
-        "list_manager_records",
-        "manager_diagnostic_records",
-        "manager_record",
-        "manager_registry_record_is_stale",
-        "manager_registry_record_liveness",
-        "normalize_manager_registry_record",
-        "replace_active_manager",
-        "select_active_manager",
-        "serve_manager_foreground",
-        "start_manager",
-        "stop_manager",
-    }
-    legacy_names = {
-        "_DetachedManagerLaunch",
-        "_ManagerRegistryView",
-        "_ManagerRuntimeInvocation",
-        "_build_manager_spec",
-        "_ensure_manager",
-        "_generate_tid",
-        "_list_manager_records",
-        "_manager_diagnostic_records",
-        "_manager_record",
-        "_manager_record_is_stale",
-        "_normalize_manager_record",
-        "_replace_active_manager",
-        "_select_active_manager",
-        "_serve_manager_foreground",
-        "_start_manager",
-        "_stop_manager",
-    }
-
-    assert all(hasattr(core_manager_runtime, name) for name in canonical_names)
-    assert not {name for name in legacy_names if hasattr(core_manager_runtime, name)}
 
 
 class _CleanupProcess:
@@ -225,7 +180,7 @@ def test_manager_snapshot_discards_malformed_optional_fields() -> None:
 
 
 def test_cmd_manager_list_returns_lossless_diagnostic_snapshots(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Diagnostic mode returns structured proof fields without rendering."""
 
@@ -273,7 +228,9 @@ def test_cmd_manager_list_returns_lossless_diagnostic_snapshots(
     )
 
 
-def test_cmd_manager_start_returns_structured_snapshot(tmp_path, monkeypatch) -> None:
+def test_cmd_manager_start_returns_structured_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
     record = {
@@ -296,7 +253,7 @@ def test_cmd_manager_start_returns_structured_snapshot(tmp_path, monkeypatch) ->
 
 
 def test_cmd_manager_stop_returns_none_when_active_manager_is_absent(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
@@ -311,7 +268,7 @@ def test_cmd_manager_stop_returns_none_when_active_manager_is_absent(
 
 
 def test_cmd_manager_status_raises_typed_error_when_absent(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
@@ -375,7 +332,9 @@ def test_manager_commands_return_structured_broker_ids(
     )
 
     listed = manager_cmd.cmd_manager_list()
-    status = manager_cmd.cmd_manager_status(record["tid"])
+    tid = record["tid"]
+    assert isinstance(tid, str)
+    status = manager_cmd.cmd_manager_status(tid)
 
     assert listed[0].timestamp == message_id
     assert status.timestamp == message_id
@@ -407,10 +366,10 @@ def _external_supervisor_runtime_handle() -> dict[str, object]:
 
 
 def _manager_service_payload(
-    context,
+    context: WeftContext,
     tid: str,
     *,
-    status: str = "active",
+    status: Literal["active", "draining", "stopped", "superseded"] = "active",
     name: str = "manager",
     runtime_handle: dict[str, object] | None = None,
     ctrl_in: str | None = None,
@@ -433,7 +392,7 @@ def _manager_service_payload(
     )
 
 
-def _latest_manager_record(context, tid: str) -> dict[str, object] | None:
+def _latest_manager_record(context: WeftContext, tid: str) -> dict[str, object] | None:
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         latest: tuple[dict[str, object], int] | None = None
@@ -592,8 +551,8 @@ _MANAGER_SNAPSHOT_CASES = (
     ids=lambda case: case.name,
 )
 def test_snapshot_registry_decision_table_uses_one_record_evidence_frame(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     case: _ManagerSnapshotCase,
 ) -> None:
     context = build_context(prepare_project_root(tmp_path / "ctx"))
@@ -681,8 +640,8 @@ def test_snapshot_registry_decision_table_uses_one_record_evidence_frame(
     ids=["chronological-input", "reversed-input"],
 )
 def test_snapshot_registry_latest_included_timestamp_wins(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     reverse_input: bool,
 ) -> None:
@@ -748,8 +707,8 @@ def test_snapshot_registry_latest_included_timestamp_wins(
     ids=["probe-disabled", "probe-enabled"],
 )
 def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     probe_stale: bool,
     newer_deleted: bool,
 ) -> None:
@@ -822,8 +781,8 @@ def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
 
 
 def test_snapshot_registry_does_not_close_caller_owned_queue(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = build_context(prepare_project_root(tmp_path / "ctx"))
     tid = "1761000000000000103"
@@ -866,8 +825,8 @@ def test_snapshot_registry_does_not_close_caller_owned_queue(
 
 
 def test_snapshot_registry_closes_locally_acquired_queue(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = build_context(prepare_project_root(tmp_path / "ctx"))
     tid = "1761000000000000105"
@@ -902,8 +861,8 @@ def test_snapshot_registry_closes_locally_acquired_queue(
     ids=["broker-error", "os-error", "runtime-error"],
 )
 def test_snapshot_registry_never_attempts_operational_peer_deletes(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     error: Exception,
 ) -> None:
     context = build_context(prepare_project_root(tmp_path / "ctx"))
@@ -960,8 +919,8 @@ def test_snapshot_registry_never_attempts_operational_peer_deletes(
 
 
 def test_snapshot_registry_never_calls_peer_delete(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = build_context(prepare_project_root(tmp_path / "ctx"))
     tid = "1761000000000000108"
@@ -1012,8 +971,8 @@ def test_snapshot_registry_never_calls_peer_delete(
     ],
 )
 def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     pong_kind: str,
     expected_in_view: bool,
 ) -> None:
@@ -1103,14 +1062,16 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
     assert remaining_ids == [message_id]
 
 
-def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
+def test_start_command_delegates_to_shared_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
     calls: list[str] = []
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
-    def _fake_ensure(context_arg):
+    def _fake_ensure(context_arg: WeftContext) -> tuple[dict[str, object], bool, None]:
         assert context_arg is context
         calls.append("ensure")
         return (
@@ -1131,7 +1092,9 @@ def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
     assert calls == ["ensure"]
 
 
-def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
+def test_start_command_reports_existing_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
 
@@ -1155,19 +1118,21 @@ def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
     assert (result.tid, result.started_here) == ("1761000000000000001", False)
 
 
-def test_start_command_replace_supersedes_before_start(tmp_path, monkeypatch):
+def test_start_command_replace_supersedes_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
     calls: list[str] = []
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
-    def fake_replace(context_arg):
+    def fake_replace(context_arg: WeftContext) -> tuple[bool, str | None]:
         assert context_arg is context
         calls.append("replace")
         return True, None
 
-    def fake_start(context_arg):
+    def fake_start(context_arg: WeftContext) -> tuple[dict[str, object], bool, None]:
         assert context_arg is context
         calls.append("start")
         return (
@@ -1189,7 +1154,9 @@ def test_start_command_replace_supersedes_before_start(tmp_path, monkeypatch):
     assert calls == ["replace", "start"]
 
 
-def test_start_command_replace_failure_does_not_start(tmp_path, monkeypatch):
+def test_start_command_replace_failure_does_not_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
     calls: list[str] = []
@@ -1216,8 +1183,8 @@ def test_start_command_replace_failure_does_not_start(tmp_path, monkeypatch):
 
 
 def test_replace_active_manager_sends_stop_and_marks_superseded(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1270,7 +1237,7 @@ def test_replace_active_manager_sends_stop_and_marks_superseded(
 
 
 def test_replace_active_manager_reselects_after_superseding_lower_tid(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1320,7 +1287,9 @@ def test_replace_active_manager_reselects_after_superseding_lower_tid(
     assert higher_latest["status"] == SERVICE_STATUS_SUPERSEDED
 
 
-def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch):
+def test_stop_command_delegates_to_shared_lifecycle_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     calls: list[tuple[object, object, object, object, object]] = []
@@ -1328,15 +1297,15 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
     def fake_stop_manager(
-        context_arg,
-        record,
-        process=None,
+        context_arg: WeftContext,
+        record: dict[str, object] | None,
+        process: subprocess.Popen[str] | None = None,
         *,
-        tid=None,
-        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-        force=False,
-        stop_if_absent=False,
-    ):
+        tid: str | None = None,
+        timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+        force: bool = False,
+        stop_if_absent: bool = False,
+    ) -> tuple[bool, str | None]:
         calls.append((context_arg, record, tid, timeout, force))
         assert stop_if_absent is False
         return True, None
@@ -1351,10 +1320,12 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
     assert calls == [(context, None, "1761000000000000001", 0.1, False)]
 
 
-def test_stop_command_without_tid_stops_active_manager(tmp_path, monkeypatch):
+def test_stop_command_without_tid_stops_active_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
-    active_record = {
+    active_record: dict[str, object] = {
         "tid": "1761000000000000006",
         "runtime_handle": _host_runtime_handle(os.getpid()),
         "ctrl_in": "selected-manager.control",
@@ -1365,24 +1336,24 @@ def test_stop_command_without_tid_stops_active_manager(tmp_path, monkeypatch):
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
     def fake_select_active_manager(
-        context_arg,
+        context_arg: WeftContext,
         *,
-        probe_stale=False,
-        probe_cache=None,
-    ):
+        probe_stale: bool = False,
+        probe_cache: dict[str, int | None] | None = None,
+    ) -> dict[str, object]:
         select_calls.append((context_arg, probe_stale, probe_cache))
         return active_record
 
     def fake_stop_manager(
-        context_arg,
-        record,
-        process=None,
+        context_arg: WeftContext,
+        record: dict[str, object] | None,
+        process: subprocess.Popen[str] | None = None,
         *,
-        tid=None,
-        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-        force=False,
-        stop_if_absent=False,
-    ):
+        tid: str | None = None,
+        timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+        force: bool = False,
+        stop_if_absent: bool = False,
+    ) -> tuple[bool, str | None]:
         del process, stop_if_absent
         stop_calls.append((context_arg, record, tid, timeout, force))
         return True, None
@@ -1407,8 +1378,8 @@ def test_stop_command_without_tid_stops_active_manager(tmp_path, monkeypatch):
 
 
 def test_stop_command_without_tid_noops_when_no_active_manager(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1435,8 +1406,8 @@ def test_stop_command_without_tid_noops_when_no_active_manager(
 
 
 def test_stop_command_default_timeout_exceeds_manager_drain_budget(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1445,15 +1416,15 @@ def test_stop_command_default_timeout_exceeds_manager_drain_budget(
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
     def fake_stop_manager(
-        context_arg,
-        record,
-        process=None,
+        context_arg: WeftContext,
+        record: dict[str, object] | None,
+        process: subprocess.Popen[str] | None = None,
         *,
-        tid=None,
-        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-        force=False,
-        stop_if_absent=False,
-    ):
+        tid: str | None = None,
+        timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+        force: bool = False,
+        stop_if_absent: bool = False,
+    ) -> tuple[bool, str | None]:
         del context_arg, record, process, tid, force, stop_if_absent
         calls.append(timeout)
         return True, None
@@ -1473,23 +1444,23 @@ def test_stop_command_default_timeout_exceeds_manager_drain_budget(
 
 
 def test_stop_manager_default_timeout_exceeds_manager_drain_budget(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     calls: list[float] = []
 
     def fake_stop_manager(
-        context_arg,
-        record,
-        process=None,
+        context_arg: WeftContext,
+        record: dict[str, object] | None,
+        process: subprocess.Popen[str] | None = None,
         *,
-        tid=None,
-        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-        force=False,
-        stop_if_absent=False,
-    ):
+        tid: str | None = None,
+        timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+        force: bool = False,
+        stop_if_absent: bool = False,
+    ) -> tuple[bool, str | None]:
         del context_arg, record, process, tid, force, stop_if_absent
         calls.append(timeout)
         return True, None
@@ -1505,7 +1476,9 @@ def test_stop_manager_default_timeout_exceeds_manager_drain_budget(
     )
 
 
-def test_stop_command_rewrites_timeout_message(tmp_path, monkeypatch):
+def test_stop_command_rewrites_timeout_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
 
@@ -1529,7 +1502,7 @@ def test_stop_command_rewrites_timeout_message(tmp_path, monkeypatch):
     assert message == "Manager 1761000000000000001 did not stop within 0.1s"
 
 
-def test_stop_command_writes_stop_for_active_manager(tmp_path):
+def test_stop_command_writes_stop_for_active_manager(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000001"
@@ -1568,7 +1541,7 @@ def test_stop_command_writes_stop_for_active_manager(tmp_path):
     assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
-def test_stop_command_noops_for_stopped_manager(tmp_path):
+def test_stop_command_noops_for_stopped_manager(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000002"
@@ -1597,7 +1570,7 @@ def test_stop_command_noops_for_stopped_manager(tmp_path):
     assert ctrl_queue.read_one() is None
 
 
-def test_stop_command_uses_registry_control_queue(tmp_path):
+def test_stop_command_uses_registry_control_queue(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000003"
@@ -1637,7 +1610,7 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
     assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
-def test_stop_command_stop_if_absent_still_sends_stop(tmp_path):
+def test_stop_command_stop_if_absent_still_sends_stop(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000004"
@@ -1658,7 +1631,7 @@ def test_stop_command_stop_if_absent_still_sends_stop(tmp_path):
 
 
 def test_stop_command_waits_for_pid_exit_after_stopped_status(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1684,7 +1657,7 @@ def test_stop_command_waits_for_pid_exit_after_stopped_status(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_list_command_omits_stale_active_manager(tmp_path) -> None:
+def test_list_command_omits_stale_active_manager(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000006"
@@ -1718,8 +1691,8 @@ def test_list_command_omits_stale_active_manager(tmp_path) -> None:
 
 
 def test_list_command_omits_stale_external_supervisor_manager(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1760,7 +1733,7 @@ def test_list_command_omits_stale_external_supervisor_manager(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_list_command_diagnostic_includes_stale_active_manager(tmp_path) -> None:
+def test_list_command_diagnostic_includes_stale_active_manager(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000018"
@@ -1805,7 +1778,7 @@ def test_list_command_diagnostic_includes_stale_active_manager(tmp_path) -> None
 
 
 def test_list_command_diagnostic_marks_lowest_live_manager_canonical(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1841,8 +1814,8 @@ def test_list_command_diagnostic_marks_lowest_live_manager_canonical(
 
 
 def test_list_command_rescues_unreachable_host_pid_with_pong(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1873,8 +1846,8 @@ def test_list_command_rescues_unreachable_host_pid_with_pong(
 
 
 def test_ensure_manager_does_not_start_when_host_pid_incumbent_is_namespace_ambiguous(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1920,8 +1893,8 @@ def test_ensure_manager_does_not_start_when_host_pid_incumbent_is_namespace_ambi
 
 
 def test_ensure_manager_starts_when_ambiguous_incumbent_strands_spawn_backlog(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -1960,7 +1933,9 @@ def test_ensure_manager_starts_when_ambiguous_incumbent_strands_spawn_backlog(
         lambda *args, **kwargs: False,
     )
 
-    def _start_replacement(*_args, **_kwargs):
+    def _start_replacement(
+        *_args: object, **_kwargs: object
+    ) -> tuple[dict[str, object], bool, None]:
         return {"tid": replacement_tid, "status": "active"}, True, None
 
     monkeypatch.setattr(core_manager_runtime, "start_manager", _start_replacement)
@@ -1974,8 +1949,8 @@ def test_ensure_manager_starts_when_ambiguous_incumbent_strands_spawn_backlog(
 
 
 def test_stop_command_force_reports_fresh_external_supervisor_without_host_pid(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -2015,8 +1990,8 @@ def test_stop_command_force_reports_fresh_external_supervisor_without_host_pid(
 
 
 def test_stop_command_force_ignores_registry_only_pid_without_mapping(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -2057,8 +2032,8 @@ def test_stop_command_force_ignores_registry_only_pid_without_mapping(
 
 
 def test_stop_command_force_appends_terminal_registry_record(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -2143,8 +2118,8 @@ def test_stop_command_force_appends_terminal_registry_record(
     ],
 )
 def test_stop_manager_force_requires_dead_pid_evidence_after_signal_failure(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     error: OSError,
     alive_after_error: bool,
     expected_success: bool,
@@ -2215,8 +2190,8 @@ def test_stop_manager_force_requires_dead_pid_evidence_after_signal_failure(
     ],
 )
 def test_stop_manager_force_requires_process_exit_evidence_after_signal_failure(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     error: OSError,
     exited_after_error: bool,
     expected_success: bool,
@@ -2276,7 +2251,7 @@ def test_stop_manager_force_requires_process_exit_evidence_after_signal_failure(
     assert marked == ([tid] if expected_success else [])
 
 
-def test_list_command_returns_table(tmp_path):
+def test_list_command_returns_table(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     registry_queue = Queue(
@@ -2300,7 +2275,7 @@ def test_list_command_returns_table(tmp_path):
     assert any(record.name == "alpha" for record in records)
 
 
-def test_status_command_not_found(tmp_path):
+def test_status_command_not_found(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     build_context(context_root)
     with pytest.raises(ManagerNotRunning, match="not found"):

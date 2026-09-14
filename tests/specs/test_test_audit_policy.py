@@ -62,7 +62,7 @@ def test_broad_unaudited_prefix_exemptions_are_gone() -> None:
 
 
 def test_unaudited_module_allowlist_entries_have_reasons() -> None:
-    assert shared_conftest._UNAUDITED_MODULE_ALLOWLIST_REASONS
+    # Finishing the audit must be allowed to remove the final exemption.
     assert all(
         reason.strip()
         for reason in shared_conftest._UNAUDITED_MODULE_ALLOWLIST_REASONS.values()

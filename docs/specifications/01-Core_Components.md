@@ -35,6 +35,8 @@ See also:
 
 ## Related Plans
 
+- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
+
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md)
@@ -770,7 +772,7 @@ task runner validation in `weft/core/agents/validation.py` and
 `weft/core/runner_validation.py`; plugin loading in `weft/_runner_plugins.py`;
 runner plugin interface in `weft/ext.py`; built-in host runner in
 `weft/core/runners/`; runner completion details in
-`weft/core/runners/outcome.py::RunnerOutcome`; optional first-party runner extensions in
+`weft/ext.py::RunnerOutcome`; optional first-party runner extensions in
 `extensions/weft_docker/weft_docker/plugin.py::get_runner_plugin`,
 `extensions/weft_macos_sandbox/weft_macos_sandbox/plugin.py::get_runner_plugin`,
 and
@@ -889,7 +891,7 @@ _Implementation mapping_: `weft/ext.py::RunnerHandle`;
 `weft/core/tasks/runner.py::TaskRunner.run_with_hooks()` owns the live callback
 seam; `weft/core/tasks/consumer.py` registers callback events, releases joined
 host identities at `_register_outcome_runtime`, and the returned
-`weft/core/runners/outcome.py::RunnerOutcome` owns the completed runtime-handle
+`weft/ext.py::RunnerOutcome` owns the completed runtime-handle
 field;
 `weft/core/runners/host.py::HostTaskRunner.run_with_hooks` owns the host-runner
 publication path;
@@ -977,7 +979,7 @@ _Implementation mapping_: `weft/core/resource_monitor.py`,
 `weft/core/runners/subprocess_runner.py`;
 `weft/commands/tasks.py::format_runner_diagnostics` is the user-facing
 presentation adapter over `weft/core/runner_diagnostics.py::diagnostic_summary`;
-the shared result contract lives in `weft/core/runners/outcome.py`. Session and
+the shared result contract lives in `weft/ext.py::RunnerOutcome`. Session and
 task ownership lives in
 `weft/core/tasks/sessions.py`,
 `weft/core/tasks/consumer.py`. Monitor-owned durable collation is implemented

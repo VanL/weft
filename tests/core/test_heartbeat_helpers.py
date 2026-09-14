@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.typing import record_and_return
 from weft._constants import (
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
@@ -151,7 +152,9 @@ def test_upsert_heartbeat_reuses_live_service_without_second_startup(
     )
     monkeypatch.setattr(
         "weft.core.heartbeat._write_heartbeat_request",
-        lambda context_arg, *, resolved, payload: captured.append(dict(payload)) or 1,
+        lambda context_arg, *, resolved, payload: record_and_return(
+            captured, dict(payload), 1
+        ),
     )
 
     result = upsert_heartbeat(

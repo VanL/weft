@@ -7,30 +7,6 @@ Spec references:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from weft.ext import RunnerOutcome
 
-from weft.core.resource_monitor import ResourceMetrics
-from weft.ext import RunnerHandle
-
-
-@dataclass(slots=True)
-class RunnerOutcome:
-    """Result returned after executing a work item."""
-
-    status: str
-    value: Any | None
-    error: str | None
-    stdout: str | None
-    stderr: str | None
-    returncode: int | None
-    duration: float
-    metrics: ResourceMetrics | None = None
-    runtime_handle: RunnerHandle | None = None
-    diagnostics: dict[str, Any] | None = None
-
-    @property
-    def ok(self) -> bool:
-        """Return whether execution completed successfully."""
-
-        return self.status == "ok"
+__all__ = ["RunnerOutcome"]

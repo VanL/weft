@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import time
 from collections import Counter
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import psutil
 import pytest
 
+from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import CONTROL_KILL
 from weft._exceptions import CommandUsageError, ControlRejected, TaskNotFound
 from weft.commands import events as event_cmd
@@ -29,10 +31,11 @@ from weft.commands.control_convergence import (
 from weft.commands.types import (
     TaskControlFailure,
     TaskControlResult,
+    TaskEvent,
     TaskPingResult,
     TaskSnapshot,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
@@ -51,6 +54,16 @@ from weft.helpers import (
 )
 
 pytestmark = [pytest.mark.shared]
+
+
+@pytest.fixture(autouse=True)
+def isolated_command_context(weft_harness: WeftTestHarness) -> WeftContext:
+    """Real context resolution must never open the caller's working database.
+
+    Control calls may be mocked while their context and TID preflight still
+    use the real broker. Share the standard harness for the whole module.
+    """
+    return weft_harness.context
 
 
 def _public_task_snapshot(tid: str, *, name: str = "demo") -> TaskSnapshot:
@@ -136,13 +149,17 @@ def test_canonical_task_status_watch_returns_typed_event_stream(
 ) -> None:
     tid = "1777000000000000124"
     snapshot = _public_task_snapshot(tid)
-    events = (event for event in ())
+    event = TaskEvent(
+        tid=tid, event_type="running", timestamp=123, payload={"status": "running"}
+    )
+    events: Iterator[TaskEvent] = iter((event,))
     monkeypatch.setattr(task_cmd, "task_snapshot", lambda *args, **kwargs: snapshot)
     monkeypatch.setattr(event_cmd, "follow_task_events", lambda *args, **kwargs: events)
 
     stream = task_cmd.cmd_task_status(tid, watch=True)
+    assert not isinstance(stream, TaskSnapshot)
     assert stream is not events
-    assert list(stream) == []
+    assert list(stream) == [event]
 
 
 def test_canonical_task_ping_returns_structured_result(
@@ -177,7 +194,7 @@ def test_canonical_task_ping_returns_structured_result(
     ("command", "expected"), [("stop", "stop_task"), ("kill", "kill_task")]
 )
 def test_canonical_task_control_returns_selected_ids_and_snapshots(
-    command: str,
+    command: Literal["stop", "kill"],
     expected: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -244,7 +261,9 @@ def test_canonical_task_control_attempts_every_selected_task_and_reports_failure
     )
 
 
-def test_canonical_task_control_rejects_mixed_explicit_and_sweep_scope() -> None:
+def test_canonical_task_control_rejects_mixed_explicit_and_sweep_scope(
+    weft_harness: WeftTestHarness,
+) -> None:
     with pytest.raises(CommandUsageError, match="cannot be combined"):
         task_cmd._task_control_result(
             "stop",
@@ -253,6 +272,7 @@ def test_canonical_task_control_rejects_mixed_explicit_and_sweep_scope() -> None
             all_tasks=True,
             pattern=None,
             context_path=None,
+            runtime_context=weft_harness.context,
         )
 
 
@@ -263,10 +283,15 @@ def test_stop_task_rejects_unknown_task_before_sending_control(
     monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(task_cmd, "task_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+
+    def _record_sent(tids: Sequence[str], **_kwargs: object) -> int:
+        sent.extend(tids)
+        return len(tids)
+
     monkeypatch.setattr(
         task_cmd,
         "stop_tasks",
-        lambda tids, **_kwargs: sent.extend(tids) or len(tids),
+        _record_sent,
     )
 
     with pytest.raises(TaskNotFound, match="not found"):
@@ -289,10 +314,15 @@ def test_stop_task_rejects_terminal_task_without_sending_control(
         ),
     )
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
+
+    def _record_sent(tids: Sequence[str], **_kwargs: object) -> int:
+        sent.extend(tids)
+        return len(tids)
+
     monkeypatch.setattr(
         task_cmd,
         "stop_tasks",
-        lambda tids, **_kwargs: sent.extend(tids) or len(tids),
+        _record_sent,
     )
 
     with pytest.raises(ControlRejected, match=f"Task {tid} already completed"):
@@ -315,10 +345,15 @@ def test_kill_task_allows_terminal_known_task_to_reach_cleanup(
         ),
     )
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
+
+    def _record_sent(tids: Sequence[str], **_kwargs: object) -> int:
+        sent.extend(tids)
+        return len(tids)
+
     monkeypatch.setattr(
         task_cmd,
         "kill_tasks",
-        lambda tids, **_kwargs: sent.extend(tids) or len(tids),
+        _record_sent,
     )
 
     task_cmd.kill_task(tid)
@@ -351,7 +386,7 @@ def test_kill_task_reports_terminal_task_without_runtime_residue_honestly(
 @pytest.mark.parametrize("operation_name", ["stop_task", "kill_task"])
 def test_single_task_control_precheck_preserves_live_context(
     monkeypatch: pytest.MonkeyPatch,
-    weft_harness,
+    weft_harness: WeftTestHarness,
     operation_name: str,
 ) -> None:
     tid = "1777000000000000999"
@@ -404,7 +439,7 @@ def test_terminal_completion_race_in_stop_sweep_is_reported_as_rejected(
 
 def test_terminal_snapshot_status_fallback_preserves_live_context(
     monkeypatch: pytest.MonkeyPatch,
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     tid = "1777000000000000999"
     observed: dict[str, object] = {}
@@ -414,7 +449,7 @@ def test_terminal_snapshot_status_fallback_preserves_live_context(
         lambda *_args, **_kwargs: None,
     )
 
-    def fake_status(*_args: object, **kwargs: object):
+    def fake_status(*_args: object, **kwargs: object) -> None:
         observed.update(kwargs)
 
     monkeypatch.setattr(task_cmd, "task_status", fake_status)
@@ -426,7 +461,7 @@ def test_terminal_snapshot_status_fallback_preserves_live_context(
 
 def test_resolve_tid_preserves_live_context(
     monkeypatch: pytest.MonkeyPatch,
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     observed: dict[str, object] = {}
 
@@ -492,6 +527,7 @@ def test_canonical_task_control_empty_explicit_selection_is_success(
 
 def test_canonical_task_control_records_invalid_explicit_tid_and_continues(
     monkeypatch: pytest.MonkeyPatch,
+    weft_harness: WeftTestHarness,
 ) -> None:
     attempted: list[str] = []
     valid_tid = "1777000000000000999"
@@ -509,6 +545,7 @@ def test_canonical_task_control_records_invalid_explicit_tid_and_continues(
         all_tasks=False,
         pattern=None,
         context_path=None,
+        runtime_context=weft_harness.context,
     )
 
     assert attempted == [valid_tid]
@@ -520,6 +557,7 @@ def test_canonical_task_control_records_invalid_explicit_tid_and_continues(
 
 def test_canonical_task_control_preserves_duplicate_invalid_requests(
     monkeypatch: pytest.MonkeyPatch,
+    weft_harness: WeftTestHarness,
 ) -> None:
     monkeypatch.setattr(
         task_cmd,
@@ -534,6 +572,7 @@ def test_canonical_task_control_preserves_duplicate_invalid_requests(
             all_tasks=False,
             pattern=None,
             context_path=None,
+            runtime_context=weft_harness.context,
         )
 
     assert [failure.tid for failure in exc_info.value.failures] == ["bad", "bad"]
@@ -570,14 +609,6 @@ def test_canonical_task_tid_returns_full_tid_and_rejects_ambiguous_selection(
     assert task_cmd.cmd_task_tid(tid="00128") == full_tid
     with pytest.raises(CommandUsageError, match="exactly one"):
         task_cmd.cmd_task_tid(tid="00128", pid=12)
-
-
-def test_task_snapshot_interfaces_drop_inert_process_parameter() -> None:
-    assert "include_process" not in inspect.signature(task_cmd.task_snapshot).parameters
-    assert (
-        "include_process"
-        not in inspect.signature(task_cmd.watch_task_status).parameters
-    )
 
 
 class MonitorStoreReadFailure(Exception):
@@ -816,7 +847,9 @@ def test_control_surface_wait_timeout_preserves_three_clock_precedence(
 
 
 class _FakeQueueChangeMonitor:
-    def __init__(self, queues, *, config=None) -> None:
+    def __init__(
+        self, queues: Sequence[Queue], *, config: Config | None = None
+    ) -> None:
         del config
         self.queue_names = [queue.name for queue in queues]
         self.queue_persistence = [
@@ -861,7 +894,9 @@ def _runtime_handle(
 
 
 def _make_taskspec(
-    tid: str, *, function_target: str = "tests.tasks.sample_targets:simulate_work"
+    tid: str,
+    *,
+    function_target: str = "tests.tasks.sample_targets:simulate_work",
 ) -> TaskSpec:
     return TaskSpec(
         tid=tid,
@@ -879,7 +914,7 @@ def _make_taskspec(
     )
 
 
-def _write_logged_pipeline_task(ctx, tid: str) -> None:
+def _write_logged_pipeline_task(ctx: WeftContext, tid: str) -> None:
     log_queue = ctx.queue("weft.log.tasks", persistent=False)
     log_queue.write(
         json.dumps(
@@ -914,7 +949,7 @@ def _write_logged_pipeline_task(ctx, tid: str) -> None:
     )
 
 
-def test_terminal_snapshot_reads_outbox_without_consuming(tmp_path) -> None:
+def test_terminal_snapshot_reads_outbox_without_consuming(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -931,7 +966,7 @@ def test_terminal_snapshot_reads_outbox_without_consuming(tmp_path) -> None:
     assert outbox.peek_one() is not None
 
 
-def test_terminal_snapshot_reads_only_typed_terminal_ctrl_out(tmp_path) -> None:
+def test_terminal_snapshot_reads_only_typed_terminal_ctrl_out(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -961,7 +996,7 @@ def test_terminal_snapshot_reads_only_typed_terminal_ctrl_out(tmp_path) -> None:
     assert ctrl_out.peek_many(limit=3)
 
 
-def test_ack_terminal_snapshot_deletes_exact_message_only(tmp_path) -> None:
+def test_ack_terminal_snapshot_deletes_exact_message_only(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -1108,7 +1143,14 @@ def test_task_ping_returns_probe_payload(
     tid = str(time.time_ns())
     calls: list[dict[str, Any]] = []
 
-    def _fake_probe(ctx_arg, *, tid, ctrl_in_name, ctrl_out_name, timeout):
+    def _fake_probe(
+        ctx_arg: WeftContext,
+        *,
+        tid: str,
+        ctrl_in_name: str,
+        ctrl_out_name: str,
+        timeout: float,
+    ) -> ControlProbeResult:
         calls.append(
             {
                 "ctx": ctx_arg,
@@ -1198,6 +1240,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
             ControlConvergenceState,
             ControlConvergenceEvidence,
             ControlConvergenceAction,
+            ControlConvergenceState,
         ],
         ...,
     ] = (
@@ -1206,6 +1249,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
             "command_sent",
             ControlConvergenceEvidence(command=CONTROL_KILL),
             "wait",
+            "command_sent",
         ),
         (
             "kill terminal after command",
@@ -1215,6 +1259,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 terminal_status="killed",
             ),
             "accept_terminal",
+            "terminal_observed",
         ),
         (
             "stop terminal after ack",
@@ -1224,6 +1269,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 terminal_status="cancelled",
             ),
             "accept_terminal",
+            "terminal_observed",
         ),
         (
             "kill terminal after runner escalation",
@@ -1234,6 +1280,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 runner_fallback_attempted=True,
             ),
             "accept_terminal",
+            "terminal_observed",
         ),
         (
             "kill terminal after host escalation",
@@ -1245,6 +1292,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 host_fallback_attempted=True,
             ),
             "accept_terminal",
+            "terminal_observed",
         ),
         (
             "runtime dead after command",
@@ -1254,6 +1302,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 runtime_dead_after_control=True,
             ),
             "accept_dead_runtime",
+            "runtime_dead_after_control",
         ),
         (
             "runtime dead after accepted",
@@ -1263,6 +1312,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 runtime_dead_after_control=True,
             ),
             "accept_dead_runtime",
+            "runtime_dead_after_control",
         ),
         (
             "runtime dead after runner escalation",
@@ -1273,6 +1323,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 runner_fallback_attempted=True,
             ),
             "accept_dead_runtime",
+            "runtime_dead_after_control",
         ),
         (
             "runtime dead after host escalation",
@@ -1284,18 +1335,21 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 host_fallback_attempted=True,
             ),
             "accept_dead_runtime",
+            "runtime_dead_after_control",
         ),
         (
             "ack waits",
             "command_sent",
             ControlConvergenceEvidence(command=CONTROL_KILL, ack_seen=True),
             "wait",
+            "accepted",
         ),
         (
             "accepted ack waits",
             "accepted",
             ControlConvergenceEvidence(command=CONTROL_KILL, ack_seen=True),
             "wait",
+            "accepted",
         ),
         (
             "command wait expires to runner escalation",
@@ -1306,6 +1360,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 observation_budget_expired=True,
             ),
             "escalate_runner",
+            "escalating_runner",
         ),
         (
             "runner escalation expires to host escalation",
@@ -1316,6 +1371,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 observation_budget_expired=True,
             ),
             "escalate_host",
+            "escalating_host",
         ),
         (
             "host escalation expires unknown",
@@ -1327,6 +1383,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 observation_budget_expired=True,
             ),
             "report_unknown",
+            "unknown",
         ),
         (
             "stop runner escalation expires unknown",
@@ -1337,15 +1394,17 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
                 observation_budget_expired=True,
             ),
             "report_unknown",
+            "unknown",
         ),
     )
     seen_transitions: set[str] = set()
     seen_states: set[ControlConvergenceState] = set()
     seen_actions: set[ControlConvergenceAction] = set()
 
-    for label, current, evidence, expected_action in cases:
+    for label, current, evidence, expected_action, expected_target in cases:
         decision = reduce_control_convergence(current, evidence)
         assert decision.action == expected_action, label
+        assert decision.target == expected_target, label
         seen_transitions.add(decision.transition_id)
         seen_states.update((decision.source, decision.target))
         seen_actions.add(decision.action)
@@ -1377,7 +1436,7 @@ def test_control_convergence_does_not_accept_kill_ack_or_wrong_terminal() -> Non
 
 
 def _wait_for_registered_worker_pid(
-    ctx, tid: str, timeout: float = 15.0, *, ready_path: Path
+    ctx: WeftContext, tid: str, timeout: float = 15.0, *, ready_path: Path
 ) -> int | None:
     deadline = time.monotonic() + timeout
     mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
@@ -1432,12 +1491,14 @@ def _launch_running_task(
         tid,
         function_target="tests.tasks.sample_targets:signal_ready_and_wait_for_release",
     )
+    assert spec.tid is not None
     process = launch_task_process(
         Consumer,
         ctx.broker_target,
         spec,
         config=ctx.config,
     )
+    assert process.pid is not None
     handed_off = False
     try:
         inbox = ctx.queue(spec.io.inputs["inbox"], persistent=True)
@@ -1529,8 +1590,10 @@ def test_running_task_setup_failure_reaps_launched_process(
             _cleanup_running_task(process, workers[0] if workers else None)
 
 
-def test_stop_tasks_terminates_active_process_tree(tmp_path) -> None:
+def test_stop_tasks_terminates_active_process_tree(tmp_path: Path) -> None:
     spec, process, worker = _launch_running_task(tmp_path)
+    assert spec.tid is not None
+    assert process.pid is not None
     try:
         stopped = task_cmd.stop_tasks([spec.tid], context_path=tmp_path)
         assert stopped == 1
@@ -1571,7 +1634,9 @@ def test_await_control_surface_uses_queue_monitor(
         ]
     )
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _FakeQueueChangeMonitor:
         monitor = _FakeQueueChangeMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
@@ -1583,7 +1648,9 @@ def test_await_control_surface_uses_queue_monitor(
     )
     observed_contexts: list[object] = []
 
-    def fake_status(*_args: object, **kwargs: object):
+    def fake_status(
+        *_args: object, **kwargs: object
+    ) -> task_cmd.system_cmd.TaskSnapshot | None:
         observed_contexts.append(kwargs.get("context"))
         return next(snapshots)
 
@@ -1688,7 +1755,9 @@ def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(
     taskspecs = iter([initial_taskspec, late_taskspec])
     created_monitors: list[_FakeQueueChangeMonitor] = []
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _FakeQueueChangeMonitor:
         monitor = _FakeQueueChangeMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
@@ -1791,7 +1860,9 @@ def test_await_control_surface_public_grace_outlives_expired_kill_ack(
                 clock.value = 2.2
             return False
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _ScriptedMonitor:
         monitor = _ScriptedMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
@@ -1873,7 +1944,9 @@ def test_await_control_surface_closes_partial_replacement_on_open_failure(
     taskspecs = iter([initial_taskspec, late_taskspec])
     created_monitors: list[_FakeQueueChangeMonitor] = []
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _FakeQueueChangeMonitor:
         monitor = _FakeQueueChangeMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
@@ -2028,8 +2101,10 @@ def test_await_control_surface_accepts_terminal_ctrl_out_without_log_replay(
     assert snapshot.metadata == {"kind": "test"}
 
 
-def test_kill_tasks_terminates_active_process_tree(tmp_path) -> None:
+def test_kill_tasks_terminates_active_process_tree(tmp_path: Path) -> None:
     spec, process, worker = _launch_running_task(tmp_path)
+    assert spec.tid is not None
+    assert process.pid is not None
     try:
         killed = task_cmd.kill_tasks([spec.tid], context_path=tmp_path)
         assert killed >= 1
@@ -2050,7 +2125,7 @@ def test_stop_tasks_uses_runner_handle_when_available(
     calls: list[tuple[str, dict[str, Any], float]] = []
 
     class FakeRunnerPlugin:
-        def stop(self, handle, *, timeout: float = 2.0) -> bool:
+        def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             calls.append(("stop", handle.to_dict(), timeout))
             return True
 
@@ -2114,7 +2189,7 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
     plugin_calls: list[tuple[str, dict[str, Any], float]] = []
 
     class FakeRunnerPlugin:
-        def stop(self, handle, *, timeout: float = 2.0) -> bool:
+        def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             plugin_calls.append(("stop", handle.to_dict(), timeout))
             return True
 
@@ -2177,7 +2252,7 @@ def test_kill_tasks_uses_runner_handle_when_available(
     calls: list[tuple[str, dict[str, Any], float]] = []
 
     class FakeRunnerPlugin:
-        def kill(self, handle, *, timeout: float = 2.0) -> bool:
+        def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             calls.append(("kill", handle.to_dict(), timeout))
             return True
 
@@ -2243,7 +2318,7 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
         host_pids=[33333],
         metadata={"scope": "test"},
     )
-    mapping_payload = {
+    mapping_payload: dict[str, object] = {
         "short": tid[-6:],
         "full": tid,
         "runner": "fake",
@@ -2253,11 +2328,13 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
     }
 
     class FakeRunnerPlugin:
-        def kill(self, handle, *, timeout: float = 2.0) -> bool:
+        def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             calls.append(("kill", handle.to_dict(), timeout))
             return True
 
-    def _running_surface(_ctx, _tid, *, timeout=0.0):
+    def _running_surface(
+        _ctx: WeftContext, _tid: str, *, timeout: float = 0.0
+    ) -> tuple[dict[str, object], task_cmd.system_cmd.TaskSnapshot]:
         del timeout
         return mapping_payload, task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
@@ -2283,16 +2360,23 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
     )
     monkeypatch.setattr(task_cmd, "_await_control_surface", _running_surface)
     monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: pid == 33333)
+
     # PID 33333 is a stand-in, not a real process, so it carries no genuine
     # create_time. Simulate a verified identity match (as a real host-pid
     # mapping entry would have) so the force-kill guard signals it -- this
     # keeps the test's intent (force-kill fires while the runner-observed
     # PID still lives) independent of the create-time verification added to
     # close the reused-PID defect.
+    def _record_force_calls(
+        pid: int, create_time: float | None, *, timeout: float, kill: bool
+    ) -> bool:
+        force_calls.append(pid)
+        return True
+
     monkeypatch.setattr(
         task_cmd,
         "terminate_verified_process_tree",
-        lambda pid, create_time, *, timeout, kill: force_calls.append(pid) or True,
+        _record_force_calls,
     )
 
     killed = task_cmd.kill_tasks([tid], context_path=root)
@@ -2543,7 +2627,7 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
     assert killed == 1
 
 
-def _latest_mapping_entry(ctx, tid: str) -> dict[str, Any] | None:
+def _latest_mapping_entry(ctx: WeftContext, tid: str) -> dict[str, Any] | None:
     mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     latest: dict[str, Any] | None = None
     latest_timestamp = -1
@@ -2556,7 +2640,7 @@ def _latest_mapping_entry(ctx, tid: str) -> dict[str, Any] | None:
 
 
 def test_force_kill_task_processes_kills_pid_with_matching_create_time(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """A host-pid mapping entry whose create_time matches the live process is
     force-killed (Spec: [CC-3.2]). `_force_kill_task_processes` is the
@@ -2565,6 +2649,8 @@ def test_force_kill_task_processes_kills_pid_with_matching_create_time(
     already ran, so it must independently guard with `pid_matches_create_time`.
     """
     spec, process, worker = _launch_running_task(tmp_path)
+    assert spec.tid is not None
+    assert process.pid is not None
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     try:
@@ -2588,12 +2674,14 @@ def test_force_kill_task_processes_kills_pid_with_matching_create_time(
         _cleanup_running_task(process, worker)
 
 
-def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
+def test_force_kill_task_processes_refuses_stale_create_time(tmp_path: Path) -> None:
     """A mapping entry with a mismatched create_time must not be signaled --
     the command refuses to signal that PID and flows into the same outcome a
     dead task takes today, instead of killing a PID that may have been
     reused by an unrelated process (Spec: [CC-3.2])."""
     spec, process, worker = _launch_running_task(tmp_path)
+    assert spec.tid is not None
+    assert process.pid is not None
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     try:
@@ -2642,10 +2730,17 @@ def test_force_kill_task_processes_records_attempt_while_verified_pid_lingers(
         ),
     }
     kill_calls: list[int] = []
+
+    def _record_kill_calls(
+        pid: int, create_time: float | None, *, timeout: float, kill: bool
+    ) -> bool:
+        kill_calls.append(pid)
+        return True
+
     monkeypatch.setattr(
         task_cmd,
         "terminate_verified_process_tree",
-        lambda pid, create_time, *, timeout, kill: kill_calls.append(pid) or True,
+        _record_kill_calls,
     )
     monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: True)
 
@@ -2656,10 +2751,12 @@ def test_force_kill_task_processes_records_attempt_while_verified_pid_lingers(
 
 
 def test_force_kill_task_processes_refuses_unknown_create_time(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """A live PID without an exact recorded identity grants no control [CC-3.2]."""
     spec, process, worker = _launch_running_task(tmp_path)
+    assert spec.tid is not None
+    assert process.pid is not None
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     try:
@@ -2692,10 +2789,12 @@ def test_force_kill_task_processes_refuses_unknown_create_time(
 
 
 def test_stop_and_kill_via_fallback_guard_is_defensive_and_unreachable_today(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Fallback controls a live exact host identity through its plugin [CC-3.2]."""
     spec, process, worker = _launch_running_task(tmp_path)
+    assert spec.tid is not None
+    assert process.pid is not None
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     try:

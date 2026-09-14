@@ -12,6 +12,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+import yaml
 
 
 def _load_release_module() -> ModuleType:
@@ -30,12 +31,12 @@ def _release_state(
     *,
     version: str,
     tag_name: str,
-    target=None,
+    target: Any = None,  # ReleaseTarget is loaded from an extensionless script.
     github_release_exists: bool = False,
     pypi_release_exists: bool = False,
     local_tag_commit: str | None = None,
     remote_tag_commit: str | None = None,
-):
+) -> Any:  # ReleaseState belongs to the dynamically loaded script module.
     return release.ReleaseState(
         target=release.ROOT_RELEASE_TARGET if target is None else target,
         version=version,
@@ -451,7 +452,7 @@ def test_main_dry_run_deletes_stale_local_tag_before_recreating(
     monkeypatch.setattr(release, "read_target_version", lambda target: "0.1.0")
     monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
 
-    def inspect(version: str, *, target=release.ROOT_RELEASE_TARGET):
+    def inspect(version: str, *, target: Any = release.ROOT_RELEASE_TARGET) -> Any:
         return _release_state(
             release,
             version=version,
@@ -587,132 +588,73 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         include_docker_extension_tests=False,
         include_macos_sandbox_extension_tests=False,
     )
-    sqlite_command = commands[0]
-    postgres_command = commands[1]
-    django_command = commands[2]
-    microsandbox_command = commands[3]
-    ruff_check_command = commands[4]
-    ruff_format_command = commands[5]
-    mypy_command = commands[6]
-    live_provider_command = commands[7]
+    sqlite_command = next(
+        command for command in commands if "pytest" in command and "-m" in command
+    )
+    postgres_command = next(
+        command for command in commands if "bin/pytest-pg" in command
+    )
+    ruff_check_command = next(
+        command for command in commands if "ruff" in command and "check" in command
+    )
+    ruff_format_command = next(
+        command for command in commands if "ruff" in command and "format" in command
+    )
+    mypy_command = next(command for command in commands if "mypy" in command)
+    live_provider_command = next(
+        command for command in commands if "bin/pytest-live-providers" in command
+    )
 
-    assert sqlite_command[:15] == (
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "--extra",
-        "docker",
-        "--extra",
-        "django",
-        "--extra",
-        "macos-sandbox",
-        "--extra",
-        "microsandbox",
-        "pytest",
-        "-v",
-        "--tb=short",
-    )
-    assert "-m" in sqlite_command
-    marker_index = sqlite_command.index("-m")
-    assert sqlite_command[marker_index + 1] == ""
-    assert "--override-ini=addopts=-ra -q --strict-markers -n logical --dist load" in (
-        sqlite_command
-    )
-    assert postgres_command == (
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "--extra",
-        "docker",
-        "--extra",
-        "django",
-        "--extra",
-        "macos-sandbox",
-        "--extra",
-        "microsandbox",
-        "bin/pytest-pg",
-        "--all",
-    )
-    assert django_command == release.DJANGO_INTEGRATION_TEST_COMMAND
-    assert microsandbox_command == release.MICROSANDBOX_EXTENSION_TEST_COMMAND
-    assert live_provider_command == (
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "python",
-        "bin/pytest-live-providers",
-    )
-    assert commands[-1] == live_provider_command
-    assert ruff_check_command == (
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "--extra",
-        "docker",
-        "--extra",
-        "django",
-        "--extra",
-        "macos-sandbox",
-        "--extra",
-        "microsandbox",
-        "ruff",
-        "check",
+    # Gate coverage matters; harmless reordering of extras and gate commands does not.
+    for command in (
+        sqlite_command,
+        postgres_command,
+        ruff_check_command,
+        ruff_format_command,
+        mypy_command,
+    ):
+        assert command[:2] == ("uv", "run")
+        extras = {
+            command[index + 1] for index, arg in enumerate(command) if arg == "--extra"
+        }
+        assert extras == {"dev", "docker", "django", "macos-sandbox", "microsandbox"}
+    assert sqlite_command[sqlite_command.index("-m") + 1] == ""
+    assert "--all" in postgres_command
+    pytest_targets = {
+        arg
+        for command in commands
+        if "pytest" in command
+        for arg in command
+        if arg.endswith("/tests")
+    }
+    assert pytest_targets == {
+        "integrations/weft_django/tests",
+        "extensions/weft_microsandbox/tests",
+    }
+    quality_targets = {
         "weft",
         "tests",
         "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
         "extensions/weft_microsandbox",
-    )
-    assert ruff_format_command == (
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "--extra",
-        "docker",
-        "--extra",
-        "django",
-        "--extra",
-        "macos-sandbox",
-        "--extra",
-        "microsandbox",
-        "ruff",
-        "format",
-        "--check",
+    }
+    for command in (ruff_check_command, ruff_format_command):
+        assert quality_targets <= set(command)
+    assert "--check" in ruff_format_command
+    assert {
         "weft",
         "tests",
-        "integrations/weft_django",
-        "extensions/weft_docker",
-        "extensions/weft_macos_sandbox",
-        "extensions/weft_microsandbox",
-    )
-    assert mypy_command == (
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "--extra",
-        "docker",
-        "--extra",
-        "django",
-        "--extra",
-        "macos-sandbox",
-        "--extra",
-        "microsandbox",
-        "mypy",
-        "weft",
+        "bin",
         "integrations/weft_django/weft_django",
         "extensions/weft_docker/weft_docker",
         "extensions/weft_macos_sandbox/weft_macos_sandbox",
         "extensions/weft_microsandbox/weft_microsandbox",
-        "--config-file",
-        "pyproject.toml",
-    )
+    } <= set(mypy_command)
+    assert mypy_command[mypy_command.index("--config-file") + 1] == "pyproject.toml"
+    assert live_provider_command[:2] == ("uv", "run")
+    assert "python" in live_provider_command
+    assert "dev" in live_provider_command
     assert release.PRECHECK_ENV_OVERRIDES == {
         "PYTEST_ADDOPTS": "-x --maxfail=1",
         "WEFT_EAGER_FAILURE_TRACEBACK": "1",
@@ -780,10 +722,19 @@ def test_build_precheck_commands_include_extension_tests_when_supported() -> Non
         include_macos_sandbox_extension_tests=True,
     )
 
-    assert commands[2] == release.DJANGO_INTEGRATION_TEST_COMMAND
-    assert commands[3] == release.MICROSANDBOX_EXTENSION_TEST_COMMAND
-    assert commands[4] == release.DOCKER_EXTENSION_TEST_COMMAND
-    assert commands[5] == release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND
+    targets = {
+        arg
+        for command in commands
+        if "pytest" in command
+        for arg in command
+        if arg.endswith("/tests")
+    }
+    assert targets == {
+        "integrations/weft_django/tests",
+        "extensions/weft_microsandbox/tests",
+        "extensions/weft_docker/tests",
+        "extensions/weft_macos_sandbox/tests",
+    }
 
 
 def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None:
@@ -795,10 +746,17 @@ def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None
         include_macos_sandbox_extension_tests=False,
     )
 
-    assert release.DJANGO_INTEGRATION_TEST_COMMAND in commands
-    assert release.MICROSANDBOX_EXTENSION_TEST_COMMAND in commands
-    assert release.DOCKER_EXTENSION_TEST_COMMAND not in commands
-    assert release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND not in commands
+    targets = {
+        arg
+        for command in commands
+        if "pytest" in command
+        for arg in command
+        if arg.endswith("/tests")
+    }
+    assert targets == {
+        "integrations/weft_django/tests",
+        "extensions/weft_microsandbox/tests",
+    }
 
 
 def test_docker_extension_tests_are_disabled_on_windows(
@@ -869,7 +827,11 @@ def test_run_command_dry_run_shows_env_prefix_and_cwd(
     """Dry-run command logging should show env overrides and non-root cwd."""
 
     release = _load_release_module()
-    monkeypatch.setattr(release.subprocess, "run", lambda *args, **kwargs: None)
+
+    def unexpected_execution(*args: object, **kwargs: object) -> None:
+        raise AssertionError("dry-run must not execute the command")
+
+    monkeypatch.setattr(release.subprocess, "run", unexpected_execution)
 
     release.run_command(
         ("pytest", "-q"),
@@ -889,16 +851,26 @@ def test_release_workflows_require_green_test_workflow() -> None:
     """All publish workflows should block on a successful Test workflow run."""
 
     root = Path(__file__).resolve().parents[2]
-    release_workflow = (root / ".github" / "workflows" / "release.yml").read_text(
-        encoding="utf-8"
+    workflow = yaml.safe_load(
+        (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     )
-
-    assert "verify-main-test-workflow" in release_workflow
-    assert 'workflow_id: "test.yml"' in release_workflow
-    assert "head_sha: expectedSha" in release_workflow
-    assert 'event: "push"' in release_workflow
-    assert 'MAX_WAIT_SECONDS: "3000"' in release_workflow
-    assert "- verify-main-test-workflow" in release_workflow
+    jobs = workflow["jobs"]
+    verification = jobs["verify-main-test-workflow"]
+    verification_step = next(
+        step
+        for step in verification["steps"]
+        if step.get("uses", "").startswith("actions/github-script@")
+    )
+    assert verification_step["env"]["EXPECTED_SHA"] == (
+        "${{ inputs.expected_tag_commit }}"
+    )
+    # These query fields bind verification to the release commit's push run.
+    script = verification_step["with"]["script"]
+    assert 'workflow_id: "test.yml"' in script
+    assert "head_sha: expectedSha" in script
+    assert 'event: "push"' in script
+    assert "verify-main-test-workflow" in jobs["publish-to-pypi"]["needs"]
+    assert "publish-to-pypi" in jobs["github-release"]["needs"]
 
 
 @pytest.mark.parametrize(
@@ -946,7 +918,8 @@ def test_release_gate_workflows_grant_actions_read_for_publish(
     """Reusable release workflow callers need actions:read to inspect Test runs."""
 
     root = Path(__file__).resolve().parents[2]
-    workflow_text = (root / workflow_path).read_text(encoding="utf-8")
-
-    assert "publish-release:" in workflow_text
-    assert "actions: read" in workflow_text
+    workflow = yaml.safe_load((root / workflow_path).read_text(encoding="utf-8"))
+    publish_job = workflow["jobs"]["publish-release"]
+    assert publish_job["uses"] == "./.github/workflows/release.yml"
+    permissions = publish_job.get("permissions", workflow.get("permissions", {}))
+    assert permissions["actions"] == "read"

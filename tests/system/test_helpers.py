@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -10,9 +11,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Generator, Iterator
 from io import StringIO
 from pathlib import Path
-from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -52,7 +53,7 @@ from weft.helpers import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_config() -> Any:
+def _reset_config() -> Iterator[None]:
     """Ensure helpers observe fresh configuration for every test."""
     reload_config()
     yield
@@ -109,6 +110,7 @@ def test_iter_queue_entries_closes_underlying_generator_on_early_close() -> None
     entries = iter_queue_entries(queue)  # type: ignore[arg-type]
 
     assert next(entries) == ("payload", 123)
+    assert isinstance(entries, Generator)
     entries.close()
 
     assert queue.raw_entries.closed is True
@@ -140,7 +142,7 @@ def test_iter_queue_entries_strict_mode_preserves_default_and_reraises() -> None
 
     assert list(iter_queue_entries(queue)) == []  # type: ignore[arg-type]
     with pytest.raises(BrokerError, match="mapping history unavailable"):
-        iter_queue_entries(queue, strict=True)  # type: ignore[arg-type,call-arg]
+        iter_queue_entries(queue, strict=True)  # type: ignore[arg-type]
 
 
 def test_resolve_broker_max_message_size_uses_weft_owned_default(
@@ -655,7 +657,7 @@ class TestFixtureCleanupDiagnostics:
             patch("tests.conftest.Queue", side_effect=[first_queue, second_queue]),
             caplog.at_level(logging.WARNING, logger="tests.conftest"),
         ):
-            fixture = queue_factory.__wrapped__(harness)
+            fixture = inspect.unwrap(queue_factory)(harness)
             make_queue = next(fixture)
             make_queue("first")
             make_queue("second")
@@ -679,7 +681,7 @@ class TestFixtureCleanupDiagnostics:
             patch("tests.conftest.Queue", side_effect=[first_queue, second_queue]),
             caplog.at_level(logging.WARNING, logger="tests.conftest"),
         ):
-            fixture = broker_env.__wrapped__(harness)
+            fixture = inspect.unwrap(broker_env)(harness)
             _, make_queue = next(fixture)
             make_queue("first")
             make_queue("second")
@@ -703,12 +705,12 @@ class TestFixtureCleanupDiagnostics:
 
         with (
             patch(
-                "weft.core.tasks.Consumer",
+                "tests.conftest.Consumer",
                 side_effect=[first_task, second_task],
             ),
             caplog.at_level(logging.WARNING, logger="tests.conftest"),
         ):
-            fixture = task_factory.__wrapped__((object(), Mock()))
+            fixture = inspect.unwrap(task_factory)((object(), Mock()))
             make_task = next(fixture)
             make_task(Mock())
             make_task(Mock())
@@ -719,16 +721,20 @@ class TestFixtureCleanupDiagnostics:
         second_task.stop.assert_called_once_with()
         self._assert_one_safe_warning(caplog, "Failed to stop test task")
 
+    @pytest.mark.parametrize(
+        "stderr", ["partial stderr", b"partial stderr", b"partial \xff stderr", None]
+    )
     def test_run_cli_timeout_keeps_primary_failure_when_harness_dump_fails(
         self,
         tmp_path: Path,
+        stderr: str | bytes | None,
     ) -> None:
         harness = Mock()
         harness.dump_debug_state.side_effect = RuntimeError("contains secret")
         timeout_error = subprocess.TimeoutExpired(
             ["weft", "status"],
             1.0,
-            stderr="partial stderr",
+            stderr=stderr,
         )
 
         with (
@@ -745,6 +751,15 @@ class TestFixtureCleanupDiagnostics:
 
         assert exc_info.value is timeout_error
         notes = getattr(exc_info.value, "__notes__", [])
+        expected_stderr = (
+            stderr.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes)
+            else stderr
+        )
+        if expected_stderr:
+            assert f"partial stderr:\n{expected_stderr}" in notes
+        else:
+            assert not any(note.startswith("partial stderr:") for note in notes)
         assert any("WeftTestHarness dump failed." in note for note in notes)
         assert all("contains secret" not in note for note in notes)
 

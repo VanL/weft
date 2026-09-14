@@ -44,7 +44,7 @@ pg = [
     "simplebroker-pg>=4.2.1",
 ]
 docker = [
-    "weft-docker>=0.9.73",
+    "weft-docker>=0.9.74",
 ]
 django = [
     "weft-django>=0.9.34",
@@ -53,23 +53,23 @@ django-channels = [
     "weft-django[channels]>=0.9.34",
 ]
 macos-sandbox = [
-    "weft-macos-sandbox>=0.6.2",
+    "weft-macos-sandbox>=0.6.3",
 ]
 microsandbox = [
-    "weft-microsandbox>=0.5.3; platform_system != 'Windows'",
+    "weft-microsandbox>=0.5.4; platform_system != 'Windows'",
 ]
 all = [
     "simplebroker-pg>=4.2.1",
-    "weft-docker>=0.9.73",
+    "weft-docker>=0.9.74",
     "weft-django>=0.9.34",
-    "weft-macos-sandbox>=0.6.2",
-    "weft-microsandbox>=0.5.3; platform_system != 'Windows'",
+    "weft-macos-sandbox>=0.6.3",
+    "weft-microsandbox>=0.5.4; platform_system != 'Windows'",
 ]
 dev = [
     "simplebroker-pg>=4.2.1",
-    "weft-docker>=0.9.73",
-    "weft-macos-sandbox>=0.6.2",
-    "weft-microsandbox>=0.5.3; platform_system != 'Windows'",
+    "weft-docker>=0.9.74",
+    "weft-macos-sandbox>=0.6.3",
+    "weft-microsandbox>=0.5.4; platform_system != 'Windows'",
     "hypothesis>=6.168.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
@@ -128,7 +128,7 @@ exclude = [
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
-addopts = "-ra -q --strict-markers -m 'not slow' -n logical --maxprocesses 8 --dist load"
+addopts = "-ra -q --strict-markers -m 'not slow' -n logical --maxprocesses 12 --dist load"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "shared: backend-agnostic tests that should pass across supported backends",

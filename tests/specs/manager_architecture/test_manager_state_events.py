@@ -7,6 +7,8 @@ import time
 
 import pytest
 
+from simplebroker import Queue
+from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -21,7 +23,7 @@ def unique_tid() -> str:
     return str(time.time_ns())
 
 
-def _drain(queue) -> list[str]:
+def _drain(queue: Queue) -> list[str]:
     items: list[str] = []
     while True:
         value = queue.read_one()
@@ -31,7 +33,7 @@ def _drain(queue) -> list[str]:
     return items
 
 
-def test_manager_emits_spawning_events(broker_env, unique_tid: str) -> None:
+def test_manager_emits_spawning_events(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     _drain(log_queue)
@@ -57,11 +59,14 @@ def test_manager_emits_spawning_events(broker_env, unique_tid: str) -> None:
 
     manager = Manager(db_path, spec)
 
-    records = [json.loads(item) for item in _drain(log_queue)]
-    events = [record.get("event") for record in records]
-
-    assert "task_spawning" in events
-    assert "task_started" in events
-
-    manager.stop(join=False)
-    manager.cleanup()
+    try:
+        records = [json.loads(item) for item in _drain(log_queue)]
+        events = [
+            record.get("event") for record in records if record.get("tid") == unique_tid
+        ]
+        assert "task_spawning" in events
+        assert "task_started" in events
+        assert events.index("task_spawning") < events.index("task_started")
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()

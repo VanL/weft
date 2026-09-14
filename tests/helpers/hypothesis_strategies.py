@@ -37,8 +37,8 @@ def invalid_taskspec_tid_strings() -> SearchStrategy[str]:
     )
     non_digits = st.text(
         alphabet=st.characters(
-            blacklist_categories=("Cs",),
-            blacklist_characters=("\x00",),
+            exclude_categories=["Cs"],
+            exclude_characters=["\x00"],
         ),
         min_size=1,
         max_size=24,
@@ -61,8 +61,8 @@ def json_scalars() -> SearchStrategy[object]:
         ),
         st.text(
             alphabet=st.characters(
-                blacklist_categories=("Cs",),
-                blacklist_characters=("\x00",),
+                exclude_categories=["Cs"],
+                exclude_characters=["\x00"],
             ),
             max_size=32,
         ),
@@ -79,8 +79,8 @@ def json_values(max_leaves: int = 8) -> SearchStrategy[object]:
             st.dictionaries(
                 st.text(
                     alphabet=st.characters(
-                        blacklist_categories=("Cs",),
-                        blacklist_characters=("\x00",),
+                        exclude_categories=["Cs"],
+                        exclude_characters=["\x00"],
                     ),
                     min_size=1,
                     max_size=16,

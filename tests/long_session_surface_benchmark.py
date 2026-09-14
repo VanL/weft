@@ -25,7 +25,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -40,8 +40,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if __package__ in {None, ""}:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    from tests.conftest import run_cli  # type: ignore[no-redef]
-    from tests.helpers.long_session_utils import (  # type: ignore[no-redef]
+    from tests.conftest import run_cli
+    from tests.helpers.long_session_utils import (
         ALIAS_INTERVAL,
         BULK_ROUNDS,
         INTERACTIVE_INTERVAL,
@@ -55,10 +55,10 @@ if __package__ in {None, ""}:
         write_command_script,
         write_persistent_spec,
     )
-    from tests.helpers.test_backend import (  # type: ignore[no-redef]
+    from tests.helpers.test_backend import (
         POSTGRES_TEST_BACKEND,
     )
-    from tests.helpers.weft_harness import WeftTestHarness  # type: ignore[no-redef]
+    from tests.helpers.weft_harness import WeftTestHarness
 else:
     from .conftest import run_cli
     from .helpers.long_session_utils import (
@@ -219,7 +219,7 @@ class BenchmarkResult:
 
 
 @contextmanager
-def _backend_env(backend: str, pg_dsn: str | None) -> dict[str, str]:
+def _backend_env(backend: str, pg_dsn: str | None) -> Iterator[dict[str, str]]:
     """Provide both process env and helper env for one backend."""
 
     keys = ("BROKER_TEST_BACKEND", "WEFT_PG_TEST_DSN")
@@ -250,7 +250,7 @@ def _api_call_environment(
     env: Mapping[str, str],
     *,
     stdin: str | None = None,
-) -> None:
+) -> Iterator[None]:
     """Temporarily patch env and stdin for in-process API calls."""
 
     previous_env = {key: os.environ.get(key) for key in [*env.keys(), "WEFT_CONTEXT"]}
@@ -284,11 +284,11 @@ def _api_call_environment(
             os.environ.pop("PYTHONIOENCODING", None)
         else:
             os.environ["PYTHONIOENCODING"] = previous_encoding
-        for key, value in previous_env.items():
-            if value is None:
+        for key, prior_value in previous_env.items():
+            if prior_value is None:
                 os.environ.pop(key, None)
             else:
-                os.environ[key] = value
+                os.environ[key] = prior_value
 
 
 class CliSurface:
@@ -729,7 +729,9 @@ def _status_payload(
     all_tasks: bool = False,
 ) -> dict[str, Any]:
     _rc, out = surface.status_json(workdir, env, all_tasks=all_tasks)
-    return json.loads(out)
+    payload = json.loads(out)
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _assert_single_active_manager(

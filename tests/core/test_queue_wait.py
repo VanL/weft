@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable, Sequence
 
 import pytest
 
 from simplebroker import Config, Queue
+from tests.helpers.typing import BrokerEnv
 from weft.core import queue_wait
 from weft.core.queue_wait import QueueChangeMonitor
 
@@ -39,15 +41,17 @@ class RaisingWaiter(FakeWaiter):
 
 
 def test_queue_change_monitor_uses_multi_queue_waiter(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, make_queue = broker_env
     queues = [make_queue("monitor.one"), make_queue("monitor.two")]
     fake_waiter = FakeWaiter()
     received: dict[str, object] = {}
 
-    def fake_create(created_queues, *, stop_event):
+    def fake_create(
+        created_queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> FakeWaiter:
         received["queues"] = created_queues
         received["stop_event"] = stop_event
         return fake_waiter
@@ -69,8 +73,8 @@ def test_queue_change_monitor_uses_multi_queue_waiter(
 
 
 def test_queue_change_monitor_falls_back_to_queue_watchers(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, make_queue = broker_env
     queues = [make_queue("fallback.monitor.one"), make_queue("fallback.monitor.two")]
@@ -82,12 +86,12 @@ def test_queue_change_monitor_falls_back_to_queue_watchers(
         def __init__(
             self,
             queue: Queue,
-            _handler,
+            _handler: Callable[[str], None],
             *,
-            stop_event,
+            stop_event: threading.Event,
             peek: bool,
             after_timestamp: int,
-            config,
+            config: Config,
         ) -> None:
             del _handler, stop_event, peek, after_timestamp
             created.append(queue)
@@ -119,8 +123,8 @@ def test_queue_change_monitor_falls_back_to_queue_watchers(
 
 
 def test_queue_change_monitor_close_is_idempotent(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, make_queue = broker_env
     fake_waiter = FakeWaiter()
@@ -139,8 +143,8 @@ def test_queue_change_monitor_close_is_idempotent(
 
 
 def test_queue_change_monitor_wakes_once_when_waiter_raises(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, make_queue = broker_env
     fake_waiter = RaisingWaiter()
@@ -155,6 +159,12 @@ def test_queue_change_monitor_wakes_once_when_waiter_raises(
     try:
         assert fake_waiter.entered.wait(timeout=1.0)
         assert monitor.wait(timeout=1.0) is True
+        # Producer closure makes the absence of a second wake meaningful.
+        thread = monitor._monitor_thread
+        assert thread is not None
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+        assert monitor.wait(timeout=0.0) is False
     finally:
         monitor.close()
 
@@ -162,8 +172,8 @@ def test_queue_change_monitor_wakes_once_when_waiter_raises(
 
 
 def test_queue_change_monitor_does_not_consume_messages(
-    broker_env,
-    monkeypatch,
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, make_queue = broker_env
     queue = make_queue("monitor.consume")

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from simplebroker.ext import InvalidConfigError
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
@@ -36,8 +37,6 @@ from weft.core.pruning.retention import (
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def custom_processor(
@@ -80,21 +79,6 @@ def test_supervised_reducer_observes_and_counts_every_scanned_row() -> None:
     assert observed == [
         (WEFT_GLOBAL_LOG_QUEUE, message, timestamp) for message, timestamp in rows[:4]
     ]
-
-
-def test_task_monitor_old_tasks_module_path_is_removed() -> None:
-    old_module = REPO_ROOT / "weft" / "core" / "tasks" / "task_monitor.py"
-    old_import = "weft.core.tasks." + "task_monitor"
-    old_reexport = "from weft.core.tasks import " + "TaskMonitor"
-    offenders: list[str] = []
-    for root_name in ("weft", "tests"):
-        for path in (REPO_ROOT / root_name).rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if old_import in text or old_reexport in text:
-                offenders.append(path.relative_to(REPO_ROOT).as_posix())
-
-    assert not old_module.exists()
-    assert offenders == []
 
 
 def serve_log_events(capsys: pytest.CaptureFixture[str]) -> list[dict[str, object]]:
@@ -390,7 +374,7 @@ def test_runtime_config_rejects_removed_task_monitor_config(name: str) -> None:
 
 
 def test_task_monitor_operational_log_emits_config_and_cycle(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = dict(weft_harness.context.config)
@@ -429,9 +413,9 @@ def test_task_monitor_operational_log_emits_config_and_cycle(
 
 
 def test_task_monitor_operational_log_warns_for_unhealthy_external_log_on_startup(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     capsys: pytest.CaptureFixture[str],
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     external_path = tmp_path / "external-target"
     external_path.mkdir()
@@ -477,9 +461,9 @@ def test_task_monitor_operational_log_warns_for_unhealthy_external_log_on_startu
 
 
 def test_task_monitor_operational_log_warns_when_external_log_regresses_on_cycle(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     capsys: pytest.CaptureFixture[str],
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     external_path = tmp_path / "task-lifetime.jsonl"
     config = dict(weft_harness.context.config)
@@ -524,7 +508,7 @@ def test_task_monitor_operational_log_warns_when_external_log_regresses_on_cycle
 
 
 def test_task_monitor_operational_log_off_is_silent(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = dict(weft_harness.context.config)
@@ -553,7 +537,7 @@ def test_task_monitor_operational_log_off_is_silent(
 
 @pytest.mark.parametrize("warning_write_fails", [False, True])
 def test_task_monitor_operational_log_failure_warns_without_exposing_error(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
     warning_write_fails: bool,
 ) -> None:
@@ -647,7 +631,7 @@ def test_runtime_config_accepts_jsonl_then_delete_when_reporting_is_configured()
     ],
 )
 def test_runtime_config_rejects_jsonl_then_delete_without_reporting_requirements(
-    tmp_path,
+    tmp_path: Path,
     overrides: dict[str, str],
     match: str,
 ) -> None:
@@ -701,7 +685,7 @@ def test_task_log_seen_candidate_is_stable_for_same_row() -> None:
 
 
 def test_cycle_snapshot_reduces_large_task_log_by_latest_tid(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     ctx = weft_harness.context
     target_tid = "1778084345905438720"
@@ -750,7 +734,7 @@ def test_cycle_snapshot_reduces_large_task_log_by_latest_tid(
 
 
 def test_cycle_snapshot_keeps_wazuh_like_failure_owned_by_task(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     ctx = weft_harness.context
     tid = "1778084345905438721"
@@ -781,7 +765,7 @@ def test_cycle_snapshot_keeps_wazuh_like_failure_owned_by_task(
 
 
 def test_cycle_snapshot_reports_result_without_terminal_without_deleting(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     ctx = weft_harness.context
     tid = "1778084345905438722"
@@ -812,7 +796,7 @@ def test_cycle_snapshot_reports_result_without_terminal_without_deleting(
 
 
 def test_cycle_snapshot_reports_claimed_outbox_as_recovery_diagnostic(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     ctx = weft_harness.context
     tid = "1778084345905438723"
@@ -844,7 +828,7 @@ def test_cycle_snapshot_reports_claimed_outbox_as_recovery_diagnostic(
 
 
 def test_cycle_snapshot_reports_nonterminal_completed_state_as_weft_conflict(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     ctx = weft_harness.context
     tid = "1778084345905438724"
@@ -874,7 +858,7 @@ def test_cycle_snapshot_reports_nonterminal_completed_state_as_weft_conflict(
 
 
 def test_canonical_retention_prune_sees_superseded_rows_across_monitor_batches(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     ctx = weft_harness.context
     target_tid = "1778084345905438729"

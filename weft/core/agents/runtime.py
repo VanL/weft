@@ -18,28 +18,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
 from weft.core.taskspec import AgentSection
+from weft.ext import NormalizedAgentMessage, NormalizedAgentWorkItem
 
 from .templates import render_agent_template
 from .tools import ResolvedAgentTool, resolve_agent_tools
-
-
-@dataclass(frozen=True, slots=True)
-class NormalizedAgentMessage:
-    """Structured message preserved at the core agent boundary."""
-
-    role: str
-    content: Any
-
-
-@dataclass(frozen=True, slots=True)
-class NormalizedAgentWorkItem:
-    """Normalized one-shot agent work request."""
-
-    content: str | tuple[str | NormalizedAgentMessage, ...]
-    instructions: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    tool_allow: tuple[str, ...] | None = None
-    tool_deny: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

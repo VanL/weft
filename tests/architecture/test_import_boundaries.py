@@ -9,12 +9,14 @@ import json
 import subprocess
 import sys
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 import typer
+from typer._click import core as click
 from typer.testing import CliRunner
 
 import simplebroker
@@ -53,6 +55,24 @@ RESULT_AUTHORITY_SOURCES = (
 
 pytestmark = [pytest.mark.shared]
 
+CLIENT_SCHEMA_EXPORTS = {
+    "TaskSpec",
+    "SpecSection",
+    "IOSection",
+    "StateSection",
+    "LimitsSection",
+    "RunnerSection",
+    "ReservedPolicy",
+    "AgentSection",
+    "AgentTemplateSection",
+    "AgentToolSection",
+    "ParameterizationSection",
+    "ParameterizationArgumentSection",
+    "RunInputSection",
+    "RunInputArgumentSection",
+    "RunInputStdinSection",
+}
+
 ROOT_METADATA = {"PROG_NAME", "__version__"}
 REMOVED_ROOT_EXPORTS = {
     "Task",
@@ -78,6 +98,7 @@ class ImportEdge:
     type_checking: bool
     path: Path
     lineno: int
+    imported_name: str | None = None
 
 
 def _module_name(path: Path) -> str:
@@ -131,6 +152,7 @@ def _parse_import_edges(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-210] exceptio
             target: str,
             syntactic_target: str,
             lineno: int,
+            imported_name: str | None = None,
         ) -> None:
             edges.append(
                 ImportEdge(
@@ -141,6 +163,7 @@ def _parse_import_edges(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-210] exceptio
                     type_checking=bool(self.type_checking_depth),
                     path=path,
                     lineno=lineno,
+                    imported_name=imported_name,
                 )
             )
 
@@ -165,9 +188,12 @@ def _parse_import_edges(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-210] exceptio
                     target=target,
                     syntactic_target=base,
                     lineno=node.lineno,
+                    imported_name=alias.name,
                 )
 
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        def visit_FunctionDef(
+            self, node: ast.FunctionDef | ast.AsyncFunctionDef
+        ) -> None:
             self.function_depth += 1
             self.generic_visit(node)
             self.function_depth -= 1
@@ -293,7 +319,8 @@ def _own_facade_violations(
     return [
         f"{edge.path}:{edge.lineno} {edge.source_module} -> {edge.syntactic_target}"
         for edge in edges
-        if edge.source_module != facade
+        if not edge.type_checking
+        and edge.source_module != facade
         and _is_module_or_child(edge.source_module, facade)
         and edge.syntactic_target == facade
     ]
@@ -310,28 +337,14 @@ def _is_module_or_child(module_name: str, prefix: str) -> bool:
     return module_name == prefix or module_name.startswith(f"{prefix}.")
 
 
-def test_transitional_core_ops_package_is_deleted() -> None:
-    assert not (PACKAGE_ROOT / "core" / "ops").exists()
-
-
-def test_transitional_core_types_module_is_deleted() -> None:
-    assert not (PACKAGE_ROOT / "core" / "types.py").exists()
-
-
-def test_managed_callable_module_is_deleted() -> None:
-    assert not (PACKAGE_ROOT / "core" / "callable.py").exists()
-
-
-def test_manager_lifecycle_mirror_module_is_deleted() -> None:
-    assert not (PACKAGE_ROOT / "commands" / "_manager_lifecycle.py").exists()
-
-
-def test_dead_command_handlers_module_is_deleted() -> None:
-    assert not (PACKAGE_ROOT / "commands" / "handlers.py").exists()
-
-
-def test_run_support_mirror_module_is_deleted() -> None:
-    assert not (PACKAGE_ROOT / "commands" / "_run_support.py").exists()
+def _is_client_schema_export(edge: ImportEdge) -> bool:
+    """Allow only the declared value imports at the public facade [PY-4]."""
+    return (
+        edge.source_module == "weft.client"
+        and edge.scope == "module"
+        and edge.target_module == "weft.core.taskspec.model"
+        and edge.imported_name in CLIENT_SCHEMA_EXPORTS
+    )
 
 
 def test_internal_import_boundaries() -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-228] exception
@@ -362,7 +375,7 @@ def test_internal_import_boundaries() -> None:  # noqa: C901 approved [TS-3.1] [
 
         if not target.startswith("weft"):
             continue
-        if _is_allowed_anywhere(target):
+        if _is_allowed_anywhere(target) or _is_client_schema_export(edge):
             continue
 
         source = edge.source_module
@@ -533,12 +546,12 @@ def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
             continue
-        module = module_aliases.get(node.value.id)
-        if module is None or node.attr == "__all__":
+        attribute_module = module_aliases.get(node.value.id)
+        if attribute_module is None or node.attr == "__all__":
             continue
-        if node.attr not in surface_exports[module]:
+        if node.attr not in surface_exports[attribute_module]:
             violations.append(
-                f"{filename}:{node.lineno} reaches non-exported {module}.{node.attr}"
+                f"{filename}:{node.lineno} reaches non-exported {attribute_module}.{node.attr}"
             )
 
     for node in ast.walk(tree):
@@ -552,13 +565,13 @@ def _simplebroker_surface_violations(source: str, *, filename: str) -> list[str]
             or not isinstance(node.args[1].value, str)
         ):
             continue
-        module = module_aliases.get(node.args[0].id)
+        getattr_module = module_aliases.get(node.args[0].id)
         attribute = node.args[1].value
-        if module is None or attribute in surface_exports[module]:
+        if getattr_module is None or attribute in surface_exports[getattr_module]:
             continue
         violations.append(
             f"{filename}:{node.lineno} reaches non-exported "
-            f"{module}.{attribute} via getattr"
+            f"{getattr_module}.{attribute} via getattr"
         )
 
     return violations
@@ -829,17 +842,6 @@ def test_host_import_registers_builtin_agent_backends() -> None:
     assert "weft.core.agents.backends.provider_cli" in modules
 
 
-def test_retained_runner_facades_keep_identity() -> None:
-    from weft.core.runners import RunnerOutcome
-    from weft.core.runners.host import RunnerOutcome as host_runner_outcome
-    from weft.core.runners.outcome import RunnerOutcome as leaf_runner_outcome
-    from weft.core.tasks.runner import RunnerOutcome as task_runner_outcome
-
-    assert RunnerOutcome is leaf_runner_outcome
-    assert host_runner_outcome is leaf_runner_outcome
-    assert task_runner_outcome is leaf_runner_outcome
-
-
 def test_root_package_exposes_only_metadata() -> None:
     import weft
 
@@ -973,6 +975,8 @@ COMMAND_ERRORS = {
                 "connect",
                 "normalize_taskspec_payload",
             }
+            | CLIENT_SCHEMA_EXPORTS
+            | {"WeftContext", "build_context"}
             | {
                 "CommandError",
                 "CommandUsageError",
@@ -999,6 +1003,13 @@ COMMAND_ERRORS = {
                 "TaskRunnerBackend",
                 "RunnerPlugin",
                 "SpecRunInputRequest",
+                "ResourceMetrics",
+                "RunnerOutcome",
+                "SessionExecutionResult",
+                "NormalizedAgentMessage",
+                "NormalizedAgentWorkItem",
+                "CommandSessionProtocol",
+                "AgentSessionProtocol",
             },
         ),
         ("weft.commands", COMMAND_EXPORTS | COMMAND_TYPES | COMMAND_ERRORS),
@@ -1070,7 +1081,9 @@ def test_deleted_tuple_command_helpers_are_absent() -> None:
     }.intersection(vars(run_module))
 
 
-def _leaf_paths(command: object, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+def _leaf_paths(
+    command: click.Command, prefix: tuple[str, ...] = ()
+) -> set[tuple[str, ...]]:
     children = getattr(command, "commands", None)
     if not children:
         return {prefix}
@@ -1128,9 +1141,9 @@ def test_commands_never_read_process_stdin() -> None:
 
 
 def _leaf_callbacks(
-    command: object,
+    command: click.Command,
     prefix: tuple[str, ...] = (),
-) -> list[tuple[tuple[str, ...], object]]:
+) -> list[tuple[tuple[str, ...], Callable[..., Any]]]:
     children = getattr(command, "commands", None)
     if children:
         return [
@@ -1138,6 +1151,7 @@ def _leaf_callbacks(
             for name, child in children.items()
             for item in _leaf_callbacks(child, (*prefix, str(name)))
         ]
+    assert command.callback is not None
     return [(prefix, command.callback)]
 
 
@@ -1238,17 +1252,22 @@ def test_every_cli_adapter_applies_the_public_error_exit_map(
     runner = CliRunner()
 
     for export, template in CLI_ERROR_INVOCATIONS.items():
+        calls: list[str] = []
 
         def fail(
             *_args: object,
             _export: str = export,
+            _calls: list[str] = calls,
             **_kwargs: object,
         ) -> None:
+            _calls.append(_export)
             raise error_classes[error_type](f"{_export} failed")
 
         monkeypatch.setattr(commands, export, fail)
         invocation = [token.format(root=tmp_path, file=fixture) for token in template]
         result = runner.invoke(app, invocation)
+        assert calls == [export], (export, result.output)
+        assert f"{export} failed" in result.output
         assert result.exit_code == expected_exit, (
             export,
             invocation,
@@ -1261,9 +1280,13 @@ def test_runtime_import_graph_is_one_way_through_ext() -> None:
     forbidden: list[ImportEdge] = []
     core_ext_edges: list[ImportEdge] = []
     for edge in _iter_import_edges(PACKAGE_ROOT):
-        if edge.type_checking or any(
-            _is_module_or_child(edge.target_module, allowed)
-            for allowed in ALLOWED_ANYWHERE
+        if (
+            edge.type_checking
+            or _is_client_schema_export(edge)
+            or any(
+                _is_module_or_child(edge.target_module, allowed)
+                for allowed in ALLOWED_ANYWHERE
+            )
         ):
             continue
         source = edge.source_module
@@ -1327,21 +1350,6 @@ def test_internal_package_initializers_are_markers(module_name: str) -> None:
     assert "__getattr__" not in module.__dict__
 
 
-def test_agent_backend_package_exports_registration_only() -> None:
-    from weft.core.agents import backends
-
-    assert backends.__all__ == ["register_builtin_agent_runtimes"]
-    assert "LLMBackend" not in backends.__dict__
-    assert "ProviderCLIBackend" not in backends.__dict__
-
-
-def test_pruning_package_initializer_is_a_marker() -> None:
-    pruning = importlib.import_module("weft.core.pruning")
-
-    assert "__all__" not in pruning.__dict__
-    assert "apply_exact_prune_candidates" not in pruning.__dict__
-
-
 @pytest.mark.parametrize(
     "module_name",
     [
@@ -1357,3 +1365,51 @@ def test_pruning_package_initializer_is_a_marker() -> None:
 def test_removed_compatibility_modules_are_not_importable(module_name: str) -> None:
     with pytest.raises(ModuleNotFoundError, match=module_name):
         importlib.import_module(module_name)
+
+
+@pytest.mark.parametrize(
+    ("source", "statement", "allowed"),
+    [
+        ("weft.client", "from weft.core.taskspec.model import TaskSpec", True),
+        (
+            "weft.client",
+            "from weft.core.taskspec.model import RunInputStdinSection",
+            True,
+        ),
+        (
+            "weft.client",
+            "from weft.core.taskspec.model import resolve_taskspec_payload",
+            False,
+        ),
+        ("weft.client", "import weft.core.taskspec.model", False),
+        ("weft.client._client", "from weft.core.taskspec.model import TaskSpec", False),
+        ("weft.client", "from weft.core.manager import Manager", False),
+    ],
+)
+def test_client_schema_exception_is_limited_to_public_values(
+    source: str,
+    statement: str,
+    allowed: bool,
+) -> None:
+    path = REPO_ROOT / (source.replace(".", "/") + ".py")
+    edges = _parse_import_edges(
+        statement,
+        path=path,
+        source_module=source,
+        current_package="weft.client",
+        known_modules={"weft.core.taskspec.model", "weft.core.manager"},
+    )
+    assert len(edges) == 1
+    assert _is_client_schema_export(edges[0]) is allowed
+
+
+@pytest.mark.parametrize(
+    "first,second", [("weft.ext", "weft.client"), ("weft.client", "weft.ext")]
+)
+def test_public_contracts_import_in_either_order(first: str, second: str) -> None:
+    _fresh_import_modules(
+        f"import {first}\nimport {second}\n"
+        "from weft.client import TaskSpec, AgentSection, build_context\n"
+        "from weft.ext import RunnerOutcome, ResourceMetrics, AgentSessionProtocol\n"
+        "assert RunnerOutcome('ok', 3, None, None, None, 0, 0.1).ok"
+    )

@@ -362,7 +362,9 @@ def test_persistent_stream_output_is_not_realtime_completion(tmp_path: Path) -> 
         assert continued.payload["data"] == "gamma"
         assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 3
     finally:
-        iterator.close()
+        close = getattr(iterator, "close", None)
+        assert callable(close)
+        close()
 
 
 def test_staggered_task_terminal_replaces_wrapper_lost_verdict(
@@ -478,7 +480,9 @@ def test_final_stream_frame_alone_is_not_realtime_completion(tmp_path: Path) -> 
         assert continued.payload["data"] == "beta"
         assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 2
     finally:
-        iterator.close()
+        close = getattr(iterator, "close", None)
+        assert callable(close)
+        close()
 
 
 def _publish_after_initial_materialization(
@@ -637,7 +641,9 @@ def test_realtime_route_refresh_preserves_unchanged_queue_cursor(
         assert len(_peek_all(ctx, default_outbox, persistent=True)) == 1
         assert len(_peek_all(ctx, default_control, persistent=True)) == 1
     finally:
-        iterator.close()
+        close = getattr(iterator, "close", None)
+        assert callable(close)
+        close()
 
 
 @pytest.mark.parametrize("failure", [None, "outbox", "control", "monitor"])
@@ -722,7 +728,9 @@ def test_realtime_rebind_releases_subscriptions(
             with pytest.raises(RuntimeError, match="injected rebind failure"):
                 list(iterator)
     finally:
-        iterator.close()
+        close = getattr(iterator, "close", None)
+        assert callable(close)
+        close()
     assert len(monitors) == (2 if failure is None else 1)
     assert {id(owner) for owner in monitors} == closed_monitors
     assert {id(handle) for handle in opened} == closed

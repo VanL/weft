@@ -23,12 +23,11 @@ def test_github_release_uploads_only_python_distributions() -> None:
     upload_step = next(
         step
         for step in github_release_steps
-        if step["name"] == "Create GitHub Release and upload artifacts"
+        if step.get("uses", "").startswith("softprops/action-gh-release@")
     )
 
     files = upload_step["with"]["files"].splitlines()
 
-    assert files == ["dist/*.tar.gz", "dist/*.whl"]
-    assert "dist/*" not in files
+    assert set(files) == {"dist/*.tar.gz", "dist/*.whl"}
     assert "id-token" not in github_release_job["permissions"]
     assert all("sigstore" not in step.get("uses", "") for step in github_release_steps)

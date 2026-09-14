@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import io
+from typing import Never
 
 import pytest
 
+from tests.helpers.typing import record_and_return
 from weft.core import serve_log
 from weft.helpers import tid_short_form
 
@@ -49,7 +51,7 @@ def test_emit_serve_log_record_suppresses_unserializable_diagnostic(
     monkeypatch.setattr(serve_log.sys, "stderr", stderr)
 
     class ExplodingRecord(dict[str, str]):
-        def items(self):
+        def items(self) -> Never:
             raise RuntimeError("secret record contents")
 
     serve_log.emit_serve_log_record(ExplodingRecord(secret="must-not-leak"))
@@ -79,7 +81,7 @@ def test_emit_serve_log_record_warns_without_record_data_when_stderr_write_fails
     monkeypatch.setattr(
         serve_log.os,
         "write",
-        lambda fd, payload: warnings.append((fd, payload)) or len(payload),
+        lambda fd, payload: record_and_return(warnings, (fd, payload), len(payload)),
     )
 
     serve_log.emit_serve_log_record({"secret": "must-not-leak"})

@@ -7,13 +7,16 @@ import os
 import re
 import threading
 import time
-from typing import get_args
+from collections.abc import Callable, Iterator
+from typing import Any, Protocol, cast, get_args
 
 import pytest
 
+from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from tests.helpers.queue_payloads import terminal_envelopes
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.typing import BrokerEnv, TaskFactory
 from tests.tasks import sample_targets as targets  # noqa: F401
 from weft import helpers as weft_helpers
 from weft._constants import (
@@ -32,6 +35,7 @@ from weft.core import process_title
 from weft.core.control_messages import encode_control_message
 from weft.core.manager import Manager
 from weft.core.task_state import task_state_queue_name
+from weft.core.tasks.base import BaseTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import tid_short_form
@@ -81,7 +85,7 @@ def build_function_spec(
     )
 
 
-def drain_queue(queue) -> list[str]:
+def drain_queue(queue: Queue) -> list[str]:
     messages: list[str] = []
     while True:
         value = queue.read_one()
@@ -91,7 +95,15 @@ def drain_queue(queue) -> list[str]:
     return messages
 
 
-def drive_task_until(task, predicate, *, timeout: float = 5.0) -> None:
+class _DrivenTask(Protocol):
+    def process_once(self) -> None: ...
+    def wait_for_activity(self, *, timeout: float) -> None: ...
+    def _has_pending_worker_results(self) -> bool: ...
+
+
+def drive_task_until(
+    task: _DrivenTask, predicate: Callable[[], bool], *, timeout: float = 5.0
+) -> None:
     drive_until(
         predicate,
         bool,
@@ -100,9 +112,13 @@ def drive_task_until(task, predicate, *, timeout: float = 5.0) -> None:
         timeout=timeout,
         pending_work=(task._has_pending_worker_results,),
         diagnostics=lambda: {
-            "status": task.taskspec.state.status,
-            "should_stop": task.should_stop,
-            "worker_snapshot": task._worker_activity_snapshot(),
+            "status": task.taskspec.state.status
+            if isinstance(task, BaseTask)
+            else None,
+            "should_stop": task.should_stop if isinstance(task, BaseTask) else None,
+            "worker_snapshot": task._worker_activity_snapshot()
+            if isinstance(task, BaseTask)
+            else None,
         },
     )
 
@@ -139,7 +155,9 @@ def test_drive_task_until_applies_ready_result_after_wall_deadline(
     assert task.process_calls == 2
 
 
-def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
+def test_tid_mapping_written(
+    broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
+) -> None:
     _db_path, make_queue = broker_env
     mapping_queue = make_queue(task_state_queue_name(unique_tid))
     drain_queue(mapping_queue)  # clear any previous messages
@@ -167,9 +185,9 @@ def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
 
 
 def test_tid_mapping_includes_metadata_role(
-    broker_env,
-    task_factory,
-    unique_tid,
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
 ) -> None:
     _db_path, make_queue = broker_env
     mapping_queue = make_queue(task_state_queue_name(unique_tid))
@@ -186,7 +204,7 @@ def test_tid_mapping_includes_metadata_role(
 
 
 def test_tid_mapping_records_runtime_identity_from_start_hooks(
-    broker_env, task_factory, unique_tid
+    broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
 ) -> None:
     _db_path, make_queue = broker_env
     mapping_queue = make_queue(task_state_queue_name(unique_tid))
@@ -222,9 +240,13 @@ def test_tid_mapping_records_runtime_identity_from_start_hooks(
         timeout=20.0 if os.name == "nt" else 10.0,
         pending_work=(task._has_pending_worker_results,),
         diagnostics=lambda: {
-            "status": task.taskspec.state.status,
-            "should_stop": task.should_stop,
-            "worker_snapshot": task._worker_activity_snapshot(),
+            "status": task.taskspec.state.status
+            if isinstance(task, BaseTask)
+            else None,
+            "should_stop": task.should_stop if isinstance(task, BaseTask) else None,
+            "worker_snapshot": task._worker_activity_snapshot()
+            if isinstance(task, BaseTask)
+            else None,
         },
     )
 
@@ -238,13 +260,17 @@ def test_tid_mapping_records_runtime_identity_from_start_hooks(
     assert "managed_pids" not in runtime_record
 
 
-def _forbid_mapping_history_reads(monkeypatch, queue_type):
+def _forbid_mapping_history_reads(
+    monkeypatch: pytest.MonkeyPatch, queue_type: type[Queue]
+) -> None:
     """Make any mapping-history read fail loudly at the queue seam."""
 
     real_peek_generator = queue_type.peek_generator
     real_peek_many = getattr(queue_type, "peek_many", None)
 
-    def poisoned_peek_generator(queue, *args, **kwargs):
+    def poisoned_peek_generator(
+        queue: Queue, *args: Any, **kwargs: Any
+    ) -> Iterator[str | tuple[str, int]]:
         if queue.name.startswith("weft.state.tasks."):
             raise AssertionError("mapping history read attempted")
         return real_peek_generator(queue, *args, **kwargs)
@@ -252,16 +278,24 @@ def _forbid_mapping_history_reads(monkeypatch, queue_type):
     monkeypatch.setattr(queue_type, "peek_generator", poisoned_peek_generator)
     if real_peek_many is not None:
 
-        def poisoned_peek_many(queue, *args, **kwargs):
+        def poisoned_peek_many(
+            queue: Queue, *args: Any, **kwargs: Any
+        ) -> list[str] | list[tuple[str, int]]:
             if queue.name.startswith("weft.state.tasks."):
                 raise AssertionError("mapping history read attempted")
-            return real_peek_many(queue, *args, **kwargs)
+            return cast(
+                list[str] | list[tuple[str, int]],
+                real_peek_many(queue, *args, **kwargs),
+            )
 
         monkeypatch.setattr(queue_type, "peek_many", poisoned_peek_many)
 
 
 def test_tid_mapping_registration_appends_without_history_read(
-    broker_env, task_factory, unique_tid, monkeypatch
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Registration is one edge-triggered append and never replays the queue.
 
@@ -306,7 +340,10 @@ def test_tid_mapping_registration_appends_without_history_read(
 
 
 def test_terminal_transition_publishes_mapping_exactly_once(
-    broker_env, task_factory, unique_tid, monkeypatch
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The terminal transition is the edge; repeated terminal reports are not.
 
@@ -336,7 +373,10 @@ def test_terminal_transition_publishes_mapping_exactly_once(
 
 
 def test_activity_transitions_publish_current_fields(
-    broker_env, task_factory, unique_tid, monkeypatch
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Actual activity changes publish activity/waiting_on; no-ops publish nothing.
 
@@ -364,7 +404,10 @@ def test_activity_transitions_publish_current_fields(
 
 
 def test_terminal_mapping_write_failure_retries_on_next_terminal_report(
-    broker_env, task_factory, unique_tid, monkeypatch
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A faulted terminal append stays best effort and retries until success.
 
@@ -388,7 +431,7 @@ def test_terminal_mapping_write_failure_retries_on_next_terminal_report(
     real_write = queue_type.write
     fault_state = {"armed": True}
 
-    def faulting_write(queue, message, *args, **kwargs):
+    def faulting_write(queue: Queue, message: str, *args: Any, **kwargs: Any) -> int:
         if queue.name.startswith("weft.state.tasks.") and fault_state["armed"]:
             fault_state["armed"] = False
             raise BrokerError("mapping append failed")
@@ -413,9 +456,9 @@ def test_terminal_mapping_write_failure_retries_on_next_terminal_report(
 
 
 def test_terminal_state_report_publishes_terminal_tid_mapping_when_activity_empty(
-    broker_env,
-    task_factory,
-    unique_tid,
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
 ) -> None:
     _db_path, make_queue = broker_env
     mapping_queue = make_queue(task_state_queue_name(unique_tid))
@@ -436,9 +479,9 @@ def test_terminal_state_report_publishes_terminal_tid_mapping_when_activity_empt
 
 
 def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
-    broker_env,
-    task_factory,
-    unique_tid,
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, make_queue = broker_env
@@ -452,11 +495,13 @@ def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
     queue_type = type(mapping_queue)
     real_peek_generator = queue_type.peek_generator
 
-    def fail_during_mapping_scan(queue, *args, **kwargs):
+    def fail_during_mapping_scan(
+        queue: Queue, *args: Any, **kwargs: Any
+    ) -> Iterator[str | tuple[str, int]]:
         if not queue.name.startswith("weft.state.tasks."):
             return real_peek_generator(queue, *args, **kwargs)
 
-        def rows():
+        def rows() -> Iterator[tuple[str, int]]:
             yield ("{}", 1)
             raise RuntimeError("mapping history iteration failed")
 
@@ -475,7 +520,9 @@ def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
     assert terminal_envelopes(ctrl_out, tid=unique_tid, source="task")
 
 
-def test_process_titles_update(task_factory, unique_tid, monkeypatch) -> None:
+def test_process_titles_update(
+    task_factory: TaskFactory, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[str] = []
     monkeypatch.setattr(process_title, "set_process_title", calls.append)
     spec = build_function_spec(unique_tid, enable_title=False)
@@ -493,7 +540,7 @@ def test_process_titles_update(task_factory, unique_tid, monkeypatch) -> None:
 
 
 def test_process_title_keeps_status_token_and_uses_activity_detail(
-    task_factory, unique_tid, monkeypatch
+    task_factory: TaskFactory, unique_tid: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[str] = []
     monkeypatch.setattr(process_title, "set_process_title", calls.append)
@@ -510,7 +557,7 @@ def test_process_title_keeps_status_token_and_uses_activity_detail(
 
 
 def test_process_title_sanitizes_dynamic_segments(
-    task_factory, unique_tid: str, monkeypatch
+    task_factory: TaskFactory, unique_tid: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[str] = []
     monkeypatch.setattr(process_title, "set_process_title", calls.append)
@@ -540,7 +587,9 @@ def test_process_title_sanitizes_dynamic_segments(
     )
 
 
-def test_state_logging_records_events(broker_env, task_factory, unique_tid) -> None:
+def test_state_logging_records_events(
+    broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
+) -> None:
     _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
@@ -568,9 +617,9 @@ def test_state_logging_records_events(broker_env, task_factory, unique_tid) -> N
 
 def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
     monkeypatch: pytest.MonkeyPatch,
-    broker_env,
-    task_factory,
-    unique_tid,
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
 ) -> None:
     _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -606,7 +655,9 @@ def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
     assert envelopes[0]["return_code"] == 0
 
 
-def test_state_logging_records_failure(broker_env, task_factory, unique_tid) -> None:
+def test_state_logging_records_failure(
+    broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
+) -> None:
     _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
@@ -631,7 +682,7 @@ def test_state_logging_records_failure(broker_env, task_factory, unique_tid) -> 
 
 
 def test_state_logging_propagates_unserializable_payload(
-    task_factory, unique_tid: str
+    task_factory: TaskFactory, unique_tid: str
 ) -> None:
     spec = build_function_spec(unique_tid)
     task = task_factory(spec)
@@ -642,22 +693,27 @@ def test_state_logging_propagates_unserializable_payload(
 
 def test_control_response_broker_error_is_best_effort(
     monkeypatch: pytest.MonkeyPatch,
-    task_factory,
+    task_factory: TaskFactory,
     unique_tid: str,
 ) -> None:
     spec = build_function_spec(unique_tid)
     task = task_factory(spec)
 
-    def _fail_write(_payload: str) -> None:
+    attempted: list[str] = []
+
+    def _fail_write(payload: str) -> None:
+        attempted.append(payload)
         raise BrokerError("ctrl-out unavailable")
 
     monkeypatch.setattr(task._ctrl_out_queue, "write", _fail_write)
 
     task._send_control_response("PING", "ok", message="PONG")
+    assert len(attempted) == 1
+    assert json.loads(attempted[0])["message"] == "PONG"
 
 
 def test_control_stop_logged_and_cancelled(
-    broker_env, task_factory, unique_tid
+    broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
 ) -> None:
     _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -680,7 +736,7 @@ def test_control_stop_logged_and_cancelled(
 
 
 def test_activity_change_emits_one_lightweight_log_event(
-    broker_env, task_factory, unique_tid
+    broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
 ) -> None:
     _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -708,9 +764,9 @@ def test_activity_change_emits_one_lightweight_log_event(
 
 def test_poll_reporting_emits_periodic_events(
     monkeypatch: pytest.MonkeyPatch,
-    broker_env,
-    task_factory,
-    unique_tid,
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
 ) -> None:
     _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -758,7 +814,10 @@ def test_poll_reporting_emits_periodic_events(
 
 
 def test_state_logging_respects_redaction(
-    monkeypatch, broker_env, task_factory, unique_tid
+    monkeypatch: pytest.MonkeyPatch,
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
 ) -> None:
     monkeypatch.setenv(
         "WEFT_REDACT_TASKSPEC_FIELDS", "spec.env.SECRET,metadata.sensitive"
@@ -830,7 +889,9 @@ def test_state_logging_respects_redaction(
     weft_helpers.reload_config()
 
 
-def test_title_error_is_nonfatal_and_preserved(task_factory, unique_tid, monkeypatch):
+def test_title_error_is_nonfatal_and_preserved(
+    task_factory: TaskFactory, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         process_title, "set_process_title", lambda title: "title unavailable"
     )
@@ -845,10 +906,10 @@ def test_title_error_is_nonfatal_and_preserved(task_factory, unique_tid, monkeyp
 
 
 def test_live_turn_ticks_without_replacing_explicit_title(
-    task_factory, unique_tid, monkeypatch
-):
+    task_factory: TaskFactory, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     task = task_factory(build_function_spec(unique_tid, enable_title=False))
-    calls = []
+    calls: list[str] = []
     monkeypatch.setattr(
         process_title, "set_process_title", lambda title: calls.append("set")
     )
@@ -866,11 +927,15 @@ def test_live_turn_ticks_without_replacing_explicit_title(
     "requested, expected", [(None, 0.25), (10.0, 0.25), (0.1, 0.1)]
 )
 def test_title_deadline_caps_shared_wait(
-    task_factory, unique_tid, monkeypatch, requested, expected
-):
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    requested: float | None,
+    expected: float,
+) -> None:
     task = task_factory(build_function_spec(unique_tid, enable_title=False))
     task.process_once()
-    waits = []
+    waits: list[float | None] = []
     monkeypatch.setattr(task, "_wait_for_reactor_activity", waits.append)
     monkeypatch.setattr(process_title, "seconds_until_due", lambda: 0.25)
     task.enable_process_title = True
@@ -878,9 +943,11 @@ def test_title_deadline_caps_shared_wait(
     assert waits == [expected]
 
 
-def test_stopped_turn_does_not_activate_title(task_factory, unique_tid, monkeypatch):
+def test_stopped_turn_does_not_activate_title(
+    task_factory: TaskFactory, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     task = task_factory(build_function_spec(unique_tid, enable_title=False))
-    calls = []
+    calls: list[str] = []
     monkeypatch.setattr(
         process_title, "set_process_title", lambda title: calls.append(title)
     )
@@ -892,8 +959,11 @@ def test_stopped_turn_does_not_activate_title(task_factory, unique_tid, monkeypa
 
 
 def test_title_failure_does_not_prevent_success(
-    broker_env, task_factory, unique_tid, monkeypatch
-):
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _, make_queue = broker_env
     monkeypatch.setattr(
         process_title, "set_process_title", lambda title: "native setter failed"
@@ -918,11 +988,11 @@ def test_title_failure_does_not_prevent_success(
 
 
 def test_off_owner_title_does_not_call_native_setter(
-    task_factory, unique_tid, monkeypatch
-):
+    task_factory: TaskFactory, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     task = task_factory(build_function_spec(unique_tid, enable_title=False))
     task.process_once()
-    calls = []
+    calls: list[tuple[threading.Thread, str]] = []
     monkeypatch.setattr(
         process_title,
         "set_process_title",
@@ -944,12 +1014,15 @@ def test_off_owner_title_does_not_call_native_setter(
 
 
 def test_pause_title_survives_owner_turn(
-    broker_env, task_factory, unique_tid, monkeypatch
-):
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _, make_queue = broker_env
     task = task_factory(build_function_spec(unique_tid, enable_title=False))
     task.taskspec.mark_running(pid=task._task_pid)
-    calls = []
+    calls: list[str] = []
     monkeypatch.setattr(process_title, "set_process_title", calls.append)
     monkeypatch.setattr(process_title, "tick", lambda: None)
     task.enable_process_title = True
@@ -965,7 +1038,9 @@ def test_pause_title_survives_owner_turn(
     assert len(calls) == 1
 
 
-def test_manager_drain_title_survives_owner_turn(broker_env, unique_tid, monkeypatch):
+def test_manager_drain_title_survives_owner_turn(
+    broker_env: BrokerEnv, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path, _ = broker_env
     spec = build_function_spec(
         unique_tid,
@@ -976,7 +1051,7 @@ def test_manager_drain_title_survives_owner_turn(broker_env, unique_tid, monkeyp
     manager = Manager(db_path, spec)
     try:
         manager.taskspec.mark_running(pid=manager._task_pid)
-        calls = []
+        calls: list[str] = []
         monkeypatch.setattr(process_title, "set_process_title", calls.append)
         monkeypatch.setattr(process_title, "tick", lambda: None)
         monkeypatch.setattr(
@@ -1000,7 +1075,7 @@ def test_manager_drain_title_survives_owner_turn(broker_env, unique_tid, monkeyp
 
 
 def test_every_defined_title_status_fits_the_handoff_capacity(
-    task_factory, unique_tid: str
+    task_factory: TaskFactory, unique_tid: str
 ) -> None:
     """The title status bound derives from the defined status sets.
 

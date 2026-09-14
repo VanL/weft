@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.9.100] - 2026-09-14
+
 ### Added
 
 - Task state now includes nullable `process_title_error`, the last detected

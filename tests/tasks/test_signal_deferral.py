@@ -50,12 +50,13 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
 from simplebroker import Queue
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.typing import BrokerEnv
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.test_task_execution import make_command_taskspec
 from weft._constants import (
@@ -268,7 +269,7 @@ def test_installed_signal_handler_only_records_state_no_broker_call() -> None:
     try:
         _install_signal_handlers(task)
         installed = signal.getsignal(signal.SIGTERM)
-        assert installed is not None
+        assert callable(installed)
         # Invoke exactly as CPython's signal machinery would.
         installed(signal.SIGTERM, None)
     finally:
@@ -303,7 +304,7 @@ def test_note_termination_signal_kill_class_outranks_later_stop(
                 "_apply_termination_request",
                 lambda signum, *, parent_lost: applied.append((signum, parent_lost)),
             )
-            task.note_termination_signal(sigusr1)
+            task.note_termination_signal(int(sigusr1))
             task.note_termination_signal(signal.SIGTERM)
             task.process_once()
 
@@ -342,7 +343,7 @@ def test_note_termination_signal_last_stop_class_signal_wins(
 
 
 def test_pending_source_snapshot_preserves_arrivals_during_drain(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid_signal_deferral: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -369,14 +370,16 @@ def test_pending_source_snapshot_preserves_arrivals_during_drain(
     )
     task.note_termination_signal(signal.SIGTERM)
 
-    class InjectingDeque(deque[tuple[str, int | None]]):
+    signal_number = int(sigusr1)
+
+    class InjectingDeque(deque[tuple[Literal["signal", "parent_loss"], int | None]]):
         injected = False
 
-        def popleft(self) -> tuple[str, int | None]:
+        def popleft(self) -> tuple[Literal["signal", "parent_loss"], int | None]:
             source = super().popleft()
             if not self.injected:
                 self.injected = True
-                task.note_termination_signal(sigusr1)
+                task.note_termination_signal(signal_number)
                 task.note_parent_loss()
             return source
 
@@ -406,7 +409,7 @@ def test_pending_source_snapshot_preserves_arrivals_during_drain(
 
 
 def test_process_once_applies_pending_signal_and_clears_it(
-    broker_env, unique_tid_signal_deferral: str
+    broker_env: BrokerEnv, unique_tid_signal_deferral: str
 ) -> None:
     """The run loop's ``process_once`` applies a noted signal exactly once."""
 

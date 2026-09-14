@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from weft.core.environment_profiles import (
@@ -15,7 +17,7 @@ def test_load_runner_environment_profile_returns_callable() -> None:
         "tests.fixtures.runtime_profiles_fixture:host_environment_profile"
     )
 
-    assert profile is not None
+    assert callable(profile)
 
 
 def test_materialize_runner_environment_merges_profile_defaults() -> None:
@@ -69,7 +71,7 @@ def test_materialize_runner_environment_explicit_working_dir_wins() -> None:
 
 
 def test_materialize_runner_environment_can_supply_docker_build_defaults(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM busybox\n", encoding="utf-8")
@@ -124,7 +126,7 @@ def test_materialize_runner_environment_rejects_invalid_result() -> None:
 
 
 def test_materialize_runner_environment_loads_bundle_local_profile(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     helper = tmp_path / "helper_module.py"
     helper.write_text(

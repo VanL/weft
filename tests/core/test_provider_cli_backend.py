@@ -42,7 +42,7 @@ def make_agent_section(
     | None = "tests.fixtures.provider_cli_fixture:resolve_operator_question",
     tool_profile_ref: str
     | None = "tests.fixtures.provider_cli_fixture:provider_tool_profile",
-    **overrides,
+    **overrides: object,
 ) -> AgentSection:
     runtime_config = {
         "provider": provider_name,
@@ -53,7 +53,7 @@ def make_agent_section(
         runtime_config["resolver_ref"] = resolver_ref
     if tool_profile_ref is not None:
         runtime_config["tool_profile_ref"] = tool_profile_ref
-    payload = {
+    payload: dict[str, object] = {
         "runtime": "provider_cli",
         "authority_class": "general",
         "model": model,
@@ -67,7 +67,7 @@ def make_agent_section(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_provider_cli_runtime_executes_one_shot_request(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     executable = str(write_provider_cli_wrapper(tmp_path, provider_name))
@@ -99,7 +99,7 @@ def test_provider_cli_runtime_executes_one_shot_request(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_provider_cli_runtime_surfaces_non_zero_exit(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     executable = str(write_provider_cli_wrapper(tmp_path, provider_name))
@@ -133,7 +133,7 @@ def test_provider_cli_runtime_surfaces_non_zero_exit(
     ),
 )
 def test_provider_cli_runtime_rejects_raw_options_that_conflict_with_tool_profile(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
     options: dict[str, object],
     match: str,
@@ -164,7 +164,7 @@ def test_provider_cli_runtime_rejects_raw_options_that_conflict_with_tool_profil
     ),
 )
 def test_provider_cli_runtime_executes_explicit_bounded_authority(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
     expected_option: str,
     expected_value: str,
@@ -197,7 +197,7 @@ def test_provider_cli_runtime_executes_explicit_bounded_authority(
 
 
 def test_provider_cli_runtime_resolves_callable_tool_profile_once_per_one_shot(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     reset_counting_tool_profile_calls()
     executable = str(write_provider_cli_wrapper(tmp_path, "codex"))
@@ -221,7 +221,7 @@ def test_provider_cli_runtime_resolves_callable_tool_profile_once_per_one_shot(
 
 
 def test_provider_cli_runtime_gemini_read_only_one_shot_uses_isolated_home(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     host_home = tmp_path / "host-home"
@@ -250,7 +250,7 @@ def test_provider_cli_runtime_gemini_read_only_one_shot_uses_isolated_home(
 
 
 def test_provider_cli_runtime_uses_project_agent_settings_executable(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -316,7 +316,7 @@ def test_resolve_provider_cli_executable_resolves_relative_project_setting_again
 
 
 def test_provider_cli_runtime_records_advisory_health_without_gating_execution(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -384,7 +384,7 @@ def test_provider_cli_runtime_records_advisory_health_without_gating_execution(
 
 
 def test_provider_cli_runtime_reports_real_opencode_invocation_failure(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PROVIDER_CLI_FIXTURE_OPENCODE_NO_RUN", "1")

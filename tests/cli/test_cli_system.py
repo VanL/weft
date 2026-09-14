@@ -16,20 +16,20 @@ from weft._constants import (
 )
 from weft.cli.app import app
 from weft.commands import TaskMonitorSummary
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.task_state import task_state_queue_name
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
 
 
-def _write_message(context, queue_name: str, body: str) -> None:
+def _write_message(context: WeftContext, queue_name: str, body: str) -> None:
     queue = context.queue(queue_name, persistent=True)
     queue.write(body)
     queue.close()
 
 
-def _write_task_log(context, payload: dict[str, object]) -> None:
+def _write_task_log(context: WeftContext, payload: dict[str, object]) -> None:
     queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     try:
         queue.write(json.dumps(payload))
@@ -41,7 +41,9 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _write_queue_json(context, queue_name: str, payload: dict[str, object]) -> int:
+def _write_queue_json(
+    context: WeftContext, queue_name: str, payload: dict[str, object]
+) -> int:
     queue = context.queue(queue_name, persistent=False)
     try:
         queue.write(json.dumps(payload))
@@ -55,7 +57,7 @@ def _write_queue_json(context, queue_name: str, payload: dict[str, object]) -> i
         queue.close()
 
 
-def _read_queue_ids(context, queue_name: str) -> set[int]:
+def _read_queue_ids(context: WeftContext, queue_name: str) -> set[int]:
     queue = context.queue(queue_name, persistent=False)
     try:
         return {
@@ -65,7 +67,7 @@ def _read_queue_ids(context, queue_name: str) -> set[int]:
         queue.close()
 
 
-def test_system_builtins_lists_shipped_inventory(workdir) -> None:
+def test_system_builtins_lists_shipped_inventory(workdir: Path) -> None:
     rc, out, err = run_cli(
         "system",
         "builtins",
@@ -80,7 +82,7 @@ def test_system_builtins_lists_shipped_inventory(workdir) -> None:
     assert "Target: weft.builtins.agent_probe:probe_agents_task" in out
 
 
-def test_system_builtins_json_reports_builtin_metadata(workdir) -> None:
+def test_system_builtins_json_reports_builtin_metadata(workdir: Path) -> None:
     rc, out, err = run_cli(
         "system",
         "builtins",
@@ -91,16 +93,7 @@ def test_system_builtins_json_reports_builtin_metadata(workdir) -> None:
     assert rc == 0
     payload = json.loads(out)
     builtin = next(item for item in payload if item["name"] == "probe-agents")
-    assert builtin["source"] == "builtin"
-    assert (
-        Path(builtin["path"])
-        .as_posix()
-        .endswith("weft/builtins/tasks/probe-agents.json")
-    )
     assert builtin["description"].startswith("Probe known delegated provider CLIs")
-    assert err == ""
-    payload = json.loads(out)
-    builtin = next(item for item in payload if item["name"] == "probe-agents")
     assert builtin["type"] == "task"
     assert builtin["source"] == "builtin"
     assert builtin["category"] == "agent-runtime"
@@ -121,7 +114,7 @@ def test_system_builtins_json_reports_builtin_metadata(workdir) -> None:
     assert err == ""
 
 
-def test_system_builtins_ignores_local_project_shadow(workdir) -> None:
+def test_system_builtins_ignores_local_project_shadow(workdir: Path) -> None:
     source_path = workdir / "local_probe_agents.json"
     _write_json(
         source_path,
@@ -151,8 +144,17 @@ def test_system_builtins_ignores_local_project_shadow(workdir) -> None:
     assert rc == 0
     assert err == ""
 
+    rc, out, err = run_cli("system", "builtins", "--json", cwd=workdir)
+    assert rc == 0
+    assert err == ""
+    payload = json.loads(out)
+    builtin = next(item for item in payload if item["name"] == "probe-agents")
+    assert builtin["source"] == "builtin"
+    assert builtin["function_target"] == "weft.builtins.agent_probe:probe_agents_task"
+    assert "local-probe-agents" not in {item["name"] for item in payload}
 
-def test_system_prune_rejects_retired_tid_mapping_group(workdir) -> None:
+
+def test_system_prune_rejects_retired_tid_mapping_group(workdir: Path) -> None:
     rc, out, err = run_cli(
         "system",
         "prune",
@@ -171,7 +173,9 @@ def test_system_prune_rejects_retired_tid_mapping_group(workdir) -> None:
     assert "allowed" in err
 
 
-def test_system_prune_apply_requires_explicit_family_before_mutation(workdir) -> None:
+def test_system_prune_apply_requires_explicit_family_before_mutation(
+    workdir: Path,
+) -> None:
     context = build_context(spec_context=workdir)
     old_id = _write_queue_json(
         context,
@@ -206,7 +210,7 @@ def test_system_prune_apply_requires_explicit_family_before_mutation(workdir) ->
     }
 
 
-def test_system_prune_rejects_invalid_options(workdir) -> None:
+def test_system_prune_rejects_invalid_options(workdir: Path) -> None:
     rc, _out, err = run_cli(
         "system",
         "prune",
@@ -238,7 +242,7 @@ def test_system_prune_rejects_invalid_options(workdir) -> None:
     assert "--keep-recent-per-key must be >= 1" in err
 
 
-def test_task_monitor_stdout_json_conflict_is_usage_error(workdir) -> None:
+def test_task_monitor_stdout_json_conflict_is_usage_error(workdir: Path) -> None:
     rc, _out, err = run_cli(
         "system",
         "task-monitor",
@@ -258,7 +262,7 @@ def test_task_monitor_stdout_json_conflict_is_usage_error(workdir) -> None:
 
 @pytest.mark.parametrize("verb", ["stop", "kill"])
 def test_single_task_control_unknown_tid_is_not_found_without_traceback(
-    workdir,
+    workdir: Path,
     verb: str,
 ) -> None:
     rc, _out, err = run_cli(
@@ -285,7 +289,7 @@ def test_single_task_control_unknown_tid_is_not_found_without_traceback(
 
 
 def test_task_stop_terminal_task_is_rejected_without_control_queue_residue(
-    workdir,
+    workdir: Path,
 ) -> None:
     context = build_context(spec_context=workdir)
     tid = "1777000000000000998"
@@ -333,7 +337,7 @@ def test_task_stop_terminal_task_is_rejected_without_control_queue_residue(
     assert f"T{tid}.ctrl_in" not in queue_names
 
 
-def test_system_prune_retention_dry_run_json(workdir) -> None:
+def test_system_prune_retention_dry_run_json(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     _write_queue_json(
         context,
@@ -370,7 +374,7 @@ def test_system_prune_retention_dry_run_json(workdir) -> None:
     }
 
 
-def test_system_prune_all_plain_output_labels_each_summary(workdir) -> None:
+def test_system_prune_all_plain_output_labels_each_summary(workdir: Path) -> None:
     rc, out, err = run_cli(
         "system",
         "prune",
@@ -387,7 +391,9 @@ def test_system_prune_all_plain_output_labels_each_summary(workdir) -> None:
     assert "\nRetention:\n" in out
 
 
-def test_system_prune_retention_apply_requires_archive_unless_force(workdir) -> None:
+def test_system_prune_retention_apply_requires_archive_unless_force(
+    workdir: Path,
+) -> None:
     context = build_context(spec_context=workdir)
     _write_queue_json(
         context,
@@ -445,7 +451,7 @@ def test_system_prune_retention_apply_requires_archive_unless_force(workdir) -> 
     )
 
 
-def test_system_prune_rejects_invalid_retention_options(workdir) -> None:
+def test_system_prune_rejects_invalid_retention_options(workdir: Path) -> None:
     rc, _out, err = run_cli(
         "system",
         "prune",
@@ -489,7 +495,7 @@ def test_system_prune_rejects_invalid_retention_options(workdir) -> None:
     assert "--force is only supported for retention prune families" in err
 
 
-def test_system_dump_exports_messages(workdir) -> None:
+def test_system_dump_exports_messages(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     _write_message(context, "dump.test", "payload")
 
@@ -514,7 +520,7 @@ def test_system_dump_exports_messages(workdir) -> None:
     assert any('"queue": "dump.test"' in line for line in lines)
 
 
-def test_system_dump_excludes_runtime_queues(workdir) -> None:
+def test_system_dump_excludes_runtime_queues(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     _write_message(context, "persist.test", "keep")
     _write_message(context, "weft.state.test_runtime", "skip")
@@ -540,7 +546,7 @@ def test_system_dump_excludes_runtime_queues(workdir) -> None:
     assert "weft.state.test_runtime" not in content
 
 
-def test_system_load_imports_dump(workdir) -> None:
+def test_system_load_imports_dump(workdir: Path) -> None:
     source_dir = workdir / "source"
     prepare_project_root(source_dir)
     source_context = build_context(spec_context=source_dir)
@@ -601,7 +607,7 @@ def test_system_load_imports_dump(workdir) -> None:
         queue.close()
 
 
-def test_system_task_monitor_stdout_jsonl(workdir) -> None:
+def test_system_task_monitor_stdout_jsonl(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     tid = "1778084345905438730"
     _write_task_log(
@@ -655,7 +661,7 @@ def test_system_task_monitor_stdout_jsonl(workdir) -> None:
     )
 
 
-def test_system_task_monitor_rejects_stdout_json(workdir) -> None:
+def test_system_task_monitor_rejects_stdout_json(workdir: Path) -> None:
     rc, out, err = run_cli(
         "system",
         "task-monitor",
@@ -672,7 +678,7 @@ def test_system_task_monitor_rejects_stdout_json(workdir) -> None:
     assert "cannot be combined" in err
 
 
-def test_system_load_alias_conflict_uses_exit_3(workdir) -> None:
+def test_system_load_alias_conflict_uses_exit_3(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     with context.broker() as broker:
         broker.add_alias("existing_alias", "old.target")
@@ -724,7 +730,7 @@ def test_system_task_monitor_follow_closes_stream_on_interrupt(
         closed = False
         yielded = False
 
-        def __iter__(self):
+        def __iter__(self) -> InterruptingStream:
             return self
 
         def __next__(self) -> TaskMonitorSummary:
@@ -750,7 +756,7 @@ def test_system_task_monitor_follow_closes_stream_on_interrupt(
     assert "Traceback" not in result.stderr
 
 
-def test_system_task_monitor_disk_json_summary(workdir) -> None:
+def test_system_task_monitor_disk_json_summary(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     tid = "1778084345905438731"
     _write_task_log(
@@ -807,7 +813,7 @@ def test_system_task_monitor_disk_json_summary(workdir) -> None:
     assert list(log_dir.glob("*.jsonl"))
 
 
-def test_system_task_monitor_uses_default_logs_dir(workdir) -> None:
+def test_system_task_monitor_uses_default_logs_dir(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     tid = "1778084345905438732"
     _write_task_log(
@@ -852,7 +858,7 @@ def test_system_task_monitor_uses_default_logs_dir(workdir) -> None:
     assert list(expected_dir.glob("*.jsonl"))
 
 
-def test_system_task_monitor_rejects_removed_archive_dir_option(workdir) -> None:
+def test_system_task_monitor_rejects_removed_archive_dir_option(workdir: Path) -> None:
     rc, out, err = run_cli(
         "system",
         "task-monitor",

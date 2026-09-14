@@ -9,6 +9,7 @@ import pytest
 
 from weft.core.agents.provider_cli import container_runtime as container_runtime_module
 from weft.core.agents.provider_cli.container_runtime import (
+    ProviderContainerRuntimeDescriptor,
     get_provider_container_runtime_descriptor,
     parse_provider_container_runtime_descriptor,
     resolve_provider_container_runtime,
@@ -36,19 +37,18 @@ def test_parse_provider_container_runtime_descriptor_rejects_runtime_dirs_withou
 def test_get_provider_container_runtime_descriptor_loads_all_supported_providers() -> (
     None
 ):
-    loaded = {
-        name: get_provider_container_runtime_descriptor(name)
-        for name in ("claude_code", "codex", "gemini", "opencode", "qwen")
-    }
-
-    assert all(descriptor is not None for descriptor in loaded.values())
-    assert loaded["codex"].runtime_mounts[0].target == "/root/.codex"  # type: ignore[index]
-    assert loaded["claude_code"].runtime_mounts[0].target == "/root/.claude"  # type: ignore[index]
-    assert loaded["claude_code"].env[0].name == "ANTHROPIC_API_KEY"  # type: ignore[index]
-    assert loaded["qwen"].runtime_mounts[0].target == "/root/.qwen"  # type: ignore[index]
-    assert loaded["gemini"].runtime_home is not None  # type: ignore[union-attr]
-    assert loaded["gemini"].env[0].name == "GEMINI_API_KEY"  # type: ignore[index]
-    assert loaded["opencode"].env[0].name == "OPENAI_API_KEY"  # type: ignore[index]
+    loaded: dict[str, ProviderContainerRuntimeDescriptor] = {}
+    for name in ("claude_code", "codex", "gemini", "opencode", "qwen"):
+        descriptor = get_provider_container_runtime_descriptor(name)
+        assert descriptor is not None
+        loaded[name] = descriptor
+    assert loaded["codex"].runtime_mounts[0].target == "/root/.codex"
+    assert loaded["claude_code"].runtime_mounts[0].target == "/root/.claude"
+    assert loaded["claude_code"].env[0].name == "ANTHROPIC_API_KEY"
+    assert loaded["qwen"].runtime_mounts[0].target == "/root/.qwen"
+    assert loaded["gemini"].runtime_home is not None
+    assert loaded["gemini"].env[0].name == "GEMINI_API_KEY"
+    assert loaded["opencode"].env[0].name == "OPENAI_API_KEY"
 
 
 def test_provider_container_descriptor_rejects_non_object_json_as_value_error(

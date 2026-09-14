@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap
+import os
 import socket
+import tempfile
 import time
+from typing import Protocol
+
+
+class _Closable(Protocol):
+    def close(self) -> None: ...
 
 
 def run_task(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-219] exception
@@ -20,20 +28,15 @@ def run_task(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-219] exception
     open_files: int = 0,
 ) -> str:
     """Simulate work for use as either a callable or subprocess target."""
-    import os
-    import tempfile
-
-    buffers: list[bytearray] = []
+    buffers: list[mmap.mmap] = []
     sockets: list[socket.socket] = []
     tcp_servers: list[socket.socket] = []
     tcp_clients: list[socket.socket] = []
-    files: list[tempfile.NamedTemporaryFile] = []
+    files: list[_Closable] = []
     file_paths: list[str] = []
 
     if memory_mb > 0:
         try:
-            import mmap
-
             size_bytes = memory_mb * 1024 * 1024
             mm = mmap.mmap(-1, size_bytes)
             page_size = mmap.PAGESIZE

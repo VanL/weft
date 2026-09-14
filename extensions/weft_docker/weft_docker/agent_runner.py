@@ -36,10 +36,13 @@ from weft.core.agents.provider_cli.runtime_prep import (
     prepare_provider_container_runtime,
 )
 from weft.core.agents.runtime import normalize_agent_work_item
-from weft.core.runners import RunnerOutcome
-from weft.core.tasks.runner import AgentSession, CommandSession
 from weft.core.taskspec import AgentSection
-from weft.ext import RunnerHandle
+from weft.ext import (
+    AgentSessionProtocol,
+    CommandSessionProtocol,
+    RunnerHandle,
+    RunnerOutcome,
+)
 
 from ._sdk import docker_client, load_docker_sdk, wait_for_container_runtime_start
 from .agent_images import ensure_agent_image
@@ -367,10 +370,10 @@ class DockerProviderCLIRunner:
                     except Exception:  # pragma: no cover - best effort cleanup  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-281] exception
                         logger.warning("Docker agent container cleanup failed")
 
-    def start_session(self) -> CommandSession:
+    def start_session(self) -> CommandSessionProtocol:
         raise ValueError("Docker runner does not support interactive sessions")
 
-    def start_agent_session(self) -> AgentSession:
+    def start_agent_session(self) -> AgentSessionProtocol:
         raise ValueError("Docker runner does not support agent sessions")
 
     def _working_dir_mapping(self) -> tuple[str | None, str]:

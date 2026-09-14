@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 
 import pytest
 
+from simplebroker import Queue
+from tests.helpers.typing import BrokerEnv
 from weft.core.tasks.debugger import Debugger
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
@@ -30,7 +34,9 @@ def make_debugger_spec(tid: str) -> TaskSpec:
     )
 
 
-def _enqueue_command(context, queue_name: str, command: dict[str, str]) -> None:
+def _enqueue_command(
+    context: Callable[[str], Queue], queue_name: str, command: dict[str, str]
+) -> None:
     queue = context(queue_name)
     payload = {
         "stdin": json.dumps(command),
@@ -41,12 +47,10 @@ def _enqueue_command(context, queue_name: str, command: dict[str, str]) -> None:
 
 @pytest.fixture
 def tid() -> str:
-    import time
-
     return str(time.time_ns())
 
 
-def test_debugger_ping(broker_env, tid) -> None:
+def test_debugger_ping(broker_env: BrokerEnv, tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_debugger_spec(tid)
     dbg = Debugger(db_path, spec)
@@ -68,7 +72,7 @@ def test_debugger_ping(broker_env, tid) -> None:
     dbg.cleanup()
 
 
-def test_debugger_info(broker_env, tid) -> None:
+def test_debugger_info(broker_env: BrokerEnv, tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_debugger_spec(tid)
     dbg = Debugger(db_path, spec)

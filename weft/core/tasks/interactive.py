@@ -30,9 +30,10 @@ from weft.core.control_messages import ControlRequest
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message
 from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.ext import CommandSessionProtocol
 
 from .multiqueue_watcher import QueueMessageContext
-from .runner import CommandSession, TaskRunner
+from .runner import TaskRunner
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class InteractiveTaskMixin(ABC):
 
     _interactive_mode: bool
     _interactive_runner: TaskRunner | None
-    _interactive_session: CommandSession | None
+    _interactive_session: CommandSessionProtocol | None
     _interactive_started: bool
     _interactive_completion_reported: bool
     _interactive_stdout_index: int
@@ -149,7 +150,7 @@ class InteractiveTaskMixin(ABC):
         """Initialize per-task interactive state."""
         self._interactive_mode = bool(getattr(self.taskspec.spec, "interactive", False))
         self._interactive_runner: TaskRunner | None = None
-        self._interactive_session: CommandSession | None = None
+        self._interactive_session: CommandSessionProtocol | None = None
         self._interactive_started = False
         self._interactive_completion_reported = False
         self._interactive_stdout_index = 0
@@ -214,7 +215,7 @@ class InteractiveTaskMixin(ABC):
         self._interactive_flush_outputs()
         return True
 
-    def _interactive_ensure_session(self, message_id: int) -> CommandSession:
+    def _interactive_ensure_session(self, message_id: int) -> CommandSessionProtocol:
         if self._interactive_session is not None:
             return self._interactive_session
 
@@ -308,7 +309,7 @@ class InteractiveTaskMixin(ABC):
             self._interactive_finalize_session()
 
     def _interactive_emit_chunks(
-        self, session: CommandSession, outbox_queue: Queue
+        self, session: CommandSessionProtocol, outbox_queue: Queue
     ) -> None:
         stdout_chunks = session.poll_stdout()
         for chunk in stdout_chunks:
@@ -340,7 +341,7 @@ class InteractiveTaskMixin(ABC):
             self._interactive_stderr_final_sent = False
 
     def _interactive_drain_remaining(
-        self, session: CommandSession, outbox_queue: Queue
+        self, session: CommandSessionProtocol, outbox_queue: Queue
     ) -> None:
         deadline = time.monotonic() + INTERACTIVE_OUTPUT_DRAIN_TIMEOUT
         while time.monotonic() < deadline:

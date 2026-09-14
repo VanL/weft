@@ -51,6 +51,7 @@ def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> 
                     if isinstance(observations, dict)
                     else []
                 )
+                assert isinstance(host_pids, list)
                 manager_pid = next(
                     (pid for pid in host_pids if isinstance(pid, int) and pid > 0),
                     None,

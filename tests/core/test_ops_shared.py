@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-import inspect
 import json
+import subprocess
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 
@@ -17,16 +20,11 @@ import weft.commands.submission as submission_mod
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.client import WeftClient
 from weft.commands.types import TaskEvent, TaskResult
+from weft.context import WeftContext
 from weft.core import manager_runtime
+from weft.core.taskspec import TaskSpec
 
 pytestmark = [pytest.mark.shared]
-
-
-def test_run_submission_bridge_drops_inert_verbose_parameter() -> None:
-    assert (
-        "verbose"
-        not in inspect.signature(run_mod._ensure_manager_after_submission).parameters
-    )
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -40,12 +38,15 @@ def test_run_adapter_routes_manager_recovery_through_shared_submission(
     captured: dict[str, object] = {}
 
     def _fake_shared(
-        context,
+        context: WeftContext,
         *,
-        submitted_tid,
-        ensure_manager_fn=None,
-        delete_spawn_request_fn=None,
-    ):
+        submitted_tid: str | int,
+        ensure_manager_fn: Callable[
+            ..., tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]
+        ]
+        | None = None,
+        delete_spawn_request_fn: Callable[[WeftContext, int], bool] | None = None,
+    ) -> tuple[dict[str, str], bool, None]:
         captured["context"] = context
         captured["submitted_tid"] = submitted_tid
         captured["ensure_manager_fn"] = ensure_manager_fn
@@ -58,7 +59,7 @@ def test_run_adapter_routes_manager_recovery_through_shared_submission(
         _fake_shared,
     )
 
-    context = object()
+    context = Mock(spec=WeftContext)
     result = run_mod._ensure_manager_after_submission(
         context,
         submitted_tid="1776000000000000001",
@@ -109,7 +110,13 @@ def test_client_submit_uses_shared_submission_module(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_prepare(context, taskspec, *, payload=None, **overrides):
+    def _fake_prepare(
+        context: WeftContext,
+        taskspec: TaskSpec | Mapping[str, object],
+        *,
+        payload: object = None,
+        **overrides: object,
+    ) -> submission_mod.PreparedSubmissionRequest:
         captured["prepare_context"] = context
         captured["taskspec"] = taskspec
         captured["payload"] = payload
@@ -120,7 +127,9 @@ def test_client_submit_uses_shared_submission_module(
             payload=payload,
         )
 
-    def _fake_submit_prepared(context, prepared):
+    def _fake_submit_prepared(
+        context: WeftContext, prepared: submission_mod.PreparedSubmissionRequest
+    ) -> submission_mod._SubmittedPreparedOutcome:
         captured["submit_context"] = context
         captured["prepared"] = prepared
         return submission_mod._SubmittedPreparedOutcome(
@@ -161,7 +170,13 @@ def test_follow_task_events_reuses_shared_result_wait_without_timeout(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_iter(context, tid, *, follow=False, timeout=None):
+    def _fake_iter(
+        context: WeftContext,
+        tid: str,
+        *,
+        follow: bool = False,
+        timeout: float | None = None,
+    ) -> Iterator[TaskEvent]:
         assert follow is True
         captured["iter_timeout"] = timeout
         yield TaskEvent(
@@ -172,8 +187,13 @@ def test_follow_task_events_reuses_shared_result_wait_without_timeout(
         )
 
     def _fake_await(
-        context, tid, *, timeout=None, show_stderr=False, emit_stream=False
-    ):
+        context: WeftContext,
+        tid: str,
+        *,
+        timeout: float | None = None,
+        show_stderr: bool = False,
+        emit_stream: bool = False,
+    ) -> TaskResult:
         captured["timeout"] = timeout
         return TaskResult(
             tid=tid,
@@ -187,7 +207,9 @@ def test_follow_task_events_reuses_shared_result_wait_without_timeout(
     monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
     monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
 
-    events = list(events_mod.follow_task_events(object(), "1776000000000000001"))
+    events = list(
+        events_mod.follow_task_events(Mock(spec=WeftContext), "1776000000000000001")
+    )
 
     assert captured["iter_timeout"] is None
     assert captured["timeout"] is None
@@ -200,7 +222,13 @@ def test_follow_task_events_passes_remaining_timeout_to_result_wait(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_iter(context, tid, *, follow=False, timeout=None):
+    def _fake_iter(
+        context: WeftContext,
+        tid: str,
+        *,
+        follow: bool = False,
+        timeout: float | None = None,
+    ) -> Iterator[TaskEvent]:
         assert follow is True
         captured["iter_timeout"] = timeout
         yield TaskEvent(
@@ -211,8 +239,13 @@ def test_follow_task_events_passes_remaining_timeout_to_result_wait(
         )
 
     def _fake_await(
-        context, tid, *, timeout=None, show_stderr=False, emit_stream=False
-    ):
+        context: WeftContext,
+        tid: str,
+        *,
+        timeout: float | None = None,
+        show_stderr: bool = False,
+        emit_stream: bool = False,
+    ) -> TaskResult:
         captured["result_timeout"] = timeout
         return TaskResult(
             tid=tid,
@@ -228,7 +261,7 @@ def test_follow_task_events_passes_remaining_timeout_to_result_wait(
 
     events = list(
         events_mod.follow_task_events(
-            object(),
+            Mock(spec=WeftContext),
             "1776000000000000001",
             timeout=5.0,
         )
@@ -245,15 +278,26 @@ def test_follow_task_events_uses_visible_result_after_event_timeout(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_iter(context, tid, *, follow=False, timeout=None):
+    def _fake_iter(
+        context: WeftContext,
+        tid: str,
+        *,
+        follow: bool = False,
+        timeout: float | None = None,
+    ) -> Iterator[TaskEvent]:
         assert follow is True
         captured["iter_timeout"] = timeout
         raise TimeoutError("event wait expired")
         yield  # pragma: no cover - makes this a generator
 
     def _fake_await(
-        context, tid, *, timeout=None, show_stderr=False, emit_stream=False
-    ):
+        context: WeftContext,
+        tid: str,
+        *,
+        timeout: float | None = None,
+        show_stderr: bool = False,
+        emit_stream: bool = False,
+    ) -> TaskResult:
         captured["result_timeout"] = timeout
         return TaskResult(
             tid=tid,
@@ -269,7 +313,7 @@ def test_follow_task_events_uses_visible_result_after_event_timeout(
 
     events = list(
         events_mod.follow_task_events(
-            object(),
+            Mock(spec=WeftContext),
             "1776000000000000001",
             timeout=0.0,
         )
@@ -284,13 +328,24 @@ def test_follow_task_events_uses_visible_result_after_event_timeout(
 def test_follow_task_events_preserves_terminal_timeout_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_iter(context, tid, *, follow=False, timeout=None):
+    def _fake_iter(
+        context: WeftContext,
+        tid: str,
+        *,
+        follow: bool = False,
+        timeout: float | None = None,
+    ) -> Iterator[TaskEvent]:
         raise TimeoutError("event wait expired")
         yield  # pragma: no cover - makes this a generator
 
     def _fake_await(
-        context, tid, *, timeout=None, show_stderr=False, emit_stream=False
-    ):
+        context: WeftContext,
+        tid: str,
+        *,
+        timeout: float | None = None,
+        show_stderr: bool = False,
+        emit_stream: bool = False,
+    ) -> TaskResult:
         return TaskResult(
             tid=tid,
             status="timeout",
@@ -305,7 +360,7 @@ def test_follow_task_events_preserves_terminal_timeout_result(
 
     events = list(
         events_mod.follow_task_events(
-            object(),
+            Mock(spec=WeftContext),
             "1776000000000000001",
             timeout=0.0,
         )
@@ -320,7 +375,13 @@ def test_follow_task_events_reports_original_timeout_after_terminal_event(
 ) -> None:
     tid = "1776000000000000001"
 
-    def _fake_iter(context, tid, *, follow=False, timeout=None):
+    def _fake_iter(
+        context: WeftContext,
+        tid: str,
+        *,
+        follow: bool = False,
+        timeout: float | None = None,
+    ) -> Iterator[TaskEvent]:
         yield TaskEvent(
             tid=tid,
             event_type="completed",
@@ -329,8 +390,13 @@ def test_follow_task_events_reports_original_timeout_after_terminal_event(
         )
 
     def _fake_await(
-        context, tid, *, timeout=None, show_stderr=False, emit_stream=False
-    ):
+        context: WeftContext,
+        tid: str,
+        *,
+        timeout: float | None = None,
+        show_stderr: bool = False,
+        emit_stream: bool = False,
+    ) -> TaskResult:
         raise events_mod.CommandTimeoutError(
             f"Timed out after {timeout} seconds waiting for task {tid}"
         )
@@ -339,7 +405,7 @@ def test_follow_task_events_reports_original_timeout_after_terminal_event(
     monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
 
     with pytest.raises(TimeoutError, match="Timed out after 5.0 seconds"):
-        list(events_mod.follow_task_events(object(), tid, timeout=5.0))
+        list(events_mod.follow_task_events(Mock(spec=WeftContext), tid, timeout=5.0))
 
 
 def test_realtime_events_uses_terminal_state_seen_during_materialization(
@@ -363,10 +429,15 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
             return _FakeQueue(name)
 
     class _FakeMonitor:
-        def __init__(self, queues, *, config=None) -> None:
+        def __init__(
+            self,
+            queues: Sequence[_FakeQueue],
+            *,
+            config: Mapping[str, object] | None = None,
+        ) -> None:
             del queues, config
 
-        def wait(self, timeout=None) -> bool:
+        def wait(self, timeout: float | None = None) -> bool:
             del timeout
             return False
 
@@ -374,8 +445,6 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
             return None
 
     first_context = _FakeContext()
-    second_context = _FakeContext()
-    assert first_context.config is not second_context.config
 
     materialized = result_mod.ResultMaterialization(
         taskspec_payload=None,
@@ -416,7 +485,7 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
 
     events = list(
         events_mod.iter_task_realtime_events(
-            first_context,
+            cast(WeftContext, first_context),
             tid,
             timeout=1.0,
         )
@@ -452,10 +521,15 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
             return _FakeQueue(name)
 
     class _FakeMonitor:
-        def __init__(self, queues, *, config=None) -> None:
+        def __init__(
+            self,
+            queues: Sequence[_FakeQueue],
+            *,
+            config: Mapping[str, object] | None = None,
+        ) -> None:
             del queues, config
 
-        def wait(self, timeout=None) -> bool:
+        def wait(self, timeout: float | None = None) -> bool:
             del timeout
             return False
 
@@ -463,8 +537,6 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
             return None
 
     first_context = _FakeContext()
-    second_context = _FakeContext()
-    assert first_context.config is not second_context.config
 
     materialized = result_mod.ResultMaterialization(
         taskspec_payload=None,
@@ -501,7 +573,7 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
 
     events = list(
         events_mod.iter_task_realtime_events(
-            first_context,
+            cast(WeftContext, first_context),
             tid,
             timeout=1.0,
         )

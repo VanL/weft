@@ -25,17 +25,18 @@ from weft.core.agents.provider_cli.container_runtime import (
     get_provider_container_runtime_descriptor,
     resolve_provider_container_runtime,
 )
-from weft.core.resource_monitor import ResourceMetrics
-from weft.core.runners import RunnerOutcome
 from weft.core.runners.subprocess_runner import (
     prepare_command_invocation,
     run_monitored_subprocess,
 )
-from weft.core.tasks.runner import AgentSession, CommandSession
 from weft.core.taskspec import AgentSection
 from weft.ext import (
+    AgentSessionProtocol,
+    CommandSessionProtocol,
+    ResourceMetrics,
     RunnerCapabilities,
     RunnerHandle,
+    RunnerOutcome,
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
@@ -309,10 +310,10 @@ class DockerCommandRunner:
                 _cleanup_process(process)
                 _remove_container(client, container_name)
 
-    def start_session(self) -> CommandSession:
+    def start_session(self) -> CommandSessionProtocol:
         raise ValueError("Docker runner does not support interactive sessions")
 
-    def start_agent_session(self) -> AgentSession:
+    def start_agent_session(self) -> AgentSessionProtocol:
         raise ValueError("Docker runner does not support agent sessions")
 
     def _build_docker_command(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-204] exception

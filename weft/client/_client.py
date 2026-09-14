@@ -9,9 +9,9 @@ Spec references:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from weft.commands import submission
 from weft.context import WeftContext, build_context
@@ -25,6 +25,9 @@ from ._namespaces import (
 )
 from ._prepared import PreparedSubmission
 from ._task import Task
+
+if TYPE_CHECKING:
+    from weft.client import TaskSpec
 
 
 class WeftClient:
@@ -77,7 +80,7 @@ class WeftClient:
 
     def submit(
         self,
-        taskspec: Any,
+        taskspec: TaskSpec | Mapping[str, Any],
         *,
         payload: Any = None,
         **overrides: Any,
@@ -86,7 +89,7 @@ class WeftClient:
 
     def prepare(
         self,
-        taskspec: Any,
+        taskspec: TaskSpec | Mapping[str, Any],
         *,
         payload: Any = None,
         **overrides: Any,
@@ -197,7 +200,9 @@ def connect(
     )
 
 
-def normalize_taskspec_payload(taskspec: Any, **overrides: Any) -> dict[str, Any]:
+def normalize_taskspec_payload(
+    taskspec: TaskSpec | Mapping[str, Any], **overrides: Any
+) -> dict[str, Any]:
     """Return the validated, normalized TaskSpec payload for a submission.
 
     Args:

@@ -45,7 +45,7 @@ FORMATTER_CHECK = (
     "extensions/weft_microsandbox"
 )
 MYPY_CHECK = (
-    "mypy weft bin integrations/weft_django/weft_django "
+    "mypy weft tests bin integrations/weft_django/weft_django "
     "extensions/weft_docker/weft_docker "
     "extensions/weft_macos_sandbox/weft_macos_sandbox "
     "extensions/weft_microsandbox/weft_microsandbox "
@@ -193,7 +193,9 @@ def _ruff_settings(*, config: Path = PYPROJECT) -> dict[str, Any]:
 
 
 def _enabled_rules() -> set[str]:
-    return _ruff_settings()["enabled"]
+    enabled = _ruff_settings()["enabled"]
+    assert isinstance(enabled, set)
+    return enabled
 
 
 def _tracked_files() -> list[Path]:
@@ -435,12 +437,6 @@ def test_ruff_policy_guard_rejects_extensionless_bash_inclusion() -> None:
         _assert_ruff_policy(ruff, lint)
 
 
-def test_effective_ruff_rules_match_reviewed_inventory() -> None:
-    expected = set(RULE_FIXTURE.read_text(encoding="utf-8").splitlines())
-    assert expected
-    _assert_enabled_rules(_enabled_rules(), expected)
-
-
 def test_enabled_rule_inventory_guard_rejects_changed_code() -> None:
     expected = set(RULE_FIXTURE.read_text(encoding="utf-8").splitlines())
     changed = expected - {min(expected)}
@@ -452,6 +448,7 @@ def test_enabled_rule_inventory_guard_rejects_changed_code() -> None:
 
 def test_real_ruff_settings_match_repository_policy() -> None:
     expected = set(RULE_FIXTURE.read_text(encoding="utf-8").splitlines())
+    assert expected
     settings = _ruff_settings()
 
     assert settings["target"] == "3.12"
@@ -463,12 +460,6 @@ def test_real_ruff_settings_match_repository_policy() -> None:
 def test_extensionless_python_inventory_is_exact() -> None:
     assert _tracked_extensionless_python() == set(EXTENSIONLESS_PYTHON)
     assert not {"bin/mypy-check", "bin/uv"} & set(EXTENSIONLESS_PYTHON)
-
-
-def test_extensionless_policy_guard_fires_when_one_tool_is_omitted() -> None:
-    incomplete = EXTENSIONLESS_PYTHON[:-1]
-    with pytest.raises(AssertionError, match="pytest-worker-count"):
-        _assert_extensionless_policy(incomplete)
 
 
 def test_dom15_checker_entry_point_converts_internal_failure_to_exit_two(

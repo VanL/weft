@@ -14,7 +14,7 @@ from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -923,7 +923,9 @@ def test_execute_import_does_not_report_partial_for_pre_mutation_capability_fail
     )
 
     with pytest.raises(ImportError) as exc_info:
-        load_command._execute_import(plan, deficient_context)
+        load_command._execute_import(
+            plan, cast(WeftContext, deficient_context)
+        )  # Missing broker capability is intentional.
 
     assert "partial import may have occurred" not in str(exc_info.value)
     with context.broker() as broker:
@@ -946,7 +948,7 @@ def test_execute_import_reports_partial_after_successful_alias_write(
     )
 
     def write_then_fail(
-        broker: object,
+        broker: Any,  # Dynamic backend handle matches WeftContext.broker().
         _lines: list[str],
         **_kwargs: object,
     ) -> None:
@@ -978,7 +980,7 @@ def test_execute_import_reports_partial_when_mutation_call_commits_then_raises(
     )
 
     def commit_then_raise(
-        broker: object,
+        broker: Any,  # Dynamic backend handle matches WeftContext.broker().
         _lines: list[str],
         **_kwargs: object,
     ) -> None:
@@ -1007,7 +1009,9 @@ def test_execute_import_reports_partial_when_mutation_call_commits_then_raises(
     monkeypatch.setattr(load_command, "load_lines", commit_then_raise)
 
     with pytest.raises(ImportError, match="partial import may have occurred"):
-        load_command._execute_import(plan, failing_context)
+        load_command._execute_import(
+            plan, cast(WeftContext, failing_context)
+        )  # Broker commits then raises by design.
 
     with context.broker() as broker:
         assert broker.peek_one("persisted.queue", with_timestamps=False) == "persisted"
@@ -1413,7 +1417,7 @@ def test_cmd_load_dry_run_reports_alias_conflicts_without_writes(
 
     after_aliases, after_queues = _snapshot_broker_state(ctx)
 
-    assert caught.value.cli_exit_code == 3
+    assert getattr(caught.value, "cli_exit_code", None) == 3
     assert "alias conflicts" in (message or "").lower()
     assert "existing_alias" in (message or "")
     assert after_aliases == before_aliases
@@ -1460,7 +1464,7 @@ def test_cmd_load_rejects_alias_conflicts_before_any_writes(tmp_path: Path) -> N
 
     after_aliases, after_queues = _snapshot_broker_state(ctx)
 
-    assert caught.value.cli_exit_code == 3
+    assert getattr(caught.value, "cli_exit_code", None) == 3
     assert "alias conflicts" in (message or "").lower()
     assert "existing_alias" in (message or "")
     assert after_aliases == before_aliases

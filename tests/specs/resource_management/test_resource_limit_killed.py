@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from tests.helpers.typing import BrokerEnv
 from tests.taskspec import fixtures
 from weft.core.tasks import Consumer
 from weft.core.tasks.runner import RunnerOutcome
 
 
-def test_resource_limit_marks_killed(broker_env) -> None:
+def test_resource_limit_marks_killed(broker_env: BrokerEnv) -> None:
     db_path, _ = broker_env
     taskspec = fixtures.create_minimal_taskspec()
     task = Consumer(db_path, taskspec)
@@ -25,6 +26,9 @@ def test_resource_limit_marks_killed(broker_env) -> None:
         duration=0.01,
     )
 
-    with pytest.raises(RuntimeError):
-        task._ensure_outcome_ok(outcome, timestamp=None, metrics_payload=None)
-    assert task.taskspec.state.status == "killed"
+    try:
+        with pytest.raises(RuntimeError):
+            task._ensure_outcome_ok(outcome, timestamp=None, metrics_payload=None)
+        assert task.taskspec.state.status == "killed"
+    finally:
+        task.cleanup()

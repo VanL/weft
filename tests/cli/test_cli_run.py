@@ -11,7 +11,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Never, cast
 
 import pytest
 
@@ -112,7 +112,7 @@ def test_cli_subprocess_bytes_match_rendered_cmd_run_outcome(
     )
 
 
-def _write_json(path: Path, payload: dict[str, object]) -> None:
+def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -128,6 +128,25 @@ def _write_queue_message(
         queue.write(payload)
     finally:
         queue.close()
+
+
+def _wait_for_queue_message(
+    context: WeftContext,
+    name: str,
+    *,
+    timeout: float = 30.0,
+) -> None:
+    queue = context.queue(name, persistent=True)
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if queue.peek_many(limit=1):
+                return
+            time.sleep(0.05)
+    finally:
+        queue.close()
+
+    raise AssertionError(f"Timed out waiting for a message on {name!r}")
 
 
 def _host_runtime_handle(pid: int) -> dict[str, Any]:
@@ -233,9 +252,7 @@ def _wait_for_task_waiting_on_input(
         snapshot = task_cmd.task_status(tid, context_path=context.root)
         if snapshot is not None:
             last_snapshot = snapshot
-            if snapshot.status == "running" or (
-                snapshot.activity == "waiting" and snapshot.waiting_on == queue_name
-            ):
+            if snapshot.activity == "waiting" and snapshot.waiting_on == queue_name:
                 return
             if snapshot.status in TERMINAL_TASK_STATUSES:
                 raise AssertionError(
@@ -276,7 +293,9 @@ def _create_stored_task_spec(
     assert err == ""
 
 
-def _latest_completed_record(harness, limit: int = 512) -> tuple[str, dict] | None:
+def _latest_completed_record(
+    harness: WeftTestHarness, limit: int = 512
+) -> tuple[str, dict] | None:
     queue = harness.context.queue(
         WEFT_GLOBAL_LOG_QUEUE,
         persistent=False,
@@ -329,7 +348,7 @@ def _raise_parallel_manager_reuse_failure(
     status_observations: list[dict[str, Any]] | None = None,
     status_payload: dict[str, object] | None = None,
     detail: str | None = None,
-) -> None:
+) -> Never:
     payload: dict[str, Any] = {
         "phase": phase,
         "root": str(root),
@@ -565,7 +584,7 @@ def _run_parallel_manager_reuse_cycle(  # noqa: C901 approved [TS-3.1] [RUFF-SUP
 
 
 def _wait_for_started_task_tid(
-    harness,
+    harness: WeftTestHarness,
     *,
     task_name: str,
     timeout: float = 30.0,
@@ -642,7 +661,7 @@ def test_started_task_tid_requires_child_work_start() -> None:
 
 
 def _wait_for_task_process_exit(
-    harness,
+    harness: WeftTestHarness,
     *,
     tid: str,
     timeout: float = 10.0,
@@ -670,7 +689,7 @@ def _wait_for_task_process_exit(
     )
 
 
-def test_cli_run_function_inline(workdir, weft_harness) -> None:
+def test_cli_run_function_inline(workdir: Path, weft_harness: WeftTestHarness) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -686,7 +705,9 @@ def test_cli_run_function_inline(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_cli_run_fast_standard_library_function(workdir, weft_harness) -> None:
+def test_cli_run_fast_standard_library_function(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     """A fast callable must report its result even when the worker exits quickly.
 
     Regression for the clean external-project invocation
@@ -745,8 +766,8 @@ def _assert_no_terminal_handoff_details(text: str) -> None:
     ),
 )
 def test_cli_run_terminal_handoff_failure_categories(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
     target: str,
     arg: str | None,
     expected: str,
@@ -789,8 +810,8 @@ def test_cli_run_terminal_handoff_failure_categories(
 
 @pytest.mark.parametrize("json_output", (False, True))
 def test_cli_run_target_failure_compatibility(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
     json_output: bool,
 ) -> None:
     """Target exceptions preserve their category and public failure schema."""
@@ -825,7 +846,7 @@ def test_cli_run_target_failure_compatibility(
     _assert_no_terminal_handoff_details(err)
 
 
-def test_cli_run_command_inline(workdir, weft_harness) -> None:
+def test_cli_run_command_inline(workdir: Path, weft_harness: WeftTestHarness) -> None:
     rc, out, err = run_cli(
         "run",
         "--",
@@ -843,7 +864,7 @@ def test_cli_run_command_inline(workdir, weft_harness) -> None:
 
 
 def test_cli_run_help_omits_removed_monitor_and_documents_named_or_path_spec(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     rc, out, err = run_cli(
         "run",
@@ -864,7 +885,7 @@ def test_cli_run_help_omits_removed_monitor_and_documents_named_or_path_spec(
 
 
 def test_cli_run_spec_help_is_spec_aware_for_builtin_dockerized_agent(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     rc, out, err = run_cli(
         "run",
@@ -890,7 +911,7 @@ def test_cli_run_spec_help_is_spec_aware_for_builtin_dockerized_agent(
 
 
 def test_cli_run_rejects_unknown_long_option_without_spec(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     rc, out, err = run_cli(
         "run",
@@ -904,7 +925,9 @@ def test_cli_run_rejects_unknown_long_option_without_spec(
     assert "Unknown option '--bogus'" in err
 
 
-def test_cli_run_spec_name_resolves_stored_task_spec(workdir, weft_harness) -> None:
+def test_cli_run_spec_name_resolves_stored_task_spec(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     _create_stored_task_spec(
         workdir,
         name="stored-echo",
@@ -1016,7 +1039,7 @@ def test_cli_run_spec_name_prefers_local_shadow_over_builtin(
     assert err == ""
 
 
-def test_cli_run_reads_stdin(workdir, weft_harness) -> None:
+def test_cli_run_reads_stdin(workdir: Path, weft_harness: WeftTestHarness) -> None:
     script = workdir / "stdin_script.py"
     script.write_text(
         "import sys\ndata = sys.stdin.read()\nprint(data.upper(), end='')\n",
@@ -1038,7 +1061,9 @@ def test_cli_run_reads_stdin(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_cli_run_rejects_oversized_piped_stdin(workdir, weft_harness) -> None:
+def test_cli_run_rejects_oversized_piped_stdin(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     script = workdir / "stdin_limit_script.py"
     script.write_text(
         "import sys\nprint(sys.stdin.read(), end='')\n",
@@ -1063,7 +1088,7 @@ def test_cli_run_rejects_oversized_piped_stdin(workdir, weft_harness) -> None:
     assert "Input exceeds maximum size of 8 bytes" in combined
 
 
-def test_cli_run_spec_path(workdir, weft_harness) -> None:
+def test_cli_run_spec_path(workdir: Path, weft_harness: WeftTestHarness) -> None:
     context = build_context(spec_context=workdir)
     _write_queue_message(
         context,
@@ -1107,7 +1132,7 @@ def test_cli_run_spec_path(workdir, weft_harness) -> None:
 
 
 def test_cli_run_stored_spec_preserves_fast_function_result(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     """Stored specs must preserve results from fast function workers.
 
@@ -1146,8 +1171,8 @@ def test_cli_run_stored_spec_preserves_fast_function_result(
 
 
 def test_cli_run_spec_without_run_input_rejects_extra_declared_args(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = workdir / "task_without_run_input.json"
     _write_json(
@@ -1260,7 +1285,7 @@ def test_run_input_adapter_typed_usage_error_keeps_cli_exit_2(
 
 
 def test_cli_run_spec_path_reads_piped_stdin_into_function(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     spec_path = workdir / "task_stdin_function.json"
     spec_payload = {
@@ -1302,7 +1327,7 @@ def test_cli_run_spec_path_reads_piped_stdin_into_function(
 
 
 def test_cli_run_spec_bundle_resolves_bundle_local_function_target(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "bundle-task"
@@ -1349,7 +1374,7 @@ def test_cli_run_spec_bundle_resolves_bundle_local_function_target(
 
 
 def test_cli_run_spec_bundle_passes_plain_json_object_stdin_to_function_target(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "bundle-json-task"
@@ -1401,8 +1426,8 @@ def test_cli_run_spec_bundle_passes_plain_json_object_stdin_to_function_target(
 
 
 def test_cli_run_spec_bundle_declared_args_shape_work_item(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "run-input-bundle"
@@ -1473,8 +1498,8 @@ def test_cli_run_spec_bundle_declared_args_shape_work_item(
 
 
 def test_cli_run_spec_builtin_arguments_payload_shapes_work_item(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = workdir / "run-input-flat-payload.json"
     _write_json(
@@ -1519,8 +1544,8 @@ def test_cli_run_spec_builtin_arguments_payload_shapes_work_item(
 
 
 def test_cli_run_spec_builtin_keyword_arguments_payload_shapes_work_item(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = workdir / "run-input-kwargs-payload.json"
     _write_json(
@@ -1565,8 +1590,8 @@ def test_cli_run_spec_builtin_keyword_arguments_payload_shapes_work_item(
 
 
 def test_cli_run_spec_bundle_declared_path_arg_normalizes_to_absolute_path(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "run-input-path-bundle"
@@ -1622,8 +1647,8 @@ def test_cli_run_spec_bundle_declared_path_arg_normalizes_to_absolute_path(
 
 
 def test_cli_run_spec_bundle_declared_args_require_declared_option(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     bundle_dir = workdir / "run-input-required-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -1674,8 +1699,8 @@ def test_cli_run_spec_bundle_declared_args_require_declared_option(
 
 
 def test_cli_run_spec_bundle_declared_args_reject_undeclared_option(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     bundle_dir = workdir / "run-input-undeclared-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -1730,8 +1755,8 @@ def test_cli_run_spec_bundle_declared_args_reject_undeclared_option(
 
 
 def test_cli_run_spec_bundle_parameterization_materializes_before_run_input(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "parameterized-bundle"
@@ -1813,8 +1838,8 @@ def test_cli_run_spec_bundle_parameterization_materializes_before_run_input(
 
 
 def test_cli_run_spec_bundle_parameterization_requires_declared_parameter(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     bundle_dir = workdir / "parameterized-required-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -1882,7 +1907,7 @@ def test_cli_run_spec_bundle_parameterization_requires_declared_parameter(
 
 
 def test_cli_run_spec_path_reads_piped_stdin_into_command(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     script = workdir / "stdin_spec_script.py"
     script.write_text(
@@ -1931,7 +1956,7 @@ def test_cli_run_spec_path_reads_piped_stdin_into_command(
 
 
 def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     spec_path = workdir / "persistent_stdin_spec.json"
@@ -1995,7 +2020,7 @@ def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
     assert err == ""
 
 
-def test_cli_run_agent_spec_path(workdir, weft_harness) -> None:
+def test_cli_run_agent_spec_path(workdir: Path, weft_harness: WeftTestHarness) -> None:
     context = build_context(spec_context=workdir)
     _write_queue_message(context, "cli_agent.inbox", "hello")
 
@@ -2028,7 +2053,9 @@ def test_cli_run_agent_spec_path(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_cli_run_agent_spec_no_wait_and_result(workdir, weft_harness) -> None:
+def test_cli_run_agent_spec_no_wait_and_result(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     context = build_context(spec_context=workdir)
     _write_queue_message(context, "cli_agent_result.inbox", "hello")
 
@@ -2080,7 +2107,7 @@ def test_cli_run_agent_spec_no_wait_and_result(workdir, weft_harness) -> None:
 
 
 def test_cli_run_persistent_agent_spec_continues_conversation(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     context = build_context(spec_context=workdir)
     weft_harness.ensure_foreground_manager()
@@ -2122,6 +2149,7 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
     )
 
     _write_queue_message(context, "cli_persistent_agent.inbox", "hello")
+    _wait_for_queue_message(context, "cli_persistent_agent.outbox")
     result_timeout = "20" if os.name == "nt" else "10"
 
     rc, out, err = run_cli(
@@ -2134,12 +2162,13 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
         harness=weft_harness,
     )
 
-    assert rc == 0
+    assert rc == 0, (out, err, weft_harness.dump_completion_timeout_state(tid))
     first_payload = json.loads(out)
     assert first_payload["result"] == "text:hello"
     assert err == ""
 
     _write_queue_message(context, "cli_persistent_agent.inbox", "__history__")
+    _wait_for_queue_message(context, "cli_persistent_agent.outbox")
 
     rc, out, err = run_cli(
         "result",
@@ -2151,7 +2180,7 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
         harness=weft_harness,
     )
 
-    assert rc == 0
+    assert rc == 0, (out, err, weft_harness.dump_completion_timeout_state(tid))
     second_payload = json.loads(out)
     assert second_payload["result"] == "history:hello"
     assert err == ""
@@ -2254,7 +2283,9 @@ def test_cli_run_persistent_spec_name_claims_and_releases_endpoint(
     assert "No active endpoint named 'mayor'" in err
 
 
-def test_cli_run_persistent_spec_rejects_wait(workdir, weft_harness) -> None:
+def test_cli_run_persistent_spec_rejects_wait(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     spec_path = workdir / "persistent_wait_rejected.json"
     spec_payload = taskspec_fixtures.create_valid_agent_taskspec(
         tid="1760000000000000203",
@@ -2278,7 +2309,9 @@ def test_cli_run_persistent_spec_rejects_wait(workdir, weft_harness) -> None:
     assert "--wait is not supported for persistent TaskSpecs" in combined
 
 
-def test_cli_run_once_overrides_persistent_spec(workdir, weft_harness) -> None:
+def test_cli_run_once_overrides_persistent_spec(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     spec_path = workdir / "persistent_once_override.json"
     spec_payload = {
         "tid": "1760000000000000204",
@@ -2318,7 +2351,9 @@ def test_cli_run_once_overrides_persistent_spec(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) -> None:
+def test_cli_run_continuous_overrides_nonpersistent_spec(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     context = build_context(spec_context=workdir)
     spec_path = workdir / "continuous_override.json"
     spec_payload = {
@@ -2402,7 +2437,9 @@ def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) 
     assert err == ""
 
 
-def test_cli_run_interactive_command_streams(workdir, weft_harness) -> None:
+def test_cli_run_interactive_command_streams(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     weft_harness.ensure_foreground_manager()
     rc, out, err = run_cli(
         "run",
@@ -2449,14 +2486,16 @@ def test_cli_run_interactive_command_streams(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_cli_run_requires_target(workdir, weft_harness) -> None:
+def test_cli_run_requires_target(workdir: Path, weft_harness: WeftTestHarness) -> None:
     rc, out, err = run_cli("run", cwd=workdir, harness=weft_harness)
     assert rc != 0
     combined = f"{out}\n{err}"
     assert "Provide a command" in combined
 
 
-def test_cli_run_command_and_function_conflict(workdir, weft_harness) -> None:
+def test_cli_run_command_and_function_conflict(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -2473,7 +2512,9 @@ def test_cli_run_command_and_function_conflict(workdir, weft_harness) -> None:
     assert "Cannot execute a shell command and --function simultaneously." in combined
 
 
-def test_cli_run_rejects_removed_monitor_option(workdir, weft_harness) -> None:
+def test_cli_run_rejects_removed_monitor_option(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "run",
         "--monitor",
@@ -2486,7 +2527,9 @@ def test_cli_run_rejects_removed_monitor_option(workdir, weft_harness) -> None:
     assert "Traceback" not in combined
 
 
-def test_cli_run_interactive_json_conflict(workdir, weft_harness) -> None:
+def test_cli_run_interactive_json_conflict(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "run",
         "--interactive",
@@ -2503,7 +2546,9 @@ def test_cli_run_interactive_json_conflict(workdir, weft_harness) -> None:
     assert "--json is not supported together with --interactive" in combined
 
 
-def test_cli_run_interactive_requires_command_target(workdir, weft_harness) -> None:
+def test_cli_run_interactive_requires_command_target(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "run",
         "--interactive",
@@ -2520,7 +2565,9 @@ def test_cli_run_interactive_requires_command_target(workdir, weft_harness) -> N
     assert "--interactive is only supported for command targets" in combined
 
 
-def test_cli_run_function_json_output(workdir, weft_harness) -> None:
+def test_cli_run_function_json_output(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -2537,7 +2584,7 @@ def test_cli_run_function_json_output(workdir, weft_harness) -> None:
     assert payload["result"]["data"] == "payload"
 
 
-def test_cli_run_command_with_env(workdir, weft_harness) -> None:
+def test_cli_run_command_with_env(workdir: Path, weft_harness: WeftTestHarness) -> None:
     script = workdir / "env_script.py"
     script.write_text(
         "import os\nprint(os.environ['RUN_ENV_VALUE'])\n",
@@ -2560,7 +2607,9 @@ def test_cli_run_command_with_env(workdir, weft_harness) -> None:
     assert out == "via-cli"
 
 
-def test_cli_run_function_with_kwargs(workdir, weft_harness) -> None:
+def test_cli_run_function_with_kwargs(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -2578,7 +2627,9 @@ def test_cli_run_function_with_kwargs(workdir, weft_harness) -> None:
     assert out == "base!"
 
 
-def test_cli_run_cpu_limit_validation(workdir, weft_harness) -> None:
+def test_cli_run_cpu_limit_validation(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -2596,7 +2647,9 @@ def test_cli_run_cpu_limit_validation(workdir, weft_harness) -> None:
     assert "CPU limit must be between 1 and 100 percent" in combined
 
 
-def test_cli_run_spec_invalid_json(workdir, weft_harness) -> None:
+def test_cli_run_spec_invalid_json(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     spec_path = workdir / "invalid_taskspec.json"
     spec_path.write_text("{ invalid json", encoding="utf-8")
 
@@ -2613,7 +2666,9 @@ def test_cli_run_spec_invalid_json(workdir, weft_harness) -> None:
     assert "Failed to read JSON" in err
 
 
-def test_cli_run_no_wait_returns_tid(workdir, weft_harness) -> None:
+def test_cli_run_no_wait_returns_tid(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -2631,7 +2686,9 @@ def test_cli_run_no_wait_returns_tid(workdir, weft_harness) -> None:
     weft_harness.wait_for_completion(out)
 
 
-def test_cli_run_no_wait_survives_short_manager_lifetime(workdir, weft_harness) -> None:
+def test_cli_run_no_wait_survives_short_manager_lifetime(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     env = os.environ.copy()
     manager_lifetime = 1.0 if os.name == "nt" else 0.2
     task_duration = 1.5 if os.name == "nt" else 0.5
@@ -2659,7 +2716,7 @@ def test_cli_run_no_wait_survives_short_manager_lifetime(workdir, weft_harness) 
 
 
 def test_harness_wait_for_completion_reports_cancelled_task(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     release_file = workdir / "harness-cancel-release"
@@ -2701,8 +2758,8 @@ def test_harness_wait_for_completion_reports_cancelled_task(
 
 @pytest.mark.parametrize("json_output", (False, True))
 def test_cli_run_wait_reports_cancelled_task(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
     json_output: bool,
 ) -> None:
     weft_harness.ensure_foreground_manager()
@@ -2766,8 +2823,8 @@ def test_cli_run_wait_reports_cancelled_task(
 
 @pytest.mark.parametrize("json_output", (False, True))
 def test_cli_run_wait_reports_memory_limit(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
     json_output: bool,
 ) -> None:
     """A confirmed limit keeps the existing killed rendering and schema."""
@@ -2814,8 +2871,8 @@ def test_cli_run_wait_reports_memory_limit(
 
 @pytest.mark.parametrize("json_output", (False, True))
 def test_cli_run_wait_returns_timeout_exit_code(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
     json_output: bool,
 ) -> None:
     weft_harness.ensure_foreground_manager()
@@ -2862,7 +2919,7 @@ def test_cli_run_wait_returns_timeout_exit_code(
 
 
 def test_cli_run_skips_stale_manager_and_preserves_history(
-    workdir, weft_harness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
     context = weft_harness.context
@@ -2911,7 +2968,9 @@ def test_cli_run_skips_stale_manager_and_preserves_history(
         registry.close()
 
 
-def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -> None:
+def test_cli_run_parallel_no_wait_adopts_active_manager(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     weft_harness.ensure_foreground_manager()
     env = os.environ.copy()
     env["WEFT_MANAGER_REUSE_ENABLED"] = "1"

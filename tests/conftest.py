@@ -9,20 +9,23 @@ import os
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from simplebroker import Queue
+from simplebroker import BrokerTarget, Queue
 from tests.helpers.test_backend import active_test_backend, prepare_cli_root
+from tests.helpers.typing import BrokerEnv, QueueFactory, TaskFactory
 from tests.helpers.weft_harness import WeftTestHarness
+from weft.core.tasks import Consumer
+from weft.core.taskspec import TaskSpec
 from weft.ext import RunnerHandle
 
 logger = logging.getLogger(__name__)
 
-pytest_plugins = ["tests.helpers.run_diagnostics"]
+pytest_plugins = ["tests.helpers.run_diagnostics", "tests.helpers.xdist_titles"]
 
 
 @pytest.fixture
@@ -120,6 +123,8 @@ _SHARED_MODULES = frozenset(
         "tests/core/test_provider_cli_session_backend.py",
         "tests/core/test_provider_cli_settings.py",
         "tests/core/test_provider_cli_windows_shims.py",
+        "tests/core/test_public_client_contracts.py",
+        "tests/core/test_public_extension_contracts.py",
         "tests/core/test_queue_wait.py",
         "tests/core/test_runner_diagnostics.py",
         "tests/core/test_runner_plugins.py",
@@ -293,14 +298,14 @@ def workdir(weft_harness: WeftTestHarness) -> Path:
 
 
 @pytest.fixture
-def broker_target(weft_harness: WeftTestHarness):
+def broker_target(weft_harness: WeftTestHarness) -> BrokerTarget:
     """Resolved broker target for the active test backend."""
 
     return weft_harness.context.broker_target
 
 
 @pytest.fixture
-def queue_factory(weft_harness: WeftTestHarness):
+def queue_factory(weft_harness: WeftTestHarness) -> Iterator[QueueFactory]:
     """Create queues bound to the active backend for the current harness root."""
 
     context = weft_harness.context
@@ -329,7 +334,7 @@ def queue_factory(weft_harness: WeftTestHarness):
 @pytest.fixture
 def broker_env(
     weft_harness: WeftTestHarness,
-) -> Iterator[tuple[object, Callable[[str], Queue]]]:
+) -> Iterator[BrokerEnv]:
     """Provide a shared broker target and a queue factory."""
     context = weft_harness.context
     broker_target = context.broker_target
@@ -356,14 +361,12 @@ def broker_env(
 
 
 @pytest.fixture
-def task_factory(broker_env: tuple[object, Callable[[str], Queue]]):
+def task_factory(broker_env: BrokerEnv) -> Iterator[TaskFactory]:
     """Create Task objects bound to the shared broker database."""
-    from weft.core.tasks import Consumer
-
     broker_target, _ = broker_env
     tasks: list[Consumer] = []
 
-    def factory(taskspec):
+    def factory(taskspec: TaskSpec) -> Consumer:
         task = Consumer(broker_target, taskspec)
         tasks.append(task)
         return task
@@ -456,6 +459,8 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
             debug_lines.append("No WeftTestHarness provided.")
         debug_text = "\n".join(debug_lines)
         existing_stderr = exc.stderr or ""
+        if isinstance(existing_stderr, bytes):
+            existing_stderr = existing_stderr.decode("utf-8", errors="replace")
         if existing_stderr:
             exc.add_note(f"partial stderr:\n{existing_stderr}")
         exc.add_note(debug_text)

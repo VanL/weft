@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, TypedDict
 
 import pytest
 from hypothesis import given
@@ -19,6 +19,14 @@ from weft.core.taskspec import LimitsSection, TaskSpec
 from weft.core.taskspec.model import resolve_taskspec_payload
 
 pytestmark = [pytest.mark.shared, pytest.mark.property]
+
+
+class MetricUpdate(TypedDict):
+    time: float | None
+    memory: float | None
+    cpu: int | None
+    fds: int | None
+    net_connections: int | None
 
 
 _JSON_MAPPING = st.dictionaries(
@@ -46,7 +54,7 @@ def _minimal_payload(
     tid: str,
     args: list[object] | None = None,
     keyword_args: dict[str, object] | None = None,
-    env: dict[str, object] | None = None,
+    env: Mapping[str, object] | None = None,
     metadata: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -185,26 +193,33 @@ def test_limit_validation_rejects_invalid_resource_bounds(
 
 @given(updates=st.lists(_METRICS, min_size=1, max_size=16))
 def test_metric_updates_preserve_current_and_peak_relationship(
-    updates: list[dict[str, float | int | None]],
+    updates: list[MetricUpdate],
 ) -> None:
     taskspec = TaskSpec.model_validate(
         resolve_taskspec_payload(_minimal_payload(tid="1755033993077017000"))
     )
 
+    observed: dict[str, list[float]] = {
+        field: [] for field in MetricUpdate.__annotations__
+    }
     for update in updates:
         taskspec.update_metrics(**update)
-        if taskspec.state.memory is not None:
-            assert taskspec.state.peak_memory is not None
-            assert taskspec.state.memory <= taskspec.state.peak_memory
-        if taskspec.state.cpu is not None:
-            assert taskspec.state.peak_cpu is not None
-            assert taskspec.state.cpu <= taskspec.state.peak_cpu
-        if taskspec.state.fds is not None:
-            assert taskspec.state.peak_fds is not None
-            assert taskspec.state.fds <= taskspec.state.peak_fds
-        if taskspec.state.net_connections is not None:
-            assert taskspec.state.peak_net_connections is not None
-            assert taskspec.state.net_connections <= taskspec.state.peak_net_connections
+        samples: dict[str, float | None] = {
+            "time": update["time"],
+            "memory": update["memory"],
+            "cpu": update["cpu"],
+            "fds": update["fds"],
+            "net_connections": update["net_connections"],
+        }
+        for field, history in observed.items():
+            sample = samples[field]
+            if sample is not None:
+                history.append(sample)
+            assert getattr(taskspec.state, field) == (history[-1] if history else None)
+            if field != "time":
+                assert getattr(taskspec.state, f"peak_{field}") == (
+                    max(history) if history else None
+                )
 
 
 _STATUS_OPERATIONS: dict[str, Callable[[TaskSpec], None]] = {
@@ -237,12 +252,16 @@ def test_status_operation_sequences_preserve_timestamp_invariants(
     successful_operations = 0
 
     for operation in (initial_operation, *tail):
+        previous_state = taskspec.state.model_dump()
         try:
             _STATUS_OPERATIONS[operation](taskspec)
         except ValueError:
-            pass
+            assert taskspec.state.model_dump() == previous_state
         else:
             successful_operations += 1
+            assert taskspec.state.status == (
+                "spawning" if operation == "started" else operation
+            )
 
         if taskspec.state.status in {"spawning", "running"}:
             assert taskspec.state.started_at is not None

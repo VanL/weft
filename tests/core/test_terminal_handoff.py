@@ -148,7 +148,10 @@ def test_terminal_handoff_table_covers_structure_and_transitions() -> None:
     """The full table fires every production edge, state, and action."""
 
     valid_cases = tuple(case for case in TERMINAL_HANDOFF_CASES if case.target)
-    transition_ids = {case.transition_id for case in valid_cases}
+    transition_ids: set[str] = set()
+    for case in valid_cases:
+        assert case.transition_id is not None
+        transition_ids.add(case.transition_id)
 
     assert len(valid_cases) == 39
     assert len(TERMINAL_HANDOFF_CASES) - len(valid_cases) == 9
@@ -224,10 +227,14 @@ def _selector_cases() -> tuple[
     ...,
 ]:
     cases = []
-    for policy, order in (
+    policies: tuple[
+        tuple[TerminalHandoffObservationPolicy, tuple[TerminalHandoffEventKind, ...]],
+        ...,
+    ] = (
         ("one_shot", ONE_SHOT_ORDER),
         ("persistent_session", PERSISTENT_SESSION_ORDER),
-    ):
+    )
+    for policy, order in policies:
         for mask in range(1, 1 << len(SELECTOR_KINDS)):
             subset = tuple(
                 kind for index, kind in enumerate(SELECTOR_KINDS) if mask & (1 << index)

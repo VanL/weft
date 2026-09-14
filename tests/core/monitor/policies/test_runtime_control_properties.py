@@ -80,9 +80,7 @@ def test_runtime_reserved_cleanup_selection_skips_active_and_keeps_order(
     )
 
     assert selection.queue_names == tuple(
-        queue_name
-        for queue_name in queue_names
-        if reserved_queue_tid(queue_name) not in active_tids
+        f"T{tid}.{QUEUE_RESERVED_SUFFIX}" for tid in tids[1::2]
     )
     assert selection.skipped_active == len(active_tids)
     assert selection.skipped_not_ready == 0

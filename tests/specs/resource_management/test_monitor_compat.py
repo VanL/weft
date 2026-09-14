@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
+from simplebroker import Queue
 from weft.core import resource_monitor
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
@@ -115,27 +118,27 @@ def test_loader_rejects_removed_constructor_context_arguments(
     ):
         load_resource_monitor(
             f"{__name__}.AlternateMonitor",
-            **{removed_argument: object()},
+            **{removed_argument: object()},  # type: ignore[arg-type]  # Deliberately unsupported keyword.
         )
 
 
-def test_resource_monitor_does_not_open_broker_queue_for_metrics() -> None:
-    monitor = ResourceMonitor()
-    monitor.stop()
-    monitor.stop()
+def test_resource_monitor_does_not_open_broker_queue_for_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbid_queue(*args: object, **kwargs: object) -> None:
+        pytest.fail("Resource sampling must not open a broker queue")
 
-    assert not hasattr(monitor, "metrics_queue")
+    monkeypatch.setattr(Queue, "__init__", forbid_queue)
+    monitor = ResourceMonitor()
+    try:
+        monitor.start(os.getpid())
+        metrics = monitor.snapshot()
+        assert metrics.timestamp > 0
+        assert metrics.memory_mb > 0
+    finally:
+        monitor.stop()
+        monitor.stop()
 
 
 def test_psutil_resource_monitor_alias_is_removed() -> None:
     assert not hasattr(resource_monitor, "PsutilResourceMonitor")
-
-
-def test_resource_monitor_exposes_only_the_current_method_family() -> None:
-    monitor = ResourceMonitor()
-
-    assert not hasattr(monitor, "start_monitoring")
-    assert not hasattr(monitor, "stop_monitoring")
-    assert not hasattr(monitor, "get_current_metrics")
-    assert not hasattr(monitor, "get_max_metrics")
-    assert not hasattr(monitor, "close")

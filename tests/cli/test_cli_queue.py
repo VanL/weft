@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -117,7 +118,7 @@ def test_queue_stdin_context_failure_is_clean_execution_error(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT semantics")
-def test_queue_watch_sigint_exits_cleanly(workdir) -> None:
+def test_queue_watch_sigint_exits_cleanly(workdir: Path) -> None:
     process = subprocess.Popen(
         [
             sys.executable,
@@ -183,7 +184,7 @@ def test_queue_watch_sigint_during_readiness_closes_stream(
     assert stream.closed
 
 
-def test_queue_write_and_read(workdir):
+def test_queue_write_and_read(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     rc, out, err = run_cli(
@@ -202,7 +203,7 @@ def test_queue_write_and_read(workdir):
     assert err == ""
 
 
-def test_queue_write_resolves_explicit_alias_operand(workdir):
+def test_queue_write_resolves_explicit_alias_operand(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     rc, out, err = run_cli(
@@ -219,7 +220,7 @@ def test_queue_write_resolves_explicit_alias_operand(workdir):
     assert err == ""
 
 
-def test_queue_write_reads_implicit_stdin(workdir):
+def test_queue_write_reads_implicit_stdin(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     rc, _, err = run_cli(
@@ -238,7 +239,7 @@ def test_queue_write_reads_implicit_stdin(workdir):
     assert err == ""
 
 
-def test_queue_read_json(workdir):
+def test_queue_read_json(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     rc, _, err = run_cli("queue", "write", "json.queue", "data", cwd=workdir)
@@ -262,7 +263,7 @@ def test_queue_read_json(workdir):
     assert err == ""
 
 
-def test_queue_peek_preserves_message(workdir):
+def test_queue_peek_preserves_message(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     rc, _, err = run_cli("queue", "write", "peek.queue", "value", cwd=workdir)
@@ -280,7 +281,7 @@ def test_queue_peek_preserves_message(workdir):
     assert err == ""
 
 
-def test_queue_move(workdir):
+def test_queue_move(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     assert run_cli("queue", "write", "from.queue", "first", cwd=workdir)[0] == 0
@@ -311,7 +312,7 @@ def test_queue_move(workdir):
     assert err == ""
 
 
-def test_queue_list(workdir):
+def test_queue_list(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "list.queue", "item", cwd=workdir)[0] == 0
 
@@ -321,7 +322,7 @@ def test_queue_list(workdir):
     assert err == ""
 
 
-def test_queue_watch(workdir):
+def test_queue_watch(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "watch.queue", "payload", cwd=workdir)[0] == 0
 
@@ -338,7 +339,7 @@ def test_queue_watch(workdir):
     assert "Watching queue 'watch.queue'" in err
 
 
-def test_queue_broadcast_reads_implicit_stdin_with_pattern(workdir):
+def test_queue_broadcast_reads_implicit_stdin_with_pattern(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     assert run_cli("queue", "write", "broadcast.alpha", "seed-a", cwd=workdir)[0] == 0
@@ -373,7 +374,7 @@ def test_queue_broadcast_reads_implicit_stdin_with_pattern(workdir):
     assert err == ""
 
 
-def test_queue_read_with_timestamps(workdir):
+def test_queue_read_with_timestamps(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "ts.queue", "payload", cwd=workdir)[0] == 0
 
@@ -391,7 +392,7 @@ def test_queue_read_with_timestamps(workdir):
     assert message == "payload"
 
 
-def test_queue_read_after_and_before_filters(workdir):
+def test_queue_read_after_and_before_filters(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "range.queue", "first", cwd=workdir)[0] == 0
     assert run_cli("queue", "write", "range.queue", "second", cwd=workdir)[0] == 0
@@ -427,7 +428,7 @@ def test_queue_read_after_and_before_filters(workdir):
     assert err == ""
 
 
-def test_queue_since_filter_is_not_accepted(workdir):
+def test_queue_since_filter_is_not_accepted(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     rc, out, err = run_cli(
@@ -444,7 +445,7 @@ def test_queue_since_filter_is_not_accepted(workdir):
     assert "No such option" in err
 
 
-def test_queue_list_json(workdir):
+def test_queue_list_json(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "jsonlist.queue", "item", cwd=workdir)[0] == 0
 
@@ -455,7 +456,7 @@ def test_queue_list_json(workdir):
     assert any(entry["queue"] == "jsonlist.queue" for entry in data)
 
 
-def test_queue_list_pattern(workdir):
+def test_queue_list_pattern(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "alpha.queue", "item", cwd=workdir)[0] == 0
     assert run_cli("queue", "write", "beta.queue", "item", cwd=workdir)[0] == 0
@@ -486,7 +487,7 @@ def test_queue_list_pattern(workdir):
     assert all(entry["queue"].startswith("beta") for entry in data)
 
 
-def test_queue_list_prefix(workdir):
+def test_queue_list_prefix(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "prefix.alpha", "item", cwd=workdir)[0] == 0
     assert run_cli("queue", "write", "other.alpha", "item", cwd=workdir)[0] == 0
@@ -504,7 +505,7 @@ def test_queue_list_prefix(workdir):
     assert err == ""
 
 
-def test_queue_list_json_stats_includes_totals(workdir):
+def test_queue_list_json_stats_includes_totals(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "stat.queue", "item", cwd=workdir)[0] == 0
 
@@ -524,7 +525,7 @@ def test_queue_list_json_stats_includes_totals(workdir):
     assert "pending" in stat_entry
 
 
-def test_queue_exists_and_stats(workdir):
+def test_queue_exists_and_stats(workdir: Path) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "meta.queue", "item", cwd=workdir)[0] == 0
 
@@ -550,7 +551,7 @@ def test_queue_exists_and_stats(workdir):
     assert err == ""
 
 
-def test_queue_invalid_message_id_returns_input_error(workdir):
+def test_queue_invalid_message_id_returns_input_error(workdir: Path) -> None:
     build_context(spec_context=workdir)
 
     rc, out, err = run_cli(
@@ -591,7 +592,9 @@ def test_queue_json_selector_ignores_unrelated_usage_error_prose(
     assert result.stderr == "unrelated message ID guidance\n"
 
 
-def test_queue_delete_rejects_all_with_message_and_preserves_queues(workdir):
+def test_queue_delete_rejects_all_with_message_and_preserves_queues(
+    workdir: Path,
+) -> None:
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "delete.one", "one", cwd=workdir)[0] == 0
     assert run_cli("queue", "write", "delete.two", "two", cwd=workdir)[0] == 0
@@ -623,7 +626,7 @@ def test_queue_delete_rejects_all_with_message_and_preserves_queues(workdir):
     assert run_cli("queue", "read", "delete.two", cwd=workdir) == (0, "two", "")
 
 
-def test_queue_resolve_reports_named_endpoint(workdir):
+def test_queue_resolve_reports_named_endpoint(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     spec = make_function_taskspec(
@@ -646,7 +649,7 @@ def test_queue_resolve_reports_named_endpoint(workdir):
         task.cleanup()
 
 
-def test_queue_write_can_target_named_endpoint(workdir):
+def test_queue_write_can_target_named_endpoint(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     spec = make_function_taskspec(
@@ -679,7 +682,7 @@ def test_queue_write_can_target_named_endpoint(workdir):
         task.cleanup()
 
 
-def test_queue_list_endpoints_json_reports_canonical_owner(workdir):
+def test_queue_list_endpoints_json_reports_canonical_owner(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     low_tid = str(time.time_ns())
     high_tid = str(int(low_tid) + 1)

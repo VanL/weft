@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -41,8 +42,12 @@ def test_prepare_agent_images_rejects_malformed_work_item_as_value_error(
     message: str,
 ) -> None:
     fake_module = types.ModuleType("weft_docker.agent_images")
-    fake_module.ensure_agent_image = lambda *_args, **_kwargs: None
-    fake_module.get_agent_image_recipe = lambda _provider: None
+    monkeypatch.setattr(
+        fake_module, "ensure_agent_image", lambda *_args, **_kwargs: None, raising=False
+    )
+    monkeypatch.setattr(
+        fake_module, "get_agent_image_recipe", lambda _provider: None, raising=False
+    )
     monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
     monkeypatch.setattr(
         agent_images_module, "builtin_platform_supported", lambda _: True
@@ -82,18 +87,24 @@ def test_prepare_agent_images_task_requires_docker_extension(
 
 def test_prepare_agent_images_task_uses_probe_results_without_persisting_settings(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     fake_module = types.ModuleType("weft_docker.agent_images")
-    fake_module.get_agent_image_recipe = lambda provider_name: (
-        object() if provider_name == "codex" else None
+    monkeypatch.setattr(
+        fake_module,
+        "get_agent_image_recipe",
+        lambda provider_name: object() if provider_name == "codex" else None,
+        raising=False,
     )
-    fake_module.ensure_agent_image = lambda provider_name, refresh=False: (
-        SimpleNamespace(
+    monkeypatch.setattr(
+        fake_module,
+        "ensure_agent_image",
+        lambda provider_name, refresh=False: SimpleNamespace(
             action="reused",
             image=f"weft-agent-{provider_name}:cached",
             cache_key=f"{provider_name}-cache-key",
-        )
+        ),
+        raising=False,
     )
     monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
     monkeypatch.setattr(
@@ -111,9 +122,9 @@ def test_prepare_agent_images_task_uses_probe_results_without_persisting_setting
 
     def fake_probe_agents(
         *,
-        project_root,
+        project_root: Path,
         persist_settings: bool,
-        providers,
+        providers: tuple[str, ...],
     ) -> dict[str, object]:
         assert project_root == tmp_path
         assert persist_settings is False
@@ -151,18 +162,24 @@ def test_prepare_agent_images_task_uses_probe_results_without_persisting_setting
 
 def test_prepare_agent_images_task_explicit_providers_skip_probe(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     fake_module = types.ModuleType("weft_docker.agent_images")
-    fake_module.get_agent_image_recipe = lambda provider_name: (
-        object() if provider_name == "codex" else None
+    monkeypatch.setattr(
+        fake_module,
+        "get_agent_image_recipe",
+        lambda provider_name: object() if provider_name == "codex" else None,
+        raising=False,
     )
-    fake_module.ensure_agent_image = lambda provider_name, refresh=False: (
-        SimpleNamespace(
+    monkeypatch.setattr(
+        fake_module,
+        "ensure_agent_image",
+        lambda provider_name, refresh=False: SimpleNamespace(
             action="built",
             image=f"weft-agent-{provider_name}:fresh",
             cache_key=f"{provider_name}-cache-key",
-        )
+        ),
+        raising=False,
     )
     monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
     monkeypatch.setattr(
@@ -203,11 +220,16 @@ def test_prepare_agent_images_task_explicit_providers_skip_probe(
 
 def test_prepare_agent_images_contains_one_provider_failure_and_continues(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     attempts: list[str] = []
     fake_module = types.ModuleType("weft_docker.agent_images")
-    fake_module.get_agent_image_recipe = lambda _provider_name: object()
+    monkeypatch.setattr(
+        fake_module,
+        "get_agent_image_recipe",
+        lambda _provider_name: object(),
+        raising=False,
+    )
 
     def ensure_agent_image(provider_name: str, *, refresh: bool = False) -> object:
         assert refresh is True
@@ -220,7 +242,9 @@ def test_prepare_agent_images_contains_one_provider_failure_and_continues(
             cache_key=f"{provider_name}-cache-key",
         )
 
-    fake_module.ensure_agent_image = ensure_agent_image
+    monkeypatch.setattr(
+        fake_module, "ensure_agent_image", ensure_agent_image, raising=False
+    )
     monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
     monkeypatch.setattr(
         agent_images_module,
@@ -264,19 +288,24 @@ def test_prepare_agent_images_contains_one_provider_failure_and_continues(
 
 def test_prepare_agent_images_does_not_contain_fatal_provider_signal(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     class FatalProviderSignal(BaseException):
         pass
 
     signal = FatalProviderSignal("stop now")
     fake_module = types.ModuleType("weft_docker.agent_images")
-    fake_module.get_agent_image_recipe = lambda _provider_name: object()
+    monkeypatch.setattr(
+        fake_module,
+        "get_agent_image_recipe",
+        lambda _provider_name: object(),
+        raising=False,
+    )
 
     def fail_build(*_args: object, **_kwargs: object) -> object:
         raise signal
 
-    fake_module.ensure_agent_image = fail_build
+    monkeypatch.setattr(fake_module, "ensure_agent_image", fail_build, raising=False)
     monkeypatch.setitem(sys.modules, "weft_docker.agent_images", fake_module)
     monkeypatch.setattr(
         agent_images_module,

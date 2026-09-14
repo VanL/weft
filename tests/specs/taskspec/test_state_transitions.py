@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from tests.taskspec import fixtures
 from weft.core.task_lifecycle import (
+    TaskLifecycleAction,
     TaskLifecycleStatus,
     TaskStatusTarget,
     task_lifecycle_machine,
@@ -16,6 +19,7 @@ from weft.core.task_lifecycle import (
     valid_task_status_targets,
     validate_task_status_transition,
 )
+from weft.core.taskspec import TaskSpec
 
 
 def test_mark_started_sets_spawning_state() -> None:
@@ -65,7 +69,7 @@ def test_lifecycle_machine_covers_allowed_state_transitions() -> None:
     )
     seen_transitions: set[str] = set()
     seen_states: set[TaskLifecycleStatus] = set()
-    seen_actions: set[str] = set()
+    seen_actions: set[TaskLifecycleAction] = set()
 
     for current, target, transition_id in cases:
         decision = validate_task_status_transition(current, target)
@@ -82,9 +86,23 @@ def test_lifecycle_machine_covers_allowed_state_transitions() -> None:
 
 
 def test_lifecycle_machine_pair_matrix_matches_transition_table() -> None:
-    for current in sorted(task_lifecycle_statuses):
-        valid_targets = valid_task_status_targets(current)
-        for target in sorted(task_lifecycle_statuses):
+    # Independent oracle from [STATE.1], not the production transition table.
+    allowed: dict[TaskLifecycleStatus, frozenset[TaskLifecycleStatus]] = {
+        "created": frozenset({"spawning", "failed", "cancelled"}),
+        "spawning": frozenset(
+            {"running", "completed", "failed", "timeout", "cancelled", "killed"}
+        ),
+        "running": frozenset({"completed", "failed", "timeout", "cancelled", "killed"}),
+        "completed": frozenset(),
+        "failed": frozenset(),
+        "timeout": frozenset(),
+        "cancelled": frozenset(),
+        "killed": frozenset(),
+    }
+    assert task_lifecycle_statuses == allowed.keys()
+    for current, valid_targets in allowed.items():
+        assert valid_task_status_targets(current) == valid_targets
+        for target in allowed:
             if target in valid_targets:
                 decision = validate_task_status_transition(current, target)
                 assert decision.source == current
@@ -93,8 +111,9 @@ def test_lifecycle_machine_pair_matrix_matches_transition_table() -> None:
                 with pytest.raises(ValueError, match="No transition matched"):
                     task_lifecycle_machine.decide(current, TaskStatusTarget(target))
 
-    for current in sorted(terminal_task_lifecycle_statuses):
-        assert valid_task_status_targets(current) == frozenset()
+    assert terminal_task_lifecycle_statuses == {
+        status for status, targets in allowed.items() if not targets
+    }
 
 
 @pytest.mark.parametrize(
@@ -146,7 +165,7 @@ def test_unknown_current_status_fails_explicitly() -> None:
         taskspec.set_status("running")
 
 
-_STATUS_OPERATIONS = {
+_STATUS_OPERATIONS: dict[str, Callable[[TaskSpec], None]] = {
     "started": lambda taskspec: taskspec.mark_started(),
     "running": lambda taskspec: taskspec.mark_running(),
     "completed": lambda taskspec: taskspec.mark_completed(),

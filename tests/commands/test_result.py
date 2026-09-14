@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Self
+from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
+from typing import Any, Self, TypedDict, cast
 
 import pytest
 from psycopg_pool import PoolTimeout
 
+from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft._exceptions import (
@@ -34,9 +37,18 @@ from weft.commands.result import (
     cmd_result,
 )
 from weft.commands.types import TaskEvent, TaskResult
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.helpers import iter_queue_json_entries
+
+
+class _ResultOptions(TypedDict, total=False):
+    tid: str
+    all: bool
+    peek: bool
+    timeout: float
+    stream: bool
+
 
 pytestmark = [pytest.mark.shared]
 
@@ -71,7 +83,7 @@ def test_public_cmd_result_returns_structured_single_and_all_results(
 
 def test_collect_all_results_consumes_each_outbox_in_one_pass(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -84,21 +96,23 @@ def test_collect_all_results_consumes_each_outbox_in_one_pass(
     counts = {"inspections": 0, "exact_reads": 0}
 
     class QueueSpy:
-        def __init__(self, queue) -> None:
+        def __init__(self, queue: Queue) -> None:
             self.queue = queue
 
-        def peek_generator(self, **kwargs):
+        def peek_generator(self, **kwargs: Any) -> Iterator[str | tuple[str, int]]:
             counts["inspections"] += 1
             return self.queue.peek_generator(**kwargs)
 
-        def read_one(self, **kwargs):
+        def read_one(self, **kwargs: Any) -> str | tuple[str, int] | None:
             counts["exact_reads"] += 1
-            return self.queue.read_one(**kwargs)
+            value = self.queue.read_one(**kwargs)
+            assert value is None or isinstance(value, (str, tuple))
+            return value
 
         def close(self) -> None:
             self.queue.close()
 
-    def queue_for(self, name: str, **kwargs):
+    def queue_for(self: WeftContext, name: str, **kwargs: Any) -> QueueSpy | Queue:
         queue = original_queue(self, name, **kwargs)
         return QueueSpy(queue) if self is ctx and name == f"T{tid}.outbox" else queue
 
@@ -113,7 +127,7 @@ def test_collect_all_results_consumes_each_outbox_in_one_pass(
 
 
 def test_collect_all_results_leaves_partial_stream_chunks_for_running_task(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -127,7 +141,9 @@ def test_collect_all_results_leaves_partial_stream_chunks_for_running_task(
     outbox.close()
 
 
-def test_collect_all_results_consumes_only_complete_stream_prefix(tmp_path) -> None:
+def test_collect_all_results_consumes_only_complete_stream_prefix(
+    tmp_path: Path,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -167,6 +183,7 @@ def test_public_cmd_result_returns_structured_stream(
     )
 
     stream = result_cmd.cmd_result("1779600000000000001", stream=True)
+    assert not isinstance(stream, (TaskResult, tuple))
     assert tuple(stream) == (event,)
 
 
@@ -180,7 +197,9 @@ def test_public_cmd_result_returns_structured_stream(
         lambda: result_cmd.cmd_result(all=True, timeout=1.0),
     ],
 )
-def test_public_cmd_result_rejects_invalid_mode_combinations(invoke) -> None:
+def test_public_cmd_result_rejects_invalid_mode_combinations(
+    invoke: Callable[[], object],
+) -> None:
     with pytest.raises(CommandUsageError):
         invoke()
 
@@ -326,7 +345,7 @@ def test_cmd_result_propagates_fatal_context_resolution_signal(
     assert exc_info.value is signal
 
 
-def _write_task_log_event(queue, tid: str, event: str, status: str) -> None:
+def _write_task_log_event(queue: Queue, tid: str, event: str, status: str) -> None:
     queue.write(
         json.dumps(
             {
@@ -362,7 +381,7 @@ def _one_shot_taskspec_payload(tid: str) -> dict[str, object]:
     }
 
 
-def _log_timestamps_by_tid(queue) -> dict[str, list[int]]:
+def _log_timestamps_by_tid(queue: Queue) -> dict[str, list[int]]:
     timestamps: dict[str, list[int]] = {}
     for payload, timestamp in iter_queue_json_entries(queue):
         tid = payload.get("tid")
@@ -456,7 +475,7 @@ def test_process_outbox_message_handles_malformed_base64() -> None:
 
 def test_collect_interactive_queue_output_handles_malformed_base64() -> None:
     class _Queue:
-        def peek_generator(self):
+        def peek_generator(self) -> Iterator[str]:
             yield json.dumps(
                 {
                     "type": "stream",
@@ -466,10 +485,13 @@ def test_collect_interactive_queue_output_handles_malformed_base64() -> None:
                 }
             )
 
-    assert collect_interactive_queue_output(_Queue()) == ["%%%not-base64%%%"]
+    # The double supplies malformed transport data at the queue read boundary.
+    assert collect_interactive_queue_output(cast(Queue, _Queue())) == [
+        "%%%not-base64%%%"
+    ]
 
 
-def test_poll_log_events_advances_cursor_over_unrelated_events(tmp_path) -> None:
+def test_poll_log_events_advances_cursor_over_unrelated_events(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
@@ -497,7 +519,7 @@ def test_poll_log_events_advances_cursor_over_unrelated_events(tmp_path) -> None
     assert later_cursor == cursor
 
 
-def test_poll_log_events_advances_cursor_when_no_target_events(tmp_path) -> None:
+def test_poll_log_events_advances_cursor_when_no_target_events(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
@@ -518,7 +540,7 @@ def test_poll_log_events_advances_cursor_when_no_target_events(tmp_path) -> None
 
 
 def test_iter_task_events_follow_advances_cursor_over_unrelated_events(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -537,7 +559,9 @@ def test_iter_task_events_follow_advances_cursor_over_unrelated_events(
         pass
 
     class _NoSleepMonitor:
-        def __init__(self, queues, *, config=None) -> None:
+        def __init__(
+            self, queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del queues, config
 
         def wait(self, timeout: float | None) -> bool:
@@ -550,13 +574,15 @@ def test_iter_task_events_follow_advances_cursor_over_unrelated_events(
     real_iter = events_cmd.iter_queue_json_entries
     since_timestamps: list[int | None] = []
 
-    def _recording_iter(queue, *, since_timestamp: int | None = None):
+    def _recording_iter(
+        queue: Queue, *, since_timestamp: int | None = None
+    ) -> Iterator[tuple[dict[str, Any], int]]:
         since_timestamps.append(since_timestamp)
         real_generator = real_iter(queue, since_timestamp=since_timestamp)
         if len(since_timestamps) != 2:
             return real_generator
 
-        def _sentinel_generator():
+        def _sentinel_generator() -> Iterator[tuple[dict[str, Any], int]]:
             raise _StopAfterSecondScan
             yield  # pragma: no cover - keep this function a generator
 
@@ -578,13 +604,15 @@ def test_iter_task_events_follow_advances_cursor_over_unrelated_events(
         with pytest.raises(_StopAfterSecondScan):
             next(event_iter)
     finally:
-        event_iter.close()
+        close = getattr(event_iter, "close", None)
+        assert callable(close)
+        close()
 
     assert since_timestamps[0] == int(target_tid)
     assert since_timestamps[1] == highest_unrelated_timestamp + 1
 
 
-def test_iter_task_events_non_follow_yields_only_target_events(tmp_path) -> None:
+def test_iter_task_events_non_follow_yields_only_target_events(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
@@ -604,7 +632,7 @@ def test_iter_task_events_non_follow_yields_only_target_events(tmp_path) -> None
     assert {event.tid for event in events} == {target_tid}
 
 
-def test_load_taskspec_payload_reads_full_log_history(tmp_path) -> None:
+def test_load_taskspec_payload_reads_full_log_history(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue = ctx.queue("weft.log.tasks", persistent=True)
@@ -636,13 +664,13 @@ def test_load_taskspec_payload_reads_full_log_history(tmp_path) -> None:
 
 
 def test_await_result_materialization_falls_back_on_malformed_io(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "malformed-io",
         "spec": {"type": "function"},
@@ -667,7 +695,7 @@ def test_await_result_materialization_falls_back_on_malformed_io(
 
 
 def test_iter_task_realtime_events_falls_back_on_malformed_io(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -707,7 +735,7 @@ def test_load_taskspec_payload_closes_log_queue() -> None:
             with_timestamps: bool = False,
             after_timestamp: int | None = None,
             before_timestamp: int | None = None,
-        ):
+        ) -> Iterator[tuple[str, int]]:
             assert with_timestamps is True
             assert after_timestamp == int(tid) - 1
             assert before_timestamp is None
@@ -734,14 +762,16 @@ def test_load_taskspec_payload_closes_log_queue() -> None:
             assert persistent is False
             return queue
 
-    taskspec = _load_taskspec_payload(FakeContext(), tid)
+    taskspec = _load_taskspec_payload(
+        cast(WeftContext, FakeContext()), tid
+    )  # Queue-lifetime double.
 
     assert taskspec is not None
     assert taskspec["tid"] == tid
     assert queue.closed is True
 
 
-def test_cmd_result_reports_failed_task_without_outbox(tmp_path) -> None:
+def test_cmd_result_reports_failed_task_without_outbox(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -773,12 +803,15 @@ def test_cmd_result_reports_failed_task_without_outbox(tmp_path) -> None:
     )
 
     result = cmd_result(tid=tid, peek=False, timeout=0.1, context=str(root))
+    assert isinstance(result, TaskResult)
 
     assert result.status == "failed"
     assert result.error == "intentional failure"
 
 
-def test_cmd_result_zero_timeout_reports_materialization_timeout(tmp_path) -> None:
+def test_cmd_result_zero_timeout_reports_materialization_timeout(
+    tmp_path: Path,
+) -> None:
     root = prepare_project_root(tmp_path)
     tid = str(time.time_ns())
 
@@ -789,7 +822,7 @@ def test_cmd_result_zero_timeout_reports_materialization_timeout(tmp_path) -> No
 
 
 def test_await_task_result_zero_timeout_reports_materialization_timeout(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -804,7 +837,7 @@ def test_await_task_result_zero_timeout_reports_materialization_timeout(
 
 def test_cmd_result_reports_claimed_outbox_without_waiting(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -835,6 +868,7 @@ def test_cmd_result_reports_claimed_outbox_without_waiting(
         result = cmd_result(
             tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
         )
+        assert isinstance(result, TaskResult)
     finally:
         outbox_queue.close()
         log_queue.close()
@@ -842,14 +876,16 @@ def test_cmd_result_reports_claimed_outbox_without_waiting(
     assert result.tid == tid
     assert result.status == "failed"
     assert result.value is None
+    assert result.error is not None
     assert "claimed" in result.error
+    assert result.reconciliation is not None
     assert result.reconciliation["classification"] == (
         "claimed_result_without_terminal"
     )
 
 
 def test_await_single_result_reads_outbox_after_completion_event(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -869,7 +905,9 @@ def test_await_single_result_reads_outbox_after_completion_event(
     )
 
     class _WakeMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
             self._written = False
 
@@ -901,7 +939,7 @@ def test_await_single_result_reads_outbox_after_completion_event(
 
 
 def test_await_single_result_returns_visible_one_shot_result_at_deadline(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -930,7 +968,7 @@ def test_await_single_result_returns_visible_one_shot_result_at_deadline(
 
 
 def test_await_single_result_zero_timeout_does_not_wait_on_partial_stream(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -940,7 +978,9 @@ def test_await_single_result_zero_timeout_does_not_wait_on_partial_stream(
     outbox_queue = ctx.queue(outbox_name, persistent=True)
 
     class _NoWaitMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
 
         def wait(self, timeout: float | None) -> bool:
@@ -978,7 +1018,7 @@ def test_await_single_result_zero_timeout_does_not_wait_on_partial_stream(
 
 
 def test_await_one_shot_result_reads_outbox_after_completion_event(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -998,7 +1038,9 @@ def test_await_one_shot_result_reads_outbox_after_completion_event(
     )
 
     class _WakeMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
             self._written = False
 
@@ -1032,7 +1074,7 @@ def test_await_one_shot_result_reads_outbox_after_completion_event(
 
 
 def test_await_one_shot_result_retains_terminal_ctrl_out_proof(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1082,7 +1124,7 @@ def test_await_one_shot_result_retains_terminal_ctrl_out_proof(
 
 
 def test_await_one_shot_result_prefers_task_completed_over_manager_wrapper_lost(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`weft result` honors a task ``completed`` over a later manager wrapper_lost.
@@ -1153,7 +1195,7 @@ def test_await_one_shot_result_prefers_task_completed_over_manager_wrapper_lost(
 
 
 def test_await_one_shot_result_prefers_outbox_over_manager_wrapper_lost(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real one-shot result outranks manager wrapper_lost fallback evidence."""
@@ -1204,7 +1246,7 @@ def test_await_one_shot_result_prefers_outbox_over_manager_wrapper_lost(
 
 
 def test_await_one_shot_result_accepts_prewritten_outbox_when_log_event_is_missed(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1237,7 +1279,7 @@ def test_await_one_shot_result_accepts_prewritten_outbox_when_log_event_is_misse
 
 
 def test_await_one_shot_result_accepts_single_primitive_outbox_when_log_event_is_missed(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1270,7 +1312,7 @@ def test_await_one_shot_result_accepts_single_primitive_outbox_when_log_event_is
 
 
 def test_await_one_shot_result_accepts_emitted_stream_when_log_event_is_missed(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1316,7 +1358,7 @@ def test_await_one_shot_result_accepts_emitted_stream_when_log_event_is_missed(
 
 
 def test_await_one_shot_result_does_not_infer_completion_from_ambiguous_outbox(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1346,7 +1388,9 @@ def test_await_one_shot_result_does_not_infer_completion_from_ambiguous_outbox(
         outbox_queue.close()
 
 
-def test_await_task_result_returns_terminal_task_timeout_as_result(tmp_path) -> None:
+def test_await_task_result_returns_terminal_task_timeout_as_result(
+    tmp_path: Path,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -1369,7 +1413,7 @@ def test_await_task_result_returns_terminal_task_timeout_as_result(tmp_path) -> 
 
 
 def test_await_single_result_aggregates_multiple_outbox_messages(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1389,7 +1433,9 @@ def test_await_single_result_aggregates_multiple_outbox_messages(
     )
 
     class _WakeMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
             self._written = False
 
@@ -1421,7 +1467,9 @@ def test_await_single_result_aggregates_multiple_outbox_messages(
     assert error is None
 
 
-def test_await_single_result_classifies_timeout_event_as_timeout(tmp_path) -> None:
+def test_await_single_result_classifies_timeout_event_as_timeout(
+    tmp_path: Path,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -1450,14 +1498,16 @@ def test_await_single_result_classifies_timeout_event_as_timeout(tmp_path) -> No
     assert error == "Target execution timed out"
 
 
-def test_await_single_result_persistent_returns_one_work_item_batch(tmp_path) -> None:
+def test_await_single_result_persistent_returns_one_work_item_batch(
+    tmp_path: Path,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
 
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "persistent-agent",
         "spec": {"type": "agent", "persistent": True},
@@ -1515,14 +1565,14 @@ def test_await_single_result_persistent_returns_one_work_item_batch(tmp_path) ->
 
 
 def test_await_single_result_persistent_returns_quiet_visible_output_without_boundary(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
 
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "persistent-agent",
         "spec": {"type": "agent", "persistent": True},
@@ -1553,7 +1603,7 @@ def test_await_single_result_persistent_returns_quiet_visible_output_without_bou
 
 
 def test_await_single_result_stream_mode_emits_chunks_without_replay(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1576,7 +1626,9 @@ def test_await_single_result_stream_mode_emits_chunks_without_replay(
     writes_triggered = 0
 
     class _LateStreamMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
 
         def wait(self, timeout: float | None) -> bool:
@@ -1630,7 +1682,7 @@ def test_await_single_result_stream_mode_emits_chunks_without_replay(
 
 
 def test_await_single_result_persistent_stream_mode_keeps_next_batch(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1640,7 +1692,7 @@ def test_await_single_result_persistent_stream_mode_keeps_next_batch(
     outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
     rendered = _capture_stream_echo(monkeypatch)
 
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "persistent-agent",
         "spec": {"type": "agent", "persistent": True},
@@ -1724,7 +1776,7 @@ def test_await_single_result_persistent_stream_mode_keeps_next_batch(
 
 def test_cmd_result_waits_for_custom_result_channels_to_materialize(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -1736,7 +1788,7 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
     default_outbox_queue.close()
     default_ctrl_queue.close()
 
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "late-custom-result",
         "spec": {"type": "function", "persistent": True},
@@ -1749,7 +1801,9 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
     }
 
     class _WakeMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
 
         def wait(self, timeout: float | None) -> bool:
@@ -1788,6 +1842,7 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
             timeout=RESULT_MATERIALIZATION_TEST_TIMEOUT,
             context=str(root),
         )
+        assert isinstance(result, TaskResult)
     finally:
         outbox_queue.close()
         log_queue.close()
@@ -1797,14 +1852,14 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
 
 
 def test_await_single_result_reuses_materialized_batch_boundary_state(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     outbox_queue = ctx.queue("late.custom.outbox", persistent=True)
 
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "late-custom-result",
         "spec": {"type": "function", "persistent": True},
@@ -1842,14 +1897,14 @@ def test_await_single_result_reuses_materialized_batch_boundary_state(
 
 
 def test_await_single_result_tolerates_materialized_boundary_timestamp_skew(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     outbox_queue = ctx.queue("skewed.custom.outbox", persistent=True)
 
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "skewed-custom-result",
         "spec": {"type": "function", "persistent": True},
@@ -1889,14 +1944,14 @@ def test_await_single_result_tolerates_materialized_boundary_timestamp_skew(
 
 
 def test_await_single_result_tolerates_late_visible_boundary_timestamp_skew(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     outbox_queue = ctx.queue("late-skewed.custom.outbox", persistent=True)
 
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "late-skewed-custom-result",
         "spec": {"type": "function", "persistent": True},
@@ -1935,7 +1990,7 @@ def test_await_single_result_tolerates_late_visible_boundary_timestamp_skew(
 
 
 def test_await_single_result_tolerates_late_polled_boundary_timestamp_skew(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -1943,7 +1998,7 @@ def test_await_single_result_tolerates_late_polled_boundary_timestamp_skew(
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     outbox_queue = ctx.queue("late-polled-skewed.custom.outbox", persistent=True)
 
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "late-polled-skewed-custom-result",
         "spec": {"type": "function", "persistent": True},
@@ -2006,14 +2061,14 @@ def test_await_single_result_tolerates_late_polled_boundary_timestamp_skew(
     ],
 )
 def test_cmd_result_reports_conflicting_options_in_precedence_order(
-    options, expected
+    options: _ResultOptions, expected: str
 ) -> None:
     with pytest.raises(CommandUsageError, match=expected):
         cmd_result(**options)
 
 
 def test_await_task_result_stream_preserves_error_payload_selection(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -2024,7 +2079,9 @@ def test_await_task_result_stream_preserves_error_payload_selection(
     outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
     monkeypatch.setattr(result_cmd, "_queue_names_exist", lambda *_args: False)
 
-    def _no_log_events(_queue, last_timestamp, _tid):
+    def _no_log_events(
+        _queue: Queue, last_timestamp: int | None, _tid: str
+    ) -> tuple[list[tuple[dict[str, object], int]], int | None]:
         return [], last_timestamp
 
     monkeypatch.setattr(result_cmd, "poll_log_events", _no_log_events)
@@ -2038,7 +2095,7 @@ def test_await_task_result_stream_preserves_error_payload_selection(
 
 
 def test_await_task_result_stream_reuses_materialized_completion_state(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -2069,13 +2126,13 @@ def test_await_task_result_stream_reuses_materialized_completion_state(
 
 
 def test_await_result_materialization_waits_for_taskspec_after_activity_event(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    taskspec_payload = {
+    taskspec_payload: dict[str, object] = {
         "tid": tid,
         "name": "late-custom-result",
         "spec": {"type": "function", "persistent": True},
@@ -2088,7 +2145,7 @@ def test_await_result_materialization_waits_for_taskspec_after_activity_event(
     }
     load_calls = 0
 
-    def _load(_context, requested_tid: str):
+    def _load(_context: WeftContext, requested_tid: str) -> dict[str, object] | None:
         nonlocal load_calls
         assert requested_tid == tid
         load_calls += 1
@@ -2096,7 +2153,9 @@ def test_await_result_materialization_waits_for_taskspec_after_activity_event(
             return None
         return taskspec_payload
 
-    def _poll(_queue, last_timestamp, requested_tid: str):
+    def _poll(
+        _queue: Queue, last_timestamp: int | None, requested_tid: str
+    ) -> tuple[list[tuple[dict[str, object], int]], int | None]:
         assert requested_tid == tid
         if last_timestamp is None:
             return [
@@ -2105,7 +2164,9 @@ def test_await_result_materialization_waits_for_taskspec_after_activity_event(
         return [], last_timestamp
 
     class _NoWakeMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
 
         def wait(self, timeout: float | None) -> bool:
@@ -2138,7 +2199,7 @@ def test_await_result_materialization_waits_for_taskspec_after_activity_event(
 
 
 def test_await_single_result_reuses_materialized_completion_state(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rendered = _capture_stream_echo(monkeypatch)
@@ -2169,7 +2230,7 @@ def test_await_single_result_reuses_materialized_completion_state(
 
 
 def test_cmd_result_passes_materialized_state_to_result_wait(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -2205,6 +2266,7 @@ def test_cmd_result_passes_materialized_state_to_result_wait(
     result = cmd_result(
         tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
     )
+    assert isinstance(result, TaskResult)
 
     assert result.status == "completed"
     assert result.value == "err"
@@ -2223,7 +2285,7 @@ def test_cmd_result_passes_materialized_state_to_result_wait(
     )
 
 
-def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path) -> None:
+def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -2244,6 +2306,7 @@ def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path) -> None:
     result = cmd_result(
         tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
     )
+    assert isinstance(result, TaskResult)
 
     assert result.status == "completed"
     assert result.value == "pipeline-result"

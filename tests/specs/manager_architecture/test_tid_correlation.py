@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +17,7 @@ from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 pytestmark = [pytest.mark.shared]
 
 
-def test_spawn_request_timestamp_matches_tid(tmp_path) -> None:
+def test_spawn_request_timestamp_matches_tid(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
     tid = str(
@@ -42,8 +43,10 @@ def test_spawn_request_timestamp_matches_tid(tmp_path) -> None:
 
     run_cmd._enqueue_taskspec(context, taskspec, None)
 
-    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True)
-    payload, timestamp = queue.read_one(with_timestamps=True)
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as queue:
+        entry = queue.read_one(with_timestamps=True)
+    assert entry is not None
+    payload, timestamp = entry
     assert isinstance(payload, str)
     assert json.loads(payload)["taskspec"]["tid"] == tid
     assert timestamp == int(tid)

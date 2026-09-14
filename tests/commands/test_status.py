@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Never
 
 import psutil
 import pytest
 
+from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
@@ -33,8 +35,12 @@ from weft._exceptions import CommandExecutionError
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.system import collect_broker_status
-from weft.commands.types import SystemStatusSnapshot, TaskEvent, TaskSnapshot
-from weft.context import build_context
+from weft.commands.types import (
+    SystemStatusSnapshot,
+    TaskEvent,
+    TaskSnapshot,
+)
+from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 from weft.core import task_evidence as core_task_evidence
 from weft.core.runners import host as host_runner
@@ -90,8 +96,12 @@ def test_public_cmd_status_returns_filtered_structured_snapshot(
     current = status_cmd.cmd_status()
     assert isinstance(current, SystemStatusSnapshot)
     assert current.tasks == [active]
-    assert status_cmd.cmd_status(all=True).tasks == [active, terminal]
-    assert status_cmd.cmd_status(all=True, status="completed").tasks == [terminal]
+    all_snapshot = status_cmd.cmd_status(all=True)
+    assert isinstance(all_snapshot, SystemStatusSnapshot)
+    assert all_snapshot.tasks == [active, terminal]
+    terminal_snapshot = status_cmd.cmd_status(all=True, status="completed")
+    assert isinstance(terminal_snapshot, SystemStatusSnapshot)
+    assert terminal_snapshot.tasks == [terminal]
 
 
 def test_public_cmd_status_returns_structured_watch_stream(
@@ -109,6 +119,7 @@ def test_public_cmd_status_returns_structured_watch_stream(
     )
 
     stream = status_cmd.cmd_status(watch=True, interval=0.01)
+    assert not isinstance(stream, SystemStatusSnapshot)
     assert tuple(stream) == (event,)
 
 
@@ -118,7 +129,7 @@ def test_public_cmd_status_is_silent_and_translates_context_failure(
 ) -> None:
     failure = OSError("context unavailable")
 
-    def fail_context(_context=None):
+    def fail_context(_context: WeftContext | None = None) -> Never:
         raise failure
 
     monkeypatch.setattr(status_cmd, "_resolve_context", fail_context)
@@ -157,11 +168,11 @@ def _runtime_handle(
 
 
 def _manager_service_payload(
-    ctx,
+    ctx: WeftContext,
     *,
     tid: str,
     name: str = "manager",
-    status: str = "active",
+    status: Literal["active", "draining", "stopped", "superseded"] = "active",
     runtime_handle: dict[str, Any] | None = None,
     internal_requests: str | None = None,
     internal_reserved: str | None = None,
@@ -195,7 +206,9 @@ def _manager_service_payload(
 
 
 class _FakeQueueChangeMonitor:
-    def __init__(self, queues, *, config=None) -> None:
+    def __init__(
+        self, queues: Sequence[Queue], *, config: Config | None = None
+    ) -> None:
         del config
         self.queue_names = [queue.name for queue in queues]
         self.wait_calls: list[float | None] = []
@@ -382,7 +395,7 @@ def _write_pipeline_log_entry(
     )
 
 
-def test_collect_broker_status_reports_message_counts(tmp_path):
+def test_collect_broker_status_reports_message_counts(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue = ctx.queue("status.queue", persistent=True)
@@ -461,7 +474,9 @@ def test_status_services_include_manager_spawned_task_monitor_before_child_log(
         child_pid=os.getpid(),
     )
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     services = payload["services"]
@@ -521,7 +536,9 @@ def test_status_services_report_task_monitor_external_log_diagnostics(
         )
     )
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     services = payload["services"]
@@ -567,7 +584,9 @@ def test_status_services_child_terminal_evidence_overrides_manager_spawn(
         },
     )
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     services = payload["services"]
@@ -618,7 +637,9 @@ def test_status_services_prefer_live_duplicate_over_terminal_duplicate(
         metadata=heartbeat_metadata,
     )
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     services = payload["services"]
@@ -744,7 +765,9 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
         lambda: observed_now + 2_000_000_000_000,
     )
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     services = payload["services"]
@@ -759,7 +782,9 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
     tasks = payload["tasks"]
     assert stale_tid not in {task["tid"] for task in tasks}
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = payload["tasks"]
@@ -836,13 +861,17 @@ def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_supersede
         metadata=heartbeat_metadata,
     )
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = payload["tasks"]
     assert stale_tid not in {task["tid"] for task in tasks}
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = payload["tasks"]
@@ -857,13 +886,15 @@ def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_supersede
     assert stale["last_timestamp"] == stale_snapshot.last_timestamp
 
 
-def test_cmd_status_json_output(tmp_path):
+def test_cmd_status_json_output(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue = ctx.queue("status.queue", persistent=True)
     queue.write("payload")
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     data = payload
@@ -939,7 +970,9 @@ def test_cmd_status_json_includes_runner_runtime_details(
         lambda name: FakeRunnerPlugin(),
     )
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     data = payload
@@ -1080,7 +1113,9 @@ def test_terminal_log_status_wins_over_weak_live_host_pid(
         == "weak_host_pid_ignored_for_terminal_lifecycle"
     )
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = payload["tasks"]
@@ -1090,7 +1125,9 @@ def test_terminal_log_status_wins_over_weak_live_host_pid(
     assert tasks[0]["reconciliation"]["classification"] == "runtime_conflict"
     assert tasks[0]["last_timestamp"] == snapshot.last_timestamp
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     assert payload["tasks"] == []
@@ -1142,7 +1179,9 @@ def test_terminal_event_reconciles_stale_running_status_payload(
     assert snapshot.reconciliation["classification"] == "stale_status_payload"
     assert snapshot.reconciliation["reason"] == "contradictory_terminal_event_status"
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     task = payload["tasks"][0]
@@ -1214,7 +1253,9 @@ def test_status_preserves_active_manager_while_terminal_manager_row_stays_termin
         lambda handle: True,
     )
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     data = payload
@@ -1567,7 +1608,9 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_stale_liveness(
     assert snapshot.reconciliation is not None
     assert snapshot.reconciliation["classification"] == "stale_liveness"
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     data = payload
@@ -1600,7 +1643,9 @@ def test_cmd_status_reports_stale_runtime_less_running_snapshot(
         name="stale-manager",
     )
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = payload["tasks"]
@@ -1609,7 +1654,9 @@ def test_cmd_status_reports_stale_runtime_less_running_snapshot(
     assert tasks[0]["status"] == "running"
     assert tasks[0]["reconciliation"]["reason"] == "runtime_missing_after_stale_window"
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = payload["tasks"]
@@ -1695,7 +1742,9 @@ def test_cmd_status_marks_stale_internal_service_without_owner_failed(
         "internal_service_runtime_missing_after_stale_window"
     )
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     task = payload["tasks"][0]
@@ -1756,7 +1805,9 @@ def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
         ),
     )
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = payload["tasks"]
@@ -1806,7 +1857,9 @@ def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
         )
     )
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = payload["tasks"]
@@ -1859,14 +1912,18 @@ def test_cmd_status_marks_superseded_manager_record_failed(
         )
     )
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     default_tasks = payload["tasks"]
     assert [task["tid"] for task in default_tasks] == [active_tid]
     assert default_tasks[0]["status"] == "running"
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     tasks = {task["tid"]: task for task in payload["tasks"]}
@@ -2303,7 +2360,9 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     monkeypatch.setattr(host_runner, "pid_is_live", lambda pid: False)
     monkeypatch.setattr(host_runner, "_current_container_runtime", lambda: None)
 
-    payload = asdict(status_cmd.cmd_status(all=True, context=root))
+    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     data = payload
@@ -2385,7 +2444,7 @@ def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
 
 
 def test_cmd_status_discovers_parent_context_from_subdirectory(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "project"
     nested = root / "subdir" / "child"
@@ -2410,7 +2469,9 @@ def test_cmd_status_discovers_parent_context_from_subdirectory(
 
     monkeypatch.chdir(Path(nested))
 
-    payload = asdict(status_cmd.cmd_status())
+    status_snapshot = status_cmd.cmd_status()
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     assert payload is not None
     assert payload["broker"]["total_messages"] == 1
@@ -2491,14 +2552,18 @@ def test_watch_task_events_uses_queue_monitor(
         ]
     )
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _FakeQueueChangeMonitor:
         monitor = _FakeQueueChangeMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
 
     monkeypatch.setattr(status_cmd, "QueueChangeMonitor", _fake_monitor)
 
-    def _fake_iter_log_events(queue, *, since_timestamp=None):
+    def _fake_iter_log_events(
+        queue: Queue, *, since_timestamp: int | None = None
+    ) -> list[tuple[dict[str, Any], int]]:
         iter_queue_names.append(queue.name)
         iter_since_timestamps.append(since_timestamp)
         return next(log_iterations, [])
@@ -2508,7 +2573,7 @@ def test_watch_task_events_uses_queue_monitor(
     events = status_cmd._iter_public_status_events(
         ctx, status_filter=None, interval=0.25
     )
-    observed = []
+    observed: list[TaskEvent] = []
     with pytest.raises(KeyboardInterrupt):
         observed.extend(events)
 
@@ -2578,7 +2643,9 @@ def test_status_reports_heartbeat_disabled_when_only_liveness_monitor_enabled(
     monkeypatch.setenv("WEFT_TASK_MONITOR_ENABLED", "0")
     monkeypatch.setenv("WEFT_LIVENESS_MONITOR_ENABLED", "1")
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     services = {service["key"]: service for service in payload["services"]}
     heartbeat = services[INTERNAL_SERVICE_KEY_HEARTBEAT]
@@ -2598,7 +2665,9 @@ def test_status_reports_heartbeat_enabled_when_task_monitor_enabled(
     monkeypatch.setenv("WEFT_TASK_MONITOR_ENABLED", "1")
     monkeypatch.setenv("WEFT_LIVENESS_MONITOR_ENABLED", "0")
 
-    payload = asdict(status_cmd.cmd_status(context=root))
+    status_snapshot = status_cmd.cmd_status(context=root)
+    assert isinstance(status_snapshot, SystemStatusSnapshot)
+    payload = asdict(status_snapshot)
 
     services = {service["key"]: service for service in payload["services"]}
     assert services[INTERNAL_SERVICE_KEY_HEARTBEAT]["enabled"] is True

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 import llm
@@ -53,7 +53,7 @@ class DeterministicAgentModel(Model):
                 )
                 return
             if prompt.schema is not None:
-                payload = {"summary": tool_output}
+                payload: dict[str, Any] = {"summary": tool_output}
                 response.response_json = payload
                 yield json.dumps(payload)
                 return
@@ -116,7 +116,7 @@ class DeterministicAgentModel(Model):
 
 
 @llm.hookimpl
-def register_models(register) -> None:
+def register_models(register: Callable[[Model], None]) -> None:
     """Register deterministic test models through llm's real hook surface."""
     register(DeterministicAgentModel())
 

@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+from simplebroker import Queue
+from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
@@ -116,7 +118,7 @@ def make_service_taskspec(
     )
 
 
-def drain_log_events(log_queue) -> list[dict[str, Any]]:
+def drain_log_events(log_queue: Queue) -> list[dict[str, Any]]:
     """Read and decode all currently visible global task-log events."""
 
     records: list[dict[str, Any]] = []
@@ -152,7 +154,7 @@ def drain_worker_results_until(
 
 
 def test_service_task_activation_publishes_running_lifecycle_once(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -177,7 +179,7 @@ def test_service_task_activation_publishes_running_lifecycle_once(
 
 
 def test_service_task_activity_is_live_only_not_task_log_event(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -200,7 +202,7 @@ def test_service_task_activity_is_live_only_not_task_log_event(
 
 def test_service_task_poll_reporting_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -222,7 +224,7 @@ def test_service_task_poll_reporting_is_disabled(
 
 
 def test_service_task_cleanup_passes_one_absolute_deadline_to_worker_groups(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -252,7 +254,7 @@ def test_service_task_cleanup_passes_one_absolute_deadline_to_worker_groups(
 
 
 def test_service_task_full_sentinel_queue_respects_cleanup_deadline(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -260,7 +262,9 @@ def test_service_task_full_sentinel_queue_respects_cleanup_deadline(
     worker_entered = threading.Event()
     release_worker = threading.Event()
 
-    def blocked_target(_context: ServiceWorkerContext) -> None:
+    def blocked_target(
+        context: ServiceWorkerContext, *args: object, **kwargs: object
+    ) -> None:
         worker_entered.set()
         assert release_worker.wait(timeout=3.0)
 
@@ -289,7 +293,7 @@ def test_service_task_full_sentinel_queue_respects_cleanup_deadline(
 
 
 def test_service_task_due_time_helpers_bound_waits(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -315,7 +319,7 @@ def test_service_task_due_time_helpers_bound_waits(
 
 
 def test_service_worker_group_runs_registered_target_on_reactor_result_drain(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -360,7 +364,7 @@ def test_service_worker_group_runs_registered_target_on_reactor_result_drain(
 
 
 def test_service_worker_groups_run_independently(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -397,7 +401,7 @@ def test_service_worker_groups_run_independently(
 
 
 def test_service_worker_group_can_run_multiple_workers_on_one_input_queue(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -444,7 +448,7 @@ def test_service_worker_group_can_run_multiple_workers_on_one_input_queue(
 
 
 def test_service_worker_group_can_restart_after_terminal_result_before_thread_exit(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     """Terminal result delivery, not thread teardown timing, releases a lane."""
@@ -516,7 +520,7 @@ def test_service_worker_group_can_restart_after_terminal_result_before_thread_ex
 
 
 def test_service_worker_exception_publishes_error_and_clears_active_state(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -554,7 +558,7 @@ def test_service_worker_exception_publishes_error_and_clears_active_state(
 
 
 def test_service_worker_fatal_exit_is_published_with_exact_identity(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env
@@ -565,7 +569,7 @@ def test_service_worker_fatal_exit_is_published_with_exact_identity(
 
     fatal = FatalServiceExit("fatal service exit")
 
-    def target(_context: ServiceWorkerContext) -> None:
+    def target(context: ServiceWorkerContext, *args: object, **kwargs: object) -> None:
         raise fatal
 
     task._register_service_worker(ServiceWorkerSpec(name="api.fatal", target=target))
@@ -602,7 +606,7 @@ def test_service_worker_fatal_exit_is_published_with_exact_identity(
 
 
 def test_service_task_lanes_are_single_flight(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, _make_queue = broker_env

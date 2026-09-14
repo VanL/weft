@@ -59,7 +59,9 @@ def test_event_follow_reuses_physical_connections(
                     initial_connections = len(connections)
             assert len(connections) == initial_connections
         finally:
-            iterator.close()
+            close = getattr(iterator, "close", None)
+            assert callable(close)
+            close()
         # Closing the observer must not close a distinct owner's shared lease.
         writer.write("writer still owns its lease")
     assert connections

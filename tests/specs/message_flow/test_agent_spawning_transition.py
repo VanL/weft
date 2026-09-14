@@ -7,7 +7,9 @@ import time
 
 import pytest
 
+from simplebroker import Queue
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.typing import BrokerEnv
 from weft._constants import TERMINAL_TASK_STATUSES, WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -44,7 +46,7 @@ def _build_spec(tid: str) -> TaskSpec:
     )
 
 
-def _drain(queue) -> list[str]:
+def _drain(queue: Queue) -> list[str]:
     items: list[str] = []
     while True:
         message = queue.read_one()
@@ -84,7 +86,7 @@ def _drive_task_until_complete(task: Consumer, *, timeout: float = 30.0) -> None
     )
 
 
-def test_agent_work_spawning_logged(broker_env, unique_tid: str) -> None:
+def test_agent_work_spawning_logged(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     _drain(log_queue)
@@ -109,3 +111,8 @@ def test_agent_work_spawning_logged(broker_env, unique_tid: str) -> None:
     assert "spawning" in statuses
     assert "running" in statuses
     assert "completed" in statuses
+    assert (
+        events.index("work_spawning")
+        < events.index("work_started")
+        < events.index("work_completed")
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -58,7 +59,7 @@ def _provider_model(provider_name: str) -> str | None:
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_structured_tool_profile_materializes_provider_specific_workspace_access(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     result = execute_agent_target(
@@ -86,7 +87,7 @@ def test_structured_tool_profile_materializes_provider_specific_workspace_access
 
 
 def test_structured_tool_profile_rejects_conflicting_raw_provider_options(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     with pytest.raises(
         ValueError,
@@ -106,7 +107,7 @@ def test_structured_tool_profile_rejects_conflicting_raw_provider_options(
         )
 
 
-def test_claude_mcp_tool_profile_wires_explicit_config(tmp_path) -> None:
+def test_claude_mcp_tool_profile_wires_explicit_config(tmp_path: Path) -> None:
     result = execute_agent_target(
         make_agent_section(
             executable=str(write_provider_cli_wrapper(tmp_path, "claude_code")),
@@ -127,7 +128,7 @@ def test_claude_mcp_tool_profile_wires_explicit_config(tmp_path) -> None:
 
 @pytest.mark.parametrize("provider_name", ("codex", "gemini", "opencode", "qwen"))
 def test_unsupported_mcp_tool_profile_fails_for_providers_without_explicit_support(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     with pytest.raises(

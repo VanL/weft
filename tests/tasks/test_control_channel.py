@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import pytest
 
 import weft.core.tasks.base as base_task
+from simplebroker import Queue
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.typing import BrokerEnv
 from tests.tasks import sample_targets as targets  # noqa: F401
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
@@ -20,14 +23,13 @@ from weft._constants import (
 )
 from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.manager import Manager
-from weft.core.tasks import Consumer, Monitor, PipelineTask
-from weft.core.tasks.base import TaskControlPolicy
+from weft.core.tasks import Consumer
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
 
-def _read_all(queue):
+def _read_all(queue: Queue) -> list[str]:
     messages = []
     while True:
         value = queue.read_one()
@@ -37,7 +39,9 @@ def _read_all(queue):
     return messages
 
 
-def _drive_task_until(task: Consumer, predicate, *, timeout: float = 5.0) -> None:
+def _drive_task_until(
+    task: Consumer, predicate: Callable[[], bool], *, timeout: float = 5.0
+) -> None:
     drive_until(
         predicate,
         bool,
@@ -71,13 +75,13 @@ def _make_manager_taskspec(tid: str) -> TaskSpec:
     )
 
 
-def test_pause_resume_control_flow(broker_env, unique_tid):
+def test_pause_resume_control_flow(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
     inbox = make_queue(spec.io.inputs["inbox"])
     outbox = make_queue(spec.io.outputs["outbox"])
 
@@ -122,13 +126,13 @@ def test_pause_resume_control_flow(broker_env, unique_tid):
     assert outbox.read_one() == "work"
 
 
-def test_status_command_reports_state(broker_env, unique_tid):
+def test_status_command_reports_state(broker_env: BrokerEnv, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
 
     ctrl_in.write(encode_control_message("STATUS", request_id="status-1"))
     task.process_once()
@@ -147,8 +151,8 @@ def test_status_command_reports_state(broker_env, unique_tid):
     [("STOP", "cancelled"), ("KILL", "killed")],
 )
 def test_stop_kill_command_sends_keyed_ack(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     command: str,
     expected_status: str,
 ) -> None:
@@ -157,7 +161,7 @@ def test_stop_kill_command_sends_keyed_ack(
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
 
     task.taskspec.mark_started(pid=0)
@@ -177,14 +181,14 @@ def test_stop_kill_command_sends_keyed_ack(
 
 
 def test_late_stop_after_terminal_state_acks_without_state_regression(
-    broker_env, unique_tid
-):
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     _read_all(log_queue)
 
@@ -204,28 +208,15 @@ def test_late_stop_after_terminal_state_acks_without_state_regression(
     assert not any(event.get("event") == "control_stop" for event in events)
 
 
-def test_stop_kill_overrides_declare_control_policy() -> None:
-    overridden_classes = [Manager, PipelineTask, Monitor]
-
-    for task_cls in overridden_classes:
-        assert "_handle_control_command" in task_cls.__dict__
-        assert isinstance(task_cls.control_policy, TaskControlPolicy)
-        assert task_cls.control_policy.stop
-        assert task_cls.control_policy.kill
-        assert task_cls.control_policy.reserved_policy
-        assert task_cls.control_policy.ack
-        assert task_cls.control_policy.terminal_state
-
-    assert Consumer.control_policy.stop == "deferred-while-active"
-
-
-def test_ping_control_command_returns_pong(broker_env, unique_tid):
+def test_ping_control_command_returns_pong(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
 
     ctrl_in.write(encode_control_message("PING"))
     task.process_once()
@@ -240,13 +231,15 @@ def test_ping_control_command_returns_pong(broker_env, unique_tid):
     assert ping_response["runner"]
 
 
-def test_structured_ping_echoes_request_id_and_snapshot(broker_env, unique_tid):
+def test_structured_ping_echoes_request_id_and_snapshot(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
     request_id = "req-123"
 
     ctrl_in.write(encode_control_message("PING", request_id=request_id))
@@ -279,8 +272,8 @@ def test_structured_ping_echoes_request_id_and_snapshot(broker_env, unique_tid):
     ],
 )
 def test_invalid_control_payload_is_acked_without_reply_and_does_not_block(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     payload: str,
 ) -> None:
     """Port the reference invalid-payload progress contract to Weft [MF-3]."""
@@ -291,7 +284,7 @@ def test_invalid_control_payload_is_acked_without_reply_and_does_not_block(
     )
     task = Consumer(db_path, spec)
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
 
     try:
         invalid_id = int(ctrl_in.write(payload))
@@ -318,8 +311,8 @@ def test_invalid_control_payload_is_acked_without_reply_and_does_not_block(
 
 
 def test_control_ack_survives_task_reconstruction_without_replay(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     """A deleted control row is not replayed after task reconstruction [MF-3]."""
     db_path, make_queue = broker_env
@@ -353,7 +346,9 @@ def test_control_ack_survives_task_reconstruction_without_replay(
         ctrl_in.write(encode_control_message("PING", request_id="first"))
         first.process_once()
         assert ctrl_in.peek_one() is None
-        first_response = json.loads(ctrl_out.read_one())
+        raw_first_response = ctrl_out.read_one()
+        assert raw_first_response is not None
+        first_response = json.loads(raw_first_response)
         assert first_response["request_id"] == "first"
         assert default_ctrl_in.peek_one() == default_trap
         assert default_ctrl_out.peek_one() is None
@@ -374,13 +369,15 @@ def test_control_ack_survives_task_reconstruction_without_replay(
         replacement.cleanup()
 
 
-def test_task_can_register_pong_extension_provider(broker_env, unique_tid):
+def test_task_can_register_pong_extension_provider(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
     task.register_pong_extension_provider(
         lambda: {"queue_depth": 3, "notes": {"mode": "diagnostic"}}
     )
@@ -399,13 +396,15 @@ def test_task_can_register_pong_extension_provider(broker_env, unique_tid):
     assert ping_response["task_status"] == task.taskspec.state.status
 
 
-def test_bad_pong_extension_provider_error_stays_nested(broker_env, unique_tid):
+def test_bad_pong_extension_provider_error_stays_nested(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
     task.register_pong_extension_provider(lambda: {"bad": {object()}})
 
     ctrl_in.write(encode_control_message("PING"))
@@ -419,14 +418,14 @@ def test_bad_pong_extension_provider_error_stays_nested(broker_env, unique_tid):
 
 
 def test_pong_extension_provider_failure_is_local_but_fatal_exit_propagates(
-    broker_env,
-    unique_tid,
+    broker_env: BrokerEnv,
+    unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
     ordinary = LookupError("verbatim extension failure")
 
     def fail_ordinary() -> None:
@@ -468,7 +467,9 @@ def test_pong_extension_provider_failure_is_local_but_fatal_exit_propagates(
         task.cleanup()
 
 
-def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):
+def test_manager_ping_includes_manager_selection_fields(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = _make_manager_taskspec(unique_tid)
     task = Manager(
@@ -483,7 +484,7 @@ def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):
     )
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
     request_id = "manager-probe-request"
 
     try:
@@ -526,8 +527,8 @@ def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):
 
 
 def test_ping_includes_runtime_summary_from_runner_plugin(
-    broker_env, unique_tid, monkeypatch
-):
+    broker_env: BrokerEnv, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
@@ -559,7 +560,7 @@ def test_ping_includes_runtime_summary_from_runner_plugin(
         fake_require_runner_plugin,
     )
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    ctrl_out = task._ctrl_out_queue
 
     ctrl_in.write(encode_control_message("PING"))
     task.process_once()

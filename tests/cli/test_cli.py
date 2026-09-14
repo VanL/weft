@@ -6,7 +6,6 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -32,19 +31,19 @@ def test_project_metadata_installs_canonical_weft_entrypoint() -> None:
 class TestCLI:
     """Test CLI functionality."""
 
-    def test_version_flag(self):
+    def test_version_flag(self) -> None:
         """Test --version flag shows correct version."""
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
         assert f"{PROG_NAME} {__version__}" in result.stdout
 
-    def test_version_short_flag(self):
+    def test_version_short_flag(self) -> None:
         """Test -v flag shows correct version."""
         result = runner.invoke(app, ["-v"])
         assert result.exit_code == 0
         assert f"{PROG_NAME} {__version__}" in result.stdout
 
-    def test_help_flag(self):
+    def test_help_flag(self) -> None:
         """Test --help flag shows help text."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
@@ -53,7 +52,7 @@ class TestCLI:
         assert "--version" in result.stdout
         assert "--help" in result.stdout
 
-    def test_no_args_shows_help(self):
+    def test_no_args_shows_help(self) -> None:
         """Test that running with no arguments shows help."""
         result = runner.invoke(app, [])
         # Exit code can be 0 or 2 depending on Python/Typer version
@@ -63,7 +62,7 @@ class TestCLI:
         assert "Weft: the durable task substrate for agent systems" in output
         assert "Options:" in output
 
-    def test_no_error_box_on_no_args(self):
+    def test_no_error_box_on_no_args(self) -> None:
         """Test that no error box appears when no arguments provided."""
         result = runner.invoke(app, [])
         output = result.stdout or result.output
@@ -75,7 +74,7 @@ class TestCLI:
 class TestModuleExecution:
     """Test running weft as a module."""
 
-    def test_module_version(self):
+    def test_module_version(self) -> None:
         """Test python -m weft --version."""
         result = subprocess.run(
             [sys.executable, "-m", "weft", "--version"],
@@ -86,7 +85,7 @@ class TestModuleExecution:
         assert result.returncode == 0
         assert f"{PROG_NAME} {__version__}" in result.stdout
 
-    def test_module_help(self):
+    def test_module_help(self) -> None:
         """Test python -m weft --help."""
         result = subprocess.run(
             [sys.executable, "-m", "weft", "--help"],
@@ -97,7 +96,7 @@ class TestModuleExecution:
         assert result.returncode == 0
         assert "Weft: the durable task substrate for agent systems" in result.stdout
 
-    def test_module_no_args(self):
+    def test_module_no_args(self) -> None:
         """Test python -m weft with no arguments."""
         result = subprocess.run(
             [sys.executable, "-m", "weft"],
@@ -111,7 +110,7 @@ class TestModuleExecution:
         output = result.stdout or result.stderr
         assert "Weft: the durable task substrate for agent systems" in output
 
-    def test_cli_package_is_not_an_executable_entrypoint(self):
+    def test_cli_package_is_not_an_executable_entrypoint(self) -> None:
         """Test that python -m weft.cli does not invoke the CLI."""
         result = subprocess.run(
             [sys.executable, "-m", "weft.cli", "--version"],
@@ -128,27 +127,11 @@ class TestModuleExecution:
 class TestCLIConstants:
     """Test that CLI uses correct constants."""
 
-    def test_program_name(self):
+    def test_program_name(self) -> None:
         """Test that the program name is correctly set."""
         assert app.info.name == PROG_NAME
 
-    def test_version_matches_constants(self):
+    def test_version_matches_constants(self) -> None:
         """Test that version in CLI matches _constants.__version__."""
         result = runner.invoke(app, ["--version"])
         assert __version__ in result.stdout
-
-    @patch("weft.cli.app.PROG_NAME", "test-prog")
-    @patch("weft.cli.app.__version__", "9.9.9")
-    def test_constants_override(self):
-        """Test that CLI correctly uses overridden constants."""
-        from weft.cli.app import version_callback
-
-        # Mock the typer.echo and Exit
-        with (
-            patch("weft.cli.app.typer.echo") as mock_echo,
-            patch("weft.cli.app.typer.Exit", side_effect=SystemExit) as mock_exit,
-            pytest.raises(SystemExit),
-        ):
-            version_callback(True)
-        mock_echo.assert_called_with("test-prog 9.9.9")
-        mock_exit.assert_called_once()

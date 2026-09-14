@@ -1300,6 +1300,13 @@ index is not a dated section and does not count toward the coalescing trigger.
 - Reproductions, review and verification are recorded in the
   [audit regression fixes plan](plans/2026-09-11-audit-regression-fixes-plan.md).
 
+
+## 2026-09-11 Test Typing and Oracle Audit
+
+- Negative assertions need reachable setup. Several tests patched an obsolete loader or allowed empty output to bypass assertions. Establish the positive mapping/output path first, then assert its suppression or failure; close the producer before asserting exact absence.
+- Typing can change the path being tested: adding an optional keyword to a fake changed runtime signature dispatch, and pre-normalizing a fixture skipped constructor normalization. Preserve intentional boundary shapes with narrow documented casts and check before/after coverage. Likewise, a targeted SQL reconciliation test did not cover the similarly named global reconciliation query.
+- Findings, replacement coverage and mutation evidence are recorded in the [test typing and correctness audit](plans/2026-09-11-test-typing-and-correctness-audit.md).
+
 ## 2026-09-14: Configuration custody includes process imports
 
 A data-only Config decoder did not prevent a spawned task from reading ambient
@@ -1312,3 +1319,25 @@ process helper policy from the restored snapshot before loading task classes,
 and prove custody with a real spawn under invalid child environment values and
 a sender-local validator that cannot be pickled. See the [migration plan](plans/2026-09-14-simplebroker-8-2-configuration-plan.md)
 and `tests/system/test_config_transport.py`.
+
+## 2026-09-14 Inline Fixtures Must Not Own the Test Worker Process
+
+- An inline Manager runs on a thread inside the pytest worker, not in the
+  dedicated process used in production. Leaving process titles enabled let its
+  deferred macOS GUI activation synchronously call LaunchServices while holding
+  the worker's interpreter lock. Under the full process suite this blocked both
+  manager progress and unrelated test code, producing clustered result and
+  cleanup timeouts.
+- Disable process-title ownership on inline harness managers. Keep the shipping
+  default on spawned task processes and retain dedicated native process-title
+  tests. More time or fewer workers would hide the ownership error without
+  removing the shared native side effect.
+- This opt-out applies only to infrastructure, not Managers or Consumers that
+  are the subject under test. Xdist also imports stock setproctitle before
+  loading conftest; on macOS, suppress its own optional titles at remote
+  bootstrap rather than patching native modules or changing child environments.
+- An inline manager's lifetime is its owned Thread, not pytest's PID. Two
+  managers may share one live PID while only one driver survives. Use full TID
+  ownership and actual thread lifetime for harness liveness; absence of local
+  ownership is unknown, not live. Thread existence is not responsiveness proof.
+  See the [xdist contention investigation](plans/2026-09-14-xdist-title-contention-plan.md).

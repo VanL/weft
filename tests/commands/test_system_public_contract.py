@@ -34,7 +34,7 @@ def test_cmd_system_tidy_returns_structured_target(tmp_path: Path) -> None:
     result = cmd_system_tidy(context=root)
 
     assert isinstance(result, SystemTidyResult)
-    assert result.target
+    assert result.target == build_context(root).broker_display_target
 
 
 def test_cmd_system_dump_returns_exact_export_counts(tmp_path: Path) -> None:
@@ -116,7 +116,6 @@ def test_cmd_system_task_monitor_returns_ordered_structured_records(
         no_checkpoint=True,
         since=0,
     )
-
     assert isinstance(result, TaskMonitorResult)
     assert all(isinstance(record, TaskMonitorRecord) for record in result.records)
     assert [item.record["record_type"] for item in result.records] == [
@@ -131,6 +130,7 @@ def test_cmd_system_task_monitor_follow_returns_idempotently_closable_stream(
     root = prepare_project_root(tmp_path / "proj")
 
     stream = cmd_system_task_monitor(context=root, follow=True)
+    assert not isinstance(stream, TaskMonitorResult)
     stream.close()
     stream.close()
 

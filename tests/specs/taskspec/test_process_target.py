@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -13,10 +14,10 @@ from weft.core.taskspec import SpecSection
 
 def test_process_target_requires_string() -> None:
     with pytest.raises(ValidationError):
-        SpecSection(type="command", process_target=["echo"])  # type: ignore[arg-type]
+        SpecSection(type="command", process_target=["echo"])
 
 
-def test_command_args_appended_to_process_target(tmp_path) -> None:
+def test_command_args_appended_to_process_target(tmp_path: Path) -> None:
     script = "import sys; print(' '.join(sys.argv[1:]))"
     completed = execute_command_target(
         sys.executable,

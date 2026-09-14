@@ -86,9 +86,11 @@ def test_ambiguous_batch_sends_no_control(
         with pytest.raises(CommandUsageError):
             operation(tids=[first, short])
     else:
-        operation = task_cmd.stop_tasks if command == "stop" else task_cmd.kill_tasks
+        command_operation = (
+            task_cmd.stop_tasks if command == "stop" else task_cmd.kill_tasks
+        )
         with pytest.raises(CommandUsageError):
-            operation([first, short], context=mapping_context)
+            command_operation([first, short], context=mapping_context)
     for tid in (first, second):
         queue = mapping_context.queue(f"T{tid}.ctrl_in", persistent=False)
         try:
@@ -105,7 +107,9 @@ def test_resolution_derives_short_and_ignores_newer_malformed_mapping(
     write_mapping(mapping_context, full, "", terminal=True)
     write_mapping(mapping_context, "undecidable", tid_short_form(full))
     assert task_cmd.resolve_full_tid(mapping_context, tid_short_form(full)) == full
-    assert task_cmd.mapping_for_tid(mapping_context, full)["terminal"] is False
+    mapping = task_cmd.mapping_for_tid(mapping_context, full)
+    assert mapping is not None
+    assert mapping["terminal"] is False
     assert (
         system_cmd._latest_tid_mapping_entries(mapping_context)[full]["terminal"]
         is False

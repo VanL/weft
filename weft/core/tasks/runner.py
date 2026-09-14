@@ -21,9 +21,7 @@ from weft.core.agents.validation import (
 from weft.core.environment_profiles import materialize_runner_environment
 from weft.core.runner_validation import validate_runner_capabilities
 from weft.core.runners.outcome import RunnerOutcome
-from weft.ext import RunnerHandle
-
-from .sessions import AgentSession, CommandSession
+from weft.ext import AgentSessionProtocol, CommandSessionProtocol, RunnerHandle
 
 
 class TaskRunner:
@@ -180,11 +178,11 @@ class TaskRunner:
         parameters = inspect.signature(self._backend.run_with_hooks).parameters
         return "on_stdout_chunk" in parameters and "on_stderr_chunk" in parameters
 
-    def start_session(self) -> CommandSession:
+    def start_session(self) -> CommandSessionProtocol:
         """Start an interactive command session for the configured runner."""
         return self._backend.start_session()
 
-    def start_agent_session(self) -> AgentSession:
+    def start_agent_session(self) -> AgentSessionProtocol:
         """Start a long-lived agent session for the configured runner."""
         return self._backend.start_agent_session()
 
@@ -245,4 +243,9 @@ def _build_runner_validation_payload(
     return payload
 
 
-__all__ = ["AgentSession", "CommandSession", "RunnerOutcome", "TaskRunner"]
+__all__ = [
+    "AgentSessionProtocol",
+    "CommandSessionProtocol",
+    "RunnerOutcome",
+    "TaskRunner",
+]

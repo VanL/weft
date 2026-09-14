@@ -1,6 +1,9 @@
 """Tests for CLI commands."""
 
+from __future__ import annotations
+
 import json
+from pathlib import Path
 
 from tests.conftest import run_cli
 
@@ -96,7 +99,7 @@ VALID_COMMAND_TASKSPEC = {
 class TestValidateTaskspecCommand:
     """Test the spec validate task CLI command."""
 
-    def test_validate_valid_taskspec(self, workdir):
+    def test_validate_valid_taskspec(self, workdir: Path) -> None:
         """Test validating a valid TaskSpec file."""
         path = workdir / "valid_taskspec.json"
         path.write_text(json.dumps(MINIMAL_VALID_TASKSPEC), encoding="utf-8")
@@ -107,7 +110,7 @@ class TestValidateTaskspecCommand:
         assert "✓" in out
         assert err == ""
 
-    def test_validate_invalid_taskspec(self, workdir):
+    def test_validate_invalid_taskspec(self, workdir: Path) -> None:
         """Test validating an invalid TaskSpec file."""
         path = workdir / "invalid_taskspec.json"
         path.write_text(json.dumps(INVALID_SHORT_TID), encoding="utf-8")
@@ -119,7 +122,7 @@ class TestValidateTaskspecCommand:
         assert "tid" in out
         assert err == ""
 
-    def test_validate_nonexistent_file(self, workdir):
+    def test_validate_nonexistent_file(self, workdir: Path) -> None:
         """Test validating a non-existent file."""
         missing = workdir / "missing.json"
 
@@ -135,7 +138,7 @@ class TestValidateTaskspecCommand:
         combined = f"{out}\n{err}"
         assert "Invalid value" in combined or "File not found" in combined
 
-    def test_validate_malformed_json(self, workdir):
+    def test_validate_malformed_json(self, workdir: Path) -> None:
         """Test validating a file with malformed JSON."""
         path = workdir / "malformed.json"
         path.write_text("{ invalid json", encoding="utf-8")
@@ -146,7 +149,7 @@ class TestValidateTaskspecCommand:
         assert "_json" in out
         assert err == ""
 
-    def test_validate_with_summary(self, workdir):
+    def test_validate_with_summary(self, workdir: Path) -> None:
         """Test that valid TaskSpec shows a summary."""
         path = workdir / "command_taskspec.json"
         path.write_text(json.dumps(VALID_COMMAND_TASKSPEC), encoding="utf-8")
@@ -159,7 +162,7 @@ class TestValidateTaskspecCommand:
         assert "command" in out
         assert err == ""
 
-    def test_validate_multiple_errors(self, workdir):
+    def test_validate_multiple_errors(self, workdir: Path) -> None:
         """Test validation with multiple errors shows all errors."""
         invalid_taskspec = {
             "tid": "abc",  # Invalid format

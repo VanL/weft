@@ -18,8 +18,8 @@ pytestmark = [pytest.mark.shared, pytest.mark.property]
 
 _TEXT = st.text(
     alphabet=st.characters(
-        blacklist_categories=("Cs",),
-        blacklist_characters=("\x00",),
+        exclude_categories=["Cs"],
+        exclude_characters=["\x00"],
     ),
     max_size=32,
 )
@@ -29,7 +29,7 @@ _TEXT = st.text(
 def test_parse_bool_matches_false_token_contract(value: str | None) -> None:
     false_values = {"0", "F", "NONE", "NULL", "FALSE"}
 
-    expected = bool(value) and value.upper() not in false_values
+    expected = value is not None and bool(value) and value.upper() not in false_values
 
     assert _parse_bool(value) is expected
 

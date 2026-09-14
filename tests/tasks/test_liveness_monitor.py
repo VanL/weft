@@ -222,10 +222,10 @@ def test_unknown_timeout_deletes_only_exact_mapping_after_completed_probe(
             if record.getMessage() == "Retired TID mapping after liveness probe"
         ]
         assert len(retirement_records) == 1
-        assert retirement_records[0].tid == target_tid
-        assert retirement_records[0].hostname == "test"
-        assert retirement_records[0].reason == "unknown_timeout"
-        assert retirement_records[0].probe_reason == "miss"
+        assert retirement_records[0].__dict__["tid"] == target_tid
+        assert retirement_records[0].__dict__["hostname"] == "test"
+        assert retirement_records[0].__dict__["reason"] == "unknown_timeout"
+        assert retirement_records[0].__dict__["probe_reason"] == "miss"
     finally:
         monitor.stop(join=False)
         monitor.cleanup()
@@ -482,8 +482,8 @@ def test_probe_worker_fatal_event_escalates_on_reactor(
             if record.getMessage() == "Liveness probe worker failed"
         ]
         assert len(failure_records) == 1
-        assert failure_records[0].worker_index == 3
-        assert failure_records[0].error_type == "FatalProbeFailure"
+        assert failure_records[0].__dict__["worker_index"] == 3
+        assert failure_records[0].__dict__["error_type"] == "FatalProbeFailure"
     finally:
         monitor.stop(join=False)
         monitor.cleanup()

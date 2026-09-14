@@ -56,7 +56,7 @@ def test_agent_runtime_name_rejects_non_object_taskspec_sections_as_value_error(
     assert exc_info.value.__cause__ is None
 
 
-def test_validate_agent_runtime_rejects_unknown_provider(tmp_path) -> None:
+def test_validate_agent_runtime_rejects_unknown_provider(tmp_path: Path) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         executable=str(write_provider_cli_wrapper(tmp_path, "codex")),
     )
@@ -78,7 +78,7 @@ def test_validate_agent_runtime_preflight_rejects_missing_executable() -> None:
 
 
 def test_validate_agent_runtime_preflight_docker_one_shot_skips_host_executable_check(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         provider="codex",
@@ -94,7 +94,7 @@ def test_validate_agent_runtime_preflight_docker_one_shot_skips_host_executable_
 
 
 def test_validate_agent_runtime_preflight_microsandbox_one_shot_skips_host_executable_check(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         provider="codex",
@@ -114,7 +114,7 @@ def test_validate_agent_runtime_preflight_microsandbox_one_shot_skips_host_execu
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_validate_agent_runtime_preflight_accepts_real_fixture_executable(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
@@ -129,7 +129,7 @@ def test_validate_agent_runtime_preflight_accepts_real_fixture_executable(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_validate_agent_runtime_preflight_does_not_launch_provider_subprocess(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -146,7 +146,7 @@ def test_validate_agent_runtime_preflight_does_not_launch_provider_subprocess(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_validate_agent_runtime_preflight_accepts_persistent_provider_cli_session(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
@@ -162,7 +162,7 @@ def test_validate_agent_runtime_preflight_accepts_persistent_provider_cli_sessio
 
 
 def test_validate_agent_runtime_preflight_does_not_check_opencode_run_support(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PROVIDER_CLI_FIXTURE_OPENCODE_NO_RUN", "1")
@@ -263,7 +263,7 @@ def test_opencode_run_help_probe_reports_timeout_facts(
 
 
 def test_validate_agent_runtime_preflight_uses_project_agent_settings_for_executable(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -295,7 +295,7 @@ def test_validate_agent_runtime_preflight_uses_project_agent_settings_for_execut
     validate_taskspec_agent_runtime(payload, load_runtime=True, preflight=True)
 
 
-def test_validate_agent_runtime_rejects_bounded_opencode(tmp_path) -> None:
+def test_validate_agent_runtime_rejects_bounded_opencode(tmp_path: Path) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         provider="opencode",
         executable=str(write_provider_cli_wrapper(tmp_path, "opencode")),
@@ -309,7 +309,7 @@ def test_validate_agent_runtime_rejects_bounded_opencode(tmp_path) -> None:
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_validate_agent_tool_profile_accepts_structured_workspace_access(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
@@ -325,7 +325,9 @@ def test_validate_agent_tool_profile_accepts_structured_workspace_access(
     validate_taskspec_agent_tool_profile(payload, load_runtime=True, preflight=True)
 
 
-def test_validate_agent_tool_profile_accepts_claude_explicit_mcp(tmp_path) -> None:
+def test_validate_agent_tool_profile_accepts_claude_explicit_mcp(
+    tmp_path: Path,
+) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         provider="claude_code",
         executable=str(write_provider_cli_wrapper(tmp_path, "claude_code")),
@@ -340,7 +342,7 @@ def test_validate_agent_tool_profile_accepts_claude_explicit_mcp(tmp_path) -> No
 
 @pytest.mark.parametrize("provider_name", ("codex", "gemini", "opencode", "qwen"))
 def test_validate_agent_tool_profile_rejects_unsupported_explicit_mcp(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
 ) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(

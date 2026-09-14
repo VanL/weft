@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.typing import BrokerEnv
 from weft._constants import load_config
 from weft.commands.interactive import InteractiveStreamClient
 from weft.core.tasks import Consumer
@@ -46,7 +47,7 @@ def _spin(task: Consumer, iterations: int = 20, delay: float = 0.05) -> None:
         time.sleep(delay)
 
 
-def test_interactive_client_streams_and_completes(broker_env) -> None:
+def test_interactive_client_streams_and_completes(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     spec = _make_interactive_spec(tid)
@@ -98,7 +99,7 @@ def test_interactive_client_streams_and_completes(broker_env) -> None:
 
 
 def test_interactive_client_ignores_invalid_ambient_broker_config(
-    broker_env,
+    broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The direct interactive Queue edge receives an isolated marker."""
@@ -115,15 +116,16 @@ def test_interactive_client_ignores_invalid_ambient_broker_config(
     )
     try:
         client.send_input("works")
-        assert (
-            json.loads(make_queue("isolated.interactive.inbox").peek_one())["stdin"]
-            == "works"
-        )
+        raw = make_queue("isolated.interactive.inbox").peek_one()
+        assert raw is not None
+        assert json.loads(raw)["stdin"] == "works"
     finally:
         client.stop()
 
 
-def test_interactive_client_observes_terminal_ctrl_out_envelope(broker_env) -> None:
+def test_interactive_client_observes_terminal_ctrl_out_envelope(
+    broker_env: BrokerEnv,
+) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     spec = _make_interactive_spec(tid)
@@ -173,7 +175,7 @@ def test_interactive_client_observes_terminal_ctrl_out_envelope(broker_env) -> N
     ("missing_source", "unknown_source", "wrong_tid", "nonterminal_status"),
 )
 def test_interactive_client_rejects_invalid_terminal_envelopes(
-    broker_env,
+    broker_env: BrokerEnv,
     invalid_case: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -245,7 +247,9 @@ def test_interactive_client_rejects_invalid_terminal_envelopes(
     assert state_events == [valid]
 
 
-def test_interactive_client_failure_overrides_stdout_final(broker_env) -> None:
+def test_interactive_client_failure_overrides_stdout_final(
+    broker_env: BrokerEnv,
+) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     spec = _make_interactive_spec(tid)
@@ -303,7 +307,7 @@ def test_interactive_client_failure_overrides_stdout_final(broker_env) -> None:
     assert client.error == "boom"
 
 
-def test_interactive_client_waits_for_control_response(broker_env) -> None:
+def test_interactive_client_waits_for_control_response(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     spec = _make_interactive_spec(tid)
@@ -341,7 +345,9 @@ def test_interactive_client_waits_for_control_response(broker_env) -> None:
     assert response["status"] == "ack"
 
 
-def test_interactive_client_waits_for_matching_request_id(broker_env) -> None:
+def test_interactive_client_waits_for_matching_request_id(
+    broker_env: BrokerEnv,
+) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     spec = _make_interactive_spec(tid)
@@ -399,7 +405,7 @@ def test_interactive_client_waits_for_matching_request_id(broker_env) -> None:
     assert response["request_id"] == "new"
 
 
-def test_interactive_client_control_stop_is_terminal(broker_env) -> None:
+def test_interactive_client_control_stop_is_terminal(broker_env: BrokerEnv) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     spec = _make_interactive_spec(tid)

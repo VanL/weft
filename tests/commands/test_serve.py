@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
+from unittest.mock import Mock
 
 import psutil
 import pytest
 
-from simplebroker import resolve_config
+from simplebroker import Config, resolve_config
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     MANAGER_PONG_LIVE_AT_KEY,
@@ -26,6 +29,7 @@ from weft.core.service_convergence import (
     manager_service_key,
     project_manager_service_record,
 )
+from weft.core.taskspec import TaskSpec
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
@@ -64,10 +68,10 @@ def _host_runtime_handle(pid: int) -> dict[str, object]:
 
 
 def _manager_service_payload(
-    context,
+    context: WeftContext,
     tid: str,
     *,
-    status: str = "active",
+    status: Literal["active", "draining", "stopped", "superseded"] = "active",
     runtime_handle: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return build_manager_service_payload(
@@ -85,7 +89,7 @@ def _manager_service_payload(
     )
 
 
-def _latest_manager_record(context, tid: str) -> dict[str, object] | None:
+def _latest_manager_record(context: WeftContext, tid: str) -> dict[str, object] | None:
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         latest: tuple[dict[str, object], int] | None = None
@@ -105,7 +109,7 @@ def _latest_manager_record(context, tid: str) -> dict[str, object] | None:
 
 
 def test_serve_command_delegates_to_shared_foreground_helper(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from weft.commands import serve as serve_cmd
 
@@ -114,13 +118,17 @@ def test_serve_command_delegates_to_shared_foreground_helper(
     calls: list[str] = []
     context_calls: list[tuple[object, object]] = []
 
-    def fake_build_context(spec_context=None, *, config=None):
+    def fake_build_context(
+        spec_context: str | Path | None = None,
+        *,
+        config: Config | None = None,
+    ) -> WeftContext:
         context_calls.append((spec_context, config))
         return context
 
     monkeypatch.setattr(serve_cmd, "build_context", fake_build_context)
 
-    def fake_serve_manager(context_arg):
+    def fake_serve_manager(context_arg: WeftContext) -> tuple[int, str | None]:
         assert context_arg is context
         calls.append("serve")
         return 0, None
@@ -137,11 +145,13 @@ def test_serve_command_delegates_to_shared_foreground_helper(
     assert calls == ["serve"]
     assert context_calls
     assert context_calls[0][0] == context_root
-    assert context_calls[0][1][MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] is True
+    configured = context_calls[0][1]
+    assert isinstance(configured, Config)
+    assert configured[MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] is True
 
 
 def test_cmd_manager_serve_returns_none_and_raises_typed_runtime_failures(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from weft.commands import serve as serve_cmd
 
@@ -168,7 +178,9 @@ def test_cmd_manager_serve_returns_none_and_raises_typed_runtime_failures(
         serve_cmd.cmd_manager_serve(context=context_root)
 
 
-def test_serve_command_returns_preflight_message(tmp_path, monkeypatch) -> None:
+def test_serve_command_returns_preflight_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from weft.commands import serve as serve_cmd
 
     context_root = prepare_project_root(tmp_path / "proj")
@@ -197,8 +209,8 @@ def test_serve_command_returns_preflight_message(tmp_path, monkeypatch) -> None:
 
 
 def test_serve_command_replace_supersedes_before_foreground(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from weft.commands import serve as serve_cmd
 
@@ -212,13 +224,15 @@ def test_serve_command_replace_supersedes_before_foreground(
         lambda spec_context=None, *, config=None: context,
     )
 
-    def fake_replace(context_arg, *, timeout):
+    def fake_replace(
+        context_arg: WeftContext, *, timeout: float
+    ) -> tuple[bool, str | None]:
         assert context_arg is context
         assert timeout > 0
         calls.append("replace")
         return True, None
 
-    def fake_serve(context_arg):
+    def fake_serve(context_arg: WeftContext) -> tuple[int, str | None]:
         assert context_arg is context
         calls.append("serve")
         return 0, None
@@ -233,8 +247,8 @@ def test_serve_command_replace_supersedes_before_foreground(
 
 
 def test_serve_command_replace_failure_does_not_serve(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from weft.commands import serve as serve_cmd
 
@@ -268,21 +282,21 @@ def test_serve_command_replace_failure_does_not_serve(
 
 
 def test_serve_foreground_uses_shared_runtime_invocation_helper(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
     invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="1761000000000000002",
-        spec=object(),
+        spec=Mock(spec=TaskSpec, metadata={}),
     )
     helper_calls: list[tuple[object, object]] = []
     run_calls: list[tuple[object, object]] = []
 
     manager_selection_calls: list[object] = []
 
-    def _fake_blocking_manager(context_arg):
+    def _fake_blocking_manager(context_arg: WeftContext) -> None:
         manager_selection_calls.append(context_arg)
 
     monkeypatch.setattr(
@@ -291,11 +305,16 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
         _fake_blocking_manager,
     )
 
-    def _fake_build_invocation(context_arg, *, idle_timeout_override=None):
+    def _fake_build_invocation(
+        context_arg: WeftContext, *, idle_timeout_override: float | None = None
+    ) -> core_manager_runtime.ManagerRuntimeInvocation:
         helper_calls.append((context_arg, idle_timeout_override))
         return invocation
 
-    def _fake_run_manager_process_foreground(invocation_arg, context_arg):
+    def _fake_run_manager_process_foreground(
+        invocation_arg: core_manager_runtime.ManagerRuntimeInvocation,
+        context_arg: WeftContext,
+    ) -> None:
         run_calls.append((invocation_arg, context_arg))
 
     monkeypatch.setattr(
@@ -319,8 +338,8 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
 
 
 def test_serve_foreground_blocks_positive_external_supervisor_duplicate(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
@@ -341,8 +360,12 @@ def test_serve_foreground_blocks_positive_external_supervisor_duplicate(
     run_calls: list[object] = []
     pong_tids: list[str] = []
 
-    def matched_pong(_context, record, **_kwargs):
-        pong_tids.append(record["tid"])
+    def matched_pong(
+        _context: WeftContext, record: dict[str, object], **_kwargs: object
+    ) -> bool:
+        record_tid = record["tid"]
+        assert isinstance(record_tid, str)
+        pong_tids.append(record_tid)
         record[MANAGER_PONG_LIVE_AT_KEY] = record["timestamp"]
         return True
 
@@ -366,8 +389,8 @@ def test_serve_foreground_blocks_positive_external_supervisor_duplicate(
 
 
 def test_serve_foreground_supersedes_unconfirmed_external_record_when_starting(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
@@ -375,7 +398,7 @@ def test_serve_foreground_supersedes_unconfirmed_external_record_when_starting(
     invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="1761000000000000005",
-        spec=object(),
+        spec=Mock(spec=TaskSpec, metadata={}),
     )
     registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
@@ -394,8 +417,12 @@ def test_serve_foreground_supersedes_unconfirmed_external_record_when_starting(
 
     probe_tids: list[str] = []
 
-    def unmatched_pong(_context, record, **_kwargs):
-        probe_tids.append(record["tid"])
+    def unmatched_pong(
+        _context: WeftContext, record: dict[str, object], **_kwargs: object
+    ) -> bool:
+        record_tid = record["tid"]
+        assert isinstance(record_tid, str)
+        probe_tids.append(record_tid)
         return False
 
     monkeypatch.setattr(
@@ -434,8 +461,8 @@ def test_serve_foreground_supersedes_unconfirmed_external_record_when_starting(
 
 @pytest.mark.parametrize("unknown_first", [True, False])
 def test_serve_foreground_supersedes_in_tid_order_before_live_blocker(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     unknown_first: bool,
 ) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
@@ -470,8 +497,12 @@ def test_serve_foreground_supersedes_in_tid_order_before_live_blocker(
 
     probe_tids: list[str] = []
 
-    def unmatched_pong(_context, record, **_kwargs):
-        probe_tids.append(record["tid"])
+    def unmatched_pong(
+        _context: WeftContext, record: dict[str, object], **_kwargs: object
+    ) -> bool:
+        record_tid = record["tid"]
+        assert isinstance(record_tid, str)
+        probe_tids.append(record_tid)
         return False
 
     monkeypatch.setattr(
@@ -513,9 +544,8 @@ def test_client_serve_preserves_explicit_context(
         return 0, None
 
     monkeypatch.setattr(core_manager_runtime, "serve_manager_foreground", serve)
-    result = WeftClient.from_weft_context(context).managers.serve()
-
-    assert result is None
+    invoke: Callable[[], object] = WeftClient.from_weft_context(context).managers.serve
+    assert invoke() is None
     assert len(seen) == 1
     assert seen[0] is context
     assert seen[0].config["MANAGER_SERVE_LOG_INTERVAL_SECONDS"] == 137.0
@@ -545,10 +575,14 @@ def test_foreground_takeover_excludes_unqualified_rows(
         context,
         tid,
         runtime_handle=handle,
-        status=kind if kind in {"draining", "stopped"} else "active",
+        status="draining"
+        if kind == "draining"
+        else ("stopped" if kind == "stopped" else "active"),
     )
     if kind == "noncanonical":
-        payload["queues"]["requests"] = "private.requests"
+        queues = payload["queues"]
+        assert isinstance(queues, dict)
+        queues["requests"] = "private.requests"
     if kind == "other_service":
         payload["service_key"] = "manager:another-service"
     with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as queue:

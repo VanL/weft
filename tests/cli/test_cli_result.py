@@ -6,13 +6,14 @@ import json
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from typer.testing import CliRunner
 
 from simplebroker.ext import OperationalError
 from tests.conftest import run_cli
+from tests.helpers.weft_harness import WeftTestHarness
 from weft.cli.app import app
 from weft.commands import TaskResult
 
@@ -44,7 +45,7 @@ def test_result_terminal_timeout_uses_exit_124(
     assert "Traceback" not in result.stderr
 
 
-def _submit_task(workdir, harness, *run_args: str) -> str:
+def _submit_task(workdir: Path, harness: WeftTestHarness, *run_args: str) -> str:
     rc, out, err = run_cli(
         "run",
         "--no-wait",
@@ -60,7 +61,7 @@ def _submit_task(workdir, harness, *run_args: str) -> str:
     return tid
 
 
-def _wait_for_outbox(harness, tid: str, timeout: float = 5.0) -> None:
+def _wait_for_outbox(harness: WeftTestHarness, tid: str, timeout: float = 5.0) -> None:
     queue_name = f"T{tid}.outbox"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -99,7 +100,7 @@ def test_wait_for_outbox_retries_transient_backend_failure() -> None:
         queues.append(queue)
         return queue
 
-    harness = SimpleNamespace(context=SimpleNamespace(queue=make_queue))
+    harness = Mock(spec=WeftTestHarness, context=Mock(queue=make_queue))
 
     _wait_for_outbox(harness, "123", timeout=1.0)
 
@@ -117,7 +118,7 @@ def _wait_for_path(path: Path, *, timeout: float = 20.0) -> bool:
 
 
 def _wait_for_stream_chunk(
-    harness, tid: str, chunk: str, timeout: float = 20.0
+    harness: WeftTestHarness, tid: str, chunk: str, timeout: float = 20.0
 ) -> bool:
     queue_name = f"T{tid}.outbox"
     deadline = time.monotonic() + timeout
@@ -138,7 +139,9 @@ def _wait_for_stream_chunk(
     return False
 
 
-def test_result_returns_payload_for_completed_task(workdir, weft_harness) -> None:
+def test_result_returns_payload_for_completed_task(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     tid = _submit_task(
         workdir,
         weft_harness,
@@ -164,7 +167,7 @@ def test_result_returns_payload_for_completed_task(workdir, weft_harness) -> Non
     assert err == ""
 
 
-def test_result_json_output(workdir, weft_harness) -> None:
+def test_result_json_output(workdir: Path, weft_harness: WeftTestHarness) -> None:
     tid = _submit_task(
         workdir,
         weft_harness,
@@ -192,7 +195,9 @@ def test_result_json_output(workdir, weft_harness) -> None:
     assert payload["result"]["data"] == "payload"
 
 
-def test_result_stream_outputs_streamed_task_once(workdir, weft_harness) -> None:
+def test_result_stream_outputs_streamed_task_once(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     tid = _submit_task(
         workdir,
         weft_harness,
@@ -221,8 +226,8 @@ def test_result_stream_outputs_streamed_task_once(workdir, weft_harness) -> None
 
 
 def test_result_stream_attaches_to_running_command_and_emits_live_output(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     ready_path = workdir / "result-stream-ready.txt"
     release_path = workdir / "result-stream-release.txt"
@@ -280,8 +285,8 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
 
 
 def test_result_streamed_command_preserves_trimmed_result_shape(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     rc, out, err = run_cli(
         "run",
@@ -314,8 +319,8 @@ def test_result_streamed_command_preserves_trimmed_result_shape(
 
 
 def test_result_stream_with_error_preserves_stderr_payload_selection(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     tid = _submit_task(
         workdir,
@@ -342,7 +347,9 @@ def test_result_stream_with_error_preserves_stderr_payload_selection(
     assert err == ""
 
 
-def test_result_stream_rejects_json_output(workdir, weft_harness) -> None:
+def test_result_stream_rejects_json_output(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "result",
         "123",
@@ -357,7 +364,9 @@ def test_result_stream_rejects_json_output(workdir, weft_harness) -> None:
     assert "cannot be used with --json" in err
 
 
-def test_result_missing_task_reports_error(workdir, weft_harness) -> None:
+def test_result_missing_task_reports_error(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     rc, out, err = run_cli(
         "result",
         "999",
@@ -371,8 +380,8 @@ def test_result_missing_task_reports_error(workdir, weft_harness) -> None:
 
 
 def test_result_missing_task_with_zero_timeout_reports_timeout(
-    workdir,
-    weft_harness,
+    workdir: Path,
+    weft_harness: WeftTestHarness,
 ) -> None:
     rc, out, err = run_cli(
         "result",

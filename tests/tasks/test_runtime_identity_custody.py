@@ -10,6 +10,7 @@ import pytest
 
 from tests.helpers.queue_payloads import terminal_envelopes
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.task_state import task_state_queue_name
@@ -26,7 +27,10 @@ pytestmark = pytest.mark.shared
 @pytest.mark.parametrize("handler", [base_module.BaseTask, Consumer])
 @pytest.mark.parametrize("kill", [False, True])
 def test_completed_worker_releases_identity_and_idle_control(
-    broker_env, monkeypatch, handler, kill: bool
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    handler: type[base_module.BaseTask],
+    kill: bool,
 ) -> None:
     if kill and not hasattr(signal, "SIGUSR1"):
         pytest.skip("SIGUSR1 is unavailable")
@@ -98,7 +102,7 @@ def test_completed_worker_releases_identity_and_idle_control(
 
 
 def test_replacement_handle_preserves_registered_identity(
-    broker_env, monkeypatch
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path, _ = broker_env
     task = Consumer(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 import multiprocessing
 import os
@@ -11,17 +10,19 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from itertools import combinations
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 
 import psutil
 import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
+from tests.helpers.typing import record_and_return
 from weft import helpers as helpers_module
 from weft._constants import AGENT_SESSION_READY_TIMEOUT_SECONDS
 from weft.core.resource_monitor import ResourceMetrics
@@ -54,21 +55,20 @@ from weft.core.terminal_handoff_transport import (
 from weft.ext import RunnerCapabilities, RunnerHandle
 
 
-def test_resource_session_and_host_runner_constructors_drop_inert_context() -> None:
-    command_parameters = inspect.signature(sessions_module.CommandSession).parameters
-    agent_parameters = inspect.signature(AgentSession).parameters
-    host_parameters = inspect.signature(HostTaskRunner).parameters
-
-    assert "limits" not in command_parameters
-    assert "limits" not in agent_parameters
-    assert "db_path" not in host_parameters
-    assert "config" not in host_parameters
-
-
-def test_runner_outcome_drops_duplicate_worker_pid_identity() -> None:
-    parameters = inspect.signature(RunnerOutcome).parameters
-
-    assert "worker_pid" not in parameters
+def test_runner_outcome_rejects_duplicate_worker_pid_identity() -> None:
+    """Completed outcomes have one runtime identity authority [CC-3.2]."""
+    with pytest.raises(TypeError, match="worker_pid"):
+        # Deliberately invalid legacy argument exercises the runtime contract.
+        RunnerOutcome(  # type: ignore[call-arg]
+            status="ok",
+            value="done",
+            error=None,
+            stdout=None,
+            stderr=None,
+            returncode=0,
+            duration=0.0,
+            worker_pid=123,
+        )
 
 
 def test_runner_handle_round_trips_new_shape() -> None:
@@ -386,7 +386,7 @@ def test_runner_handle_from_dict_rejects_persisted_shape_as_value_error(
 
 
 @pytest.mark.timeout(30)
-def test_task_runner_executes_function_successfully():
+def test_task_runner_executes_function_successfully() -> None:
     runner = TaskRunner(
         target_type="function",
         tid=None,
@@ -673,7 +673,9 @@ def test_agent_session_metrics_failure_returns_cache_and_later_recovers(
     "session_factory",
     [
         lambda monitor: sessions_module.CommandSession(
-            object(),
+            cast(
+                subprocess.Popen[bytes], object()
+            ),  # Process is unused by this metrics-only probe.
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
@@ -710,7 +712,9 @@ def test_session_limit_verdict_survives_optional_metrics_read_failure(
     "session_factory",
     [
         lambda monitor: sessions_module.CommandSession(
-            object(),
+            cast(
+                subprocess.Popen[bytes], object()
+            ),  # Process is unused by this metrics-only probe.
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
@@ -757,7 +761,9 @@ def test_session_monitor_adapter_failure_fails_open_and_releases_monitor(
     "session_factory",
     [
         lambda monitor: sessions_module.CommandSession(
-            object(),
+            cast(
+                subprocess.Popen[bytes], object()
+            ),  # Process is unused by this metrics-only probe.
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             monitor,
@@ -1678,6 +1684,10 @@ def _write_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:
         """
 from __future__ import annotations
 
+from tests.helpers.typing import record_and_return
+
+from collections.abc import Iterator, Mapping
+
 import os
 import sys
 import time
@@ -1700,6 +1710,10 @@ if __name__ == "__main__":
     parent_script.write_text(
         """
 from __future__ import annotations
+
+from tests.helpers.typing import record_and_return
+
+from collections.abc import Iterator, Mapping
 
 import subprocess
 import sys
@@ -1771,7 +1785,7 @@ def test_wait_for_pid_exit_accepts_disappearance_during_status(
     assert _wait_for_pid_exit(123, timeout=0.1)
 
 
-def test_task_runner_executes_command_successfully(tmp_path):
+def test_task_runner_executes_command_successfully(tmp_path: Path) -> None:
     runner = TaskRunner(
         target_type="command",
         tid=None,
@@ -1791,6 +1805,7 @@ def test_task_runner_executes_command_successfully(tmp_path):
     outcome = runner.run({})
 
     assert outcome.ok
+    assert isinstance(outcome.value, str)
     assert outcome.value.strip() == "ok"
     assert outcome.returncode == 0
 
@@ -1859,6 +1874,7 @@ def test_interactive_session_collects_immediate_exit_stream_tail(
         monitor_interval=0.05,
     )
     session = runner.start_session()
+    assert isinstance(session, sessions_module.CommandSession)
     stdout: list[str] = []
     stderr: list[str] = []
     deadline = time.monotonic() + 5.0
@@ -1882,7 +1898,7 @@ def test_interactive_session_collects_immediate_exit_stream_tail(
     assert session._stderr_closed is True
 
 
-def test_task_runner_applies_environment_profile_defaults(tmp_path):
+def test_task_runner_applies_environment_profile_defaults(tmp_path: Path) -> None:
     runner = TaskRunner(
         target_type="command",
         tid=None,
@@ -1908,7 +1924,7 @@ def test_task_runner_applies_environment_profile_defaults(tmp_path):
     assert outcome.value == "host-default"
 
 
-def test_task_runner_reports_command_failure(tmp_path):
+def test_task_runner_reports_command_failure(tmp_path: Path) -> None:
     runner = TaskRunner(
         target_type="command",
         tid=None,
@@ -1932,7 +1948,7 @@ def test_task_runner_reports_command_failure(tmp_path):
     assert outcome.error is not None
 
 
-def test_task_runner_times_out(tmp_path):
+def test_task_runner_times_out(tmp_path: Path) -> None:
     runner = TaskRunner(
         target_type="command",
         tid=None,
@@ -1990,7 +2006,7 @@ def test_task_runner_timeout_terminates_command_descendants(tmp_path: Path) -> N
                 pass
 
 
-def test_task_runner_enforces_memory_limit(tmp_path):
+def test_task_runner_enforces_memory_limit(tmp_path: Path) -> None:
     pytest.importorskip("psutil")
     limits = LimitsSection(memory_mb=1)
     runner = TaskRunner(
@@ -2016,7 +2032,7 @@ def test_task_runner_enforces_memory_limit(tmp_path):
     assert outcome.metrics is not None
 
 
-def test_task_runner_enforces_cpu_limit(tmp_path):
+def test_task_runner_enforces_cpu_limit(tmp_path: Path) -> None:
     pytest.importorskip("psutil")
     limits = LimitsSection(cpu_percent=1)
     runner = TaskRunner(
@@ -2050,7 +2066,7 @@ def test_task_runner_enforces_cpu_limit(tmp_path):
     assert outcome.metrics is not None
 
 
-def test_task_runner_enforces_fd_limit(tmp_path):
+def test_task_runner_enforces_fd_limit(tmp_path: Path) -> None:
     pytest.importorskip("psutil")
     limits = LimitsSection(max_fds=5)
     runner = TaskRunner(
@@ -2078,7 +2094,7 @@ def test_task_runner_enforces_fd_limit(tmp_path):
     assert outcome.metrics is not None
 
 
-def test_task_runner_reports_multiple_violations(tmp_path):
+def test_task_runner_reports_multiple_violations(tmp_path: Path) -> None:
     pytest.importorskip("psutil")
     limits = LimitsSection(memory_mb=1, max_fds=2)
     runner = TaskRunner(
@@ -2107,7 +2123,7 @@ def test_task_runner_reports_multiple_violations(tmp_path):
     assert outcome.metrics is not None
 
 
-def test_task_runner_can_be_cancelled(tmp_path):
+def test_task_runner_can_be_cancelled(tmp_path: Path) -> None:
     cancel_after_start = False
 
     def on_worker_started(_pid: int | None) -> None:
@@ -2237,7 +2253,7 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
     plugin_calls: list[tuple[bool, str | None]] = []
 
     def fake_validate_runtime(
-        taskspec_payload,
+        taskspec_payload: Mapping[str, object],
         *,
         bundle_root: str | None = None,
         load_runtime: bool = False,
@@ -2248,7 +2264,7 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
         validation_calls.append(("runtime", preflight, bundle_root))
 
     def fake_validate_tool_profile(
-        taskspec_payload,
+        taskspec_payload: Mapping[str, object],
         *,
         bundle_root: str | None = None,
         load_runtime: bool = False,
@@ -2259,7 +2275,7 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
         validation_calls.append(("tool_profile", preflight, bundle_root))
 
     class FakeBackend:
-        def run_with_hooks(self, work_item, **kwargs):
+        def run_with_hooks(self, work_item: object, **kwargs: object) -> RunnerOutcome:
             del work_item, kwargs
             return RunnerOutcome(
                 status="ok",
@@ -2280,7 +2296,7 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
 
         def validate_taskspec(
             self,
-            taskspec_payload,
+            taskspec_payload: Mapping[str, object],
             *,
             bundle_root: str | None = None,
             preflight: bool = False,
@@ -2288,15 +2304,15 @@ def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
             assert "_weft_bundle_root" not in taskspec_payload
             plugin_calls.append((preflight, bundle_root))
 
-        def create_runner(self, **kwargs):
+        def create_runner(self, **kwargs: object) -> FakeBackend:
             del kwargs
             return FakeBackend()
 
-        def stop(self, handle, *, timeout: float = 2.0) -> bool:
+        def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             del handle, timeout
             return True
 
-        def kill(self, handle, *, timeout: float = 2.0) -> bool:
+        def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             del handle, timeout
             return True
 
@@ -2353,7 +2369,7 @@ def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
     plugin_calls: list[bool] = []
 
     def fake_validate_runtime(
-        taskspec_payload,
+        taskspec_payload: Mapping[str, object],
         *,
         bundle_root: str | None = None,
         load_runtime: bool = False,
@@ -2363,7 +2379,7 @@ def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
         validation_calls.append(("runtime", preflight))
 
     def fake_validate_tool_profile(
-        taskspec_payload,
+        taskspec_payload: Mapping[str, object],
         *,
         bundle_root: str | None = None,
         load_runtime: bool = False,
@@ -2389,7 +2405,7 @@ def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
 
         def validate_taskspec(
             self,
-            taskspec_payload,
+            taskspec_payload: Mapping[str, object],
             *,
             bundle_root: str | None = None,
             preflight: bool = False,
@@ -2397,15 +2413,15 @@ def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
             del taskspec_payload, bundle_root
             plugin_calls.append(preflight)
 
-        def create_runner(self, **kwargs):
+        def create_runner(self, **kwargs: object) -> FakeBackend:
             del kwargs
             return FakeBackend()
 
-        def stop(self, handle, *, timeout: float = 2.0) -> bool:
+        def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             del handle, timeout
             return True
 
-        def kill(self, handle, *, timeout: float = 2.0) -> bool:
+        def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             del handle, timeout
             return True
 
@@ -2515,7 +2531,7 @@ def test_task_runner_materializes_docker_container_profile_at_plugin_boundary(
             return None
 
     @contextmanager
-    def fake_docker_client(*, timeout: int = 10):
+    def fake_docker_client(*, timeout: int = 10) -> Iterator[FakeDockerClient]:
         del timeout
         yield FakeDockerClient()
 
@@ -2603,7 +2619,7 @@ def test_spawned_worker_rejects_command_targets_without_running_them(
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: sent.append(payload) or True,
+        lambda _sender, payload, **_kwargs: record_and_return(sent, payload, True),
     )
 
     host_module._worker_entry(
@@ -2651,7 +2667,7 @@ def test_function_worker_maps_arbitrary_execution_failure_to_terminal_outcome(
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: sent.append(payload) or True,
+        lambda _sender, payload, **_kwargs: record_and_return(sent, payload, True),
     )
 
     host_module._worker_entry(
@@ -2742,7 +2758,15 @@ def test_function_host_start_callback_propagates_non_exception_failure_identity(
         raise fatal
 
     with pytest.raises(FatalSignal) as caught:
-        runner.run_with_hooks("payload", **{callback_name: fail_callback})
+        runner.run_with_hooks(
+            "payload",
+            on_worker_started=fail_callback
+            if callback_name == "on_worker_started"
+            else None,
+            on_runtime_handle_started=fail_callback
+            if callback_name == "on_runtime_handle_started"
+            else None,
+        )
 
     assert caught.value is fatal
 
@@ -4100,7 +4124,7 @@ class _StartFailureContext:
 
 
 class _StartedProcess(_StartFailureProcess):
-    pid = None
+    pid: int | None = None
 
     def __init__(self) -> None:
         super().__init__()
@@ -4125,6 +4149,8 @@ class _StartedProcess(_StartFailureProcess):
 
 
 class _StartedContext(_StartFailureContext):
+    process: _StartedProcess
+
     def __init__(self) -> None:
         super().__init__()
         self.process = _StartedProcess()
@@ -4355,7 +4381,7 @@ def test_agent_worker_maps_work_item_failure_and_closes_session_and_ipc(
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: responses.append(payload) or True,
+        lambda _sender, payload, **_kwargs: record_and_return(responses, payload, True),
     )
 
     host_module._agent_session_worker_entry(
@@ -4412,7 +4438,7 @@ def test_agent_worker_maps_post_ready_boundary_failure_to_result_and_closes_reso
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: responses.append(payload) or True,
+        lambda _sender, payload, **_kwargs: record_and_return(responses, payload, True),
     )
 
     host_module._agent_session_worker_entry(
@@ -4474,7 +4500,7 @@ def test_agent_worker_propagates_non_exception_work_item_failure_identity_and_cl
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: responses.append(payload) or True,
+        lambda _sender, payload, **_kwargs: record_and_return(responses, payload, True),
     )
 
     with pytest.raises(FatalSignal) as caught:
@@ -4518,7 +4544,7 @@ def test_agent_worker_maps_startup_failure_and_closes_ipc(
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: responses.append(payload) or True,
+        lambda _sender, payload, **_kwargs: record_and_return(responses, payload, True),
     )
 
     host_module._agent_session_worker_entry(

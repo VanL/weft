@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Self
 
@@ -16,13 +17,14 @@ from weft.commands.task_monitor import (
     ReducedTaskLog,
     StdoutTaskMonitorSink,
     TaskMonitorConfig,
+    TaskMonitorResult,
     _build_summary_record,
     _load_checkpoint,
     _reduce_task_log,
     cmd_system_task_monitor,
     run_task_monitor,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.task_evidence import TaskEvidenceSnapshot
 
 pytestmark = [pytest.mark.shared]
@@ -61,7 +63,7 @@ def _taskspec_payload(
     }
 
 
-def _write_log(ctx: Any, payload: dict[str, Any]) -> None:
+def _write_log(ctx: WeftContext, payload: dict[str, Any]) -> None:
     queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     try:
         queue.write(json.dumps(payload))
@@ -200,6 +202,7 @@ def test_follow_stream_advances_an_in_memory_high_water_without_checkpoint(
         no_checkpoint=True,
         since=0,
     )
+    assert not isinstance(stream, TaskMonitorResult)
     try:
         assert next(stream).record["tid"] == first_tid
         _write_log(
@@ -270,43 +273,67 @@ def test_task_summary_projects_reconciliation_by_timestamp_domain(
 
     assert record["last_task_log_timestamp"] == "1779700000000000001"
     assert record["reconciliation"]["observed_at"] == expected_observed_at
+    assert snapshot.reconciliation is not None
     assert snapshot.reconciliation["observed_at"] == observed_at
 
 
-def test_monitor_checkpoint_advances_after_successful_sink_write(workdir) -> None:
+@pytest.mark.parametrize("sink_fails", [False, True])
+def test_monitor_checkpoint_advances_after_successful_sink_write(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch, sink_fails: bool
+) -> None:
     ctx = build_context(spec_context=workdir)
     tid = "1778084345905438720"
-    taskspec = _taskspec_payload(tid)
-    _write_log(
-        ctx,
-        {
-            "event": "work_completed",
-            "status": "completed",
-            "tid": tid,
-            "taskspec": taskspec,
-        },
-    )
-    checkpoint = workdir / "checkpoint.json"
-
-    result = run_task_monitor(
-        TaskMonitorConfig(
-            context=workdir,
-            sink="disk",
-            log_dir=workdir / "logs",
-            checkpoint=checkpoint,
-            no_checkpoint=False,
-            since=0,
-            limit=None,
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False) as queue:
+        message_id = queue.write(
+            json.dumps(
+                {
+                    "event": "work_completed",
+                    "status": "completed",
+                    "tid": tid,
+                    "taskspec": _taskspec_payload(tid),
+                }
+            )
         )
+    checkpoint = workdir / "checkpoint.json"
+    original_write = DiskJsonlTaskMonitorSink.write_records
+    observed: list[dict[str, Any]] = []
+
+    def observe_write(
+        self: DiskJsonlTaskMonitorSink, records: Iterable[dict[str, Any]]
+    ) -> int:
+        assert not checkpoint.exists(), "checkpoint advanced before output was durable"
+        rows = list(records)
+        observed.extend(rows)
+        if sink_fails:
+            raise OSError("sink unavailable")
+        return original_write(self, rows)
+
+    monkeypatch.setattr(DiskJsonlTaskMonitorSink, "write_records", observe_write)
+    config = TaskMonitorConfig(
+        context=workdir,
+        sink="disk",
+        log_dir=workdir / "logs",
+        checkpoint=checkpoint,
+        no_checkpoint=False,
+        since=0,
+        limit=1,
     )
+    if sink_fails:
+        with pytest.raises(CommandExecutionError, match="sink unavailable"):
+            run_task_monitor(config)
+        assert not checkpoint.exists()
+    else:
+        result = run_task_monitor(config)
+        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+        assert payload["last_task_log_timestamp"] == message_id
+        assert result.checkpoint_timestamp == message_id
+    summaries = [
+        record for record in observed if record["record_type"] == "task_summary"
+    ]
+    assert [record["tid"] for record in summaries] == [tid]
 
-    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-    assert isinstance(payload["last_task_log_timestamp"], int)
-    assert payload["last_task_log_timestamp"] > 0
-    assert isinstance(result.checkpoint_timestamp, int)
 
-
-def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir) -> None:
+def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir: Path) -> None:
     ctx = build_context(spec_context=workdir)
     tid = "1778084345905438721"
     _write_log(
@@ -354,7 +381,7 @@ def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir) -> None:
     assert len(task_summaries) == 1
 
 
-def test_monitor_crash_window_duplicate_has_stable_summary_id(workdir) -> None:
+def test_monitor_crash_window_duplicate_has_stable_summary_id(workdir: Path) -> None:
     ctx = build_context(spec_context=workdir)
     tid = "1778084345905438722"
     _write_log(
@@ -390,7 +417,7 @@ def test_monitor_crash_window_duplicate_has_stable_summary_id(workdir) -> None:
     assert len(set(summary_ids)) == 1
 
 
-def test_corrupt_checkpoint_fails_clearly(workdir) -> None:
+def test_corrupt_checkpoint_fails_clearly(workdir: Path) -> None:
     checkpoint = workdir / "checkpoint.json"
     checkpoint.write_text("not-json", encoding="utf-8")
 
@@ -421,7 +448,7 @@ def test_checkpoint_loader_rejects_non_object_json_as_value_error(
     assert exc_info.value.__cause__ is None
 
 
-def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
+def test_terminal_log_success_summary_uses_terminal_log(workdir: Path) -> None:
     ctx = build_context(spec_context=workdir)
     tid = "1778084345905438723"
     _write_log(
@@ -476,7 +503,9 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
     assert str(result.checkpoint_timestamp) == completed["checkpoint_timestamp"]
 
 
-def test_task_failure_without_task_monitor_anomaly_is_domain_failure(workdir) -> None:
+def test_task_failure_without_task_monitor_anomaly_is_domain_failure(
+    workdir: Path,
+) -> None:
     ctx = build_context(spec_context=workdir)
     tid = "1778084345905438724"
     _write_log(
@@ -510,7 +539,7 @@ def test_task_failure_without_task_monitor_anomaly_is_domain_failure(workdir) ->
     assert summary["cleanup_candidate"] is False
 
 
-def test_active_task_emits_no_task_summary(workdir) -> None:
+def test_active_task_emits_no_task_summary(workdir: Path) -> None:
     ctx = build_context(spec_context=workdir)
     tid = "1778084345905438725"
     _write_log(
@@ -542,7 +571,7 @@ def test_active_task_emits_no_task_summary(workdir) -> None:
 
 
 def test_wrapper_lost_and_result_without_terminal_do_not_consume_queues(
-    workdir,
+    workdir: Path,
 ) -> None:
     ctx = build_context(spec_context=workdir)
     wrapper_tid = "1778084345905438726"

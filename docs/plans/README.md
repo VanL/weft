@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 213 plan files in this directory.
+There are currently 216 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,10 +23,11 @@ There are currently 213 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-09-14-xdist-title-contention-plan.md`](./2026-09-14-xdist-title-contention-plan.md) | Xdist Title Contention Investigation | `draft` | none |
 | [`2026-09-14-django-core-context-resolution-plan.md`](./2026-09-14-django-core-context-resolution-plan.md) | Django Context Resolution Owned by Weft | `completed` | none |
 | [`2026-09-14-simplebroker-8-2-configuration-plan.md`](./2026-09-14-simplebroker-8-2-configuration-plan.md) | SimpleBroker 8.2 Configuration Migration | `completed` | none |
-| [`2026-09-11-bounded-status-and-monitor-work-plan.md`](./2026-09-11-bounded-status-and-monitor-work-plan.md) | Bounded Status Reconstruction and Monitor Work Plan | `draft` | none |
-| [`2026-09-11-per-tid-task-state-namespace-plan.md`](./2026-09-11-per-tid-task-state-namespace-plan.md) | Per-TID Task State Namespace Plan | `completed` | none |
+| [`2026-09-11-public-python-contracts-plan.md`](./2026-09-11-public-python-contracts-plan.md) | Public Python Construction and Extension Contracts | `completed` | none |
+| [`2026-09-11-test-typing-and-correctness-audit.md`](./2026-09-11-test-typing-and-correctness-audit.md) | Test Typing and Correctness Audit | `completed` | none |
 | [`2026-09-11-audit-regression-fixes-plan.md`](./2026-09-11-audit-regression-fixes-plan.md) | Audit Regression Fixes | `draft` | none |
 | [`2026-09-10-deferred-macos-process-title-plan.md`](./2026-09-10-deferred-macos-process-title-plan.md) | Cross-Platform Process Titles with Deferred macOS GUI Registration | `completed` | none |
 | [`2026-09-09-updated-dependency-suite-repairs-plan.md`](./2026-09-09-updated-dependency-suite-repairs-plan.md) | Updated Dependency Suite Repairs | `draft` | none |
@@ -48,6 +49,8 @@ There are currently 213 plan files in this directory.
 | [`2026-08-31-guard-and-custody-simplification-plan.md`](./2026-08-31-guard-and-custody-simplification-plan.md) | Guard and Custody Simplification Plan | `draft` | none |
 | [`2026-08-29-liveness-reaper-and-custody-split-plan.md`](./2026-08-29-liveness-reaper-and-custody-split-plan.md) | Liveness Reaper and TID-Mapping Custody Split Plan | `completed` | none |
 | [`2026-08-29-liveness-monitor-plan.md`](./2026-08-29-liveness-monitor-plan.md) | LivenessMonitor Service and Runtime Probe Package Plan | `draft` | [`2026-08-29-liveness-reaper-and-custody-split-plan.md`](./2026-08-29-liveness-reaper-and-custody-split-plan.md) |
+| [`2026-09-11-bounded-status-and-monitor-work-plan.md`](./2026-09-11-bounded-status-and-monitor-work-plan.md) | Bounded Status Reconstruction and Monitor Work Plan | `draft` | none |
+| [`2026-09-11-per-tid-task-state-namespace-plan.md`](./2026-09-11-per-tid-task-state-namespace-plan.md) | Per-TID Task State Namespace Plan | `completed` | none |
 | [`2026-08-28-simplebroker-8-upgrade-plan.md`](./2026-08-28-simplebroker-8-upgrade-plan.md) | SimpleBroker 8.0 Upgrade Plan | `completed` | none |
 | [`2026-08-27-per-tid-liveness-registry-and-monitor-split-plan.md`](./2026-08-27-per-tid-liveness-registry-and-monitor-split-plan.md) | Per-TID Liveness Registry and Monitor Split Plan | `draft` | [`2026-08-29-liveness-monitor-plan.md`](./2026-08-29-liveness-monitor-plan.md) |
 | [`2026-08-26-simplebroker-7-5-1-compatibility-plan.md`](./2026-08-26-simplebroker-7-5-1-compatibility-plan.md) | SimpleBroker 7.5.1 Compatibility Upgrade Plan | `draft` | none |

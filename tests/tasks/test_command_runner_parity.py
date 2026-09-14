@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ from tests.helpers.test_backend import (
     active_test_backend,
     prepare_project_root,
 )
+from tests.helpers.typing import BrokerEnv
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft._runner_plugins import require_runner_plugin
 from weft.commands import system as status_cmd
@@ -52,7 +53,7 @@ SLOW_CONSUMER_LIFECYCLE_TIMEOUT_SECONDS = 30.0
 
 
 @contextmanager
-def _docker_external_resource_lock():
+def _docker_external_resource_lock() -> Iterator[None]:
     try:
         import fcntl
     except ImportError:  # pragma: no cover - Windows skips real Docker tests
@@ -76,7 +77,7 @@ def _node_uses_real_docker(node: pytest.Item) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _serialize_real_docker_tests(request: pytest.FixtureRequest):
+def _serialize_real_docker_tests(request: pytest.FixtureRequest) -> Iterator[None]:
     if not _node_uses_real_docker(request.node):
         yield
         return
@@ -181,8 +182,15 @@ def _skip_unavailable_runner(
         _ensure_docker_image_available(str(options["image"]))
 
 
-def _format_docker_setup_detail(stdout: str | None, stderr: str | None) -> str:
-    detail = (stderr or stdout or "").strip()
+def _format_docker_setup_detail(
+    stdout: str | bytes | None, stderr: str | bytes | None
+) -> str:
+    raw_detail = stderr or stdout or ""
+    detail = (
+        raw_detail.decode("utf-8", errors="replace")
+        if isinstance(raw_detail, bytes)
+        else raw_detail
+    ).strip()
     if not detail:
         return ""
     return detail[-500:]
@@ -351,7 +359,7 @@ def test_docker_runner_preflight_rejects_missing_build_context(
     from contextlib import contextmanager
 
     @contextmanager
-    def fake_docker_client(*, timeout: int = 10):
+    def fake_docker_client(*, timeout: int = 10) -> Iterator[FakeClient]:
         del timeout
         yield FakeClient()
 
@@ -505,7 +513,7 @@ def _drain(queue: Queue) -> list[str]:
 
 def _drive_consumer_until(
     task: Consumer,
-    predicate,
+    predicate: Callable[[], bool],
     *,
     timeout: float = 10.0,
     timeout_detail: Callable[[], str] | None = None,
@@ -819,6 +827,7 @@ def test_docker_runner_enforces_nofile_limit_with_ulimit(
     outcome = runner.run({})
 
     assert outcome.ok
+    assert isinstance(outcome.value, str)
     payload = json.loads(outcome.value)
     assert payload == {"soft": 64, "hard": 64}
 
@@ -860,9 +869,10 @@ def test_docker_runner_disables_network_when_max_connections_is_zero(
     outcome = runner.run({})
 
     assert outcome.ok
-    assert outcome.value.splitlines() == [
-        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT"
-    ]
+    assert isinstance(outcome.value, str)
+    route_lines = [line.split() for line in outcome.value.splitlines() if line.strip()]
+    assert route_lines[0][:3] == ["Iface", "Destination", "Gateway"]
+    assert len(route_lines) == 1, "network-disabled container unexpectedly has a route"
 
 
 @pytest.mark.parametrize("runner_name", RUNNER_NAMES)
@@ -890,6 +900,7 @@ def test_command_runners_execute_python_probe_equivalently(
     )
 
     assert outcome.ok
+    assert isinstance(outcome.value, str)
     payload = json.loads(outcome.value)
     assert payload["argv"] == ["--base-arg", "--work-item-arg"]
     assert payload["stdin"] == "hello parity"
@@ -944,7 +955,7 @@ def test_command_runners_timeout_equivalently(
 @pytest.mark.parametrize("runner_name", RUNNER_NAMES)
 def test_consumer_command_runners_share_basic_lifecycle(
     runner_name: str,
-    broker_env,
+    broker_env: BrokerEnv,
     sandbox_profile: Path,
     tmp_path: Path,
 ) -> None:

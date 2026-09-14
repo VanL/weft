@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 import weft.core.endpoints as endpoints_module
 from simplebroker import Queue
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
@@ -37,7 +39,7 @@ from weft.core.taskspec import TaskSpec
 from weft.helpers import iter_queue_json_entries, tid_short_form
 
 
-def _entries(queue) -> list[dict[str, object]]:
+def _entries(queue: Queue) -> list[dict[str, object]]:
     return [payload for payload, _message_id in iter_queue_json_entries(queue)]
 
 
@@ -83,7 +85,7 @@ class _CloseTrackingQueue:
     def __getattr__(self, name: str) -> object:
         return getattr(self._queue, name)
 
-    def delete(self, *, message_id: int | str | None = None) -> bool:
+    def delete(self, *, message_id: int | str) -> bool:
         if self._delete_defect:
             raise AssertionError("unexpected delete defect")
         return self._queue.delete(message_id=message_id)
@@ -100,7 +102,7 @@ def unique_tid() -> str:
 
 @pytest.mark.parametrize("already_absent", [False, True])
 def test_task_can_register_and_unregister_named_endpoint(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     already_absent: bool,
 ) -> None:
@@ -123,6 +125,7 @@ def test_task_can_register_and_unregister_named_endpoint(
         assert records[0]["metadata"] == {"role": "operator-facing"}
 
         if already_absent:
+            assert task._endpoint_registration_message_id is not None
             registry.delete(message_id=task._endpoint_registration_message_id)
         task.unregister_endpoint_name()
         assert _entries(registry) == []
@@ -135,7 +138,7 @@ def test_task_can_register_and_unregister_named_endpoint(
 
 @pytest.mark.parametrize("second_name", ["mayor", "supervisor.daily"])
 def test_task_second_registration_is_rejected_until_unregister(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
     second_name: str,
 ) -> None:
@@ -161,7 +164,7 @@ def test_task_second_registration_is_rejected_until_unregister(
 
 
 def test_task_endpoint_name_validation_rejects_invalid_names(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -184,7 +187,7 @@ def test_task_endpoint_name_validation_rejects_invalid_names(
 
 
 def test_task_endpoint_name_validation_rejects_reserved_internal_names(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -203,7 +206,7 @@ def test_task_endpoint_name_validation_rejects_reserved_internal_names(
 
 
 def test_internal_runtime_task_can_claim_reserved_internal_endpoint_name(
-    broker_env,
+    broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
@@ -232,7 +235,7 @@ def test_internal_runtime_task_can_claim_reserved_internal_endpoint_name(
 
 
 def test_endpoint_resolution_uses_latest_owner_row_without_deleting_history(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -271,7 +274,7 @@ def test_endpoint_resolution_uses_latest_owner_row_without_deleting_history(
     ],
 )
 def test_endpoint_resolution_is_order_independent_and_preserves_live_claimants(
-    tmp_path,
+    tmp_path: Path,
     owner_order: tuple[str, ...],
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -314,7 +317,7 @@ def test_endpoint_resolution_is_order_independent_and_preserves_live_claimants(
 
 
 def test_endpoint_resolution_never_attempts_stale_row_deletion(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -342,7 +345,7 @@ def test_endpoint_resolution_never_attempts_stale_row_deletion(
     def flaky_delete(
         queue: Queue,
         *,
-        message_id: int | str | None = None,
+        message_id: int | str,
     ) -> bool:
         if queue.name != WEFT_ENDPOINTS_REGISTRY_QUEUE:
             return original_delete(queue, message_id=message_id)
@@ -367,7 +370,7 @@ def test_endpoint_resolution_never_attempts_stale_row_deletion(
 
 
 def test_endpoint_resolution_keeps_rows_and_closes_queue_after_liveness_defect(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -418,7 +421,7 @@ def test_endpoint_resolution_keeps_rows_and_closes_queue_after_liveness_defect(
 
 
 def test_endpoint_resolution_pattern_preserves_all_stale_rows(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -448,7 +451,7 @@ def test_endpoint_resolution_pattern_preserves_all_stale_rows(
     ids=["success", "unexpected-delete-defect"],
 )
 def test_endpoint_resolution_closes_acquired_registry_queue(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     delete_defect: bool,
@@ -491,7 +494,7 @@ def test_endpoint_resolution_closes_acquired_registry_queue(
 
 
 def test_endpoint_claim_survives_resolution_before_mapping_publication(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     context = build_context(spec_context=prepare_project_root(tmp_path))
     registry = context.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
@@ -508,7 +511,7 @@ def test_endpoint_claim_survives_resolution_before_mapping_publication(
 
 
 def test_endpoint_claim_retains_append_id_across_interleaved_peer_append(
-    broker_env, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+    broker_env: BrokerEnv, unique_tid: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path, make_queue = broker_env
     task = Consumer(
@@ -517,7 +520,7 @@ def test_endpoint_claim_retains_append_id_across_interleaved_peer_append(
     )
     registry = make_queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
     original_queue = task._queue
-    written_ids = []
+    written_ids: list[int] = []
     scans = []
 
     class InterleavedQueue:
@@ -557,7 +560,7 @@ def test_endpoint_claim_retains_append_id_across_interleaved_peer_append(
 
 
 def test_failed_endpoint_append_holds_no_claim_and_can_retry(
-    broker_env, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+    broker_env: BrokerEnv, unique_tid: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path, make_queue = broker_env
     task = Consumer(
@@ -614,7 +617,7 @@ def test_failed_endpoint_append_holds_no_claim_and_can_retry(
     ],
 )
 def test_latest_mapping_fold_skips_malformed_newer_rows_and_keeps_valid_neighbors(
-    tmp_path, invalid
+    tmp_path: Path, invalid: object
 ) -> None:
     context = build_context(spec_context=prepare_project_root(tmp_path))
     queue = context.queue(
@@ -643,7 +646,7 @@ def test_latest_mapping_fold_skips_malformed_newer_rows_and_keeps_valid_neighbor
 
 
 def test_failed_endpoint_unregister_retains_claim_for_exact_retry(
-    broker_env, unique_tid: str, monkeypatch: pytest.MonkeyPatch
+    broker_env: BrokerEnv, unique_tid: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path, make_queue = broker_env
     task = Consumer(
@@ -691,7 +694,7 @@ def test_failed_endpoint_unregister_retains_claim_for_exact_retry(
 
 
 def test_endpoint_owner_snapshot_read_errors_propagate(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failed read after broker acquisition is never an empty state view."""
     context = build_context(spec_context=prepare_project_root(tmp_path))

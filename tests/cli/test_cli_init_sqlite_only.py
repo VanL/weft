@@ -8,11 +8,14 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import run_cli
+from tests.helpers.weft_harness import WeftTestHarness
 
 pytestmark = [pytest.mark.sqlite_only]
 
 
-def test_cli_init_rejects_empty_default_db_config(workdir: Path, weft_harness) -> None:
+def test_cli_init_rejects_empty_default_db_config(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     project_root = workdir / "no-default"
     env = os.environ.copy()
     env["WEFT_DEFAULT_DB_NAME"] = ""
@@ -34,7 +37,7 @@ def test_cli_init_rejects_empty_default_db_config(workdir: Path, weft_harness) -
 
 def test_cli_init_rejects_empty_default_db_with_configured_project_file(
     workdir: Path,
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     project_root = workdir / "project-config"
     config_path = project_root / ".weft" / "broker.toml"

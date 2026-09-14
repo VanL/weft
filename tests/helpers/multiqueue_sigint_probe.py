@@ -8,9 +8,11 @@ import signal
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
-from simplebroker.ext import PollingStrategy
+from simplebroker import Queue
+from simplebroker.ext import ActivityWaiter, PollingStrategy
 from weft.core.tasks import multiqueue_watcher as watcher_module
 from weft.core.tasks.multiqueue_watcher import MultiQueueWatcher
 
@@ -49,7 +51,9 @@ class InterruptingStrategy(PollingStrategy):
         super().__init__(stop_event)
         self.interrupt_next_replace = interrupt_on_replace
 
-    def replace_activity_waiter(self, activity_waiter):
+    def replace_activity_waiter(
+        self, activity_waiter: ActivityWaiter | None
+    ) -> ActivityWaiter | None:
         displaced = super().replace_activity_waiter(activity_waiter)
         if self.interrupt_next_replace:
             self.interrupt_next_replace = False
@@ -73,7 +77,9 @@ def main() -> int:
     waiters: list[RecordingWaiter] = []
     signatures: list[tuple[str, ...]] = []
 
-    def create_waiter(queues, *, stop_event):
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event | None = None
+    ) -> RecordingWaiter:
         del stop_event
         signatures.append(tuple(queue.name for queue in queues))
         waiter = RecordingWaiter(

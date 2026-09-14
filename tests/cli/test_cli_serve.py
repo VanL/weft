@@ -25,7 +25,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.service_convergence import (
     manager_service_key,
@@ -78,7 +78,7 @@ def _popen_cli(
     )
 
 
-def _manager_records(context) -> list[dict[str, Any]]:
+def _manager_records(context: WeftContext) -> list[dict[str, Any]]:
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         snapshot: dict[str, dict[str, Any]] = {}
@@ -99,7 +99,7 @@ def _manager_records(context) -> list[dict[str, Any]]:
     return list(snapshot.values())
 
 
-def _active_canonical_manager_records(context) -> list[dict[str, Any]]:
+def _active_canonical_manager_records(context: WeftContext) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for record in _manager_records(context):
         if not is_canonical_manager_record(record):
@@ -142,7 +142,7 @@ def _host_pid_from_record(record: dict[str, Any]) -> int | None:
 
 
 def _wait_for_active_canonical_manager(
-    context,
+    context: WeftContext,
     *,
     process: subprocess.Popen[str] | None = None,
     timeout: float | None = None,
@@ -198,7 +198,7 @@ def _wait_for_started_task_tid(
     raise AssertionError(f"Timed out waiting for started task {task_name!r}")
 
 
-def _service_records(context, *, service_key: str) -> list[dict[str, Any]]:
+def _service_records(context: WeftContext, *, service_key: str) -> list[dict[str, Any]]:
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         latest_by_tid: dict[str, dict[str, Any]] = {}
@@ -240,7 +240,9 @@ def _service_records(context, *, service_key: str) -> list[dict[str, Any]]:
     )
 
 
-def _live_service_records(context, *, service_key: str) -> list[dict[str, Any]]:
+def _live_service_records(
+    context: WeftContext, *, service_key: str
+) -> list[dict[str, Any]]:
     live_records: list[dict[str, Any]] = []
     for record in _service_records(context, service_key=service_key):
         status = record.get("status")
@@ -270,7 +272,7 @@ def _live_service_records(context, *, service_key: str) -> list[dict[str, Any]]:
 
 
 def _wait_for_single_live_service(
-    context,
+    context: WeftContext,
     *,
     service_key: str,
     process: subprocess.Popen[str],
@@ -332,7 +334,7 @@ def _operational_log_events(output: str) -> list[dict[str, Any]]:
 
 
 def test_serve_runs_in_foreground_and_reuses_single_manager(
-    workdir, weft_harness: WeftTestHarness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     context_root = workdir
     context = build_context(spec_context=context_root)
@@ -390,7 +392,7 @@ def test_serve_runs_in_foreground_and_reuses_single_manager(
 
 
 def test_serve_help_includes_operational_log_options(
-    workdir,
+    workdir: Path,
     weft_harness: WeftTestHarness,
 ) -> None:
     rc, out, err = run_cli(
@@ -409,7 +411,7 @@ def test_serve_help_includes_operational_log_options(
 
 
 def test_serve_level_info_emits_process_operational_log(
-    workdir,
+    workdir: Path,
     weft_harness: WeftTestHarness,
 ) -> None:
     context_root = workdir
@@ -478,7 +480,7 @@ def test_serve_level_info_emits_process_operational_log(
 
 
 def test_serve_level_off_suppresses_env_operational_log(
-    workdir,
+    workdir: Path,
     weft_harness: WeftTestHarness,
 ) -> None:
     context_root = workdir
@@ -525,7 +527,7 @@ def test_serve_level_off_suppresses_env_operational_log(
 
 
 def test_serve_restarts_singleton_services_without_duplicates(
-    workdir,
+    workdir: Path,
     weft_harness: WeftTestHarness,
 ) -> None:
     context_root = workdir
@@ -615,7 +617,7 @@ def test_serve_restarts_singleton_services_without_duplicates(
 
 
 def test_serve_rejects_duplicate_canonical_manager(
-    workdir, weft_harness: WeftTestHarness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     context_root = workdir
     context = build_context(spec_context=context_root)
@@ -653,7 +655,9 @@ def test_serve_rejects_duplicate_canonical_manager(
             _stop_process(process)
 
 
-def test_serve_forces_no_idle_timeout(workdir, weft_harness: WeftTestHarness) -> None:
+def test_serve_forces_no_idle_timeout(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
     context_root = workdir
     context = build_context(spec_context=context_root)
 
@@ -702,7 +706,7 @@ def test_serve_forces_no_idle_timeout(workdir, weft_harness: WeftTestHarness) ->
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
 def test_serve_sigterm_drains_children_cleanly(
-    workdir, weft_harness: WeftTestHarness
+    workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     context_root = workdir
     context = build_context(spec_context=context_root)

@@ -28,6 +28,19 @@ harnesses:
   `tests/multiqueue_polling_benchmark.py` are dev-only measurement tools, not
   part of the canonical test contract.
 
+Test infrastructure must preserve production behavior for the subject under
+test, including process-title activation. Harness-only inline managers may
+disable their own titles. On macOS, xdist's optional worker-title updates are
+suppressed before its native title import; the worker retains its Unix
+executable name until code under test changes it. This changes no production
+module, child environment, or native-library module binding.
+`tests/helpers/xdist_titles.py` owns this bootstrap boundary.
+
+For harness-owned inline managers, runtime liveness follows the actual owned
+driver thread, keyed by full manager TID. The enclosing pytest PID is not
+manager-lifetime evidence. Finished threads are stale; missing local ownership
+is unknown. Thread lifetime does not prove control responsiveness.
+
 Manual in-process tests with one task reactor and the exact repeated control
 frame `process_once -> observe -> bounded owner wait` use the shared
 `tests/helpers/reactor_driver.py` timing engine for condition observation, an
@@ -98,6 +111,17 @@ production priority table. Multi-turn cases prove already-reduced stop and
 producer-exit level signals cannot starve outcome, seal, or drain expiry.
 
 ### Repository Static-Analysis Gate [TS-3]
+
+The mypy gate includes all Python modules under `tests/`, including fixtures,
+helpers, and development benchmark scripts, alongside the existing production
+and repository-tool scopes. Test functions and fixtures declare complete
+parameter and return types under the repository's existing strict definition
+checks. Deliberately invalid inputs remain runtime validation tests; any
+necessary typing escape is local to the invalid value and explains the boundary
+under test. Directory-wide test exclusions and test-wide disabling of definition
+or body checking are not permitted.
+
+Related plan: [Test Typing and Correctness Audit](../plans/2026-09-11-test-typing-and-correctness-audit.md).
 
 Weft's Python lint gate uses the stable default rule set of the Ruff version
 locked in `uv.lock`, extended with the repository's reviewed `E`, `W`, `F`,
@@ -317,6 +341,7 @@ bug evidence.
 
 ## Related Plans
 
+- [Xdist Title Contention Investigation](../plans/2026-09-14-xdist-title-contention-plan.md) records native evidence and the infrastructure-only title boundary.
 - [Load-Sensitive Test Lifecycle Fixes](../plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) records harness driver closure, owned CLI contexts, readiness barriers, and optional run diagnostics.
 - [Updated Dependency Suite Repairs](../plans/2026-09-09-updated-dependency-suite-repairs-plan.md) records full-suite failure investigation and Django integration runtime ownership.
 

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from simplebroker import Queue
 from tests.helpers.test_backend import prepare_project_root
 from weft.commands import run as run_module
 from weft.context import build_context
@@ -36,7 +38,9 @@ def _build_spec(tid: str) -> TaskSpec:
     )
 
 
-def test_spawn_request_uses_insert_messages_api(monkeypatch, tmp_path) -> None:
+def test_spawn_request_uses_insert_messages_api(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
     tid = str(
@@ -46,10 +50,10 @@ def test_spawn_request_uses_insert_messages_api(monkeypatch, tmp_path) -> None:
         )
     )
     taskspec = _build_spec(tid)
-    called = {"count": 0, "message_id": None}
+    called: dict[str, int | None] = {"count": 0, "message_id": None}
     original_get_connection = spawn_requests.Queue.get_connection
 
-    def _get_connection_with_insert_probe(self):
+    def _get_connection_with_insert_probe(self: Queue) -> AbstractContextManager[Any]:
         connection_cm = original_get_connection(self)
 
         @contextmanager
@@ -63,7 +67,9 @@ def test_spawn_request_uses_insert_messages_api(monkeypatch, tmp_path) -> None:
 
                     def insert_messages(self, records: Any) -> None:
                         captured_records = tuple(records)
-                        called["count"] += len(captured_records)
+                        count = called["count"]
+                        assert count is not None
+                        called["count"] = count + len(captured_records)
                         assert len(captured_records) == 1
                         called["message_id"] = captured_records[0][2]
                         return original(captured_records)

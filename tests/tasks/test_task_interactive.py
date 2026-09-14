@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,6 +13,7 @@ import pytest
 
 from simplebroker import Queue
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
@@ -69,7 +71,7 @@ def make_interactive_spec(
     )
 
 
-def _drain(queue) -> list[str]:
+def _drain(queue: Queue) -> list[str]:
     items: list[str] = []
     while True:
         value = queue.read_one()
@@ -79,37 +81,45 @@ def _drain(queue) -> list[str]:
     return items
 
 
-def _spin(task: Consumer, iterations: int = 10, delay: float = 0.05) -> None:
-    for _ in range(iterations):
-        task.process_once()
-        time.sleep(delay)
+def _drive_interactive(task: Consumer, ready: Callable[[], bool]) -> None:
+    drive_until(
+        ready,
+        bool,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=10.0,
+        diagnostics=lambda: task.taskspec.state.status,
+    )
 
 
-def _instrument_streaming_queue(monkeypatch):
+def _finished(task: Consumer) -> bool:
+    return task.should_stop and task._interactive_session is None
+
+
+def _instrument_streaming_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[dict[str, object]], list[int | str]]:
     writes: list[dict[str, object]] = []
-    deletes: list[int | None] = []
+    deletes: list[int | str] = []
     original_queue = BaseTask._queue
-    proxies: dict[int, Queue] = {}
+    proxies: dict[int, QueueProxy] = {}
 
     class QueueProxy:
         def __init__(self, delegate: Queue) -> None:
             self._delegate = delegate
 
-        def write(self, message: str) -> None:
+        def write(self, message: str) -> int:
             writes.append(json.loads(message))
             return self._delegate.write(message)
 
-        def delete(self, *args, **kwargs) -> None:
-            message_id = kwargs.get("message_id")
-            if message_id is None and args:
-                message_id = args[0]
+        def delete(self, message_id: int | str) -> bool:
             deletes.append(message_id)
-            return self._delegate.delete(*args, **kwargs)
+            return self._delegate.delete(message_id=message_id)
 
-        def __getattr__(self, attr: str):
+        def __getattr__(self, attr: str) -> object:
             return getattr(self._delegate, attr)
 
-    def instrument(self, name: str) -> Queue:
+    def instrument(self: BaseTask, name: str) -> Queue:
         queue = original_queue(self, name)
         if name != WEFT_STREAMING_SESSIONS_QUEUE:
             return queue
@@ -117,7 +127,9 @@ def _instrument_streaming_queue(monkeypatch):
         if proxy is None:
             proxy = QueueProxy(queue)
             proxies[id(queue)] = proxy
-        return proxy
+        return cast(
+            Queue, proxy
+        )  # Queue facade delegates all operations except recorded writes/deletes.
 
     monkeypatch.setattr(BaseTask, "_queue", instrument, raising=False)
     return writes, deletes
@@ -137,7 +149,9 @@ def _is_final_marker(raw: str) -> bool:
     )
 
 
-def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None:
+def test_interactive_command_streams_output(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_interactive_spec(unique_tid)
     task = Consumer(db_path, spec)
@@ -149,11 +163,11 @@ def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None
     _drain(log_queue)
 
     inbox.write(json.dumps({"stdin": "hello\n"}))
-    _spin(task)
+    _drive_interactive(task, lambda: task._interactive_session is not None)
 
     inbox.write(json.dumps({"stdin": "quit\n"}))
     # Allow process to exit and finalize
-    _spin(task, iterations=30)
+    _drive_interactive(task, lambda: _finished(task))
 
     stdout_messages = []
     while True:
@@ -176,25 +190,21 @@ def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None
         if msg is None:
             break
         ctrl_messages.append(json.loads(msg))
-    if ctrl_messages:
-        assert any(
-            message.get("type") == "stream"
-            and message.get("stream") == "stderr"
-            and message.get("final") is True
-            for message in ctrl_messages
-        )
-        terminal = next(
-            message
-            for message in ctrl_messages
-            if message.get("type") == "terminal"
-            and message.get("status") == "completed"
-        )
-        assert terminal["source"] == "task"
-        assert terminal["tid"] == unique_tid
-        assert isinstance(terminal["timestamp"], int)
-        assert (
-            coerce_terminal_envelope(json.dumps(terminal), tid=unique_tid) == terminal
-        )
+    assert any(
+        message.get("type") == "stream"
+        and message.get("stream") == "stderr"
+        and message.get("final") is True
+        for message in ctrl_messages
+    )
+    terminal = next(
+        message
+        for message in ctrl_messages
+        if message.get("type") == "terminal" and message.get("status") == "completed"
+    )
+    assert terminal["source"] == "task"
+    assert terminal["tid"] == unique_tid
+    assert isinstance(terminal["timestamp"], int)
+    assert coerce_terminal_envelope(json.dumps(terminal), tid=unique_tid) == terminal
 
     events = [json.loads(e) for e in _drain(log_queue)]
     assert any(event["event"] == "work_completed" for event in events)
@@ -226,7 +236,7 @@ class _TerminalWriteQueue:
 @pytest.mark.parametrize("started", [False, True], ids=["before-input", "active"])
 @pytest.mark.parametrize("fail_once", [False, True], ids=["write-ok", "write-retry"])
 def test_interactive_command_control_unwinds_before_terminal_and_ack(
-    broker_env, unique_tid: str, command: str, started: bool, fail_once: bool
+    broker_env: BrokerEnv, unique_tid: str, command: str, started: bool, fail_once: bool
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_interactive_spec(unique_tid)
@@ -327,7 +337,7 @@ def test_interactive_command_control_unwinds_before_terminal_and_ack(
 
 @pytest.mark.parametrize("fail_once", [False, True])
 def test_interactive_session_start_failure_uses_canonical_terminal_writer(
-    broker_env, tmp_path: Path, unique_tid: str, fail_once: bool
+    broker_env: BrokerEnv, tmp_path: Path, unique_tid: str, fail_once: bool
 ) -> None:
     db_path, make_queue = broker_env
     payload = make_interactive_spec(unique_tid).model_dump(mode="json")
@@ -375,7 +385,7 @@ def test_interactive_session_start_failure_uses_canonical_terminal_writer(
 
 
 def test_interactive_command_routes_stderr_and_reports_failure(
-    tmp_path: Path, broker_env, unique_tid: str
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     script = tmp_path / "interactive_failure.py"
@@ -413,7 +423,7 @@ if __name__ == "__main__":
 
     try:
         inbox.write(json.dumps({"stdin": "go\n"}))
-        _spin(task, iterations=30)
+        _drive_interactive(task, lambda: _finished(task))
 
         stdout_messages = [json.loads(msg) for msg in _drain(outbox)]
         ctrl_messages = [json.loads(msg) for msg in _drain(ctrl_out)]
@@ -451,7 +461,7 @@ if __name__ == "__main__":
 
 
 def test_interactive_control_commands_report_live_status(
-    broker_env, unique_tid: str
+    broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_interactive_spec(unique_tid)
@@ -463,14 +473,15 @@ def test_interactive_control_commands_report_live_status(
 
     try:
         inbox.write(json.dumps({"stdin": "hello\n"}))
-        _spin(task)
+        _drive_interactive(task, lambda: task._interactive_session is not None)
 
         ctrl_in.write(encode_control_message("STATUS"))
         ctrl_in.write(encode_control_message("PING"))
         responses: list[dict[str, object]] = []
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
-            _spin(task, iterations=1)
+            task.process_once()
+            task.wait_for_activity(timeout=0.02)
             responses = [json.loads(msg) for msg in ctrl_out.peek_generator()]
             if any(r.get("command") == "STATUS" for r in responses) and any(
                 r.get("command") == "PING" for r in responses
@@ -486,12 +497,12 @@ def test_interactive_control_commands_report_live_status(
         assert ping_response["message"] == "PONG"
     finally:
         inbox.write(json.dumps({"stdin": "quit\n"}))
-        _spin(task, iterations=20)
+        _drive_interactive(task, lambda: _finished(task))
         task.stop(join=False)
 
 
 def test_interactive_late_input_is_dropped_after_completion(
-    broker_env, unique_tid: str
+    broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_interactive_spec(unique_tid)
@@ -503,9 +514,9 @@ def test_interactive_late_input_is_dropped_after_completion(
 
     try:
         inbox.write(json.dumps({"stdin": "hello\n"}))
-        _spin(task)
+        _drive_interactive(task, lambda: task._interactive_session is not None)
         inbox.write(json.dumps({"stdin": "quit\n"}))
-        _spin(task, iterations=30)
+        _drive_interactive(task, lambda: _finished(task))
 
         baseline_messages = [json.loads(msg) for msg in _drain(outbox)]
         baseline_stdout = "".join(
@@ -517,7 +528,7 @@ def test_interactive_late_input_is_dropped_after_completion(
         assert task.taskspec.state.status == "completed"
 
         inbox.write(json.dumps({"stdin": "after\n"}))
-        _spin(task, iterations=5)
+        task.process_once()
 
         late_messages = [json.loads(msg) for msg in _drain(outbox)]
         late_stdout = "".join(
@@ -533,7 +544,7 @@ def test_interactive_late_input_is_dropped_after_completion(
 
 
 def test_interactive_close_sentinel_purged_on_cleanup(
-    broker_env, unique_tid: str
+    broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_interactive_spec(unique_tid)
@@ -544,10 +555,10 @@ def test_interactive_close_sentinel_purged_on_cleanup(
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
 
     inbox.write(json.dumps({"stdin": "hello\\n"}))
-    _spin(task)
+    _drive_interactive(task, lambda: task._interactive_session is not None)
 
     inbox.write(json.dumps({"close": True}))
-    _spin(task, iterations=40)
+    _drive_interactive(task, lambda: _finished(task))
 
     outbox_before = outbox.peek_many(limit=50) or []
     ctrl_before = ctrl_out.peek_many(limit=50) or []
@@ -565,7 +576,7 @@ def test_interactive_close_sentinel_purged_on_cleanup(
 
 
 def test_interactive_streaming_session_records(
-    monkeypatch, broker_env, unique_tid: str
+    monkeypatch: pytest.MonkeyPatch, broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     writes, deletes = _instrument_streaming_queue(monkeypatch)
 
@@ -576,10 +587,10 @@ def test_interactive_streaming_session_records(
     inbox = make_queue(spec.io.inputs["inbox"])
 
     inbox.write(json.dumps({"stdin": "hello\\n"}))
-    _spin(task)
+    _drive_interactive(task, lambda: task._interactive_session is not None)
 
     inbox.write(json.dumps({"close": True}))
-    _spin(task, iterations=40)
+    _drive_interactive(task, lambda: _finished(task))
 
     task.cleanup()
 
@@ -589,6 +600,7 @@ def test_interactive_streaming_session_records(
     assert session["mode"] == "interactive"
     assert session["queue"] == spec.io.outputs["outbox"]
     assert session["ctrl_queue"] == spec.io.control["ctrl_out"]
+    assert isinstance(session["session_id"], str)
     assert session["session_id"].startswith(
         f"{unique_tid}:{spec.io.outputs['outbox']}:"
     )
@@ -596,7 +608,7 @@ def test_interactive_streaming_session_records(
 
 
 def test_interactive_limit_marks_killed_without_terminal_transition_error(
-    tmp_path: Path, broker_env, unique_tid: str
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
     script = tmp_path / "interactive_limit.py"

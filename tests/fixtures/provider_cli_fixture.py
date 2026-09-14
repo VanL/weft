@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from tests.fixtures.mcp_stdio_fixture import call_fixture_tool
-from weft.core.agents.runtime import content_to_prompt_text
+from weft.core.agents.runtime import NormalizedAgentWorkItem, content_to_prompt_text
+from weft.core.taskspec import AgentSection
 from weft.ext import AgentResolverResult, AgentToolProfileResult
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,7 +32,9 @@ _PROVIDER_BINARIES = {
 TOOL_PROFILE_CALLS: list[dict[str, Any]] = []
 
 
-def resolve_operator_question(*, agent, work_item, tid):
+def resolve_operator_question(
+    *, agent: AgentSection, work_item: NormalizedAgentWorkItem, tid: str
+) -> AgentResolverResult:
     del agent
     return AgentResolverResult(
         prompt=f"resolved:{content_to_prompt_text(work_item.content)}",
@@ -41,7 +44,7 @@ def resolve_operator_question(*, agent, work_item, tid):
     )
 
 
-def provider_tool_profile(*, agent, tid):
+def provider_tool_profile(*, agent: AgentSection, tid: str) -> AgentToolProfileResult:
     provider_name = str(agent.runtime_config.get("provider", "")).strip()
     provider_options: dict[str, Any] = {}
     if provider_name == "claude_code":
@@ -67,7 +70,9 @@ def reset_counting_tool_profile_calls() -> None:
     TOOL_PROFILE_CALLS.clear()
 
 
-def counting_provider_tool_profile(*, agent, tid):
+def counting_provider_tool_profile(
+    *, agent: AgentSection, tid: str
+) -> AgentToolProfileResult:
     """Record profile resolution before returning the normal fixture profile."""
 
     TOOL_PROFILE_CALLS.append(
@@ -79,12 +84,14 @@ def counting_provider_tool_profile(*, agent, tid):
     return provider_tool_profile(agent=agent, tid=tid)
 
 
-def invalid_resolver(*, agent, work_item, tid):
+def invalid_resolver(
+    *, agent: AgentSection, work_item: NormalizedAgentWorkItem, tid: str
+) -> str:
     del agent, work_item, tid
     return "nope"
 
 
-def invalid_tool_profile(*, agent, tid):
+def invalid_tool_profile(*, agent: AgentSection, tid: str) -> str:
     del agent, tid
     return "nope"
 

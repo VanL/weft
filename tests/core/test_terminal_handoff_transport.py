@@ -78,8 +78,8 @@ def test_terminal_transport_write_failure_does_not_retry() -> None:
         return {"error": "fallback"}
 
     with pytest.raises(TerminalHandoffTransportError, match="delivery failed"):
-        send_terminal_payload(  # type: ignore[arg-type]
-            sender,
+        send_terminal_payload(
+            sender,  # type: ignore[arg-type]  # partial connection double injects a write failure
             {"result": "ok"},
             serialization_failure_factory=_unexpected_fallback,
         )

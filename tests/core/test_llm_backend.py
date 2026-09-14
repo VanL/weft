@@ -17,8 +17,8 @@ def reset_runtime_registry() -> None:
     register_builtin_agent_runtimes()
 
 
-def make_agent_section(**overrides) -> AgentSection:
-    payload = {
+def make_agent_section(**overrides: object) -> AgentSection:
+    payload: dict[str, object] = {
         "runtime": "llm",
         "model": TEST_MODEL_ID,
         "runtime_config": {"plugin_modules": ["tests.fixtures.llm_test_models"]},

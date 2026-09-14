@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -11,7 +12,7 @@ from weft.core.spec_store import read_spec_json
 pytestmark = [pytest.mark.shared]
 
 
-def test_read_spec_json_chains_missing_file_error(tmp_path) -> None:
+def test_read_spec_json_chains_missing_file_error(tmp_path: Path) -> None:
     missing = tmp_path / "missing.json"
 
     with pytest.raises(ValueError) as exc_info:
@@ -20,7 +21,7 @@ def test_read_spec_json_chains_missing_file_error(tmp_path) -> None:
     assert isinstance(exc_info.value.__cause__, FileNotFoundError)
 
 
-def test_read_spec_json_chains_malformed_json_error(tmp_path) -> None:
+def test_read_spec_json_chains_malformed_json_error(tmp_path: Path) -> None:
     path = tmp_path / "broken.json"
     path.write_text("{", encoding="utf-8")
 
@@ -30,7 +31,9 @@ def test_read_spec_json_chains_malformed_json_error(tmp_path) -> None:
     assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
 
 
-def test_read_spec_json_rejects_non_object_payload_as_value_error(tmp_path) -> None:
+def test_read_spec_json_rejects_non_object_payload_as_value_error(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "list.json"
     path.write_text("[]", encoding="utf-8")
 

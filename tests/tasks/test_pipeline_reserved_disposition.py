@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+from simplebroker import Queue
+from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_pipeline_runtime import _entry_edge_spec
 from weft.core.tasks.pipeline import PipelineEdgeTask
 from weft.core.taskspec import TaskSpec
@@ -18,7 +20,10 @@ pytestmark = pytest.mark.shared
 
 @pytest.mark.parametrize("fail_ack", [False, True])
 def test_override_handoff_disposes_input_once_and_preserves_backlog(
-    broker_env, monkeypatch: pytest.MonkeyPatch, caplog, fail_ack: bool
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fail_ack: bool,
 ) -> None:
     db_path, make_queue = broker_env
     payload = _entry_edge_spec(
@@ -33,7 +38,7 @@ def test_override_handoff_disposes_input_once_and_preserves_backlog(
     delete_calls = []
 
     class AckQueue:
-        def __init__(self, queue: Any) -> None:
+        def __init__(self, queue: Queue) -> None:
             self.queue = queue
 
         def __getattr__(self, name: str) -> Any:

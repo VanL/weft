@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import psutil
 import pytest
 
+from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.task_state import task_state_queue_name
@@ -66,10 +67,10 @@ def worker_tree() -> Iterator[tuple[subprocess.Popen[str], psutil.Process]]:
     "identity", ["matching", "mismatched", "unknown", "runner", "external"]
 )
 def test_signal_respects_worker_identity_and_authority(
-    broker_env,
-    worker_tree,
-    monkeypatch,
-    caplog,
+    broker_env: BrokerEnv,
+    worker_tree: tuple[subprocess.Popen[str], psutil.Process],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     handler: type[BaseTask],
     graceful: bool,
     identity: str,
@@ -81,9 +82,9 @@ def test_signal_respects_worker_identity_and_authority(
     task = None
     try:
         process = psutil.Process(worker.pid)
-        recorded_time = process.create_time()
+        recorded_time: float | None = process.create_time()
         if identity == "mismatched":
-            recorded_time += 1000.0
+            recorded_time = process.create_time() + 1000.0
         elif identity == "unknown":
             recorded_time = None
         authority = {
@@ -170,7 +171,11 @@ def test_signal_respects_worker_identity_and_authority(
     "evidence", ["supplied_exact", "both_unknown", "conflicting_exact"]
 )
 def test_managed_identity_merge_preserves_explicit_evidence(
-    broker_env, worker_tree, monkeypatch, graceful: bool, evidence: str
+    broker_env: BrokerEnv,
+    worker_tree: tuple[subprocess.Popen[str], psutil.Process],
+    monkeypatch: pytest.MonkeyPatch,
+    graceful: bool,
+    evidence: str,
 ) -> None:
     """Publication and control share exact evidence without a second PID lookup."""
     worker, descendant = worker_tree
@@ -236,7 +241,10 @@ def test_managed_identity_merge_preserves_explicit_evidence(
     [(None, 10.0, 10.0), (None, None, None), (10.0, 20.0, 10.0)],
 )
 def test_observation_merge_keeps_exact_evidence(
-    monkeypatch, recorded: float | None, supplied: float | None, expected: float | None
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: float | None,
+    supplied: float | None,
+    expected: float | None,
 ) -> None:
     lookup = Mock(side_effect=AssertionError("must not re-observe recorded identity"))
     monkeypatch.setattr(base_module, "process_create_time", lookup)

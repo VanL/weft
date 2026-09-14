@@ -1,9 +1,11 @@
 """Public extension contracts for Weft.
 
 Spec references:
+- docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-4]
 - docs/specifications/01-Core_Components.md [CC-3.1], [CC-3.2]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
-- docs/specifications/13-Agent_Runtime.md [AR-5]
+- docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1]
+- docs/specifications/13-Agent_Runtime.md [AR-4.1], [AR-5]
 
 Stability note: this module is the declared contract surface, but the
 shipped first-party runner plugins also import `weft.core` internals that
@@ -21,23 +23,27 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from simplebroker import BrokerTarget
-    from weft.core.agents.runtime import NormalizedAgentWorkItem
-    from weft.core.runners.host import RunnerOutcome
-    from weft.core.tasks.sessions import AgentSession, CommandSession
-    from weft.core.taskspec import AgentSection
+    from weft.client import AgentSection
 
 __all__ = [
     "AgentMCPServerDescriptor",
     "AgentResolver",
     "AgentResolverResult",
+    "AgentSessionProtocol",
     "AgentToolProfile",
     "AgentToolProfileResult",
+    "CommandSessionProtocol",
+    "NormalizedAgentMessage",
+    "NormalizedAgentWorkItem",
+    "ResourceMetrics",
     "RunnerCapabilities",
     "RunnerEnvironmentProfile",
     "RunnerEnvironmentProfileResult",
     "RunnerHandle",
+    "RunnerOutcome",
     "RunnerPlugin",
     "RunnerRuntimeDescription",
+    "SessionExecutionResult",
     "SpecRunInputRequest",
     "TaskRunnerBackend",
 ]
@@ -348,6 +354,103 @@ class RunnerEnvironmentProfileResult:
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
+@dataclass(slots=True)
+class ResourceMetrics:
+    """Snapshot of process resource utilisation (Spec: [RM-5], [RM-5.1])."""
+
+    timestamp: int = 0
+    memory_mb: float = 0.0
+    cpu_percent: float = 0.0
+    open_files: int = 0
+    connections: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-friendly dict (Spec: [RM-5.1])."""
+        return {
+            "timestamp": self.timestamp,
+            "memory_mb": round(self.memory_mb, 2),
+            "cpu_percent": round(self.cpu_percent, 1),
+            "open_files": self.open_files,
+            "connections": self.connections,
+        }
+
+    def exceeds_limits(self, limits: Any) -> list[str]:
+        """Return a list of limit categories exceeded (Spec: [RM-5.1])."""
+        violations: list[str] = []
+        if limits is None:
+            return violations
+
+        memory_limit = getattr(limits, "memory_mb", None)
+        if memory_limit and self.memory_mb > memory_limit:
+            violations.append("memory")
+
+        cpu_limit = getattr(limits, "cpu_percent", None)
+        if cpu_limit and self.cpu_percent > cpu_limit:
+            violations.append("cpu")
+
+        fd_limit = getattr(limits, "max_fds", None)
+        if fd_limit and self.open_files > fd_limit:
+            violations.append("fds")
+
+        conn_limit = getattr(limits, "max_connections", None)
+        if conn_limit and self.connections > conn_limit:
+            violations.append("connections")
+
+        return violations
+
+
+@dataclass(slots=True)
+class RunnerOutcome:
+    """Result returned after executing a work item."""
+
+    status: str
+    value: Any | None
+    error: str | None
+    stdout: str | None
+    stderr: str | None
+    returncode: int | None
+    duration: float
+    metrics: ResourceMetrics | None = None
+    runtime_handle: RunnerHandle | None = None
+    diagnostics: dict[str, Any] | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Return whether execution completed successfully."""
+
+        return self.status == "ok"
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedAgentMessage:
+    """Structured message preserved at the core agent boundary."""
+
+    role: str
+    content: Any
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedAgentWorkItem:
+    """Normalized one-shot agent work request."""
+
+    content: str | tuple[str | NormalizedAgentMessage, ...]
+    instructions: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    tool_allow: tuple[str, ...] | None = None
+    tool_deny: tuple[str, ...] | None = None
+
+
+@dataclass(slots=True)
+class SessionExecutionResult:
+    """Result envelope returned by a long-lived session worker."""
+
+    status: str
+    value: Any | None
+    error: str | None
+    metrics: ResourceMetrics | None = None
+    diagnostics: dict[str, Any] | None = None
+
+
 class AgentResolver(Protocol):
     """Public callable contract for delegated-runtime resolvers."""
 
@@ -386,6 +489,43 @@ class RunnerEnvironmentProfile(Protocol):
     ) -> RunnerEnvironmentProfileResult: ...
 
 
+class CommandSessionProtocol(Protocol):
+    """Structural interactive session contract. Spec: [PY-1], [CC-3.2]."""
+
+    @property
+    def pid(self) -> int | None: ...
+    @property
+    def handle(self) -> RunnerHandle | None: ...
+    @property
+    def last_metrics(self) -> ResourceMetrics | None: ...
+    def send(self, data: str) -> None: ...
+    def close_stdin(self) -> None: ...
+    def poll_stdout(self) -> list[str]: ...
+    def poll_stderr(self) -> list[str]: ...
+    def is_alive(self) -> bool: ...
+    def returncode(self) -> int | None: ...
+    def terminate(self, *, deadline: float | None = None) -> None: ...
+    def close(self) -> None: ...
+    def poll_limits(self) -> tuple[bool, str | None]: ...
+    def stop_monitor(self) -> None: ...
+
+
+class AgentSessionProtocol(Protocol):
+    """Structural persistent agent session contract. Spec: [PY-1], [CC-3.5]."""
+
+    @property
+    def pid(self) -> int | None: ...
+    @property
+    def handle(self) -> RunnerHandle | None: ...
+    def execute(
+        self,
+        work_item: Any,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> SessionExecutionResult: ...
+    def close(self, *, deadline: float | None = None) -> None: ...
+
+
 @runtime_checkable
 class TaskRunnerBackend(Protocol):
     """Execution backend produced by a runner plugin."""
@@ -403,9 +543,9 @@ class TaskRunnerBackend(Protocol):
         on_stderr_chunk: Callable[[str, bool], None] | None = None,
     ) -> RunnerOutcome: ...
 
-    def start_session(self) -> CommandSession: ...
+    def start_session(self) -> CommandSessionProtocol: ...
 
-    def start_agent_session(self) -> AgentSession: ...
+    def start_agent_session(self) -> AgentSessionProtocol: ...
 
 
 class RunnerPlugin(Protocol):

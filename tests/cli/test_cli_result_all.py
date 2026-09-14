@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 
 from tests.conftest import run_cli
 from tests.helpers.weft_harness import WeftTestHarness
@@ -63,7 +64,7 @@ def _wait_for_result_all_text(
 def _wait_for_result_all_json(
     harness: WeftTestHarness,
     *,
-    predicate,
+    predicate: Callable[[dict[str, object]], bool],
     peek: bool = True,
     timeout: float = 5.0,
 ) -> dict[str, object]:
@@ -81,6 +82,7 @@ def _wait_for_result_all_json(
         )
         if rc == 0:
             payload = json.loads(out)
+            assert isinstance(payload, dict)
             if predicate(payload):
                 return payload
         last_out = out
@@ -139,19 +141,25 @@ def test_result_all_json_output(weft_harness: WeftTestHarness) -> None:
         "json1",
     )
     weft_harness.wait_for_completion(tid1)
+
+    def has_expected_result(payload: dict[str, object]) -> bool:
+        results = payload.get("results")
+        return (
+            isinstance(results, list)
+            and len(results) == 1
+            and results[0]["tid"] == tid1
+        )
+
     data = _wait_for_result_all_json(
         weft_harness,
-        predicate=lambda payload: (
-            "results" in payload
-            and len(payload["results"]) == 1
-            and payload["results"][0]["tid"] == tid1
-        ),
+        predicate=has_expected_result,
     )
 
-    assert "results" in data
-    assert len(data["results"]) == 1
-    assert data["results"][0]["tid"] == tid1
-    assert data["results"][0]["result"] == "json1"
+    results = data["results"]
+    assert isinstance(results, list)
+    assert len(results) == 1
+    assert results[0]["tid"] == tid1
+    assert results[0]["result"] == "json1"
 
 
 def test_result_all_filters_active_streaming_tasks(

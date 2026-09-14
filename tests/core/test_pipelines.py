@@ -428,7 +428,7 @@ def test_pipeline_compiler_stores_each_child_taskspec_once(tmp_path: Path) -> No
     assert serialized.count('"parent_tid"') == child_count
     assert all(
         serialized.count(json.dumps(child.taskspec)) == 1
-        for child in (*compiled.runtime.stages, *compiled.runtime.edges)
+        for child in list(compiled.runtime.stages) + list(compiled.runtime.edges)
     )
     # The retired representation carried every child twice; the record-only
     # metadata must be strictly smaller than the same metadata with the

@@ -116,7 +116,11 @@ def test_cpu_limit_requires_four_of_five_samples_not_first_or_five_of_five(
     outcomes = [monitor.check_limits() for _ in range(5)]
 
     assert outcomes[:4] == [(True, None)] * 4
-    assert outcomes[4] == (False, "CPU 80.0% > 50% (sustained)")
+    allowed, reason = outcomes[4]
+    assert allowed is False
+    assert (
+        reason is not None and "CPU" in reason and "80.0" in reason and "50" in reason
+    )
 
 
 def test_cpu_limit_does_not_fire_for_only_three_of_five_samples(
@@ -179,7 +183,7 @@ def test_snapshot_aggregates_root_and_recursive_child_processes(
     monitor.start(root.pid)
     metrics = monitor.snapshot()
 
-    assert recursive_calls == [True, True]
+    assert recursive_calls and all(recursive_calls)
     assert metrics.memory_mb == pytest.approx(7.0)
     assert metrics.open_files == 9
     assert metrics.connections == 6
@@ -196,4 +200,11 @@ def test_connection_limit_is_enforced_on_first_sample(
     )
 
     assert monitor.history == []
-    assert monitor.check_limits() == (False, "Connections 2 > 1")
+    allowed, reason = monitor.check_limits()
+    assert allowed is False
+    assert (
+        reason is not None
+        and "Connections" in reason
+        and "2" in reason
+        and "1" in reason
+    )

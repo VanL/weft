@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Never
+from unittest.mock import Mock
 
 import psutil
 import pytest
@@ -30,7 +32,6 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
-from weft.commands import prune as prune_commands
 from weft.commands.prune import (
     run_runtime_prune,
     write_runtime_prune_report,
@@ -46,6 +47,7 @@ from weft.core.pruning.runtime import (
     RuntimeQueueScanStats,
 )
 from weft.core.service_convergence import (
+    ServiceOwnerStatus,
     build_manager_service_payload,
     build_service_owner_payload,
     parse_service_owner_row,
@@ -58,13 +60,8 @@ from weft.liveness import registry
 pytestmark = [pytest.mark.shared]
 
 
-def test_prune_command_does_not_reexport_core_config_types() -> None:
-    assert not hasattr(prune_commands, "RuntimePruneConfig")
-    assert not hasattr(prune_commands, "RetentionPruneConfig")
-
-
 def test_runtime_prune_preserves_exact_run_id_format(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = _context(tmp_path)
@@ -112,12 +109,12 @@ def test_runtime_prune_candidate_json_formats_message_id_only(tmp_path: Path) ->
     assert isinstance(candidate.message_id, int)
 
 
-def _context(tmp_path):
+def _context(tmp_path: Path) -> WeftContext:
     root = prepare_project_root(tmp_path)
     return build_context(spec_context=root)
 
 
-def _write_json(ctx, queue_name: str, payload: dict[str, object]) -> int:
+def _write_json(ctx: WeftContext, queue_name: str, payload: dict[str, object]) -> int:
     queue = ctx.queue(queue_name, persistent=False)
     try:
         queue.write(json.dumps(payload))
@@ -132,10 +129,10 @@ def _write_json(ctx, queue_name: str, payload: dict[str, object]) -> int:
 
 
 def _manager_service_payload(
-    ctx,
+    ctx: WeftContext,
     *,
     tid: str,
-    status: str = "active",
+    status: Literal["active", "draining", "stopped", "superseded"] = "active",
     name: str = "manager",
     runtime_handle: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -158,7 +155,7 @@ def _managed_service_payload(
     *,
     service_key: str,
     tid: str,
-    status: str = SERVICE_STATUS_ACTIVE,
+    status: ServiceOwnerStatus = SERVICE_STATUS_ACTIVE,
 ) -> dict[str, object]:
     return build_service_owner_payload(
         service_key=service_key,
@@ -185,7 +182,9 @@ def _managed_service_payload(
     )
 
 
-def _read_rows(ctx, queue_name: str) -> list[tuple[dict[str, object], int]]:
+def _read_rows(
+    ctx: WeftContext, queue_name: str
+) -> list[tuple[dict[str, object], int]]:
     queue = ctx.queue(queue_name, persistent=False)
     try:
         return [
@@ -196,7 +195,7 @@ def _read_rows(ctx, queue_name: str) -> list[tuple[dict[str, object], int]]:
         queue.close()
 
 
-def test_tid_mapping_runtime_prune_group_is_rejected(tmp_path) -> None:
+def test_tid_mapping_runtime_prune_group_is_rejected(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     result = runtime_pruning.run_runtime_prune_for_context(
         ctx,
@@ -211,7 +210,7 @@ def test_tid_mapping_runtime_prune_group_is_rejected(tmp_path) -> None:
 
 
 def test_runtime_validation_error_does_not_create_or_truncate_report(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     report_path = tmp_path / "runtime-report.jsonl"
@@ -240,12 +239,12 @@ def test_runtime_validation_error_does_not_create_or_truncate_report(
 
 
 def test_runtime_initial_scan_error_does_not_create_or_truncate_report(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = _context(tmp_path)
 
-    def fail_scan(*_args, **_kwargs):
+    def fail_scan(*_args: object, **_kwargs: object) -> Never:
         raise RuntimeError("scan failed")
 
     monkeypatch.setattr(runtime_pruning, "_read_runtime_queue", fail_scan)
@@ -269,12 +268,12 @@ def test_runtime_initial_scan_error_does_not_create_or_truncate_report(
 
 
 def test_runtime_apply_scan_error_halts_before_apply_without_report(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = _context(tmp_path)
 
-    def fail_scan(*_args, **_kwargs):
+    def fail_scan(*_args: object, **_kwargs: object) -> Never:
         raise RuntimeError("scan failed")
 
     monkeypatch.setattr(runtime_pruning, "_read_runtime_queue", fail_scan)
@@ -332,12 +331,7 @@ def test_runtime_apply_scans_once_and_deletes_that_snapshot(
         ),
     )
     real_build = runtime_pruning._build_candidates
-    calls = 0
-
-    def counting_build(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return real_build(*args, **kwargs)
+    counting_build = Mock(wraps=real_build)
 
     monkeypatch.setattr(runtime_pruning, "_build_candidates", counting_build)
 
@@ -350,7 +344,7 @@ def test_runtime_apply_scans_once_and_deletes_that_snapshot(
         )
     )
 
-    assert calls == 1
+    assert counting_build.call_count == 1
     assert result.errors == ()
     assert [candidate.message_id for candidate in result.candidates] == [
         first_active,
@@ -384,14 +378,22 @@ def test_runtime_apply_scans_once_and_deletes_that_snapshot(
     ],
 )
 def test_manager_prune_requires_owner_evidence_and_both_age_windows(
-    tmp_path, monkeypatch, status, liveness, age, min_age, deleted
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: Literal["active", "draining", "stopped", "superseded"],
+    liveness: Literal["live", "stale", "unknown"],
+    age: float,
+    min_age: float,
+    deleted: bool,
 ) -> None:
     """Every status and history position obeys the same custody predicate."""
     ctx = _context(tmp_path)
     monkeypatch.setattr(registry, "_runtime_liveness_probes", {})
     observations = []
 
-    def probe(handle, budget):
+    def probe(
+        handle: RunnerHandle, budget: float
+    ) -> Literal["live", "stale", "unknown"]:
         observations.append(handle.id)
         return liveness
 
@@ -437,7 +439,7 @@ def test_manager_prune_requires_owner_evidence_and_both_age_windows(
 
 
 def test_manager_prune_preserves_live_host_identity_history(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ctx = _context(tmp_path)
     handle = RunnerHandle(
@@ -476,7 +478,7 @@ def test_manager_prune_preserves_live_host_identity_history(
     assert len(_read_rows(ctx, WEFT_SERVICES_REGISTRY_QUEUE)) == 3
 
 
-def test_manager_prune_reports_malformed_service_owner_rows(tmp_path) -> None:
+def test_manager_prune_reports_malformed_service_owner_rows(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     malformed_id = _write_json(
         ctx,
@@ -507,7 +509,9 @@ def test_manager_prune_reports_malformed_service_owner_rows(tmp_path) -> None:
     assert candidate.reason == "malformed_service_owner_row"
 
 
-def test_services_prune_deletes_superseded_managed_service_history(tmp_path) -> None:
+def test_services_prune_deletes_superseded_managed_service_history(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     service_key = "_weft.service.heartbeat"
     first_active = _write_json(
@@ -561,7 +565,7 @@ def test_services_prune_deletes_superseded_managed_service_history(tmp_path) -> 
     assert second_active in remaining_ids
 
 
-def test_streaming_prune_deletes_terminal_owner_marker_only(tmp_path) -> None:
+def test_streaming_prune_deletes_terminal_owner_marker_only(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     stale_id = _write_json(
         ctx,
@@ -604,7 +608,9 @@ def test_streaming_prune_deletes_terminal_owner_marker_only(tmp_path) -> None:
     assert active_id in remaining_ids
 
 
-def test_streaming_prune_preserves_duplicate_marker_for_running_owner(tmp_path) -> None:
+def test_streaming_prune_preserves_duplicate_marker_for_running_owner(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     tid = "1770000000000000022"
     older_id = _write_json(
@@ -637,7 +643,7 @@ def test_streaming_prune_preserves_duplicate_marker_for_running_owner(tmp_path) 
     assert newer_id in remaining_ids
 
 
-def test_endpoint_prune_preserves_live_duplicate_claimants(tmp_path) -> None:
+def test_endpoint_prune_preserves_live_duplicate_claimants(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     old_id = _write_json(
         ctx,
@@ -732,7 +738,7 @@ def test_endpoint_prune_preserves_live_duplicate_claimants(tmp_path) -> None:
     )
 
 
-def test_pipeline_rows_are_report_only_in_first_slice(tmp_path) -> None:
+def test_pipeline_rows_are_report_only_in_first_slice(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     pipeline_id = _write_json(
         ctx,
@@ -764,7 +770,11 @@ def test_pipeline_rows_are_report_only_in_first_slice(tmp_path) -> None:
     "age,min_age,deleted", [(60, 0, False), (600, 0, True), (600, 900, False)]
 )
 def test_managed_service_prune_uses_nanosecond_ttl(
-    tmp_path, monkeypatch, age, min_age, deleted
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    age: float,
+    min_age: float,
+    deleted: bool,
 ) -> None:
     ctx = _context(tmp_path)
     mid = _write_json(
@@ -791,7 +801,11 @@ def test_managed_service_prune_uses_nanosecond_ttl(
 @pytest.mark.parametrize("logging_enabled", [False, True])
 @pytest.mark.parametrize("already_missing", [False, True])
 def test_malformed_service_prune_logs_only_actual_deletions(
-    tmp_path, monkeypatch, caplog, logging_enabled, already_missing
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    logging_enabled: bool,
+    already_missing: bool,
 ) -> None:
     ctx = _context(tmp_path)
     try:
@@ -823,6 +837,7 @@ def test_malformed_service_prune_logs_only_actual_deletions(
                     assert queue.delete(message_id=row_ids[0])
                 finally:
                     queue.close()
+            applied: Sequence[RuntimePruneCandidate]
             if already_missing:
                 applied = runtime_pruning._apply_candidates(ctx, selected)
             else:
@@ -846,13 +861,13 @@ def test_malformed_service_prune_logs_only_actual_deletions(
                 for r in caplog.records
                 if r.getMessage() == "Pruned malformed service-owner row"
             ]
-            assert {r.message_id for r in records} == (
+            assert {r.__dict__["message_id"] for r in records} == (
                 expected_ids if logging_enabled else set()
             )
             assert all(
                 r.levelno == logging.ERROR
-                and r.queue == WEFT_SERVICES_REGISTRY_QUEUE
-                and r.owner_tid.startswith("invalid-")
+                and r.__dict__["queue"] == WEFT_SERVICES_REGISTRY_QUEUE
+                and r.__dict__["owner_tid"].startswith("invalid-")
                 for r in records
             )
             assert {
@@ -881,7 +896,12 @@ def test_malformed_service_prune_logs_only_actual_deletions(
     [(299, 0, False), (300, 0, True), (599, 600, False), (600, 600, True)],
 )
 def test_valid_manager_row_with_missing_identity_obeys_both_prune_windows(
-    tmp_path, monkeypatch, handle, age, min_age, deleted
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handle: dict[str, object],
+    age: float,
+    min_age: float,
+    deleted: bool,
 ) -> None:
     ctx = _context(tmp_path)
     payload = _manager_service_payload(

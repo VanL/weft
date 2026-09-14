@@ -14,8 +14,8 @@ from weft.core.agents.runtime import NormalizedAgentMessage, NormalizedAgentWork
 from weft.core.taskspec import AgentSection
 
 
-def make_agent_section(**overrides) -> AgentSection:
-    payload = {
+def make_agent_section(**overrides: object) -> AgentSection:
+    payload: dict[str, object] = {
         "runtime": "provider_cli",
         "authority_class": "general",
         "model": "gpt-5-codex",

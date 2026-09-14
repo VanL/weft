@@ -1815,7 +1815,7 @@ provides-extras = ["channels", "realtime", "dev"]
 
 [[package]]
 name = "weft-docker"
-version = "0.9.73"
+version = "0.9.74"
 source = { editable = "extensions/weft_docker" }
 dependencies = [
     { name = "docker" },
@@ -1826,13 +1826,13 @@ dependencies = [
 requires-dist = [
     { name = "docker", specifier = ">=7.1.0,<8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.99" },
+    { name = "weft", specifier = ">=0.9.100" },
 ]
 provides-extras = ["dev"]
 
 [[package]]
 name = "weft-macos-sandbox"
-version = "0.6.2"
+version = "0.6.3"
 source = { editable = "extensions/weft_macos_sandbox" }
 dependencies = [
     { name = "weft" },
@@ -1841,13 +1841,13 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.99,<1" },
+    { name = "weft", specifier = ">=0.9.100,<1" },
 ]
 provides-extras = ["dev"]
 
 [[package]]
 name = "weft-microsandbox"
-version = "0.5.3"
+version = "0.5.4"
 source = { editable = "extensions/weft_microsandbox" }
 dependencies = [
     { name = "microsandbox" },
@@ -1858,6 +1858,6 @@ dependencies = [
 requires-dist = [
     { name = "microsandbox", specifier = ">=0.5.7,<0.6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.99" },
+    { name = "weft", specifier = ">=0.9.100" },
 ]
 provides-extras = ["dev"]

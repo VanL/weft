@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from tests.fixtures.provider_cli_fixture import provider_tool_profile
 from weft.core.agents.provider_cli.execution import prepare_provider_cli_execution
 from weft.core.agents.runtime import normalize_agent_work_item
 from weft.core.taskspec import AgentSection
 
 
-def test_prepare_provider_cli_execution_uses_supplied_cwd_and_tempdir(tmp_path) -> None:
+def test_prepare_provider_cli_execution_uses_supplied_cwd_and_tempdir(
+    tmp_path: Path,
+) -> None:
     agent = AgentSection.model_validate(
         {
             "runtime": "provider_cli",

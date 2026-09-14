@@ -16,24 +16,65 @@ Each `__all__` is its authoritative public-name inventory. Names not exported
 there, including `weft.core.*`, helpers, constants, command leaves, and
 `execute_run`, are private.
 
-`weft.ext.__all__` is exactly: `RunnerHandle`, `RunnerCapabilities`,
+`weft.ext.__all__` exports `RunnerHandle`, `RunnerCapabilities`,
 `RunnerRuntimeDescription`, `AgentResolverResult`, `AgentToolProfileResult`,
 `AgentMCPServerDescriptor`, `RunnerEnvironmentProfileResult`, `AgentResolver`,
 `AgentToolProfile`, `RunnerEnvironmentProfile`, `TaskRunnerBackend`,
-`RunnerPlugin`, and `SpecRunInputRequest`.
+`RunnerPlugin`, `SpecRunInputRequest`, `ResourceMetrics`, `RunnerOutcome`,
+`SessionExecutionResult`, `NormalizedAgentMessage`, `NormalizedAgentWorkItem`,
+`CommandSessionProtocol`, and `AgentSessionProtocol`.
 
 `weft.client.__all__` retains its existing inventory and adds exactly
 `CommandError`, `CommandUsageError`, `CommandTimeoutError`,
 `CommandExecutionError`, `SubmissionError`, `SubmissionValidationError`,
 `SubmissionManagerError`, and `normalize_taskspec_payload`.
 
-Contexts used by the client carry immutable SimpleBroker `Config` snapshots
-with uppercase unprefixed keys in `config` and `broker_config`, as specified in
-[SB-0.4]. Create a new context to apply changed configuration; copying its
-values does not reconfigure live handles.
+The client additionally exports `TaskSpec`, `SpecSection`, `IOSection`,
+`StateSection`, `LimitsSection`, `RunnerSection`, `ReservedPolicy`,
+`AgentSection`, `AgentTemplateSection`, `AgentToolSection`,
+`ParameterizationSection`, `ParameterizationArgumentSection`,
+`RunInputSection`, `RunInputArgumentSection`, `RunInputStdinSection`,
+`WeftContext`, and `build_context`. These are the existing validated models
+and context owner, not parallel representations. Supported TaskSpec use is
+construction, validation, field inspection, and serialization. Lifecycle and
+transport helpers remain runtime internals. Template validation uses
+`TaskSpec.model_validate(payload, context={"template": True,
+"auto_expand": False})`; normal construction retains resolved expansion.
+Submission remains responsible for committing the task and its TID.
 
-Implementation: `weft/context.py:WeftContext` owns the context snapshot.
+`build_context` retains its existing arguments and side effects: by default
+it resolves configuration and creates the metadata directories and broker;
+`create_dirs=False` and `create_database=False` disable those respective
+creation steps; resolution can still create the project root. A supplied
+context is preserved by `WeftClient`. The context
+does not own a permanently open broker; callers close queues they obtain and
+use the broker context manager to release its resources. The context's `config`
+and `broker_config` are immutable SimpleBroker `Config` snapshots with uppercase
+unprefixed keys, as specified in [SB-0.4]. Create a new context to apply changed
+configuration; copying its values does not reconfigure live handles. Broker
+types remain SimpleBroker's public contracts.
+
 Related plan: [SimpleBroker configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
+
+Extension value types preserve their existing fields and behavior.
+`CommandSessionProtocol` exposes readonly `pid`, `handle`, `last_metrics`;
+`send(data)`, `close_stdin()`, `poll_stdout()`, `poll_stderr()`, `is_alive()`,
+`returncode()`, `terminate(*, deadline=None)`, `close()`, `poll_limits()`, and
+`stop_monitor()`. `AgentSessionProtocol` exposes readonly `pid`, `handle`,
+`execute(work_item, *, cancel_requested=None) -> SessionExecutionResult`, and
+`close(*, deadline=None)`. Backend session methods return these structural
+protocols; concrete process session constructors remain private. These types
+preserve existing lifecycle semantics and introduce no new cleanup guarantee.
+Agent callbacks receive the `AgentSection` publicly available from
+`weft.client` and normalized work-item types from `weft.ext`.
+First-party runners may still use private implementation under coordinated
+versioning; these exports do not promise a complete standalone backend SDK.
+
+Implementation: `weft/client/__init__.py` re-exports the schema from
+`weft/core/taskspec/model.py` and context from `weft/context.py`.
+`weft/ext.py` owns the public extension values and protocols;
+`weft/core/tasks/runner.py`, `weft/core/tasks/consumer.py`, and
+`weft/core/tasks/interactive.py` consume the structural session contracts.
 
 `WeftClient.from_context(spec_context=None, *, fallback_root=None, autostart=None)`
 requests a resolved context from the core context owner. `fallback_root` follows
@@ -46,7 +87,10 @@ snapshots; the Django adapter does not set core's context-precedence bookkeeping
 _Implementation mapping_: `weft/client/_client.py::WeftClient.__init__`,
 `weft/client/_client.py::WeftClient.from_context`, `weft/context.py::build_context`,
 `weft/client/__init__.py`, `weft/commands/__init__.py`, `weft/ext.py`,
-`weft/core/taskspec/model.py`, `tests/core/test_client.py`.
+`weft/core/taskspec/model.py`, `tests/core/test_client.py`,
+`tests/core/test_public_client_contracts.py`,
+`tests/core/test_public_extension_contracts.py`, and
+`tests/fixtures/public_extension_contract.py`.
 
 ## Commands surface contract [PY-2]
 
@@ -318,15 +362,19 @@ Runtime imports are one-way: `cli -> commands -> core`,
 `client -> commands -> core`, and `core -> ext`; commands may also import ext.
 Commands never import adapters; core never imports commands or adapters; CLI
 and client never import each other; runtime ext imports never point back to
-core, commands, or adapters. Type-checking-only ext-to-core annotations are
-allowed. CLI and core initializers remain import-light markers; client and
+core, commands, or adapters. Type-checking-only extension annotations may refer to public client schema
+types. The client package initializer may re-export only the declared schema
+types from `weft.core.taskspec.model`; this is a value-type facade exception,
+not permission for client operations to call core. CLI and core initializers remain import-light markers; client and
 commands are public package facades and ext is a public module. Architecture
 tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
 - [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
 
+- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
 
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 

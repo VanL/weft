@@ -11,6 +11,8 @@ import psutil
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.typing import BrokerEnv, TaskFactory
+from tests.helpers.weft_harness import WeftTestHarness
 from weft.commands.tasks import resolve_full_tid
 from weft.context import build_context
 from weft.core.task_state import task_state_queue_name
@@ -82,7 +84,7 @@ def test_old_stored_short_resolves_from_full_tid(tmp_path: Path) -> None:
 
 
 def test_consumer_publishes_and_matches_new_short_title(
-    broker_env, task_factory, weft_harness
+    broker_env: BrokerEnv, task_factory: TaskFactory, weft_harness: WeftTestHarness
 ) -> None:
     # The OS title dependency is optional; exercise its real implementation.
     setproctitle = pytest.importorskip("setproctitle")

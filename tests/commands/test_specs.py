@@ -113,7 +113,9 @@ def test_validate_spec_source_rejects_task_options_for_pipeline(option: str) -> 
         "stages": [{"name": "only", "task": "stage1"}],
     }
 
-    result = spec_cmd.validate_spec_source(payload, **{option: True})
+    result = spec_cmd.validate_spec_source(
+        payload, load_runner=option == "load_runner", preflight=option == "preflight"
+    )
 
     assert result.valid is False
     assert result.errors_by_stage == {

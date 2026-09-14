@@ -7,6 +7,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -21,14 +22,13 @@ from weft.commands._task_snapshot_reducer import (
     FoldedTaskRecord,
     RuntimeObservation,
     SnapshotEvidence,
-    TaskSnapshot,
     order_task_snapshots,
     plan_snapshot_probes,
     prepare_snapshot,
     reduce_task_event,
     reduce_task_snapshot,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.task_evidence import TaskEvidenceSnapshot
 from weft.ext import RunnerHandle
 from weft.helpers import tid_short_form
@@ -248,8 +248,8 @@ def test_reduce_task_event_keeps_placeholder_for_non_taskspec_row() -> None:
 
 
 def test_reduce_task_event_applies_status_precedence_and_copies_inputs() -> None:
-    metadata = {"tag": ["original"]}
-    diagnostics = {"phase": {"name": "startup"}}
+    metadata: dict[str, object] = {"tag": ["original"]}
+    diagnostics: dict[str, object] = {"phase": {"name": "startup"}}
     taskspec = _taskspec(status="completed", completed_at=3, metadata=metadata)
     payload = _event(
         event="task_completed",
@@ -483,12 +483,6 @@ def test_order_task_snapshots_filters_terminal_and_orders_active_first() -> None
     ] == ["1", "2", "0"]
 
 
-def test_system_reexports_snapshot_types() -> None:
-    assert system.TaskSnapshot is TaskSnapshot
-    assert system.CollectedTaskSnapshot is CollectedTaskSnapshot
-    assert system._runner_name_for_snapshot is system.runner_name_for_snapshot
-
-
 def test_evidence_acquisition_skips_local_and_claimed_for_terminal_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -506,13 +500,18 @@ def test_evidence_acquisition_skips_local_and_claimed_for_terminal_rows(
         "claimed_outbox_result_evidence",
         fail_probe,
     )
+
+    def _record_runtime_calls(**kwargs: object) -> tuple[bool, str, str]:
+        runtime_calls.append(True)
+        return (False, "none", "unknown")
+
     monkeypatch.setattr(
         system,
         "_runtime_evidence_details",
-        lambda **kwargs: (runtime_calls.append(True) or False, "none", "unknown"),
+        _record_runtime_calls,
     )
     plan, evidence = system._collect_snapshot_evidence(
-        object(),
+        Mock(spec=WeftContext),
         _record(status="completed", completed_at=3_000_000_000),
         mapping_entry=None,
         selected_active_manager_tid=None,
@@ -547,10 +546,14 @@ def test_evidence_acquisition_preserves_local_claimed_probe_guard(
         "task_local_terminal_evidence",
         lambda *args, **kwargs: local,
     )
+
+    def _record_claimed_calls(*args: object, **kwargs: object) -> None:
+        claimed_calls.append(TID)
+
     monkeypatch.setattr(
         system.task_evidence,
         "claimed_outbox_result_evidence",
-        lambda *args, **kwargs: claimed_calls.append(TID) or None,
+        _record_claimed_calls,
     )
     monkeypatch.setattr(
         system,
@@ -558,7 +561,7 @@ def test_evidence_acquisition_preserves_local_claimed_probe_guard(
         lambda **kwargs: (False, "none", "unknown"),
     )
     plan, _evidence_value = system._collect_snapshot_evidence(
-        object(),
+        Mock(spec=WeftContext),
         _record(),
         mapping_entry=None,
         selected_active_manager_tid=None,
@@ -595,7 +598,7 @@ def test_evidence_acquisition_skips_runtime_diagnostic_for_nonterminal_rows(
         ),
     )
     plan, evidence = system._collect_snapshot_evidence(
-        object(),
+        Mock(spec=WeftContext),
         _record(),
         mapping_entry=None,
         selected_active_manager_tid=None,
@@ -622,13 +625,15 @@ def test_mapping_runtime_fields_override_event_runtime_fields(
         control={"authority": "external-supervisor"},
     )
     described: list[RunnerHandle | None] = []
+
+    def _record_described(handle: RunnerHandle) -> dict[str, object]:
+        described.append(handle)
+        return {"runner": handle.runner, "id": handle.id, "state": "unknown"}
+
     monkeypatch.setattr(
         system.task_evidence,
         "describe_runtime",
-        lambda handle: (
-            described.append(handle)
-            or {"runner": handle.runner, "id": handle.id, "state": "unknown"}
-        ),
+        _record_described,
     )
     monkeypatch.setattr(
         system.task_evidence,
@@ -648,7 +653,7 @@ def test_mapping_runtime_fields_override_event_runtime_fields(
         }
     )
     plan, evidence = system._collect_snapshot_evidence(
-        object(),
+        Mock(spec=WeftContext),
         record,
         mapping_entry={
             "runner": "docker",

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 
 from weft.core.state_machines import StateMachine, Transition
+from weft.core.task_lifecycle import TaskLifecycleAction as TaskAction
+from weft.core.task_lifecycle import TaskLifecycleStatus as TaskState
+from weft.core.task_lifecycle import TaskStatusTarget as TargetStatus
+from weft.core.task_lifecycle import task_lifecycle_machine
 
 pytestmark = [pytest.mark.shared]
 
@@ -20,7 +25,7 @@ class Signal:
     value: str
 
 
-def _is_signal(expected: str):
+def _is_signal(expected: str) -> Callable[[str, Signal], bool]:
     def _predicate(_state: str, signal: Signal) -> bool:
         return signal.value == expected
 
@@ -444,211 +449,46 @@ def test_coverage_assertions_report_missing_and_unknown_values() -> None:
     with pytest.raises(AssertionError, match="Uncovered states"):
         machine.assert_states_covered(("idle", "running"))
     with pytest.raises(AssertionError, match="Unknown covered states"):
-        machine.assert_states_covered(("idle", "running", "done", "not-real"))
+        # Deliberately cross the static literal boundary to test runtime rejection.
+        machine.assert_states_covered(
+            ("idle", "running", "done", cast(SimpleState, "not-real"))
+        )
 
     with pytest.raises(AssertionError, match="Uncovered actions"):
         machine.assert_actions_covered(("start",))
     with pytest.raises(AssertionError, match="Unknown covered actions"):
-        machine.assert_actions_covered(("start", "finish", "not-real"))
-
-
-TaskState = Literal[
-    "created",
-    "spawning",
-    "running",
-    "completed",
-    "failed",
-    "timeout",
-    "cancelled",
-    "killed",
-]
-TaskAction = Literal[
-    "begin_spawn",
-    "start_running",
-    "complete",
-    "fail",
-    "timeout",
-    "cancel",
-    "kill",
-]
-
-
-@dataclass(frozen=True, slots=True)
-class TargetStatus:
-    status: TaskState
-
-
-def _target_status(expected: TaskState):
-    def _predicate(_state: TaskState, target: TargetStatus) -> bool:
-        return target.status == expected
-
-    return _predicate
-
-
-def _task_lifecycle_machine() -> StateMachine[TaskState, TargetStatus, TaskAction]:
-    return StateMachine(
-        states=(
-            "created",
-            "spawning",
-            "running",
-            "completed",
-            "failed",
-            "timeout",
-            "cancelled",
-            "killed",
-        ),
-        actions=(
-            "begin_spawn",
-            "start_running",
-            "complete",
-            "fail",
-            "timeout",
-            "cancel",
-            "kill",
-        ),
-        transitions=(
-            Transition(
-                id="created-to-spawning",
-                source="created",
-                target="spawning",
-                action="begin_spawn",
-                predicate=_target_status("spawning"),
-                reason="task spawn started",
-            ),
-            Transition(
-                id="created-to-failed",
-                source="created",
-                target="failed",
-                action="fail",
-                predicate=_target_status("failed"),
-                reason="task failed before start",
-            ),
-            Transition(
-                id="created-to-cancelled",
-                source="created",
-                target="cancelled",
-                action="cancel",
-                predicate=_target_status("cancelled"),
-                reason="task cancelled before start",
-            ),
-            Transition(
-                id="spawning-to-running",
-                source="spawning",
-                target="running",
-                action="start_running",
-                predicate=_target_status("running"),
-                reason="task running",
-            ),
-            Transition(
-                id="spawning-to-completed",
-                source="spawning",
-                target="completed",
-                action="complete",
-                predicate=_target_status("completed"),
-                reason="task completed during spawn",
-            ),
-            Transition(
-                id="spawning-to-failed",
-                source="spawning",
-                target="failed",
-                action="fail",
-                predicate=_target_status("failed"),
-                reason="task failed during spawn",
-            ),
-            Transition(
-                id="spawning-to-timeout",
-                source="spawning",
-                target="timeout",
-                action="timeout",
-                predicate=_target_status("timeout"),
-                reason="task timed out during spawn",
-            ),
-            Transition(
-                id="spawning-to-cancelled",
-                source="spawning",
-                target="cancelled",
-                action="cancel",
-                predicate=_target_status("cancelled"),
-                reason="task cancelled during spawn",
-            ),
-            Transition(
-                id="spawning-to-killed",
-                source="spawning",
-                target="killed",
-                action="kill",
-                predicate=_target_status("killed"),
-                reason="task killed during spawn",
-            ),
-            Transition(
-                id="running-to-completed",
-                source="running",
-                target="completed",
-                action="complete",
-                predicate=_target_status("completed"),
-                reason="task completed",
-            ),
-            Transition(
-                id="running-to-failed",
-                source="running",
-                target="failed",
-                action="fail",
-                predicate=_target_status("failed"),
-                reason="task failed",
-            ),
-            Transition(
-                id="running-to-timeout",
-                source="running",
-                target="timeout",
-                action="timeout",
-                predicate=_target_status("timeout"),
-                reason="task timed out",
-            ),
-            Transition(
-                id="running-to-cancelled",
-                source="running",
-                target="cancelled",
-                action="cancel",
-                predicate=_target_status("cancelled"),
-                reason="task cancelled",
-            ),
-            Transition(
-                id="running-to-killed",
-                source="running",
-                target="killed",
-                action="kill",
-                predicate=_target_status("killed"),
-                reason="task killed",
-            ),
-        ),
-        terminal_states=("completed", "failed", "timeout", "cancelled", "killed"),
-    )
+        # Deliberately cross the static literal boundary to test runtime rejection.
+        machine.assert_actions_covered(
+            ("start", "finish", cast(SimpleAction, "not-real"))
+        )
 
 
 def test_task_lifecycle_allowed_transitions_are_covered() -> None:
-    machine = _task_lifecycle_machine()
-    cases: tuple[tuple[TaskState, TaskState, str], ...] = (
-        ("created", "spawning", "created-to-spawning"),
-        ("created", "failed", "created-to-failed"),
-        ("created", "cancelled", "created-to-cancelled"),
-        ("spawning", "running", "spawning-to-running"),
-        ("spawning", "completed", "spawning-to-completed"),
-        ("spawning", "failed", "spawning-to-failed"),
-        ("spawning", "timeout", "spawning-to-timeout"),
-        ("spawning", "cancelled", "spawning-to-cancelled"),
-        ("spawning", "killed", "spawning-to-killed"),
-        ("running", "completed", "running-to-completed"),
-        ("running", "failed", "running-to-failed"),
-        ("running", "timeout", "running-to-timeout"),
-        ("running", "cancelled", "running-to-cancelled"),
-        ("running", "killed", "running-to-killed"),
+    machine = task_lifecycle_machine
+    cases: tuple[tuple[TaskState, TaskState, str, TaskAction], ...] = (
+        ("created", "spawning", "created-to-spawning", "begin_spawn"),
+        ("created", "failed", "created-to-failed", "fail"),
+        ("created", "cancelled", "created-to-cancelled", "cancel"),
+        ("spawning", "running", "spawning-to-running", "start_running"),
+        ("spawning", "completed", "spawning-to-completed", "complete"),
+        ("spawning", "failed", "spawning-to-failed", "fail"),
+        ("spawning", "timeout", "spawning-to-timeout", "timeout"),
+        ("spawning", "cancelled", "spawning-to-cancelled", "cancel"),
+        ("spawning", "killed", "spawning-to-killed", "kill"),
+        ("running", "completed", "running-to-completed", "complete"),
+        ("running", "failed", "running-to-failed", "fail"),
+        ("running", "timeout", "running-to-timeout", "timeout"),
+        ("running", "cancelled", "running-to-cancelled", "cancel"),
+        ("running", "killed", "running-to-killed", "kill"),
     )
     seen_transitions: set[str] = set()
     seen_states: set[TaskState] = set()
     seen_actions: set[TaskAction] = set()
 
-    for current, target, transition_id in cases:
+    for current, target, transition_id, expected_action in cases:
         decision = machine.decide(current, TargetStatus(target))
         assert decision.target == target
+        assert decision.action == expected_action
         assert decision.transition_id == transition_id
         seen_transitions.add(decision.transition_id)
         seen_states.update((decision.source, decision.target))
@@ -677,7 +517,7 @@ def test_task_lifecycle_rejects_representative_forbidden_transitions(
     current: TaskState,
     target: TaskState,
 ) -> None:
-    machine = _task_lifecycle_machine()
+    machine = task_lifecycle_machine
 
     with pytest.raises(ValueError, match="No transition matched"):
         machine.decide(current, TargetStatus(target))

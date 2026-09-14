@@ -109,6 +109,7 @@ def test_dockerized_agent_run_input_builds_mounted_document_work_item() -> None:
         bundle_root=taskspec.get_bundle_root(),
     )
 
+    assert isinstance(payload, dict)
     assert payload["template"] == "explain_mounted"
     assert payload["template_args"] == {
         "prompt": "Summarize this document",

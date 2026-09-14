@@ -10,62 +10,17 @@ import logging
 import sys
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from importlib import import_module
 from typing import Any
 
 import psutil
 
 from weft._constants import DEFAULT_POLLING_INTERVAL
+from weft.ext import ResourceMetrics
 
 logger = logging.getLogger(__name__)
 
 PsutilProcess = Any
-
-
-@dataclass(slots=True)
-class ResourceMetrics:
-    """Snapshot of process resource utilisation (Spec: [RM-5], [RM-5.1])."""
-
-    timestamp: int = 0
-    memory_mb: float = 0.0
-    cpu_percent: float = 0.0
-    open_files: int = 0
-    connections: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to a JSON-friendly dict (Spec: [RM-5.1])."""
-        return {
-            "timestamp": self.timestamp,
-            "memory_mb": round(self.memory_mb, 2),
-            "cpu_percent": round(self.cpu_percent, 1),
-            "open_files": self.open_files,
-            "connections": self.connections,
-        }
-
-    def exceeds_limits(self, limits: Any) -> list[str]:
-        """Return a list of limit categories exceeded (Spec: [RM-5.1])."""
-        violations: list[str] = []
-        if limits is None:
-            return violations
-
-        memory_limit = getattr(limits, "memory_mb", None)
-        if memory_limit and self.memory_mb > memory_limit:
-            violations.append("memory")
-
-        cpu_limit = getattr(limits, "cpu_percent", None)
-        if cpu_limit and self.cpu_percent > cpu_limit:
-            violations.append("cpu")
-
-        fd_limit = getattr(limits, "max_fds", None)
-        if fd_limit and self.open_files > fd_limit:
-            violations.append("fds")
-
-        conn_limit = getattr(limits, "max_connections", None)
-        if conn_limit and self.connections > conn_limit:
-            violations.append("connections")
-
-        return violations
 
 
 class BaseResourceMonitor(ABC):

@@ -38,5 +38,4 @@ def test_command_layer_direct_queue_construction_is_explicitly_bounded() -> None
 
 
 def test_command_layer_queue_allowlist_entries_have_reasons() -> None:
-    assert DIRECT_QUEUE_ALLOWLIST_REASONS
     assert all(reason.strip() for reason in DIRECT_QUEUE_ALLOWLIST_REASONS.values())

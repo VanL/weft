@@ -38,13 +38,12 @@ from weft.core.control_messages import parse_control_request
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
-from weft.ext import RunnerHandle
+from weft.ext import AgentSessionProtocol, RunnerHandle
 
 from .base import BaseTask, TaskControlPolicy, TaskWorkerResult
 from .interactive import InteractiveTaskMixin
 from .multiqueue_watcher import QueueMessageContext, QueueMode, QueueRuntimeConfig
 from .runner import RunnerOutcome, TaskRunner
-from .sessions import AgentSession
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +96,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._direct_work_waiting = False
         self._direct_work_value: Any = None
         self._direct_work_exception: BaseException | None = None
-        self._agent_session: AgentSession | None = None
+        self._agent_session: AgentSessionProtocol | None = None
         self._deferred_active_control_command: str | None = None
         self._deferred_active_control_timestamp: int | None = None
         self._deferred_active_control_request_id: str | None = None
@@ -1190,7 +1189,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             and agent.conversation_scope == "per_task"
         )
 
-    def _ensure_agent_session(self) -> AgentSession:
+    def _ensure_agent_session(self) -> AgentSessionProtocol:
         if self._agent_session is not None:
             return self._agent_session
 

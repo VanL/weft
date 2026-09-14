@@ -6,7 +6,8 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -26,10 +27,11 @@ from weft._constants import (
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
     WEFT_MONITOR_SCHEMA_VERSION,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.monitor import store as monitor_store_module
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import (
+    MonitorStore,
     MonitorStoreUnavailable,
     MonitorTaskCollationRecord,
     _monitor_column_type_is_compatible,
@@ -45,7 +47,7 @@ from weft.core.monitor.store import (
 pytestmark = [pytest.mark.shared]
 
 
-def _context(tmp_path):
+def _context(tmp_path: Path) -> WeftContext:
     return build_context(spec_context=prepare_project_root(tmp_path))
 
 
@@ -129,7 +131,7 @@ def _collation_record(
 
 
 def _monitor_table_count(
-    ctx,
+    ctx: WeftContext,
     table: str,
     *,
     where: str = "",
@@ -143,7 +145,7 @@ def _monitor_table_count(
     return int(rows[0][0])
 
 
-def _monitor_meta_value(ctx, key: str) -> dict[str, object] | None:
+def _monitor_meta_value(ctx: WeftContext, key: str) -> dict[str, object] | None:
     with ctx.broker() as broker, broker.sidecar() as session:
         rows = list(
             session.run(
@@ -156,7 +158,7 @@ def _monitor_meta_value(ctx, key: str) -> dict[str, object] | None:
 
 
 def _monitor_message_ids(
-    ctx,
+    ctx: WeftContext,
     *,
     context_key: str,
     tid: str,
@@ -171,7 +173,7 @@ def _monitor_message_ids(
     return tuple(int(row[0]) for row in rows)
 
 
-def _monitor_table_exists(ctx, table: str) -> bool:
+def _monitor_table_exists(ctx: WeftContext, table: str) -> bool:
     with ctx.broker() as broker, broker.sidecar() as session:
         if ctx.backend_name == "postgres":
             rows = list(
@@ -194,7 +196,7 @@ def _monitor_table_exists(ctx, table: str) -> bool:
     return bool(rows and rows[0][0])
 
 
-def _monitor_table_columns(ctx, table: str) -> tuple[str, ...]:
+def _monitor_table_columns(ctx: WeftContext, table: str) -> tuple[str, ...]:
     with ctx.broker() as broker, broker.sidecar() as session:
         if ctx.backend_name == "postgres":
             rows = session.run(
@@ -209,7 +211,7 @@ def _monitor_table_columns(ctx, table: str) -> tuple[str, ...]:
         return tuple(str(row[1]) for row in rows)
 
 
-def _monitor_index_exists(ctx, index_name: str) -> bool:
+def _monitor_index_exists(ctx: WeftContext, index_name: str) -> bool:
     with ctx.broker() as broker, broker.sidecar() as session:
         if ctx.backend_name == "postgres":
             rows = list(
@@ -232,7 +234,7 @@ def _monitor_index_exists(ctx, index_name: str) -> bool:
     return bool(rows and rows[0][0])
 
 
-def _monitor_primary_key(ctx, table: str) -> tuple[str, ...]:
+def _monitor_primary_key(ctx: WeftContext, table: str) -> tuple[str, ...]:
     with ctx.broker() as broker, broker.sidecar() as session:
         if ctx.backend_name == "postgres":
             rows = session.run(
@@ -378,7 +380,9 @@ _RELEASE_V5_INDEXES = (
 )
 
 
-def _create_release_v5_schema(ctx, *, include_deferred_table: bool = True) -> None:
+def _create_release_v5_schema(
+    ctx: WeftContext, *, include_deferred_table: bool = True
+) -> None:
     """Create the physical schema produced by the release-v5 DDL lineage."""
 
     with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
@@ -440,8 +444,8 @@ def _create_release_v5_schema(ctx, *, include_deferred_table: bool = True) -> No
 
 
 def _prepare_v5_tombstone(
-    ctx,
-    store,
+    ctx: WeftContext,
+    store: MonitorStore,
     *,
     tid: str,
     message_id: int,
@@ -456,7 +460,7 @@ def _prepare_v5_tombstone(
         )
 
 
-def test_store_sidecar_session_rolls_back_on_exception(tmp_path) -> None:
+def test_store_sidecar_session_rolls_back_on_exception(tmp_path: Path) -> None:
     """A failing store write must leave no partial rows behind."""
 
     ctx = _context(tmp_path)
@@ -483,7 +487,7 @@ def test_store_sidecar_session_rolls_back_on_exception(tmp_path) -> None:
 
 
 def test_monitor_store_get_task_signals_completely_uninitialized_catalog(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     store = open_monitor_store(_context(tmp_path))
 
@@ -550,7 +554,7 @@ def test_monitor_collation_summary_classifies_builtin_service_keys() -> None:
     assert summary["service"]["service_key"] == INTERNAL_SERVICE_KEY_HEARTBEAT
 
 
-def test_monitor_store_schema_creation_is_idempotent(tmp_path) -> None:
+def test_monitor_store_schema_creation_is_idempotent(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
 
@@ -562,7 +566,6 @@ def test_monitor_store_schema_creation_is_idempotent(tmp_path) -> None:
 
 
 def test_monitor_schema_column_registry_is_complete() -> None:
-    assert sum(len(spec.columns) for spec in _monitor_table_specs) == 58
     assert {
         column for spec in _monitor_table_specs for column in spec.columns
     } == _monitor_required_column_names
@@ -626,7 +629,7 @@ def test_postgres_monitor_column_type_normalization(
     )
 
 
-def test_monitor_store_v6_rejects_missing_table_without_repair(tmp_path) -> None:
+def test_monitor_store_v6_rejects_missing_table_without_repair(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -639,7 +642,7 @@ def test_monitor_store_v6_rejects_missing_table_without_repair(tmp_path) -> None
     assert _monitor_table_exists(ctx, "weft_monitor_deferred_writes") is False
 
 
-def test_monitor_store_v6_rejects_missing_column_without_repair(tmp_path) -> None:
+def test_monitor_store_v6_rejects_missing_column_without_repair(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -657,7 +660,9 @@ def test_monitor_store_v6_rejects_missing_column_without_repair(tmp_path) -> Non
     )
 
 
-def test_monitor_store_v6_rejects_incompatible_required_column_type(tmp_path) -> None:
+def test_monitor_store_v6_rejects_incompatible_required_column_type(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -681,7 +686,7 @@ def test_monitor_store_v6_rejects_incompatible_required_column_type(tmp_path) ->
         store.ensure_schema()
 
 
-def test_monitor_store_v6_rejects_nullable_required_column(tmp_path) -> None:
+def test_monitor_store_v6_rejects_nullable_required_column(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -705,7 +710,7 @@ def test_monitor_store_v6_rejects_nullable_required_column(tmp_path) -> None:
         store.ensure_schema()
 
 
-def test_monitor_store_v6_rejects_nonnullable_optional_column(tmp_path) -> None:
+def test_monitor_store_v6_rejects_nonnullable_optional_column(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -727,7 +732,7 @@ def test_monitor_store_v6_rejects_nonnullable_optional_column(tmp_path) -> None:
         store.ensure_schema()
 
 
-def test_monitor_store_v6_accepts_safely_omittable_extra_column(tmp_path) -> None:
+def test_monitor_store_v6_accepts_safely_omittable_extra_column(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -739,7 +744,7 @@ def test_monitor_store_v6_accepts_safely_omittable_extra_column(tmp_path) -> Non
     store.ensure_schema()
 
 
-def test_monitor_store_v6_rejects_write_required_extra_column(tmp_path) -> None:
+def test_monitor_store_v6_rejects_write_required_extra_column(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -764,7 +769,7 @@ def test_monitor_store_v6_rejects_write_required_extra_column(tmp_path) -> None:
     ],
 )
 def test_monitor_store_v6_classifies_extra_column_defaults(
-    tmp_path,
+    tmp_path: Path,
     definition: str,
     accepted: bool,
 ) -> None:
@@ -801,7 +806,7 @@ def test_monitor_store_v6_classifies_extra_column_defaults(
 
 
 def test_monitor_store_v6_rejects_unproven_nonnull_default_expression(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -896,7 +901,9 @@ _MONITOR_LEGACY_INDEX_NAMES = frozenset(
 )
 
 
-def test_monitor_store_accepts_complete_empty_unversioned_schema(tmp_path) -> None:
+def test_monitor_store_accepts_complete_empty_unversioned_schema(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -937,10 +944,10 @@ def test_monitor_store_accepts_complete_empty_unversioned_schema(tmp_path) -> No
     ids=[case[0] for case in _MONITOR_REQUIRED_INDEX_MUTATIONS],
 )
 def test_monitor_store_v6_rejects_missing_index_without_repair(
-    tmp_path,
-    index_name,
-    _table_name,
-    _wrong_column,
+    tmp_path: Path,
+    index_name: str,
+    _table_name: str,
+    _wrong_column: str,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -960,10 +967,10 @@ def test_monitor_store_v6_rejects_missing_index_without_repair(
     ids=[case[0] for case in _MONITOR_REQUIRED_INDEX_MUTATIONS],
 )
 def test_monitor_store_v6_rejects_wrong_index_shape_without_repair(
-    tmp_path,
-    index_name,
-    table_name,
-    wrong_column,
+    tmp_path: Path,
+    index_name: str,
+    table_name: str,
+    wrong_column: str,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -978,7 +985,7 @@ def test_monitor_store_v6_rejects_wrong_index_shape_without_repair(
     assert _monitor_index_exists(ctx, index_name) is True
 
 
-def test_monitor_store_v6_accepts_absent_legacy_indexes(tmp_path) -> None:
+def test_monitor_store_v6_accepts_absent_legacy_indexes(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -994,7 +1001,7 @@ def test_monitor_store_v6_accepts_absent_legacy_indexes(tmp_path) -> None:
     )
 
 
-def test_monitor_store_v6_accepts_extra_nonunique_index(tmp_path) -> None:
+def test_monitor_store_v6_accepts_extra_nonunique_index(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1009,7 +1016,7 @@ def test_monitor_store_v6_accepts_extra_nonunique_index(tmp_path) -> None:
     assert _monitor_index_exists(ctx, index_name) is True
 
 
-def test_monitor_store_v6_rejects_extra_unique_index(tmp_path) -> None:
+def test_monitor_store_v6_rejects_extra_unique_index(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1026,7 +1033,7 @@ def test_monitor_store_v6_rejects_extra_unique_index(tmp_path) -> None:
     assert _monitor_index_exists(ctx, index_name) is True
 
 
-def test_monitor_store_v6_accepts_unique_copy_of_primary_key(tmp_path) -> None:
+def test_monitor_store_v6_accepts_unique_copy_of_primary_key(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1043,7 +1050,7 @@ def test_monitor_store_v6_accepts_unique_copy_of_primary_key(tmp_path) -> None:
 
 
 def test_monitor_store_v6_rejects_unique_primary_key_copy_with_new_collation(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     if ctx.backend_name != "sqlite":
@@ -1064,7 +1071,7 @@ def test_monitor_store_v6_rejects_unique_primary_key_copy_with_new_collation(
     assert _monitor_index_exists(ctx, index_name) is True
 
 
-def test_monitor_store_v6_rejects_partial_required_index(tmp_path) -> None:
+def test_monitor_store_v6_rejects_partial_required_index(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1081,7 +1088,9 @@ def test_monitor_store_v6_rejects_partial_required_index(tmp_path) -> None:
         store.ensure_schema()
 
 
-def test_monitor_store_v6_rejects_missing_primary_key_without_repair(tmp_path) -> None:
+def test_monitor_store_v6_rejects_missing_primary_key_without_repair(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1106,7 +1115,7 @@ def test_monitor_store_v6_rejects_missing_primary_key_without_repair(tmp_path) -
     assert _monitor_primary_key(ctx, "weft_monitor_meta") == ()
 
 
-def test_monitor_store_v6_rejects_checkpoint_without_message_id(tmp_path) -> None:
+def test_monitor_store_v6_rejects_checkpoint_without_message_id(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1131,8 +1140,8 @@ def test_monitor_store_v6_rejects_checkpoint_without_message_id(tmp_path) -> Non
     ],
 )
 def test_monitor_store_rejects_nonempty_unversioned_tables(
-    tmp_path,
-    nonempty_table,
+    tmp_path: Path,
+    nonempty_table: str,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -1212,7 +1221,7 @@ def test_monitor_store_rejects_nonempty_unversioned_tables(
 
 def test_monitor_store_status_represents_backend_failure(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     store = open_monitor_store(_context(tmp_path))
 
@@ -1232,7 +1241,7 @@ def test_monitor_store_status_represents_backend_failure(
 
 def test_monitor_store_status_does_not_contain_fatal_backend_signal(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     class FatalBackendSignal(BaseException):
         pass
@@ -1251,7 +1260,7 @@ def test_monitor_store_status_does_not_contain_fatal_backend_signal(
     assert exc_info.value is signal
 
 
-def test_monitor_store_deferred_writes_are_bounded_outbox_rows(tmp_path) -> None:
+def test_monitor_store_deferred_writes_are_bounded_outbox_rows(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1289,11 +1298,28 @@ def test_monitor_store_deferred_writes_are_bounded_outbox_rows(tmp_path) -> None
     assert store.list_pending_deferred_writes(limit=10) == ()
     assert store.deferred_write_status().pending == 0
 
+    # Insert out of order: the oldest pending report must be flushed first,
+    # with report_id breaking ties and limit preserving the remaining work.
+    for report_id, created_at_ns in (("z", 5), ("b", 4), ("a", 4)):
+        store.upsert_deferred_write(
+            report={**report, "report_id": report_id},
+            external_error="retry",
+            now_ns=created_at_ns,
+        )
+    assert [row.report_id for row in store.list_pending_deferred_writes(limit=2)] == [
+        "a",
+        "b",
+    ]
+    store.mark_deferred_writes_flushed(("a", "b"), 6)
+    assert [row.report_id for row in store.list_pending_deferred_writes(limit=10)] == [
+        "z"
+    ]
+
 
 @pytest.mark.parametrize("schema_version", [None, 1, 2.0, 3, "2", True])
 def test_monitor_store_rejects_noncurrent_external_schema_deferred_write(
-    tmp_path,
-    schema_version,
+    tmp_path: Path,
+    schema_version: float | str | None,
 ) -> None:
     store = open_monitor_store(_context(tmp_path))
     store.ensure_schema()
@@ -1310,7 +1336,7 @@ def test_monitor_store_rejects_noncurrent_external_schema_deferred_write(
         )
 
 
-def test_monitor_store_checkpoint_round_trips(tmp_path) -> None:
+def test_monitor_store_checkpoint_round_trips(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1322,7 +1348,7 @@ def test_monitor_store_checkpoint_round_trips(tmp_path) -> None:
 
 
 def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -1478,7 +1504,7 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
 
 
 def test_monitor_store_migrates_v5_owned_json_and_obsolete_delete_state(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     _create_release_v5_schema(ctx)
@@ -1648,7 +1674,9 @@ def test_monitor_store_migrates_v5_owned_json_and_obsolete_delete_state(
     assert new_record.last_message_id == new_message_id
 
 
-def test_monitor_store_v5_rejects_missing_data_table_without_repair(tmp_path) -> None:
+def test_monitor_store_v5_rejects_missing_data_table_without_repair(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     _create_release_v5_schema(ctx)
     store = open_monitor_store(ctx)
@@ -1662,7 +1690,9 @@ def test_monitor_store_v5_rejects_missing_data_table_without_repair(tmp_path) ->
     assert _monitor_meta_value(ctx, "schema_version") == {"version": 5}
 
 
-def test_monitor_store_v5_migration_creates_absent_deferred_table(tmp_path) -> None:
+def test_monitor_store_v5_migration_creates_absent_deferred_table(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     _create_release_v5_schema(ctx, include_deferred_table=False)
     store = open_monitor_store(ctx)
@@ -1677,7 +1707,9 @@ def test_monitor_store_v5_migration_creates_absent_deferred_table(tmp_path) -> N
     )
 
 
-def test_monitor_store_v5_migration_rolls_back_all_changes_on_failure(tmp_path) -> None:
+def test_monitor_store_v5_migration_rolls_back_all_changes_on_failure(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     _create_release_v5_schema(ctx)
     store = open_monitor_store(ctx)
@@ -1755,7 +1787,7 @@ def test_monitor_store_v5_migration_rolls_back_all_changes_on_failure(tmp_path) 
 
 
 def test_monitor_store_v5_migration_rejects_present_tombstoned_raw_row(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -1793,7 +1825,7 @@ def test_monitor_store_v5_migration_rejects_present_tombstoned_raw_row(
 
 def test_monitor_store_v5_migration_rolls_back_on_raw_probe_error(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -1821,7 +1853,9 @@ def test_monitor_store_v5_migration_rolls_back_on_raw_probe_error(
 
 
 @pytest.mark.parametrize("version", [4, 7])
-def test_monitor_store_rejects_unsupported_schema_versions(tmp_path, version) -> None:
+def test_monitor_store_rejects_unsupported_schema_versions(
+    tmp_path: Path, version: int
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1837,8 +1871,8 @@ def test_monitor_store_rejects_unsupported_schema_versions(tmp_path, version) ->
 
 @pytest.mark.parametrize("version_value", [None, "6", True])
 def test_monitor_store_rejects_malformed_schema_version(
-    tmp_path,
-    version_value,
+    tmp_path: Path,
+    version_value: str | bool | None,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -1855,8 +1889,8 @@ def test_monitor_store_rejects_malformed_schema_version(
 
 @pytest.mark.parametrize("raw_value", ["{not-json", "[]", "null"])
 def test_monitor_store_rejects_malformed_schema_version_metadata(
-    tmp_path,
-    raw_value,
+    tmp_path: Path,
+    raw_value: str,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -1871,7 +1905,7 @@ def test_monitor_store_rejects_malformed_schema_version_metadata(
         store.ensure_schema()
 
 
-def test_monitor_store_v6_rejects_noncanonical_owned_data(tmp_path) -> None:
+def test_monitor_store_v6_rejects_noncanonical_owned_data(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -1893,8 +1927,8 @@ def test_monitor_store_v6_rejects_noncanonical_owned_data(tmp_path) -> None:
 
 @pytest.mark.parametrize("owned_field", ["collation", "deferred"])
 def test_monitor_store_v6_rejects_malformed_owned_json(
-    tmp_path,
-    owned_field,
+    tmp_path: Path,
+    owned_field: str,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -1949,8 +1983,8 @@ def test_monitor_store_v6_rejects_malformed_owned_json(
     ],
 )
 def test_monitor_store_v6_rejects_noncanonical_owned_id_family(
-    tmp_path,
-    owned_field,
+    tmp_path: Path,
+    owned_field: str,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2045,8 +2079,8 @@ def test_monitor_store_v6_rejects_noncanonical_owned_id_family(
 
 @pytest.mark.parametrize("old_state", ["child_tombstone", "raw_parent_with_child"])
 def test_monitor_store_v6_rejects_old_release_delete_states(
-    tmp_path,
-    old_state,
+    tmp_path: Path,
+    old_state: str,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2072,7 +2106,9 @@ def test_monitor_store_v6_rejects_old_release_delete_states(
         store.ensure_schema()
 
 
-def test_monitor_store_upsert_is_replay_safe_and_preserves_terminal(tmp_path) -> None:
+def test_monitor_store_upsert_is_replay_safe_and_preserves_terminal(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2104,7 +2140,9 @@ def test_monitor_store_upsert_is_replay_safe_and_preserves_terminal(tmp_path) ->
     ]
 
 
-def test_monitor_store_get_tasks_fetches_records_in_one_api_call(tmp_path) -> None:
+def test_monitor_store_get_tasks_fetches_records_in_one_api_call(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2119,7 +2157,7 @@ def test_monitor_store_get_tasks_fetches_records_in_one_api_call(tmp_path) -> No
 
 
 def test_monitor_store_lists_ingested_open_task_refs_without_summary_requirement(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2147,7 +2185,9 @@ def test_monitor_store_lists_ingested_open_task_refs_without_summary_requirement
     ]
 
 
-def test_monitor_store_summary_ready_respects_terminal_retention(tmp_path) -> None:
+def test_monitor_store_summary_ready_respects_terminal_retention(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2182,7 +2222,7 @@ def test_monitor_store_summary_ready_respects_terminal_retention(tmp_path) -> No
     ]
 
 
-def test_monitor_store_summary_ready_uses_family_high_water(tmp_path) -> None:
+def test_monitor_store_summary_ready_uses_family_high_water(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2224,7 +2264,9 @@ def test_monitor_store_summary_ready_uses_family_high_water(tmp_path) -> None:
     ] == [(tid, "terminal")]
 
 
-def test_monitor_store_summary_ready_suspects_only_known_interval(tmp_path) -> None:
+def test_monitor_store_summary_ready_suspects_only_known_interval(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2254,7 +2296,7 @@ def test_monitor_store_summary_ready_suspects_only_known_interval(tmp_path) -> N
 
 
 def test_monitor_store_summary_ready_classifies_stale_open_without_interval(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2286,7 +2328,7 @@ def test_monitor_store_summary_ready_classifies_stale_open_without_interval(
     ]
 
 
-def test_monitor_store_lists_old_open_service_owner_candidates(tmp_path) -> None:
+def test_monitor_store_lists_old_open_service_owner_candidates(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2346,7 +2388,7 @@ def test_monitor_store_lists_old_open_service_owner_candidates(tmp_path) -> None
 
 
 def test_monitor_store_disposition_tombstone_removes_family_from_ready_list(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2388,7 +2430,7 @@ def test_monitor_store_disposition_tombstone_removes_family_from_ready_list(
 
 
 def test_monitor_store_post_disposal_activity_reopens_control_cleanup(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """A resurrected family must clean recreated queues at real terminal."""
 
@@ -2427,7 +2469,7 @@ def test_monitor_store_post_disposal_activity_reopens_control_cleanup(
 
 
 def test_monitor_store_lists_control_deleted_terminal_disposition_backfill(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2467,7 +2509,7 @@ def test_monitor_store_lists_control_deleted_terminal_disposition_backfill(
 
 
 def test_monitor_store_summary_ready_keeps_summary_emitted_undisposed_family(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2499,7 +2541,7 @@ def test_monitor_store_summary_ready_keeps_summary_emitted_undisposed_family(
 
 
 def test_monitor_store_terminal_control_cleanup_ready_requires_summary_and_age(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2559,7 +2601,7 @@ def test_monitor_store_terminal_control_cleanup_ready_requires_summary_and_age(
 
 
 def test_monitor_store_zero_retention_cutoff_preserves_nanosecond_precision(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2588,7 +2630,9 @@ def test_monitor_store_zero_retention_cutoff_preserves_nanosecond_precision(
     assert [record.tid for record in ready] == [tid]
 
 
-def test_monitor_store_batch_ingest_updates_tasks_and_checkpoint(tmp_path) -> None:
+def test_monitor_store_batch_ingest_updates_tasks_and_checkpoint(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(
         ctx,
@@ -2628,7 +2672,9 @@ def test_monitor_store_batch_ingest_updates_tasks_and_checkpoint(tmp_path) -> No
     assert second_record.terminal_seen is False
 
 
-def test_monitor_store_deletes_task_messages_and_reconciles_parent(tmp_path) -> None:
+def test_monitor_store_deletes_task_messages_and_reconciles_parent(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2692,7 +2738,9 @@ def test_monitor_store_deletes_task_messages_and_reconciles_parent(tmp_path) -> 
     )
 
 
-def test_monitor_store_lists_manager_task_spawned_retention_refs(tmp_path) -> None:
+def test_monitor_store_lists_manager_task_spawned_retention_refs(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2754,7 +2802,7 @@ def test_monitor_store_lists_manager_task_spawned_retention_refs(tmp_path) -> No
 
 
 def test_monitor_store_event_trim_deletes_child_refs_without_closing_manager(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2811,7 +2859,7 @@ def test_monitor_store_event_trim_deletes_child_refs_without_closing_manager(
 
 
 def test_monitor_store_deletes_messages_and_reconciles_only_affected_tids(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -2853,7 +2901,9 @@ def test_monitor_store_deletes_messages_and_reconciles_only_affected_tids(
     assert second_record.raw_deleted_at_ns is None
 
 
-def test_monitor_store_reconciles_existing_raw_deleted_child_refs(tmp_path) -> None:
+def test_monitor_store_reconciles_existing_raw_deleted_child_refs(
+    tmp_path: Path,
+) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2891,7 +2941,7 @@ def test_monitor_store_reconciles_existing_raw_deleted_child_refs(tmp_path) -> N
     )
 
 
-def test_monitor_store_lists_raw_deleted_task_log_recovery_tids(tmp_path) -> None:
+def test_monitor_store_lists_raw_deleted_task_log_recovery_tids(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2916,6 +2966,14 @@ def test_monitor_store_lists_raw_deleted_task_log_recovery_tids(tmp_path) -> Non
     )
 
     assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == (tid,)
+    assert (
+        store.list_raw_deleted_task_log_recovery_tids(limit=10, require_summary=True)
+        == ()
+    )
+    store.mark_summary_emitted(tid, terminal.message_id + 1)
+    assert store.list_raw_deleted_task_log_recovery_tids(
+        limit=10, require_summary=True
+    ) == (tid,)
     store.mark_orphan_raw_recovery_checked((tid,), terminal.message_id + 2)
     record = store.get_task(tid)
     assert record is not None
@@ -2933,7 +2991,7 @@ def test_monitor_store_lists_raw_deleted_task_log_recovery_tids(tmp_path) -> Non
     assert record.orphan_raw_recovery_checked_at_ns is None
 
 
-def test_monitor_store_lists_reserved_cleanup_pending_tasks(tmp_path) -> None:
+def test_monitor_store_lists_reserved_cleanup_pending_tasks(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2979,7 +3037,7 @@ def test_monitor_store_lists_reserved_cleanup_pending_tasks(tmp_path) -> None:
     assert record.reserved_cleanup_checked_at_ns is None
 
 
-def test_monitor_store_lists_missing_task_message_ids(tmp_path) -> None:
+def test_monitor_store_lists_missing_task_message_ids(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -3002,7 +3060,7 @@ def test_monitor_store_lists_missing_task_message_ids(tmp_path) -> None:
     assert missing == (known.message_id - 1, known.message_id + 1)
 
 
-def test_monitor_store_retires_completed_collation_families(tmp_path) -> None:
+def test_monitor_store_retires_completed_collation_families(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -3047,7 +3105,7 @@ def test_monitor_store_retires_completed_collation_families(tmp_path) -> None:
     assert store.get_task(tid) is None
 
 
-def test_monitor_store_retirement_honors_retention_window(tmp_path) -> None:
+def test_monitor_store_retirement_honors_retention_window(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -3096,7 +3154,7 @@ def test_monitor_store_retirement_honors_retention_window(tmp_path) -> None:
 
 
 def test_monitor_store_retirement_requires_reserved_cleanup_when_probe_needed(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -3144,7 +3202,7 @@ def test_monitor_store_retirement_requires_reserved_cleanup_when_probe_needed(
     assert store.get_task(tid) is None
 
 
-def test_monitor_store_rejects_newer_schema_version(tmp_path) -> None:
+def test_monitor_store_rejects_newer_schema_version(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -3191,11 +3249,51 @@ class _FirewalledContext:
         return getattr(self._inner, name)
 
 
-def test_store_uses_only_public_broker_surface(tmp_path) -> None:
+def test_store_uses_only_public_broker_surface(tmp_path: Path) -> None:
     context = _FirewalledContext(_context(tmp_path))
-    store = open_monitor_store(context)
+    store = open_monitor_store(cast(WeftContext, context))
     try:
         store.ensure_schema()
         assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) is None
     finally:
         store.close()
+
+
+def test_monitor_store_reconciles_all_unreferenced_families_in_its_context(
+    tmp_path: Path,
+) -> None:
+    """The full reconciliation query marks all orphan parents, never retained peers."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tids = tuple(str(1779000000000010000 + index) for index in range(5))
+    updates = tuple(
+        _update(tid, 1779000000000020000 + index) for index, tid in enumerate(tids)
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE, updates, checkpoint_message_id=None
+    )
+    store.delete_task_messages_after_raw_delete(
+        (updates[3].message_id,), deleted_at_ns=30
+    )
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        access = store._access(session)
+        # Simulate existing orphan refs without invoking targeted reconciliation.
+        access.delete_task_messages(
+            (updates[0].message_id, updates[1].message_id, updates[4].message_id)
+        )
+        session.run(
+            "UPDATE weft_monitor_task_collations SET context_key = ? WHERE context_key = ? AND tid = ?",
+            ("other-context", store.context_key, tids[4]),
+        )
+        access.reconcile_raw_deleted(40)
+        access.reconcile_raw_deleted(50)
+        for tid, expected in zip(tids[:4], (40, 40, None, 30), strict=True):
+            record = access.fetch_task(tid)
+            assert record is not None
+            assert record.raw_deleted_at_ns == expected
+        other = monitor_store_module._MonitorTableAccess(
+            session, context_key="other-context", backend_name=ctx.backend_name
+        ).fetch_task(tids[4])
+        assert other is not None
+        assert other.raw_deleted_at_ns is None

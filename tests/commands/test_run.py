@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import prompt_toolkit
 import pytest
@@ -22,6 +22,7 @@ from prompt_toolkit.output import DummyOutput
 import weft.commands._result_wait as result_wait_cmd
 import weft.commands._spawn_submission as spawn_submission_cmd
 import weft.commands.run as run_cmd
+from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
@@ -62,7 +63,7 @@ from weft.commands.run import (
     _wait_for_task_completion,
 )
 from weft.commands.types import RunExecutionResult
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.control_messages import parse_control_request
 from weft.core.control_probe import ControlProbeResult, MatchedPong
@@ -222,7 +223,7 @@ def _external_supervisor_runtime_handle() -> dict[str, Any]:
 
 
 def _write_active_manager_registry_record(
-    ctx,
+    ctx: WeftContext,
     *,
     tid: str,
     runtime_handle: dict[str, Any],
@@ -236,7 +237,7 @@ def _write_active_manager_registry_record(
                 ctx,
                 tid=tid,
                 status="active",
-                runtime_handle=runtime_handle,
+                runtime_handle=runtime_handle or {},
                 requests=requests,
             )
         )
@@ -249,10 +250,10 @@ def _write_active_manager_registry_record(
 
 
 def _manager_service_payload(
-    ctx,
+    ctx: WeftContext,
     *,
     tid: str,
-    status: str = "active",
+    status: Literal["active", "draining", "stopped", "superseded"] = "active",
     name: str = "manager",
     runtime_handle: dict[str, Any] | None = None,
     requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
@@ -272,7 +273,7 @@ def _manager_service_payload(
             "ctrl_out": ctrl_out or f"T{tid}.ctrl_out",
             "outbox": outbox,
         },
-        runtime_handle=runtime_handle,
+        runtime_handle=runtime_handle or {},
     )
     if service_key is not None:
         payload["service_key"] = service_key
@@ -280,7 +281,7 @@ def _manager_service_payload(
 
 
 def _select_active_manager_while_answering_probe(
-    ctx,
+    ctx: WeftContext,
     *,
     tid: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -295,7 +296,7 @@ def _select_active_manager_while_answering_probe(
     target_tid = tid
 
     def _fake_probe(
-        _ctx,
+        _ctx: WeftContext,
         *,
         tid: str,
         ctrl_in_name: str,
@@ -341,7 +342,7 @@ def _select_active_manager_while_answering_probe(
 
 
 def _read_all_queue_messages(
-    ctx, queue_name: str, *, persistent: bool = False
+    ctx: WeftContext, queue_name: str, *, persistent: bool = False
 ) -> list[str]:
     queue = ctx.queue(queue_name, persistent=persistent)
     messages: list[str] = []
@@ -664,7 +665,9 @@ def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
         def make_prompt_session(
             *_args: Any, **_kwargs: Any
         ) -> _PromptCompletionSession:
-            session = real_prompt_session(input=pipe_input, output=DummyOutput())
+            session: prompt_toolkit.PromptSession[str] = real_prompt_session(
+                input=pipe_input, output=DummyOutput()
+            )
             wrapper = _PromptCompletionSession(
                 session,
                 completion_timing=completion_timing,
@@ -683,7 +686,9 @@ def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
         )
 
         result = run_cmd._run_interactive_session(
-            _PromptCompletionContext(log_queue),
+            cast(
+                WeftContext, _PromptCompletionContext(log_queue)
+            ),  # Deliberate queue-only context double.
             _make_taskspec(str(time.time_ns())),
             stdin_data=None,
             use_prompt=True,
@@ -728,7 +733,9 @@ def test_interactive_start_failure_closes_owned_resources(
 
     with pytest.raises(StartFailure) as exc_info:
         run_cmd._run_interactive_session(
-            _PromptCompletionContext(log_queue),
+            cast(
+                WeftContext, _PromptCompletionContext(log_queue)
+            ),  # Deliberate queue-only context double.
             _make_taskspec(str(time.time_ns())),
             stdin_data=None,
             use_prompt=False,
@@ -956,7 +963,7 @@ def _wait_for_task_status(
 
 
 def _seed_terminal_monitor_store_record(
-    context,
+    context: WeftContext,
     *,
     tid: str,
     status: str = "failed",
@@ -1229,7 +1236,7 @@ def test_task_status_reports_unknown_when_monitor_store_read_fails(
     assert snapshot.error == "monitor store unavailable: store temporarily unavailable"
 
 
-def _stop_active_manager(context) -> None:
+def _stop_active_manager(context: WeftContext) -> None:
     record = core_manager_runtime.select_active_manager(context)
     if record is None:
         return
@@ -1296,7 +1303,7 @@ def _registry_view(
 
 
 class _FakeQueueChangeMonitor:
-    def __init__(self, queues, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, queues: Sequence[Queue], *args: Any, **kwargs: Any) -> None:
         del args, kwargs
         self.queue_names = [queue.name for queue in queues]
         self.wait_calls: list[float | None] = []
@@ -1332,7 +1339,9 @@ def test_wait_for_task_completion_reads_outbox_after_completion_event(
     writes_triggered = 0
 
     class _LateOutboxMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
 
         def wait(self, timeout: float | None) -> bool:
@@ -1385,7 +1394,9 @@ def test_wait_for_task_completion_aggregates_multiple_outbox_messages(
     writes_triggered = 0
 
     class _LateOutboxMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
+        def __init__(
+            self, _queues: Sequence[Queue], *, config: Config | None = None
+        ) -> None:
             del config
 
         def wait(self, timeout: float | None) -> bool:
@@ -1475,12 +1486,12 @@ def test_collect_interactive_queue_output_reads_beyond_fixed_window() -> None:
 
     collected = _collect_interactive_queue_output(queue)  # type: ignore[arg-type]
 
-    assert len(collected) == 600
-    assert collected[0] == "chunk-0\n"
-    assert collected[-1] == "chunk-599\n"
+    assert collected == [f"chunk-{index}\n" for index in range(600)]
 
 
 class _FakeManagerSpec:
+    """Serialization-only double; casts are confined to launcher-boundary tests."""
+
     def model_dump_json(self) -> str:
         return "{}"
 
@@ -1515,6 +1526,8 @@ def test_build_manager_process_command_preserves_bundle_transport_provenance(
 
 
 class _FakePopen:
+    """Deterministic launcher double; nominal Popen casts stay at injection sites."""
+
     def __init__(
         self,
         *,
@@ -1546,7 +1559,7 @@ class _FakePopen:
 
 
 def test_start_manager_does_not_terminate_competing_startup_manager(
-    tmp_path: Any,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1556,7 +1569,7 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=4242,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
-        launcher_process=fake_process,
+        launcher_process=cast(subprocess.Popen[str], fake_process),
     )
 
     monkeypatch.setattr(
@@ -1564,7 +1577,7 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
         lambda context: core_manager_runtime.ManagerRuntimeInvocation(
             task_cls_path="weft.core.manager.Manager",
             tid="9" * 19,
-            spec=_FakeManagerSpec(),
+            spec=cast(TaskSpec, _FakeManagerSpec()),
         ),
     )
     monkeypatch.setattr(
@@ -1618,7 +1631,7 @@ def test_start_manager_detaches_registered_startup_manager_after_losing_selectio
     invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="9" * 19,
-        spec=_FakeManagerSpec(),
+        spec=cast(TaskSpec, _FakeManagerSpec()),
     )
     competing_record = {
         "tid": "1775619800000000000",
@@ -1637,7 +1650,7 @@ def test_start_manager_detaches_registered_startup_manager_after_losing_selectio
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=fake_process.pid,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
-        launcher_process=fake_process,
+        launcher_process=cast(subprocess.Popen[str], fake_process),
     )
     acknowledged: list[str] = []
     launcher_signals: list[str] = []
@@ -1668,12 +1681,16 @@ def test_start_manager_detaches_registered_startup_manager_after_losing_selectio
         "weft.core.manager_runtime._acknowledge_competing_launched_manager",
         lambda launch_arg, *, manager_tid: acknowledged.append(manager_tid),
     )
+
+    def _record_launcher_signals(
+        process: object, signal_name: str
+    ) -> tuple[bool, str | None]:
+        launcher_signals.append(signal_name)
+        return (True, None)
+
     monkeypatch.setattr(
         "weft.core.manager_runtime._send_launcher_signal",
-        lambda process, signal_name: (
-            launcher_signals.append(signal_name) or True,
-            None,
-        ),
+        _record_launcher_signals,
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime._cleanup_startup_stderr",
@@ -1706,7 +1723,7 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=4242,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
-        launcher_process=fake_process,
+        launcher_process=cast(subprocess.Popen[str], fake_process),
     )
     cleaned_paths: list[Path] = []
 
@@ -1715,7 +1732,7 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
         lambda context: core_manager_runtime.ManagerRuntimeInvocation(
             task_cls_path="weft.core.manager.Manager",
             tid="9" * 19,
-            spec=_FakeManagerSpec(),
+            spec=cast(TaskSpec, _FakeManagerSpec()),
         ),
     )
     monkeypatch.setattr(
@@ -1780,7 +1797,7 @@ def test_start_manager_adopts_competing_manager_after_startup_timeout_settles(
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=4242,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
-        launcher_process=fake_process,
+        launcher_process=cast(subprocess.Popen[str], fake_process),
     )
     cleaned_paths: list[Path] = []
     settlement_calls: list[str] = []
@@ -1790,7 +1807,7 @@ def test_start_manager_adopts_competing_manager_after_startup_timeout_settles(
         lambda context: core_manager_runtime.ManagerRuntimeInvocation(
             task_cls_path="weft.core.manager.Manager",
             tid="9" * 19,
-            spec=_FakeManagerSpec(),
+            spec=cast(TaskSpec, _FakeManagerSpec()),
         ),
     )
     monkeypatch.setattr(
@@ -1808,7 +1825,9 @@ def test_start_manager_adopts_competing_manager_after_startup_timeout_settles(
         ),
     )
 
-    def _settle(context, *, manager_tid, deadline):
+    def _settle(
+        context: WeftContext, *, manager_tid: str, deadline: float
+    ) -> dict[str, object]:
         del context, deadline
         settlement_calls.append(manager_tid)
         return competing_record
@@ -1855,7 +1874,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="9" * 19,
-        spec=_FakeManagerSpec(),
+        spec=cast(TaskSpec, _FakeManagerSpec()),
     )
     helper_calls: list[tuple[object, object]] = []
     launch_calls: list[tuple[object, object]] = []
@@ -1863,14 +1882,19 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=fake_process.pid,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
-        launcher_process=fake_process,
+        launcher_process=cast(subprocess.Popen[str], fake_process),
     )
 
-    def _fake_build_invocation(context_arg, *, idle_timeout_override=None):
+    def _fake_build_invocation(
+        context_arg: WeftContext, *, idle_timeout_override: float | None = None
+    ) -> core_manager_runtime.ManagerRuntimeInvocation:
         helper_calls.append((context_arg, idle_timeout_override))
         return invocation
 
-    def _fake_launch(context_arg, invocation_arg):
+    def _fake_launch(
+        context_arg: WeftContext,
+        invocation_arg: core_manager_runtime.ManagerRuntimeInvocation,
+    ) -> core_manager_runtime.DetachedManagerLaunch:
         launch_calls.append((context_arg, invocation_arg))
         return launch
 
@@ -1939,12 +1963,12 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="9" * 19,
-        spec=_FakeManagerSpec(),
+        spec=cast(TaskSpec, _FakeManagerSpec()),
     )
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=fake_process.pid,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
-        launcher_process=fake_process,
+        launcher_process=cast(subprocess.Popen[str], fake_process),
     )
     warnings: list[str] = []
     debug_messages: list[str] = []
@@ -2022,12 +2046,12 @@ def test_start_manager_rejects_ack_failure_before_success_signal(
     invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="9" * 19,
-        spec=_FakeManagerSpec(),
+        spec=cast(TaskSpec, _FakeManagerSpec()),
     )
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=fake_process.pid,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
-        launcher_process=fake_process,
+        launcher_process=cast(subprocess.Popen[str], fake_process),
     )
 
     monkeypatch.setattr(
@@ -2125,7 +2149,7 @@ def test_start_manager_timeout_reports_existing_observation_without_new_probes(
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=4242,
         stderr_path=tmp_path / "startup.stderr",
-        launcher_process=_FakePopen(poll_results=[None]),
+        launcher_process=cast(subprocess.Popen[str], _FakePopen(poll_results=[None])),
     )
     target = {"tid": tid, "status": "active"} if record_seen else None
     view = core_manager_runtime.ManagerRegistryView(
@@ -2138,7 +2162,9 @@ def test_start_manager_timeout_reports_existing_observation_without_new_probes(
         core_manager_runtime,
         "_build_manager_runtime_invocation",
         lambda _: core_manager_runtime.ManagerRuntimeInvocation(
-            task_cls_path="weft.core.manager.Manager", tid=tid, spec=_FakeManagerSpec()
+            task_cls_path="weft.core.manager.Manager",
+            tid=tid,
+            spec=cast(TaskSpec, _FakeManagerSpec()),
         ),
     )
     monkeypatch.setattr(
@@ -2164,9 +2190,12 @@ def test_start_manager_timeout_reports_existing_observation_without_new_probes(
     monkeypatch.setattr(
         core_manager_runtime, "_await_manager_start_settlement", lambda *_a, **_k: None
     )
-    monkeypatch.setattr(
-        core_manager_runtime, "pid_is_live", lambda pid: probe_calls.append(pid) or True
-    )
+
+    def _record_probe_calls(pid: int) -> bool:
+        probe_calls.append(pid)
+        return True
+
+    monkeypatch.setattr(core_manager_runtime, "pid_is_live", _record_probe_calls)
     monkeypatch.setattr(core_manager_runtime.time, "monotonic", lambda: clock[0])
 
     def fail_start(
@@ -2211,14 +2240,14 @@ def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(
     launch = core_manager_runtime.DetachedManagerLaunch(
         pid=4242,
         stderr_path=stderr_path,
-        launcher_process=fake_process,
+        launcher_process=cast(subprocess.Popen[str], fake_process),
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime._build_manager_runtime_invocation",
         lambda context: core_manager_runtime.ManagerRuntimeInvocation(
             task_cls_path="weft.core.manager.Manager",
             tid="9" * 19,
-            spec=_FakeManagerSpec(),
+            spec=cast(TaskSpec, _FakeManagerSpec()),
         ),
     )
     monkeypatch.setattr(
@@ -2258,11 +2287,13 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
     )
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
-    def _fake_enqueue(context_arg, taskspec, work_payload):
+    def _fake_enqueue(
+        context_arg: WeftContext, taskspec: TaskSpec, work_payload: str | None
+    ) -> int:
         calls.append("enqueue")
         return 1775679597297004544
 
-    def _fake_ensure(context_arg):
+    def _fake_ensure(context_arg: WeftContext) -> tuple[dict[str, object], bool, None]:
         calls.append("ensure")
         return (
             {"tid": "1775679596841701376", "ctrl_in": "Tmanager.ctrl_in"},
@@ -2577,7 +2608,7 @@ def test_enqueue_template_uses_committed_submission_id(
     committed_id = 1777000000000000456
     captured: dict[str, Any] = {}
 
-    def fail_preallocation(_context) -> str:
+    def fail_preallocation(_context: WeftContext) -> str:
         raise AssertionError("template enqueue must not preallocate a TID")
 
     def fake_submit(*args: object, **kwargs: object) -> int:
@@ -2774,7 +2805,9 @@ def test_reconcile_submitted_spawn_can_wait_past_reserved_claim(
         ]
     )
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _FakeQueueChangeMonitor:
         monitor = _FakeQueueChangeMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
@@ -2858,7 +2891,9 @@ def test_reconcile_submitted_spawn_uses_queue_monitor(
         ]
     )
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _FakeQueueChangeMonitor:
         monitor = _FakeQueueChangeMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
@@ -2940,7 +2975,9 @@ def test_reconcile_submitted_spawn_rebuilds_monitor_when_reserved_queues_change(
         ]
     )
 
-    def _fake_monitor(queues, *, config=None):
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _FakeQueueChangeMonitor:
         monitor = _FakeQueueChangeMonitor(queues, config=config)
         created_monitors.append(monitor)
         return monitor
@@ -4372,7 +4409,7 @@ def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(
 
     def fake_terminate_process_tree(
         pid: int, *, timeout: float, kill_after: bool = True
-    ):
+    ) -> set[int]:
         killed.append((pid, timeout))
         return {pid}
 
@@ -4427,9 +4464,14 @@ def test_stop_manager_force_refuses_stopped_state_while_tree_root_is_live(
         "weft.core.manager_runtime.terminate_process_tree",
         lambda *args, **kwargs: set(),
     )
+
+    def _record_marked(*args: object, **kwargs: object) -> bool:
+        marked.append(tid)
+        return True
+
     monkeypatch.setattr(
         "weft.core.manager_runtime._mark_manager_stopped",
-        lambda *args, **kwargs: marked.append(tid) or True,
+        _record_marked,
     )
 
     stopped, message = core_manager_runtime.stop_manager(
@@ -4467,9 +4509,14 @@ def test_stop_manager_force_does_not_publish_stopped_after_permission_denial(
         "weft.core.manager_runtime._registry_view",
         lambda *args, **kwargs: _registry_view(),
     )
+
+    def _record_marked(*args: object, **kwargs: object) -> bool:
+        marked.append(tid)
+        return True
+
     monkeypatch.setattr(
         "weft.core.manager_runtime._mark_manager_stopped",
-        lambda *args, **kwargs: marked.append(tid) or True,
+        _record_marked,
     )
 
     class PermissionDeniedProcess:
@@ -4505,7 +4552,7 @@ def test_stop_manager_force_does_not_publish_stopped_after_permission_denial(
     stopped, message = core_manager_runtime.stop_manager(
         ctx,
         None,
-        process=process,  # type: ignore[arg-type]
+        process=process,
         tid=tid,
         timeout=0.0,
         force=True,

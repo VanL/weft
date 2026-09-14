@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -463,7 +464,9 @@ def _eligible_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def _gate(payload: dict[str, object], record: dict[str, object] | None = None) -> bool:
+def _gate(
+    payload: dict[str, object], record: Mapping[str, object] | None = None
+) -> bool:
     return pong_proves_dispatch_eligible(
         payload,
         record={"weft_context": _ROOT} if record is None else record,

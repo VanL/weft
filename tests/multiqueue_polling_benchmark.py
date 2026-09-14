@@ -23,16 +23,19 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
+
+from simplebroker import BrokerTarget
 
 if __package__ in {None, ""}:
     REPO_ROOT = Path(__file__).resolve().parents[1]
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    from tests.helpers.test_backend import (  # type: ignore[no-redef]
+    from tests.helpers.test_backend import (
         POSTGRES_TEST_BACKEND,
         cleanup_prepared_roots,
         prepare_project_root,
@@ -44,7 +47,7 @@ else:
         prepare_project_root,
     )
 
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.tasks.multiqueue_watcher import MultiQueueWatcher, QueueMode
 
 SQLITE_BACKEND = "sqlite"
@@ -134,11 +137,17 @@ class WorkloadSpec:
 class InstrumentedMultiQueueWatcher(MultiQueueWatcher):
     """MultiQueueWatcher that exposes pre-check timing for benchmarks."""
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(
+        self,
+        queue_configs: Mapping[str, Mapping[str, object]],
+        *,
+        db: BrokerTarget | str | Path | None = None,
+        config: Mapping[str, Any] | None = None,
+    ) -> None:
         self.precheck_count = 0
         self.last_precheck_finished_ns: int | None = None
         self.precheck_event = threading.Event()
-        super().__init__(*args, **kwargs)
+        super().__init__(queue_configs=queue_configs, db=db, config=config)
 
     def _has_pending_messages(self) -> bool:
         result = super()._has_pending_messages()
@@ -158,7 +167,7 @@ def _ensure_postgres_support() -> None:
 
 
 @contextmanager
-def _backend_env(backend: str, pg_dsn: str | None) -> dict[str, str]:
+def _backend_env(backend: str, pg_dsn: str | None) -> Iterator[dict[str, str]]:
     """Provide both process env and helper env for one backend."""
 
     keys = ("BROKER_TEST_BACKEND", "WEFT_PG_TEST_DSN")
@@ -193,7 +202,7 @@ def _build_watcher(
     *,
     queue_count: int,
     processed: list[str],
-) -> tuple[MultiQueueWatcher, object]:
+) -> tuple[MultiQueueWatcher, WeftContext]:
     return _build_watcher_cls(
         MultiQueueWatcher,
         root,
@@ -210,7 +219,7 @@ def _build_watcher_cls(
     *,
     queue_count: int,
     processed: list[str],
-) -> tuple[MultiQueueWatcher, object]:
+) -> tuple[MultiQueueWatcher, WeftContext]:
     prepared_root = prepare_project_root(root, env=env)
     context = build_context(spec_context=prepared_root)
 

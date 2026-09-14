@@ -52,7 +52,7 @@ from weft.client._namespaces import (
     SystemNamespace,
     TasksNamespace,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import open_monitor_store
 from weft.core.task_state import task_state_queue_name
@@ -230,23 +230,6 @@ CLIENT_API_PARITY_EXPECTATIONS = {
     ),
 }
 
-CLIENT_API_OMISSIONS = {
-    "manager diagnostics": (
-        "operator/debug output does not yet have a typed public result contract"
-    ),
-    "system task-monitor": (
-        "foreground monitor scans are operator maintenance, not a stable library API"
-    ),
-    "system prune runtime-state": (
-        "destructive/reporting maintenance remains CLI-only until scoped result "
-        "types are promoted"
-    ),
-    "system prune retention": (
-        "archive-producing cleanup is an operator workflow, not a task client "
-        "capability"
-    ),
-}
-
 
 def test_client_api_parity_guard_matches_current_public_matrix() -> None:
     missing: list[str] = []
@@ -271,7 +254,7 @@ def test_client_control_sweeps_delegate_to_structured_owner(
     expected = object()
     observed: dict[str, object] = {}
 
-    def fake_control(command_arg: str, tid: str | None, **kwargs: object):
+    def fake_control(command_arg: str, tid: str | None, **kwargs: object) -> object:
         observed.update(command=command_arg, tid=tid, **kwargs)
         return expected
 
@@ -323,7 +306,7 @@ def test_client_control_sweep_preserves_non_tid_selector(
     client = WeftClient(path=Path.cwd())
     observed: dict[str, object] = {}
 
-    def fake_control(command_arg: str, tid: str | None, **kwargs: object):
+    def fake_control(command_arg: str, tid: str | None, **kwargs: object) -> object:
         observed.update(command=command_arg, tid=tid, **kwargs)
         return object()
 
@@ -333,11 +316,6 @@ def test_client_control_sweep_preserves_non_tid_selector(
 
     assert observed["tids"] is None
     assert all(observed[key] == value for key, value in selector.items())
-
-
-def test_client_api_omissions_are_explicitly_classified() -> None:
-    assert CLIENT_API_OMISSIONS
-    assert all(reason.strip() for reason in CLIENT_API_OMISSIONS.values())
 
 
 def test_connect_resolves_context() -> None:
@@ -855,18 +833,28 @@ def test_task_stop_and_kill_delegate_through_shared_task_ops(
 ) -> None:
     calls: list[tuple[str, str, object, float | None]] = []
 
-    def _fake_stop(tid: str, *, context=None, context_path=None) -> None:
+    def _fake_stop(
+        tid: str,
+        *,
+        context: WeftContext | None = None,
+        context_path: Path | None = None,
+    ) -> None:
         calls.append(("stop", tid, context or context_path, None))
 
-    def _fake_kill(tid: str, *, context=None, context_path=None) -> None:
+    def _fake_kill(
+        tid: str,
+        *,
+        context: WeftContext | None = None,
+        context_path: Path | None = None,
+    ) -> None:
         calls.append(("kill", tid, context or context_path, None))
 
     def _fake_ping(
         tid: str,
         *,
         timeout: float,
-        context=None,
-        context_path=None,
+        context: WeftContext | None = None,
+        context_path: Path | None = None,
     ) -> dict[str, object]:
         calls.append(("ping", tid, context or context_path, timeout))
         return {"timed_out": False, "error": None, "observed_at": 123, "pong": {}}
@@ -964,18 +952,28 @@ def test_specs_namespace_validate_uses_bound_client_context(
         assert validation.payload["name"] == "validate-me"
 
 
-def test_system_dump_load_and_tidy_are_available() -> None:
-    with WeftTestHarness() as harness:
-        client = WeftClient(path=harness.root)
+def test_system_dump_load_and_tidy_preserve_queue_contents() -> None:
+    with WeftTestHarness() as source, WeftTestHarness() as destination:
+        client = WeftClient(path=source.root)
+        restored = WeftClient(path=destination.root)
         client.queues.write("client.dump.queue", "message")
-
         export_path = client.system.dump()
-        load_result = client.system.load(input_file=export_path, dry_run=True)
-        tidy_result = client.system.tidy()
 
-        assert export_path.exists()
-        assert load_result.message
-        assert tidy_result.target
+        preview = restored.system.load(input_file=export_path, dry_run=True)
+        assert preview.imported is False
+        assert restored.queues.peek("client.dump.queue", all_messages=True) == []
+
+        loaded = restored.system.load(input_file=export_path)
+        assert loaded.imported is True
+        assert [
+            entry.message
+            for entry in restored.queues.peek("client.dump.queue", all_messages=True)
+        ] == ["message"]
+        restored.system.tidy()
+        assert [
+            entry.message
+            for entry in restored.queues.peek("client.dump.queue", all_messages=True)
+        ] == ["message"]
 
 
 def test_prepare_snapshots_payload_without_starting_runtime() -> None:

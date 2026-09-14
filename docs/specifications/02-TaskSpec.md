@@ -682,6 +682,8 @@ its internal spawn-request `requeue` policy.
 
 ## Related Plans
 
+- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
+
 - [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 
 - [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)

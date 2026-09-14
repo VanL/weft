@@ -14,6 +14,7 @@ from tests.fixtures.provider_cli_fixture import (
     write_provider_cli_wrapper,
 )
 from weft.core.agents import register_builtin_agent_runtimes
+from weft.core.agents.backends.provider_cli import ProviderCLIBackendSession
 from weft.core.agents.runtime import (
     clear_agent_runtime_registry,
     normalize_agent_work_item,
@@ -35,9 +36,9 @@ def make_agent_section(
     executable: str,
     provider_name: str = "codex",
     model: str | None = None,
-    **overrides,
+    **overrides: object,
 ) -> AgentSection:
-    payload = {
+    payload: dict[str, object] = {
         "runtime": "provider_cli",
         "authority_class": "general",
         "model": model,
@@ -56,7 +57,7 @@ def make_agent_section(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_provider_cli_session_continues_across_turns(
-    tmp_path,
+    tmp_path: Path,
     provider_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -70,6 +71,7 @@ def test_provider_cli_session_continues_across_turns(
     )
 
     session = start_agent_runtime_session(agent, tid="123")
+    assert isinstance(session, ProviderCLIBackendSession)
     try:
         first = session.execute(
             normalize_agent_work_item(agent, {"task": "remember:phase2-token"})
@@ -126,6 +128,7 @@ def test_provider_cli_session_resolves_callable_tool_profile_once_per_turn(
     expected_call = {"provider": "codex", "tid": "123"}
 
     session = start_agent_runtime_session(agent, tid="123")
+    assert isinstance(session, ProviderCLIBackendSession)
     try:
         assert TOOL_PROFILE_CALLS == [expected_call]
         session.execute(normalize_agent_work_item(agent, {"task": "first"}))
@@ -138,7 +141,7 @@ def test_provider_cli_session_resolves_callable_tool_profile_once_per_turn(
 
 
 def test_provider_cli_session_close_cleans_up_tempdir_after_failure(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     executable = str(write_provider_cli_wrapper(tmp_path, "codex"))
     session = start_agent_runtime_session(
@@ -148,6 +151,7 @@ def test_provider_cli_session_close_cleans_up_tempdir_after_failure(
         ),
         tid="123",
     )
+    assert isinstance(session, ProviderCLIBackendSession)
     tempdir = Path(session._tempdir.name)  # Lifecycle assertion.
 
     try:
@@ -165,7 +169,7 @@ def test_provider_cli_session_close_cleans_up_tempdir_after_failure(
 
 
 def test_provider_cli_session_reports_real_opencode_invocation_failure(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PROVIDER_CLI_FIXTURE_OPENCODE_NO_RUN", "1")
@@ -178,6 +182,7 @@ def test_provider_cli_session_reports_real_opencode_invocation_failure(
             model="fixture-model",
         )
     )
+    assert isinstance(session, ProviderCLIBackendSession)
     try:
         with pytest.raises(RuntimeError) as exc_info:
             session.execute(

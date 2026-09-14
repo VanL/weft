@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import heapq
 import json
+import os
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_QUEUE_NAMESPACE_PREFIX,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import HeartbeatTask
@@ -69,10 +71,22 @@ def test_heartbeat_uses_cached_base_task_context(
     calls: list[bool | None] = []
     real_build_context = base_task_mod.build_context
 
-    def counted_build_context(*args: object, **kwargs: object) -> object:
-        value = kwargs.get("create_database")
-        calls.append(value if isinstance(value, bool) else None)
-        return real_build_context(*args, **kwargs)
+    def counted_build_context(
+        spec_context: str | os.PathLike[str] | None = None,
+        *,
+        config: Mapping[str, Any] | None = None,
+        create_dirs: bool = True,
+        create_database: bool = True,
+        autostart: bool | None = None,
+    ) -> WeftContext:
+        calls.append(create_database)
+        return real_build_context(
+            spec_context,
+            config=config,
+            create_dirs=create_dirs,
+            create_database=create_database,
+            autostart=autostart,
+        )
 
     monkeypatch.setattr(base_task_mod, "build_context", counted_build_context)
     task = HeartbeatTask(

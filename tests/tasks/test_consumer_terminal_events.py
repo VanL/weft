@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from simplebroker import Queue
+from simplebroker import BrokerTarget, Queue
+from tests.helpers.typing import BrokerEnv
 from tests.taskspec import fixtures
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks import Consumer
@@ -15,7 +16,7 @@ from weft.core.tasks.runner import RunnerOutcome
 pytestmark = [pytest.mark.shared]
 
 
-def _terminal_events(db_path: str, tid: str) -> list[str]:
+def _terminal_events(db_path: BrokerTarget, tid: str) -> list[str]:
     queue = Queue(WEFT_GLOBAL_LOG_QUEUE, db_path=db_path, persistent=False)
     try:
         events: list[str] = []
@@ -39,7 +40,7 @@ def _terminal_events(db_path: str, tid: str) -> list[str]:
     ],
 )
 def test_consumer_terminal_outcome_emits_one_state_event(
-    broker_env,
+    broker_env: BrokerEnv,
     status: str,
     error: str,
     expected_event: str,
@@ -61,11 +62,13 @@ def test_consumer_terminal_outcome_emits_one_state_event(
     with pytest.raises((RuntimeError, TimeoutError)):
         task._ensure_outcome_ok(outcome, timestamp=None, metrics_payload=None)
 
-    events = _terminal_events(db_path, taskspec.tid)
+    events = _terminal_events(db_path, task.tid)
     assert events.count(expected_event) == 1
 
 
-def test_consumer_unknown_runner_outcome_status_fails_task(broker_env) -> None:
+def test_consumer_unknown_runner_outcome_status_fails_task(
+    broker_env: BrokerEnv,
+) -> None:
     db_path, _ = broker_env
     taskspec = fixtures.create_minimal_taskspec()
     task = Consumer(db_path, taskspec)
@@ -85,5 +88,5 @@ def test_consumer_unknown_runner_outcome_status_fails_task(broker_env) -> None:
 
     assert task.taskspec.state.status == "failed"
     assert "nonsense" in (task.taskspec.state.error or "")
-    events = _terminal_events(db_path, taskspec.tid)
+    events = _terminal_events(db_path, task.tid)
     assert events.count("work_failed") == 1

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Never
 
 import pytest
 
@@ -16,6 +15,7 @@ from weft._exceptions import CommandUsageError, InvalidTID, SubmissionValidation
 from weft.client import normalize_taskspec_payload
 from weft.commands._spawn_submission import SpawnSubmissionReconciliation
 from weft.commands.types import PreparedSubmissionRequest
+from weft.context import WeftContext
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.taskspec import (
     TaskSpec,
@@ -56,6 +56,7 @@ def materialize_for_test(request: Any) -> dict[str, Any]:
     """Materialize the fixture without relying on a bundle-local import."""
 
     payload = json.loads(json.dumps(request.taskspec_payload))
+    assert isinstance(payload, dict)
     payload["name"] = "task-" + request.arguments["provider"]
     return payload
 
@@ -120,7 +121,7 @@ def materialize_with_runtime_error(request: Any) -> dict[str, Any]:
 
 
 def test_prepare_spec_processes_parameterization_then_run_input(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = _write_declared_argument_spec(weft_harness.root)
 
@@ -135,7 +136,7 @@ def test_prepare_spec_processes_parameterization_then_run_input(
 
 
 def test_prepare_spec_rejects_payload_when_run_input_is_declared(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = _write_declared_argument_spec(weft_harness.root)
 
@@ -149,7 +150,7 @@ def test_prepare_spec_rejects_payload_when_run_input_is_declared(
 
 
 def test_prepare_spec_routes_stdin_as_initial_payload_without_run_input(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = weft_harness.root / "plain.json"
     spec_path.write_text(
@@ -184,7 +185,7 @@ def test_prepare_spec_routes_stdin_as_initial_payload_without_run_input(
     ],
 )
 def test_prepare_spec_preserves_command_initial_payload_semantics(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     interactive: bool,
     stdin_text: str | None,
     expected: dict[str, Any],
@@ -215,7 +216,7 @@ def test_prepare_spec_preserves_command_initial_payload_semantics(
 
 @pytest.mark.parametrize("declared_context", [False, True])
 def test_prepare_spec_passes_resolved_runtime_root_to_run_input_adapter(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     tmp_path: Path,
     declared_context: bool,
 ) -> None:
@@ -244,7 +245,7 @@ def test_prepare_spec_passes_resolved_runtime_root_to_run_input_adapter(
 
 
 def test_prepare_spec_expands_home_in_runtime_context(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -505,7 +506,7 @@ def test_prepare_spec_rejects_invalid_context_before_run_input(
 
 
 def test_prepare_spec_rejects_stdin_when_run_input_declares_no_stdin(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = _write_declared_argument_spec(weft_harness.root)
 
@@ -519,7 +520,7 @@ def test_prepare_spec_rejects_stdin_when_run_input_declares_no_stdin(
 
 
 def test_prepare_spec_rejects_payload_plus_stdin_without_run_input(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = weft_harness.root / "plain.json"
     spec_path.write_text(
@@ -545,7 +546,7 @@ def test_prepare_spec_rejects_payload_plus_stdin_without_run_input(
 
 
 def test_prepare_spec_classifies_malformed_taskspec_as_submission_validation(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = weft_harness.root / "malformed.json"
     spec_path.write_text(
@@ -560,7 +561,7 @@ def test_prepare_spec_classifies_malformed_taskspec_as_submission_validation(
 
 
 def test_prepare_spec_classifies_unknown_override_as_submission_validation(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = _write_declared_argument_spec(weft_harness.root)
 
@@ -583,7 +584,7 @@ def test_prepare_spec_classifies_unknown_override_as_submission_validation(
     ],
 )
 def test_prepare_spec_preserves_adapter_failures_as_submission_validation(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     adapter_ref: str,
 ) -> None:
     spec_path = weft_harness.root / "adapter-failure.json"
@@ -609,7 +610,7 @@ def test_prepare_spec_preserves_adapter_failures_as_submission_validation(
 
 @pytest.mark.parametrize("stage", ["parameterization", "run_input"])
 def test_prepare_spec_preserves_adapter_raised_weft_error_identity(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     stage: str,
 ) -> None:
     spec_path = weft_harness.root / f"typed-{stage}.json"
@@ -649,7 +650,7 @@ def test_prepare_spec_preserves_adapter_raised_weft_error_identity(
 
 
 def test_prepare_spec_wraps_parameterization_adapter_runtime_error(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     spec_path = weft_harness.root / "parameterization-runtime-error.json"
     spec_path.write_text(
@@ -684,29 +685,6 @@ class ManagerStartupFailure(Exception):
 
 class ManagerStartupSignal(BaseException):
     """Fatal manager-startup signal that reconciliation must not contain."""
-
-
-def test_manager_startup_interfaces_drop_inert_verbose_parameter() -> None:
-    assert (
-        "verbose"
-        not in inspect.signature(core_manager_runtime.start_manager).parameters
-    )
-    assert (
-        "verbose"
-        not in inspect.signature(core_manager_runtime.ensure_manager).parameters
-    )
-    assert (
-        "verbose"
-        not in inspect.signature(
-            submission_mod.ensure_manager_after_submission
-        ).parameters
-    )
-
-
-def test_prepare_taskspec_drops_inert_context_parameter() -> None:
-    assert (
-        "context" not in inspect.signature(submission_mod.prepare_taskspec).parameters
-    )
 
 
 @pytest.mark.parametrize(
@@ -746,7 +724,7 @@ def test_apply_submit_overrides_rejects_invalid_model_dump_spec_type(
 
 
 def test_plain_submission_name_does_not_require_endpoint_syntax(
-    weft_harness,
+    weft_harness: WeftTestHarness,
 ) -> None:
     prepared = submission_mod.prepare(
         weft_harness.context,
@@ -764,7 +742,7 @@ def test_plain_submission_name_does_not_require_endpoint_syntax(
 
 
 def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A post-enqueue startup failure yields to durable spawned evidence."""
@@ -774,7 +752,7 @@ def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
     startup_error = ManagerStartupFailure("startup detail")
     calls: list[str] = []
 
-    def fail_startup(_context: object) -> object:
+    def fail_startup(_context: object) -> Never:
         calls.append("ensure")
         raise startup_error
 
@@ -799,7 +777,7 @@ def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
 
 
 def test_ensure_manager_rejected_result_preserves_startup_failure_as_cause(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A manager rejection stays primary while retaining the startup failure."""
@@ -808,7 +786,7 @@ def test_ensure_manager_rejected_result_preserves_startup_failure_as_cause(
     tid = "1777000000000000790"
     startup_error = ManagerStartupFailure("startup detail")
 
-    def fail_startup(_context: object) -> object:
+    def fail_startup(_context: object) -> Never:
         raise startup_error
 
     monkeypatch.setattr(
@@ -832,7 +810,7 @@ def test_ensure_manager_rejected_result_preserves_startup_failure_as_cause(
 
 
 def test_ensure_manager_propagates_fatal_startup_signal_without_reconciliation(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """BaseException signals bypass the ordinary queue reconciliation policy."""
@@ -840,7 +818,7 @@ def test_ensure_manager_propagates_fatal_startup_signal_without_reconciliation(
     context = weft_harness.context
     signal = ManagerStartupSignal()
 
-    def fail_startup(_context: object) -> object:
+    def fail_startup(_context: object) -> Never:
         raise signal
 
     monkeypatch.setattr(
@@ -862,7 +840,7 @@ def test_ensure_manager_propagates_fatal_startup_signal_without_reconciliation(
 
 
 def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = weft_harness.context
@@ -886,7 +864,7 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
     committed_id = 1777000000000000789
     captured: dict[str, Any] = {}
 
-    def fail_preallocation(_context) -> str:
+    def fail_preallocation(_context: WeftContext) -> str:
         raise AssertionError("prepared submission must not preallocate a TID")
 
     def fake_submit(*args: object, **kwargs: object) -> int:
@@ -894,7 +872,7 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
         captured["submit_kwargs"] = kwargs
         return committed_id
 
-    def fake_ensure(_context, *, submitted_tid: str | int) -> None:
+    def fake_ensure(_context: WeftContext, *, submitted_tid: str | int) -> None:
         captured["reconciled_tid"] = submitted_tid
 
     monkeypatch.setattr(core_manager_runtime, "generate_tid", fail_preallocation)
@@ -910,7 +888,7 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
 
 
 def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(
-    weft_harness,
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = weft_harness.context
@@ -942,7 +920,7 @@ def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(
         captured["submit_kwargs"] = kwargs
         return int(explicit_tid)
 
-    def fake_ensure(_context, *, submitted_tid: str | int) -> None:
+    def fake_ensure(_context: WeftContext, *, submitted_tid: str | int) -> None:
         captured["reconciled_tid"] = submitted_tid
 
     monkeypatch.setattr(submission_mod, "submit_spawn_request", fake_submit)

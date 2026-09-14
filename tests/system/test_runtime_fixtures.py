@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Mapping
 from io import StringIO
 from types import SimpleNamespace
 
@@ -53,7 +54,7 @@ def test_mcp_tool_call_rejects_invalid_remote_content_as_runtime_error(
         stdout=StringIO(),
         stderr=StringIO(),
     )
-    responses = iter(
+    responses: Iterator[Mapping[str, object]] = iter(
         (
             {},
             {"result": {"tools": [{"name": mcp_stdio_fixture.FIXTURE_TOOL_NAME}]}},

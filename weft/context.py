@@ -88,12 +88,13 @@ __all__ = [
 
 @dataclass(frozen=True)
 class WeftContext:
-    """Resolved context information for a Weft project.
+    """Resolved context snapshot, publicly available from ``weft.client``.
 
-    Configuration fields are immutable snapshots; use a new context to change
-    configuration.
+    A context owns no permanently open broker. Close queues returned by
+    :meth:`queue`, and use :meth:`broker` as a context manager. Configuration
+    fields are immutable snapshots; use a new context to change configuration.
 
-    Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3];
+    Spec: [SB-0], [SB-0.1], [MA-3];
     docs/specifications/14-Python_API_Surfaces.md [PY-1].
     """
 
@@ -255,10 +256,15 @@ def build_context(
         autostart: Optional override for enabling auto-start TaskSpecs. When
             ``None`` the value is taken from the configuration/environment.
 
+    Resolution may create the project root even when both creation flags
+    are False. Those flags control metadata directories and broker creation,
+    not all filesystem effects of resolving a context.
+
     Returns:
         Fully-populated :class:`WeftContext`.
 
-    Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3]
+    Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3];
+    docs/specifications/14-Python_API_Surfaces.md [PY-1].
     """
     resolved_config = resolve_runtime_config(config)
     root, broker_target, discovered = _resolve_root_and_target(

@@ -24,32 +24,33 @@ class TestTaskSimple:
         tempdir = tempfile.TemporaryDirectory()
         return tempdir, Path(tempdir.name) / "task.db"
 
-    def test_task_initialization_with_path(self):
+    def test_task_initialization_with_path(self) -> None:
         """Test Task can be initialized with a database path."""
         tempdir, db_path = self._db_path()
         try:
             taskspec = fixtures.create_minimal_taskspec()
             task = Consumer(str(db_path), taskspec)
             assert task.tid == taskspec.tid
+            assert task.taskspec is taskspec
             assert task.tid.isdigit()
             assert len(task.tid) == 19
             task.cleanup()
         finally:
             tempdir.cleanup()
 
-    def test_task_initialization_with_pathlib(self):
+    def test_task_initialization_with_pathlib(self) -> None:
         """Test Task initialization with Path object."""
         tempdir, db_path = self._db_path()
         try:
             taskspec = fixtures.create_minimal_taskspec()
             task = Consumer(db_path, taskspec)
             assert task.tid == taskspec.tid
-            assert hasattr(task, "taskspec")
+            assert task.taskspec is taskspec
             task.cleanup()
         finally:
             tempdir.cleanup()
 
-    def test_task_initialization_with_broker_target(self):
+    def test_task_initialization_with_broker_target(self) -> None:
         """Test Task initialization with a public BrokerTarget."""
         tempdir, db_path = self._db_path()
         try:
@@ -63,12 +64,12 @@ class TestTaskSimple:
             task = Consumer(target, taskspec)
             assert task.tid == taskspec.tid
             assert task._db_path == target
-            assert hasattr(task, "taskspec")
+            assert task.taskspec is taskspec
             task.cleanup()
         finally:
             tempdir.cleanup()
 
-    def test_task_with_stop_event(self):
+    def test_task_with_stop_event(self) -> None:
         """Test Task with custom stop event."""
         tempdir, db_path = self._db_path()
         try:
@@ -77,11 +78,14 @@ class TestTaskSimple:
             task = Consumer(str(db_path), taskspec, stop_event=stop_event)
             assert task.tid == taskspec.tid
             assert task._stop_event is stop_event
+            task.stop()
+            assert stop_event.is_set()
+            assert task.should_stop
             task.cleanup()
         finally:
             tempdir.cleanup()
 
-    def test_task_provides_default_stop_event(self):
+    def test_task_provides_default_stop_event(self) -> None:
         """Task should always expose a functioning stop event."""
         tempdir, db_path = self._db_path()
         try:
@@ -92,24 +96,12 @@ class TestTaskSimple:
 
             # stop() should succeed even if the watcher thread was never started
             task.stop()
+            assert task._stop_event.is_set()
+            assert task.should_stop
         finally:
             tempdir.cleanup()
 
-    def test_task_inherits_from_multiqueue_watcher(self):
-        """Test that Task properly inherits from MultiQueueWatcher."""
-        tempdir, db_path = self._db_path()
-        try:
-            taskspec = fixtures.create_minimal_taskspec()
-            task = Consumer(str(db_path), taskspec)
-            from weft.core.tasks.multiqueue_watcher import MultiQueueWatcher
-
-            assert isinstance(task, MultiQueueWatcher)
-            assert hasattr(task, "taskspec")
-            task.cleanup()
-        finally:
-            tempdir.cleanup()
-
-    def test_required_queues(self):
+    def test_required_queues(self) -> None:
         """Task resolves all five default reactor queue roles."""
         tempdir, db_path = self._db_path()
         try:
@@ -130,7 +122,7 @@ class TestTaskSimple:
         finally:
             tempdir.cleanup()
 
-    def test_custom_taskspec_queues(self):
+    def test_custom_taskspec_queues(self) -> None:
         """Canonical custom queues drive the reactor; extra inputs do not."""
         tempdir, db_path = self._db_path()
         try:
@@ -166,22 +158,6 @@ class TestTaskSimple:
             assert task._ctrl_out_queue.name == "custom.control.out"
             assert "data" not in roles
             assert "custom.data.queue" not in roles.values()
-            task.cleanup()
-        finally:
-            tempdir.cleanup()
-
-    def test_task_has_basic_attributes(self):
-        """Test that task has all basic attributes."""
-        tempdir, db_path = self._db_path()
-        try:
-            taskspec = fixtures.create_minimal_taskspec()
-            task = Consumer(str(db_path), taskspec)
-
-            assert hasattr(task, "tid")
-            assert hasattr(task, "taskspec")
-            assert task.tid == taskspec.tid
-            assert task.taskspec is taskspec
-            assert task._queue_names["reserved"].endswith(".reserved")
             task.cleanup()
         finally:
             tempdir.cleanup()

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator, Iterator
+from typing import Never
+
 import pytest
 
 from weft._exceptions import (
@@ -47,7 +50,7 @@ def test_queue_boundary_scopes_type_error_to_usage() -> None:
 def test_typed_command_errors_translates_lazy_failure_and_closes_source() -> None:
     closed: list[bool] = []
 
-    def source():
+    def source() -> Generator[int, None, None]:
         try:
             yield 1
             raise ValueError("lazy failure")
@@ -55,7 +58,7 @@ def test_typed_command_errors_translates_lazy_failure_and_closes_source() -> Non
             closed.append(True)
 
     @typed_command_errors
-    def stream():
+    def stream() -> Generator[int, None, None]:
         return source()
 
     result = stream()
@@ -67,17 +70,17 @@ def test_typed_command_errors_translates_lazy_failure_and_closes_source() -> Non
 
 def test_lazy_failure_is_not_masked_when_cleanup_also_fails() -> None:
     class BrokenIterator:
-        def __iter__(self):
+        def __iter__(self) -> BrokenIterator:
             return self
 
-        def __next__(self):
+        def __next__(self) -> Never:
             raise ValueError("iteration failed")
 
         def close(self) -> None:
             raise RuntimeError("cleanup failed")
 
     @typed_command_errors
-    def command():
+    def command() -> BrokenIterator:
         return BrokenIterator()
 
     with pytest.raises(CommandUsageError, match="iteration failed"):
@@ -87,17 +90,17 @@ def test_lazy_failure_is_not_masked_when_cleanup_also_fails() -> None:
 @pytest.mark.parametrize("exhausted", [False, True])
 def test_stream_cleanup_failure_is_translated(exhausted: bool) -> None:
     class BrokenCloseIterator:
-        def __iter__(self):
+        def __iter__(self) -> BrokenCloseIterator:
             return self
 
-        def __next__(self):
+        def __next__(self) -> Never:
             raise StopIteration
 
         def close(self) -> None:
             raise RuntimeError("cleanup failed")
 
     @typed_command_errors
-    def command():
+    def command() -> BrokenCloseIterator:
         return BrokenCloseIterator()
 
     stream = command()
@@ -111,17 +114,21 @@ def test_stream_cleanup_failure_is_translated(exhausted: bool) -> None:
 def test_typed_command_errors_stream_close_is_idempotent() -> None:
     closed: list[bool] = []
 
-    def source():
-        try:
-            yield 1
-        finally:
+    class Source(Iterator[int]):
+        def __next__(self) -> int:
+            return 1
+
+        def close(self) -> None:
             closed.append(True)
 
     @typed_command_errors
-    def stream():
-        return source()
+    def stream() -> Source:
+        return Source()
 
     result = stream()
+    assert next(result) == 1
     result.close()
     result.close()
-    assert closed == []
+    assert closed == [True]
+    with pytest.raises(StopIteration):
+        next(result)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import itertools
 import logging
 import queue
@@ -10,7 +9,7 @@ import subprocess
 import sys
 import time as real_time
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import IO, Any, cast
 
 import pytest
 
@@ -20,13 +19,6 @@ from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.ext import RunnerHandle
 
 pytestmark = [pytest.mark.shared]
-
-
-def test_run_monitored_subprocess_does_not_accept_broker_context() -> None:
-    parameters = inspect.signature(run_monitored_subprocess).parameters
-
-    assert "db_path" not in parameters
-    assert "config" not in parameters
 
 
 class _FakeRunnerClock:
@@ -160,7 +152,7 @@ def test_stream_reader_normalizes_crlf_split_across_chunks() -> None:
 
     target_queue: queue.Queue[str | None] = queue.Queue()
 
-    subprocess_runner._start_stream_reader(ChunkedStream(), target_queue)
+    subprocess_runner._start_stream_reader(cast(IO[str], ChunkedStream()), target_queue)
 
     assert target_queue.get(timeout=1.0) == "\nnext"
     assert target_queue.get(timeout=1.0) == "\n"
@@ -284,11 +276,6 @@ def test_start_callback_propagates_non_exception_failure_identity(
     def fail_callback(_value: object) -> None:
         raise fatal
 
-    callback_args: dict[str, Callable[[Any], None] | None] = {
-        "on_worker_started": None,
-        "on_runtime_handle_started": None,
-    }
-    callback_args[callback_name] = fail_callback
     stop_calls: list[str] = []
 
     def stop_runtime() -> None:
@@ -320,7 +307,12 @@ def test_start_callback_propagates_non_exception_failure_identity(
                 cancel_requested=None,
                 stop_runtime=stop_runtime,
                 kill_runtime=kill_runtime,
-                **callback_args,
+                on_worker_started=fail_callback
+                if callback_name == "on_worker_started"
+                else None,
+                on_runtime_handle_started=fail_callback
+                if callback_name == "on_runtime_handle_started"
+                else None,
             )
         production_reaped = process.poll() is not None
     finally:

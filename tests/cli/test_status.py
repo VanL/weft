@@ -10,7 +10,8 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 import pytest
 
@@ -21,7 +22,7 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_state import task_state_queue_name
 from weft.helpers import process_create_time, tid_short_form
@@ -29,7 +30,7 @@ from weft.helpers import process_create_time, tid_short_form
 pytestmark = [pytest.mark.shared]
 
 
-def _write_log_event(context, payload: dict[str, Any]) -> None:
+def _write_log_event(context: WeftContext, payload: dict[str, Any]) -> None:
     queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     queue.write(json.dumps(payload))
 
@@ -46,7 +47,7 @@ def _host_runtime_handle(pid: int) -> dict[str, Any]:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT semantics")
-def test_task_status_watch_sigint_exits_cleanly(workdir) -> None:
+def test_task_status_watch_sigint_exits_cleanly(workdir: Path) -> None:
     tid = "1777000000000000888"
     context = build_context(spec_context=workdir)
     started = time.time_ns()
@@ -121,10 +122,10 @@ def test_task_status_watch_sigint_exits_cleanly(workdir) -> None:
 
 
 def _manager_service_payload(
-    context,
+    context: WeftContext,
     *,
     tid: str,
-    status: str = "active",
+    status: Literal["active", "draining", "stopped", "superseded"] = "active",
     name: str = "manager",
     runtime_handle: dict[str, Any] | None = None,
     requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
@@ -144,7 +145,7 @@ def _manager_service_payload(
     )
 
 
-def test_status_reports_no_managers(workdir) -> None:
+def test_status_reports_no_managers(workdir: Path) -> None:
     rc, out, err = run_cli("status", cwd=workdir)
 
     assert rc == 0
@@ -153,7 +154,7 @@ def test_status_reports_no_managers(workdir) -> None:
     assert err == ""
 
 
-def test_status_json_includes_manager_records(workdir) -> None:
+def test_status_json_includes_manager_records(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
 
@@ -191,7 +192,7 @@ def test_status_json_includes_manager_records(workdir) -> None:
         registry.read_many(limit=100)
 
 
-def test_status_json_excludes_wrong_service_key_manager_records(workdir) -> None:
+def test_status_json_excludes_wrong_service_key_manager_records(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
 
@@ -219,7 +220,7 @@ def test_status_json_excludes_wrong_service_key_manager_records(workdir) -> None
         registry.read_many(limit=100)
 
 
-def test_status_filters_stopped_managers_by_default(workdir) -> None:
+def test_status_filters_stopped_managers_by_default(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
 
@@ -246,7 +247,7 @@ def test_status_filters_stopped_managers_by_default(workdir) -> None:
         registry.read_many(limit=100)
 
 
-def test_status_reports_running_task_json(workdir) -> None:
+def test_status_reports_running_task_json(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     tid = "1844674407370955161"
     started = time.time_ns()
@@ -291,7 +292,9 @@ def test_status_reports_running_task_json(workdir) -> None:
     assert entry["metadata"]["owner"] == "tests"
 
 
-def test_status_json_reports_dead_host_running_task_as_stale_liveness(workdir) -> None:
+def test_status_json_reports_dead_host_running_task_as_stale_liveness(
+    workdir: Path,
+) -> None:
     context = build_context(spec_context=workdir)
     tid = "1844674407370955169"
     started = time.time_ns()
@@ -347,7 +350,9 @@ def test_status_json_reports_dead_host_running_task_as_stale_liveness(workdir) -
     assert data["tasks"][0]["reconciliation"]["reason"] == "host_process_not_live"
 
 
-def test_task_status_process_json_reports_dead_pid_stale_liveness(workdir) -> None:
+def test_task_status_process_json_reports_dead_pid_stale_liveness(
+    workdir: Path,
+) -> None:
     context = build_context(spec_context=workdir)
     tid = "1844674407370955170"
     started = time.time_ns()
@@ -413,7 +418,7 @@ def test_task_status_process_json_reports_dead_pid_stale_liveness(workdir) -> No
 
 
 def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
-    workdir,
+    workdir: Path,
 ) -> None:
     context = build_context(spec_context=workdir)
     tid = "1844674407370955171"
@@ -484,7 +489,7 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
     assert err == ""
 
 
-def test_task_status_not_found(workdir) -> None:
+def test_task_status_not_found(workdir: Path) -> None:
     rc, out, err = run_cli("task", "status", "nonexistent", cwd=workdir)
 
     assert rc == 2
@@ -492,7 +497,7 @@ def test_task_status_not_found(workdir) -> None:
     assert "Task nonexistent not found" in err
 
 
-def test_task_status_rejects_removed_live_probe_option(workdir) -> None:
+def test_task_status_rejects_removed_live_probe_option(workdir: Path) -> None:
     rc, out, err = run_cli(
         "task",
         "status",

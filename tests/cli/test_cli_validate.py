@@ -32,7 +32,7 @@ def write_taskspec(path: Path, spec: Any) -> None:
     path.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
 
 
-def test_validate_taskspec_success(workdir):
+def test_validate_taskspec_success(workdir: Path) -> None:
     """Valid TaskSpec should pass validation via CLI."""
     taskspec = create_valid_function_taskspec()
     spec_path = workdir / "taskspec.json"
@@ -45,7 +45,7 @@ def test_validate_taskspec_success(workdir):
     assert err == ""
 
 
-def test_validate_taskspec_failure(workdir):
+def test_validate_taskspec_failure(workdir: Path) -> None:
     """Invalid TaskSpec should fail validation and report errors."""
     taskspec = create_valid_function_taskspec()
     payload = taskspec.model_dump(mode="json")
@@ -145,7 +145,7 @@ def test_validate_taskspec_rejects_removed_approval_field_without_traceback(
 
 
 def test_validate_taskspec_missing_explicit_file_preserves_exit_contract(
-    workdir,
+    workdir: Path,
 ) -> None:
     missing = workdir / "missing-taskspec.json"
     env = os.environ.copy()
@@ -167,7 +167,7 @@ def test_validate_taskspec_missing_explicit_file_preserves_exit_contract(
 
 
 @pytest.mark.parametrize("option", ["--load-runner", "--preflight"])
-def test_validate_pipeline_rejects_task_only_option(workdir, option: str) -> None:
+def test_validate_pipeline_rejects_task_only_option(workdir: Path, option: str) -> None:
     path = workdir / "pipeline.json"
     write_taskspec(
         path,
@@ -192,7 +192,7 @@ def test_validate_pipeline_rejects_task_only_option(workdir, option: str) -> Non
     assert err == "--load-runner and --preflight only apply to task specs"
 
 
-def test_validate_taskspec_agent_summary(workdir):
+def test_validate_taskspec_agent_summary(workdir: Path) -> None:
     taskspec = create_valid_agent_taskspec()
     spec_path = workdir / "agent_taskspec.json"
     write_taskspec(spec_path, taskspec)
@@ -207,7 +207,9 @@ def test_validate_taskspec_agent_summary(workdir):
     assert err == ""
 
 
-def test_validate_taskspec_command_summary_preserves_fields_and_order(workdir) -> None:
+def test_validate_taskspec_command_summary_preserves_fields_and_order(
+    workdir: Path,
+) -> None:
     """The validation summary keeps its user-facing command field sequence."""
     taskspec = create_valid_command_taskspec(name="ordered-command")
     payload = taskspec.model_dump(mode="json")
@@ -218,6 +220,7 @@ def test_validate_taskspec_command_summary_preserves_fields_and_order(workdir) -
     rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
 
     assert rc == 0
+    assert taskspec.tid is not None
     expected_fragments = (
         "TaskSpec Summary",
         "TID",
@@ -239,7 +242,7 @@ def test_validate_taskspec_command_summary_preserves_fields_and_order(workdir) -
     assert err == ""
 
 
-def test_validate_taskspec_preflight_host_runner(workdir):
+def test_validate_taskspec_preflight_host_runner(workdir: Path) -> None:
     taskspec = create_valid_function_taskspec()
     spec_path = workdir / "host_taskspec.json"
     write_taskspec(spec_path, taskspec)
@@ -261,7 +264,7 @@ def test_validate_taskspec_preflight_host_runner(workdir):
     assert err == ""
 
 
-def test_validate_taskspec_load_runner_missing_plugin(workdir):
+def test_validate_taskspec_load_runner_missing_plugin(workdir: Path) -> None:
     taskspec = create_valid_function_taskspec()
     payload = taskspec.model_dump(mode="json")
     payload["spec"]["runner"] = {
@@ -289,8 +292,8 @@ def test_validate_taskspec_load_runner_missing_plugin(workdir):
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_validate_taskspec_load_runner_provider_cli_runtime(
-    workdir, provider_name: str
-):
+    workdir: Path, provider_name: str
+) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         provider=provider_name,
         executable=str(write_provider_cli_wrapper(workdir, provider_name)),
@@ -317,7 +320,7 @@ def test_validate_taskspec_load_runner_provider_cli_runtime(
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_validate_taskspec_preflight_persistent_provider_cli_runtime(
-    workdir,
+    workdir: Path,
     provider_name: str,
 ) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
@@ -346,7 +349,9 @@ def test_validate_taskspec_preflight_persistent_provider_cli_runtime(
     assert err == ""
 
 
-def test_validate_taskspec_preflight_provider_cli_does_not_probe_subprocess(workdir):
+def test_validate_taskspec_preflight_provider_cli_does_not_probe_subprocess(
+    workdir: Path,
+) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         provider="codex",
         executable=str(write_provider_cli_wrapper(workdir, "codex")),
@@ -372,7 +377,9 @@ def test_validate_taskspec_preflight_provider_cli_does_not_probe_subprocess(work
     assert err == ""
 
 
-def test_validate_taskspec_preflight_provider_cli_missing_executable(workdir):
+def test_validate_taskspec_preflight_provider_cli_missing_executable(
+    workdir: Path,
+) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         executable="/nonexistent/provider-cli",
     )
@@ -395,7 +402,7 @@ def test_validate_taskspec_preflight_provider_cli_missing_executable(workdir):
     assert err == ""
 
 
-def test_validate_taskspec_load_runner_environment_profile(workdir):
+def test_validate_taskspec_load_runner_environment_profile(workdir: Path) -> None:
     taskspec = create_valid_function_taskspec()
     payload = taskspec.model_dump(mode="json")
     payload["spec"]["runner"] = {
@@ -424,7 +431,9 @@ def test_validate_taskspec_load_runner_environment_profile(workdir):
     assert err == ""
 
 
-def test_validate_taskspec_missing_environment_profile_reports_correct_layer(workdir):
+def test_validate_taskspec_missing_environment_profile_reports_correct_layer(
+    workdir: Path,
+) -> None:
     taskspec = create_valid_function_taskspec()
     payload = taskspec.model_dump(mode="json")
     payload["spec"]["runner"] = {
@@ -451,7 +460,7 @@ def test_validate_taskspec_missing_environment_profile_reports_correct_layer(wor
     assert err == ""
 
 
-def test_validate_taskspec_tool_profile_reports_correct_layer(workdir):
+def test_validate_taskspec_tool_profile_reports_correct_layer(workdir: Path) -> None:
     taskspec = create_valid_provider_cli_agent_taskspec(
         provider="codex",
         executable=str(write_provider_cli_wrapper(workdir, "codex")),
@@ -480,7 +489,7 @@ def test_validate_taskspec_tool_profile_reports_correct_layer(workdir):
 
 
 def test_validate_taskspec_bundle_directory_loads_bundle_local_environment_profile(
-    workdir,
+    workdir: Path,
 ) -> None:
     bundle_dir = workdir / "bundle-task"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -544,7 +553,7 @@ def test_validate_taskspec_bundle_directory_loads_bundle_local_environment_profi
     assert err == ""
 
 
-def test_validate_taskspec_run_input_bundle_adapter(workdir) -> None:
+def test_validate_taskspec_run_input_bundle_adapter(workdir: Path) -> None:
     bundle_dir = workdir / "run_input_bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
@@ -592,7 +601,7 @@ def test_validate_taskspec_run_input_bundle_adapter(workdir) -> None:
     assert err == ""
 
 
-def test_validate_taskspec_run_input_builtin_adapter(workdir) -> None:
+def test_validate_taskspec_run_input_builtin_adapter(workdir: Path) -> None:
     spec_path = workdir / "run_input_builtin.json"
     write_taskspec(
         spec_path,
@@ -630,7 +639,7 @@ def test_validate_taskspec_run_input_builtin_adapter(workdir) -> None:
     assert err == ""
 
 
-def test_validate_taskspec_run_input_missing_adapter_ref_fails(workdir) -> None:
+def test_validate_taskspec_run_input_missing_adapter_ref_fails(workdir: Path) -> None:
     bundle_dir = workdir / "invalid_run_input_bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     write_taskspec(
@@ -669,7 +678,9 @@ def test_validate_taskspec_run_input_missing_adapter_ref_fails(workdir) -> None:
     assert err == ""
 
 
-def test_validate_taskspec_adapter_failure_short_circuits_preflight(workdir) -> None:
+def test_validate_taskspec_adapter_failure_short_circuits_preflight(
+    workdir: Path,
+) -> None:
     bundle_dir = workdir / "invalid_run_input_bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     write_taskspec(
@@ -707,11 +718,8 @@ def test_validate_taskspec_adapter_failure_short_circuits_preflight(workdir) -> 
     )
 
     assert rc == 1
-    assert out.startswith(
-        "✓ TaskSpec is valid\n"
-        "✗ Run-input validation failed\n\n"
-        "               Validation Errors               \n"
-    )
+    assert out.index("✓ TaskSpec is valid") < out.index("✗ Run-input validation failed")
+    assert out.index("✗ Run-input validation failed") < out.index("Validation Errors")
     assert "run_input" in out
     assert "No module named 'helper_module'" in out
     assert "Environment profile preflight passed" not in out

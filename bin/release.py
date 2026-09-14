@@ -169,6 +169,8 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "microsandbox",
         "mypy",
         "weft",
+        "tests",
+        "bin",
         "integrations/weft_django/weft_django",
         "extensions/weft_docker/weft_docker",
         "extensions/weft_macos_sandbox/weft_macos_sandbox",

@@ -137,7 +137,7 @@ handle, and process-disappearance behavior remains part of the current monitor
 implementation.
 
 _Implementation mapping_:
-`weft/core/resource_monitor.py::ResourceMetrics`,
+`weft/ext.py::ResourceMetrics`,
 `weft/core/resource_monitor.py::BaseResourceMonitor`,
 `weft/core/resource_monitor.py::ResourceMonitor`,
 `weft/core/resource_monitor.py::load_resource_monitor`;
@@ -319,6 +319,8 @@ controls stay here only when they are already shipped and observable:
 - [`06A-Resource_Management_Planned.md`](06A-Resource_Management_Planned.md)
 
 ## Related Plans
+
+- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
 
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)

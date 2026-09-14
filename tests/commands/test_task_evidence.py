@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from tests.helpers.test_backend import prepare_project_root
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
+from weft.commands.types import SystemStatusSnapshot
 from weft.context import build_context
 from weft.core import task_evidence
 from weft.core.task_state import task_state_queue_name
@@ -289,7 +291,7 @@ def test_probe_with_task_reraises_base_exception_from_probe_thread(
 
 
 def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -360,7 +362,9 @@ def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
         assert task_status.reconciliation is not None
         assert task_status.reconciliation["classification"] == "wrapper_lost"
 
-        payload = asdict(status_cmd.cmd_status(all=True, context=root))
+        status_snapshot = status_cmd.cmd_status(all=True, context=root)
+        assert isinstance(status_snapshot, SystemStatusSnapshot)
+        payload = asdict(status_snapshot)
         assert payload is not None
         rows = payload["tasks"]
         assert rows[0]["tid"] == tid
@@ -369,7 +373,9 @@ def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
         assert rows[0]["return_code"] == 1
         assert rows[0]["reconciliation"]["classification"] == "wrapper_lost"
 
-        payload = asdict(status_cmd.cmd_status(context=root))
+        status_snapshot = status_cmd.cmd_status(context=root)
+        assert isinstance(status_snapshot, SystemStatusSnapshot)
+        payload = asdict(status_snapshot)
         assert payload is not None
         assert payload["tasks"] == []
     finally:
@@ -377,7 +383,7 @@ def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
 
 
 def test_one_shot_outbox_without_terminal_log_classifies_completed(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -414,7 +420,9 @@ def test_one_shot_outbox_without_terminal_log_classifies_completed(
         assert task_status.reconciliation is not None
         assert task_status.reconciliation["classification"] == "result_without_terminal"
 
-        payload = asdict(status_cmd.cmd_status(all=True, context=root))
+        status_snapshot = status_cmd.cmd_status(all=True, context=root)
+        assert isinstance(status_snapshot, SystemStatusSnapshot)
+        payload = asdict(status_snapshot)
         assert payload is not None
         rows = payload["tasks"]
         assert rows[0]["status"] == "completed"
@@ -427,7 +435,7 @@ def test_one_shot_outbox_without_terminal_log_classifies_completed(
 
 
 def test_one_shot_outbox_evidence_beats_dead_runtime_reconciliation(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -462,7 +470,7 @@ def test_one_shot_outbox_evidence_beats_dead_runtime_reconciliation(
 
 def test_claimed_outbox_without_terminal_reports_recovery_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -522,7 +530,7 @@ def test_claimed_outbox_without_terminal_reports_recovery_diagnostic(
 
 def test_stale_liveness_without_terminal_or_claimed_result_is_not_failed(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -555,7 +563,7 @@ def test_stale_liveness_without_terminal_or_claimed_result_is_not_failed(
 
 
 def test_outbox_evidence_does_not_complete_persistent_or_ambiguous_tasks(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -614,7 +622,7 @@ def test_outbox_evidence_does_not_complete_persistent_or_ambiguous_tasks(
 
 
 def test_ping_pong_ignores_unmatched_and_preserves_terminal_ctrl_out(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -694,7 +702,7 @@ def test_ping_pong_ignores_unmatched_and_preserves_terminal_ctrl_out(
 
 
 def test_known_tid_ping_pong_updates_task_status(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -771,7 +779,7 @@ def test_known_tid_ping_pong_updates_task_status(
         task.stop(join=False)
 
 
-def test_project_status_does_not_active_ping_tasks_by_default(tmp_path) -> None:
+def test_project_status_does_not_active_ping_tasks_by_default(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -787,7 +795,9 @@ def test_project_status_does_not_active_ping_tasks_by_default(tmp_path) -> None:
     )
     ctrl_in = ctx.queue(f"T{tid}.ctrl_in", persistent=True)
     try:
-        payload = asdict(status_cmd.cmd_status(all=True, context=root))
+        status_snapshot = status_cmd.cmd_status(all=True, context=root)
+        assert isinstance(status_snapshot, SystemStatusSnapshot)
+        payload = asdict(status_snapshot)
 
         assert payload is not None
         assert ctrl_in.peek_one() is None
@@ -822,7 +832,7 @@ def _manager_wrapper_lost_envelope(tid: str) -> str:
     )
 
 
-def test_task_terminal_ctrl_out_beats_manager_wrapper_lost(tmp_path) -> None:
+def test_task_terminal_ctrl_out_beats_manager_wrapper_lost(tmp_path: Path) -> None:
     """A task-sourced terminal envelope outranks a manager wrapper_lost failsafe.
 
     Regression for the completed->failed inversion: when a task ``completed``

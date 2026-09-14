@@ -18,6 +18,7 @@ import traceback
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
+from weakref import WeakValueDictionary
 
 import psutil
 
@@ -59,6 +60,8 @@ from weft.helpers import (
     process_create_time,
     terminate_process_tree,
 )
+from weft.liveness.models import RuntimeLiveness
+from weft.liveness.registry import register_runtime_liveness_probe
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,25 @@ SQLITE_SETUP_DEADLINE_MARKERS: Final[tuple[str, ...]] = (
     "setup deadline expired",
     "could not make progress within 10.0s",
 )
+TEST_HARNESS_LIVENESS_PROVIDER: Final[str] = "weft-test-harness"
+_inline_manager_threads: WeakValueDictionary[str, threading.Thread] = (
+    WeakValueDictionary()
+)
+"""Observe retained drivers by full TID without owning threads or harnesses."""
+
+
+def _test_harness_runtime_liveness(
+    handle: RunnerHandle, _timeout_seconds: float
+) -> RuntimeLiveness:
+    """Report owned driver lifetime, not responsiveness (Spec: [TS-0])."""
+
+    tid = handle.metadata.get("manager_tid")
+    if not isinstance(tid, str):
+        return "unknown"
+    thread = _inline_manager_threads.get(tid)
+    if thread is None or thread.ident is None:
+        return "unknown"
+    return "live" if thread.is_alive() else "stale"
 
 
 def _is_windows() -> bool:
@@ -247,13 +269,29 @@ class WeftTestHarness:
             manager_tid,
             idle_timeout_override=0.0,
         )
+        spec_payload = spec.model_dump(mode="python")
+        spec_payload["spec"]["enable_process_title"] = False
+        spec = type(spec).model_validate(
+            spec_payload,
+            context={"auto_expand": False},
+        )
         manager_runtime_handle = RunnerHandle(
             runner="host",
             kind="supervised-process",
             id=str(os.getpid()),
             control={"authority": "external-supervisor"},
-            observations={"host_pids": [os.getpid()]},
-            metadata={"supervisor": "weft-test-harness"},
+            observations={
+                "host_pids": [os.getpid()],
+                "liveness_provider": TEST_HARNESS_LIVENESS_PROVIDER,
+            },
+            metadata={
+                "supervisor": "weft-test-harness",
+                "manager_tid": manager_tid,
+            },
+        )
+        register_runtime_liveness_probe(
+            TEST_HARNESS_LIVENESS_PROVIDER,
+            _test_harness_runtime_liveness,
         )
         manager_config = dict(context.config)
         manager_config["MANAGER_RUNTIME_HANDLE_JSON"] = json.dumps(
@@ -277,6 +315,8 @@ class WeftTestHarness:
         )
         thread.start()
         self._inline_managers.append((manager, thread, stop_event))
+        # Publish only after start() returns: pre-start evidence stays unknown.
+        _inline_manager_threads[manager_tid] = thread
         self.register_manager_tid(manager_tid)
 
         deadline = time.monotonic() + timeout
@@ -845,17 +885,23 @@ class WeftTestHarness:
         return host_pids[0] if host_pids else None
 
     @staticmethod
-    def _mapping_host_processes(
+    def _mapping_runtime_handle(
         data: dict[str, object],
-    ) -> list[tuple[int, float | None]]:
+    ) -> RunnerHandle | None:
         runtime_handle = data.get("runtime_handle")
         if not isinstance(runtime_handle, dict):
-            return []
+            return None
         try:
-            handle = RunnerHandle.from_dict(runtime_handle)
+            return RunnerHandle.from_dict(runtime_handle)
         except (TypeError, ValueError):
-            return []
-        return list(handle.scoped_host_processes())
+            return None
+
+    @classmethod
+    def _mapping_host_processes(
+        cls, data: dict[str, object]
+    ) -> list[tuple[int, float | None]]:
+        handle = cls._mapping_runtime_handle(data)
+        return list(handle.scoped_host_processes()) if handle is not None else []
 
     @classmethod
     def _mapping_host_pids(cls, data: dict[str, object]) -> list[int]:
@@ -988,7 +1034,18 @@ class WeftTestHarness:
                 continue
             if record.get("status") != "active":
                 continue
-            if not any(
+            handle = self._mapping_runtime_handle(record)
+            if (
+                handle is not None
+                and handle.observations.get("liveness_provider")
+                == TEST_HARNESS_LIVENESS_PROVIDER
+            ):
+                if (
+                    handle.metadata.get("manager_tid") != record.get("tid")
+                    or _test_harness_runtime_liveness(handle, 0.0) != "live"
+                ):
+                    continue
+            elif not any(
                 self._pid_matches_mapping_identity(pid, create_time)
                 for pid, create_time in self._mapping_host_processes(record)
             ):
