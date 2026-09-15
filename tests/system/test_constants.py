@@ -6,6 +6,7 @@ import ast
 import os
 import re
 from collections.abc import MutableMapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -137,6 +138,9 @@ def test_explicit_override_normalization_preserves_error_contract(
 
     with (
         patch.dict(os.environ, {}, clear=True),
+        pytest.warns(UserWarning, match=rf"\b{name}=")
+        if expected_error is InvalidConfigError
+        else nullcontext(),
         pytest.raises(expected_error, match=name),
     ):
         load_config({name: value})
@@ -536,6 +540,10 @@ class TestLoadConfig:
                 {"WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": "-1"},
                 clear=True,
             ),
+            pytest.warns(
+                UserWarning,
+                match=r"\bWEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS=",
+            ),
             pytest.raises(
                 ValueError,
                 match="WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
@@ -554,6 +562,7 @@ class TestLoadConfig:
                 },
                 clear=True,
             ),
+            pytest.warns(UserWarning, match=r"\bWEFT_TASK_MONITOR_INTERVAL_SECONDS="),
             pytest.raises(ValueError, match="WEFT_TASK_MONITOR_INTERVAL_SECONDS"),
         ):
             load_config()
@@ -565,6 +574,7 @@ class TestLoadConfig:
                 {"WEFT_TASK_MONITOR_BATCH_SIZE": "0"},
                 clear=True,
             ),
+            pytest.warns(UserWarning, match=r"\bWEFT_TASK_MONITOR_BATCH_SIZE="),
             pytest.raises(ValueError, match="WEFT_TASK_MONITOR_BATCH_SIZE"),
         ):
             load_config()
@@ -575,6 +585,9 @@ class TestLoadConfig:
                 os.environ,
                 {"WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": "0"},
                 clear=True,
+            ),
+            pytest.warns(
+                UserWarning, match=r"\bWEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT="
             ),
             pytest.raises(ValueError, match="WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"),
         ):
@@ -587,6 +600,9 @@ class TestLoadConfig:
                 {"WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": "0"},
                 clear=True,
             ),
+            pytest.warns(
+                UserWarning, match=r"\bWEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE="
+            ),
             pytest.raises(ValueError, match="WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"),
         ):
             load_config()
@@ -597,6 +613,9 @@ class TestLoadConfig:
                 os.environ,
                 {"WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0"},
                 clear=True,
+            ),
+            pytest.warns(
+                UserWarning, match=r"\bWEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS="
             ),
             pytest.raises(ValueError, match="WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"),
         ):
@@ -647,6 +666,7 @@ class TestLoadConfig:
                 {"WEFT_MANAGER_SERVE_LOG_LEVEL": "verbose"},
                 clear=True,
             ),
+            pytest.warns(UserWarning, match=r"\bWEFT_MANAGER_SERVE_LOG_LEVEL="),
             pytest.raises(ValueError, match="WEFT_MANAGER_SERVE_LOG_LEVEL"),
         ):
             load_config()
@@ -658,6 +678,9 @@ class TestLoadConfig:
                 os.environ,
                 {"WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": value},
                 clear=True,
+            ),
+            pytest.warns(
+                UserWarning, match=r"\bWEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS="
             ),
             pytest.raises(ValueError, match="WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS"),
         ):
@@ -778,6 +801,7 @@ class TestLoadConfig:
     ) -> None:
         with (
             patch.dict(os.environ, {name: value}, clear=True),
+            pytest.warns(UserWarning, match=rf"\b{name}="),
             pytest.raises(ValueError, match=name),
         ):
             load_config()
@@ -806,6 +830,7 @@ class TestLoadConfig:
     def test_weft_directory_name_env_rejects_invalid_values(self, value: str) -> None:
         with (
             patch.dict(os.environ, {"WEFT_DIRECTORY_NAME": value}, clear=True),
+            pytest.warns(UserWarning, match=r"\bWEFT_DIRECTORY_NAME="),
             pytest.raises(ValueError, match="WEFT_DIRECTORY_NAME"),
         ):
             load_config()
@@ -937,6 +962,7 @@ class TestLoadConfig:
     def test_manager_timeout_env_rejects_invalid_values(self, value: str) -> None:
         with (
             patch.dict(os.environ, {"WEFT_MANAGER_LIFETIME_TIMEOUT": value}),
+            pytest.warns(UserWarning, match=r"\bWEFT_MANAGER_LIFETIME_TIMEOUT="),
             pytest.raises(ValueError, match="WEFT_MANAGER_LIFETIME_TIMEOUT"),
         ):
             load_config()

@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -827,7 +827,12 @@ def test_deferred_failures_register_no_callback(
             if failure == "payload" and family == "reference"
             else (TypeError, ValueError)
         )
-        with pytest.raises(error):
+        with (
+            pytest.warns(UserWarning, match=r"\bWEFT_MAX_MESSAGE_SIZE=")
+            if failure == "config"
+            else nullcontext(),
+            pytest.raises(error),
+        ):
             _deferred_family(
                 family,
                 root=TEST_ROOT,
