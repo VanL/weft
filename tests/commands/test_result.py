@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Self, TypedDict, cast
 
@@ -682,7 +683,7 @@ def test_await_result_materialization_falls_back_on_malformed_io(
     monkeypatch.setattr(
         result_cmd,
         "_load_taskspec_payload",
-        lambda _context, requested_tid: (
+        lambda _context, requested_tid, **_kwargs: (
             taskspec_payload if requested_tid == tid else None
         ),
     )
@@ -731,11 +732,13 @@ def test_load_taskspec_payload_closes_log_queue() -> None:
 
         def peek_generator(
             self,
+            queue_name: str,
             *,
             with_timestamps: bool = False,
             after_timestamp: int | None = None,
             before_timestamp: int | None = None,
         ) -> Iterator[tuple[str, int]]:
+            assert queue_name == WEFT_GLOBAL_LOG_QUEUE
             assert with_timestamps is True
             assert after_timestamp == int(tid) - 1
             assert before_timestamp is None
@@ -754,12 +757,22 @@ def test_load_taskspec_payload_closes_log_queue() -> None:
         def close(self) -> None:
             self.closed = True
 
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.close()
+
+        @contextmanager
+        def get_connection(self) -> Iterator[Self]:
+            yield self
+
     queue = FakeQueue()
 
     class FakeContext:
         def queue(self, name: str, *, persistent: bool = False) -> FakeQueue:
             assert name == WEFT_GLOBAL_LOG_QUEUE
-            assert persistent is False
+            assert persistent is True
             return queue
 
     taskspec = _load_taskspec_payload(
@@ -2077,7 +2090,9 @@ def test_await_task_result_stream_preserves_error_payload_selection(
     outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
 
     outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
-    monkeypatch.setattr(result_cmd, "_queue_names_exist", lambda *_args: False)
+    monkeypatch.setattr(
+        result_cmd, "_queue_names_exist", lambda *_args, **_kwargs: False
+    )
 
     def _no_log_events(
         _queue: Queue, last_timestamp: int | None, _tid: str
@@ -2145,7 +2160,9 @@ def test_await_result_materialization_waits_for_taskspec_after_activity_event(
     }
     load_calls = 0
 
-    def _load(_context: WeftContext, requested_tid: str) -> dict[str, object] | None:
+    def _load(
+        _context: WeftContext, requested_tid: str, *, broker: Any | None = None
+    ) -> dict[str, object] | None:
         nonlocal load_calls
         assert requested_tid == tid
         load_calls += 1
@@ -2177,7 +2194,9 @@ def test_await_result_materialization_waits_for_taskspec_after_activity_event(
             return
 
     monkeypatch.setattr(result_cmd, "_load_taskspec_payload", _load)
-    monkeypatch.setattr(result_cmd, "_queue_names_exist", lambda *_args: False)
+    monkeypatch.setattr(
+        result_cmd, "_queue_names_exist", lambda *_args, **_kwargs: False
+    )
     monkeypatch.setattr(
         result_cmd,
         "_result_surface_has_activity",

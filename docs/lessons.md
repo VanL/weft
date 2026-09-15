@@ -1341,3 +1341,20 @@ and `tests/system/test_config_transport.py`.
   ownership and actual thread lifetime for harness liveness; absence of local
   ownership is unknown, not live. Thread existence is not responsiveness proof.
   See the [xdist contention investigation](plans/2026-09-14-xdist-title-contention-plan.md).
+
+## 2026-09-14 Connection Reuse Must Follow the Owner
+
+- A persistent Queue recreated by every helper can still perform a fresh
+  backend schema check per facade. Task helpers should borrow an existing
+  owner's connection, not merely set `persistent=True` on new handles. Verify
+  actual connection opens after warmup, fresh independent commits, rollback,
+  and bounded cleanup. Connection lifetime must not extend transaction lifetime.
+- Releasing a worker queue lease does not necessarily recycle its thread-local
+  core while reactor leases keep the shared session alive. Use the public
+  thread-local cleanup boundary before that worker exits; never recycle the
+  reactor's connection from another thread.
+- Patching `module.os.getpid` mutates the shared stdlib module. Real broker
+  resources can then detect a false fork after the patch is restored, even
+  during finalization. Isolate a run-ID test's module-local OS view instead of
+  changing process identity for every dependency. See the
+  [connection reuse repair](plans/2026-09-14-bounded-registry-connection-reuse-plan.md).

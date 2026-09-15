@@ -17,6 +17,7 @@ import logging
 import os
 import time
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -62,6 +63,7 @@ from weft.core.monitor.store import (
     open_monitor_store,
 )
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 from weft.core.runner_diagnostics import diagnostic_summary
 from weft.core.task_state import (
     latest_task_state_rows,
@@ -69,7 +71,6 @@ from weft.core.task_state import (
     task_state_queue_name,
 )
 from weft.helpers import (
-    iter_queue_json_entries,
     pid_is_live,
     terminate_verified_process_tree,
     tid_short_form,
@@ -117,15 +118,19 @@ def _read_tid_mapping_entries(
     ]
 
 
-def mapping_for_tid(ctx: WeftContext, tid: str) -> dict[str, Any] | None:
-    full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
-    row = read_task_state_snapshot(ctx, full)
+def mapping_for_tid(
+    ctx: WeftContext, tid: str, *, broker: Any | None = None
+) -> dict[str, Any] | None:
+    full = resolve_full_tid(ctx, tid, broker=broker) or tid.strip().lstrip("T")
+    row = read_task_state_snapshot(ctx, full, broker=broker)
     return row[1] if row is not None else None
 
 
 def _load_taskspec_payload_bounded(
     ctx: WeftContext,
     tid: str,
+    *,
+    broker: Any | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest TaskSpec for a full TID without old global replay.
 
@@ -134,12 +139,12 @@ def _load_taskspec_payload_bounded(
 
     if not tid.isdigit():
         return None
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     latest: dict[str, Any] | None = None
-    try:
+    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
         for payload, _timestamp in system_cmd._iter_log_events(
-            log_queue,
+            None,
             since_timestamp=int(tid) - 1,
+            broker=db,
         ):
             if payload.get("tid") != tid:
                 continue
@@ -147,11 +152,11 @@ def _load_taskspec_payload_bounded(
             if isinstance(taskspec, dict):
                 latest = taskspec
         return latest
-    finally:
-        log_queue.close()
 
 
-def resolve_full_tid(ctx: WeftContext, raw: str) -> str | None:
+def resolve_full_tid(
+    ctx: WeftContext, raw: str, *, broker: Any | None = None
+) -> str | None:
     """Resolve one full or unambiguous derived short TID.
 
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3].
@@ -161,7 +166,7 @@ def resolve_full_tid(ctx: WeftContext, raw: str) -> str | None:
         return None
     if is_task_tid(candidate):
         return candidate
-    matches = system_cmd._read_tid_mappings(ctx).get(candidate, [])
+    matches = system_cmd._read_tid_mappings(ctx, broker=broker).get(candidate, [])
     if len(matches) > 1:
         raise CommandUsageError(
             f"Ambiguous short TID {candidate}: {', '.join(matches)}"
@@ -385,49 +390,60 @@ def task_terminal_snapshot(
         )
 
     deadline = time.monotonic() + timeout if timeout > 0 else None
-    while True:
-        taskspec_payload = _load_taskspec_payload_bounded(ctx, full_tid)
-        mapping_entry = mapping_for_tid(ctx, full_tid)
-        evidence = task_evidence.known_tid_evidence(
-            ctx,
-            tid=full_tid,
-            taskspec_payload=taskspec_payload,
-            mapping_entry=mapping_entry,
-        )
-        if evidence is not None:
-            snapshot = task_evidence.terminal_snapshot_from_evidence(evidence)
-            if snapshot.status in {"running", "pending"} and deadline is not None:
-                if time.monotonic() >= deadline:
-                    return snapshot
-                time.sleep(
-                    min(
-                        TASK_EVIDENCE_POLL_INTERVAL,
-                        max(0.0, deadline - time.monotonic()),
-                    )
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log_queue:
+        while True:
+            with log_queue.get_connection() as broker:
+                taskspec_payload = _load_taskspec_payload_bounded(
+                    ctx, full_tid, broker=broker
                 )
-                continue
-            return snapshot
+                mapping_entry = mapping_for_tid(ctx, full_tid, broker=broker)
+                evidence = task_evidence.known_tid_evidence(
+                    ctx,
+                    tid=full_tid,
+                    taskspec_payload=taskspec_payload,
+                    mapping_entry=mapping_entry,
+                    broker=broker,
+                )
+                status_snapshot = (
+                    _task_status(
+                        full_tid,
+                        include_terminal=True,
+                        context=ctx,
+                        broker=broker,
+                        observation_queue=log_queue,
+                    )
+                    if evidence is None
+                    else None
+                )
+            if evidence is not None:
+                snapshot = task_evidence.terminal_snapshot_from_evidence(evidence)
+                if snapshot.status in {"running", "pending"} and deadline is not None:
+                    if time.monotonic() >= deadline:
+                        return snapshot
+                    time.sleep(
+                        min(
+                            TASK_EVIDENCE_POLL_INTERVAL,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    )
+                    continue
+                return snapshot
 
-        status_snapshot = task_status(
-            full_tid,
-            include_terminal=True,
-            context=ctx,
-        )
-        terminal_status_snapshot = _terminal_snapshot_from_status_snapshot(
-            status_snapshot
-        )
-        if terminal_status_snapshot is not None:
-            return terminal_status_snapshot
-
-        if deadline is None or time.monotonic() >= deadline:
-            return TaskTerminalSnapshot(
-                tid=full_tid,
-                status="unknown",
-                source="observer",
+            terminal_status_snapshot = _terminal_snapshot_from_status_snapshot(
+                status_snapshot
             )
-        time.sleep(
-            min(TASK_EVIDENCE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
-        )
+            if terminal_status_snapshot is not None:
+                return terminal_status_snapshot
+
+            if deadline is None or time.monotonic() >= deadline:
+                return TaskTerminalSnapshot(
+                    tid=full_tid,
+                    status="unknown",
+                    source="observer",
+                )
+            time.sleep(
+                min(TASK_EVIDENCE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
+            )
 
 
 def ack_terminal_snapshot(
@@ -462,9 +478,31 @@ def task_status(
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> system_cmd.TaskSnapshot | None:
+    return _task_status(
+        tid,
+        include_terminal=include_terminal,
+        ping=ping,
+        probe_timeout=probe_timeout,
+        context=context,
+        context_path=context_path,
+    )
+
+
+def _task_status(
+    tid: str,
+    *,
+    include_terminal: bool = True,
+    ping: bool = False,
+    probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+    broker: Any | None = None,
+    observation_queue: Queue | None = None,
+) -> system_cmd.TaskSnapshot | None:
+    """Shared status projection with explicit bounded resource loans [MF-5]."""
     ctx = _coerce_context(context=context, context_path=context_path)
-    full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
-    pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid)
+    full_tid = resolve_full_tid(ctx, tid, broker=broker) or tid.strip().lstrip("T")
+    pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid, broker=broker)
     if ping and is_task_tid(full_tid):
         taskspec_payload = load_latest_taskspec_payload(ctx, full_tid)
         mapping_entry = mapping_for_tid(ctx, full_tid)
@@ -488,23 +526,28 @@ def task_status(
             ctx,
             full_tid,
             include_terminal=include_terminal,
+            broker=broker,
         )
     else:
         snapshots = system_cmd._collect_task_snapshots(
             ctx,
             include_terminal=include_terminal,
             tid_filters={full_tid},
+            broker=broker,
         )
         base_snapshot = snapshots[0] if snapshots else None
     if pipeline_snapshot is not None and _prefer_pipeline_snapshot(
         pipeline_snapshot, base_snapshot
     ):
-        return _pipeline_task_snapshot(ctx, full_tid, pipeline_snapshot, base_snapshot)
+        return _pipeline_task_snapshot(
+            ctx, full_tid, pipeline_snapshot, base_snapshot, broker=broker
+        )
     if base_snapshot is None and is_task_tid(full_tid):
         base_snapshot = _monitor_store_task_snapshot(
             ctx,
             full_tid,
             include_terminal=include_terminal,
+            queue=observation_queue,
         )
     if pipeline_snapshot is not None and base_snapshot is not None:
         base_snapshot = replace(base_snapshot, pipeline_status=pipeline_snapshot)
@@ -568,6 +611,7 @@ def _monitor_store_task_snapshot(
     tid: str,
     *,
     include_terminal: bool,
+    queue: Queue | None = None,
 ) -> system_cmd.TaskSnapshot | None:
     """Return a snapshot from Monitor state after raw task-log retirement.
 
@@ -579,7 +623,7 @@ def _monitor_store_task_snapshot(
     """
 
     try:
-        store = open_monitor_store(ctx, config=ctx.config)
+        store = open_monitor_store(ctx, config=ctx.config, queue=queue)
         record = store.get_task(tid)
     except MonitorStoreNotInitialized:
         return None
@@ -882,20 +926,41 @@ def task_snapshot(
 ) -> TaskSnapshot | None:
     """Return one public task snapshot or `None` if absent."""
 
+    return _task_snapshot(
+        tid,
+        include_terminal=include_terminal,
+        context=context,
+        context_path=context_path,
+    )
+
+
+def _task_snapshot(
+    tid: str,
+    *,
+    include_terminal: bool = True,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+    broker: Any | None = None,
+    observation_queue: Queue | None = None,
+) -> TaskSnapshot | None:
+    """Project fresh public fields using an observation owner's loans [MF-5]."""
+
     ctx = _coerce_context(context=context, context_path=context_path)
-    snapshot = task_status(
+    snapshot = _task_status(
         tid,
         include_terminal=include_terminal,
         context=ctx,
+        broker=broker,
+        observation_queue=observation_queue,
     )
     if snapshot is None:
         return None
     return _public_snapshot(
         snapshot,
         taskspec_payload=(
-            _load_taskspec_payload_bounded(ctx, snapshot.tid)
+            _load_taskspec_payload_bounded(ctx, snapshot.tid, broker=broker)
             if is_task_tid(snapshot.tid)
-            else load_latest_taskspec_payload(ctx, snapshot.tid)
+            else load_latest_taskspec_payload(ctx, snapshot.tid, broker=broker)
         ),
     )
 
@@ -913,20 +978,26 @@ def watch_task_status(
     ctx = _coerce_context(context=context, context_path=context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     deadline = _deadline_from_timeout(timeout)
-    monitor_queues = [ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)]
-    if is_task_tid(full_tid):
-        monitor_queues.append(
-            ctx.queue(task_state_queue_name(full_tid), persistent=False)
-        )
-    monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
-    last_seen: tuple[int | None, str | None] | None = None
-    try:
+    with ExitStack() as stack:
+        log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+        stack.callback(log_queue.close)
+        monitor_queues = [log_queue]
+        if is_task_tid(full_tid):
+            state_queue = ctx.queue(task_state_queue_name(full_tid), persistent=True)
+            stack.callback(state_queue.close)
+            monitor_queues.append(state_queue)
+        monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
+        stack.callback(monitor.close)
+        last_seen: tuple[int | None, str | None] | None = None
         while True:
-            snapshot = task_snapshot(
-                full_tid,
-                include_terminal=include_terminal,
-                context=ctx,
-            )
+            with log_queue.get_connection() as broker:
+                snapshot = _task_snapshot(
+                    full_tid,
+                    include_terminal=include_terminal,
+                    context=ctx,
+                    broker=broker,
+                    observation_queue=log_queue,
+                )
             current = (
                 snapshot.last_timestamp if snapshot is not None else None,
                 snapshot.status if snapshot is not None else None,
@@ -945,10 +1016,6 @@ def watch_task_status(
                 else min(system_cmd.STATUS_WATCH_MIN_INTERVAL, remaining)
             )
             monitor.wait(wait_timeout)
-    finally:
-        monitor.close()
-        for queue in monitor_queues:
-            queue.close()
 
 
 def resolve_tid(
@@ -991,18 +1058,19 @@ def _prefer_pipeline_snapshot(
 def _latest_pipeline_status_snapshot(
     ctx: WeftContext,
     tid: str,
+    *,
+    broker: Any | None = None,
 ) -> dict[str, Any] | None:
-    taskspec_payload = load_latest_taskspec_payload(ctx, tid)
+    taskspec_payload = load_latest_taskspec_payload(ctx, tid, broker=broker)
     if not isinstance(taskspec_payload, dict):
         return None
     status_queue = pipeline_status_queue_name(tid, taskspec_payload)
     if not isinstance(status_queue, str) or not status_queue:
         return None
 
-    queue = ctx.queue(status_queue, persistent=True)
-    try:
+    with queue_broker(ctx, status_queue, broker=broker) as db:
         latest: dict[str, Any] | None = None
-        for payload, _timestamp in iter_queue_json_entries(queue):
+        for payload, _timestamp in iter_broker_queue_json_entries(db, status_queue):
             payload_tid = payload.get("pipeline_tid")
             if payload.get("type") != "pipeline_status":
                 continue
@@ -1010,8 +1078,6 @@ def _latest_pipeline_status_snapshot(
                 continue
             latest = payload
         return latest
-    finally:
-        queue.close()
 
 
 def _pipeline_task_snapshot(
@@ -1019,8 +1085,10 @@ def _pipeline_task_snapshot(
     tid: str,
     pipeline_status: dict[str, Any],
     base_snapshot: system_cmd.TaskSnapshot | None,
+    *,
+    broker: Any | None = None,
 ) -> system_cmd.TaskSnapshot:
-    taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
+    taskspec_payload = load_latest_taskspec_payload(ctx, tid, broker=broker) or {}
     state = taskspec_payload.get("state") if isinstance(taskspec_payload, dict) else {}
     state = state if isinstance(state, dict) else {}
     started_at = (
@@ -1060,7 +1128,7 @@ def _pipeline_task_snapshot(
     runtime = base_snapshot.runtime if base_snapshot is not None else None
 
     if base_snapshot is None:
-        mapping_entry = mapping_for_tid(ctx, tid)
+        mapping_entry = mapping_for_tid(ctx, tid, broker=broker)
         runner = system_cmd._runner_name_for_snapshot(
             taskspec=taskspec_payload if isinstance(taskspec_payload, dict) else {},
             mapping_entry=mapping_entry,
@@ -1133,7 +1201,8 @@ def _ctrl_out_for_tid(
     *,
     taskspec: dict[str, Any] | None = None,
 ) -> str:
-    taskspec = taskspec or load_latest_taskspec_payload(ctx, tid)
+    if taskspec is None:
+        taskspec = load_latest_taskspec_payload(ctx, tid)
     if taskspec:
         io_section = taskspec.get("io") or {}
         control = io_section.get("control") or {}
@@ -1247,19 +1316,26 @@ class _ControlSurfaceResources:
         self.ctrl_out_name = ctrl_out_name
         self.pipeline_status_name = pipeline_status_name
         self._queues: list[Queue] = []
+        self._stack = ExitStack()
         self._monitor: QueueChangeMonitor | None = None
         try:
             if state_queue_name is not None:
-                self._queues.append(ctx.queue(state_queue_name, persistent=True))
-            self._queues.append(ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True))
-            self.ctrl_out_queue = ctx.queue(ctrl_out_name, persistent=True)
-            self._queues.append(self.ctrl_out_queue)
+                self._open_queue(ctx, state_queue_name)
+            self.log_queue = self._open_queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
+            self.ctrl_out_queue = self._open_queue(ctx, ctrl_out_name)
             if isinstance(pipeline_status_name, str) and pipeline_status_name:
-                self._queues.append(ctx.queue(pipeline_status_name, persistent=True))
+                self._open_queue(ctx, pipeline_status_name)
             self._monitor = QueueChangeMonitor(self._queues, config=ctx.config)
+            self._stack.callback(self._monitor.close)
         except BaseException:
             self.close()
             raise
+
+    def _open_queue(self, ctx: WeftContext, name: str) -> Queue:
+        queue = ctx.queue(name, persistent=True)
+        self._stack.callback(queue.close)
+        self._queues.append(queue)
+        return queue
 
     def matches(
         self,
@@ -1287,14 +1363,9 @@ class _ControlSurfaceResources:
     def close(self) -> None:
         """Close the monitor before its queues, at most once per resource."""
 
-        monitor = self._monitor
         self._monitor = None
-        if monitor is not None:
-            monitor.close()
-        queues = self._queues
         self._queues = []
-        for queue in queues:
-            queue.close()
+        self._stack.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1417,7 +1488,10 @@ def _await_control_surface(
     try:
         kill_ack_deadline: float | None = None
         while True:
-            taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
+            with resources.log_queue.get_connection() as broker:
+                taskspec_payload = (
+                    load_latest_taskspec_payload(ctx, tid, broker=broker) or {}
+                )
             pipeline_status_queue = pipeline_status_queue_name(tid, taskspec_payload)
             ctrl_out_queue = _ctrl_out_for_tid(
                 ctx,
@@ -1458,8 +1532,14 @@ def _await_control_surface(
                     observation.kill_ack_observed_at + CONTROL_SURFACE_WAIT_INTERVAL
                 )
 
-            latest_entry = mapping_for_tid(ctx, tid) or latest_entry
-            snapshot = task_status(tid, context=ctx)
+            with resources.log_queue.get_connection() as broker:
+                latest_entry = mapping_for_tid(ctx, tid, broker=broker) or latest_entry
+                snapshot = _task_status(
+                    tid,
+                    context=ctx,
+                    broker=broker,
+                    observation_queue=resources.log_queue,
+                )
             if snapshot is not None:
                 latest_snapshot = snapshot
                 if snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:

@@ -1,6 +1,7 @@
 """Shared keyed control-channel probe helpers.
 
 Spec references:
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3]
 - docs/specifications/07-System_Invariants.md [MANAGER.8]
 """
@@ -11,11 +12,11 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_PING,
@@ -163,7 +164,7 @@ def pong_proves_dispatch_eligible(
     return payload.get("weft_context") == expected_context
 
 
-def _retire_reply_row(ctrl_out: Queue, ctrl_out_name: str, message_id: int) -> None:
+def _retire_reply_row(broker: Any, ctrl_out_name: str, message_id: int) -> None:
     """Best-effort exact-ID delete of one probe-owned ctrl_out reply row.
 
     Retirement is hygiene, not proof: failures never change the caller's
@@ -172,7 +173,7 @@ def _retire_reply_row(ctrl_out: Queue, ctrl_out_name: str, message_id: int) -> N
     """
 
     try:
-        ctrl_out.delete(message_id=message_id)
+        broker.delete_message_ids(ctrl_out_name, [message_id])
     except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
         logger.debug(
             "Failed to retire keyed probe reply",
@@ -181,7 +182,7 @@ def _retire_reply_row(ctrl_out: Queue, ctrl_out_name: str, message_id: int) -> N
         )
 
 
-def _sweep_own_replies(ctrl_out: Queue, ctrl_out_name: str, request_id: str) -> None:
+def _sweep_own_replies(broker: Any, ctrl_out_name: str, request_id: str) -> None:
     """Best-effort single sweep deleting every row keyed to ``request_id``.
 
     Runs once at probe timeout to cover the reply-arrived-after-last-peek
@@ -194,7 +195,7 @@ def _sweep_own_replies(ctrl_out: Queue, ctrl_out_name: str, request_id: str) -> 
 
     reply_ids: list[int] = []
     try:
-        iterator = ctrl_out.peek_generator(with_timestamps=True)
+        iterator = broker.peek_generator(ctrl_out_name, with_timestamps=True)
         with closing_queue_iterator(iterator) as rows:
             for item in rows:
                 if not isinstance(item, tuple) or len(item) != 2:
@@ -210,7 +211,28 @@ def _sweep_own_replies(ctrl_out: Queue, ctrl_out_name: str, request_id: str) -> 
         )
         return
     for message_id in reply_ids:
-        _retire_reply_row(ctrl_out, ctrl_out_name, message_id)
+        _retire_reply_row(broker, ctrl_out_name, message_id)
+
+
+@contextmanager
+def _probe_broker(
+    ctx: WeftContext, ctrl_in_name: str, broker: Any | None
+) -> Iterator[Any]:
+    """Borrow the caller's broker or own one bounded persistent queue lease.
+
+    Connection lifetime spans polling, not a transaction. Borrowed brokers
+    must belong to the calling thread and are never closed here.
+
+    Spec: [SB-0.4]
+    """
+    if broker is not None:
+        yield broker
+        return
+    with (
+        ctx.queue(ctrl_in_name, persistent=True) as queue,
+        queue.get_connection() as opened,
+    ):
+        yield opened
 
 
 def send_keyed_ping_probe(
@@ -221,6 +243,7 @@ def send_keyed_ping_probe(
     ctrl_out_name: str,
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     request_id: str | None = None,
+    broker: Any | None = None,
 ) -> ControlProbeResult:
     """Send a keyed PING, wait for a matching PONG, and retire keyed replies.
 
@@ -235,30 +258,24 @@ def send_keyed_ping_probe(
     still remain; its lifetime is bounded by task-exit purge and
     terminal/dead-TID cleanup. Queue I/O errors are returned as probe errors
     so caller-side liveness decisions can stay conservative.
+    Task callers pass their thread-owned broker; standalone calls own a
+    persistent lease until the probe finishes. No transaction spans the wait.
 
     Spec: [MF-3], [MANAGER.8]
     """
 
     probe_request_id = request_id or uuid.uuid4().hex
     try:
-        ctrl_in = ctx.queue(ctrl_in_name, persistent=True)
-        try:
-            ctrl_in.write(
-                encode_control_message(CONTROL_PING, request_id=probe_request_id)
+        with _probe_broker(ctx, ctrl_in_name, broker) as db:
+            db.write(
+                ctrl_in_name,
+                encode_control_message(CONTROL_PING, request_id=probe_request_id),
             )
-        finally:
-            ctrl_in.close()
-    except (BrokerError, OSError, RuntimeError) as exc:
-        return ControlProbeResult(request_id=probe_request_id, error=str(exc))
-
-    deadline = time.monotonic() + max(0.0, timeout)
-    try:
-        ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
-        try:
+            deadline = time.monotonic() + max(0.0, timeout)
             while True:
                 matched_payload: dict[str, Any] | None = None
                 matched_message_id: int | None = None
-                iterator = ctrl_out.peek_generator(with_timestamps=True)
+                iterator = db.peek_generator(ctrl_out_name, with_timestamps=True)
                 with closing_queue_iterator(iterator) as rows:
                     for item in rows:
                         if not isinstance(item, tuple) or len(item) != 2:
@@ -275,7 +292,7 @@ def send_keyed_ping_probe(
                         matched_message_id = int(timestamp)
                         break
                 if matched_payload is not None and matched_message_id is not None:
-                    _retire_reply_row(ctrl_out, ctrl_out_name, matched_message_id)
+                    _retire_reply_row(db, ctrl_out_name, matched_message_id)
                     return ControlProbeResult(
                         request_id=probe_request_id,
                         matched=MatchedPong(
@@ -286,13 +303,11 @@ def send_keyed_ping_probe(
                     )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    _sweep_own_replies(ctrl_out, ctrl_out_name, probe_request_id)
+                    _sweep_own_replies(db, ctrl_out_name, probe_request_id)
                     return ControlProbeResult(
                         request_id=probe_request_id,
                         timed_out=True,
                     )
                 time.sleep(min(CONTROL_SURFACE_WAIT_INTERVAL, remaining))
-        finally:
-            ctrl_out.close()
     except (BrokerError, OSError, RuntimeError) as exc:
         return ControlProbeResult(request_id=probe_request_id, error=str(exc))

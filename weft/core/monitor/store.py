@@ -37,7 +37,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
-from simplebroker import format_message_id
+from simplebroker import Queue, format_message_id
 from simplebroker.ext import BrokerError, SidecarSession, SidecarUnavailableError
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
@@ -915,8 +915,13 @@ def open_monitor_store(
     context: WeftContext,
     *,
     config: Mapping[str, Any] | None = None,
+    queue: Queue | None = None,
 ) -> MonitorStore:
-    """Return a Monitor store bound to an already resolved Weft context."""
+    """Return a store, optionally borrowing the task's matching persistent queue.
+
+    The caller owns the queue and must keep it open until the store is finished.
+    Its target and resolved configuration must match ``context`` [SB-0.4a].
+    """
 
     store_config = MonitorStoreConfig(
         write_batch_size=int(
@@ -926,7 +931,7 @@ def open_monitor_store(
             )
         )
     )
-    return MonitorStore(context, store_config=store_config)
+    return MonitorStore(context, store_config=store_config, queue=queue)
 
 
 class _MonitorTableAccess:
@@ -2353,10 +2358,12 @@ class MonitorStore:
         context: WeftContext,
         *,
         store_config: MonitorStoreConfig | None = None,
+        queue: Queue | None = None,
     ) -> None:
         self._context = context
         self._context_key = service_context_key(context)
         self._config = store_config or MonitorStoreConfig()
+        self._queue = queue
 
     @property
     def context_key(self) -> str:
@@ -2386,8 +2393,16 @@ class MonitorStore:
         SidecarUnavailableError only originates from ``broker.sidecar()``
         itself (non-SQL backends), so mapping it here cannot mask errors
         raised by Monitor-store SQL inside the block.
+
+        Acquire and release on the executing thread. A borrowed persistent
+        queue outlives this block; the sidecar transaction never does [SB-0.4a].
         """
-        with self._context.broker() as broker:
+        connection = (
+            self._queue.get_connection()
+            if self._queue is not None
+            else self._context.broker()
+        )
+        with connection as broker:
             try:
                 with broker.sidecar(transaction=transaction) as session:
                     yield session
@@ -2399,8 +2414,8 @@ class MonitorStore:
     def close(self) -> None:
         """Close the store.
 
-        The current implementation uses short-lived broker connections per
-        method, so there is no store-owned resource to close.
+        Task callers lend their persistent queue; its lifetime remains with the
+        task, not this store. Standalone callers use bounded broker scopes.
         """
 
     def ensure_schema(self) -> None:
@@ -2470,6 +2485,8 @@ class MonitorStore:
     def _raw_message_is_absent(self, queue_name: str, message_id: int) -> bool:
         """Prove exact raw-row absence through the public broker surface."""
 
+        # Migration calls this inside a sidecar transaction. SimpleBroker forbids
+        # queue operations on that core until the transaction has ended.
         with self._context.broker() as broker:
             return (
                 broker.peek_one(

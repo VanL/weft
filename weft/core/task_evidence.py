@@ -35,12 +35,12 @@ from weft.core.outbox import (
     aggregate_public_outputs,
     process_outbox_message,
 )
+from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 from weft.core.runner_diagnostics import diagnostic_summary
 from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
     handle_has_live_host_process,
-    iter_queue_json_entries,
 )
 
 
@@ -476,6 +476,7 @@ def ping_pong_evidence(
     tid: str,
     taskspec_payload: dict[str, Any] | None = None,
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
+    broker: Any | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Send a keyed PING and return matching live PONG evidence if visible."""
 
@@ -486,6 +487,7 @@ def ping_pong_evidence(
         ctrl_in_name=ctrl_in_name,
         ctrl_out_name=ctrl_out_name,
         timeout=timeout,
+        broker=broker,
     )
     if result.matched is None:
         return None
@@ -546,13 +548,13 @@ def peek_terminal_ctrl_out_evidence(
     tid: str,
     ctrl_out_name: str,
     taskspec_payload: dict[str, Any] | None = None,
+    broker: Any | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Peek typed terminal ctrl_out evidence without consuming it."""
 
-    queue = ctx.queue(ctrl_out_name, persistent=False)
     candidates: list[tuple[dict[str, Any], int]] = []
-    try:
-        iterator = queue.peek_generator(with_timestamps=True)
+    with queue_broker(ctx, ctrl_out_name, broker=broker) as db:
+        iterator = db.peek_generator(ctrl_out_name, with_timestamps=True)
         with closing_queue_iterator(iterator) as rows:
             for item in rows:
                 if not isinstance(item, tuple) or len(item) != 2:
@@ -562,8 +564,6 @@ def peek_terminal_ctrl_out_evidence(
                 if payload is None:
                     continue
                 candidates.append((payload, int(timestamp)))
-    finally:
-        queue.close()
 
     selected = select_terminal_envelope(candidates)
     if selected is None:
@@ -603,6 +603,7 @@ def peek_final_outbox_evidence(
     tid: str,
     outbox_name: str,
     taskspec_payload: dict[str, Any] | None,
+    broker: Any | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Peek conservative final one-shot outbox evidence without consuming it."""
 
@@ -610,14 +611,13 @@ def peek_final_outbox_evidence(
         taskspec_payload
     ):
         return None
-    queue = ctx.queue(outbox_name, persistent=True)
     stream_buffer: list[str] = []
     values: list[Any] = []
     ack_targets: list[QueueAckTarget] = []
     observed_at: int | None = None
     saw_partial = False
-    try:
-        iterator = queue.peek_generator(with_timestamps=True)
+    with queue_broker(ctx, outbox_name, broker=broker) as db:
+        iterator = db.peek_generator(outbox_name, with_timestamps=True)
         with closing_queue_iterator(iterator) as rows:
             for item in rows:
                 if not isinstance(item, tuple) or len(item) != 2:
@@ -639,8 +639,6 @@ def peek_final_outbox_evidence(
                     QueueAckTarget(queue=outbox_name, message_id=timestamp_int)
                 )
                 observed_at = timestamp_int
-    finally:
-        queue.close()
 
     if saw_partial or len(values) != 1:
         return None
@@ -668,11 +666,13 @@ def peek_final_outbox_evidence(
 def queue_message_counts(
     ctx: WeftContext,
     queue_name: str,
+    *,
+    broker: Any | None = None,
 ) -> QueueMessageCounts | None:
     """Return backend-neutral queue counts when the broker exposes them."""
 
     try:
-        with ctx.broker() as db:
+        with queue_broker(ctx, queue_name, broker=broker) as db:
             stats = db.get_queue_stat(queue_name)
     except (BrokerError, OSError, RuntimeError):  # pragma: no cover - best effort
         return None
@@ -690,6 +690,7 @@ def claimed_outbox_result_evidence(
     tid: str,
     outbox_name: str,
     taskspec_payload: dict[str, Any] | None,
+    broker: Any | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Return a recovery diagnostic for claimed one-shot outbox residue.
 
@@ -704,7 +705,7 @@ def claimed_outbox_result_evidence(
         taskspec_payload
     ):
         return None
-    counts = queue_message_counts(ctx, outbox_name)
+    counts = queue_message_counts(ctx, outbox_name, broker=broker)
     if counts is None or counts.total <= 0:
         return None
     if counts.unclaimed > 0 or counts.claimed <= 0:
@@ -740,6 +741,7 @@ def task_local_terminal_evidence(
     *,
     tid: str,
     taskspec_payload: dict[str, Any] | None,
+    broker: Any | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Return terminal task-local evidence when visible."""
 
@@ -749,6 +751,7 @@ def task_local_terminal_evidence(
         tid=tid,
         ctrl_out_name=ctrl_out_name,
         taskspec_payload=taskspec_payload,
+        broker=broker,
     )
     if ctrl_snapshot is not None:
         return ctrl_snapshot
@@ -757,6 +760,7 @@ def task_local_terminal_evidence(
         tid=tid,
         outbox_name=outbox_name,
         taskspec_payload=taskspec_payload,
+        broker=broker,
     )
 
 
@@ -868,17 +872,18 @@ def bounded_log_terminal_evidence(
     ctx: WeftContext,
     *,
     tid: str,
+    broker: Any | None = None,
 ) -> tuple[TaskEvidenceSnapshot | None, bool, int | None]:
     """Return latest bounded log terminal evidence and prior-live hints."""
 
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     latest_terminal: TaskEvidenceSnapshot | None = None
     prior_live = False
     latest_prior_live_at: int | None = None
-    try:
+    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
         since_timestamp = int(tid) - 1 if tid.isdigit() else None
-        for payload, timestamp in iter_queue_json_entries(
-            log_queue,
+        for payload, timestamp in iter_broker_queue_json_entries(
+            db,
+            WEFT_GLOBAL_LOG_QUEUE,
             since_timestamp=since_timestamp,
         ):
             if payload.get("tid") != tid:
@@ -891,8 +896,6 @@ def bounded_log_terminal_evidence(
             if terminal is not None:
                 latest_terminal = terminal
         return latest_terminal, prior_live, latest_prior_live_at
-    finally:
-        log_queue.close()
 
 
 def stale_observer_evidence(
@@ -942,12 +945,14 @@ def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
     mapping_entry: dict[str, Any] | None = None,
     ping: bool = False,
     probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
+    broker: Any | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Return the best non-consuming evidence for a known full TID."""
 
     log_snapshot, log_prior_live, log_prior_live_at = bounded_log_terminal_evidence(
         ctx,
         tid=tid,
+        broker=broker,
     )
     read_only_snapshot: TaskEvidenceSnapshot | None = log_snapshot
 
@@ -956,6 +961,7 @@ def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
             ctx,
             tid=tid,
             taskspec_payload=taskspec_payload,
+            broker=broker,
         )
         if local_snapshot is not None:
             read_only_snapshot = local_snapshot
@@ -988,6 +994,7 @@ def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
                 tid=tid,
                 outbox_name=outbox_name,
                 taskspec_payload=taskspec_payload,
+                broker=broker,
             )
             read_only_snapshot = claimed_snapshot or stale_snapshot
 
@@ -999,6 +1006,7 @@ def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
         tid=tid,
         taskspec_payload=taskspec_payload,
         timeout=probe_timeout,
+        broker=broker,
     )
     if pong_snapshot is None:
         return read_only_snapshot

@@ -5,6 +5,7 @@ read-only process/runtime inspection; the reactor alone touches broker state.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3], [CC-3.2]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5], Cleanup Boundary
 - docs/specifications/07-System_Invariants.md [LIVENESS.R1]-[LIVENESS.R10]
 """
@@ -171,13 +172,14 @@ class LivenessMonitor(ServiceTask):
         """Sample current snapshots, retaining evidence when broker reads fail.
 
         Full reconciliation additionally reduces age-fenced history. Queue
-        handles belong to this pass, never the task's permanent queue cache.
+        facades belong to this pass, never the task's permanent queue cache.
+        The task retains the connection; each broker operation commits separately.
 
         Spec: [LIVENESS.R3], [LIVENESS.R4], [LIVENESS.R8], [LIVENESS.R10]
         """
         ctx = self._task_context()
         try:
-            with ctx.broker() as broker:
+            with self._get_connected_queue().get_connection() as broker:
                 tids = set(list_task_state_tids(ctx, broker=broker))
                 for missing_tid in self._latest_rows.keys() - tids:
                     self._forget_mapping_row(missing_tid)
@@ -504,7 +506,7 @@ class LivenessMonitor(ServiceTask):
     def _retire_mapping_row(self, row: MappingRow) -> bool:
         """Verify and retire older rows before the probed latest [LIVENESS.R3]."""
         try:
-            with self._task_context().broker() as broker:
+            with self._get_connected_queue().get_connection() as broker:
                 snapshot, retire_ids, retained_ids = self._read_mapping_history(
                     row.tid, broker=broker
                 )

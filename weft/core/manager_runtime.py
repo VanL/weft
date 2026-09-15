@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NoReturn
@@ -56,6 +57,7 @@ from weft.core.control_probe import (
     pong_proves_dispatch_eligible,
     send_keyed_ping_probe,
 )
+from weft.core.queue_window import iter_broker_queue_json_entries
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.task_state import read_task_state_snapshot
 from weft.core.taskspec import (
@@ -65,6 +67,7 @@ from weft.core.taskspec import (
 )
 from weft.ext import RunnerHandle
 from weft.helpers import (
+    closing_queue_iterator,
     detect_container_runtime,
     is_canonical_manager_record,
     iter_queue_json_entries,
@@ -152,10 +155,11 @@ def generate_tid(context: WeftContext) -> str:
 
 
 def _registry_queue(context: WeftContext) -> Queue:
-    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    """Own a bounded registry lease, including watcher reads (Spec: [SB-0.4])."""
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=True)
     try:
         discard_v1_service_registry_rows(queue)
-    except (BrokerError, OSError, RuntimeError, ValueError):
+    except BaseException:
         queue.close()
         raise
     return queue
@@ -187,6 +191,7 @@ def _manager_registry_disposition(
     *,
     probe_stale: bool,
     probe_cache: dict[str, int | None] | None,
+    broker: Any | None = None,
 ) -> _ManagerRegistryDisposition:
     """Filter one active manager row without taking delete custody ([MA-1])."""
 
@@ -197,7 +202,7 @@ def _manager_registry_disposition(
     if liveness == "stale" or _manager_record_unknown_is_expired(record):
         return "omit"
     if is_canonical_manager_record(record) and _manager_record_has_matched_pong(
-        context, record, probe_cache=probe_cache
+        context, record, probe_cache=probe_cache, broker=broker
     ):
         return "keep"
     if _host_pid_visibility_is_namespace_ambiguous(record):
@@ -227,13 +232,27 @@ def _snapshot_registry(
     probe_stale: bool = False,
     probe_cache: dict[str, int | None] | None = None,
     queue: Queue | None = None,
+    broker: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fold included manager rows without deleting peer evidence ([MF-3.1])."""
-    registry_queue = queue or _registry_queue(context)
-    owns_queue = queue is None
     snapshot: dict[str, dict[str, Any]] = {}
-    try:
-        for data, timestamp in iter_queue_json_entries(registry_queue):
+    with ExitStack() as scope:
+        if broker is None:
+            registry_queue = queue or _registry_queue(context)
+            if queue is None:
+                scope.callback(registry_queue.close)
+            broker = scope.enter_context(registry_queue.get_connection())
+        elif queue is None:
+            discard_v1_service_registry_rows(broker=broker)
+        entries = scope.enter_context(
+            closing_queue_iterator(
+                iter_broker_queue_json_entries(
+                    broker,
+                    queue.name if queue is not None else WEFT_SERVICES_REGISTRY_QUEUE,
+                )
+            )
+        )
+        for data, timestamp in entries:
             record = normalize_manager_registry_record(
                 context,
                 data,
@@ -250,6 +269,7 @@ def _snapshot_registry(
                     record,
                     probe_stale=probe_stale,
                     probe_cache=probe_cache,
+                    broker=broker,
                 )
                 if disposition == "omit":
                     continue
@@ -259,10 +279,6 @@ def _snapshot_registry(
                 record=record,
                 timestamp=timestamp,
             )
-
-    finally:
-        if owns_queue:
-            registry_queue.close()
 
     return snapshot
 
@@ -339,24 +355,36 @@ def _select_uncertain_active_manager_from_snapshot(
     return min(candidates, key=lambda record: int(str(record.get("tid", "0"))))
 
 
-def _public_spawn_backlog_pending(context: WeftContext) -> bool:
-    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
-    try:
-        return bool(queue.has_pending())
-    except (BrokerError, OSError, RuntimeError):
-        logger.debug("Failed to inspect public spawn backlog", exc_info=True)
-        return False
-    finally:
-        queue.close()
+def _public_spawn_backlog_pending(
+    context: WeftContext, *, broker: Any | None = None
+) -> bool:
+    with ExitStack() as scope:
+        queue = (
+            scope.enter_context(
+                context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True)
+            )
+            if broker is None
+            else None
+        )
+        try:
+            if queue is not None:
+                return bool(queue.has_pending())
+            assert broker is not None
+            return bool(broker.has_pending_messages(WEFT_SPAWN_REQUESTS_QUEUE))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to inspect public spawn backlog", exc_info=True)
+            return False
 
 
 def _namespace_ambiguous_incumbent_should_block_start(
     context: WeftContext,
     record: dict[str, Any],
+    *,
+    broker: Any | None = None,
 ) -> bool:
     """Return whether an ambiguous incumbent should still suppress startup."""
 
-    if not _public_spawn_backlog_pending(context):
+    if not _public_spawn_backlog_pending(context, broker=broker):
         return True
     timestamp = _manager_record_timestamp(record)
     if timestamp is None:
@@ -506,6 +534,7 @@ def _registry_view(
     probe_stale: bool = False,
     probe_cache: dict[str, int | None] | None = None,
     queue: Queue | None = None,
+    broker: Any | None = None,
 ) -> ManagerRegistryView:
     snapshot = _snapshot_registry(
         context,
@@ -513,6 +542,7 @@ def _registry_view(
         probe_stale=probe_stale,
         probe_cache=probe_cache,
         queue=queue,
+        broker=broker,
     )
     return ManagerRegistryView(
         records=snapshot,
@@ -618,6 +648,7 @@ def _manager_record_has_matched_pong(
     record: dict[str, Any],
     *,
     probe_cache: dict[str, int | None] | None,
+    broker: Any | None = None,
 ) -> bool:
     tid_value = record.get("tid")
     if not isinstance(tid_value, str) or not tid_value:
@@ -637,6 +668,7 @@ def _manager_record_has_matched_pong(
         tid=tid,
         ctrl_in_name=ctrl_in_name,
         ctrl_out_name=ctrl_out_name,
+        broker=broker,
         timeout=max(
             0.0,
             min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS),
@@ -693,6 +725,7 @@ def list_manager_records(
     include_stopped: bool = False,
     canonical_only: bool = False,
     prune_stale: bool = True,
+    broker: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Return manager registry records for command-layer consumers."""
 
@@ -702,6 +735,7 @@ def list_manager_records(
             prune_stale=prune_stale,
             probe_stale=prune_stale,
             probe_cache={},
+            broker=broker,
         ).values()
     )
     if canonical_only:
@@ -722,6 +756,7 @@ def select_active_manager(
     *,
     probe_stale: bool = False,
     probe_cache: dict[str, int | None] | None = None,
+    broker: Any | None = None,
 ) -> dict[str, Any] | None:
     """Return the current canonical active manager record, if any."""
 
@@ -729,6 +764,7 @@ def select_active_manager(
         context,
         probe_stale=probe_stale,
         probe_cache=probe_cache,
+        broker=broker,
     ).active_manager
 
 
@@ -1238,9 +1274,11 @@ def _await_manager_start_settlement(
     )
     last_active: dict[str, Any] | None = None
     probe_cache: dict[str, int | None] = {}
-    registry_queue = _registry_queue(context)
-    monitor = QueueChangeMonitor([registry_queue], config=context.config)
-    try:
+    with ExitStack() as resources:
+        registry_queue = _registry_queue(context)
+        resources.callback(registry_queue.close)
+        monitor = QueueChangeMonitor([registry_queue], config=context.config)
+        resources.callback(monitor.close)
         while True:
             view = _registry_view(
                 context,
@@ -1256,9 +1294,6 @@ def _await_manager_start_settlement(
             if remaining <= 0:
                 return last_active
             monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
-    finally:
-        monitor.close()
-        registry_queue.close()
 
 
 def _wait_for_process_exit(
@@ -1291,9 +1326,11 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
     entry_observed = initial_record is not None
     last_record = initial_record
     pid_checked_at = 0.0
-    registry_queue = _registry_queue(context)
-    monitor = QueueChangeMonitor([registry_queue], config=context.config)
-    try:
+    with ExitStack() as resources:
+        registry_queue = _registry_queue(context)
+        resources.callback(registry_queue.close)
+        monitor = QueueChangeMonitor([registry_queue], config=context.config)
+        resources.callback(monitor.close)
         while time.monotonic() < deadline:
             view = _registry_view(
                 context,
@@ -1351,9 +1388,6 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
                 break
             monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
         return False, last_record
-    finally:
-        monitor.close()
-        registry_queue.close()
 
 
 def _manager_record_is_foreground_serve(record: dict[str, Any] | None) -> bool:
@@ -1601,9 +1635,11 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
     last_child_pid_live: bool | None = None
     last_selected_proof: bool | None = None
     probe_cache: dict[str, int | None] = {}
-    registry_queue = _registry_queue(context)
-    monitor = QueueChangeMonitor([registry_queue], config=context.config)
-    try:
+    with ExitStack() as resources:
+        registry_queue = _registry_queue(context)
+        resources.callback(registry_queue.close)
+        monitor = QueueChangeMonitor([registry_queue], config=context.config)
+        resources.callback(monitor.close)
         while time.monotonic() < deadline:
             view = _registry_view(
                 context,
@@ -1727,10 +1763,6 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
             if remaining <= 0:
                 break
             monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
-    finally:
-        monitor.close()
-        registry_queue.close()
-
     if competing_record is not None:
         return _reconcile_competing_manager_start(
             context,
@@ -1789,13 +1821,20 @@ def _terminate_manager_process(
 
 def ensure_manager(
     context: WeftContext,
+    *,
+    broker: Any | None = None,
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
-    """Guarantee a canonical active manager exists, starting one if necessary."""
+    """Reuse an active manager through a borrowed scope, or start a new process.
+
+    The caller owns the borrowed connection. Startup retains its separate
+    bounded registry/watcher ownership. Spec: [MA-3], [SB-0.4].
+    """
     probe_cache: dict[str, int | None] = {}
     view = _registry_view(
         context,
         probe_stale=True,
         probe_cache=probe_cache,
+        broker=broker,
     )
     record = view.active_manager
     if record:
@@ -1805,6 +1844,7 @@ def ensure_manager(
         should_block = _namespace_ambiguous_incumbent_should_block_start(
             context,
             uncertain_record,
+            broker=broker,
         )
         if should_block:
             return uncertain_record, False, None

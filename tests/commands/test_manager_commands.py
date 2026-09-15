@@ -572,6 +572,7 @@ def test_snapshot_registry_decision_table_uses_one_record_evidence_frame(
         record: dict[str, Any],
         *,
         probe_cache: dict[str, int | None] | None,
+        broker: Any | None = None,
     ) -> bool:
         del probe_cache
         pong_calls.append(str(record["tid"]))
@@ -725,6 +726,7 @@ def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
         record: dict[str, Any],
         *,
         probe_cache: dict[str, int | None] | None,
+        broker: Any | None = None,
     ) -> bool:
         del probe_cache
         pong_calls.append(str(record["name"]))
@@ -778,6 +780,144 @@ def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
     assert snapshot[tid]["timestamp"] == older_id
     assert remaining_ids == ([older_id] if newer_deleted else [older_id, newer_id])
     assert pong_calls == ["newer"]
+
+
+@pytest.mark.parametrize("outcome", ["stopped", "failure"])
+def test_manager_stop_observation_reuses_pg_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    """Keep one bounded lease while observing fresh registry rows [MA-3]."""
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    if context.backend_name != "postgres":
+        pytest.skip("Counts physical PostgreSQL connections")
+    psycopg = pytest.importorskip("psycopg")
+    original_connect = psycopg.Connection.connect.__func__
+    connections: list[Any] = []
+
+    def connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
+        connection = original_connect(cls, *args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(psycopg.Connection, "connect", classmethod(connect))
+    monkeypatch.setattr(psycopg, "connect", psycopg.Connection.connect)
+    original_view = core_manager_runtime._registry_view
+    counts: list[int] = []
+    statuses: list[str] = []
+    tid = "1761000000000000111"
+    with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=True) as writer:
+        _write_manager_registry_row(writer, context, tid, status="draining")
+
+        def view(*args: Any, **kwargs: Any) -> Any:
+            result = original_view(*args, **kwargs)
+            counts.append(len(connections))
+            assert result.target_record is not None
+            statuses.append(result.target_record["status"])
+            if len(counts) == 3 and outcome == "failure":
+                raise RuntimeError("injected registry observation failure")
+            if result.target_record["status"] != "stopped":
+                _write_manager_registry_row(
+                    writer,
+                    context,
+                    tid,
+                    status="stopped" if len(counts) == 3 else "draining",
+                )
+            return result
+
+        monkeypatch.setattr(core_manager_runtime, "_registry_view", view)
+
+        def observe() -> tuple[bool, dict[str, Any] | None]:
+            return core_manager_runtime._await_manager_stop_confirmation(
+                context,
+                target_tid=tid,
+                deadline=time.monotonic() + 30,
+                initial_record=None,
+                process=None,
+                stop_if_absent=False,
+            )
+
+        if outcome == "failure":
+            with pytest.raises(RuntimeError, match="injected registry observation"):
+                observe()
+        else:
+            stopped, record = observe()
+            assert stopped
+            assert record is not None and record["status"] == "stopped"
+            assert statuses == ["draining", "draining", "draining", "stopped"]
+        # An independent owner remains usable after the observer releases its lease.
+        writer.write("independent writer remains usable")
+    assert len(counts) >= 3
+    assert counts[1:] == [counts[0]] * (len(counts) - 1)
+    assert connections and all(connection.closed for connection in connections)
+
+
+@pytest.mark.parametrize("owner", ["stop", "settlement", "startup"])
+@pytest.mark.parametrize("failure", ["construction", "close"])
+def test_manager_registry_wait_releases_queue_on_monitor_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+    failure: str,
+) -> None:
+    """Queue ownership starts before monitor construction and outlasts its close."""
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=True)
+    queue.write("warm the real connection")
+    closed: list[str] = []
+    original_close = queue.close
+
+    def close_queue() -> None:
+        original_close()
+        closed.append("queue")
+
+    class FailingMonitor:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            if failure == "construction":
+                raise RuntimeError("injected monitor construction failure")
+
+        def close(self) -> None:
+            closed.append("monitor")
+            raise RuntimeError("injected monitor close failure")
+
+    def fail_scan(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("injected scan failure")
+
+    monkeypatch.setattr(queue, "close", close_queue)
+    monkeypatch.setattr(core_manager_runtime, "_registry_queue", lambda _ctx: queue)
+    monkeypatch.setattr(core_manager_runtime, "QueueChangeMonitor", FailingMonitor)
+    monkeypatch.setattr(core_manager_runtime, "_registry_view", fail_scan)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_build_manager_runtime_invocation",
+        lambda _ctx: type("Invocation", (), {"tid": "1761000000000000112"})(),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime, "_launch_detached_manager", lambda *_: None
+    )
+    try:
+        with pytest.raises(RuntimeError, match=f"injected monitor {failure}"):
+            if owner == "stop":
+                core_manager_runtime._await_manager_stop_confirmation(
+                    context,
+                    target_tid="1761000000000000112",
+                    deadline=time.monotonic() + 30,
+                    initial_record=None,
+                    process=None,
+                    stop_if_absent=False,
+                )
+            elif owner == "settlement":
+                core_manager_runtime._await_manager_start_settlement(
+                    context,
+                    manager_tid="1761000000000000112",
+                    deadline=time.monotonic() + 30,
+                )
+            else:
+                core_manager_runtime.start_manager(context)
+        assert closed == (["monitor", "queue"] if failure == "close" else ["queue"])
+    finally:
+        original_close()
 
 
 def test_snapshot_registry_does_not_close_caller_owned_queue(
@@ -1002,6 +1142,7 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
         ctrl_out_name: str,
         timeout: float,
         request_id: str | None = None,
+        broker: Any | None = None,
     ) -> ControlProbeResult:
         del timeout, request_id
         probe_calls.append((tid, ctrl_in_name, ctrl_out_name))

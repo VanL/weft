@@ -1216,6 +1216,10 @@ def test_pipeline_bootstrap_fatal_exit_keeps_primary_when_rollbacks_fail(
         ctrl_queues[1]: RollbackExit("private rollback detail 2"),
     }
     registry_failure = RollbackExit("private registry detail")
+    rollback_attempts: list[str] = []
+    with task._get_connected_queue().get_connection() as broker:
+        broker_type = type(broker)
+        original_write = broker_type.write
 
     def fail_third_submission(*args: Any, **kwargs: Any) -> None:
         nonlocal attempt
@@ -1224,25 +1228,31 @@ def test_pipeline_bootstrap_fatal_exit_keeps_primary_when_rollbacks_fail(
             raise fatal
         original_submit(*args, **kwargs)
 
-    def queue_with_stop_failure(name: str) -> Any:
+    def queue_with_registry_failure(name: str) -> Any:
         queue = original_queue(name)
         if name == WEFT_PIPELINES_STATE_QUEUE:
             return _DeleteThenFailingQueue(queue, failure=registry_failure)
-        if name not in rollback_failures:
-            return queue
-            return _WriteFailingQueue(
-                queue,
-                message=encode_control_message(CONTROL_STOP),
-                failure=rollback_failures[name],
-            )
+        return queue
+
+    def write_with_stop_failure(
+        db: Any, queue_name: str, message: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        if queue_name in rollback_failures and message == encode_control_message(
+            CONTROL_STOP
+        ):
+            rollback_attempts.append(queue_name)
+            raise rollback_failures[queue_name]
+        return original_write(db, queue_name, message, *args, **kwargs)
 
     monkeypatch.setattr(pipeline_module, "submit_spawn_request", fail_third_submission)
-    monkeypatch.setattr(task, "_queue", queue_with_stop_failure)
+    monkeypatch.setattr(task, "_queue", queue_with_registry_failure)
+    monkeypatch.setattr(broker_type, "write", write_with_stop_failure)
 
     with pytest.raises(FatalSubmissionExit) as exc_info:
         task._bootstrap_children()
 
     assert exc_info.value is fatal
+    assert rollback_attempts == ctrl_queues[:2]
     spawned = _drain_json(original_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
     assert [item["taskspec"]["tid"] for item in spawned] == [
         child_payloads[0]["tid"],

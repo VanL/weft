@@ -303,10 +303,11 @@ def _select_active_manager_while_answering_probe(
         ctrl_out_name: str,
         timeout: float,
         request_id: str | None = None,
+        broker: Any | None = None,
     ) -> ControlProbeResult:
         if probed_tids is not None:
             probed_tids.append(tid)
-        del _ctx, timeout
+        del _ctx, timeout, broker
         probe_request_id = request_id or "test-probe"
         if tid != target_tid:
             return ControlProbeResult(request_id=probe_request_id, timed_out=True)
@@ -2704,25 +2705,30 @@ def test_delete_spawn_request_swallows_delete_errors(
 ) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
-    closed = False
+    with (
+        context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as queue,
+        queue.get_connection() as broker,
+    ):
+        broker_type = type(broker)
+    attempts: list[tuple[str, list[int]]] = []
+    closed: list[str] = []
+    original_close = Queue.close
 
-    class _FakeQueue:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            del args, kwargs
+    def fail_delete(db: Any, queue_name: str, message_ids: list[int]) -> int:
+        attempts.append((queue_name, message_ids))
+        raise RuntimeError("delete failed")
 
-        def delete(self, *, message_id: int) -> None:
-            del message_id
-            raise RuntimeError("delete failed")
+    def close(queue: Queue) -> None:
+        original_close(queue)
+        closed.append(queue.name)
 
-        def close(self) -> None:
-            nonlocal closed
-            closed = True
+    with monkeypatch.context() as patch:
+        patch.setattr(broker_type, "delete_message_ids", fail_delete)
+        patch.setattr(Queue, "close", close)
+        deleted = _delete_spawn_request(context, 1775679597297004544)
 
-    monkeypatch.setattr("weft.core.spawn_requests.Queue", _FakeQueue)
-
-    deleted = _delete_spawn_request(context, 1775679597297004544)
-
-    assert closed is True
+    assert attempts == [(WEFT_SPAWN_REQUESTS_QUEUE, [1775679597297004544])]
+    assert closed == [WEFT_SPAWN_REQUESTS_QUEUE]
     assert deleted is False
 
 
@@ -2821,7 +2827,7 @@ def test_reconcile_submitted_spawn_can_wait_past_reserved_claim(
     monkeypatch.setattr(
         spawn_submission_cmd,
         "_spawn_reconciliation_queue_specs",
-        lambda _context, _tid: (
+        lambda _context, _tid, **_kwargs: (
             (task_state_queue_name(submitted_tid), False),
             (WEFT_GLOBAL_LOG_QUEUE, False),
             (WEFT_SPAWN_REQUESTS_QUEUE, False),
@@ -2907,7 +2913,7 @@ def test_reconcile_submitted_spawn_uses_queue_monitor(
     monkeypatch.setattr(
         spawn_submission_cmd,
         "_spawn_reconciliation_queue_specs",
-        lambda _context, _tid: (
+        lambda _context, _tid, **_kwargs: (
             (task_state_queue_name(submitted_tid), False),
             (WEFT_GLOBAL_LOG_QUEUE, False),
             (WEFT_SPAWN_REQUESTS_QUEUE, False),
@@ -2991,7 +2997,7 @@ def test_reconcile_submitted_spawn_rebuilds_monitor_when_reserved_queues_change(
     monkeypatch.setattr(
         spawn_submission_cmd,
         "_spawn_reconciliation_queue_specs",
-        lambda _context, _tid: next(queue_specs),
+        lambda _context, _tid, **_kwargs: next(queue_specs),
     )
 
     result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.1)
@@ -4570,18 +4576,15 @@ def test_spawn_state_subscription_observes_first_write(tmp_path: Path) -> None:
     tid = str(time.time_ns())
     specs = spawn_submission_cmd._spawn_reconciliation_queue_specs(context, tid)
     state_name = task_state_queue_name(tid)
-    assert (state_name, False) in specs
-    queues, monitor = spawn_submission_cmd._open_spawn_reconciliation_monitor(
-        context, specs
-    )
-    publisher = context.queue(state_name, persistent=False)
-    try:
+    assert (state_name, True) in specs
+    with (
+        spawn_submission_cmd._open_spawn_reconciliation_monitor(context, specs) as (
+            _queues,
+            monitor,
+        ),
+        context.queue(state_name, persistent=True) as publisher,
+    ):
         assert publisher.peek_many() == []
         publisher.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
         assert monitor.wait(5.0)
         assert spawn_submission_cmd._mapping_exists_for_tid(context, tid)
-    finally:
-        monitor.close()
-        for queue in queues:
-            queue.close()
-        publisher.close()

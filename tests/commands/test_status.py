@@ -2498,7 +2498,7 @@ def test_task_snapshot_collection_tolerates_unexpected_manager_selection_failure
     )
     selection_attempts: list[object] = []
 
-    def _fail_manager_selection(_ctx: Any) -> None:
+    def _fail_manager_selection(_ctx: Any, *, broker: Any | None = None) -> None:
         selection_attempts.append(_ctx)
         raise UnexpectedManagerSelectionFailure("runner probe failed")
 

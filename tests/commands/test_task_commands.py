@@ -452,7 +452,7 @@ def test_terminal_snapshot_status_fallback_preserves_live_context(
     def fake_status(*_args: object, **kwargs: object) -> None:
         observed.update(kwargs)
 
-    monkeypatch.setattr(task_cmd, "task_status", fake_status)
+    monkeypatch.setattr(task_cmd, "_task_status", fake_status)
 
     task_cmd.task_terminal_snapshot(tid, context=weft_harness.context)
 
@@ -1654,7 +1654,7 @@ def test_await_control_surface_uses_queue_monitor(
         observed_contexts.append(kwargs.get("context"))
         return next(snapshots)
 
-    monkeypatch.setattr(task_cmd, "task_status", fake_status)
+    monkeypatch.setattr(task_cmd, "_task_status", fake_status)
 
     # Use the production wait budget: this test still builds real queue handles,
     # and PG-backed setup under xdist can exhaust artificial sub-second budgets.
@@ -1772,7 +1772,7 @@ def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(
     )
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("replacement ctrl_out terminal should finish first")
         ),
@@ -1874,7 +1874,7 @@ def test_await_control_surface_public_grace_outlives_expired_kill_ack(
     monkeypatch.setattr(
         task_cmd, "load_latest_taskspec_payload", lambda *_args, **_kwargs: None
     )
-    monkeypatch.setattr(task_cmd, "task_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(task_cmd, "_task_status", lambda *_args, **_kwargs: None)
 
     try:
         entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.5)
@@ -1988,7 +1988,7 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
     monkeypatch.setattr(task_cmd, "CONTROL_SURFACE_WAIT_INTERVAL", 0.001)
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *_args, **_kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid_short_form(tid),
@@ -2085,7 +2085,7 @@ def test_await_control_surface_accepts_terminal_ctrl_out_without_log_replay(
     )
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("terminal ctrl_out should be sufficient")
         ),

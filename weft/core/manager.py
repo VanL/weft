@@ -3,6 +3,7 @@
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3], [CC-2.5]
 - docs/specifications/03-Manager_Architecture.md [MA-0], [MA-1], [MA-2], [MA-3]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-3.1]
 """
 
@@ -126,7 +127,6 @@ from weft.helpers import (
     detect_container_runtime,
     handle_has_live_host_process,
     is_canonical_manager_record,
-    iter_queue_entries,
     iter_queue_json_entries,
     kill_process_tree,
     live_host_processes_from_handle,
@@ -1566,7 +1566,8 @@ class Manager(ServiceTask):
         last_error: BaseException | None = None
         for attempt in range(MANAGER_CHILD_INBOX_SEED_ATTEMPTS):
             try:
-                self._queue(inbox_name).write(payload)
+                with self._get_connected_queue().get_connection() as broker:
+                    broker.write(inbox_name, payload)
                 return True
             except (BrokerError, OSError, RuntimeError) as exc:
                 last_error = exc
@@ -1713,9 +1714,10 @@ class Manager(ServiceTask):
                 return None
 
         try:
-            mappings = latest_tid_mapping_entries_for_endpoint_resolution(
-                self._task_context(),
-            )
+            with self._get_connected_queue().get_connection() as broker:
+                mappings = latest_tid_mapping_entries_for_endpoint_resolution(
+                    self._task_context(), broker=broker
+                )
             live_tids = {
                 tid
                 for tid, payload in mappings.items()
@@ -2543,11 +2545,8 @@ class Manager(ServiceTask):
         request_id = uuid.uuid4().hex
         ping_message = encode_control_message(CONTROL_PING, request_id=request_id)
         try:
-            ctrl_in = self._manager_context().queue(ctrl_in_name, persistent=True)
-            try:
-                ctrl_in.write(ping_message)
-            finally:
-                ctrl_in.close()
+            with self._get_connected_queue().get_connection() as broker:
+                broker.write(ctrl_in_name, ping_message)
         except (BrokerError, OSError, RuntimeError) as exc:
             proof = ManagerLeadershipProof(
                 "unknown",
@@ -2584,18 +2583,15 @@ class Manager(ServiceTask):
     ) -> int | None:
         """Find the exact row id for a manager-owned probe payload."""
 
-        # Use a short-lived direct handle for manager-owned probe queues so the
-        # context cache does not retain transient control rows.
-        queue = Queue(
-            queue_name,
-            db_path=self._db_path,
-            config=self._broker_config,
-        )
         try:
             latest_message_id: int | None = None
-            for body, message_id in iter_queue_entries(queue):
-                if body == message:
-                    latest_message_id = message_id
+            with self._get_connected_queue().get_connection() as broker:
+                iterator = broker.peek_generator(queue_name, with_timestamps=True)
+                with closing_queue_iterator(iterator) as rows:
+                    for item in rows:
+                        body, message_id = cast(tuple[str, int], item)
+                        if body == message:
+                            latest_message_id = message_id
             return latest_message_id
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
@@ -2604,8 +2600,6 @@ class Manager(ServiceTask):
                 exc_info=True,
             )
             return None
-        finally:
-            queue.close()
 
     def _advance_manager_pong_probe(
         self,
@@ -2619,12 +2613,10 @@ class Manager(ServiceTask):
         matched_proof: ManagerLeadershipProof | None = None
         matched_message_id: int | None = None
         try:
-            ctrl_out = self._manager_context().queue(
-                probe.ctrl_out_name,
-                persistent=False,
-            )
-            try:
-                iterator = ctrl_out.peek_generator(with_timestamps=True)
+            with self._get_connected_queue().get_connection() as broker:
+                iterator = broker.peek_generator(
+                    probe.ctrl_out_name, with_timestamps=True
+                )
                 with closing_queue_iterator(iterator) as rows:
                     for item in rows:
                         if not isinstance(item, tuple) or len(item) != 2:
@@ -2645,8 +2637,6 @@ class Manager(ServiceTask):
                         )
                         matched_message_id = int(_timestamp)
                         break
-            finally:
-                ctrl_out.close()
         except (BrokerError, OSError, RuntimeError) as exc:
             proof = ManagerLeadershipProof(
                 "unknown",
@@ -2720,23 +2710,15 @@ class Manager(ServiceTask):
 
         if message_id is None:
             return
-        # Use a short-lived direct handle for exact probe cleanup so the context
-        # cache does not retain transient control queues.
-        queue = Queue(
-            queue_name,
-            db_path=self._db_path,
-            config=self._broker_config,
-        )
         try:
-            queue.delete(message_id=message_id)
+            with self._get_connected_queue().get_connection() as broker:
+                broker.delete_message_ids(queue_name, [message_id])
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to delete internal probe row",
                 extra={"queue": queue_name, "message_id": message_id},
                 exc_info=True,
             )
-        finally:
-            queue.close()
 
     def _sweep_probe_reply_rows(self, ctrl_out_name: str, request_id: str) -> None:
         """Best-effort sweep of ctrl_out rows keyed to one finished probe.
@@ -2750,26 +2732,21 @@ class Manager(ServiceTask):
         Spec: [MF-3], [MANAGER.8]
         """
 
-        # Use a short-lived direct handle for manager-owned probe queues so the
-        # context cache does not retain transient control rows.
-        queue = Queue(
-            ctrl_out_name,
-            db_path=self._db_path,
-            config=self._broker_config,
-        )
         reply_ids: list[int] = []
         try:
-            for body, message_id in iter_queue_entries(queue):
-                if reply_bears_request_id(body, request_id=request_id):
-                    reply_ids.append(message_id)
+            with self._get_connected_queue().get_connection() as broker:
+                iterator = broker.peek_generator(ctrl_out_name, with_timestamps=True)
+                with closing_queue_iterator(iterator) as rows:
+                    for item in rows:
+                        body, message_id = cast(tuple[str, int], item)
+                        if reply_bears_request_id(body, request_id=request_id):
+                            reply_ids.append(message_id)
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to scan ctrl_out for keyed probe replies",
                 extra={"queue": ctrl_out_name, "request_id": request_id},
                 exc_info=True,
             )
-        finally:
-            queue.close()
         for message_id in reply_ids:
             self._delete_exact_probe_message(ctrl_out_name, message_id)
 
@@ -3449,48 +3426,33 @@ class Manager(ServiceTask):
         except (AssertionError, OSError, ValueError):  # pragma: no cover - defensive
             return True
 
-    def _child_terminal_proof_visible(self, tid: str, child: ManagedChild) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-008] exception
+    def _child_terminal_proof_visible(self, tid: str, child: ManagedChild) -> bool:
         ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-        # Use a short-lived direct handle for child-local queues so the manager
-        # cache does not retain per-child control queues after reaping.
-        ctrl_out = Queue(
-            ctrl_out_name,
-            db_path=self._db_path,
-            persistent=False,
-            config=self._broker_config,
-        )
+        # Dynamic child queues borrow the connection, never a cached queue handle.
         try:
-            iterator = ctrl_out.peek_generator(with_timestamps=True)
-            with closing_queue_iterator(iterator) as rows:
-                for entry in rows:
-                    body = entry[0] if isinstance(entry, tuple) else entry
-                    try:
-                        payload = json.loads(str(body))
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    if (
-                        payload.get("type") == TERMINAL_ENVELOPE_TYPE
-                        and payload.get("tid") == tid
-                        and payload.get("source") == "task"
-                    ):
-                        return True
+            with self._get_connected_queue().get_connection() as broker:
+                iterator = broker.peek_generator(ctrl_out_name, with_timestamps=True)
+                with closing_queue_iterator(iterator) as rows:
+                    for entry in rows:
+                        body = entry[0] if isinstance(entry, tuple) else entry
+                        try:
+                            payload = json.loads(str(body))
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(payload, dict):
+                            continue
+                        if (
+                            payload.get("type") == TERMINAL_ENVELOPE_TYPE
+                            and payload.get("tid") == tid
+                            and payload.get("source") == "task"
+                        ):
+                            return True
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to inspect child ctrl_out for terminal proof",
                 exc_info=True,
             )
             return True
-        finally:
-            try:
-                ctrl_out.close()
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to close child ctrl_out proof queue %s",
-                    ctrl_out_name,
-                    exc_info=True,
-                )
 
         log_queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
         try:
@@ -3552,31 +3514,15 @@ class Manager(ServiceTask):
         }
         if exitcode is not None:
             payload["return_code"] = int(exitcode)
-        # Use a short-lived direct handle for child-local queues so wrapper-lost
-        # evidence is written without extending the manager's queue cache.
-        ctrl_out = Queue(
-            ctrl_out_name,
-            db_path=self._db_path,
-            persistent=False,
-            config=self._broker_config,
-        )
         try:
-            ctrl_out.write(json.dumps(payload))
+            with self._get_connected_queue().get_connection() as broker:
+                broker.write(ctrl_out_name, json.dumps(payload))
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to write manager terminal envelope for child %s",
                 tid,
                 exc_info=True,
             )
-        finally:
-            try:
-                ctrl_out.close()
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to close manager terminal envelope queue %s",
-                    ctrl_out_name,
-                    exc_info=True,
-                )
 
     def _cleanup_children(self, *, deadline: float | None = None) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
         autostart_child_exited = False
@@ -3948,16 +3894,10 @@ class Manager(ServiceTask):
         )
 
     def _send_child_control_command(self, queue_name: str, command: str) -> None:
-        # Child control queues are caller-selected task-local queues; keep the
-        # handle short-lived rather than caching arbitrary child queue names.
-        queue = Queue(
-            queue_name,
-            db_path=self._db_path,
-            persistent=True,
-            config=self._broker_config,
-        )
+        # Borrow the task's thread-owned connection without caching child names.
         try:
-            queue.write(encode_control_message(command))
+            with self._get_connected_queue().get_connection() as broker:
+                broker.write(queue_name, encode_control_message(command))
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to send %s to %s",
@@ -3965,16 +3905,6 @@ class Manager(ServiceTask):
                 queue_name,
                 exc_info=True,
             )
-        finally:
-            try:
-                queue.close()
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to close %s queue %s",
-                    command,
-                    queue_name,
-                    exc_info=True,
-                )
 
     def _send_stop_command(self, queue_name: str) -> None:
         self._send_child_control_command(queue_name, CONTROL_STOP)
@@ -4220,22 +4150,23 @@ class Manager(ServiceTask):
     ) -> int:
         """Delete visible and claimed queue rows by exact message ID."""
 
-        queue = self._queue(queue_name)
-        message_ids: list[int] = []
-        iterator = queue.peek_generator(with_timestamps=True)
-        with closing_queue_iterator(iterator) as rows:
-            for entry in rows:
-                if limit is not None and len(message_ids) >= limit:
-                    break
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
-                _body, timestamp = entry
-                if isinstance(timestamp, int):
-                    message_ids.append(timestamp)
-        deleted = 0
-        for message_id in message_ids:
-            if queue.delete(message_id=message_id):
-                deleted += 1
+        # Stale manager names are dynamic; only the connection stays task-owned.
+        with self._get_connected_queue().get_connection() as broker:
+            message_ids: list[int] = []
+            iterator = broker.peek_generator(queue_name, with_timestamps=True)
+            with closing_queue_iterator(iterator) as rows:
+                for entry in rows:
+                    if limit is not None and len(message_ids) >= limit:
+                        break
+                    if not isinstance(entry, tuple) or len(entry) != 2:
+                        continue
+                    _body, timestamp = entry
+                    if isinstance(timestamp, int):
+                        message_ids.append(timestamp)
+            deleted = 0
+            for message_id in message_ids:
+                if broker.delete_message_ids(queue_name, [message_id]):
+                    deleted += 1
         return deleted
 
     def _cleanup_own_internal_reserved_queue(self) -> None:
@@ -4294,7 +4225,7 @@ class Manager(ServiceTask):
 
         pattern = f"T*.{QUEUE_INTERNAL_RESERVED_SUFFIX}"
         try:
-            with self._manager_context().broker() as broker:
+            with self._get_connected_queue().get_connection() as broker:
                 queue_names = tuple(
                     str(name) for name in broker.list_queues(pattern=pattern)
                 )
@@ -5049,7 +4980,10 @@ class Manager(ServiceTask):
 
     def _latest_tid_runtime_handle(self, tid: str) -> RunnerHandle | None:
         """Read the canonical newest valid mapping handle ([OBS.4])."""
-        latest = read_task_state_snapshot(self._manager_context(), tid)
+        with self._get_connected_queue().get_connection() as broker:
+            latest = read_task_state_snapshot(
+                self._manager_context(), tid, broker=broker
+            )
         if latest is None:
             return None
         _timestamp, latest_payload = latest
@@ -5108,11 +5042,8 @@ class Manager(ServiceTask):
         request_id = uuid.uuid4().hex
         ping_message = encode_control_message(CONTROL_PING, request_id=request_id)
         try:
-            ctrl_in = self._manager_context().queue(ctrl_in_name, persistent=True)
-            try:
-                ctrl_in.write(ping_message)
-            finally:
-                ctrl_in.close()
+            with self._get_connected_queue().get_connection() as broker:
+                broker.write(ctrl_in_name, ping_message)
         except (BrokerError, OSError, RuntimeError) as exc:
             return ServiceCandidate(
                 key=service_key,
@@ -5164,12 +5095,10 @@ class Manager(ServiceTask):
         matched_message_id: int | None = None
         matched = False
         try:
-            ctrl_out = self._manager_context().queue(
-                probe.ctrl_out_name,
-                persistent=False,
-            )
-            try:
-                iterator = ctrl_out.peek_generator(with_timestamps=True)
+            with self._get_connected_queue().get_connection() as broker:
+                iterator = broker.peek_generator(
+                    probe.ctrl_out_name, with_timestamps=True
+                )
                 with closing_queue_iterator(iterator) as rows:
                     for item in rows:
                         if not isinstance(item, tuple) or len(item) != 2:
@@ -5185,8 +5114,6 @@ class Manager(ServiceTask):
                         matched_message_id = int(_message_timestamp)
                         matched = True
                         break
-            finally:
-                ctrl_out.close()
         except (BrokerError, OSError, RuntimeError) as exc:
             self._delete_exact_probe_message(
                 probe.ctrl_in_name,
@@ -6062,12 +5989,14 @@ class Manager(ServiceTask):
             )
 
         try:
-            compiled = compile_linear_pipeline(
-                pipeline_spec,
-                context=pipeline_context,
-                task_loader=_load_pipeline_stage,
-                source_ref=str(resolved.path),
-            )
+            with self._get_connected_queue().get_connection() as broker:
+                compiled = compile_linear_pipeline(
+                    pipeline_spec,
+                    context=pipeline_context,
+                    task_loader=_load_pipeline_stage,
+                    source_ref=str(resolved.path),
+                    broker=broker,
+                )
         except (
             BrokerError,
             FileNotFoundError,

@@ -882,6 +882,7 @@ class _InteractiveRunLifecycle:
             record = open_monitor_store(
                 self._context,
                 config=self._context.config,
+                queue=self._log_queue,
             ).get_task(self._tid)
         except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-332] exception
             return False

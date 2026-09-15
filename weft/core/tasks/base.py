@@ -598,15 +598,15 @@ class BaseTask(MultiQueueWatcher, ABC):
             config=config,
             create_database=False,
         )
-        broker_target = getattr(self, "_db_path", None)
-        if isinstance(broker_target, BrokerTarget):
-            return replace(
-                ctx,
-                broker_target=broker_target,
-                database_path=broker_target.target_path,
-                broker_config=self._broker_config,
-            )
-        return ctx
+        broker_target = self._db_path
+        if isinstance(broker_target, str):
+            broker_target = BrokerTarget(backend_name="sqlite", target=broker_target)
+        return replace(
+            ctx,
+            broker_target=broker_target,
+            database_path=broker_target.target_path,
+            broker_config=self._broker_config,
+        )
 
     def _task_context(self) -> WeftContext:
         """Return cached context metadata for this task process."""
@@ -867,7 +867,7 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _cleanup_base_task_resources(self, deadline: float) -> None:
         """Close BaseTask-owned resources under the caller's deadline.
 
-        Spec: [CC-2.5], [SB-0.1]
+        Spec: [CC-2.5], [SB-0.1], [SB-0.4]
         """
 
         failures: list[BaseException] = []
@@ -893,12 +893,16 @@ class BaseTask(MultiQueueWatcher, ABC):
         attempt("streaming_session", self._end_streaming_session)
         attempt("control_queues", self._cleanup_standard_control_queues_on_exit)
         queue_handles: list[Queue] = list(self._queue_cache.values())
+        queue_handles.extend(runtime.queue for runtime in self._queues.values())
         seen_queue_ids: set[int] = set()
         for queue in queue_handles:
             queue_id = id(queue)
             if queue_id in seen_queue_ids:
                 continue
             seen_queue_ids.add(queue_id)
+            # Recycle this thread's core before releasing its session lease.
+            # Queue cleanup also covers the primary watcher's auxiliary handle.
+            attempt(f"queue_connections:{queue.name}", queue.cleanup_connections)
             try:
                 queue.close()
             except (BrokerError, OSError, RuntimeError) as exc:
@@ -962,7 +966,6 @@ class BaseTask(MultiQueueWatcher, ABC):
                 "base_resources",
                 lambda: self._cleanup_base_task_resources(deadline),
             )
-            attempt("thread_local", self._cleanup_thread_local)
             finalizer = getattr(self, "_finalizer", None)
             if finalizer is not None:
                 attempt("weakref_finalizer", finalizer.detach)

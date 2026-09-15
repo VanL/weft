@@ -403,9 +403,11 @@ def test_heartbeat_owner_resolution_is_endpoint_registry_version_gated(
     def counted_resolve_endpoint(
         ctx: object,
         name: str,
+        *,
+        broker: Any | None = None,
     ) -> object:
         resolve_calls.append(name)
-        return real_resolve_endpoint(ctx, name)  # type: ignore[arg-type]
+        return real_resolve_endpoint(ctx, name, broker=broker)  # type: ignore[arg-type]
 
     monkeypatch.setattr(
         heartbeat_module,

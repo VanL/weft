@@ -22,7 +22,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext
-from weft.core.queue_window import QueueWindowRow, is_old_enough
+from weft.core.queue_window import QueueWindowRow, is_old_enough, queue_broker
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +194,7 @@ def fetch_dead_task_log_coalesce_group(
     tid: str,
     *,
     chunk_limit: int,
+    broker: Any | None = None,
 ) -> DeadTaskLogCoalesceGroup:
     """Fetch exact ``weft.log.tasks`` rows whose task family TID matches ``tid``."""
 
@@ -204,9 +205,9 @@ def fetch_dead_task_log_coalesce_group(
     rows: list[QueueWindowRow] = []
     api_matches = 0
     after_timestamp: int | None = None
-    with ctx.broker() as broker:
+    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
         while True:
-            message_ids = broker.find_message_ids(
+            message_ids = db.find_message_ids(
                 WEFT_GLOBAL_LOG_QUEUE,
                 body_contains=tid,
                 limit=effective_limit,
@@ -219,7 +220,7 @@ def fetch_dead_task_log_coalesce_group(
             after_timestamp = max(int(message_id) for message_id in message_ids)
             for message_id in message_ids:
                 row = _task_log_row_for_message_id_including_claimed(
-                    broker,
+                    db,
                     int(message_id),
                 )
                 if row is not None and _row_belongs_to_tid(row, tid):

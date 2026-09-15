@@ -26,11 +26,12 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 from weft.core.task_state import latest_task_state_rows
 from weft.ext import RunnerHandle
 from weft.helpers import (
+    closing_queue_iterator,
     handle_has_live_host_process,
-    iter_queue_json_entries,
 )
 from weft.liveness.registry import runtime_liveness_from_registered_probe
 
@@ -211,11 +212,17 @@ def endpoint_record_from_payload(
     )
 
 
-def _latest_task_statuses(ctx: WeftContext) -> dict[str, str]:
-    queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    try:
+def _latest_task_statuses(
+    ctx: WeftContext, *, broker: Any | None = None
+) -> dict[str, str]:
+    with (
+        queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db,
+        closing_queue_iterator(
+            iter_broker_queue_json_entries(db, WEFT_GLOBAL_LOG_QUEUE)
+        ) as rows,
+    ):
         latest: dict[str, tuple[int, str]] = {}
-        for payload, message_id in iter_queue_json_entries(queue):
+        for payload, message_id in rows:
             tid = payload.get("tid")
             if not isinstance(tid, str) or not tid:
                 continue
@@ -236,23 +243,25 @@ def _latest_task_statuses(ctx: WeftContext) -> dict[str, str]:
             if previous is None or previous[0] <= message_id:
                 latest[tid] = (int(message_id), status)
         return {tid: status for tid, (_message_id, status) in latest.items()}
-    finally:
-        queue.close()
 
 
-def latest_task_statuses_for_endpoint_resolution(ctx: WeftContext) -> dict[str, str]:
+def latest_task_statuses_for_endpoint_resolution(
+    ctx: WeftContext, *, broker: Any | None = None
+) -> dict[str, str]:
     """Return latest task statuses used by endpoint owner liveness checks."""
 
-    return _latest_task_statuses(ctx)
+    return _latest_task_statuses(ctx, broker=broker)
 
 
 def latest_tid_mapping_entries_for_endpoint_resolution(
-    ctx: WeftContext, *, tids: Iterable[str] | None = None
+    ctx: WeftContext, *, tids: Iterable[str] | None = None, broker: Any | None = None
 ) -> dict[str, dict[str, Any]]:
     """Return current candidate snapshots for owner liveness (Spec: [MF-3.1])."""
     return {
         full: payload
-        for full, (_message_id, payload) in latest_task_state_rows(ctx, tids).items()
+        for full, (_message_id, payload) in latest_task_state_rows(
+            ctx, tids, broker=broker
+        ).items()
     }
 
 
@@ -326,28 +335,33 @@ def list_resolved_endpoints(
     ctx: WeftContext,
     *,
     pattern: str | None = None,
+    broker: Any | None = None,
 ) -> list[ResolvedEndpoint]:
     """Return canonical live endpoint records without deleting registry rows.
 
     Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3.1]
     """
 
-    registry_queue = ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
-    try:
+    with queue_broker(ctx, WEFT_ENDPOINTS_REGISTRY_QUEUE, broker=broker) as db:
         latest_by_owner: dict[tuple[str, str], EndpointRecord] = {}
-        for payload, message_id in iter_queue_json_entries(registry_queue):
-            record = endpoint_record_from_payload(payload, message_id=int(message_id))
-            if record is None:
-                continue
-            if pattern is not None and not fnmatchcase(record.name, pattern):
-                continue
-            previous = latest_by_owner.get((record.name, record.tid))
-            if previous is None or (previous.message_id or -1) <= int(message_id):
-                latest_by_owner[(record.name, record.tid)] = record
+        with closing_queue_iterator(
+            iter_broker_queue_json_entries(db, WEFT_ENDPOINTS_REGISTRY_QUEUE)
+        ) as rows:
+            for payload, message_id in rows:
+                record = endpoint_record_from_payload(
+                    payload, message_id=int(message_id)
+                )
+                if record is None:
+                    continue
+                if pattern is not None and not fnmatchcase(record.name, pattern):
+                    continue
+                previous = latest_by_owner.get((record.name, record.tid))
+                if previous is None or (previous.message_id or -1) <= int(message_id):
+                    latest_by_owner[(record.name, record.tid)] = record
 
-        task_statuses = _latest_task_statuses(ctx)
+        task_statuses = _latest_task_statuses(ctx, broker=db)
         tid_mappings = latest_tid_mapping_entries_for_endpoint_resolution(
-            ctx, tids={record.tid for record in latest_by_owner.values()}
+            ctx, tids={record.tid for record in latest_by_owner.values()}, broker=db
         )
         grouped = _classify_latest_endpoint_records(
             latest_by_owner.values(),
@@ -363,15 +377,17 @@ def list_resolved_endpoints(
             )
         resolved.sort(key=lambda item: (item.record.name, int(item.record.tid)))
         return resolved
-    finally:
-        registry_queue.close()
 
 
-def resolve_endpoint(ctx: WeftContext, name: str) -> ResolvedEndpoint | None:
+def resolve_endpoint(
+    ctx: WeftContext, name: str, *, broker: Any | None = None
+) -> ResolvedEndpoint | None:
     """Resolve one stable endpoint name to its canonical live owner."""
 
     normalized_name = normalize_endpoint_name(name)
-    for resolved in list_resolved_endpoints(ctx, pattern=normalized_name):
+    for resolved in list_resolved_endpoints(
+        ctx, pattern=normalized_name, broker=broker
+    ):
         if resolved.record.name == normalized_name:
             return resolved
     return None

@@ -36,6 +36,7 @@ from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.pipelines import pipeline_public_queues
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.queue_window import queue_broker
 from weft.helpers import closing_queue_iterator, iter_queue_json_entries
 
 from ._boundary import typed_command_errors
@@ -117,8 +118,10 @@ def _pipeline_queue_names_for_tid(tid: str) -> tuple[str, str, str]:
     return queues.outbox, queues.ctrl_out, queues.status
 
 
-def _load_taskspec_payload(context: WeftContext, tid: str) -> dict[str, Any] | None:
-    return load_latest_taskspec_payload(context, tid)
+def _load_taskspec_payload(
+    context: WeftContext, tid: str, *, broker: Any | None = None
+) -> dict[str, Any] | None:
+    return load_latest_taskspec_payload(context, tid, broker=broker)
 
 
 def _queue_exists(context: WeftContext, queue_name: str) -> bool:
@@ -133,14 +136,16 @@ def _queue_exists(context: WeftContext, queue_name: str) -> bool:
             return False
 
 
-def _queue_names_exist(context: WeftContext, *queue_names: str) -> bool:
+def _queue_names_exist(
+    context: WeftContext, *queue_names: str, broker: Any | None = None
+) -> bool:
     """Return ``True`` when any named queue currently exists."""
 
     wanted = {name for name in queue_names if name}
     if not wanted:
         return False
 
-    with context.broker() as db:
+    with queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
         try:
             return any(bool(db.queue_exists(name)) for name in wanted)
         except (
@@ -156,6 +161,7 @@ def _result_surface_has_activity(
     *,
     outbox_name: str,
     ctrl_out_name: str,
+    broker: Any | None = None,
 ) -> bool:
     """Return ``True`` when the default result surface already has messages.
 
@@ -165,13 +171,11 @@ def _result_surface_has_activity(
     discovery have not caught up yet.
     """
 
-    outbox_queue = context.queue(outbox_name, persistent=True)
-    ctrl_queue = context.queue(ctrl_out_name, persistent=False)
-    try:
-        return outbox_queue.peek_one() is not None or ctrl_queue.peek_one() is not None
-    finally:
-        outbox_queue.close()
-        ctrl_queue.close()
+    with queue_broker(context, outbox_name, broker=broker) as db:
+        return (
+            db.peek_one(outbox_name) is not None
+            or db.peek_one(ctrl_out_name) is not None
+        )
 
 
 def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108] exception
@@ -197,12 +201,14 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
     try:
         log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
         resources.callback(log_queue.close)
+        # Retain the lease, not a transaction; each poll reads fresh committed data.
+        broker = resources.enter_context(log_queue.get_connection())
         monitor = QueueChangeMonitor([log_queue], config=context.config)
         resources.callback(monitor.close)
         log_last_timestamp: int | None = None
 
         while True:
-            taskspec_payload = _load_taskspec_payload(context, tid)
+            taskspec_payload = _load_taskspec_payload(context, tid, broker=broker)
             outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
                 tid,
                 taskspec_payload,
@@ -218,6 +224,7 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
                 context,
                 outbox_name=outbox_name,
                 ctrl_out_name=ctrl_out_name,
+                broker=broker,
             ):
                 return ResultMaterialization(
                     taskspec_payload=None,
@@ -238,10 +245,12 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
                     pipeline_outbox_name,
                     pipeline_ctrl_out_name,
                     pipeline_status_name,
+                    broker=broker,
                 ) or _result_surface_has_activity(
                     context,
                     outbox_name=pipeline_outbox_name,
                     ctrl_out_name=pipeline_ctrl_out_name,
+                    broker=broker,
                 ):
                     return ResultMaterialization(
                         taskspec_payload=None,
@@ -290,6 +299,7 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
                             context,
                             outbox_name=outbox_name,
                             ctrl_out_name=ctrl_out_name,
+                            broker=broker,
                         )
                         return ResultMaterialization(
                             taskspec_payload=event_taskspec,
@@ -318,6 +328,7 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
                             context,
                             outbox_name=outbox_name,
                             ctrl_out_name=ctrl_out_name,
+                            broker=broker,
                         ),
                     )
                 continue

@@ -33,11 +33,12 @@ from weft.core.endpoints import (
     resolve_endpoint,
 )
 from weft.core.manager_services import ServiceCandidate, summarize_service_candidates
+from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 from weft.core.task_state import read_task_state_snapshot
 from weft.ext import RunnerHandle
 from weft.helpers import (
+    closing_queue_iterator,
     handle_has_live_host_process,
-    iter_queue_json_entries,
 )
 
 
@@ -46,25 +47,28 @@ def _write_heartbeat_request(
     *,
     resolved: ResolvedEndpoint,
     payload: Mapping[str, Any],
+    broker: Any | None = None,
 ) -> int | None:
-    queue = context.queue(resolved.record.inbox, persistent=False)
-    try:
-        queue.write(json.dumps(dict(payload), ensure_ascii=False))
+    with queue_broker(context, resolved.record.inbox, broker=broker) as db:
+        db.write(resolved.record.inbox, json.dumps(dict(payload), ensure_ascii=False))
         return None
-    finally:
-        queue.close()
 
 
 def _latest_heartbeat_task_status(
     context: WeftContext,
     *,
     tid: str,
+    broker: Any | None = None,
 ) -> str | None:
-    queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     latest_status: str | None = None
     latest_timestamp = -1
-    try:
-        for payload, timestamp in iter_queue_json_entries(queue):
+    with (
+        queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db,
+        closing_queue_iterator(
+            iter_broker_queue_json_entries(db, WEFT_GLOBAL_LOG_QUEUE)
+        ) as rows,
+    ):
+        for payload, timestamp in rows:
             if payload.get("tid") != tid or timestamp < latest_timestamp:
                 continue
             taskspec_dump = payload.get("taskspec")
@@ -87,8 +91,6 @@ def _latest_heartbeat_task_status(
             if isinstance(status, str):
                 latest_status = status
                 latest_timestamp = timestamp
-    finally:
-        queue.close()
     return latest_status
 
 
@@ -96,8 +98,9 @@ def _heartbeat_runtime_handle_is_live(
     context: WeftContext,
     *,
     tid: str,
+    broker: Any | None = None,
 ) -> bool:
-    row = read_task_state_snapshot(context, tid)
+    row = read_task_state_snapshot(context, tid, broker=broker)
     if row is None:
         return False
     handle_payload = row[1].get("runtime_handle")
@@ -114,6 +117,7 @@ def _heartbeat_endpoint_candidate(
     context: WeftContext,
     *,
     resolved: ResolvedEndpoint,
+    broker: Any | None = None,
 ) -> ServiceCandidate:
     record = resolved.record
     if record.status != "active":
@@ -125,7 +129,9 @@ def _heartbeat_endpoint_candidate(
             reason=f"endpoint status {record.status}",
         )
 
-    latest_status = _latest_heartbeat_task_status(context, tid=record.tid)
+    latest_status = _latest_heartbeat_task_status(
+        context, tid=record.tid, broker=broker
+    )
     if latest_status in TERMINAL_TASK_STATUSES:
         return ServiceCandidate(
             key=INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -135,7 +141,7 @@ def _heartbeat_endpoint_candidate(
             reason=latest_status,
         )
 
-    if _heartbeat_runtime_handle_is_live(context, tid=record.tid):
+    if _heartbeat_runtime_handle_is_live(context, tid=record.tid, broker=broker):
         return ServiceCandidate(
             key=INTERNAL_SERVICE_KEY_HEARTBEAT,
             tid=record.tid,
@@ -150,6 +156,7 @@ def _heartbeat_endpoint_candidate(
             ctrl_in_name=record.ctrl_in,
             ctrl_out_name=record.ctrl_out,
             timeout=HEARTBEAT_ENDPOINT_PROBE_TIMEOUT,
+            broker=broker,
         )
         if probe.matched is not None:
             return ServiceCandidate(
@@ -180,9 +187,10 @@ def _heartbeat_endpoint_is_live(
     context: WeftContext,
     *,
     resolved: ResolvedEndpoint,
+    broker: Any | None = None,
 ) -> bool:
     summary = summarize_service_candidates(
-        [_heartbeat_endpoint_candidate(context, resolved=resolved)]
+        [_heartbeat_endpoint_candidate(context, resolved=resolved, broker=broker)]
     )
     return (
         summary.canonical_live is not None
@@ -194,21 +202,29 @@ def ensure_heartbeat_service(
     context: WeftContext,
     *,
     startup_timeout: float = MANAGER_STARTUP_TIMEOUT_SECONDS,
+    broker: Any | None = None,
 ) -> ResolvedEndpoint:
     """Ensure the built-in heartbeat service is live and return its endpoint."""
 
-    resolved = resolve_endpoint(context, INTERNAL_HEARTBEAT_ENDPOINT_NAME)
-    if resolved is not None and _heartbeat_endpoint_is_live(context, resolved=resolved):
+    resolved = resolve_endpoint(
+        context, INTERNAL_HEARTBEAT_ENDPOINT_NAME, broker=broker
+    )
+    if resolved is not None and _heartbeat_endpoint_is_live(
+        context, resolved=resolved, broker=broker
+    ):
         return resolved
 
-    manager_runtime.ensure_manager(context)
+    manager_runtime.ensure_manager(context, broker=broker)
 
     deadline = time.monotonic() + startup_timeout
     while time.monotonic() < deadline:
-        resolved = resolve_endpoint(context, INTERNAL_HEARTBEAT_ENDPOINT_NAME)
+        resolved = resolve_endpoint(
+            context, INTERNAL_HEARTBEAT_ENDPOINT_NAME, broker=broker
+        )
         if resolved is not None and _heartbeat_endpoint_is_live(
             context,
             resolved=resolved,
+            broker=broker,
         ):
             return resolved
         time.sleep(MANAGER_REGISTRY_POLL_INTERVAL)
@@ -226,13 +242,17 @@ def upsert_heartbeat(
     destination_queue: str,
     message: Any,
     startup_timeout: float = MANAGER_STARTUP_TIMEOUT_SECONDS,
+    broker: Any | None = None,
 ) -> int | None:
     """Register or replace one runtime-scoped heartbeat."""
 
-    resolved = ensure_heartbeat_service(context, startup_timeout=startup_timeout)
+    resolved = ensure_heartbeat_service(
+        context, startup_timeout=startup_timeout, broker=broker
+    )
     return _write_heartbeat_request(
         context,
         resolved=resolved,
+        broker=broker,
         payload={
             "action": "upsert",
             "heartbeat_id": heartbeat_id,
@@ -247,13 +267,15 @@ def cancel_heartbeat(
     context: WeftContext,
     *,
     heartbeat_id: str,
+    broker: Any | None = None,
 ) -> int | None:
     """Cancel one runtime-scoped heartbeat registration."""
 
-    resolved = ensure_heartbeat_service(context)
+    resolved = ensure_heartbeat_service(context, broker=broker)
     return _write_heartbeat_request(
         context,
         resolved=resolved,
+        broker=broker,
         payload={
             "action": "cancel",
             "heartbeat_id": heartbeat_id,

@@ -392,11 +392,16 @@ def test_service_owner_schema_version_rejects_noncanonical_suffixes(
 
 
 class _TaskMonitorContextStub:
-    def __init__(self, context: Any) -> None:
+    def __init__(self, context: Any, registry_queue: Queue) -> None:
         self._context = context
+        self._registry_queue = registry_queue
 
     def _monitor_context(self) -> Any:
         return self._context
+
+    def _queue(self, name: str) -> Queue:
+        assert name == self._registry_queue.name
+        return self._registry_queue
 
 
 def _read_service_registry_surface(surface: str, context: Any) -> object:
@@ -405,8 +410,9 @@ def _read_service_registry_surface(surface: str, context: Any) -> object:
     if surface == "system-status":
         return system_commands._collect_service_registry_evidence(context, now_ns=0)
     if surface == "task-monitor":
-        monitor = _TaskMonitorContextStub(context)
-        return TaskMonitor._latest_service_owner_records(monitor)  # type: ignore[arg-type]
+        with context.queue("weft.state.services", persistent=True) as registry_queue:
+            monitor = _TaskMonitorContextStub(context, registry_queue)
+            return TaskMonitor._latest_service_owner_records(monitor)  # type: ignore[arg-type]
     raise AssertionError(f"unknown service-registry surface: {surface}")
 
 

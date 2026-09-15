@@ -27,19 +27,19 @@ def test_newest_valid_snapshot_is_local_and_suffix_bound(tmp_path: Path) -> None
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
     tid = "1760000000123456789"
     other = "1760000000987654321"
-    queue = ctx.queue(task_state_queue_name(tid))
+    queue = ctx.queue(task_state_queue_name(tid), persistent=True)
     try:
         good = {"full": tid, "short": "display", "terminal": False}
         message_id = queue.write(json.dumps(good))
         queue.write(json.dumps({"full": other, "short": "wrong"}))
         for _ in range(1050):
             queue.write("malformed")
-        assert read_task_state_snapshot(ctx, tid) == (message_id, good)
-        assert latest_task_state_rows(ctx, [tid]) == {tid: (message_id, good)}
         assert len(queue.peek_many(limit=1100)) == 1052
-        assert read_task_state_snapshot(ctx, other) is None
     finally:
         queue.close()
+    assert read_task_state_snapshot(ctx, tid) == (message_id, good)
+    assert latest_task_state_rows(ctx, [tid]) == {tid: (message_id, good)}
+    assert read_task_state_snapshot(ctx, other) is None
 
 
 def test_names_include_malformed_only_entries_without_payload_reads(

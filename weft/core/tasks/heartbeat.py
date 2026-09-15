@@ -350,9 +350,10 @@ class HeartbeatTask(ServiceTask):
                     self._reschedule_registration(registration, now=now)
                     continue
                 try:
-                    self._queue(registration.destination_queue).write(
-                        registration.message_text
-                    )
+                    with self._get_connected_queue().get_connection() as broker:
+                        broker.write(
+                            registration.destination_queue, registration.message_text
+                        )
                 except (BrokerError, OSError, RuntimeError):
                     logger.debug(
                         "Failed to emit heartbeat %s to %s",
@@ -406,7 +407,10 @@ class HeartbeatTask(ServiceTask):
                 return self._cached_service_ownership
 
         version_before = self._endpoint_registry_version()
-        resolved = resolve_endpoint(self._context, INTERNAL_HEARTBEAT_ENDPOINT_NAME)
+        with self._get_connected_queue().get_connection() as broker:
+            resolved = resolve_endpoint(
+                self._context, INTERNAL_HEARTBEAT_ENDPOINT_NAME, broker=broker
+            )
         version_after = self._endpoint_registry_version()
         if resolved is None:
             ownership: tuple[Literal["self", "other", "unknown"], str | None] = (

@@ -24,9 +24,11 @@ from weft._constants import (
     SERVICE_STATUS_SUPERSEDED,
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGER,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import WeftContext, service_context_key
+from weft.helpers import closing_queue_iterator
 
 logger = logging.getLogger(__name__)
 
@@ -257,25 +259,41 @@ def _service_owner_schema_version(body: str) -> int | None:
     return version if suffix == str(version) else None
 
 
-def discard_v1_service_registry_rows(queue: Queue) -> None:
+def discard_v1_service_registry_rows(
+    queue: Queue | None = None, *, broker: Any | None = None
+) -> None:
     """Discard obsolete v1 service-owner rows before live interpretation.
 
     The scan includes claimed rows and completes before any deletion so a
     numeric future schema aborts without partially changing the registry.
+    A borrowed broker uses the supplied queue name, or the services registry
+    when no queue is supplied. Neither borrowed resource is closed here.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-1.4].
     """
 
+    if queue is None and broker is None:
+        raise ValueError("a queue or borrowed broker is required")
+    queue_name = queue.name if queue is not None else WEFT_SERVICES_REGISTRY_QUEUE
+
     def scan_schema_rows() -> tuple[tuple[int, int], ...]:
+        if broker is None:
+            assert queue is not None
+            entries = queue.peek_generator(with_timestamps=True, include_claimed=True)
+        else:
+            entries = broker.peek_generator(
+                queue_name, with_timestamps=True, include_claimed=True
+            )
         rows = cast(
             Iterable[tuple[str, int]],
-            queue.peek_generator(with_timestamps=True, include_claimed=True),
+            entries,
         )
-        return tuple(
-            (int(message_id), version)
-            for body, message_id in rows
-            if (version := _service_owner_schema_version(body)) is not None
-        )
+        with closing_queue_iterator(rows) as owned_rows:
+            return tuple(
+                (int(message_id), version)
+                for body, message_id in owned_rows
+                if (version := _service_owner_schema_version(body)) is not None
+            )
 
     schema_rows = scan_schema_rows()
     v1_ids = [message_id for message_id, version in schema_rows if version == 1]
@@ -285,7 +303,11 @@ def discard_v1_service_registry_rows(queue: Queue) -> None:
             f"future service-owner schema v{min(future_versions)} is unsupported"
         )
     if v1_ids:
-        queue.delete_many(v1_ids)
+        if broker is None:
+            assert queue is not None
+            queue.delete_many(v1_ids)
+        else:
+            broker.delete_message_ids(queue_name, v1_ids)
 
     schema_rows = scan_schema_rows()
     remaining_v1_ids = [

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -460,30 +460,42 @@ def _prepare_v5_tombstone(
         )
 
 
-def test_store_sidecar_session_rolls_back_on_exception(tmp_path: Path) -> None:
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_store_sidecar_session_rolls_back_on_exception(
+    tmp_path: Path, borrowed: bool
+) -> None:
     """A failing store write must leave no partial rows behind."""
 
     ctx = _context(tmp_path)
-    store = open_monitor_store(ctx)
-    store.ensure_schema()
 
     class _Boom(Exception):
         pass
 
-    with pytest.raises(_Boom), store._sidecar_session(transaction=True) as session:
-        session.run(
-            "INSERT INTO weft_monitor_meta (key, value_json, updated_at_ns) "
-            "VALUES (?, ?, ?)",
-            ("rollback_probe", "{}", 1),
+    with ExitStack() as resources:
+        queue = (
+            resources.enter_context(ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True))
+            if borrowed
+            else None
         )
-        raise _Boom()
+        store = open_monitor_store(ctx, queue=queue)
+        resources.callback(store.close)
+        store.ensure_schema()
+        with pytest.raises(_Boom), store._sidecar_session(transaction=True) as session:
+            session.run(
+                "INSERT INTO weft_monitor_meta (key, value_json, updated_at_ns) "
+                "VALUES (?, ?, ?)",
+                ("rollback_probe", "{}", 1),
+            )
+            raise _Boom()
 
-    assert (
-        _monitor_table_count(
-            ctx, "weft_monitor_meta", where="key = ?", params=("rollback_probe",)
+        assert (
+            _monitor_table_count(
+                ctx, "weft_monitor_meta", where="key = ?", params=("rollback_probe",)
+            )
+            == 0
         )
-        == 0
-    )
+        store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, 1778089999999999913)
+        assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == 1778089999999999913
 
 
 def test_monitor_store_get_task_signals_completely_uninitialized_catalog(

@@ -8,7 +8,8 @@ Spec references:
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -84,26 +85,39 @@ def _taskspec_payload_for_spawn(
     return encode_taskspec_transport_payload(model)
 
 
+@contextmanager
+def _spawn_broker(
+    broker_target: BrokerTarget | str | Path,
+    queue_name: str,
+    config: Mapping[str, Any] | None,
+    broker: Any | None,
+) -> Iterator[Any]:
+    """Borrow a task connection or own one pre-context lease [SB-0.4]."""
+    if broker is not None:
+        yield broker
+        return
+    with (
+        Queue(
+            queue_name,
+            db_path=_normalize_broker_target(broker_target),
+            persistent=True,
+            config=resolve_runtime_config(config),
+        ) as queue,
+        queue.get_connection() as opened,
+    ):
+        yield opened
+
+
 def generate_spawn_request_timestamp(
     broker_target: BrokerTarget | str | Path,
     *,
     config: Mapping[str, Any] | None = None,
+    broker: Any | None = None,
 ) -> int:
     """Return a broker-valid task timestamp from the spawn-request queue."""
 
-    queue_config = resolve_runtime_config(config)
-    # Direct Queue ok here: TID allocation happens before a WeftContext or task
-    # object is available; see runtime-and-context-patterns.md section 2.
-    queue = Queue(
-        WEFT_SPAWN_REQUESTS_QUEUE,
-        db_path=_normalize_broker_target(broker_target),
-        persistent=False,
-        config=queue_config,
-    )
-    try:
-        return int(queue.generate_timestamp())
-    finally:
-        queue.close()
+    with _spawn_broker(broker_target, WEFT_SPAWN_REQUESTS_QUEUE, config, broker) as db:
+        return int(db.generate_timestamp())
 
 
 def _write_spawn_request_with_timestamp(
@@ -177,6 +191,7 @@ def submit_spawn_request(
     seed_start_envelope: bool = True,
     allow_internal_runtime: bool = False,
     spawn_queue_name: str = WEFT_SPAWN_REQUESTS_QUEUE,
+    broker: Any | None = None,
 ) -> int:
     """Write a manager spawn request and return its authoritative TID.
 
@@ -233,27 +248,15 @@ def submit_spawn_request(
     message_json = json.dumps(message)
     message_timestamp = int(resolved_tid) if resolved_tid is not None else None
 
-    queue_config = resolve_runtime_config(config)
-    # Direct Queue ok here: spawn submission receives only a broker target, before
-    # a context-bound queue helper is available; see runtime-and-context-patterns.md section 2.
-    queue = Queue(
-        spawn_queue_name,
-        db_path=_normalize_broker_target(broker_target),
-        persistent=False,
-        config=queue_config,
-    )
-    try:
+    with _spawn_broker(broker_target, spawn_queue_name, config, broker) as db:
         if message_timestamp is None:
-            return int(queue.write(message_json))
-        with queue.get_connection() as db:
-            _write_spawn_request_with_timestamp(
-                db,
-                queue_name=spawn_queue_name,
-                message=message_json,
-                timestamp=message_timestamp,
-            )
-    finally:
-        queue.close()
+            return int(db.write(spawn_queue_name, message_json))
+        _write_spawn_request_with_timestamp(
+            db,
+            queue_name=spawn_queue_name,
+            message=message_json,
+            timestamp=message_timestamp,
+        )
 
     return message_timestamp
 
@@ -263,25 +266,20 @@ def delete_spawn_request(
     *,
     message_timestamp: int,
     config: Mapping[str, Any] | None = None,
+    broker: Any | None = None,
 ) -> bool:
     """Best-effort removal of a queued spawn request after setup failure."""
 
-    queue_config = resolve_runtime_config(config)
-    # Direct Queue ok here: rollback cleanup receives only a broker target, before
-    # a context-bound queue helper is available; see runtime-and-context-patterns.md section 2.
-    queue = Queue(
-        WEFT_SPAWN_REQUESTS_QUEUE,
-        db_path=_normalize_broker_target(broker_target),
-        persistent=False,
-        config=queue_config,
-    )
     try:
-        return bool(queue.delete(message_id=message_timestamp))
+        with _spawn_broker(
+            broker_target, WEFT_SPAWN_REQUESTS_QUEUE, config, broker
+        ) as db:
+            return bool(
+                db.delete_message_ids(WEFT_SPAWN_REQUESTS_QUEUE, [message_timestamp])
+            )
     except (
         BrokerError,
         OSError,
         RuntimeError,
     ):  # pragma: no cover - spawn cleanup best effort
         return False
-    finally:
-        queue.close()

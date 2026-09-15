@@ -7,6 +7,7 @@ import logging
 import os
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal, Never
 from unittest.mock import Mock
 
@@ -71,7 +72,10 @@ def test_runtime_prune_preserves_exact_run_id_format(
         lambda *_args: "2030-01-02T03:04:05",
     )
     monkeypatch.setattr(runtime_pruning.time, "time_ns", lambda: 9_876_543_210)
-    monkeypatch.setattr(runtime_pruning.os, "getpid", lambda: 4321)
+    # Keep the broker's process identity real while pinning the report field.
+    os_proxy = SimpleNamespace(**vars(runtime_pruning.os))
+    os_proxy.getpid = lambda: 4321
+    monkeypatch.setattr(runtime_pruning, "os", os_proxy)
 
     result = runtime_pruning.run_runtime_prune_for_context(
         ctx,

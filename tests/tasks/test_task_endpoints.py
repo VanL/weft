@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 import pytest
 
@@ -93,6 +94,17 @@ class _CloseTrackingQueue:
     def close(self) -> None:
         self.closed = True
         self._queue.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
 
 @pytest.fixture

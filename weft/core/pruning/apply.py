@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Iterable
-from typing import Protocol
+from contextlib import ExitStack
+from functools import partial
+from typing import Any, Protocol
 
 from simplebroker.ext import BrokerError
 from weft.context import WeftContext
@@ -48,6 +50,7 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
     force: bool = False,
     exact_status: bool = False,
     reconcile_missing: bool = False,
+    broker: Any | None = None,
 ) -> list[AppliedCandidate]:
     """Delete exact prune candidates and return caller-shaped apply results.
 
@@ -69,6 +72,8 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
             never be reported ``deleted=True``. Use this only for
             idempotent cleanup paths where missing rows mean the work is
             already complete.
+        broker: Borrowed task-owned broker. The caller retains its connection
+            scope; standalone calls own a bounded persistent queue instead.
 
     Returns:
         Per-candidate apply results in queue-grouped processing order.
@@ -82,8 +87,14 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
 
     applied: list[AppliedCandidate] = []
     for queue_name, queue_candidates in by_queue.items():
-        queue = ctx.queue(queue_name, persistent=_queue_is_persistent(queue_name))
-        try:
+        with ExitStack() as scope:
+            delete_ids: Callable[[list[int]], int]
+            if broker is None:
+                queue = scope.enter_context(ctx.queue(queue_name, persistent=True))
+                # Acquire lazily inside the existing per-candidate error boundary.
+                delete_ids = queue.delete_many
+            else:
+                delete_ids = partial(broker.delete_message_ids, queue_name)
             queue_results: list[AppliedCandidate | None] = [None] * len(
                 queue_candidates
             )
@@ -98,7 +109,7 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
                 if exact_status:
                     for index, candidate in deletable:
                         try:
-                            deleted = queue.delete(message_id=candidate.message_id)
+                            deleted = delete_ids([candidate.message_id]) > 0
                         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
                             queue_results[index] = apply_result(
                                 candidate,
@@ -113,8 +124,8 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
                             )
                 else:
                     try:
-                        deleted_count = queue.delete_many(
-                            [candidate.message_id for _index, candidate in deletable]
+                        deleted_count = delete_ids(
+                            [candidate.message_id for _index, candidate in deletable],
                         )
                     except (BrokerError, OSError, RuntimeError, ValueError) as exc:
                         for index, candidate in deletable:
@@ -140,7 +151,7 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
                             # present row can never be reported deleted.
                             for index, candidate in deletable:
                                 try:
-                                    queue.delete(message_id=candidate.message_id)
+                                    delete_ids([candidate.message_id])
                                 except (
                                     BrokerError,
                                     OSError,
@@ -181,12 +192,4 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
             for result in queue_results:
                 if result is not None:
                     applied.append(result)
-        finally:
-            queue.close()
     return applied
-
-
-def _queue_is_persistent(queue_name: str) -> bool:
-    """Return whether the prune helper must open a persistent queue handle."""
-
-    return queue_name.endswith(".outbox")

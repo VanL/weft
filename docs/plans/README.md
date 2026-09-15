@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 216 plan files in this directory.
+There are currently 217 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 216 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-09-14-bounded-registry-connection-reuse-plan.md`](./2026-09-14-bounded-registry-connection-reuse-plan.md) | Bounded Registry Connection Reuse | `draft` | none |
 | [`2026-09-14-xdist-title-contention-plan.md`](./2026-09-14-xdist-title-contention-plan.md) | Xdist Title Contention Investigation | `draft` | none |
 | [`2026-09-14-django-core-context-resolution-plan.md`](./2026-09-14-django-core-context-resolution-plan.md) | Django Context Resolution Owned by Weft | `completed` | none |
 | [`2026-09-14-simplebroker-8-2-configuration-plan.md`](./2026-09-14-simplebroker-8-2-configuration-plan.md) | SimpleBroker 8.2 Configuration Migration | `completed` | none |

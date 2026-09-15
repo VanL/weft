@@ -115,6 +115,17 @@
 
 ### Fixed
 
+- Task runtime helpers and Monitor sidecars reuse their owned persistent broker
+  connections instead of reconnecting during repeated scans and cleanup.
+  Sidecar transactions remain bounded per operation. Task and Monitor worker
+  cleanup release thread-local broker resources before their queue leases,
+  without recycling another thread's core.
+  Task shutdown also closes configured watched queues that were never cached,
+  including pipeline event queues.
+- Manager lifecycle, task status/control, submission reconciliation, results,
+  and realtime observation retain their connections through bounded waits while
+  reading fresh evidence. Activity-monitor construction and replacement failures
+  release acquired watcher resources and queue leases.
 - Realtime observation refreshes late task metadata and custom queue routes.
   Persistent work-item output and outbox values with unknown task metadata no
   longer falsely end the task stream; explicit terminal evidence still does.

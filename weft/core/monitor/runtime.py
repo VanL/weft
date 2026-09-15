@@ -57,7 +57,8 @@ from weft._constants import (
     WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
 )
 from weft.context import WeftContext
-from weft.helpers import iter_queue_entries
+from weft.core.queue_window import iter_broker_queue_entries, queue_broker
+from weft.helpers import closing_queue_iterator
 
 TaskLogObserver = Callable[[str, str, int], None]
 
@@ -543,6 +544,7 @@ def build_task_monitor_cycle_snapshot(
     limit: int | None = None,
     monitor_tid: str | None = None,
     observer: TaskLogObserver | None = None,
+    broker: Any | None = None,
 ) -> TaskMonitorCycleSnapshot:
     """Build part-2 lifecycle candidates from real broker queues.
 
@@ -552,16 +554,20 @@ def build_task_monitor_cycle_snapshot(
     Spec: [MF-5]
     """
 
-    queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    try:
+    with (
+        queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db,
+        closing_queue_iterator(
+            iter_broker_queue_entries(
+                db, WEFT_GLOBAL_LOG_QUEUE, since_timestamp=since_timestamp
+            )
+        ) as entries,
+    ):
         scan = reduce_task_log_messages(
-            iter_queue_entries(queue, since_timestamp=since_timestamp),
+            entries,
             since_timestamp=since_timestamp,
             limit=limit,
             observer=observer,
         )
-    finally:
-        queue.close()
 
     now_ns = time.time_ns()
     outbox_names = {
@@ -569,7 +575,7 @@ def build_task_monitor_cycle_snapshot(
         for reduced in scan.reduced.values()
         if reduced.tid != monitor_tid
     }
-    queue_counts = _queue_message_counts_by_name(ctx, outbox_names)
+    queue_counts = _queue_message_counts_by_name(ctx, outbox_names, broker=broker)
     lifecycle_candidates = [
         candidate
         for reduced in scan.reduced.values()
@@ -580,6 +586,7 @@ def build_task_monitor_cycle_snapshot(
                 reduced,
                 now_ns=now_ns,
                 queue_counts=queue_counts,
+                broker=broker,
             ),
         )
         if candidate is not None
@@ -712,6 +719,7 @@ def _candidate_for_reduced(
     *,
     now_ns: int,
     queue_counts: Mapping[str, task_evidence.QueueMessageCounts],
+    broker: Any | None = None,
 ) -> TaskMonitorCandidate | None:
     conflict_reason = _lifecycle_conflict_reason(reduced.latest_payload)
     snapshot = _best_evidence(
@@ -719,6 +727,7 @@ def _candidate_for_reduced(
         reduced,
         now_ns=now_ns,
         queue_counts=queue_counts,
+        broker=broker,
     )
     if conflict_reason is not None:
         return _snapshot_candidate(
@@ -763,6 +772,8 @@ def _candidate_for_reduced(
 def _queue_message_counts_by_name(
     ctx: WeftContext,
     queue_names: Iterable[str],
+    *,
+    broker: Any | None = None,
 ) -> dict[str, task_evidence.QueueMessageCounts]:
     wanted = {name for name in queue_names if name}
     if not wanted:
@@ -770,7 +781,7 @@ def _queue_message_counts_by_name(
 
     counts: dict[str, task_evidence.QueueMessageCounts] = {}
     try:
-        with ctx.broker() as db:
+        with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
             for name in wanted:
                 stats = db.get_queue_stat(name)
                 counts[name] = task_evidence.QueueMessageCounts(
@@ -789,6 +800,7 @@ def _best_evidence(
     *,
     now_ns: int,
     queue_counts: Mapping[str, task_evidence.QueueMessageCounts],
+    broker: Any | None = None,
 ) -> task_evidence.TaskEvidenceSnapshot | None:
     if reduced.terminal_payload is not None:
         snapshot = task_evidence.log_terminal_evidence(
@@ -802,6 +814,7 @@ def _best_evidence(
         ctx,
         tid=reduced.tid,
         taskspec_payload=reduced.taskspec_payload,
+        broker=broker,
     )
     if local_snapshot is not None:
         return local_snapshot

@@ -26,7 +26,8 @@ import threading
 import time
 import weakref
 from collections import Counter, deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -207,7 +208,7 @@ from weft.core.tasks.service import (
     ServiceWorkerSpec,
 )
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.helpers import iter_queue_entries, tid_short_form
+from weft.helpers import closing_queue_iterator, iter_queue_entries, tid_short_form
 
 logger = logging.getLogger(__name__)
 
@@ -1025,10 +1026,16 @@ class TaskMonitor(ServiceTask):
             if queue_id in seen_queue_ids:
                 continue
             seen_queue_ids.add(queue_id)
-            try:
-                queue_obj.close()
-            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
-                errors.append(f"queue:{getattr(queue_obj, 'name', '?')}: {exc}")
+            # Reactor leases can outlive this thread. Recycle its cached core
+            # before releasing the worker's lease on the shared session.
+            for label, operation in (
+                ("queue_cleanup", queue_obj.cleanup_connections),
+                ("queue", queue_obj.close),
+            ):
+                try:
+                    operation()
+                except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
+                    errors.append(f"{label}:{getattr(queue_obj, 'name', '?')}: {exc}")
 
         finalizer = getattr(self, "_finalizer", None)
         if finalizer is not None:
@@ -1217,6 +1224,7 @@ class TaskMonitor(ServiceTask):
                     store = open_monitor_store(
                         self._monitor_context(),
                         config=self._weft_config,
+                        queue=self._get_connected_queue(),
                     )
                 except (OSError, RuntimeError, ValueError) as exc:
                     self._monitor_store = None
@@ -2218,36 +2226,40 @@ class TaskMonitor(ServiceTask):
         }
 
         def data_rows(
-            queue: Any,
+            entries: Iterable[tuple[str, int]],
             role: str,
             queue_name: str,
         ) -> Iterator[tuple[int, str, str, str]]:
-            for body, message_id in iter_queue_entries(queue, strict=True):
+            for body, message_id in entries:
                 yield int(message_id), role, queue_name, body
 
-        data_queues: list[Any] = []
         data_sources: list[Iterator[tuple[int, str, str, str]]] = []
         control_row_counts = {"ctrl_in": 0, "ctrl_out": 0}
         salvage_rows: list[dict[str, Any]] = []
         total_data_rows = 0
         overflow_by_role: Counter[str] = Counter()
-        try:
+        with ExitStack() as resources:
+            broker = resources.enter_context(
+                self._get_connected_queue().get_connection()
+            )
             for queue_name in dict.fromkeys(queue_names):
                 suffix = queue_name.rsplit(".", maxsplit=1)[-1]
                 role = role_by_suffix.get(suffix)
                 if role is None:
                     continue
-                queue = self._monitor_context().queue(queue_name, persistent=False)
+                entries = resources.enter_context(
+                    closing_queue_iterator(
+                        broker.peek_generator(queue_name, with_timestamps=True)
+                    )
+                )
                 if role in control_row_counts:
-                    try:
-                        control_row_counts[role] += sum(
-                            1 for _ in iter_queue_entries(queue, strict=True)
-                        )
-                    finally:
-                        queue.close()
+                    control_row_counts[role] += sum(1 for _ in entries)
                     continue
-                data_queues.append(queue)
-                data_sources.append(data_rows(queue, role, queue_name))
+                data_sources.append(
+                    data_rows(
+                        cast(Iterable[tuple[str, int]], entries), role, queue_name
+                    )
+                )
 
             ordered_rows = heapq.merge(
                 *data_sources,
@@ -2272,10 +2284,6 @@ class TaskMonitor(ServiceTask):
                         "truncated": len(retained_body) < len(original),
                     }
                 )
-        finally:
-            for queue in data_queues:
-                queue.close()
-
         return {
             "schema": "weft.task_local_salvage.v1",
             "rows": salvage_rows,
@@ -2348,7 +2356,9 @@ class TaskMonitor(ServiceTask):
         store: MonitorStore | None = None
         try:
             store = open_monitor_store(
-                self._monitor_context(), config=self._weft_config
+                self._monitor_context(),
+                config=self._weft_config,
+                queue=self._get_connected_queue(),
             )
             store.ensure_schema()
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
@@ -2553,14 +2563,16 @@ class TaskMonitor(ServiceTask):
     ) -> _RetainedTaskLogIngestResult:
         """Fold retained visible task-log rows into the Monitor table."""
 
-        scanner = GeneratorTaskLogScanner()
+        scanner = GeneratorTaskLogScanner(persistent=True)
         checkpoint_message_id = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
-        window = scanner.scan_window(
-            self._monitor_context(),
-            WEFT_GLOBAL_LOG_QUEUE,
-            scan_limit=self._monitor_config.task_log_scan_limit,
-            since_timestamp=checkpoint_message_id,
-        )
+        with self._get_connected_queue().get_connection() as broker:
+            window = scanner.scan_window(
+                self._monitor_context(),
+                WEFT_GLOBAL_LOG_QUEUE,
+                scan_limit=self._monitor_config.task_log_scan_limit,
+                since_timestamp=checkpoint_message_id,
+                broker=broker,
+            )
         scanned = 0
         malformed_deleted = 0
         valid_ingested = 0
@@ -2737,13 +2749,15 @@ class TaskMonitor(ServiceTask):
             self._record_pre_checkpoint_recovery_progress(result)
             return result
 
-        scanner = GeneratorTaskLogScanner()
-        window = scanner.scan_window(
-            self._monitor_context(),
-            WEFT_GLOBAL_LOG_QUEUE,
-            scan_limit=self._monitor_config.task_log_scan_limit,
-            before_timestamp=checkpoint_message_id,
-        )
+        scanner = GeneratorTaskLogScanner(persistent=True)
+        with self._get_connected_queue().get_connection() as broker:
+            window = scanner.scan_window(
+                self._monitor_context(),
+                WEFT_GLOBAL_LOG_QUEUE,
+                scan_limit=self._monitor_config.task_log_scan_limit,
+                before_timestamp=checkpoint_message_id,
+                broker=broker,
+            )
         candidate_rows = [
             row
             for row in window.rows
@@ -2943,13 +2957,15 @@ class TaskMonitor(ServiceTask):
             )
             for row in rows
         )
-        applied = tuple(
-            apply_exact_prune_candidates(
-                self._monitor_context(),
-                refs,
-                apply_result=_applied_raw_external_message,
+        with self._get_connected_queue().get_connection() as broker:
+            applied = tuple(
+                apply_exact_prune_candidates(
+                    self._monitor_context(),
+                    refs,
+                    apply_result=_applied_raw_external_message,
+                    broker=broker,
+                )
             )
-        )
         errors = [result.error for result in applied if result.error is not None]
         if require_deleted:
             errors.extend(
@@ -3233,7 +3249,7 @@ class TaskMonitor(ServiceTask):
             queue_names=cleanup_plan.queue_names,
         )
         try:
-            with self._monitor_context().broker() as broker:
+            with self._get_connected_queue().get_connection() as broker:
                 rows_deleted = int(broker.delete_from_queues(cleanup_plan.queue_names))
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"{queue_label}: {exc}")
@@ -3311,7 +3327,7 @@ class TaskMonitor(ServiceTask):
                 queue_names=queue_names_to_delete,
             )
             try:
-                with self._monitor_context().broker() as broker:
+                with self._get_connected_queue().get_connection() as broker:
                     rows_deleted = int(broker.delete_from_queues(queue_names_to_delete))
             except (BrokerError, OSError, RuntimeError, ValueError) as exc:
                 queue_label = ",".join(queue_names_to_delete)
@@ -3381,7 +3397,7 @@ class TaskMonitor(ServiceTask):
         rows_deleted = 0
         errors: list[str] = []
         try:
-            with self._monitor_context().broker() as broker:
+            with self._get_connected_queue().get_connection() as broker:
                 rows_deleted = int(broker.delete_from_queues((queue_name,)))
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"reserved queue delete ({queue_name}): {exc}")
@@ -3395,20 +3411,16 @@ class TaskMonitor(ServiceTask):
     def _latest_service_owner_records(self) -> tuple[ServiceOwnerRecord, ...]:
         """Return latest service-owner rows from the runtime service registry."""
 
-        ctx = self._monitor_context()
-        services = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+        services = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
         service_entries: list[tuple[Mapping[str, Any], int]] = []
-        try:
-            discard_v1_service_registry_rows(services)
-            for body, timestamp in iter_queue_entries(services):
-                try:
-                    payload = json.loads(body)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(payload, Mapping):
-                    service_entries.append((payload, int(timestamp)))
-        finally:
-            services.close()
+        discard_v1_service_registry_rows(services)
+        for body, timestamp in iter_queue_entries(services):
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, Mapping):
+                service_entries.append((payload, int(timestamp)))
 
         service_read = collect_service_owner_records(service_entries)
         return reduce_latest_by_service_owner(service_read.records)
@@ -3459,17 +3471,19 @@ class TaskMonitor(ServiceTask):
 
         return self._active_runtime_tids(tids)
 
-    @staticmethod
     def _nonterminal_mapping_row_tids(
-        ctx: WeftContext, tids: set[str] | None = None
+        self, ctx: WeftContext, tids: set[str] | None = None
     ) -> set[str]:
         """Return TIDs whose newest valid mapping row is non-terminal."""
 
-        return {
-            tid
-            for tid, (_timestamp, payload) in latest_task_state_rows(ctx, tids).items()
-            if payload.get("terminal") is not True
-        }
+        with self._get_connected_queue().get_connection() as broker:
+            return {
+                tid
+                for tid, (_timestamp, payload) in latest_task_state_rows(
+                    ctx, tids, broker=broker
+                ).items()
+                if payload.get("terminal") is not True
+            }
 
     def _stale_service_owner_summary_ready_tasks(
         self,
@@ -3593,7 +3607,7 @@ class TaskMonitor(ServiceTask):
         names: set[str] = set()
         if not patterns:
             return names
-        with self._monitor_context().broker() as broker:
+        with self._get_connected_queue().get_connection() as broker:
             for pattern in patterns:
                 names.update(
                     str(queue_name)
@@ -3731,7 +3745,9 @@ class TaskMonitor(ServiceTask):
 
         try:
             store = open_monitor_store(
-                self._monitor_context(), config=self._weft_config
+                self._monitor_context(),
+                config=self._weft_config,
+                queue=self._get_connected_queue(),
             )
             self._monitor_store = store
             store.ensure_schema()
@@ -4461,14 +4477,16 @@ class TaskMonitor(ServiceTask):
 
         applied: tuple[_AppliedMonitorRawMessage, ...] = ()
         if selected_for_delete and not report_errors:
-            applied = tuple(
-                apply_exact_prune_candidates(
-                    self._monitor_context(),
-                    selected_for_delete,
-                    apply_result=_applied_monitor_raw_message,
-                    reconcile_missing=True,
+            with self._get_connected_queue().get_connection() as broker:
+                applied = tuple(
+                    apply_exact_prune_candidates(
+                        self._monitor_context(),
+                        selected_for_delete,
+                        apply_result=_applied_monitor_raw_message,
+                        reconcile_missing=True,
+                        broker=broker,
+                    )
                 )
-            )
         delete_errors = tuple(
             result.error for result in applied if result.error is not None
         )
@@ -4532,7 +4550,7 @@ class TaskMonitor(ServiceTask):
         """Fetch exact task-log raw rows for selected refs, including claimed rows."""
 
         rows: dict[int, QueueWindowRow] = {}
-        with self._monitor_context().broker() as broker:
+        with self._get_connected_queue().get_connection() as broker:
             for ref in refs:
                 row = broker.peek_one(
                     ref.queue,
@@ -4542,7 +4560,7 @@ class TaskMonitor(ServiceTask):
                 )
                 if row is None:
                     continue
-                body, timestamp = row
+                body, timestamp = cast(tuple[str, int], row)
                 rows[int(timestamp)] = QueueWindowRow(
                     queue=ref.queue,
                     body=body if isinstance(body, str) else str(body),
@@ -4616,12 +4634,14 @@ class TaskMonitor(ServiceTask):
             return MonitorStoreRetirementResult()
         selected_refs = refs[: self._monitor_config.batch_size]
         more_refs = len(refs) > len(selected_refs)
-        applied = apply_exact_prune_candidates(
-            self._monitor_context(),
-            selected_refs,
-            apply_result=_applied_monitor_raw_message,
-            reconcile_missing=True,
-        )
+        with self._get_connected_queue().get_connection() as broker:
+            applied = apply_exact_prune_candidates(
+                self._monitor_context(),
+                selected_refs,
+                apply_result=_applied_monitor_raw_message,
+                reconcile_missing=True,
+                broker=broker,
+            )
         reconciled_ids = tuple(
             result.candidate.message_id
             for result in applied
@@ -4686,11 +4706,13 @@ class TaskMonitor(ServiceTask):
         errors: list[str] = []
         for tid in selected_tids:
             try:
-                group = _fetch_dead_task_log_coalesce_group(
-                    self._monitor_context(),
-                    tid,
-                    chunk_limit=max(1, self._monitor_config.batch_size),
-                )
+                with self._get_connected_queue().get_connection() as broker:
+                    group = _fetch_dead_task_log_coalesce_group(
+                        self._monitor_context(),
+                        tid,
+                        chunk_limit=max(1, self._monitor_config.batch_size),
+                        broker=broker,
+                    )
             except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"{tid}: {exc}")
                 continue
@@ -4791,17 +4813,19 @@ class TaskMonitor(ServiceTask):
         if now_monotonic < self._next_heartbeat_registration_attempt_monotonic:
             return
         try:
-            upsert_heartbeat(
-                self._monitor_context(),
-                heartbeat_id=self._heartbeat_id,
-                interval_seconds=self._monitor_config.interval_seconds,
-                destination_queue=self._queue_names["inbox"],
-                message={
-                    "type": "task_monitor_wakeup",
-                    "monitor_tid": self.tid,
-                },
-                startup_timeout=TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
-            )
+            with self._get_connected_queue().get_connection() as broker:
+                upsert_heartbeat(
+                    self._monitor_context(),
+                    heartbeat_id=self._heartbeat_id,
+                    interval_seconds=self._monitor_config.interval_seconds,
+                    destination_queue=self._queue_names["inbox"],
+                    message={
+                        "type": "task_monitor_wakeup",
+                        "monitor_tid": self.tid,
+                    },
+                    startup_timeout=TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
+                    broker=broker,
+                )
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             self._heartbeat_error = f"heartbeat registration failed: {exc}"
             self._last_error = self._heartbeat_error
@@ -4818,7 +4842,12 @@ class TaskMonitor(ServiceTask):
         if not self._heartbeat_registered:
             return
         try:
-            cancel_heartbeat(self._monitor_context(), heartbeat_id=self._heartbeat_id)
+            with self._get_connected_queue().get_connection() as broker:
+                cancel_heartbeat(
+                    self._monitor_context(),
+                    heartbeat_id=self._heartbeat_id,
+                    broker=broker,
+                )
         except (BrokerError, OSError, RuntimeError, ValueError):
             return
         finally:
@@ -4827,13 +4856,15 @@ class TaskMonitor(ServiceTask):
     def _scan_task_log_candidates(
         self,
     ) -> tuple[tuple[TaskMonitorCandidate, ...], int | None, int]:
-        snapshot = build_task_monitor_cycle_snapshot(
-            self._monitor_context(),
-            since_timestamp=self._last_checkpoint,
-            limit=self._monitor_config.batch_size,
-            monitor_tid=self.tid,
-            observer=self._task_observer,
-        )
+        with self._get_connected_queue().get_connection() as broker:
+            snapshot = build_task_monitor_cycle_snapshot(
+                self._monitor_context(),
+                since_timestamp=self._last_checkpoint,
+                limit=self._monitor_config.batch_size,
+                monitor_tid=self.tid,
+                observer=self._task_observer,
+                broker=broker,
+            )
         return (
             snapshot.candidates,
             snapshot.last_task_log_timestamp,
@@ -5566,7 +5597,7 @@ class TaskMonitor(ServiceTask):
         errors: list[str] = []
         vacuum_ok = False
         try:
-            with self._monitor_context().broker() as broker:
+            with self._get_connected_queue().get_connection() as broker:
                 broker.vacuum()
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"vacuum: {exc}")
@@ -5586,10 +5617,12 @@ class TaskMonitor(ServiceTask):
             keep_recent_per_key=RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
         )
         try:
-            result = run_runtime_prune_for_context(
-                self._monitor_context(),
-                prune_config,
-            )
+            with self._get_connected_queue().get_connection() as broker:
+                result = run_runtime_prune_for_context(
+                    self._monitor_context(),
+                    prune_config,
+                    broker=broker,
+                )
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"runtime_prune: {exc}")
         else:
@@ -5684,12 +5717,14 @@ class TaskMonitor(ServiceTask):
             )
         if not getattr(self, "_worker_lane_snapshot_only", False):
             self._set_activity("raw_external_logging", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
-        scanner = GeneratorTaskLogScanner()
-        window = scanner.scan_window(
-            self._monitor_context(),
-            WEFT_GLOBAL_LOG_QUEUE,
-            scan_limit=self._monitor_config.task_log_scan_limit,
-        )
+        scanner = GeneratorTaskLogScanner(persistent=True)
+        with self._get_connected_queue().get_connection() as broker:
+            window = scanner.scan_window(
+                self._monitor_context(),
+                WEFT_GLOBAL_LOG_QUEUE,
+                scan_limit=self._monitor_config.task_log_scan_limit,
+                broker=broker,
+            )
         selected: list[_RawExternalPruneRef] = []
         errors: list[str] = []
         for row in window.rows:
@@ -5726,13 +5761,15 @@ class TaskMonitor(ServiceTask):
         self._refresh_external_task_log_status()
         applied: tuple[_AppliedMonitorRawMessage, ...] = ()
         if selected and not errors:
-            applied = tuple(
-                apply_exact_prune_candidates(
-                    self._monitor_context(),
-                    selected,
-                    apply_result=_applied_raw_external_message,
+            with self._get_connected_queue().get_connection() as broker:
+                applied = tuple(
+                    apply_exact_prune_candidates(
+                        self._monitor_context(),
+                        selected,
+                        apply_result=_applied_raw_external_message,
+                        broker=broker,
+                    )
                 )
-            )
         apply_errors = tuple(
             result.error for result in applied if result.error is not None
         )

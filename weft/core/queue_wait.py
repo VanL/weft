@@ -39,20 +39,24 @@ class QueueChangeMonitor:
         self._monitor_thread: threading.Thread | None = None
         self._config = resolve_runtime_config(config)
 
-        if self._start_multi_queue_waiter(list(queues)):
-            return
+        try:
+            if self._start_multi_queue_waiter(list(queues)):
+                return
 
-        for queue in queues:
-            watcher = QueueWatcher(
-                queue,
-                self._handle_queue_activity,
-                stop_event=self._stop_event,
-                peek=True,
-                after_timestamp=queue.last_ts,
-                config=self._config,
-            )
-            watcher.run_in_thread()
-            self._watchers.append(watcher)
+            for queue in queues:
+                watcher = QueueWatcher(
+                    queue,
+                    self._handle_queue_activity,
+                    stop_event=self._stop_event,
+                    peek=True,
+                    after_timestamp=queue.last_ts,
+                    config=self._config,
+                )
+                self._watchers.append(watcher)
+                watcher.run_in_thread()
+        except BaseException:
+            self.close()
+            raise
 
     def _start_multi_queue_waiter(self, queues: list[Queue]) -> bool:
         if not queues:

@@ -15,6 +15,7 @@ import json
 import os
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -60,6 +61,7 @@ from weft.commands.types import (
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime, task_evidence
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.queue_window import iter_broker_queue_json_entries
 from weft.core.service_convergence import (
     ServiceOwnerRecord,
     collect_service_owner_records,
@@ -259,22 +261,24 @@ def _collect_manager_records(
     )
 
 
-def _read_tid_mappings(ctx: WeftContext) -> dict[str, list[str]]:
+def _read_tid_mappings(
+    ctx: WeftContext, *, broker: Any | None = None
+) -> dict[str, list[str]]:
     """Group retained task-state names by derived short form [CLI-1.2.3]."""
     mapping: dict[str, list[str]] = {}
-    for full in list_task_state_tids(ctx):
+    for full in list_task_state_tids(ctx, broker=broker):
         short = tid_short_form(full)
         mapping.setdefault(short, []).append(full)
     return {short: sorted(fulls) for short, fulls in mapping.items()}
 
 
 def _latest_tid_mapping_entries(
-    ctx: WeftContext, tids: Iterable[str] | None = None
+    ctx: WeftContext, tids: Iterable[str] | None = None, *, broker: Any | None = None
 ) -> dict[str, dict[str, Any]]:
     return {
         full: payload
         for full, (_message_id, payload) in latest_task_state_rows(
-            ctx, tids=tids
+            ctx, tids=tids, broker=broker
         ).items()
     }
 
@@ -296,18 +300,27 @@ def _resolve_tid_filters(ctx: WeftContext, raw: str | None) -> set[str] | None:
 
 
 def _iter_log_events(
-    queue: Queue,
+    queue: Queue | None,
     *,
     since_timestamp: int | None = None,
+    broker: Any | None = None,
 ) -> Iterable[tuple[dict[str, Any], int]]:
     """Replay all state-change events from the global log queue.
 
     Spec: [MF-5]
     """
     try:
-        iterator_raw = queue.peek_generator(
-            with_timestamps=True,
-            after_timestamp=since_timestamp,
+        iterator_raw = (
+            broker.peek_generator(
+                WEFT_GLOBAL_LOG_QUEUE,
+                with_timestamps=True,
+                after_timestamp=since_timestamp,
+            )
+            if broker is not None
+            else cast(Queue, queue).peek_generator(
+                with_timestamps=True,
+                after_timestamp=since_timestamp,
+            )
         )
     except (
         BrokerError,
@@ -621,6 +634,7 @@ def _collect_snapshot_evidence(
     selected_active_manager_tid: str | None,
     service_owner_index: _InternalServiceOwnerEvidenceIndex,
     now_ns: int,
+    broker: Any | None = None,
 ) -> tuple[SnapshotProbePlan, SnapshotEvidence]:
     """Acquire only the runtime and queue observations requested by policy."""
 
@@ -641,6 +655,7 @@ def _collect_snapshot_evidence(
             ctx,
             tid=record.tid,
             taskspec_payload=taskspec,
+            broker=broker,
         )
     draft = prepare_snapshot(record, local_evidence=local_evidence)
 
@@ -699,6 +714,7 @@ def _collect_snapshot_evidence(
             tid=record.tid,
             outbox_name=outbox_name,
             taskspec_payload=taskspec,
+            broker=broker,
         )
 
     return probe_plan, SnapshotEvidence(
@@ -721,6 +737,7 @@ def _collect_task_snapshot_records(
     now_ns: int | None = None,
     service_registry_evidence: Sequence[_ServiceEvidence] | None = None,
     tid_mapping_entries: Mapping[str, Mapping[str, Any]] | None = None,
+    broker: Any | None = None,
 ) -> list[CollectedTaskSnapshot]:
     """Reconstruct current task state from event-sourced log replay.
 
@@ -731,14 +748,16 @@ def _collect_task_snapshot_records(
     registry_evidence = (
         tuple(service_registry_evidence)
         if service_registry_evidence is not None
-        else tuple(_collect_service_registry_evidence(ctx, now_ns=now_ns))
+        else tuple(
+            _collect_service_registry_evidence(ctx, now_ns=now_ns, broker=broker)
+        )
     )
     service_owner_index = _InternalServiceOwnerEvidenceIndex.from_evidence(
         registry_evidence
     )
     records: dict[str, FoldedTaskRecord] = {}
     try:
-        selected_manager = manager_runtime.select_active_manager(ctx)
+        selected_manager = manager_runtime.select_active_manager(ctx, broker=broker)
         selected_active_manager_tid = (
             str(selected_manager["tid"])
             if isinstance(selected_manager, Mapping)
@@ -748,11 +767,13 @@ def _collect_task_snapshot_records(
         )
     except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-335] exception
         selected_active_manager_tid = None
-    log_queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
-    try:
+    with (
+        _queue(ctx, WEFT_GLOBAL_LOG_QUEUE) if broker is None else nullcontext()
+    ) as log_queue:
         for payload, timestamp in _iter_log_events(
             log_queue,
             since_timestamp=since_timestamp,
+            broker=broker,
         ):
             tid = payload.get("tid")
             if not isinstance(tid, str):
@@ -765,12 +786,9 @@ def _collect_task_snapshot_records(
             )
             if reduced is not None:
                 records[tid] = reduced
-    finally:
-        log_queue.close()
-
     if tid_mapping_entries is None:
         tid_mapping_entries = _latest_tid_mapping_entries(
-            ctx, tids=records if tid_filters is not None else None
+            ctx, tids=records if tid_filters is not None else None, broker=broker
         )
     records_out: list[CollectedTaskSnapshot] = []
     for tid, record in records.items():
@@ -783,6 +801,7 @@ def _collect_task_snapshot_records(
             selected_active_manager_tid=selected_active_manager_tid,
             service_owner_index=service_owner_index,
             now_ns=now_ns,
+            broker=broker,
         )
         snapshot = reduce_task_snapshot(
             probe_plan,
@@ -986,16 +1005,20 @@ def _collect_service_registry_evidence(
     ctx: WeftContext,
     *,
     now_ns: int,
+    broker: Any | None = None,
 ) -> list[_ServiceEvidence]:
-    queue = _queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+    queue = _queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE) if broker is None else None
     try:
-        discard_v1_service_registry_rows(queue)
+        discard_v1_service_registry_rows(queue, broker=broker)
     except (BrokerError, OSError, RuntimeError, ValueError):
-        queue.close()
+        if queue is not None:
+            queue.close()
         raise
     try:
         read = collect_service_owner_records(
-            iter_queue_json_entries(queue),
+            iter_broker_queue_json_entries(broker, WEFT_SERVICES_REGISTRY_QUEUE)
+            if broker is not None
+            else iter_queue_json_entries(cast(Queue, queue)),
             service_type=SERVICE_TYPE_MANAGED,
         )
         return [
@@ -1012,7 +1035,8 @@ def _collect_service_registry_evidence(
     except (BrokerError, OSError, RuntimeError):
         return []
     finally:
-        queue.close()
+        if queue is not None:
+            queue.close()
 
 
 def _service_evidence_from_spawn_payload(
@@ -1299,6 +1323,7 @@ def _collect_task_snapshots(
     *,
     include_terminal: bool,
     tid_filters: set[str] | None,
+    broker: Any | None = None,
 ) -> list[TaskSnapshot]:
     """Reconstruct current task state from one event-sourced log replay.
 
@@ -1311,6 +1336,7 @@ def _collect_task_snapshots(
             ctx,
             include_terminal=include_terminal,
             tid_filters=tid_filters,
+            broker=broker,
         )
     ]
 
@@ -1320,6 +1346,7 @@ def collect_known_tid_snapshot(
     tid: str,
     *,
     include_terminal: bool = True,
+    broker: Any | None = None,
 ) -> TaskSnapshot | None:
     """Return one full-TID diagnostic snapshot using bounded task-log replay."""
 
@@ -1330,12 +1357,14 @@ def collect_known_tid_snapshot(
         include_terminal=include_terminal,
         tid_filters={tid},
         since_timestamp=int(tid) - 1,
+        broker=broker,
     )
     if not records and int(tid) > time.time_ns():
         records = _collect_task_snapshot_records(
             ctx,
             include_terminal=include_terminal,
             tid_filters={tid},
+            broker=broker,
         )
     return records[0].snapshot if records else None
 

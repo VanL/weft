@@ -168,8 +168,37 @@ existing close/finally boundary. Regression coverage lives in
 `tests/commands/test_observation_connections.py`; the repair evidence is recorded
 in [the dependency suite repair plan](../plans/2026-09-09-updated-dependency-suite-repairs-plan.md).
 
+Task control observation in `weft/commands/tasks.py` also lends its owned log
+queue connection through `_task_history.py`, `system.py`, and manager/evidence
+helpers. Each turn rereads metadata, routing, and completion evidence; connection
+reuse does not cache those observations. Watchers close before their queues,
+including failed construction and cleanup paths. Coverage lives in
+`tests/commands/test_control_observation_connections.py` and
+`tests/core/test_manager_runtime_connections.py`; the task and helper audit is
+recorded in [the connection reuse repair plan](../plans/2026-09-14-bounded-registry-connection-reuse-plan.md).
+The same loans cover status-watch and terminal-snapshot loops, submission
+reconciliation in `_spawn_submission.py`, result materialization in `result.py`,
+realtime following in `events.py`, and the interactive Monitor-store fallback
+in `run.py`. Transactions end before waits and generator yields; a bounded
+observer may retain an operation lease without retaining a transaction. Regression
+coverage also lives in `test_spawn_observation_connections.py`,
+`test_result_observation_connections.py`, and `test_event_observation_connections.py`
+under `tests/commands/`.
+
 Current behavior:
 
+- Tasks, including services and Monitor maintenance workers, reuse persistent
+  broker connections by default. Runtime helpers borrow the owning task's queue
+  connection, or use bounded persistent handles in the same resolved session.
+  Dynamic queue handles must not accumulate in an unbounded task cache.
+  Any transient exception must identify why the owned connection cannot be
+  used. Connection lifetime does not extend transaction lifetime: sidecar
+  transactions commit or roll back within each bounded operation, never across
+  reactor waits, external I/O, or thread handoff. Worker-local handles are
+  released by their worker's existing cleanup boundary. Task cleanup includes
+  all configured watched queues, not just queues visited through its cache;
+  duplicate handles close once. After final endpoint, streaming, and control
+  writes, the current thread's core is recycled before its queue leases close.
 - context resolution returns a `WeftContext` with a resolved broker target
 - queue and broker helpers are created from that broker target
 - file-backed and non-file-backed backends share the same normal runtime path
@@ -253,6 +282,15 @@ Most Weft runtime state is queue-shaped, but Weft may keep narrow
 non-queue operational tables beside SimpleBroker tables when the state is a
 derived read model rather than queue data. The current example is the
 TaskMonitor durable collation store:
+
+Task-owned stores borrow a persistent task queue and enter a fresh sidecar
+session for each operation. `MonitorStore.close()` does not close that borrowed
+queue. Migration raw-row checks are a bounded separate-connection exception:
+SimpleBroker prohibits queue operations on the core holding an active sidecar
+transaction. Standalone non-task store callers retain bounded broker scopes.
+Implementation: `MonitorStore._sidecar_session`, `_raw_message_is_absent`, and
+the TaskMonitor store-opening paths. Audit and repair evidence lives in
+[the connection-reuse plan](../plans/2026-09-14-bounded-registry-connection-reuse-plan.md).
 
 Monitor relational message-ID and checkpoint columns remain integers. Exact
 broker IDs embedded in Monitor-owned JSON text are canonical strings at rest:

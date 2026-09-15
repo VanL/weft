@@ -65,7 +65,13 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.pruning.apply import apply_exact_prune_candidates
-from weft.core.queue_window import is_old_enough, message_age_seconds
+from weft.core.queue_window import (
+    is_old_enough,
+    iter_broker_queue_entries,
+    iter_broker_queue_json_entries,
+    message_age_seconds,
+    queue_broker,
+)
 from weft.core.task_evidence import (
     coerce_terminal_envelope,
     control_queue_names_for_tid,
@@ -75,7 +81,6 @@ from weft.core.task_evidence import (
     status_from_log_payload,
     terminal_status_from_event,
 )
-from weft.helpers import iter_queue_entries, iter_queue_json_entries
 
 RetentionFamily = Literal["task-local", "task-log", "retention"]
 
@@ -222,6 +227,8 @@ class _TaskEvidence:
 def run_retention_prune_for_context(
     ctx: WeftContext,
     config: RetentionPruneConfig,
+    *,
+    broker: Any | None = None,
 ) -> RetentionPruneResult:
     """Run retention pruning against an already-resolved context.
 
@@ -246,7 +253,7 @@ def run_retention_prune_for_context(
             halted_at="validation",
         )
 
-    candidates, stats, scan_errors = _build_candidates(ctx, config)
+    candidates, stats, scan_errors = _build_candidates(ctx, config, broker=broker)
     visible_candidates = list(
         candidates if config.limit is None else candidates[: config.limit]
     )
@@ -295,7 +302,11 @@ def run_retention_prune_for_context(
                     warnings=tuple(warnings),
                     archived=archived,
                 )
-        applied = tuple(_apply_candidates(ctx, visible_candidates, force=config.force))
+        applied = tuple(
+            _apply_candidates(
+                ctx, visible_candidates, force=config.force, broker=broker
+            )
+        )
 
     result = RetentionPruneResult(
         config=config,
@@ -360,9 +371,11 @@ def _validate_config(config: RetentionPruneConfig) -> str | None:
 def _build_candidates(
     ctx: WeftContext,
     config: RetentionPruneConfig,
+    *,
+    broker: Any | None = None,
 ) -> tuple[list[RetentionPruneCandidate], list[RetentionQueueScanStats], list[str]]:
     now_ns = time.time_ns()
-    log_rows, log_scanned = _read_task_log_rows(ctx)
+    log_rows, log_scanned = _read_task_log_rows(ctx, broker=broker)
     task_evidence = _reduce_task_evidence(log_rows)
     if config.task_filters:
         task_evidence = {
@@ -403,6 +416,7 @@ def _build_candidates(
             config=config,
             task_evidence=task_evidence,
             now_ns=now_ns,
+            broker=broker,
         )
         candidates.extend(local_candidates)
         stats.extend(local_stats)
@@ -414,12 +428,15 @@ def _build_candidates(
     return candidates, stats, errors
 
 
-def _read_task_log_rows(ctx: WeftContext) -> tuple[list[_LogRow], int]:
-    queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+def _read_task_log_rows(
+    ctx: WeftContext, *, broker: Any | None = None
+) -> tuple[list[_LogRow], int]:
     rows: list[_LogRow] = []
     scanned = 0
-    try:
-        for payload, message_id in iter_queue_json_entries(queue):
+    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
+        for payload, message_id in iter_broker_queue_json_entries(
+            db, WEFT_GLOBAL_LOG_QUEUE
+        ):
             scanned += 1
             tid = payload.get("tid")
             if not isinstance(tid, str) or not tid:
@@ -436,8 +453,6 @@ def _read_task_log_rows(ctx: WeftContext) -> tuple[list[_LogRow], int]:
                     taskspec_payload=taskspec if isinstance(taskspec, dict) else None,
                 )
             )
-    finally:
-        queue.close()
     return rows, scanned
 
 
@@ -553,6 +568,7 @@ def _task_local_candidates(
     config: RetentionPruneConfig,
     task_evidence: Mapping[str, _TaskEvidence],
     now_ns: int,
+    broker: Any | None = None,
 ) -> tuple[list[RetentionPruneCandidate], list[RetentionQueueScanStats], list[str]]:
     candidates: list[RetentionPruneCandidate] = []
     stats: list[RetentionQueueScanStats] = []
@@ -564,6 +580,7 @@ def _task_local_candidates(
                 config=config,
                 evidence=evidence,
                 now_ns=now_ns,
+                broker=broker,
             )
         except (BrokerError, OSError, RuntimeError) as exc:
             errors.append(f"failed to scan task-local queues for {tid}: {exc}")
@@ -579,6 +596,7 @@ def _task_local_candidates_for_tid(
     config: RetentionPruneConfig,
     evidence: _TaskEvidence,
     now_ns: int,
+    broker: Any | None = None,
 ) -> tuple[list[RetentionPruneCandidate], list[RetentionQueueScanStats]]:
     tid = evidence.tid
     outbox_name, ctrl_out_name = queue_names_for_tid(tid, evidence.taskspec_payload)
@@ -596,6 +614,7 @@ def _task_local_candidates_for_tid(
         evidence=evidence,
         queue_name=ctrl_out_name,
         now_ns=now_ns,
+        broker=broker,
     )
     candidates.extend(ctrl_out_candidates)
     stats.append(
@@ -612,6 +631,7 @@ def _task_local_candidates_for_tid(
         evidence=evidence,
         queue_name=outbox_name,
         now_ns=now_ns,
+        broker=broker,
     )
     candidates.extend(outbox_candidates)
     stats.append(
@@ -628,6 +648,7 @@ def _task_local_candidates_for_tid(
         evidence=evidence,
         queue_name=ctrl_in_name,
         now_ns=now_ns,
+        broker=broker,
     )
     candidates.extend(ctrl_in_candidates)
     stats.append(
@@ -649,6 +670,7 @@ def _task_local_candidates_for_tid(
             queue_name=queue_name,
             candidate_class=candidate_class,
             now_ns=now_ns,
+            broker=broker,
         )
         candidates.extend(queue_candidates)
         stats.append(
@@ -668,13 +690,15 @@ def _ctrl_out_candidates(
     evidence: _TaskEvidence,
     queue_name: str,
     now_ns: int,
+    broker: Any | None = None,
 ) -> tuple[list[RetentionPruneCandidate], int]:
-    rows = _read_raw_queue(ctx, queue_name)
+    rows = _read_raw_queue(ctx, queue_name, broker=broker)
     snapshot = peek_terminal_ctrl_out_evidence(
         ctx,
         tid=evidence.tid,
         ctrl_out_name=queue_name,
         taskspec_payload=evidence.taskspec_payload,
+        broker=broker,
     )
     terminal_ids = (
         {
@@ -752,13 +776,15 @@ def _outbox_candidates(
     evidence: _TaskEvidence,
     queue_name: str,
     now_ns: int,
+    broker: Any | None = None,
 ) -> tuple[list[RetentionPruneCandidate], int]:
-    rows = _read_raw_queue(ctx, queue_name, persistent=True)
+    rows = _read_raw_queue(ctx, queue_name, persistent=True, broker=broker)
     snapshot = peek_final_outbox_evidence(
         ctx,
         tid=evidence.tid,
         outbox_name=queue_name,
         taskspec_payload=evidence.taskspec_payload,
+        broker=broker,
     )
     final_ids = (
         {
@@ -832,8 +858,9 @@ def _ctrl_in_candidates(
     evidence: _TaskEvidence,
     queue_name: str,
     now_ns: int,
+    broker: Any | None = None,
 ) -> tuple[list[RetentionPruneCandidate], int]:
-    rows = _read_raw_queue(ctx, queue_name)
+    rows = _read_raw_queue(ctx, queue_name, broker=broker)
     candidates: list[RetentionPruneCandidate] = []
     for body, message_id in rows:
         payload = _json_payload(body)
@@ -875,8 +902,9 @@ def _work_queue_candidates(
     queue_name: str,
     candidate_class: str,
     now_ns: int,
+    broker: Any | None = None,
 ) -> tuple[list[RetentionPruneCandidate], int]:
-    rows = _read_raw_queue(ctx, queue_name)
+    rows = _read_raw_queue(ctx, queue_name, broker=broker)
     candidates: list[RetentionPruneCandidate] = []
     for body, message_id in rows:
         overridden: list[str] = []
@@ -911,15 +939,14 @@ def _read_raw_queue(
     ctx: WeftContext,
     queue_name: str,
     *,
-    persistent: bool = False,
+    persistent: bool = True,
+    broker: Any | None = None,
 ) -> list[tuple[str, int]]:
-    queue = ctx.queue(queue_name, persistent=persistent)
-    try:
+    with queue_broker(ctx, queue_name, broker=broker, persistent=persistent) as db:
         return [
-            (body, int(message_id)) for body, message_id in iter_queue_entries(queue)
+            (body, int(message_id))
+            for body, message_id in iter_broker_queue_entries(db, queue_name)
         ]
-    finally:
-        queue.close()
 
 
 def _json_payload(body: str) -> Any | None:
@@ -1000,6 +1027,7 @@ def _apply_candidates(
     candidates: Sequence[RetentionPruneCandidate],
     *,
     force: bool,
+    broker: Any | None = None,
 ) -> list[RetentionPruneCandidate]:
     blocked: list[RetentionPruneCandidate] = []
     deletable: list[RetentionPruneCandidate] = []
@@ -1022,6 +1050,7 @@ def _apply_candidates(
             ctx,
             deletable,
             force=force,
+            broker=broker,
             apply_result=lambda candidate, applied, error: candidate.for_apply_result(
                 applied=applied,
                 error=error,

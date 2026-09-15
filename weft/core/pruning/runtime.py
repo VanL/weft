@@ -18,7 +18,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -55,13 +55,19 @@ from weft.core.manager_runtime import (
     normalize_manager_registry_record,
 )
 from weft.core.pruning.apply import apply_exact_prune_candidates
-from weft.core.queue_window import is_old_enough, message_age_seconds
+from weft.core.queue_window import (
+    is_old_enough,
+    iter_broker_queue_json_entries,
+    message_age_seconds,
+    queue_broker,
+)
 from weft.core.service_convergence import (
     parse_service_owner_row,
     plan_service_owner_history_prune,
 )
 from weft.core.task_state import latest_task_state_rows
-from weft.helpers import iter_queue_json_entries, send_log
+from weft.helpers import send_log
+from weft.helpers.message_ids import is_task_tid
 
 RuntimeQueueName = Literal[
     "managers",
@@ -177,6 +183,8 @@ class RuntimePruneResult:
 def run_runtime_prune_for_context(
     ctx: WeftContext,
     config: RuntimePruneConfig,
+    *,
+    broker: Any | None = None,
 ) -> RuntimePruneResult:
     """Run runtime-state pruning against an already-resolved context.
 
@@ -200,7 +208,7 @@ def run_runtime_prune_for_context(
             halted_at="validation",
         )
 
-    candidates, stats, scan_errors = _build_candidates(ctx, config)
+    candidates, stats, scan_errors = _build_candidates(ctx, config, broker=broker)
     visible_candidates = list(
         candidates if config.limit is None else candidates[: config.limit]
     )
@@ -217,7 +225,7 @@ def run_runtime_prune_for_context(
 
     applied: tuple[RuntimePruneCandidate, ...] = ()
     if config.apply:
-        applied = tuple(_apply_candidates(ctx, visible_candidates))
+        applied = tuple(_apply_candidates(ctx, visible_candidates, broker=broker))
 
     return RuntimePruneResult(
         config=config,
@@ -249,6 +257,8 @@ def _validate_config(config: RuntimePruneConfig) -> str | None:
 def _build_candidates(
     ctx: WeftContext,
     config: RuntimePruneConfig,
+    *,
+    broker: Any | None = None,
 ) -> tuple[list[RuntimePruneCandidate], list[RuntimeQueueScanStats], list[str]]:
     now_ns = time.time_ns()
     builders = {
@@ -263,7 +273,9 @@ def _build_candidates(
     errors: list[str] = []
     for queue_group in config.queues:
         try:
-            queue_candidates, scanned = builders[queue_group](ctx, config, now_ns)
+            queue_candidates, scanned = builders[queue_group](
+                ctx, config, now_ns, broker=broker
+            )
         except (BrokerError, OSError, RuntimeError) as exc:
             errors.append(
                 f"failed to scan {RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS[queue_group]}: {exc}"
@@ -284,16 +296,15 @@ def _build_candidates(
 def _read_runtime_queue(
     ctx: WeftContext,
     queue_name: str,
+    *,
+    broker: Any | None = None,
 ) -> tuple[list[tuple[dict[str, Any], int]], int]:
-    queue = ctx.queue(queue_name, persistent=False)
-    try:
+    with queue_broker(ctx, queue_name, broker=broker) as db:
         entries = [
             (payload, int(timestamp))
-            for payload, timestamp in iter_queue_json_entries(queue)
+            for payload, timestamp in iter_broker_queue_json_entries(db, queue_name)
         ]
         return entries, len(entries)
-    finally:
-        queue.close()
 
 
 def _payload_excerpt(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -344,6 +355,8 @@ def _manager_candidates(
     ctx: WeftContext,
     config: RuntimePruneConfig,
     now_ns: int,
+    *,
+    broker: Any | None = None,
 ) -> tuple[list[RuntimePruneCandidate], int]:
     """Retire aged stale owners or unknown owners past both windows.
 
@@ -353,7 +366,9 @@ def _manager_candidates(
 
     Spec: [MA-1], [MF-5], [OBS.13.6]
     """
-    entries, scanned = _read_runtime_queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+    entries, scanned = _read_runtime_queue(
+        ctx, WEFT_SERVICES_REGISTRY_QUEUE, broker=broker
+    )
     candidates: list[RuntimePruneCandidate] = []
     for payload, message_id in entries:
         if not is_old_enough(message_id, now_ns, config.min_age_seconds):
@@ -399,8 +414,12 @@ def _service_candidates(
     ctx: WeftContext,
     config: RuntimePruneConfig,
     now_ns: int,
+    *,
+    broker: Any | None = None,
 ) -> tuple[list[RuntimePruneCandidate], int]:
-    entries, scanned = _read_runtime_queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+    entries, scanned = _read_runtime_queue(
+        ctx, WEFT_SERVICES_REGISTRY_QUEUE, broker=broker
+    )
     payload_by_id = {message_id: payload for payload, message_id in entries}
     managed_records = []
     candidates: list[RuntimePruneCandidate] = []
@@ -446,11 +465,14 @@ def _service_candidates(
     return candidates, scanned
 
 
-def _latest_task_statuses_from_log(ctx: WeftContext) -> dict[str, str]:
-    queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    try:
+def _latest_task_statuses_from_log(
+    ctx: WeftContext, *, broker: Any | None = None
+) -> dict[str, str]:
+    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
         latest: dict[str, tuple[int, str]] = {}
-        for payload, message_id in iter_queue_json_entries(queue):
+        for payload, message_id in iter_broker_queue_json_entries(
+            db, WEFT_GLOBAL_LOG_QUEUE
+        ):
             tid = payload.get("tid")
             status = payload.get("status")
             if not isinstance(tid, str) or not tid:
@@ -467,17 +489,31 @@ def _latest_task_statuses_from_log(ctx: WeftContext) -> dict[str, str]:
             if previous is None or previous[0] <= int(message_id):
                 latest[tid] = (int(message_id), status)
         return {tid: status for tid, (_message_id, status) in latest.items()}
-    finally:
-        queue.close()
+
+
+def _current_task_state_rows(
+    ctx: WeftContext, tids: Iterable[str], *, broker: Any | None = None
+) -> dict[str, tuple[int, dict[str, Any]]]:
+    """Read candidate state through a bounded persistent handle [SB-0.4]."""
+
+    selected = tuple(dict.fromkeys(tid for tid in tids if is_task_tid(tid)))
+    if not selected:
+        return {}
+    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
+        return latest_task_state_rows(ctx, selected, broker=db)
 
 
 def _streaming_candidates(
     ctx: WeftContext,
     config: RuntimePruneConfig,
     now_ns: int,
+    *,
+    broker: Any | None = None,
 ) -> tuple[list[RuntimePruneCandidate], int]:
-    entries, scanned = _read_runtime_queue(ctx, WEFT_STREAMING_SESSIONS_QUEUE)
-    task_statuses = _latest_task_statuses_from_log(ctx)
+    entries, scanned = _read_runtime_queue(
+        ctx, WEFT_STREAMING_SESSIONS_QUEUE, broker=broker
+    )
+    task_statuses = _latest_task_statuses_from_log(ctx, broker=broker)
     candidate_tids = {
         payload["tid"]
         for payload, message_id in entries
@@ -485,7 +521,7 @@ def _streaming_candidates(
         and payload["tid"]
         and is_old_enough(message_id, now_ns, config.min_age_seconds)
     }
-    tid_mappings = latest_task_state_rows(ctx, candidate_tids)
+    tid_mappings = _current_task_state_rows(ctx, candidate_tids, broker=broker)
     grouped: dict[str, list[tuple[dict[str, Any], int]]] = defaultdict(list)
     for payload, message_id in entries:
         key = payload.get("session_id")
@@ -538,8 +574,12 @@ def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] excepti
     ctx: WeftContext,
     config: RuntimePruneConfig,
     now_ns: int,
+    *,
+    broker: Any | None = None,
 ) -> tuple[list[RuntimePruneCandidate], int]:
-    entries, scanned = _read_runtime_queue(ctx, WEFT_ENDPOINTS_REGISTRY_QUEUE)
+    entries, scanned = _read_runtime_queue(
+        ctx, WEFT_ENDPOINTS_REGISTRY_QUEUE, broker=broker
+    )
     parsed = []
     grouped: dict[tuple[str, str], list[tuple[dict[str, Any], int]]] = defaultdict(list)
     for payload, message_id in entries:
@@ -549,10 +589,10 @@ def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] excepti
         parsed.append((payload, message_id, record))
         grouped[(record.name, record.tid)].append((payload, message_id))
 
-    task_statuses = latest_task_statuses_for_endpoint_resolution(ctx)
+    task_statuses = latest_task_statuses_for_endpoint_resolution(ctx, broker=broker)
     tid_mappings = {
         tid: payload
-        for tid, (_message_id, payload) in latest_task_state_rows(
+        for tid, (_message_id, payload) in _current_task_state_rows(
             ctx,
             {
                 record.tid
@@ -560,6 +600,7 @@ def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] excepti
                 if record.status == "active"
                 and is_old_enough(message_id, now_ns, config.min_age_seconds)
             },
+            broker=broker,
         ).items()
     }
     candidates: list[RuntimePruneCandidate] = []
@@ -620,8 +661,12 @@ def _pipeline_candidates(
     ctx: WeftContext,
     config: RuntimePruneConfig,
     now_ns: int,
+    *,
+    broker: Any | None = None,
 ) -> tuple[list[RuntimePruneCandidate], int]:
-    entries, scanned = _read_runtime_queue(ctx, WEFT_PIPELINES_STATE_QUEUE)
+    entries, scanned = _read_runtime_queue(
+        ctx, WEFT_PIPELINES_STATE_QUEUE, broker=broker
+    )
     candidates: list[RuntimePruneCandidate] = []
     for payload, message_id in entries:
         if not is_old_enough(message_id, now_ns, config.min_age_seconds):
@@ -648,6 +693,8 @@ def _pipeline_candidates(
 def _apply_candidates(
     ctx: WeftContext,
     candidates: Sequence[RuntimePruneCandidate],
+    *,
+    broker: Any | None = None,
 ) -> list[RuntimePruneCandidate]:
     """Apply exact rows and log only confirmed malformed-row deletions.
 
@@ -656,6 +703,7 @@ def _apply_candidates(
     applied = apply_exact_prune_candidates(
         ctx,
         candidates,
+        broker=broker,
         exact_status=any(
             candidate.reason == "malformed_service_owner_row"
             for candidate in candidates

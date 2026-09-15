@@ -3,6 +3,7 @@
 Spec references:
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-1], [PL-2], [PL-2.7], [PL-3.2], [PL-4.1]
 - docs/specifications/05-Message_Flow_and_State.md [MF-4], [MF-6]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 """
 
 from __future__ import annotations
@@ -386,13 +387,19 @@ def compile_linear_pipeline(
     context: WeftContext | PipelineCompilationContext,
     task_loader: Callable[[str], dict[str, Any]],
     source_ref: str | None = None,
+    broker: Any | None = None,
 ) -> CompiledPipelineRun:
-    """Compile a validated pipeline into first-class runtime-owned child tasks."""
+    """Compile a validated pipeline into first-class runtime-owned child tasks.
+
+    An optional broker is borrowed only for timestamp allocation and never
+    closed or retained in the compiled plan. Spec: [PL-2.7], [SB-0.4].
+    """
 
     pipeline_tid = str(
         generate_spawn_request_timestamp(
             context.broker_target,
             config=context.broker_config,
+            broker=broker,
         )
     )
     queues = pipeline_public_queues(pipeline_tid)
@@ -424,12 +431,14 @@ def compile_linear_pipeline(
             generate_spawn_request_timestamp(
                 context.broker_target,
                 config=context.broker_config,
+                broker=broker,
             )
         )
         stage_tid = str(
             generate_spawn_request_timestamp(
                 context.broker_target,
                 config=context.broker_config,
+                broker=broker,
             )
         )
 
@@ -552,6 +561,7 @@ def compile_linear_pipeline(
         generate_spawn_request_timestamp(
             context.broker_target,
             config=context.broker_config,
+            broker=broker,
         )
     )
     exit_edge_runtime_payload = {

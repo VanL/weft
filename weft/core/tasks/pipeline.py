@@ -529,16 +529,18 @@ class PipelineTask(BaseTask):
         ctrl_queue = (
             taskspec_payload.get("io", {}).get("control", {}).get("ctrl_in", "")
         )
-        submit_spawn_request(
-            self._db_path,
-            taskspec=taskspec_payload,
-            work_payload=None,
-            config=self._weft_config,
-            tid=taskspec_payload.get("tid"),
-            seed_start_envelope=False,
-            allow_internal_runtime=True,
-            spawn_queue_name=WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
-        )
+        with self._get_connected_queue().get_connection() as broker:
+            submit_spawn_request(
+                self._db_path,
+                taskspec=taskspec_payload,
+                work_payload=None,
+                config=self._broker_config,
+                tid=taskspec_payload.get("tid"),
+                seed_start_envelope=False,
+                allow_internal_runtime=True,
+                spawn_queue_name=WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+                broker=broker,
+            )
         return str(ctrl_queue)
 
     def _handle_pipeline_event(
@@ -824,7 +826,8 @@ class PipelineTask(BaseTask):
             if not queue_name:
                 continue
             try:
-                self._queue(queue_name).write(encode_control_message(command))
+                with self._get_connected_queue().get_connection() as broker:
+                    broker.write(queue_name, encode_control_message(command))
             except (
                 BrokerError,
                 OSError,

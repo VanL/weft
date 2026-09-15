@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterator, Mapping
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -5712,22 +5712,11 @@ def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
         manager.cleanup()
 
 
-def test_manager_closes_seeded_child_inbox_queue(
+def test_manager_seeded_child_inbox_does_not_enter_queue_cache(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manager, _make_queue = manager_setup
-
-    class FakeSeedQueue:
-        def __init__(self) -> None:
-            self.writes: list[str] = []
-            self.closed = False
-
-        def write(self, payload: str) -> None:
-            self.writes.append(payload)
-
-        def close(self) -> None:
-            self.closed = True
+    manager, make_queue = manager_setup
 
     class FakeProcess:
         pid = None
@@ -5744,16 +5733,6 @@ def test_manager_closes_seeded_child_inbox_queue(
         "launch_task_process",
         lambda *args, **kwargs: FakeProcess(),
     )
-    seed_queue = FakeSeedQueue()
-    original_get_queue = manager.get_queue
-
-    def fake_get_queue(name: str) -> Queue | FakeSeedQueue | None:
-        if name == "seeded.inbox":
-            return seed_queue
-        return original_get_queue(name)
-
-    monkeypatch.setattr(manager, "get_queue", fake_get_queue)
-
     child_spec = TaskSpec(
         tid=str(time.time_ns()),
         name="seeded-child",
@@ -5771,12 +5750,9 @@ def test_manager_closes_seeded_child_inbox_queue(
     )
 
     assert manager._launch_child_task(child_spec, {"args": ["payload"]}) is True
-    assert seed_queue.writes == [json.dumps({"args": ["payload"]})]
-    assert seed_queue.closed is False
-
-    manager.cleanup()
-
-    assert seed_queue.closed is True
+    assert "seeded.inbox" not in manager._queue_cache
+    with make_queue("seeded.inbox") as reader:
+        assert drain(reader) == [json.dumps({"args": ["payload"]})]
 
 
 def test_manager_cleanup_waits_for_active_child_launch_worker(
@@ -6033,33 +6009,10 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
 
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manager, _make_queue = manager_setup
+    manager, make_queue = manager_setup
     child_tid = str(time.time_ns())
     child_ctrl_out = f"T{child_tid}.ctrl_out"
-
-    class FakeTerminalQueue:
-        instances: ClassVar[list[FakeTerminalQueue]] = []
-
-        def __init__(self, name: str, *args: object, **kwargs: object) -> None:
-            del args, kwargs
-            self.name = name
-            self.writes: list[str] = []
-            self.closed = False
-            FakeTerminalQueue.instances.append(self)
-
-        def peek_generator(
-            self, *, with_timestamps: bool = False
-        ) -> Iterator[tuple[str, int]]:
-            del with_timestamps
-            return iter(())
-
-        def write(self, payload: str) -> None:
-            self.writes.append(payload)
-
-        def close(self) -> None:
-            self.closed = True
 
     class FakeProcess:
         pid = None
@@ -6071,7 +6024,6 @@ def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
         def join(self, timeout: float | None = None) -> None:
             del timeout
 
-    monkeypatch.setattr(manager_mod, "Queue", FakeTerminalQueue)
     child = ManagedChild(
         process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
@@ -6081,13 +6033,10 @@ def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
     manager._write_manager_terminal_envelope(child_tid, child)
 
     assert child_ctrl_out not in manager._queue_cache
-    assert [queue.name for queue in FakeTerminalQueue.instances] == [
-        child_ctrl_out,
-        child_ctrl_out,
-    ]
-    assert all(queue.closed for queue in FakeTerminalQueue.instances)
-    assert len(FakeTerminalQueue.instances[1].writes) == 1
-    payload = json.loads(FakeTerminalQueue.instances[1].writes[0])
+    with make_queue(child_ctrl_out) as reader:
+        messages = drain(reader)
+    assert len(messages) == 1
+    payload = json.loads(messages[0])
     assert payload["type"] == TERMINAL_ENVELOPE_TYPE
     assert payload["source"] == "manager"
     assert payload["tid"] == child_tid
@@ -6098,9 +6047,8 @@ def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
 
 def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manager, _make_queue = manager_setup
+    manager, make_queue = manager_setup
     child_tid = str(time.time_ns())
     child_ctrl_out = f"T{child_tid}.ctrl_out"
     terminal_payload = json.dumps(
@@ -6114,28 +6062,6 @@ def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
         }
     )
 
-    class FakeTerminalQueue:
-        instances: ClassVar[list[FakeTerminalQueue]] = []
-
-        def __init__(self, name: str, *args: object, **kwargs: object) -> None:
-            del args, kwargs
-            self.name = name
-            self.writes: list[str] = []
-            self.closed = False
-            FakeTerminalQueue.instances.append(self)
-
-        def peek_generator(
-            self, *, with_timestamps: bool = False
-        ) -> Iterator[tuple[str, int]]:
-            del with_timestamps
-            return iter(((terminal_payload, time.time_ns()),))
-
-        def write(self, payload: str) -> None:
-            self.writes.append(payload)
-
-        def close(self) -> None:
-            self.closed = True
-
     class FakeProcess:
         pid = None
         exitcode = 1
@@ -6146,18 +6072,17 @@ def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
         def join(self, timeout: float | None = None) -> None:
             del timeout
 
-    monkeypatch.setattr(manager_mod, "Queue", FakeTerminalQueue)
     child = ManagedChild(
         process=cast(BaseProcess, FakeProcess()),
         ctrl_queue=None,
         ctrl_out_queue=child_ctrl_out,
     )
 
-    manager._write_manager_terminal_envelope(child_tid, child)
-
-    assert [queue.name for queue in FakeTerminalQueue.instances] == [child_ctrl_out]
-    assert FakeTerminalQueue.instances[0].writes == []
-    assert FakeTerminalQueue.instances[0].closed is True
+    with make_queue(child_ctrl_out) as queue:
+        queue.write(terminal_payload)
+        manager._write_manager_terminal_envelope(child_tid, child)
+        assert drain(queue) == [terminal_payload]
+    assert child_ctrl_out not in manager._queue_cache
 
 
 def test_manager_registry_entries(
@@ -9553,10 +9478,13 @@ def test_manager_idle_timeout_waits_for_active_child_to_finish(
 def test_manager_does_not_launch_child_when_initial_inbox_seed_fails(
     broker_env: BrokerEnv,
     unique_tid: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    manager = Manager(db_path, make_manager_spec(unique_tid, idle_timeout=0.0))
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config({"WEFT_MAX_MESSAGE_SIZE": 32768}),
+    )
     child_tid = str(int(unique_tid) + 1)
     child = TaskSpec(
         tid=child_tid,
@@ -9576,21 +9504,9 @@ def test_manager_does_not_launch_child_when_initial_inbox_seed_fails(
         state=StateSection(),
     )
 
-    class FailingQueue:
-        def write(self, _payload: str) -> None:
-            raise RuntimeError("locked")
-
-    original_queue = manager._queue
-
-    def fake_queue(name: str) -> Queue | FailingQueue:
-        if name == child.io.inputs["inbox"]:
-            return FailingQueue()
-        return original_queue(name)
-
-    monkeypatch.setattr(manager, "_queue", fake_queue)
-
     try:
-        launched = manager._launch_child_task(child, {"args": []})
+        # The real broker rejects oversized input before any launch can occur.
+        launched = manager._launch_child_task(child, "x" * 32769)
 
         assert launched is False
         assert manager._child_processes == {}

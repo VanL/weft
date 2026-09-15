@@ -18,6 +18,7 @@ import time
 import traceback
 import weakref
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
 from types import BuiltinFunctionType, FunctionType, SimpleNamespace
@@ -1535,6 +1536,124 @@ def _drive_consumer_until(
             return
         task.wait_for_activity(timeout=0.05)
     assert predicate()
+
+
+@pytest.mark.parametrize("worker_local", [False, True])
+def test_task_monitor_store_reuses_task_connection(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_local: bool,
+) -> None:
+    """Store transactions reuse the task lease without holding writes open."""
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999911"),
+        observer=lambda _queue_name, _message, _timestamp: None,
+    )
+
+    def exercise(owner: TaskMonitor) -> None:
+        ctx = owner._monitor_context()
+        if ctx.backend_name != "postgres":
+            pytest.skip("Physical PostgreSQL connection regression")
+        store = owner._ensure_monitor_store()
+        assert store is not None
+        psycopg = pytest.importorskip("psycopg")
+        original_connect = psycopg.Connection.connect.__func__
+        connections: list[Any] = []
+
+        def connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
+            connection = original_connect(cls, *args, **kwargs)
+            connections.append(connection)
+            return connection
+
+        monkeypatch.setattr(psycopg.Connection, "connect", classmethod(connect))
+        monkeypatch.setattr(psycopg, "connect", psycopg.Connection.connect)
+        for message_id in (1778089999999999912, 1778089999999999913):
+            store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, message_id)
+            assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_id
+        cached_names = set(owner._queue_cache)
+        for index in range(3):
+            name = f"T{1778089999999999920 + index}.outbox"
+            with owner._get_connected_queue().get_connection() as broker:
+                broker.write(name, "salvage payload")
+            salvage = owner._task_local_salvage((name,))
+            assert salvage["total_data_rows"] == 1
+            assert (
+                base64.b64decode(salvage["rows"][0]["body_b64"]) == b"salvage payload"
+            )
+        assert set(owner._queue_cache) == cached_names
+        assert connections == []
+
+        # A fresh, unshared connection must see the commit before task shutdown.
+        with ctx.broker() as broker, broker.sidecar() as session:
+            rows = list(
+                session.run(
+                    "SELECT value_json FROM weft_monitor_meta WHERE key = ?",
+                    ("checkpoint:" + WEFT_GLOBAL_LOG_QUEUE,),
+                    fetch=True,
+                )
+            )
+        assert rows
+        assert json.loads(rows[0][0])["message_id"] == "1778089999999999913"
+        store.close()
+        queue = owner._get_connected_queue()
+        queue.write("still task-owned")
+        assert queue.read_one() == "still task-owned"
+
+    def exercise_worker() -> None:
+        owner = task._worker_local_monitor_clone()
+        try:
+            exercise(owner)
+        finally:
+            assert owner._close_worker_local_resources() == ()
+
+    try:
+        if worker_local:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(exercise_worker).result()
+        else:
+            exercise(task)
+    finally:
+        task.stop()
+
+
+def test_task_monitor_worker_releases_thread_core_without_recycling_owner(
+    broker_env: BrokerEnv,
+) -> None:
+    """Worker shutdown releases its core while the reactor session stays live."""
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999914"),
+        observer=lambda _queue_name, _message, _timestamp: None,
+    )
+    owner_queue = task._get_connected_queue()
+    with owner_queue.get_connection() as owner_core:
+        owner_core.list_queues()
+
+    def exercise_worker() -> weakref.ReferenceType[BrokerConnection]:
+        worker = task._worker_local_monitor_clone()
+        try:
+            queue = worker._get_connected_queue()
+            with queue.get_connection() as core:
+                assert core is not owner_core
+                core.list_queues()
+                reference = weakref.ref(core)
+            return reference
+        finally:
+            assert worker._close_worker_local_resources() == ()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            worker_core = executor.submit(exercise_worker).result()
+        gc.collect()
+        assert worker_core() is None
+        with owner_queue.get_connection() as current:
+            assert current is owner_core
+            current.list_queues()
+    finally:
+        task.stop()
 
 
 def test_task_monitor_uses_cached_base_task_context(
@@ -11045,17 +11164,16 @@ def test_task_monitor_task_local_salvage_streams_overflow_rows_with_bounded_memo
     max_live_bodies = 0
     rows_per_queue = 20
 
-    def tracked_entries(queue: Any, *, strict: bool = False) -> Any:
+    def tracked_entries(queue_name: str, *, with_timestamps: bool = False) -> Any:
         nonlocal max_live_bodies
-        assert strict is True
+        assert with_timestamps is True
         for index in range(rows_per_queue):
             gc.collect()
             max_live_bodies = max(max_live_bodies, len(live_bodies))
-            body = TrackedBody(f"{queue.name}-{index}")
+            body = TrackedBody(f"{queue_name}-{index}")
             live_bodies.add(body)
-            yield body, index * 10 + int(queue.name.endswith(".outbox"))
+            yield body, index * 10 + int(queue_name.endswith(".outbox"))
 
-    monkeypatch.setattr(task_monitor_mod, "iter_queue_entries", tracked_entries)
     tid = "1778084345905438776"
     queue_names = tuple(
         f"T{tid}.{suffix}" for suffix in ("inbox", "reserved", "outbox")
@@ -11066,7 +11184,12 @@ def test_task_monitor_task_local_salvage_streams_overflow_rows_with_bounded_memo
         config=_stale_open_test_config(),
     )
     try:
-        salvage = task._task_local_salvage(queue_names)
+        with (
+            monkeypatch.context() as patch,
+            task._get_connected_queue().get_connection() as broker,
+        ):
+            patch.setattr(broker, "peek_generator", tracked_entries)
+            salvage = task._task_local_salvage(queue_names)
 
         assert salvage["total_data_rows"] == rows_per_queue * len(queue_names)
         assert len(salvage["rows"]) == 2

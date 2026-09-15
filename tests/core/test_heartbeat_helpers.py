@@ -107,19 +107,19 @@ def test_ensure_heartbeat_service_starts_service_on_first_use(
 
     monkeypatch.setattr(
         "weft.core.heartbeat.resolve_endpoint",
-        lambda context_arg, name: next(responses),
+        lambda context_arg, name, *, broker=None: next(responses),
     )
     monkeypatch.setattr(
         core_manager_runtime,
         "ensure_manager",
-        lambda context_arg: calls.__setitem__(
+        lambda context_arg, *, broker=None: calls.__setitem__(
             "ensure",
             calls["ensure"] + 1,
         ),
     )
     monkeypatch.setattr(
         "weft.core.heartbeat._heartbeat_endpoint_is_live",
-        lambda context_arg, *, resolved: True,
+        lambda context_arg, *, resolved, broker=None: True,
     )
     monkeypatch.setattr("weft.core.heartbeat.time.sleep", lambda _seconds: None)
 
@@ -139,20 +139,22 @@ def test_upsert_heartbeat_reuses_live_service_without_second_startup(
 
     monkeypatch.setattr(
         "weft.core.heartbeat.resolve_endpoint",
-        lambda context_arg, name: resolved,
+        lambda context_arg, name, *, broker=None: resolved,
     )
     monkeypatch.setattr(
         core_manager_runtime,
         "ensure_manager",
-        lambda context_arg: (_ for _ in ()).throw(AssertionError("unexpected ensure")),
+        lambda context_arg, *, broker=None: (_ for _ in ()).throw(
+            AssertionError("unexpected ensure")
+        ),
     )
     monkeypatch.setattr(
         "weft.core.heartbeat._heartbeat_endpoint_is_live",
-        lambda context_arg, *, resolved: True,
+        lambda context_arg, *, resolved, broker=None: True,
     )
     monkeypatch.setattr(
         "weft.core.heartbeat._write_heartbeat_request",
-        lambda context_arg, *, resolved, payload: record_and_return(
+        lambda context_arg, *, resolved, payload, broker=None: record_and_return(
             captured, dict(payload), 1
         ),
     )
@@ -185,12 +187,12 @@ def test_ensure_heartbeat_service_fails_on_startup_timeout(
 
     monkeypatch.setattr(
         "weft.core.heartbeat.resolve_endpoint",
-        lambda context_arg, name: None,
+        lambda context_arg, name, *, broker=None: None,
     )
     monkeypatch.setattr(
         core_manager_runtime,
         "ensure_manager",
-        lambda context_arg: None,
+        lambda context_arg, *, broker=None: None,
     )
 
     with pytest.raises(RuntimeError, match="did not publish a live endpoint"):

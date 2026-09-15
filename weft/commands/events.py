@@ -27,13 +27,14 @@ from weft._exceptions import CommandTimeoutError
 from weft.commands.types import TaskEvent
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.queue_window import iter_broker_queue_entries, queue_broker
 from weft.core.task_evidence import (
     TaskEvidenceSnapshot,
     peek_terminal_ctrl_out_evidence,
     queue_names_for_tid,
     task_local_terminal_evidence,
 )
-from weft.helpers import iter_queue_entries, iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries
 
 from ._result_wait import (
     append_public_value,
@@ -185,12 +186,12 @@ def _peek_result_value(
     context: WeftContext,
     *,
     outbox_name: str,
+    broker: Any | None = None,
 ) -> Any | None:
-    queue = context.queue(outbox_name, persistent=True)
     stream_buffer: list[str] = []
     result_values: list[Any] = []
-    try:
-        for raw_payload, _timestamp in iter_queue_entries(queue):
+    with queue_broker(context, outbox_name, broker=broker) as db:
+        for raw_payload, _timestamp in iter_broker_queue_entries(db, outbox_name):
             final, value = process_outbox_message(
                 raw_payload,
                 stream_buffer,
@@ -199,8 +200,6 @@ def _peek_result_value(
             if final and value is not None:
                 append_public_value(result_values, value, show_stderr=False)
         return aggregate_public_outputs(result_values)
-    finally:
-        queue.close()
 
 
 def _task_snapshot_event(
@@ -208,10 +207,14 @@ def _task_snapshot_event(
     normalized_tid: str,
     *,
     allow_outbox_completion: bool,
+    broker: Any | None = None,
+    observation_queue: Queue | None = None,
 ) -> TaskEvent | None:
-    snapshot = task_ops.task_snapshot(
+    snapshot = task_ops._task_snapshot(
         normalized_tid,
         context=context,
+        broker=broker,
+        observation_queue=observation_queue,
     )
     if snapshot is None:
         return None
@@ -428,19 +431,23 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
     )
 
     snapshot_emitted = False
-    snapshot_event = _task_snapshot_event(
-        context, normalized_tid, allow_outbox_completion=taskspec_payload is not None
-    )
-    if snapshot_event is not None:
-        if _is_cancelled(cancel_event):
-            return
-        yield snapshot_event
-        snapshot_emitted = True
-
     resources = ExitStack()
     try:
         log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
         resources.callback(log_queue.close)
+        with log_queue.get_connection() as broker:
+            snapshot_event = _task_snapshot_event(
+                context,
+                normalized_tid,
+                allow_outbox_completion=taskspec_payload is not None,
+                broker=broker,
+                observation_queue=log_queue,
+            )
+        if snapshot_event is not None:
+            if _is_cancelled(cancel_event):
+                return
+            yield snapshot_event
+            snapshot_emitted = True
         route_resources, outbox_queue, ctrl_queue, monitor = _open_realtime_routes(
             context, outbox_name, ctrl_out_name, log_queue
         )
@@ -593,11 +600,14 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                         outbox_name, ctrl_out_name = new_outbox, new_control
                         routes_changed = True
                 if not snapshot_emitted:
-                    snapshot_event = _task_snapshot_event(
-                        context,
-                        normalized_tid,
-                        allow_outbox_completion=taskspec_payload is not None,
-                    )
+                    with log_queue.get_connection() as broker:
+                        snapshot_event = _task_snapshot_event(
+                            context,
+                            normalized_tid,
+                            allow_outbox_completion=taskspec_payload is not None,
+                            broker=broker,
+                            observation_queue=log_queue,
+                        )
                     if snapshot_event is not None:
                         yield snapshot_event
                         snapshot_emitted = True
@@ -627,20 +637,23 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 streams_output = outbox_stream_frames_seen or _task_streams_output(
                     taskspec_payload
                 )
-                evidence = (
-                    peek_terminal_ctrl_out_evidence(
-                        context,
-                        tid=normalized_tid,
-                        ctrl_out_name=ctrl_out_name,
-                        taskspec_payload=taskspec_payload,
+                with log_queue.get_connection() as broker:
+                    evidence = (
+                        peek_terminal_ctrl_out_evidence(
+                            context,
+                            tid=normalized_tid,
+                            ctrl_out_name=ctrl_out_name,
+                            taskspec_payload=taskspec_payload,
+                            broker=broker,
+                        )
+                        if streams_output or taskspec_payload is None
+                        else task_local_terminal_evidence(
+                            context,
+                            tid=normalized_tid,
+                            taskspec_payload=taskspec_payload,
+                            broker=broker,
+                        )
                     )
-                    if streams_output or taskspec_payload is None
-                    else task_local_terminal_evidence(
-                        context,
-                        tid=normalized_tid,
-                        taskspec_payload=taskspec_payload,
-                    )
-                )
                 if (
                     evidence is not None
                     and evidence.terminal
@@ -689,15 +702,21 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                     )
                     terminal_state_emitted = True
                 if not snapshot_emitted:
-                    snapshot_event = _task_snapshot_event(
-                        context,
-                        normalized_tid,
-                        allow_outbox_completion=taskspec_payload is not None,
-                    )
+                    with log_queue.get_connection() as broker:
+                        snapshot_event = _task_snapshot_event(
+                            context,
+                            normalized_tid,
+                            allow_outbox_completion=taskspec_payload is not None,
+                            broker=broker,
+                            observation_queue=log_queue,
+                        )
                     if snapshot_event is not None:
                         yield snapshot_event
                         snapshot_emitted = True
-                result_value = _peek_result_value(context, outbox_name=outbox_name)
+                with log_queue.get_connection() as broker:
+                    result_value = _peek_result_value(
+                        context, outbox_name=outbox_name, broker=broker
+                    )
                 if terminal_status == "completed" and result_value is None:
                     grace_deadline = (
                         time.monotonic() + WEFT_COMPLETED_RESULT_GRACE_SECONDS
@@ -715,10 +734,12 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                             else min(0.05, remaining, grace_remaining)
                         )
                         monitor.wait(wait_timeout)
-                        result_value = _peek_result_value(
-                            context,
-                            outbox_name=outbox_name,
-                        )
+                        with log_queue.get_connection() as broker:
+                            result_value = _peek_result_value(
+                                context,
+                                outbox_name=outbox_name,
+                                broker=broker,
+                            )
                     if result_value is None and task_ops._deadline_expired(deadline):
                         _raise_follow_timeout(
                             tid=normalized_tid,

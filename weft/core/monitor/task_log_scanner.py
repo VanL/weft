@@ -16,8 +16,13 @@ from typing import Any, cast
 
 from weft._constants import TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED
 from weft.context import WeftContext
-from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
-from weft.helpers import iter_queue_entries
+from weft.core.queue_window import (
+    DecodedQueueWindowRow,
+    QueueWindowRow,
+    iter_broker_queue_entries,
+    queue_broker,
+)
+from weft.helpers import closing_queue_iterator
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +55,7 @@ class TaskLogScanWindow:
 class GeneratorTaskLogScanner:
     """Task-log scanner backed by the public SimpleBroker generator API."""
 
-    persistent: bool = False
+    persistent: bool = True
 
     def scan_window(
         self,
@@ -60,21 +65,29 @@ class GeneratorTaskLogScanner:
         scan_limit: int,
         since_timestamp: int | None = None,
         before_timestamp: int | None = None,
+        broker: Any | None = None,
     ) -> TaskLogScanWindow:
         """Return a bounded decoded task-log window from FIFO queue iteration."""
 
         if scan_limit <= 0:
             raise ValueError("task-log scan_limit must be positive")
 
-        queue = ctx.queue(queue_name, persistent=self.persistent)
         rows: list[DecodedQueueWindowRow] = []
         scan_limit_reached = False
-        try:
-            for body, message_id in iter_queue_entries(
-                queue,
-                since_timestamp=since_timestamp,
-                before_timestamp=before_timestamp,
-            ):
+        with (
+            queue_broker(
+                ctx, queue_name, broker=broker, persistent=self.persistent
+            ) as db,
+            closing_queue_iterator(
+                iter_broker_queue_entries(
+                    db,
+                    queue_name,
+                    since_timestamp=since_timestamp,
+                    before_timestamp=before_timestamp,
+                )
+            ) as entries,
+        ):
+            for body, message_id in entries:
                 if len(rows) >= scan_limit:
                     scan_limit_reached = True
                     break
@@ -84,8 +97,6 @@ class GeneratorTaskLogScanner:
                     message_id=int(message_id),
                 )
                 rows.append(decode_task_log_row(raw))
-        finally:
-            queue.close()
 
         return TaskLogScanWindow(
             rows=tuple(rows),

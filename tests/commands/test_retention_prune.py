@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -48,7 +49,10 @@ def test_retention_prune_preserves_exact_run_id_format(
         lambda *_args: "2030-01-02T03:04:05",
     )
     monkeypatch.setattr(retention_pruning.time, "time_ns", lambda: 9_876_543_210)
-    monkeypatch.setattr(retention_pruning.os, "getpid", lambda: 4321)
+    # Keep the broker's process identity real while pinning the report field.
+    os_proxy = SimpleNamespace(**vars(retention_pruning.os))
+    os_proxy.getpid = lambda: 4321
+    monkeypatch.setattr(retention_pruning, "os", os_proxy)
 
     result = retention_pruning.run_retention_prune_for_context(
         ctx,

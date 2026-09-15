@@ -12,20 +12,22 @@ from typing import Any
 
 from weft._constants import PIPELINE_RUNTIME_METADATA_KEY, WEFT_GLOBAL_LOG_QUEUE
 from weft.context import WeftContext
-from weft.helpers import iter_queue_json_entries
+from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 
 
 def load_latest_taskspec_payload(
     context: WeftContext,
     tid: str,
+    *,
+    broker: Any | None = None,
 ) -> dict[str, Any] | None:
-    """Return the latest logged TaskSpec payload for ``tid``."""
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    """Read fresh TaskSpec history, borrowing a bounded owner's broker [MF-5]."""
 
     def _scan_history(*, since_timestamp: int | None) -> dict[str, Any] | None:
         latest_taskspec: dict[str, Any] | None = None
-        for payload, _timestamp in iter_queue_json_entries(
-            log_queue,
+        for payload, _timestamp in iter_broker_queue_json_entries(
+            db,
+            WEFT_GLOBAL_LOG_QUEUE,
             since_timestamp=since_timestamp,
         ):
             if payload.get("tid") != tid:
@@ -35,14 +37,12 @@ def load_latest_taskspec_payload(
                 latest_taskspec = taskspec
         return latest_taskspec
 
-    try:
+    with queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
         since_timestamp = int(tid) - 1 if tid.isdigit() else None
         latest_taskspec = _scan_history(since_timestamp=since_timestamp)
         if latest_taskspec is not None or since_timestamp is None:
             return latest_taskspec
         return _scan_history(since_timestamp=None)
-    finally:
-        log_queue.close()
 
 
 def is_pipeline_taskspec_payload(taskspec_payload: dict[str, Any] | None) -> bool:
