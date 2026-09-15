@@ -232,6 +232,14 @@ thread's core. The owner-thread ordering repair above cannot evict the departed
 thread's core. Publication is held pending owner approval for an upstream
 SimpleBroker lifetime repair; no cross-thread eviction is added in Weft.
 
+The public Queue-only reproduction isolates the upstream behavior: with one
+persistent keeper lease, five sequential worker threads retain five cores and
+five open SQLite connections whether main closes each returned queue after join
+or each worker closes its own queue before exit. Worker-side
+cleanup_connections followed by close retains zero. Closing the final keeper
+releases all five retained connections. These are measured SQLite counts, not
+inferred PostgreSQL counts.
+
 ## Confirmed Exception
 
 MonitorStore schema migration invokes raw-row absence checks while inside a

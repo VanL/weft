@@ -6942,42 +6942,33 @@ def test_manager_runtime_handle_uses_external_supervisor_in_container(
 
 
 def test_manager_unregister_registry_broker_error_is_best_effort(
-    unique_tid: str,
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FailingRegistryQueue:
-        def generate_timestamp(self) -> int:
-            return 123
+    manager, _make_queue = manager_setup
+    registry_queue = manager._queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    deleted_ids: list[int | None] = []
+    written_payloads: list[str] = []
 
-        def delete(self, *, message_id: int | None = None) -> bool:
-            del message_id
-            raise BrokerError("registry delete failed")
+    def fail_delete(*, message_id: int | None = None) -> bool:
+        deleted_ids.append(message_id)
+        raise BrokerError("registry delete failed")
 
-        def write(self, _payload: str) -> None:
-            raise BrokerError("registry write failed")
+    def fail_write(payload: str) -> None:
+        written_payloads.append(payload)
+        raise BrokerError("registry write failed")
 
-    manager = object.__new__(Manager)
     manager._unregistered = False
     manager._registry_message_id = 456
-    manager.tid = unique_tid
-    manager.taskspec = make_manager_spec(
-        unique_tid,
-        f"manager.{unique_tid}.inbox",
-        f"manager.{unique_tid}.ctrl_in",
-        f"manager.{unique_tid}.ctrl_out",
-    )
-    manager._queue_names = {
-        "inbox": f"manager.{unique_tid}.inbox",
-        "ctrl_in": f"manager.{unique_tid}.ctrl_in",
-        "ctrl_out": f"manager.{unique_tid}.ctrl_out",
-        "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
-        "reserved": f"T{unique_tid}.reserved",
-    }
-    monkeypatch.setattr(manager, "_queue", lambda _name: _FailingRegistryQueue())
-    monkeypatch.setattr(manager, "_latest_registry_entry", lambda _queue, _tid: None)
+    with monkeypatch.context() as patch:
+        patch.setattr(registry_queue, "delete", fail_delete)
+        patch.setattr(registry_queue, "write", fail_write)
+        patch.setattr(manager, "_latest_registry_entry", lambda _queue, _tid: None)
 
-    manager._unregister_manager()
+        manager._unregister_manager()
 
+    assert deleted_ids == [456]
+    assert len(written_payloads) == 1
     assert manager._unregistered is True
     assert manager._registry_message_id is None
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -410,41 +410,10 @@ def test_follow_task_events_reports_original_timeout_after_terminal_event(
 
 def test_realtime_events_uses_terminal_state_seen_during_materialization(
     monkeypatch: pytest.MonkeyPatch,
+    weft_harness: WeftTestHarness,
 ) -> None:
     tid = "1776000000000000001"
-
-    class _FakeQueue:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-        def close(self) -> None:
-            return None
-
-    class _FakeContext:
-        def __init__(self) -> None:
-            self.config: dict[str, object] = {}
-
-        def queue(self, name: str, *, persistent: bool = False) -> _FakeQueue:
-            del persistent
-            return _FakeQueue(name)
-
-    class _FakeMonitor:
-        def __init__(
-            self,
-            queues: Sequence[_FakeQueue],
-            *,
-            config: Mapping[str, object] | None = None,
-        ) -> None:
-            del queues, config
-
-        def wait(self, timeout: float | None = None) -> bool:
-            del timeout
-            return False
-
-        def close(self) -> None:
-            return None
-
-    first_context = _FakeContext()
+    first_context = weft_harness.context
 
     materialized = result_mod.ResultMaterialization(
         taskspec_payload=None,
@@ -465,7 +434,6 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
         "_await_result_materialization",
         lambda *args, **kwargs: materialized,
     )
-    monkeypatch.setattr(events_mod, "QueueChangeMonitor", _FakeMonitor)
     monkeypatch.setattr(
         events_mod, "iter_queue_json_entries", lambda *args, **kwargs: iter(())
     )
@@ -475,17 +443,19 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
     monkeypatch.setattr(
         events_mod,
         "_task_snapshot_event",
-        lambda context, normalized_tid, *, allow_outbox_completion: TaskEvent(
-            tid=normalized_tid,
-            event_type="snapshot",
-            timestamp=1,
-            payload={"tid": normalized_tid, "status": "completed"},
+        lambda context, normalized_tid, *, allow_outbox_completion, broker, observation_queue: (
+            TaskEvent(
+                tid=normalized_tid,
+                event_type="snapshot",
+                timestamp=1,
+                payload={"tid": normalized_tid, "status": "completed"},
+            )
         ),
     )
 
     events = list(
         events_mod.iter_task_realtime_events(
-            cast(WeftContext, first_context),
+            first_context,
             tid,
             timeout=1.0,
         )
@@ -497,46 +467,17 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
         "result",
         "end",
     ]
+    assert events[1].timestamp == 42
+    assert events[1].payload == {"status": "completed", "event": "work_completed"}
     assert events[-2].payload == {"status": "completed", "value": "done", "error": None}
 
 
 def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
     monkeypatch: pytest.MonkeyPatch,
+    weft_harness: WeftTestHarness,
 ) -> None:
     tid = "1776000000000000001"
-
-    class _FakeQueue:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-        def close(self) -> None:
-            return None
-
-    class _FakeContext:
-        def __init__(self) -> None:
-            self.config: dict[str, object] = {}
-
-        def queue(self, name: str, *, persistent: bool = False) -> _FakeQueue:
-            del persistent
-            return _FakeQueue(name)
-
-    class _FakeMonitor:
-        def __init__(
-            self,
-            queues: Sequence[_FakeQueue],
-            *,
-            config: Mapping[str, object] | None = None,
-        ) -> None:
-            del queues, config
-
-        def wait(self, timeout: float | None = None) -> bool:
-            del timeout
-            return False
-
-        def close(self) -> None:
-            return None
-
-    first_context = _FakeContext()
+    first_context = weft_harness.context
 
     materialized = result_mod.ResultMaterialization(
         taskspec_payload=None,
@@ -553,7 +494,6 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
         "_await_result_materialization",
         lambda *args, **kwargs: materialized,
     )
-    monkeypatch.setattr(events_mod, "QueueChangeMonitor", _FakeMonitor)
     monkeypatch.setattr(
         events_mod, "iter_queue_json_entries", lambda *args, **kwargs: iter(())
     )
@@ -563,17 +503,19 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
     monkeypatch.setattr(
         events_mod,
         "_task_snapshot_event",
-        lambda context, normalized_tid, *, allow_outbox_completion: TaskEvent(
-            tid=normalized_tid,
-            event_type="snapshot",
-            timestamp=100,
-            payload={"tid": normalized_tid, "status": "completed"},
+        lambda context, normalized_tid, *, allow_outbox_completion, broker, observation_queue: (
+            TaskEvent(
+                tid=normalized_tid,
+                event_type="snapshot",
+                timestamp=100,
+                payload={"tid": normalized_tid, "status": "completed"},
+            )
         ),
     )
 
     events = list(
         events_mod.iter_task_realtime_events(
-            cast(WeftContext, first_context),
+            first_context,
             tid,
             timeout=1.0,
         )
@@ -585,5 +527,6 @@ def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
         "result",
         "end",
     ]
+    assert events[1].timestamp == 100
     assert events[1].payload == {"status": "completed"}
     assert events[-2].payload == {"status": "completed", "value": "done", "error": None}
