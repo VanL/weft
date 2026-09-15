@@ -255,6 +255,20 @@ repair and would require a separate ownership design.
 
 ## Integration Verification
 
+Final Weft repair verification at 920923e3:
+
+- Full SQLite: 5,059 passed, 39 skipped in 268.68 seconds, 12 workers.
+- Full PostgreSQL: 5,003 passed, 24 skipped in 277.12 seconds, 12 workers.
+  The earlier source-port exhaustion and pool-finalization warning did not recur.
+- Ruff check and format check pass; mypy passes all 432 selected source files.
+- The first full SQLite run's four failures were corrected without changing
+  production behavior: two event tests now use real broker resources, a Manager
+  failure test uses an initialized Manager, and new core modules are registered
+  for cross-backend coverage. Their original terminal and best-effort assertions
+  remain active, with additional evidence-source and injected-call assertions.
+- No tag, push, CI release, or publish was performed. The departed-thread
+  SimpleBroker lifetime issue above remains open, pending scope approval.
+
 After command-control observation borrowing, the same 12-worker Monitor and
 Liveness PostgreSQL slice passed 214 tests in 35.44 seconds. Real connection
 instrumentation counted 7,844 opens, versus 17,051 before the command repair.
