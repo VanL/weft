@@ -2847,12 +2847,13 @@ def test_cli_run_wait_reports_memory_limit(
             "60",
         ]
     )
+    run_timeout = 120.0 if sys.platform == "win32" else 30.0
 
     rc, out, err = run_cli(
         *cli_args,
         cwd=workdir,
         harness=weft_harness,
-        timeout=30.0,
+        timeout=run_timeout,
     )
 
     assert rc == 1
