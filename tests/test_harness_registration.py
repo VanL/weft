@@ -1653,6 +1653,45 @@ def test_inline_cleanup_retains_live_driver_and_allows_retry(
 
 
 @pytest.mark.shared
+def test_inline_cleanup_waits_after_manager_cleanup_unblocks_driver() -> None:
+    harness = WeftTestHarness()
+    cleanup_called = threading.Event()
+    stop_event = threading.Event()
+
+    class CleanupUnblocksManager:
+        tid = "1780000000000000000"
+
+        def stop(self, *, join: bool = False) -> None:
+            assert join is False
+
+        def cleanup(self) -> None:
+            cleanup_called.set()
+
+    def delayed_exit() -> None:
+        assert stop_event.wait(5.0), "harness did not request inline driver stop"
+        assert cleanup_called.wait(5.0), "harness did not run manager cleanup"
+
+    thread = threading.Thread(target=delayed_exit)
+    thread.start()
+    harness._inline_managers.append(
+        (cast(Any, CleanupUnblocksManager()), thread, stop_event)
+    )
+
+    try:
+        harness._stop_inline_managers()
+
+        assert cleanup_called.is_set()
+        assert not thread.is_alive()
+        assert harness._inline_managers == []
+    finally:
+        cleanup_called.set()
+        stop_event.set()
+        thread.join(5.0)
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.shared
 def test_inline_manager_does_not_own_test_worker_process_title() -> None:
     """Inline manager fixtures must not invoke native title services."""
     with WeftTestHarness() as harness:

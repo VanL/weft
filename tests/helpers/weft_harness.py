@@ -79,6 +79,7 @@ TERMINAL_TASK_EVENTS = {
 TEMP_DIR_CLEANUP_RETRY_SLEEP_SECONDS: Final[float] = 0.05
 TEMP_DIR_CLEANUP_MAX_ATTEMPTS: Final[int] = 5
 WINDOWS_TEMP_DIR_CLEANUP_TIMEOUT_SECONDS: Final[float] = 30.0
+INLINE_MANAGER_DRIVER_STOP_TIMEOUT_SECONDS: Final[float] = 2.0
 CONTEXT_SETUP_RETRY_MAX_ATTEMPTS: Final[int] = 3
 CONTEXT_SETUP_RETRY_SLEEP_SECONDS: Final[float] = 1.0
 SQLITE_SETUP_DEADLINE_MARKERS: Final[tuple[str, ...]] = (
@@ -759,13 +760,15 @@ class WeftTestHarness:
     # Internal helpers
     # ------------------------------------------------------------------
     def _stop_inline_managers(self) -> None:
+        cleanup_join_timeout = max(6.0, min(self._manager_timeout, 10.0))
         for manager, _thread, stop_event in self._inline_managers:
             stop_event.set()
             manager.stop(join=False)
         for manager, thread, _stop_event in self._inline_managers:
-            thread.join(timeout=2.0)
+            thread.join(timeout=INLINE_MANAGER_DRIVER_STOP_TIMEOUT_SECONDS)
             if thread.is_alive():
                 manager.cleanup()
+                thread.join(timeout=cleanup_join_timeout)
         self._inline_managers[:] = [
             entry for entry in self._inline_managers if entry[1].is_alive()
         ]
