@@ -1268,7 +1268,8 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _next_inactive_probe_at _next_maintenance_due_monotonic
     _next_runtime_cleanup_queue_discovery_due_monotonic _owned_dynamic_queues
     _owned_fixed_queues _owned_queue_names _owns_queue
-    _parent_loss_watch_active _paused _pending_messages_precheck_confirmed
+    _parent_loss_watch_active _paused _prior_queue_stop_event
+    _pending_messages_precheck_confirmed
     _pending_termination_sources _persistent
     _persistent_service _pong_extension_provider _queue_cache _queue_generation
     _queue_iterator _queue_name_map _queue_obj _queues _resource_monitor
@@ -1310,7 +1311,7 @@ _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     _fixed_queue_names _kill_requested _monitor_config _monitor_store _multi_activity_waiter
     _multi_activity_waiter_generation _multi_activity_waiter_signature
     _owned_dynamic_queues _owned_fixed_queues _owned_queue_names _owns_queue
-    _parent_loss_watch_active _paused
+    _parent_loss_watch_active _paused _prior_queue_stop_event
     _pending_messages_precheck_confirmed _pending_termination_sources
     _pong_extension_provider _queue_cache
     _queue_iterator _queue_obj _queues _resource_monitor _run_thread _running_event

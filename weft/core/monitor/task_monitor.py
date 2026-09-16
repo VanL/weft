@@ -932,6 +932,7 @@ class TaskMonitor(ServiceTask):
         worker._queue_cache = {}
         worker._owned_queue_names = set()
         worker._active_queues = []
+        worker._prior_queue_stop_event = None
         worker._queue_iterator = itertools.cycle([])
         object.__setattr__(worker, "_strategy", None)
         worker._multi_activity_waiter = None
