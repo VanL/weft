@@ -26,6 +26,13 @@ from weft.helpers import iter_queue_json_entries
 pytestmark = pytest.mark.shared
 
 
+def _process_gone_or_zombie(process: psutil.Process) -> bool:
+    try:
+        return not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
 @pytest.fixture
 def worker_tree() -> Iterator[tuple[subprocess.Popen[str], psutil.Process]]:
     # The child announces readiness before its parent publishes its PID. This
@@ -227,10 +234,7 @@ def test_managed_identity_merge_preserves_explicit_evidence(
             assert descendant.is_running()
         else:
             worker.wait(timeout=5)
-            assert (
-                not descendant.is_running()
-                or descendant.status() == psutil.STATUS_ZOMBIE
-            )
+            assert _process_gone_or_zombie(descendant)
     finally:
         task.cleanup()
         mappings.close()

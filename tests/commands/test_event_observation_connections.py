@@ -133,28 +133,24 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
     tid, _payload = _seed_task(ctx, status="completed", streams=True)
     now = 100.0
     reads = 0
-    previous: tuple[int, int] | None = None
     deltas: list[tuple[int, int]] = []
     original_peek = events_cmd._peek_result_value
 
     def peek(*args: Any, **kwargs: Any) -> Any:
         nonlocal reads
+        previous = (len(connections), len(queues))
         reads += 1
         assert reads <= 4
-        return original_peek(*args, **kwargs)
+        result = original_peek(*args, **kwargs)
+        deltas.append((len(connections) - previous[0], len(queues) - previous[1]))
+        return result
 
     def wait(_monitor: Any, timeout: float | None) -> bool:
-        nonlocal now, previous
+        nonlocal now
         now += max(timeout or 0.0, 0.001)
-        if reads:
-            if previous is not None:
-                deltas.append(
-                    (len(connections) - previous[0], len(queues) - previous[1])
-                )
-            if reads == 3:
-                with ctx.broker() as writer:
-                    writer.write(f"T{tid}.outbox", json.dumps({"late": True}))
-            previous = (len(connections), len(queues))
+        if reads == 3:
+            with ctx.broker() as writer:
+                writer.write(f"T{tid}.outbox", json.dumps({"late": True}))
         return True
 
     monkeypatch.setattr(
@@ -164,7 +160,7 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(events_cmd.iter_task_realtime_events(ctx, tid))
     assert reads == 4
-    assert deltas == [(0, 0)] * 2
+    assert deltas == [(0, 0)] * 4
     assert emitted[-2].event_type == "result"
     assert emitted[-2].payload["value"] == {"late": True}
     assert emitted[-1].event_type == "end"
