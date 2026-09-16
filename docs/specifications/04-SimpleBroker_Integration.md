@@ -290,14 +290,16 @@ non-queue operational tables beside SimpleBroker tables when the state is a
 derived read model rather than queue data. The current example is the
 TaskMonitor durable collation store:
 
-Task-owned stores borrow a persistent task queue and enter a fresh sidecar
-session for each operation. `MonitorStore.close()` does not close that borrowed
-queue. Migration raw-row checks are a bounded separate-connection exception:
-SimpleBroker prohibits queue operations on the core holding an active sidecar
-transaction. Standalone non-task store callers retain bounded broker scopes.
+Task-owned stores borrow the owner's `BrokerSession` and enter a short sidecar
+context for each operation. `MonitorStore.close()` does not close that borrowed
+owner. Standalone store operations retain a bounded independent fallback.
+Migration raw-row checks retain their separate-connection exception inside a
+sidecar transaction: SimpleBroker prohibits queue operations on the core
+holding that transaction.
 Implementation: `MonitorStore._sidecar_session`, `_raw_message_is_absent`, and
-the TaskMonitor store-opening paths. Audit and repair evidence lives in
-[the connection-reuse plan](../plans/2026-09-14-bounded-registry-connection-reuse-plan.md).
+the TaskMonitor store-opening paths. Audit and repair evidence lives in the
+[connection-reuse plan](../plans/2026-09-14-bounded-registry-connection-reuse-plan.md)
+and the [explicit session lifetime plan](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
 Monitor relational message-ID and checkpoint columns remain integers. Exact
 broker IDs embedded in Monitor-owned JSON text are canonical strings at rest:

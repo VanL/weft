@@ -37,7 +37,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
-from simplebroker import Queue, format_message_id
+from simplebroker import BrokerSession, BrokerTarget, Queue, format_message_id
 from simplebroker.ext import BrokerError, SidecarSession, SidecarUnavailableError
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
@@ -915,13 +915,18 @@ def open_monitor_store(
     context: WeftContext,
     *,
     config: Mapping[str, Any] | None = None,
+    session: BrokerSession | None = None,
     queue: Queue | None = None,
 ) -> MonitorStore:
-    """Return a store, optionally borrowing the task's matching persistent queue.
+    """Return a store, optionally borrowing a matching persistent owner.
 
-    The caller owns the queue and must keep it open until the store is finished.
-    Its target and resolved configuration must match ``context`` [SB-0.4a].
+    The caller owns the session or queue and must keep it open until the store is
+    finished. Its target and resolved configuration must match ``context``
+    [SB-0.4a].
     """
+
+    if session is not None and queue is not None:
+        raise ValueError("MonitorStore accepts either session or queue, not both")
 
     store_config = MonitorStoreConfig(
         write_batch_size=int(
@@ -931,7 +936,12 @@ def open_monitor_store(
             )
         )
     )
-    return MonitorStore(context, store_config=store_config, queue=queue)
+    return MonitorStore(
+        context,
+        store_config=store_config,
+        session=session,
+        queue=queue,
+    )
 
 
 class _MonitorTableAccess:
@@ -2350,6 +2360,26 @@ class _MonitorTableAccess:
         )
 
 
+def _session_matches_context(session: BrokerSession, context: WeftContext) -> bool:
+    """Return whether a borrowed session has the context's exact broker identity."""
+
+    session_target = session.target
+    if isinstance(session_target, BrokerTarget):
+        session_target_value = session_target.target
+        session_options = session_target.backend_options
+    else:
+        session_target_value = str(session_target)
+        session_options = {}
+    context_target = context.broker_target
+    return (
+        session.backend_name == context_target.backend_name
+        and session_target_value == context_target.target
+        and dict(session_options) == dict(context_target.backend_options)
+        and session.config.prefix == context.broker_config.prefix
+        and dict(session.config) == dict(context.broker_config)
+    )
+
+
 class MonitorStore:
     """Durable store for Monitor-owned task-log collation state."""
 
@@ -2358,12 +2388,20 @@ class MonitorStore:
         context: WeftContext,
         *,
         store_config: MonitorStoreConfig | None = None,
+        session: BrokerSession | None = None,
         queue: Queue | None = None,
     ) -> None:
+        if session is not None and queue is not None:
+            raise ValueError("MonitorStore accepts either session or queue, not both")
+        if session is not None and not _session_matches_context(session, context):
+            raise ValueError("MonitorStore session does not match its WeftContext")
         self._context = context
         self._context_key = service_context_key(context)
         self._config = store_config or MonitorStoreConfig()
-        self._queue = queue
+        self._session = session
+        self._queue = (
+            session.queue(WEFT_GLOBAL_LOG_QUEUE) if session is not None else queue
+        )
 
     @property
     def context_key(self) -> str:
@@ -2395,13 +2433,12 @@ class MonitorStore:
         raised by Monitor-store SQL inside the block.
 
         Acquire and release on the executing thread. A borrowed persistent
-        queue outlives this block; the sidecar transaction never does [SB-0.4a].
+        owner outlives this block; the sidecar transaction never does [SB-0.4a].
         """
-        connection = (
-            self._queue.get_connection()
-            if self._queue is not None
-            else self._context.broker()
-        )
+        if self._queue is not None:
+            connection = self._queue.get_connection()
+        else:
+            connection = self._context.broker()
         with connection as broker:
             try:
                 with broker.sidecar(transaction=transaction) as session:
@@ -2414,8 +2451,9 @@ class MonitorStore:
     def close(self) -> None:
         """Close the store.
 
-        Task callers lend their persistent queue; its lifetime remains with the
-        task, not this store. Standalone callers use bounded broker scopes.
+        Task callers lend their persistent session or queue; its lifetime remains
+        with the task, not this store. Standalone callers use bounded broker
+        scopes.
         """
 
     def ensure_schema(self) -> None:

@@ -136,6 +136,15 @@ class _CloseRecordingProxy:
             raise RuntimeError(f"{self._name} close boom")
 
 
+class _FatalCloseRecordingProxy(_CloseRecordingProxy):
+    """Record a complete real close and then raise lifecycle control."""
+
+    def close(self) -> None:
+        self._events.append(self._name)
+        self._delegate.close()
+        raise SystemExit(f"{self._name} close signal")
+
+
 class _MonitorStoreSetupFailureProxy(_CloseRecordingProxy):
     """Fail one real-store setup step while retaining observable close."""
 
@@ -667,6 +676,180 @@ def test_task_monitor_worker_close_attempts_all_resources_and_reports_failure(
     }
 
 
+def test_task_monitor_worker_close_attempts_all_resources_before_base_exception(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+) -> None:
+    """Lifecycle control from one close cannot skip later worker resources."""
+
+    db_path, make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "fatal-close.jsonl"),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999412"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    worker = task._worker_local_monitor_clone()
+    events: list[str] = []
+    assert worker._external_task_log_sink is not None
+    worker._external_task_log_sink = cast(
+        task_monitor_mod.ExternalTaskLogSink,
+        _FatalCloseRecordingProxy(
+            worker._external_task_log_sink,
+            name="sink",
+            events=events,
+        ),
+    )
+    worker._queue_cache["worker.fatal.close"] = cast(
+        Queue,
+        _CloseRecordingProxy(
+            make_queue("worker.fatal.close"),
+            name="queue",
+            events=events,
+        ),
+    )
+    worker._broker_session = cast(
+        Any,
+        _CloseRecordingProxy(
+            worker._monitor_context().session(),
+            name="session",
+            events=events,
+        ),
+    )
+
+    try:
+        with pytest.raises(SystemExit, match="sink close signal"):
+            worker._close_worker_local_resources()
+        assert events == ["sink", "queue", "session"]
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("worker_kind", ["builtin", "runtime"])
+def test_task_monitor_worker_clone_failure_returns_typed_failure(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_kind: str,
+) -> None:
+    """The common worker boundary types snapshot setup failures for both lanes."""
+
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999413"),
+        observer=lambda _queue, _message, _timestamp: None,
+    )
+
+    def fail_clone() -> TaskMonitor:
+        raise RuntimeError("worker clone boom")
+
+    monkeypatch.setattr(task, "_worker_local_monitor_clone", fail_clone)
+    try:
+        if worker_kind == "builtin":
+            result = task._run_builtin_cycle_worker(
+                task_monitor_mod._TaskMonitorBuiltinCycleWork(
+                    request_id="clone-failure",
+                    now_ns=time.time_ns(),
+                    task_log_owner="monitor_store",
+                )
+            )
+            assert result.result.success is False
+            assert result.result.errors == ("worker clone boom",)
+            assert result.runtime_cleanup_ready is False
+        else:
+            runtime_result = task._run_terminal_control_cleanup_worker(
+                task_monitor_mod._TaskControlCleanupWork(
+                    request_id="clone-failure",
+                    now_ns=time.time_ns(),
+                )
+            )
+            assert runtime_result.cleanup.success is False
+            assert runtime_result.cleanup.pending is True
+            assert runtime_result.cleanup.errors == ("worker clone boom",)
+            assert runtime_result.monitor_status is not None
+            assert runtime_result.monitor_status.error == "worker clone boom"
+    finally:
+        task.stop()
+
+
+def test_task_monitor_worker_clone_resource_failure_unwinds_worker_sink_only(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failure after worker sink acquisition releases only the clone lease."""
+
+    db_path, _make_queue = broker_env
+    output_path = tmp_path / "clone-unwind.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(output_path),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999414"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    real_sink = task_monitor_mod.ExternalTaskLogSink
+    real_replace = task_monitor_mod.replace
+    status_type = type(task._external_task_log_status)
+    events: list[str] = []
+
+    class SnapshotFailure(RuntimeError):
+        pass
+
+    def recording_sink(*args: Any, **kwargs: Any) -> Any:
+        return _CloseRecordingProxy(
+            real_sink(*args, **kwargs),
+            name="worker_sink",
+            events=events,
+        )
+
+    def fail_after_sink(value: Any, **changes: Any) -> Any:
+        if isinstance(value, status_type):
+            raise SnapshotFailure("worker post-sink snapshot boom")
+        return real_replace(value, **changes)
+
+    monkeypatch.setattr(task_monitor_mod, "ExternalTaskLogSink", recording_sink)
+    monkeypatch.setattr(task_monitor_mod, "replace", fail_after_sink)
+    try:
+        try:
+            result = task._run_builtin_cycle_worker(
+                task_monitor_mod._TaskMonitorBuiltinCycleWork(
+                    request_id="clone-resource-failure",
+                    now_ns=time.time_ns(),
+                    task_log_owner="monitor_store",
+                )
+            )
+        finally:
+            monkeypatch.setattr(task_monitor_mod, "replace", real_replace)
+            monkeypatch.setattr(task_monitor_mod, "ExternalTaskLogSink", real_sink)
+
+        assert result.result.success is False
+        assert result.result.errors == ("worker post-sink snapshot boom",)
+        assert events == ["worker_sink"]
+        assert task._external_task_log_sink is not None
+        task._external_task_log_sink.emit_json_text(
+            '{"owner":"reactor"}',
+            emitted_at_ns=1778089999999999415,
+        )
+    finally:
+        task.stop()
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == {"owner": "reactor"}
+
+
 def test_task_monitor_builtin_worker_close_failure_replaces_success(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
@@ -988,7 +1171,7 @@ def test_task_monitor_control_cleanup_deferred_status_survives_refresh(
 
 
 @pytest.mark.parametrize("worker_kind", ["builtin", "runtime"])
-@pytest.mark.parametrize("failed_resource", ["store", "sink", "queue"])
+@pytest.mark.parametrize("failed_resource", ["store", "sink", "queue", "session"])
 def test_task_monitor_worker_entry_close_failure_matrix_is_retryable(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
@@ -1016,11 +1199,25 @@ def test_task_monitor_worker_entry_close_failure_matrix_is_retryable(
     )
     events: list[str] = []
     clone_threads: list[threading.Thread] = []
+    borrowed_sessions: list[Any] = []
     fail_close = {"enabled": True}
     real_clone = task._worker_local_monitor_clone
     real_open_monitor_store = task_monitor_mod.open_monitor_store
+    real_context_session = WeftContext.session
+
+    def recording_context_session(context: WeftContext) -> Any:
+        return _CloseRecordingProxy(
+            real_context_session(context),
+            name="session",
+            events=events,
+            fail=fail_close["enabled"] and failed_resource == "session",
+        )
 
     def recording_open_monitor_store(*args: Any, **kwargs: Any) -> Any:
+        session = kwargs.get("session")
+        assert session is not None
+        if session is not task._broker_session:
+            borrowed_sessions.append(session)
         store = real_open_monitor_store(*args, **kwargs)
         return _CloseRecordingProxy(
             store,
@@ -1058,6 +1255,7 @@ def test_task_monitor_worker_entry_close_failure_matrix_is_retryable(
         "open_monitor_store",
         recording_open_monitor_store,
     )
+    monkeypatch.setattr(WeftContext, "session", recording_context_session)
     monkeypatch.setattr(task, "_worker_local_monitor_clone", recording_clone)
 
     if worker_kind == "runtime":
@@ -1130,7 +1328,7 @@ def test_task_monitor_worker_entry_close_failure_matrix_is_retryable(
             )
             assert task._monitor_store_status == owner_monitor_status
 
-        assert events == ["store", "sink", "queue"]
+        assert events == ["store", "sink", "queue", "session"]
 
         events.clear()
         clone_threads.clear()
@@ -1152,8 +1350,9 @@ def test_task_monitor_worker_entry_close_failure_matrix_is_retryable(
                 > owner_diagnostic
             )
         assert clone_threads
+        assert borrowed_sessions
         assert all(thread is not threading.current_thread() for thread in clone_threads)
-        assert events[:3] == ["store", "sink", "queue"]
+        assert events[:4] == ["store", "sink", "queue", "session"]
     finally:
         task.stop()
 
@@ -1570,6 +1769,8 @@ def test_task_monitor_store_reuses_task_connection(
             pytest.skip("Physical PostgreSQL connection regression")
         store = owner._ensure_monitor_store()
         assert store is not None
+        with owner._get_connected_queue().get_connection() as broker:
+            broker.list_queues()
         psycopg = pytest.importorskip("psycopg")
         original_connect = psycopg.Connection.connect.__func__
         connections: list[Any] = []
@@ -1584,6 +1785,7 @@ def test_task_monitor_store_reuses_task_connection(
         for message_id in (1778089999999999912, 1778089999999999913):
             store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, message_id)
             assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_id
+        assert connections == []
         cached_names = set(owner._queue_cache)
         for index in range(3):
             name = f"T{1778089999999999920 + index}.outbox"
@@ -1614,11 +1816,10 @@ def test_task_monitor_store_reuses_task_connection(
         assert queue.read_one() == "still task-owned"
 
     def exercise_worker() -> None:
-        owner = task._worker_local_monitor_clone()
-        try:
+        close_errors: list[str] = []
+        with task._worker_local_maintenance_scope(close_errors) as owner:
             exercise(owner)
-        finally:
-            assert owner._close_worker_local_resources() == ()
+        assert close_errors == []
 
     try:
         if worker_local:
@@ -1645,16 +1846,15 @@ def test_task_monitor_worker_releases_thread_core_without_recycling_owner(
         owner_core.list_queues()
 
     def exercise_worker() -> weakref.ReferenceType[BrokerConnection]:
-        worker = task._worker_local_monitor_clone()
-        try:
+        close_errors: list[str] = []
+        with task._worker_local_maintenance_scope(close_errors) as worker:
             queue = worker._get_connected_queue()
             with queue.get_connection() as core:
                 assert core is not owner_core
                 core.list_queues()
                 reference = weakref.ref(core)
-            return reference
-        finally:
-            assert worker._close_worker_local_resources() == ()
+        assert close_errors == []
+        return reference
 
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -3007,6 +3207,7 @@ def test_task_monitor_recovers_orphan_raw_task_log_rows_after_bad_raw_mark(
     assert recovery.families_checked == 1
     assert recovery.empty_probes == 0
     assert recovery.errors == ()
+    store = task_monitor_mod.open_monitor_store(task._monitor_context())
     assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
     recovered_record = store.get_task(tid)
     assert recovered_record is not None
@@ -3085,6 +3286,7 @@ def test_task_monitor_marks_orphan_recovery_checked_when_raw_rows_absent(
     assert recovery.errors == ()
     assert second_recovery.families_checked == 0
     assert second_recovery.empty_probes == 0
+    store = task_monitor_mod.open_monitor_store(task._monitor_context())
     assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
     record = store.get_task(tid)
     assert record is not None
@@ -3163,6 +3365,7 @@ def test_task_monitor_orphan_recovery_leaves_failed_probe_retryable(
     assert recovery.families_checked == 0
     assert recovery.empty_probes == 0
     assert recovery.errors == (f"{tid}: probe failed",)
+    store = task_monitor_mod.open_monitor_store(task._monitor_context())
     assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == (tid,)
     record = store.get_task(tid)
     assert record is not None
@@ -3241,6 +3444,7 @@ def test_task_monitor_orphan_recovery_reports_bounded_waypoint(
     assert third.empty_probes == 0
     assert third_progress.waypoint_reached is False
     assert third_progress.base_reached is True
+    store = task_monitor_mod.open_monitor_store(task._monitor_context())
     assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
 
 

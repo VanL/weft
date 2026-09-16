@@ -27,7 +27,7 @@ import time
 import weakref
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -971,33 +971,63 @@ class TaskMonitor(ServiceTask):
         worker._endpoint_registration_message_id = None
         worker._streaming_session_info = None
         worker._streaming_session_message_id = None
-        owner_sink = self._external_task_log_sink
-        worker._external_task_log_sink = (
-            ExternalTaskLogSink(
-                path=owner_sink.path,
-                mode=worker._monitor_config.task_log_external_mode,
-                monitor_tid=worker.tid,
-            )
-            if owner_sink is not None
-            else None
-        )
-        worker._external_task_log_status = replace(
-            self._external_task_log_status,
-            last_emitted=0,
-            last_blocked_deletions=0,
-            total_emitted=0,
-            total_blocked_deletions=0,
-        )
-        worker._external_task_log_worker_latest_status = (
-            worker._external_task_log_status
-        )
+        worker._external_task_log_sink = None
         worker._worker_lane_snapshot_only = True
         worker._finalizer = weakref.finalize(
             worker,
             cast(Any, _noop_worker_finalizer),
             weakref.ref(cast(BaseWatcher, worker)),
         )
+        owner_sink = self._external_task_log_sink
+        try:
+            worker._external_task_log_sink = (
+                ExternalTaskLogSink(
+                    path=owner_sink.path,
+                    mode=worker._monitor_config.task_log_external_mode,
+                    monitor_tid=worker.tid,
+                )
+                if owner_sink is not None
+                else None
+            )
+            worker._external_task_log_status = replace(
+                self._external_task_log_status,
+                last_emitted=0,
+                last_blocked_deletions=0,
+                total_emitted=0,
+                total_blocked_deletions=0,
+            )
+            worker._external_task_log_worker_latest_status = (
+                worker._external_task_log_status
+            )
+        except BaseException as exc:
+            try:
+                worker._close_worker_local_resources()
+            except BaseException as cleanup_exc:  # noqa: BLE001 - cleanup boundary
+                exc.add_note(
+                    f"TaskMonitor worker snapshot cleanup also failed: {cleanup_exc!r}"
+                )
+            raise
         return worker
+
+    @contextmanager
+    def _worker_local_maintenance_scope(
+        self,
+        close_errors: list[str],
+    ) -> Iterator[TaskMonitor]:
+        """Create one worker clone/session and close it before publication.
+
+        Both durable-effects lanes use this complete ownership boundary; neither
+        borrows the reactor's session.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
+        """
+
+        worker = self._worker_local_monitor_clone()
+        try:
+            worker._broker_session = worker._monitor_context().session()
+            yield worker
+        finally:
+            close_errors.extend(worker._close_worker_local_resources())
 
     def _close_worker_local_resources(self) -> tuple[str, ...]:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-024] exception
         """Close every worker-owned live resource and return ordered errors.
@@ -1011,32 +1041,50 @@ class TaskMonitor(ServiceTask):
         """
 
         errors: list[str] = []
+        fatal_failure: BaseException | None = None
+
+        def close_resource(label: str, operation: Callable[[], None]) -> None:
+            nonlocal fatal_failure
+            try:
+                operation()
+            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
+                errors.append(f"{label}: {exc}")
+            except BaseException as exc:  # noqa: BLE001 - cleanup boundary
+                if fatal_failure is None:
+                    fatal_failure = exc
+                else:
+                    fatal_failure.add_note(
+                        f"Additional worker cleanup BaseException in {label}: {exc!r}"
+                    )
+
         store = self._monitor_store
         self._monitor_store = None
         if store is not None:
-            try:
-                store.close()
-            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
-                errors.append(f"monitor_store: {exc}")
+            close_resource("monitor_store", store.close)
 
         sink = self._external_task_log_sink
         self._external_task_log_sink = None
         if sink is not None:
-            try:
-                sink.close()
-            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
-                errors.append(f"external_task_log_sink: {exc}")
+            close_resource("external_task_log_sink", sink.close)
 
         queues: list[Any] = []
         queue_obj = self._queue_obj
         object.__setattr__(self, "_queue_obj", None)
         if queue_obj is not None:
             queues.append(queue_obj)
+        ctrl_out_queue_obj = self._ctrl_out_queue_obj
+        object.__setattr__(self, "_ctrl_out_queue_obj", None)
+        if ctrl_out_queue_obj is not None:
+            queues.append(ctrl_out_queue_obj)
         queues.extend(self._queue_cache.values())
         self._queue_cache = {}
         for runtime_config in self._queues.values():
             queues.append(runtime_config.queue)
         self._queues = {}
+        queues.extend(self._owned_fixed_queues)
+        self._owned_fixed_queues = []
+        queues.extend(self._owned_dynamic_queues.values())
+        self._owned_dynamic_queues = {}
 
         seen_queue_ids: set[int] = set()
         for queue_obj in queues:
@@ -1044,20 +1092,23 @@ class TaskMonitor(ServiceTask):
             if queue_id in seen_queue_ids:
                 continue
             seen_queue_ids.add(queue_id)
-            # Reactor leases can outlive this thread. Recycle its cached core
-            # before releasing the worker's lease on the shared session.
-            for label, operation in (
-                ("queue_cleanup", queue_obj.cleanup_connections),
-                ("queue", queue_obj.close),
-            ):
-                try:
-                    operation()
-                except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-322] exception
-                    errors.append(f"{label}:{getattr(queue_obj, 'name', '?')}: {exc}")
+            close_resource(
+                f"queue:{getattr(queue_obj, 'name', '?')}",
+                queue_obj.close,
+            )
+
+        session = self._broker_session
+        self._broker_session = None
+        if session is not None:
+            close_resource("broker_session", session.close)
 
         finalizer = getattr(self, "_finalizer", None)
         if finalizer is not None:
             finalizer.detach()
+        if fatal_failure is not None:
+            for error in errors:
+                fatal_failure.add_note(f"Additional worker cleanup failure: {error}")
+            raise fatal_failure
         return tuple(errors)
 
     def _capture_cached_diagnostics(self) -> _TaskMonitorCachedDiagnostics:
@@ -1242,7 +1293,7 @@ class TaskMonitor(ServiceTask):
                     store = open_monitor_store(
                         self._monitor_context(),
                         config=self._weft_config,
-                        queue=self._get_connected_queue(),
+                        session=self._broker_session,
                     )
                 except (OSError, RuntimeError, ValueError) as exc:
                     self._monitor_store = None
@@ -2376,7 +2427,7 @@ class TaskMonitor(ServiceTask):
             store = open_monitor_store(
                 self._monitor_context(),
                 config=self._weft_config,
-                queue=self._get_connected_queue(),
+                session=self._broker_session,
             )
             store.ensure_schema()
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
@@ -3706,31 +3757,49 @@ class TaskMonitor(ServiceTask):
         Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
         """
 
-        worker = self._worker_local_monitor_clone()
-        initial_external_status = worker._external_task_log_status
+        close_error_list: list[str] = []
         try:
-            try:
-                worker_result = worker._run_terminal_control_cleanup_worker_local(work)
-            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-325] exception
-                worker_result = _TaskControlCleanupWorkerResult(
-                    work=work,
-                    cleanup=_TaskControlCleanupResult(
-                        pending=True,
-                        errors=(str(exc),),
-                    ),
-                    monitor_status=MonitorStoreStatus(
-                        available=False,
-                        error=str(exc),
-                    ),
+            with self._worker_local_maintenance_scope(
+                close_error_list,
+            ) as scoped_worker:
+                initial_external_status = scoped_worker._external_task_log_status
+                try:
+                    worker_result = (
+                        scoped_worker._run_terminal_control_cleanup_worker_local(work)
+                    )
+                except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-325] exception
+                    worker_result = _TaskControlCleanupWorkerResult(
+                        work=work,
+                        cleanup=_TaskControlCleanupResult(
+                            pending=True,
+                            errors=(str(exc),),
+                        ),
+                        monitor_status=MonitorStoreStatus(
+                            available=False,
+                            error=str(exc),
+                        ),
+                    )
+                external_status = (
+                    scoped_worker._external_task_log_status
+                    if scoped_worker._external_task_log_status
+                    != initial_external_status
+                    else None
                 )
-            external_status = (
-                worker._external_task_log_status
-                if worker._external_task_log_status != initial_external_status
-                else None
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-325] exception
+            worker_result = _TaskControlCleanupWorkerResult(
+                work=work,
+                cleanup=_TaskControlCleanupResult(
+                    pending=True,
+                    errors=(str(exc),),
+                ),
+                monitor_status=MonitorStoreStatus(
+                    available=False,
+                    error=str(exc),
+                ),
             )
-        finally:
-            close_errors = worker._close_worker_local_resources()
+            external_status = None
 
+        close_errors = tuple(close_error_list)
         cleanup = worker_result.cleanup
         if close_errors:
             cleanup = replace(
@@ -3765,7 +3834,7 @@ class TaskMonitor(ServiceTask):
             store = open_monitor_store(
                 self._monitor_context(),
                 config=self._weft_config,
-                queue=self._get_connected_queue(),
+                session=self._broker_session,
             )
             self._monitor_store = store
             store.ensure_schema()
@@ -5030,21 +5099,30 @@ class TaskMonitor(ServiceTask):
         Spec: docs/specifications/07-System_Invariants.md [IMPL.11]
         """
 
-        worker = self._worker_local_monitor_clone()
+        close_error_list: list[str] = []
         try:
-            try:
-                result, runtime_cleanup_ready = worker._run_builtin_cycle_worker_local(
-                    work
-                )
-            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-326] exception
-                result = TaskMonitorProcessorResult(
-                    success=False,
-                    errors=(str(exc),),
-                )
-                runtime_cleanup_ready = False
-            diagnostics = worker._capture_cached_diagnostics()
-        finally:
-            close_errors = worker._close_worker_local_resources()
+            with self._worker_local_maintenance_scope(
+                close_error_list,
+            ) as scoped_worker:
+                try:
+                    result, runtime_cleanup_ready = (
+                        scoped_worker._run_builtin_cycle_worker_local(work)
+                    )
+                except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-326] exception
+                    result = TaskMonitorProcessorResult(
+                        success=False,
+                        errors=(str(exc),),
+                    )
+                    runtime_cleanup_ready = False
+                diagnostics = scoped_worker._capture_cached_diagnostics()
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-326] exception
+            result = TaskMonitorProcessorResult(
+                success=False,
+                errors=(str(exc),),
+            )
+            runtime_cleanup_ready = False
+            diagnostics = self._capture_cached_diagnostics()
+        close_errors = tuple(close_error_list)
         if close_errors:
             result = replace(
                 result,

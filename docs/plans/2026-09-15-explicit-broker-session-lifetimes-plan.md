@@ -810,12 +810,15 @@ had been implemented.
 
 ## Implementation Checkpoint
 
-Slices 1-2 are implemented in the working tree. The dependency floors, public
+Slices 1-3 are implemented. The dependency floors, public
 context session factory, fixed watcher/task inventory ownership, task drive
 scope, constructor unwind, harness driver ownership, and minimum Monitor clone
-compatibility are present. Slices 3-5 have not started. Their proposed spec
-deltas remain unpromoted pending the mandatory slice-2 gate and user
-confirmation.
+compatibility are present. The user confirmed all remaining slices after the
+slice-2 gate. Slice 3 adds one automatic worker-local session scope for both
+Monitor maintenance lanes; MonitorStore borrows the owner session through a
+session-minted persistent sidecar anchor; queue, sink, store, and session close
+failures remain typed before result publication. The [IMPL.11] and [SB-0.4a]
+spec deltas are promoted. Slices 4-5 remain.
 
 The slice-2 gate passed after independent review remediation. SQLite evidence:
 656 passed and 4 skipped across the core, Liveness, Monitor, ownership, and
@@ -823,8 +826,19 @@ harness matrix. PostgreSQL evidence: 618 passed across the same shared matrix.
 The focused ownership matrix passed 25 tests on each backend. Ruff check,
 Ruff format check, full configured mypy, git diff check, and six plan/spec
 hygiene tests pass. The final independent re-review reported no findings and
-PASS. Per the gate, implementation stops here until the user confirms the
-remaining Monitor, command/observer, and Django scope.
+PASS. The user then confirmed the remaining Monitor, command/observer, and
+Django scope.
+
+Slice-3 SQLite evidence: 316 tests completed across MonitorStore and
+TaskMonitor, with two PostgreSQL-only cases skipped. PostgreSQL evidence: 315
+passed and one SQLite-only case skipped. The close-failure matrix covers store,
+sink, queue, and session failures on both maintenance lanes. The PostgreSQL
+physical-connect probe verifies repeated sidecar operations do not create new
+connections after each owner path is warmed. Full configured mypy, repository
+Ruff check/format, six plan/spec hygiene tests, and git diff check pass.
+Independent review findings on owner-identity validation, clone acquisition
+unwind, and BaseException-safe cleanup were remediated with firing tests. The
+final slice-3 re-review returned PASS with no remaining findings.
 
 ## Deviation Log
 

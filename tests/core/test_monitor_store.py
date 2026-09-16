@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 
+from simplebroker import Config
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
@@ -496,6 +497,76 @@ def test_store_sidecar_session_rolls_back_on_exception(
         )
         store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, 1778089999999999913)
         assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == 1778089999999999913
+
+
+def test_monitor_store_borrows_session_without_closing_owner(tmp_path: Path) -> None:
+    """Task-owned stores reuse but never close their owner's session [SB-0.4a]."""
+
+    ctx = _context(tmp_path)
+    with ctx.session() as owner:
+        store = open_monitor_store(ctx, session=owner)
+        store.ensure_schema()
+        store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, 1778089999999999914)
+        store.close()
+
+        queue = owner.queue("monitor.store.owner-still-live")
+        queue.write("still owned")
+        assert queue.read_one() == "still owned"
+
+
+def test_monitor_store_rejects_ambiguous_borrowed_owner(tmp_path: Path) -> None:
+    """A store cannot borrow two independently managed lifetime owners."""
+
+    ctx = _context(tmp_path)
+    with ctx.session() as session:
+        queue = session.queue(WEFT_GLOBAL_LOG_QUEUE)
+        with pytest.raises(ValueError, match="either session or queue"):
+            open_monitor_store(ctx, session=session, queue=queue)
+
+
+@pytest.mark.parametrize("mismatch", ["target", "options", "config"])
+def test_monitor_store_rejects_session_from_another_context(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    """Borrowed sessions must have the store context's exact broker identity."""
+
+    ctx = _context(tmp_path)
+    if mismatch == "target":
+        other_ctx = replace(
+            ctx,
+            broker_target=replace(
+                ctx.broker_target,
+                target=f"{ctx.broker_target.target}-other",
+            ),
+        )
+    elif mismatch == "options":
+        other_ctx = replace(
+            ctx,
+            broker_target=replace(
+                ctx.broker_target,
+                backend_options={
+                    **ctx.broker_target.backend_options,
+                    "monitor_store_mismatch": True,
+                },
+            ),
+        )
+    else:
+        config_values = dict(ctx.broker_config)
+        config_values["BUSY_TIMEOUT"] = int(config_values["BUSY_TIMEOUT"]) + 1
+        other_ctx = replace(
+            ctx,
+            broker_config=Config(
+                config_values,
+                prefix=ctx.broker_config.prefix,
+            ),
+        )
+
+    with (
+        ctx.session() as session,
+        pytest.raises(ValueError, match="does not match"),
+    ):
+        open_monitor_store(other_ctx, session=session)
 
 
 def test_monitor_store_get_task_signals_completely_uninitialized_catalog(

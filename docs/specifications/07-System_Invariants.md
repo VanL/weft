@@ -771,7 +771,12 @@ the sole exact-delete executor for TID mappings),
 - **IMPL.11**: TaskMonitor maintenance workers close every worker-owned queue,
   Monitor store, TaskSpec/config snapshot, and external-sink facade in
   `finally` and never share watcher, lifecycle, queue, store, sink counters,
-  or mutable task state with the reactor. Same-path sink facades lease one
+  broker session, or mutable task state with the reactor. Both maintenance
+  entry points use one automatic worker-local `BrokerSession` scope. The
+  worker store borrows that session, and typed result publication occurs only
+  after local queue, sink, store, and session cleanup. A worker clone replaces
+  the reactor's ownership/session fields with its own values. Same-path sink
+  facades lease one
   process-local writer/rotation owner so only one live rotating handler exists
   per resolved path. Built-in and runtime-cleanup results return frozen typed
   diagnostics only after worker resources close; close failures produce
@@ -793,6 +798,8 @@ the sole exact-delete executor for TID mappings),
   close-order, deferred-status merge, and live-control tests in
   `tests/tasks/test_task_monitor.py`, `tests/core/test_monitor_external_log.py`,
   and `tests/core/test_monitor_store.py` fire this invariant.
+
+  Implementation plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
 Monitor scheduling implementation notes: `TaskMonitor._run_monitor_store_cycle`
 owns collation-family retirement independently of ingestion catchup, using
