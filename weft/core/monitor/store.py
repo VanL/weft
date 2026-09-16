@@ -2375,8 +2375,7 @@ def _session_matches_context(session: BrokerSession, context: WeftContext) -> bo
         session.backend_name == context_target.backend_name
         and session_target_value == context_target.target
         and dict(session_options) == dict(context_target.backend_options)
-        and session.config.prefix == context.broker_config.prefix
-        and dict(session.config) == dict(context.broker_config)
+        and session.config is context.broker_config
     )
 
 

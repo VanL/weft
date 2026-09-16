@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 
-from simplebroker import Config
+from simplebroker import Config, ConfigField
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
@@ -561,6 +561,42 @@ def test_monitor_store_rejects_session_from_another_context(
                 prefix=ctx.broker_config.prefix,
             ),
         )
+
+    with (
+        ctx.session() as session,
+        pytest.raises(ValueError, match="does not match"),
+    ):
+        open_monitor_store(other_ctx, session=session)
+
+
+def test_monitor_store_rejects_value_equal_but_distinct_config_identity(
+    tmp_path: Path,
+) -> None:
+    """Value equality does not establish SimpleBroker process-session identity."""
+
+    ctx = _context(tmp_path)
+    defaults = dict(ctx.broker_config._defaults)
+    busy_timeout = defaults["BUSY_TIMEOUT"]
+    defaults["BUSY_TIMEOUT"] = ConfigField(
+        default=busy_timeout.default,
+        description=busy_timeout.description,
+        validator=busy_timeout.validator,
+        sensitive=busy_timeout.sensitive,
+    )
+    other_ctx = replace(
+        ctx,
+        broker_config=Config(
+            dict(ctx.broker_config),
+            prefix=ctx.broker_config.prefix,
+            defaults=defaults,
+        ),
+    )
+    assert dict(other_ctx.broker_config) == dict(ctx.broker_config)
+    assert other_ctx.broker_config._defaults == ctx.broker_config._defaults
+    assert (
+        other_ctx.broker_config._defaults["BUSY_TIMEOUT"]
+        is not ctx.broker_config._defaults["BUSY_TIMEOUT"]
+    )
 
     with (
         ctx.session() as session,

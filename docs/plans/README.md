@@ -23,7 +23,7 @@ There are currently 218 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-09-15-explicit-broker-session-lifetimes-plan.md`](./2026-09-15-explicit-broker-session-lifetimes-plan.md) | Explicit Broker Session Lifetimes | `draft` | none |
+| [`2026-09-15-explicit-broker-session-lifetimes-plan.md`](./2026-09-15-explicit-broker-session-lifetimes-plan.md) | Explicit Broker Session Lifetimes | `completed` | none |
 | [`2026-09-14-bounded-registry-connection-reuse-plan.md`](./2026-09-14-bounded-registry-connection-reuse-plan.md) | Bounded Registry Connection Reuse | `draft` | none |
 | [`2026-09-14-xdist-title-contention-plan.md`](./2026-09-14-xdist-title-contention-plan.md) | Xdist Title Contention Investigation | `draft` | none |
 | [`2026-09-14-django-core-context-resolution-plan.md`](./2026-09-14-django-core-context-resolution-plan.md) | Django Context Resolution Owned by Weft | `completed` | none |

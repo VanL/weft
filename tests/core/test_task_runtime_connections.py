@@ -10,6 +10,7 @@ import time
 import weakref
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -284,6 +285,37 @@ def test_consumer_drive_scope_preserves_session_exit_failure_priority(
         assert exc_info.value is close_failure
     assert len(failed_driver_sessions) == 1
     original_close(failed_driver_sessions[0])
+
+
+def test_consumer_drive_scope_finalizes_when_driver_session_entry_fails(
+    counted_connections: tuple[WeftContext, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Driver-session acquisition failure still owns canonical finalization."""
+
+    ctx, _connections = counted_connections
+    task = Consumer(
+        ctx.broker_target,
+        _taskspec(str(time.time_ns()), ctx.root),
+        config=ctx.config,
+    )
+
+    @contextmanager
+    def fail_session(_context: WeftContext) -> Iterator[BrokerSession]:
+        raise RuntimeError("injected driver session entry failure")
+        yield  # pragma: no cover - contextmanager shape
+
+    monkeypatch.setattr(WeftContext, "session", fail_session)
+
+    with (
+        pytest.raises(RuntimeError, match="driver session entry failure"),
+        task.drive_scope(),
+    ):
+        raise AssertionError("unreachable")
+
+    assert task._task_lifecycle.value == "closed"
+    assert task._cleanup_errors == ()
+    assert task._broker_session is None
 
 
 def test_foreign_stop_with_same_key_operation_records_refused_inventory_close(

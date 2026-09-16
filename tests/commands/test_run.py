@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import prompt_toolkit
@@ -2827,6 +2828,11 @@ def test_reconcile_submitted_spawn_can_wait_past_reserved_claim(
     monkeypatch.setattr(spawn_submission_cmd, "QueueChangeMonitor", _fake_monitor)
     monkeypatch.setattr(
         spawn_submission_cmd,
+        "time",
+        SimpleNamespace(monotonic=lambda: 0.0),
+    )
+    monkeypatch.setattr(
+        spawn_submission_cmd,
         "_reconcile_submitted_spawn_once",
         lambda *_args, **_kwargs: next(results),
     )
@@ -2913,6 +2919,11 @@ def test_reconcile_submitted_spawn_uses_queue_monitor(
     monkeypatch.setattr(spawn_submission_cmd, "QueueChangeMonitor", _fake_monitor)
     monkeypatch.setattr(
         spawn_submission_cmd,
+        "time",
+        SimpleNamespace(monotonic=lambda: 0.0),
+    )
+    monkeypatch.setattr(
+        spawn_submission_cmd,
         "_reconcile_submitted_spawn_once",
         lambda *_args, **_kwargs: next(results),
     )
@@ -2995,6 +3006,11 @@ def test_reconcile_submitted_spawn_rebuilds_monitor_when_reserved_queues_change(
         return monitor
 
     monkeypatch.setattr(spawn_submission_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "time",
+        SimpleNamespace(monotonic=lambda: 0.0),
+    )
     monkeypatch.setattr(
         spawn_submission_cmd,
         "_reconcile_submitted_spawn_once",

@@ -28,6 +28,8 @@ See also:
   [`docs/plans/2026-09-14-simplebroker-8-2-configuration-plan.md`](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md)
 - SimpleBroker 8.0 upgrade plan:
   [`docs/plans/2026-08-28-simplebroker-8-upgrade-plan.md`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
+- explicit broker session lifetime plan:
+  [`docs/plans/2026-09-15-explicit-broker-session-lifetimes-plan.md`](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 - cleanup policy convergence plan:
   [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
 - monitor policy progress contract plan:
@@ -190,6 +192,15 @@ coverage also lives in `test_spawn_observation_connections.py`,
 under `tests/commands/`.
 
 Current behavior:
+
+_Implementation mapping_: shared task inventory and driver ownership live in
+`weft/core/tasks/base.py` and `weft/core/tasks/multiqueue_watcher.py`; Monitor
+worker/store ownership lives in `weft/core/monitor/task_monitor.py` and
+`weft/core/monitor/store.py`; bounded command observers live in the command
+modules listed above.
+Standalone fallback scopes are owned by `weft/core/control_probe.py`,
+`manager_runtime.py`, `pruning/apply.py`, `queue_window.py`, and
+`spawn_requests.py`.
 
 - Tasks use persistent SimpleBroker `BrokerSession` ownership by default.
   Shared task infrastructure owns fixed queue leases and the executing thread's

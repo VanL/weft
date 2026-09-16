@@ -770,18 +770,30 @@ def test_load_taskspec_payload_closes_log_queue() -> None:
     queue = FakeQueue()
 
     class FakeContext:
+        def __init__(self) -> None:
+            self.session_exited = False
+
+        @contextmanager
+        def session(self) -> Iterator[None]:
+            try:
+                yield
+            finally:
+                self.session_exited = True
+
         def queue(self, name: str, *, persistent: bool = False) -> FakeQueue:
             assert name == WEFT_GLOBAL_LOG_QUEUE
             assert persistent is True
             return queue
 
+    context = FakeContext()
     taskspec = _load_taskspec_payload(
-        cast(WeftContext, FakeContext()), tid
+        cast(WeftContext, context), tid
     )  # Queue-lifetime double.
 
     assert taskspec is not None
     assert taskspec["tid"] == tid
     assert queue.closed is True
+    assert context.session_exited is True
 
 
 def test_cmd_result_reports_failed_task_without_outbox(tmp_path: Path) -> None:

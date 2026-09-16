@@ -60,6 +60,11 @@ entered and exited by the executing thread. `WeftContext` and `WeftClient` do
 not cache a live session. Existing `queue()` and `broker()` ownership and
 defaults are unchanged.
 
+_Implementation mapping_: `weft/context.py::WeftContext.session` owns the
+factory. Exact target/config behavior is covered by
+`tests/context/test_context.py`; real-backend task/session cleanup is covered by
+`tests/core/test_task_runtime_connections.py`.
+
 Related plan: [SimpleBroker configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
 Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
@@ -170,6 +175,15 @@ New/refined exact contracts:
   `send_input(text)`, `close_input()`, `stop() -> TaskControlResult`,
   `wait(timeout=None) -> RunExecutionResult`, and idempotent `close()`. Close
   releases owned resources but does not cancel the task.
+
+_Implementation mapping_: `weft/commands/_resources.py` owns stream cleanup
+exception priority; `weft/commands/_result_wait.py`, `_spawn_submission.py`,
+`events.py`, `queue.py`, `result.py`, `system.py`, and `tasks.py` own the
+bounded and generator observation scopes; `weft/commands/run.py::_LiveRunSession`
+owns input and child-stream closure. Cross-thread Django adaptation is mapped
+under [DJ-12.1] and [DJ-12.2]. Firing cleanup coverage lives in
+`tests/commands/test_resource_cleanup.py`, `test_queue.py`, `test_status.py`,
+and `integrations/weft_django/tests/test_weft_django.py`.
 - `QueueMoveResult(source: str, destination: str,
   entries: tuple[QueueEntry, ...], moved_count: int)`; entries are the exact
   ordered moved set.

@@ -732,6 +732,117 @@ def test_task_monitor_worker_close_attempts_all_resources_before_base_exception(
         task.stop()
 
 
+def test_task_monitor_reactor_sink_close_failure_is_recorded_by_finalizer(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reactor-owned sink cleanup failure is not reported as clean closure."""
+
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "reactor-close.jsonl"),
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999416"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    sink = task._external_task_log_sink
+    assert sink is not None
+    original_close = sink.close
+    inherited_cleanup: list[TaskMonitor] = []
+    original_inherited_cleanup = service_task_mod.ServiceTask._cleanup_task_resources
+
+    def fail_close(_sink: Any) -> None:
+        raise RuntimeError("reactor sink close boom")
+
+    def record_inherited_cleanup(task: TaskMonitor, deadline: float) -> None:
+        inherited_cleanup.append(task)
+        original_inherited_cleanup(task, deadline)
+
+    monkeypatch.setattr(
+        service_task_mod.ServiceTask,
+        "_cleanup_task_resources",
+        record_inherited_cleanup,
+    )
+    monkeypatch.setattr(task_monitor_mod.ExternalTaskLogSink, "close", fail_close)
+    task.stop()
+
+    assert task._task_lifecycle.value == "closed"
+    assert len(task._cleanup_errors) == 1
+    assert "reactor sink close boom" in str(task._cleanup_errors[0])
+    assert task._broker_session is None
+    assert task._external_task_log_sink is None
+    assert inherited_cleanup == [task]
+    original_close()
+
+
+def test_task_monitor_registers_sink_before_fatal_validation_failure(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Partial initialization can close a sink acquired before validation."""
+
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "fatal-validate.jsonl"),
+        }
+    )
+    validated: list[task_monitor_mod.ExternalTaskLogSink] = []
+    closed: list[task_monitor_mod.ExternalTaskLogSink] = []
+    inherited_abort_calls: list[TaskMonitor] = []
+    original_close = task_monitor_mod.ExternalTaskLogSink.close
+    original_inherited_abort = (
+        service_task_mod.ServiceTask._abort_partial_initialization
+    )
+
+    def fail_validation(sink: task_monitor_mod.ExternalTaskLogSink) -> None:
+        validated.append(sink)
+        raise KeyboardInterrupt("fatal sink validation")
+
+    def record_close(sink: task_monitor_mod.ExternalTaskLogSink) -> None:
+        closed.append(sink)
+        original_close(sink)
+
+    def record_inherited_abort(task: TaskMonitor) -> None:
+        inherited_abort_calls.append(task)
+        original_inherited_abort(task)
+
+    monkeypatch.setattr(
+        task_monitor_mod.ExternalTaskLogSink,
+        "validate",
+        fail_validation,
+    )
+    monkeypatch.setattr(task_monitor_mod.ExternalTaskLogSink, "close", record_close)
+    monkeypatch.setattr(
+        service_task_mod.ServiceTask,
+        "_abort_partial_initialization",
+        record_inherited_abort,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="fatal sink validation"):
+        TaskMonitor(
+            db_path,
+            make_task_monitor_taskspec("1778089999999999417"),
+            observer=lambda _queue, _message, _timestamp: None,
+            config=config,
+        )
+
+    assert len(validated) == 1
+    assert closed == validated
+    assert len(inherited_abort_calls) == 1
+
+
 @pytest.mark.parametrize("worker_kind", ["builtin", "runtime"])
 def test_task_monitor_worker_clone_failure_returns_typed_failure(
     broker_env: BrokerEnv,

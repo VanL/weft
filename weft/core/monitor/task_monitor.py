@@ -215,6 +215,25 @@ logger = logging.getLogger(__name__)
 TaskMonitorCallback = Callable[[str, str, int], None]
 
 
+def _run_cleanup_steps(
+    steps: Sequence[tuple[str, Callable[[], None]]],
+) -> None:
+    """Attempt ordered cleanup steps and retain the first exact failure."""
+
+    failures: list[tuple[str, BaseException]] = []
+    for label, operation in steps:
+        try:
+            operation()
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-374] exception
+            failures.append((label, exc))
+    if not failures:
+        return
+    _, primary = failures[0]
+    for label, secondary in failures[1:]:
+        primary.add_note(f"Additional cleanup failure in {label}: {secondary!r}")
+    raise primary
+
+
 def _noop_worker_finalizer(_wref: weakref.ReferenceType[BaseWatcher]) -> None:
     """Provide worker snapshots an identity-disjoint, broker-free finalizer."""
 
@@ -769,25 +788,32 @@ class TaskMonitor(ServiceTask):
         Spec: docs/specifications/07-System_Invariants.md [IMPL.10], [IMPL.11]
         """
 
-        self._close_external_task_log_sink()
-        super()._cleanup_task_resources(deadline)
+        inherited_cleanup = super()._cleanup_task_resources
+        _run_cleanup_steps(
+            (
+                ("external_task_log_sink", self._close_external_task_log_sink),
+                ("inherited_task_resources", lambda: inherited_cleanup(deadline)),
+            )
+        )
 
     def _abort_partial_initialization(self) -> None:
         """Release a sink acquired by post-super Monitor initialization."""
 
-        self._close_external_task_log_sink()
-        super()._abort_partial_initialization()
+        _run_cleanup_steps(
+            (
+                ("external_task_log_sink", self._close_external_task_log_sink),
+                ("inherited_task_resources", super()._abort_partial_initialization),
+            )
+        )
 
     def _close_external_task_log_sink(self) -> None:
         """Close the external task-log sink owned by the reactor instance."""
 
         sink = self._external_task_log_sink
+        self._external_task_log_sink = None
         if sink is None:
             return
-        try:
-            sink.close()
-        except (OSError, RuntimeError, ValueError):  # pragma: no cover - defensive
-            logger.debug("Failed to close external task-log sink", exc_info=True)
+        sink.close()
 
     def _worker_local_monitor_clone(self) -> TaskMonitor:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-024] exception
         """Return a worker-local monitor copy for durable cleanup effects.
@@ -2003,8 +2029,8 @@ class TaskMonitor(ServiceTask):
             mode=self._monitor_config.task_log_external_mode,
             monitor_tid=self.tid,
         )
-        sink.validate()
         self._external_task_log_sink = sink
+        sink.validate()
         if self._refresh_external_task_log_status():
             self._register_tid_mapping()
         if self._external_task_log_status.healthy is False:

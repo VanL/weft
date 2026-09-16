@@ -1260,14 +1260,22 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._drive_scope_active = True
 
         try:
-            with self._task_context().session():
-                try:
-                    yield
-                finally:
-                    self._finalize_task_once(
-                        time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS,
-                        exiting_drive_scope=True,
-                    )
+            try:
+                with self._task_context().session():
+                    try:
+                        yield
+                    finally:
+                        self._finalize_task_once(
+                            time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS,
+                            exiting_drive_scope=True,
+                        )
+            finally:
+                # Session construction/entry can fail before the inner cleanup
+                # boundary. The finalizer is idempotent after a normal exit.
+                self._finalize_task_once(
+                    time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS,
+                    exiting_drive_scope=True,
+                )
         finally:
             with self._task_lifecycle_lock:
                 self._drive_scope_active = False

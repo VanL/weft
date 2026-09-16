@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Added
+
+- `WeftContext.session()` exposes a SimpleBroker `BrokerSession` bound to the
+  context's resolved target and immutable configuration for explicit embedding
+  lifetimes. Session work and cleanup stay on the calling thread; the context
+  and client do not cache a live session.
+
+### Changed
+
+- Weft now requires SimpleBroker 8.3.0 or newer and `simplebroker-pg` 4.3.0 or
+  newer when PostgreSQL support is installed.
+- All task families use shared persistent session ownership for their fixed
+  queue inventory and executing-thread lifetime. Manual task drivers can use
+  `BaseTask.drive_scope()` around the complete drive lifetime; normal run paths
+  enter that scope automatically. TaskMonitor's two maintenance lanes each own
+  an independent worker-local session while their stores borrow that owner.
+
+### Fixed
+
+- Long-lived command, Manager, result, status, queue-watch, and realtime
+  observers now reuse one persistent connection scope while keeping every
+  transaction bounded. Partial setup and generator-close failures unwind in
+  owner order and remain observable.
+- Django ASGI SSE and Channels streams create, advance, and close each blocking
+  broker iterator on one per-stream worker. Disconnect no longer closes a
+  generator concurrently or waits past its deadline for a blocked advance;
+  retained cleanup reports failures after the worker unwinds. WSGI preserves
+  direct request-thread iteration and closure.
+
 ## [0.9.100] - 2026-09-14
 
 ### Added

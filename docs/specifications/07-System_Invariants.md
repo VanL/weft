@@ -1169,6 +1169,8 @@ doc:
 
 ## Related Plans
 
+- [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
+
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)

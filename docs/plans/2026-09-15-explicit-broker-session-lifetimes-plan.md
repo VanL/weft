@@ -1,6 +1,6 @@
 # Explicit Broker Session Lifetimes
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.2.1], [CC-2.3]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.1], [SB-0.4], [SB-0.4a]; docs/specifications/07-System_Invariants.md [IMPL.8], [IMPL.9], [IMPL.10], [IMPL.11], [QUEUE.8]; docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-2]; docs/specifications/13C-Using_Weft_With_Django.md [DJ-12.1], [DJ-12.2]
 Superseded by: none
 
@@ -810,7 +810,7 @@ had been implemented.
 
 ## Implementation Checkpoint
 
-Slices 1-4 are implemented. The dependency floors, public
+Slices 1-5 are implemented. The dependency floors, public
 context session factory, fixed watcher/task inventory ownership, task drive
 scope, constructor unwind, harness driver ownership, and minimum Monitor clone
 compatibility are present. The user confirmed all remaining slices after the
@@ -822,7 +822,9 @@ spec deltas are promoted. Slice 4 adds command-owned session scopes to bounded
 and streaming command paths, bounded standalone core-helper fallbacks, and
 owner-thread Django ASGI/Channels iterator bridges while retaining direct
 handler-thread WSGI iteration. The [PY-2], [DJ-12.1], and [DJ-12.2] spec deltas
-are promoted. Slice 5 remains.
+are promoted. Slice 5 completes the public embedding guidance, source-spec
+implementation mappings and backlinks, durable cleanup lessons, changelog,
+full backend verification, extension verification, and package-build gates.
 
 The slice-2 gate passed after independent review remediation. SQLite evidence:
 656 passed and 4 skipped across the core, Liveness, Monitor, ownership, and
@@ -857,11 +859,39 @@ Channels cancellation wait, Manager partial-setup leakage, missing public
 boundary tests, and duplicate detached-cleanup diagnostics; final re-review is
 complete and returned PASS with no remaining findings.
 
+Slice-5 full-suite evidence: SQLite passed 5,096 tests with 39 expected skips;
+PostgreSQL passed 5,040 tests with 24 expected skips on the final clean runs.
+The first PostgreSQL run exposed a test-boundary defect in three mocked spawn
+reconciliation tests: their 100 ms behavior deadline included real session and
+queue setup, so full-suite connection pressure could consume the deadline
+before the mocked monitor outcome. The production deadline was not changed.
+Those tests now replace only the command module's monotonic clock with a
+deterministic clock; the focused matrix passes on both backends.
+
+The extension gates passed with 117 Django tests and one expected PG-only skip,
+76 microsandbox tests, 113 Docker tests, and 26 macOS sandbox tests. Repository
+Ruff check and format check, configured mypy over 434 source files, 96 policy
+and spec-hygiene tests, and git diff checks pass. The root package and all four
+subpackages build both source and wheel distributions at their current
+versions. Windows teardown and publication remain CI/release gates and were not
+claimed by this local implementation task.
+
+The final independent review found five lifecycle gaps despite the green broad
+matrix: driver-session entry failure could bypass finalization; reactor sink
+close failure was suppressed; MonitorStore compared less config material than
+the upstream process-session key; a published dynamic queue was registered only
+after fallible displaced-waiter cleanup; and a Monitor sink was assigned only
+after fallible validation. Each finding received a firing regression and an
+ordering or ownership fix. The first remediation review accepted four fixes and
+found that value-equal `ConfigField` declarations still differ in the upstream
+key. MonitorStore now requires the exact context `Config` object, matching every
+in-tree owner path. The final narrow review returned PASS with no findings.
+
 ## Deviation Log
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 | --- | --- | --- | --- | --- |
 
-No implementation deviations are currently recorded for slices 1-2. The
+No implementation deviations are recorded for slices 1-5. The
 foreign-stop matrix wording was corrected during implementation review so an
 active owner scope is never bypassed by a foreign finalizer.

@@ -1358,3 +1358,26 @@ and `tests/system/test_config_transport.py`.
   during finalization. Isolate a run-ID test's module-local OS view instead of
   changing process identity for every dependency. See the
   [connection reuse repair](plans/2026-09-14-bounded-registry-connection-reuse-plan.md).
+
+## 2026-09-16 Resource Lifetimes Need Distinct Owners
+
+- A queue lease, a caller-thread broker cache, and a transaction are three
+  different lifetimes. Closing a persistent queue does not prove the executing
+  thread released its cached core, while holding a session does not justify a
+  transaction across a wait or yield. Put one explicit session at the real
+  operation or driver boundary, keep transactions short, close active
+  iterators before session exit, and verify physical cleanup with a surviving
+  sibling handle on both backends.
+- Session-close refusal is thread-and-broker-key-wide, not handle-local. Its
+  private upstream exception type is not a Weft contract. End all same-key
+  operations on the owner thread before session exit and keep cleanup ordered
+  so queue leases are attempted even if session close later refuses. A task's
+  `CLOSED` state means finalization was attempted; it is not proof that every
+  resource was released when cleanup recorded a failure.
+- Async delivery does not transfer ownership of a synchronous broker iterator.
+  Creation, every `next()`, and final `close()` must stay serialized on one
+  owner thread. A disconnect deadline only bounds the event-loop caller; it
+  does not prove a blocked worker stopped. Retain the cleanup future until it
+  unwinds, and give exactly one boundary responsibility for propagating or
+  logging cleanup failure. See the
+  [explicit broker session lifetime plan](plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).

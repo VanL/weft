@@ -1070,6 +1070,13 @@ Generator exit is lifecycle control: a cleanup failure remains observable to
 the stream owner, while a genuine application or send failure remains primary
 and records secondary cleanup diagnostics.
 
+_Implementation mapping_: request-mode selection lives in
+`integrations/weft_django/weft_django/views.py`; synchronous and asynchronous
+SSE wrappers live in `sse.py`; shared owner-thread iterator serialization lives
+in `realtime.py::AsyncIteratorOwner`; Channels lifetime and detached-cleanup
+diagnostics live in `channels.py::TaskEventsConsumer`. Firing transport coverage
+is in `integrations/weft_django/tests/test_weft_django.py`.
+
 ### Realtime payload contract [DJ-12.3]
 
 SSE and WebSocket should use the same JSON event payload shape:
@@ -1410,6 +1417,8 @@ Once the package is split into a sibling repo:
   provide the required public client API
 
 ## Backlinks
+
+- [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 
 - [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
 

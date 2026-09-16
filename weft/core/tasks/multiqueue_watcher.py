@@ -698,6 +698,9 @@ class MultiQueueWatcher(BaseWatcher):
                 except Exception as exc:
                     raise _TopologyDriveError(exc) from exc
 
+            if request.kind == "add":
+                assert candidate_config is not None
+                self._register_dynamic_queue(candidate_config.queue)
             close_candidates: list[Any] = []
             for waiter in (prior_cached_waiter, displaced_waiter):
                 if (
@@ -708,10 +711,7 @@ class MultiQueueWatcher(BaseWatcher):
                     close_candidates.append(waiter)
             for waiter in close_candidates:
                 self._close_activity_waiter_once(waiter)
-            if request.kind == "add":
-                assert candidate_config is not None
-                self._register_dynamic_queue(candidate_config.queue)
-            else:
+            if request.kind == "remove":
                 self._close_dynamic_queue(prior_mapping[request.queue_name].queue)
         finally:
             if not topology_published:

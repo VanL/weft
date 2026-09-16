@@ -311,7 +311,6 @@ def test_background_add_queue_rebinds_exact_set_on_drive_owner(
     thread_exception_guard: list[threading.ExceptHookArgs],
 ) -> None:
     """A foreign add waits for the drive owner to replace the native waiter."""
-    del thread_exception_guard
     db_path, _make_queue = broker_env
     created: list[tuple[tuple[str, ...], BlockingWaiter, int]] = []
 
@@ -1903,6 +1902,73 @@ def test_fatal_topology_failure_precedes_deferred_sigint_after_cleanup(
     assert candidate_waiter.close_calls == 1
     assert old_waiter.close_threads == [drive.ident]
     assert candidate_waiter.close_threads == [drive.ident]
+
+
+def test_fatal_displaced_waiter_close_retains_published_queue_for_teardown(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+) -> None:
+    """Published queue ownership precedes fallible displaced-waiter cleanup."""
+
+    db_path, _make_queue = broker_env
+    old_waiter = BlockingWaiter()
+    candidate_waiter = FakeWaiter()
+    waiters = iter((old_waiter, candidate_waiter))
+    registration_seen: list[bool] = []
+    closed_queue_names: list[str] = []
+    original_queue_close = Queue.close
+
+    class FatalWaiterClose(BaseException):
+        pass
+
+    fatal = FatalWaiterClose()
+
+    class FatalCloseWatcher(MultiQueueWatcher):
+        def _close_activity_waiter_once(self, waiter: object | None) -> None:
+            if waiter is old_waiter and "fatal-close.added" in self._queues:
+                queue = self._queues["fatal-close.added"].queue
+                registration_seen.append(id(queue) in self._owned_dynamic_queues)
+                raise fatal
+            super()._close_activity_waiter_once(waiter)
+
+    def close_queue(queue: Queue) -> None:
+        closed_queue_names.append(queue.name)
+        original_queue_close(queue)
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
+        lambda _queues, *, stop_event: next(waiters),
+    )
+    monkeypatch.setattr(Queue, "close", close_queue)
+    watcher = FatalCloseWatcher(
+        queue_configs={"fatal-close.initial": {"handler": lambda *_args: None}},
+        db=db_path,
+    )
+    drive = watcher.run_in_thread()
+    assert old_waiter.wait_entered.wait(timeout=2.0)
+    mutation_errors: list[RuntimeError] = []
+
+    def mutate() -> None:
+        try:
+            watcher.add_queue("fatal-close.added", lambda *_args: None)
+        except RuntimeError as exc:  # pragma: no cover - asserted below
+            mutation_errors.append(exc)
+
+    mutator = threading.Thread(target=mutate)
+    mutator.start()
+    old_waiter.release.set()
+    mutator.join(timeout=2.0)
+    drive.join(timeout=2.0)
+
+    assert not mutator.is_alive()
+    assert not drive.is_alive()
+    assert len(mutation_errors) == 1
+    assert len(thread_exception_guard) == 1
+    assert thread_exception_guard[0].exc_value is fatal
+    thread_exception_guard.clear()
+    assert registration_seen == [True]
+    assert "fatal-close.added" in closed_queue_names
 
 
 def test_same_waiter_replacement_publication_failure_preserves_installed_owner(

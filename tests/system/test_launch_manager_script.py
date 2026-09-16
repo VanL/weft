@@ -5,9 +5,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -34,6 +36,13 @@ def _load_launch_manager_module() -> ModuleType:
 class _FakeQueue:
     def __init__(self, events: list[object]) -> None:
         self._events = events
+        self.closed = False
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.closed = True
 
     def peek_many(self, *, limit: int, with_timestamps: bool) -> object:
         assert limit == 1000
@@ -42,6 +51,21 @@ class _FakeQueue:
         if isinstance(event, BaseException):
             raise event
         return event
+
+
+class _FakeContext:
+    broker_target = "ignored"
+
+    def __init__(self) -> None:
+        self.broker_config: dict[str, Any] = {}
+        self.session_exited = False
+
+    @contextmanager
+    def session(self) -> Iterator[None]:
+        try:
+            yield
+        finally:
+            self.session_exited = True
 
 
 @pytest.mark.parametrize(
@@ -83,11 +107,13 @@ def test_wait_for_registry_retries_supported_read_errors(
         "time",
         SimpleNamespace(time=lambda: 0.0, sleep=lambda _delay: None),
     )
-    context = SimpleNamespace(broker_target="ignored", broker_config={})
+    context = _FakeContext()
 
     result = launch_manager._wait_for_registry(context, tid)
 
     assert result == active_record
+    assert queue.closed
+    assert context.session_exited
 
 
 def test_wait_for_registry_propagates_unexpected_read_error(
@@ -101,7 +127,9 @@ def test_wait_for_registry_propagates_unexpected_read_error(
         "time",
         SimpleNamespace(time=lambda: 0.0, sleep=lambda _delay: None),
     )
-    context = SimpleNamespace(broker_target="ignored", broker_config={})
+    context = _FakeContext()
 
     with pytest.raises(TypeError, match="invalid queue result"):
         launch_manager._wait_for_registry(context, "123")
+    assert queue.closed
+    assert context.session_exited

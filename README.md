@@ -191,6 +191,25 @@ context without requesting metadata-directory or broker initialization; resoluti
 can still create the project root. Close queues
 obtained from `context.queue()`; use `context.broker()` as a context manager.
 
+For several related queue operations on one thread, use the context's explicit
+session scope. Queues minted by the session share its persistent broker core and
+are closed when the scope exits; individual transactions still end at each
+operation boundary:
+
+```python
+with context.session() as session:
+    requests = session.queue("example.requests")
+    results = session.queue("example.results")
+    requests.write("start")
+    assert results.peek_one() is None
+```
+
+Enter and exit the session on the thread that performs the broker work. End
+active iterators and connection contexts before leaving the scope. Session
+close considers every active operation for the same broker target/configuration
+key on that thread, including operations opened through unrelated handles; it
+is not handle-local. The context and client do not retain a hidden live session.
+
 `weft.commands` exposes CLI-equivalent operations with structured outcomes.
 `weft.ext` exposes runner results, resource metrics, agent request values, and
 structural session protocols for extension authors. Concrete process sessions
