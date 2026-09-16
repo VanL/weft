@@ -205,10 +205,7 @@ def _bind_declared_context(taskspec: TaskSpec) -> TaskSpec:
     declared_root = taskspec.spec.weft_context
     if not declared_root:
         return taskspec
-    try:
-        expanded_root = Path(declared_root).expanduser()
-    except RuntimeError as exc:
-        raise ValueError(str(exc)) from exc
+    expanded_root = _expand_declared_context_root(declared_root)
     payload = taskspec.model_dump(mode="json")
     payload["spec"]["weft_context"] = str(expanded_root.resolve())
     return validate_taskspec_payload(
@@ -216,6 +213,17 @@ def _bind_declared_context(taskspec: TaskSpec) -> TaskSpec:
         bundle_root=taskspec.get_bundle_root(),
         template=taskspec.tid is None,
     )
+
+
+def _expand_declared_context_root(declared_root: str) -> Path:
+    """Return the user-expanded context root or reject invalid path text."""
+
+    if "\x00" in declared_root:
+        raise ValueError("weft_context must not contain null bytes")
+    try:
+        return Path(declared_root).expanduser()
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _initial_work_payload(
@@ -381,7 +389,10 @@ def _resolve_submission_runtime_root(
 ) -> Path:
     """Resolve the one runtime-root rule shared by every submission surface."""
 
-    return Path(taskspec.spec.weft_context or context.root).expanduser().resolve()
+    declared_root = taskspec.spec.weft_context
+    if not declared_root:
+        return context.root.resolve()
+    return _expand_declared_context_root(declared_root).resolve()
 
 
 def _submit_prepared_outcome(
