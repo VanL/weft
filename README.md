@@ -1188,68 +1188,74 @@ uv build
 
 Weft uses a tag-driven release flow in GitHub Actions:
 
+- [`.github/workflows/test.yml`](./.github/workflows/test.yml) is the only
+  automated test workflow. It runs the main multi-platform suite, the complete
+  SQLite suite on the canonical coverage lane, PostgreSQL-compatible tests,
+  coverage, lint, formatting, and type checks first. After that stage succeeds,
+  it runs the Django, Docker, macOS sandbox, and Microsandbox suites in
+  parallel.
 - [`.github/workflows/release-gate.yml`](./.github/workflows/release-gate.yml)
-  runs on pushed `v*` tags, executes the full SQLite suite plus the
-  PG-compatible suite via [`bin/pytest-pg`](./bin/pytest-pg), runs the
-  Docker extension test suite on Ubuntu, the macOS sandbox extension test
-  suite on macOS, and the Microsandbox extension test suite on Ubuntu, and
-  only invokes the publish workflow if every job passes. If the tag is moved
-  while a gate is running, the older run is canceled and the gate refuses to
-  publish from the stale tag state.
+  runs on pushed `v*` tags and invokes the `weft` publish workflow. It does not
+  rerun tests.
 - [`.github/workflows/release-gate-docker.yml`](./.github/workflows/release-gate-docker.yml)
-  runs on pushed `weft_docker/v*` tags, executes the Docker extension package
-  tests on Ubuntu, and publishes the `weft-docker` package to PyPI if the tag
-  still points at the tested commit.
+  runs on pushed `weft_docker/v*` tags and publishes only `weft-docker`.
 - [`.github/workflows/release-gate-django.yml`](./.github/workflows/release-gate-django.yml)
-  runs on pushed `weft_django/v*` tags, executes the Django integration package
-  tests on Ubuntu, and publishes the `weft-django` package to PyPI if the tag
-  still points at the tested commit.
+  runs on pushed `weft_django/v*` tags and publishes only `weft-django`.
 - [`.github/workflows/release-gate-macos-sandbox.yml`](./.github/workflows/release-gate-macos-sandbox.yml)
-  runs on pushed `weft_macos_sandbox/v*` tags, executes the macOS sandbox
-  extension package tests on macOS, and publishes the `weft-macos-sandbox`
-  package to PyPI if the tag still points at the tested commit.
+  runs on pushed `weft_macos_sandbox/v*` tags and publishes only
+  `weft-macos-sandbox`.
 - [`.github/workflows/release-gate-microsandbox.yml`](./.github/workflows/release-gate-microsandbox.yml)
-  runs on pushed `weft_microsandbox/v*` tags, executes the Microsandbox
-  extension package tests on Ubuntu, and publishes the `weft-microsandbox`
-  package to PyPI if the tag still points at the tested commit.
+  runs on pushed `weft_microsandbox/v*` tags and publishes only
+  `weft-microsandbox`.
 - [`.github/workflows/release.yml`](./.github/workflows/release.yml) is a
   reusable workflow that can only be called from a release gate; it handles
-  package build, PyPI publishing, signing, and, for the root `weft` package,
-  GitHub Release creation from the tested commit SHA rather than re-resolving
-  the mutable tag.
+  a one-shot check of the already completed Test push run, package build, PyPI
+  publishing, and, for the root `weft` package, GitHub Release creation from
+  the tested commit SHA rather than re-resolving the mutable tag.
 
 ```bash
 # Reuse the current version if it has never reached GitHub Release / PyPI;
 # otherwise pass --version with a new X.Y.Z version
-uv run python bin/release.py
+uv run python bin/release.py core
 
 # Explicitly release a new version
-uv run python bin/release.py --version 0.1.1
+uv run python bin/release.py core --version 0.1.1
 
-# If an unpublished remote tag exists on the wrong commit, recreate it explicitly
+# Release one first-party package independently
+uv run python bin/release.py docker
+
+# Release every currently unpublished first-party package version
+uv run python bin/release.py all
+
+# If an unpublished remote tag exists on the wrong commit, replace it explicitly
 uv run python bin/release.py --retag
 
 # Preview the release steps without changing files or running commands
 uv run python bin/release.py --dry-run
 ```
 
+The positional release target is `core`, `django`, `docker`, `macos-sandbox`,
+`microsandbox`, or `all`; it defaults to `core`. The helper pushes tags only for
+the selected target. `all` selects every currently unpublished first-party
+package version.
+
 The release helper only requires a new version after that version has produced
 either a GitHub Release or a PyPI publication. If the current repo version is
 still unpublished, the helper can reuse it without rewriting version files.
 It will still refuse to silently move an existing remote tag to a different
-commit; use `--retag` if you want the helper to delete and recreate an
-unpublished remote tag.
+commit; use `--retag` to replace an unpublished remote tag with a
+force-with-lease guard against concurrent movement.
 
-The helper also inspects the current versions in the first-party extension
-packages:
+With target `all`, the helper also inspects the current versions in the
+first-party extension packages:
 
 - `extensions/weft_docker/pyproject.toml`
 - `integrations/weft_django/pyproject.toml`
 - `extensions/weft_macos_sandbox/pyproject.toml`
 - `extensions/weft_microsandbox/pyproject.toml`
 
-If any package version is still unpublished on PyPI, the helper pushes the
-matching namespaced tag from the tested commit:
+When an explicitly selected package version is still unpublished on PyPI, the
+helper pushes its matching tag from the tested commit:
 
 - `weft_docker/vX.Y.Z`
 - `weft_django/vX.Y.Z`
@@ -1265,7 +1271,7 @@ version sources:
 - `pyproject.toml`
 - `weft/_constants.py`
 
-Before it tags and pushes, the helper runs:
+Before it pushes the release commit, the helper runs:
 
 1. The SQLite release precheck with xdist
 2. The PG-compatible release precheck with `uv run bin/pytest-pg --all`
@@ -1300,28 +1306,22 @@ resolve to an unavailable free model.
 This paid, credentialed gate runs only in the local release helper. The GitHub
 release gates do not run live provider tests.
 
-After the helper pushes `v0.1.1`, the release gate workflow will:
+After local checks and any version commit, the helper:
 
-1. Run the full SQLite suite
-2. Run the PG-compatible suite with `uv run bin/pytest-pg --all`
-3. Run the Django integration tests on Ubuntu
-4. Run the Docker extension tests on Ubuntu
-5. Run the macOS sandbox extension tests on macOS
-6. Run the Microsandbox extension tests on Ubuntu
-7. Confirm the tag still points at the tested commit
-8. Invoke the package release workflow only if all suites pass
-9. Build distributions with `uv build`
-10. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
-11. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
+1. Pushes the release commit to `main`
+2. Waits locally for the exact commit's `Test` push workflow to finish
+3. Stops without creating tags if that workflow is missing, fails, is
+   cancelled, or times out
+4. Refetches `origin/main` and rechecks publication and tag state
+5. Creates and pushes only the requested package tags at the tested commit
 
-If the helper also pushes a namespaced package tag such as `weft_docker/vX.Y.Z`,
-`weft_django/vX.Y.Z`, `weft_macos_sandbox/vX.Y.Z`, or
-`weft_microsandbox/vX.Y.Z`, the package-specific release gates will:
+Each triggered package release gate then:
 
-1. Run the matching package test suite
-2. Verify the namespaced tag still points at the tested commit
-3. Build the package from its subdirectory
-4. Publish the distribution to PyPI
+1. Performs one fail-closed check that the exact Test push run is already green
+2. Verifies the package tag still points at the tested commit
+3. Builds the selected package from its package directory
+4. Publishes that distribution to PyPI
+5. For `weft`, creates the GitHub Release and uploads its distribution files
 
 Prerequisite:
 

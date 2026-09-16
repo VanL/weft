@@ -71,73 +71,44 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
-      - name: Wait for successful Test workflow on release commit
+      - name: Require completed Test workflow on release commit
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXPECTED_SHA: ${{ inputs.expected_tag_commit }}
-          POLL_INTERVAL_SECONDS: "30"
-          MAX_WAIT_SECONDS: "3000"
         with:
           script: |
             const expectedSha = process.env.EXPECTED_SHA;
-            const pollIntervalMs =
-              Number(process.env.POLL_INTERVAL_SECONDS || "30") * 1000;
-            const maxWaitMs =
-              Number(process.env.MAX_WAIT_SECONDS || "2700") * 1000;
-            const deadline = Date.now() + maxWaitMs;
+            const response = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "test.yml",
+              event: "push",
+              head_sha: expectedSha,
+              per_page: 20,
+            });
 
-            while (Date.now() < deadline) {
-              const response = await github.rest.actions.listWorkflowRuns({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: "test.yml",
-                event: "push",
-                head_sha: expectedSha,
-                per_page: 20,
+            const runs = response.data.workflow_runs
+              .filter(
+                (run) =>
+                  run.head_sha === expectedSha &&
+                  ["main", "master"].includes(run.head_branch ?? ""),
+              )
+              .sort((left, right) => {
+                const leftTimestamp = Date.parse(left.run_started_at ?? left.created_at);
+                const rightTimestamp = Date.parse(right.run_started_at ?? right.created_at);
+                return rightTimestamp - leftTimestamp;
               });
-
-              const runs = response.data.workflow_runs
-                .filter(
-                  (run) =>
-                    run.head_sha === expectedSha &&
-                    ["main", "master"].includes(run.head_branch ?? ""),
-                )
-                .sort((left, right) => {
-                  const leftTimestamp = Date.parse(
-                    left.run_started_at ?? left.created_at,
-                  );
-                  const rightTimestamp = Date.parse(
-                    right.run_started_at ?? right.created_at,
-                  );
-                  return rightTimestamp - leftTimestamp;
-                });
-
-              if (runs.length === 0) {
-                core.info(
-                  `No Test workflow run found yet for ${expectedSha}; waiting ${pollIntervalMs / 1000}s`,
-                );
-              } else {
-                const latest = runs[0];
-                core.info(
-                  `Observed Test workflow run ${latest.id} (${latest.html_url}) status=${latest.status} conclusion=${latest.conclusion}`,
-                );
-                if (latest.status === "completed") {
-                  if (latest.conclusion === "success") {
-                    return;
-                  }
-                  core.setFailed(
-                    `Test workflow ${latest.html_url} concluded ${latest.conclusion} for ${expectedSha}`,
-                  );
-                  return;
-                }
-              }
-
-              await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+            if (runs.length === 0) {
+              core.setFailed(`No Test push workflow found for ${expectedSha}`);
+              return;
             }
 
-            core.setFailed(
-              `Timed out waiting for a successful Test workflow run on ${expectedSha}`,
-            );
+            const latest = runs[0];
+            if (latest.status !== "completed" || latest.conclusion !== "success") {
+              core.setFailed(
+                `Test workflow ${latest.html_url} is ${latest.status}/${latest.conclusion} for ${expectedSha}`,
+              );
+            }
 
   verify-tag-current:
     runs-on: ubuntu-latest

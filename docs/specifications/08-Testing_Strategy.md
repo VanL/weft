@@ -67,6 +67,45 @@ The point is not to maximize suite count. The point is to keep the current
 contract exercised where it matters and to make backend-sensitive drift easy to
 see.
 
+### Staged CI and Release Proof [TS-4]
+
+The `Test` workflow is the sole automated test owner. Its main stage runs the
+multi-platform Python matrix, every SQLite test including the slow marker on
+one canonical Linux/Python lane, the PostgreSQL-compatible suite through
+`bin/pytest-pg`, coverage aggregation, and repository static gates. The Django,
+Docker, macOS sandbox, and Microsandbox suites all require that complete main
+stage and then fan out in parallel. Release workflows do not run pytest.
+
+The release helper accepts one explicit package target (`core`, `django`,
+`docker`, `macos-sandbox`, or `microsandbox`) or `all`, defaulting to `core`.
+It pushes the release commit to `main`, waits locally for the exact SHA's
+successful `push` run of `.github/workflows/test.yml` on `main` or `master`,
+refetches `origin/main`, and rechecks publication plus tag state before it
+creates or pushes only the selected package tags. Missing, failed, cancelled,
+or timed-out CI; an unreachable SHA; changed publication state; or changed tag
+identity fails before tag publication.
+
+Each tag-triggered release gate performs one fail-closed API check that the
+already-completed Test push run is green, verifies that the tag still points to
+the tested SHA, and then calls the sole package build/publish workflow. It must
+not poll a running workflow or occupy a runner while tests execute. A root tag
+publishes only `weft`; each namespaced tag publishes only its corresponding
+first-party package.
+
+Owner: `.github/workflows/test.yml` owns test execution and stage ordering;
+`bin/release.py` owns the local pre-tag wait and exact run identity; the
+release-gate workflows own package/tag routing; `.github/workflows/release.yml`
+owns the independent one-shot run check, immutable tag verification, build,
+and publication.
+Boundary: CI and release orchestration only, not Weft runtime behavior.
+Verification: `tests/system/test_release_script.py` parses the workflow DAG and
+exercises release target/status logic; `tests/system/test_release_workflow.py`
+checks publication assets. Required action: add new first-party test suites to
+the main or extension stage and to the release-helper target map atomically;
+never add a second test execution path to a release workflow.
+
+Related plan: [Single CI Release Gate](../plans/2026-09-16-single-ci-release-gate-plan.md).
+
 Current classification rule:
 
 - test modules should declare backend scope explicitly through `shared` or

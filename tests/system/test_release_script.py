@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -370,6 +370,42 @@ def test_collect_extension_release_plans_skips_already_published_packages(
     assert skipped[0].target is release.DOCKER_RELEASE_TARGET
 
 
+def test_post_ci_revalidation_rejects_publication_or_tag_identity_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every requested target must remain unchanged through the CI wait."""
+
+    release = _load_release_module()
+    initial = _release_state(
+        release,
+        version="0.1.0",
+        tag_name="v0.1.0",
+        target=release.ROOT_RELEASE_TARGET,
+        remote_tag_commit="a" * 40,
+    )
+    published = dataclasses.replace(initial, pypi_release_exists=True)
+    monkeypatch.setattr(
+        release, "inspect_release_state", lambda *args, **kwargs: published
+    )
+
+    with pytest.raises(RuntimeError, match="was published while release CI ran"):
+        release.revalidate_release_states_after_ci(
+            (initial,),
+            head_commit="b" * 40,
+            allow_retag=True,
+        )
+
+    moved = dataclasses.replace(initial, remote_tag_commit="c" * 40)
+    monkeypatch.setattr(release, "inspect_release_state", lambda *args, **kwargs: moved)
+
+    with pytest.raises(RuntimeError, match="Tag state.*changed"):
+        release.revalidate_release_states_after_ci(
+            (initial,),
+            head_commit="b" * 40,
+            allow_retag=True,
+        )
+
+
 def test_github_api_auth_headers_use_environment_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -408,6 +444,73 @@ def test_github_api_auth_headers_fall_back_to_gh_auth_token(
     headers = release._github_api_auth_headers()
 
     assert headers == {"Authorization": "Bearer gh-token"}
+
+
+def test_matching_test_runs_accepts_only_exact_main_push_and_selects_latest() -> None:
+    """Release CI proof must not accept PR, dispatch, branch, or stale-SHA runs."""
+
+    release = _load_release_module()
+    sha = "a" * 40
+    matching_old = {
+        "id": 1,
+        "head_sha": sha,
+        "head_branch": "main",
+        "event": "push",
+        "created_at": "2026-09-16T10:00:00Z",
+    }
+    matching_new = {
+        "id": 2,
+        "head_sha": sha,
+        "head_branch": "main",
+        "event": "push",
+        "created_at": "2026-09-16T11:00:00Z",
+    }
+    rejected = [
+        {**matching_new, "id": 3, "event": "pull_request"},
+        {**matching_new, "id": 4, "event": "workflow_dispatch"},
+        {**matching_new, "id": 5, "head_branch": "feature"},
+        {**matching_new, "id": 6, "head_sha": "b" * 40},
+    ]
+
+    runs = release._matching_test_runs(
+        [matching_old, *rejected, matching_new],
+        release_sha=sha,
+    )
+
+    assert runs == (matching_new, matching_old)
+
+
+def test_wait_for_test_workflow_fails_immediately_on_completed_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known failed Test run must stop release without sleeping or tagging."""
+
+    release = _load_release_module()
+    sha = "a" * 40
+    monkeypatch.setattr(release, "_github_api_token", lambda: "token")
+    monkeypatch.setattr(
+        release,
+        "_fetch_test_runs",
+        lambda release_sha, *, token: [
+            {
+                "id": 1,
+                "head_sha": release_sha,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://example.test/run/1",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        release.time,
+        "sleep",
+        lambda seconds: pytest.fail(f"must not sleep after failure: {seconds}"),
+    )
+
+    with pytest.raises(RuntimeError, match="concluded failure"):
+        release.wait_for_test_workflow(sha)
 
 
 def test_main_dry_run_reuses_current_unpublished_version(
@@ -507,7 +610,7 @@ def test_main_dry_run_retags_remote_when_requested(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Dry-run should show remote tag deletion only when ``--retag`` is set."""
+    """Dry-run should lease-protect an explicitly requested remote retag."""
 
     release = _load_release_module()
     monkeypatch.setattr(release, "read_current_version", lambda: "0.1.0")
@@ -531,9 +634,9 @@ def test_main_dry_run_retags_remote_when_requested(
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    assert "$ git push --delete origin v0.1.0" in captured.out
     assert "$ git tag -d v0.1.0" in captured.out
     assert "$ git tag v0.1.0" in captured.out
+    assert "--force-with-lease=refs/tags/v0.1.0:" in captured.out
 
 
 def test_main_dry_run_pushes_unpublished_extension_tags(
@@ -568,7 +671,7 @@ def test_main_dry_run_pushes_unpublished_extension_tags(
     )
     monkeypatch.setattr(release, "current_head_commit", lambda: "a" * 40)
 
-    exit_code = release.main(["--dry-run"])
+    exit_code = release.main(["all", "--dry-run"])
     captured = capsys.readouterr()
 
     assert exit_code == 0
@@ -578,6 +681,43 @@ def test_main_dry_run_pushes_unpublished_extension_tags(
     assert "$ git push origin weft_docker/v0.2.0" in captured.out
     assert "$ git push origin weft_django/v0.3.0" in captured.out
     assert "$ git push origin weft_macos_sandbox/v0.4.0" in captured.out
+
+
+def test_main_dry_run_defaults_to_core_only(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The default release target must not publish extension packages."""
+
+    release = _load_release_module()
+    monkeypatch.setattr(release, "read_target_version", lambda target: "0.1.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version, *, target=release.ROOT_RELEASE_TARGET: _release_state(
+            release,
+            version=version,
+            tag_name=target.tag_name(version),
+            target=target,
+        ),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: "a" * 40)
+
+    assert release.main(["--dry-run", "--skip-checks"]) == 0
+
+    output = capsys.readouterr().out
+    assert "$ git push origin v0.1.0" in output
+    assert "weft_docker/v" not in output
+    assert "weft_django/v" not in output
+    assert "weft_macos_sandbox/v" not in output
+    assert "weft_microsandbox/v" not in output
+    assert output.index("$ git push origin main") < output.index(
+        "would wait for the exact main/master push run"
+    )
+    assert output.index("would wait for the exact main/master push run") < output.index(
+        "$ git tag v0.1.0"
+    )
 
 
 def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
@@ -847,8 +987,105 @@ def test_run_command_dry_run_shows_env_prefix_and_cwd(
     assert "(cwd=extensions/weft_docker)" in captured.out
 
 
-def test_release_workflows_require_green_test_workflow() -> None:
-    """All publish workflows should block on a successful Test workflow run."""
+def test_ci_runs_one_staged_test_graph_before_release() -> None:
+    """Main proof must precede parallel extensions and release gates run no tests."""
+
+    root = Path(__file__).resolve().parents[2]
+    test_workflow = yaml.safe_load(
+        (root / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    )
+    jobs = test_workflow["jobs"]
+    main_jobs = {"test", "test-postgres", "coverage", "lint"}
+    extension_jobs = {
+        "test-django-integration",
+        "test-docker-extension",
+        "test-macos-sandbox-extension",
+        "test-microsandbox-extension",
+    }
+
+    assert main_jobs | extension_jobs <= jobs.keys()
+    for job_name in extension_jobs:
+        assert set(jobs[job_name]["needs"]) == main_jobs
+        assert "if" not in jobs[job_name]
+
+    discovered = set((root / "tests").rglob("test*.py"))
+    for job_name in ("test", "test-postgres"):
+        included: list[Path] = []
+        for row in jobs[job_name]["strategy"]["matrix"]["include"]:
+            for target_text in row["pytest_targets"].split():
+                target = root / target_text
+                assert target.exists(), target
+                included.extend(
+                    sorted(target.rglob("test*.py")) if target.is_dir() else [target]
+                )
+        assert len(included) == len(set(included)), f"duplicate targets in {job_name}"
+        assert set(included) == discovered
+
+    release_gate_paths = sorted(
+        (root / ".github" / "workflows").glob("release-gate*.yml")
+    )
+    assert release_gate_paths
+    for workflow_path in release_gate_paths:
+        release_workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        for job in release_workflow["jobs"].values():
+            for step in job.get("steps", []):
+                assert "pytest" not in step.get("run", "")
+
+
+def test_release_gate_routes_each_tag_to_exactly_one_package() -> None:
+    """Each immutable package tag must invoke only its matching publication."""
+
+    root = Path(__file__).resolve().parents[2]
+    expected = {
+        "release-gate.yml": ("v*", "weft", ".", True),
+        "release-gate-django.yml": (
+            "weft_django/v*",
+            "weft-django",
+            "integrations/weft_django",
+            False,
+        ),
+        "release-gate-docker.yml": (
+            "weft_docker/v*",
+            "weft-docker",
+            "extensions/weft_docker",
+            False,
+        ),
+        "release-gate-macos-sandbox.yml": (
+            "weft_macos_sandbox/v*",
+            "weft-macos-sandbox",
+            "extensions/weft_macos_sandbox",
+            False,
+        ),
+        "release-gate-microsandbox.yml": (
+            "weft_microsandbox/v*",
+            "weft-microsandbox",
+            "extensions/weft_microsandbox",
+            False,
+        ),
+    }
+    gate_paths = sorted((root / ".github" / "workflows").glob("release-gate*.yml"))
+    assert {path.name for path in gate_paths} == expected.keys()
+
+    for path in gate_paths:
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        tag, package, package_dir, github_release = expected[path.name]
+        assert workflow[True]["push"]["tags"] == [tag]
+        assert set(workflow["jobs"]) == {"publish-release"}
+        publish = workflow["jobs"]["publish-release"]
+        assert publish["uses"] == "./.github/workflows/release.yml"
+        assert publish["with"] == {
+            "package_name": package,
+            "package_dir": package_dir,
+            "tag_name": "${{ github.ref_name }}",
+            "release_ref": "${{ github.sha }}",
+            "expected_tag_commit": "${{ github.sha }}",
+            "create_github_release": github_release,
+        }
+        assert publish["permissions"]["actions"] == "read"
+
+
+def test_publish_checks_completed_main_push_once_without_polling() -> None:
+    """Publication must fail closed on one exact completed Test push lookup."""
 
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load(
@@ -861,65 +1098,18 @@ def test_release_workflows_require_green_test_workflow() -> None:
         for step in verification["steps"]
         if step.get("uses", "").startswith("actions/github-script@")
     )
+    script = verification_step["with"]["script"]
+
     assert verification_step["env"]["EXPECTED_SHA"] == (
         "${{ inputs.expected_tag_commit }}"
     )
-    # These query fields bind verification to the release commit's push run.
-    script = verification_step["with"]["script"]
     assert 'workflow_id: "test.yml"' in script
     assert "head_sha: expectedSha" in script
     assert 'event: "push"' in script
+    assert '["main", "master"]' in script
+    assert 'latest.status !== "completed"' in script
+    assert 'latest.conclusion !== "success"' in script
+    assert "while (" not in script
+    assert "setTimeout" not in script
     assert "verify-main-test-workflow" in jobs["publish-to-pypi"]["needs"]
     assert "publish-to-pypi" in jobs["github-release"]["needs"]
-
-
-@pytest.mark.parametrize(
-    "workflow_path",
-    [
-        Path(".github/workflows/test.yml"),
-        Path(".github/workflows/release-gate.yml"),
-    ],
-)
-def test_ci_pytest_target_paths_exist(workflow_path: Path) -> None:
-    """A stale explicit target must not disable an entire CI test shard."""
-
-    root = Path(__file__).resolve().parents[2]
-    workflow_text = (root / workflow_path).read_text(encoding="utf-8")
-    target_groups = re.findall(
-        r"^\s*pytest_targets:\s*(\S.*)$",
-        workflow_text,
-        flags=re.MULTILINE,
-    )
-
-    assert target_groups, f"{workflow_path} declares no pytest target groups"
-    missing = sorted(
-        {
-            target
-            for target_group in target_groups
-            for target in target_group.split()
-            if not (root / target).exists()
-        }
-    )
-    assert missing == [], f"{workflow_path} has missing pytest targets: {missing}"
-
-
-@pytest.mark.parametrize(
-    "workflow_path",
-    [
-        Path(".github/workflows/release-gate.yml"),
-        Path(".github/workflows/release-gate-docker.yml"),
-        Path(".github/workflows/release-gate-django.yml"),
-        Path(".github/workflows/release-gate-macos-sandbox.yml"),
-    ],
-)
-def test_release_gate_workflows_grant_actions_read_for_publish(
-    workflow_path: Path,
-) -> None:
-    """Reusable release workflow callers need actions:read to inspect Test runs."""
-
-    root = Path(__file__).resolve().parents[2]
-    workflow = yaml.safe_load((root / workflow_path).read_text(encoding="utf-8"))
-    publish_job = workflow["jobs"]["publish-release"]
-    assert publish_job["uses"] == "./.github/workflows/release.yml"
-    permissions = publish_job.get("permissions", workflow.get("permissions", {}))
-    assert permissions["actions"] == "read"

@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -55,6 +58,8 @@ RELEASE_GATE_WORKFLOW: Final[str] = ROOT_RELEASE_GATE_WORKFLOW
 GITHUB_API_BASE: Final[str] = "https://api.github.com"
 PYPI_API_BASE: Final[str] = "https://pypi.org/pypi"
 HTTP_TIMEOUT_SECONDS: Final[float] = 10.0
+CI_POLL_INTERVAL_SECONDS: Final[float] = 30.0
+CI_WAIT_TIMEOUT_SECONDS: Final[float] = 7200.0
 VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\d+\.\d+\.\d+$")
 PYPROJECT_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(
     r'(?m)^version = "([^"]+)"$'
@@ -380,6 +385,14 @@ FIRST_PARTY_EXTENSION_TARGETS: Final[tuple[ReleaseTarget, ...]] = (
     MACOS_SANDBOX_RELEASE_TARGET,
     MICROSANDBOX_RELEASE_TARGET,
 )
+RELEASE_TARGETS: Final[dict[str, ReleaseTarget]] = {
+    ROOT_RELEASE_TARGET.key: ROOT_RELEASE_TARGET,
+    DOCKER_RELEASE_TARGET.key: DOCKER_RELEASE_TARGET,
+    DJANGO_RELEASE_TARGET.key: DJANGO_RELEASE_TARGET,
+    MACOS_SANDBOX_RELEASE_TARGET.key: MACOS_SANDBOX_RELEASE_TARGET,
+    MICROSANDBOX_RELEASE_TARGET.key: MICROSANDBOX_RELEASE_TARGET,
+}
+ALL_RELEASE_TARGET_KEY: Final[str] = "all"
 
 
 def validate_version(version: str) -> str:
@@ -1013,6 +1026,43 @@ def collect_extension_release_plans(
     return tuple(plans), tuple(skipped)
 
 
+def revalidate_release_states_after_ci(
+    initial_states: tuple[ReleaseState, ...],
+    *,
+    head_commit: str,
+    allow_retag: bool,
+) -> tuple[SupplementalReleasePlan, ...]:
+    """Refresh every requested target before any release tag is mutated."""
+
+    validated: list[SupplementalReleasePlan] = []
+    for initial in initial_states:
+        refreshed = inspect_release_state(initial.version, target=initial.target)
+        if refreshed.published:
+            raise RuntimeError(
+                f"{initial.target.display_name} {initial.version} was published "
+                "while release CI ran"
+            )
+        if (
+            refreshed.local_tag_commit != initial.local_tag_commit
+            or refreshed.remote_tag_commit != initial.remote_tag_commit
+        ):
+            raise RuntimeError(
+                f"Tag state for {initial.tag_name} changed while release CI ran"
+            )
+        validated.append(
+            SupplementalReleasePlan(
+                state=refreshed,
+                tag_action=plan_tag_action(
+                    refreshed,
+                    head_commit=head_commit,
+                    version_changed=False,
+                    allow_retag=allow_retag,
+                ),
+            )
+        )
+    return tuple(validated)
+
+
 def _remote_tag_reuse_note(state: ReleaseState) -> str:
     return (
         f"Tag {state.tag_name} already exists on origin at HEAD. Pushing the same tag "
@@ -1021,8 +1071,179 @@ def _remote_tag_reuse_note(state: ReleaseState) -> str:
     )
 
 
+def _github_repo_slug() -> str:
+    """Return the GitHub ``owner/repository`` slug for origin."""
+
+    remote_url = origin_remote_url()
+    repo_slug = github_repo_slug_from_remote(remote_url)
+    if repo_slug is None:
+        raise RuntimeError(
+            f"Unable to determine GitHub repository from origin remote: {remote_url}"
+        )
+    return repo_slug
+
+
+def _github_api_json(path: str, *, token: str) -> Mapping[str, object]:
+    """Return one authenticated GitHub API JSON object."""
+
+    request = urllib_request.Request(
+        f"{GITHUB_API_BASE}{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "weft-release-helper",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            payload = json.load(response)
+    except urllib_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"GitHub API request failed for {path}: HTTP {exc.code}: {detail}"
+        ) from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(
+            f"GitHub API request failed for {path}: {exc.reason}"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise TypeError("GitHub API response was not a JSON object")
+    return payload
+
+
+def _matching_test_runs(
+    raw_runs: object,
+    *,
+    release_sha: str,
+) -> tuple[Mapping[str, object], ...]:
+    """Return newest-first protected-branch Test push runs for one SHA."""
+
+    if not isinstance(raw_runs, list):
+        raise TypeError("GitHub API response did not include workflow_runs")
+    matching = [
+        run
+        for run in raw_runs
+        if isinstance(run, Mapping)
+        and run.get("head_sha") == release_sha
+        and run.get("event") == "push"
+        and run.get("head_branch") in {"main", "master"}
+    ]
+    return tuple(
+        sorted(
+            matching,
+            key=lambda run: (
+                str(run.get("run_started_at") or run.get("created_at") or ""),
+                int(run.get("run_attempt") or 0),
+                int(run.get("id") or 0),
+            ),
+            reverse=True,
+        )
+    )
+
+
+def _fetch_test_runs(release_sha: str, *, token: str) -> object:
+    """Fetch Test workflow push runs for one exact commit."""
+
+    repo_slug = urllib_parse.quote(_github_repo_slug(), safe="/")
+    query = urllib_parse.urlencode(
+        {"event": "push", "head_sha": release_sha, "per_page": "20"}
+    )
+    payload = _github_api_json(
+        f"/repos/{repo_slug}/actions/workflows/test.yml/runs?{query}",
+        token=token,
+    )
+    return payload.get("workflow_runs")
+
+
+def wait_for_test_workflow(
+    release_sha: str,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Wait locally for the exact release commit's Test push run to pass."""
+
+    if dry_run:
+        print(
+            "dry-run: would wait for the exact main/master push run of "
+            f".github/workflows/test.yml at {release_sha}"
+        )
+        return
+
+    token = _github_api_token()
+    if not token:
+        raise RuntimeError(
+            "Authenticated GitHub access is required to wait for release CI"
+        )
+    deadline = time.monotonic() + CI_WAIT_TIMEOUT_SECONDS
+    while True:
+        runs = _matching_test_runs(
+            _fetch_test_runs(release_sha, token=token),
+            release_sha=release_sha,
+        )
+        if runs:
+            latest = runs[0]
+            status = str(latest.get("status") or "")
+            conclusion = latest.get("conclusion")
+            url = str(latest.get("html_url") or "")
+            print(
+                f"Test workflow {url or '<unknown>'}: "
+                f"{status}/{conclusion or 'pending'}",
+                flush=True,
+            )
+            if status == "completed":
+                if conclusion == "success":
+                    return
+                raise RuntimeError(
+                    f"Test workflow {url or '<unknown>'} concluded {conclusion} "
+                    f"for {release_sha}"
+                )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"Timed out waiting for the Test push workflow on {release_sha}"
+            )
+        time.sleep(CI_POLL_INTERVAL_SECONDS)
+
+
+def require_release_sha_on_origin_main(
+    release_sha: str,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Fetch main and require it still contains the tested release commit."""
+
+    run_command(("git", "fetch", "origin", "main"), dry_run=dry_run)
+    if dry_run:
+        print(
+            "dry-run: would require the tested release SHA to remain reachable "
+            "from origin/main"
+        )
+        return
+    result = _capture_command(
+        ("git", "merge-base", "--is-ancestor", release_sha, "origin/main")
+    )
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise RuntimeError(
+            f"Tested release SHA {release_sha} is no longer reachable from origin/main"
+        )
+    detail = result.stderr.strip() or result.stdout.strip() or "unknown git error"
+    raise RuntimeError(f"Unable to verify origin/main ancestry: {detail}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create a local Weft release")
+    parser.add_argument(
+        "target",
+        nargs="?",
+        choices=(*RELEASE_TARGETS, ALL_RELEASE_TARGET_KEY),
+        default=ROOT_RELEASE_TARGET.key,
+        help=(
+            "Package to release. Defaults to core; use all to release every "
+            "currently unpublished first-party package."
+        ),
+    )
     parser.add_argument(
         "--version",
         help=(
@@ -1045,8 +1266,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--retag",
         action="store_true",
         help=(
-            "Delete and recreate unpublished remote tags when the existing tag "
-            "points at the wrong commit."
+            "Replace unpublished remote tags with a force-with-lease guard when "
+            "the existing tag points at the wrong commit."
         ),
     )
     return parser
@@ -1078,20 +1299,19 @@ def _prepare_tag_action(
     *,
     tag_action: TagAction,
     dry_run: bool,
+    target_commit: str,
 ) -> None:
-    """Apply local tag mutations and remote tag deletions."""
+    """Prepare the exact local release tag without mutating the remote."""
 
     tag_name = state.tag_name
     if tag_action == "replace_local":
         run_command(("git", "tag", "-d", tag_name), dry_run=dry_run)
 
-    if tag_action == "replace_remote":
-        if state.local_tag_commit is not None:
-            run_command(("git", "tag", "-d", tag_name), dry_run=dry_run)
-        run_command(("git", "push", "--delete", "origin", tag_name), dry_run=dry_run)
+    if tag_action == "replace_remote" and state.local_tag_commit is not None:
+        run_command(("git", "tag", "-d", tag_name), dry_run=dry_run)
 
     if tag_action in {"create", "replace_local", "replace_remote"}:
-        run_command(("git", "tag", tag_name), dry_run=dry_run)
+        run_command(("git", "tag", tag_name, target_commit), dry_run=dry_run)
 
 
 def _push_tag_action(
@@ -1103,7 +1323,21 @@ def _push_tag_action(
     """Push a prepared tag to origin when required."""
 
     tag_name = state.tag_name
-    if tag_action in {"create", "push_local", "replace_local", "replace_remote"}:
+    if tag_action == "replace_remote":
+        if state.remote_tag_commit is None:
+            raise RuntimeError(f"Cannot lease-replace missing remote tag {tag_name}")
+        run_command(
+            (
+                "git",
+                "push",
+                f"--force-with-lease=refs/tags/{tag_name}:{state.remote_tag_commit}",
+                "origin",
+                f"refs/tags/{tag_name}",
+            ),
+            dry_run=dry_run,
+        )
+        return
+    if tag_action in {"create", "push_local", "replace_local"}:
         run_command(("git", "push", "origin", tag_name), dry_run=dry_run)
         return
 
@@ -1115,17 +1349,40 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    current_version = read_current_version()
+    if args.target == ALL_RELEASE_TARGET_KEY and args.version is not None:
+        parser.error("--version cannot be used with target 'all'")
     dirty = is_dirty_worktree()
 
     if dirty and not args.dry_run:
         raise RuntimeError("Working tree must be clean before release.")
 
-    target_version, release_state = resolve_target_version(
-        args.version,
-        current_version=current_version,
-        target=ROOT_RELEASE_TARGET,
-    )
+    if args.target == ALL_RELEASE_TARGET_KEY:
+        observed_states = tuple(
+            inspect_release_state(
+                read_target_version(target),
+                target=target,
+            )
+            for target in RELEASE_TARGETS.values()
+        )
+        selected_states = tuple(
+            state for state in observed_states if not state.published
+        )
+        if not selected_states:
+            print("No unpublished release targets found.")
+            return 0
+        primary_target = selected_states[0].target
+        current_version = selected_states[0].version
+        target_version = current_version
+        release_state = selected_states[0]
+    else:
+        primary_target = RELEASE_TARGETS[args.target]
+        current_version = read_target_version(primary_target)
+        target_version, release_state = resolve_target_version(
+            args.version,
+            current_version=current_version,
+            target=primary_target,
+        )
+        selected_states = (release_state,)
     version_changed = target_version != current_version
     initial_head_commit = current_head_commit()
     planning_head_commit = (
@@ -1137,12 +1394,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
         version_changed=version_changed,
         allow_retag=args.retag,
     )
-    planned_extension_releases, skipped_extension_releases = (
-        collect_extension_release_plans(
-            head_commit=planning_head_commit,
-            allow_retag=args.retag,
+    if args.target == ALL_RELEASE_TARGET_KEY:
+        planned_extension_releases = tuple(
+            SupplementalReleasePlan(
+                state=state,
+                tag_action=plan_tag_action(
+                    state,
+                    head_commit=planning_head_commit,
+                    version_changed=False,
+                    allow_retag=args.retag,
+                ),
+            )
+            for state in selected_states[1:]
         )
-    )
+        skipped_extension_releases = tuple(
+            state for state in observed_states if state.published
+        )
+    else:
+        planned_extension_releases = ()
+        skipped_extension_releases = ()
 
     print(f"current: {current_version}")
     print(f"target:  {target_version}")
@@ -1165,9 +1435,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
                 )
         if version_changed:
             print(
-                "dry-run: would update "
-                f"{PYPROJECT_PATH.relative_to(PROJECT_ROOT)} and "
-                f"{CONSTANTS_PATH.relative_to(PROJECT_ROOT)}"
+                f"dry-run: would update {primary_target.display_name} version source(s)"
             )
         else:
             print(
@@ -1177,8 +1445,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
         for step in build_postupdate_steps():
             run_command(step.command, cwd=step.cwd, dry_run=True)
         if version_changed:
+            release_paths = [
+                str(primary_target.pyproject_path.relative_to(PROJECT_ROOT))
+            ]
+            if primary_target.constants_path is not None:
+                release_paths.append(
+                    str(primary_target.constants_path.relative_to(PROJECT_ROOT))
+                )
+            release_paths.append("uv.lock")
             run_command(
-                ("git", "add", "pyproject.toml", "weft/_constants.py", "uv.lock"),
+                ("git", "add", *release_paths),
                 dry_run=True,
             )
             run_command(
@@ -1188,20 +1464,28 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
             print(
                 "dry-run: no release commit needed because version files already match"
             )
+        run_command(("git", "push", "origin", "main"), dry_run=True)
+        wait_for_test_workflow(planning_head_commit, dry_run=True)
+        require_release_sha_on_origin_main(planning_head_commit, dry_run=True)
         _prepare_tag_action(
             release_state,
             tag_action=root_tag_action,
             dry_run=True,
+            target_commit=planning_head_commit,
         )
-        run_command(("git", "push"), dry_run=True)
         _push_tag_action(release_state, tag_action=root_tag_action, dry_run=True)
         for plan in planned_extension_releases:
-            _prepare_tag_action(plan.state, tag_action=plan.tag_action, dry_run=True)
+            _prepare_tag_action(
+                plan.state,
+                tag_action=plan.tag_action,
+                dry_run=True,
+                target_commit=planning_head_commit,
+            )
             _push_tag_action(plan.state, tag_action=plan.tag_action, dry_run=True)
         print(
             "dry-run: next step is to wait for "
-            f"{ROOT_RELEASE_GATE_WORKFLOW} on {release_state.tag_name} and any "
-            "extension release gates triggered by pushed namespaced tags"
+            f"{release_state.target.release_gate_workflow} on "
+            f"{release_state.tag_name} and any explicitly selected package tags"
         )
         return 0
 
@@ -1213,12 +1497,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
             run_command(command, env_overrides=precheck_env)
 
     if version_changed:
-        write_target_version(ROOT_RELEASE_TARGET, target_version)
-        print(
-            "Updated version files: "
-            f"{PYPROJECT_PATH.relative_to(PROJECT_ROOT)}, "
-            f"{CONSTANTS_PATH.relative_to(PROJECT_ROOT)}"
-        )
+        write_target_version(primary_target, target_version)
+        print(f"Updated version files: {primary_target.display_name} version source(s)")
     else:
         print(
             f"Reusing current unpublished version {target_version}; version files unchanged"
@@ -1228,37 +1508,42 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
         run_command(step.command, cwd=step.cwd)
 
     if version_changed:
-        run_command(("git", "add", "pyproject.toml", "weft/_constants.py", "uv.lock"))
+        release_paths = [str(primary_target.pyproject_path.relative_to(PROJECT_ROOT))]
+        if primary_target.constants_path is not None:
+            release_paths.append(
+                str(primary_target.constants_path.relative_to(PROJECT_ROOT))
+            )
+        release_paths.append("uv.lock")
+        run_command(("git", "add", *release_paths))
         run_command(("git", "commit", "-m", f"Release {target_version}"))
 
     head_commit = current_head_commit()
-    root_tag_action = plan_tag_action(
-        release_state,
-        head_commit=head_commit,
-        version_changed=version_changed,
-        allow_retag=args.retag,
-    )
-    extension_releases, _ = collect_extension_release_plans(
-        head_commit=head_commit,
-        allow_retag=args.retag,
-    )
+    run_command(("git", "push", "origin", "main"))
+    wait_for_test_workflow(head_commit)
+    require_release_sha_on_origin_main(head_commit)
 
-    _prepare_tag_action(
-        release_state,
-        tag_action=root_tag_action,
-        dry_run=False,
+    validated_releases = revalidate_release_states_after_ci(
+        selected_states,
+        head_commit=head_commit,
+        allow_retag=args.retag,
     )
-    run_command(("git", "push"))
-    _push_tag_action(release_state, tag_action=root_tag_action, dry_run=False)
-    for plan in extension_releases:
-        _prepare_tag_action(plan.state, tag_action=plan.tag_action, dry_run=False)
-        _push_tag_action(plan.state, tag_action=plan.tag_action, dry_run=False)
+    pushed_tags: list[str] = []
+    for release_plan in validated_releases:
+        _prepare_tag_action(
+            release_plan.state,
+            tag_action=release_plan.tag_action,
+            dry_run=False,
+            target_commit=head_commit,
+        )
+        _push_tag_action(
+            release_plan.state,
+            tag_action=release_plan.tag_action,
+            dry_run=False,
+        )
+        pushed_tags.append(release_plan.state.tag_name)
 
     print(
-        "Next step: wait for "
-        f"{ROOT_RELEASE_GATE_WORKFLOW} on {release_state.tag_name}; any pushed "
-        "extension tags will run their package-specific release gates and publish "
-        "their distributions to PyPI after those gates pass"
+        "Next step: wait for the release gates triggered by " + ", ".join(pushed_tags)
     )
     return 0
 
@@ -1266,7 +1551,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except RuntimeError as exc:
+    except (RuntimeError, TypeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     except subprocess.CalledProcessError as exc:
