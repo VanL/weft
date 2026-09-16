@@ -55,6 +55,13 @@ from weft.core.terminal_handoff_transport import (
 from weft.ext import RunnerCapabilities, RunnerHandle
 
 
+def _process_gone_or_zombie(process: psutil.Process) -> bool:
+    try:
+        return not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
 def test_runner_outcome_rejects_duplicate_worker_pid_identity() -> None:
     """Completed outcomes have one runtime identity authority [CC-3.2]."""
     with pytest.raises(TypeError, match="worker_pid"):
@@ -170,7 +177,7 @@ def test_verified_tree_terminates_matching_real_descendants(kill: bool) -> None:
             process.pid, identity, kill=kill, timeout=0.5
         )
         assert process.poll() is not None
-        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+        assert _process_gone_or_zombie(child)
     finally:
         if process.poll() is None:
             process.kill()
