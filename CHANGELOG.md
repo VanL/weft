@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## [0.9.101] - 2026-09-16
+
+### Changed
+
+- Optimized CI and release-gate execution so this patch release can validate
+  the new workflow behavior and measure the resulting CI speedup without
+  product-code changes.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.36`, `weft-docker 0.9.76`,
+  `weft-macos-sandbox 0.6.5`, and `weft-microsandbox 0.5.6`.
+
 ## [0.9.100] - 2026-09-16
 
 ### Added
