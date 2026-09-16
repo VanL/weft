@@ -88,6 +88,12 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         config: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
+        with self._initialization_scope():
+            self._initialize_consumer_runtime()
+
+    def _initialize_consumer_runtime(self) -> None:
+        """Initialize Consumer-owned state and eager broker effects."""
+
         self._init_interactive()
         self._active_raw_message: str | None = None
         self._active_message_timestamp: int | None = None

@@ -357,6 +357,18 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
             assert getattr(worker, name) is not getattr(task, name), name
         assert worker._queue_obj is None
         assert worker._ctrl_out_queue_obj is None
+        assert worker._broker_session is None
+        assert worker._owned_fixed_queues == []
+        assert worker._owned_dynamic_queues == {}
+        assert task._owns_queue is False
+        assert worker._owns_queue is True
+        for name in (
+            "_broker_session",
+            "_owned_fixed_queues",
+            "_owned_dynamic_queues",
+            "_owns_queue",
+        ):
+            assert name in _WORKER_SNAPSHOT_REPLACED_FIELDS
         assert worker._strategy is None
         assert worker._multi_activity_waiter is None
         assert task._drive_owner_thread is threading.current_thread()

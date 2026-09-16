@@ -637,6 +637,28 @@ class ServiceTask(BaseTask):
             self._stop_service_worker(name, deadline=deadline)
         super()._cleanup_task_resources(deadline)
 
+    def _abort_partial_initialization(self) -> None:
+        """Stop service workers before shared constructor unwind closes queues."""
+
+        failures: list[BaseException] = []
+        deadline = time.monotonic() + TASK_REACTOR_WAKEUP_MAX_SECONDS
+        for name in tuple(self._service_worker_registrations):
+            try:
+                self._stop_service_worker(name, deadline=deadline)
+            except BaseException as exc:  # noqa: BLE001 - construction cleanup boundary
+                failures.append(exc)
+        try:
+            super()._abort_partial_initialization()
+        except BaseException as exc:  # noqa: BLE001 - construction cleanup boundary
+            failures.append(exc)
+        if failures:
+            primary = failures[0]
+            for secondary in failures[1:]:
+                primary.add_note(
+                    f"Additional service construction cleanup failure: {secondary!r}"
+                )
+            raise primary
+
     @staticmethod
     def _timeout_until_ns(due_ns: int, *, now_ns: int) -> float:
         """Return seconds until a nanosecond deadline."""

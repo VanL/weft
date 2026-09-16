@@ -43,13 +43,15 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 8.2.1 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 4.2.1 or newer. These coordinated
-floors provide backend API v8, ascending public-message-ID default selection,
+Weft requires SimpleBroker 8.3.0 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 4.3.0 or newer. These coordinated
+floors provide backend API v9, ascending public-message-ID default selection,
 surrogate-free SQL schema v6, bounded dump watermarks, immutable
 invocation/handle configuration snapshots, typed queue result overloads,
-public closeable queue iterator types, ID-cursor live peek pagination, and the synchronized watcher lifecycle
-contract used by Weft.
+public closeable queue iterator types, ID-cursor live peek pagination,
+synchronized watcher lifecycle and owned-versus-borrowed queue cleanup, and
+the public `BrokerSession` connect/queue/connection/recycle_thread/close and
+context-manager lifetime contract used by Weft.
 
 Upgrading a SQLite or PostgreSQL target from the v7 package line to v8 is a
 coordinated cold cutover. Stop all v7 clients and sidecar transactions, take a
@@ -62,6 +64,8 @@ _Implementation mapping_: `weft/commands/queue.py` delegates to
 `simplebroker.commands`; `weft/context.py` injects the resolved broker target;
 `weft/core/tasks/base.py` and `weft/core/tasks/multiqueue_watcher.py` build
 task-local queue handles from the same broker target.
+
+Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
 Current consequences:
 
@@ -187,18 +191,21 @@ under `tests/commands/`.
 
 Current behavior:
 
-- Tasks, including services and Monitor maintenance workers, reuse persistent
-  broker connections by default. Runtime helpers borrow the owning task's queue
-  connection, or use bounded persistent handles in the same resolved session.
-  Dynamic queue handles must not accumulate in an unbounded task cache.
-  Any transient exception must identify why the owned connection cannot be
-  used. Connection lifetime does not extend transaction lifetime: sidecar
-  transactions commit or roll back within each bounded operation, never across
-  reactor waits, external I/O, or thread handoff. Worker-local handles are
-  released by their worker's existing cleanup boundary. Task cleanup includes
-  all configured watched queues, not just queues visited through its cache;
-  duplicate handles close once. After final endpoint, streaming, and control
-  writes, the current thread's core is recycled before its queue leases close.
+- Tasks use persistent SimpleBroker `BrokerSession` ownership by default.
+  Shared task infrastructure owns fixed queue leases and the executing thread's
+  session scope; subclasses and helpers borrow that ownership. A complete task
+  drive scope exits on the thread that used the cached core, on both normal and
+  exceptional exit. Connection reuse spans turns, not SQL
+  transactions: transactions end before waits, yields, external I/O, and thread
+  handoff. Cleanup releases waiters and iterators before final queue writes and
+  session exit. This ordering includes caller-owned observers with active
+  operations on the same thread and process-session key, not just the task's own
+  handles. Close failures follow the owning boundary's recording or propagation
+  contract; Weft does not depend on a private upstream refusal type or report a
+  refused close as success. Dynamic queue discovery and watcher membership must
+  not retain every historical queue handle. Independent bounded connections
+  remain valid where no owner exists or a documented operation cannot use the
+  owned session.
 - context resolution returns a `WeftContext` with a resolved broker target
 - queue and broker helpers are created from that broker target
 - file-backed and non-file-backed backends share the same normal runtime path

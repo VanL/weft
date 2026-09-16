@@ -105,6 +105,12 @@ class HeartbeatTask(ServiceTask):
         config: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
+        with self._initialization_scope():
+            self._initialize_heartbeat_runtime(taskspec)
+
+    def _initialize_heartbeat_runtime(self, taskspec: TaskSpec) -> None:
+        """Initialize heartbeat state and publish its eager service lifecycle."""
+
         self._context: WeftContext = self._task_context()
         self._ownership_check_required = True
         self._last_endpoint_registry_version: int | None = None

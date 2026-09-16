@@ -372,6 +372,12 @@ class Manager(ServiceTask):
     ) -> None:
         thread_event = cast(threading.Event | None, stop_event)
         super().__init__(db, taskspec, stop_event=thread_event, config=config)
+        with self._initialization_scope():
+            self._initialize_manager_runtime(taskspec)
+
+    def _initialize_manager_runtime(self, taskspec: TaskSpec) -> None:
+        """Initialize Manager-owned state and eager registry effects."""
+
         discard_v1_service_registry_rows(self._queue(WEFT_SERVICES_REGISTRY_QUEUE))
         self._register_service_worker(
             ServiceWorkerSpec(

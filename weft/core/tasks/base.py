@@ -30,7 +30,8 @@ import time
 import weakref
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -298,6 +299,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._turn_active = False
         self._wait_active = False
         self._drive_loop_active = False
+        self._drive_scope_active = False
         self._strategy_started = False
         self._pending_termination_sources: deque[TerminationRequestSource] = deque()
         self._parent_loss_watch_active = False
@@ -306,6 +308,10 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._queue_names = self._resolve_queue_names()
         self._validate_reactor_topology()
         queue_configs = self._build_queue_configs()
+        self._fixed_queue_names = {
+            *self._reactor_queue_roles().values(),
+            *self._reactor_support_routes().values(),
+        }
 
         resolved_config = resolve_runtime_config(config)
         self._weft_config = dict(resolved_config)
@@ -331,6 +337,12 @@ class BaseTask(MultiQueueWatcher, ABC):
             persistent=True,
             config=resolved_config,
         )
+
+        with self._initialization_scope():
+            self._initialize_base_task_runtime()
+
+    def _initialize_base_task_runtime(self) -> None:
+        """Open fixed queues and publish the eager initial lifecycle state."""
 
         # Pre-register canonical queues so they share the watcher's connection pool
         for queue_name in self._queue_names.values():
@@ -358,13 +370,60 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._terminal_tid_mapping_published = False
 
         self.enable_process_title = bool(
-            getattr(taskspec.spec, "enable_process_title", True)
+            getattr(self.taskspec.spec, "enable_process_title", True)
         )
         if self.enable_process_title:
             self._update_process_title("init")
         self._register_tid_mapping()
         self._claim_configured_runtime_endpoint()
         self._report_state_change(event="task_initialized")
+
+    @contextmanager
+    def _initialization_scope(self) -> Iterator[None]:
+        """Recycle construction-thread state or unwind partial task resources."""
+
+        try:
+            yield
+            session = self._broker_session
+            if session is not None:
+                session.recycle_thread()
+        except BaseException as exc:
+            try:
+                self._abort_partial_initialization()
+            except BaseException as cleanup_exc:  # noqa: BLE001 - cleanup boundary
+                exc.add_note(f"Task construction cleanup also failed: {cleanup_exc!r}")
+            raise
+
+    def _abort_partial_initialization(self) -> None:
+        """Release acquired resources without entering task finalization."""
+
+        failures: list[BaseException] = []
+
+        def attempt(operation: Callable[[], None]) -> None:
+            try:
+                operation()
+            except BaseException as exc:  # noqa: BLE001 - cleanup boundary
+                failures.append(exc)
+
+        if hasattr(self, "_worker_stopping"):
+            attempt(
+                lambda: self._stop_worker_lanes(
+                    time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS
+                )
+            )
+        if hasattr(self, "_endpoint_registration_name"):
+            attempt(self.unregister_endpoint_name)
+        if hasattr(self, "_streaming_session_info"):
+            attempt(self._end_streaming_session)
+        attempt(self._reset_multi_activity_waiter)
+        attempt(self._close_owned_broker_resources)
+        if failures:
+            primary = failures[0]
+            for secondary in failures[1:]:
+                primary.add_note(
+                    f"Additional construction cleanup failure: {secondary!r}"
+                )
+            raise primary
 
     # ------------------------------------------------------------------
     # Queue configuration
@@ -553,12 +612,16 @@ class BaseTask(MultiQueueWatcher, ABC):
         if managed is not None:
             self._queue_cache[name] = managed
         else:
-            queue_obj = Queue(
-                name,
-                db_path=self._db_path,
-                persistent=True,
-                config=self._broker_config,
-            )
+            if name in self._fixed_queue_names:
+                queue_obj = self._open_fixed_queue(name)
+            else:
+                queue_obj = Queue(
+                    name,
+                    db_path=self._db_path,
+                    persistent=True,
+                    config=self._broker_config,
+                )
+                self._register_dynamic_queue(queue_obj)
             self._queue_cache[name] = queue_obj
             self._owned_queue_names.add(name)
 
@@ -892,24 +955,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         attempt("endpoint", self.unregister_endpoint_name)
         attempt("streaming_session", self._end_streaming_session)
         attempt("control_queues", self._cleanup_standard_control_queues_on_exit)
-        queue_handles: list[Queue] = list(self._queue_cache.values())
-        queue_handles.extend(runtime.queue for runtime in self._queues.values())
-        seen_queue_ids: set[int] = set()
-        for queue in queue_handles:
-            queue_id = id(queue)
-            if queue_id in seen_queue_ids:
-                continue
-            seen_queue_ids.add(queue_id)
-            # Recycle this thread's core before releasing its session lease.
-            # Queue cleanup also covers the primary watcher's auxiliary handle.
-            attempt(f"queue_connections:{queue.name}", queue.cleanup_connections)
-            try:
-                queue.close()
-            except (BrokerError, OSError, RuntimeError) as exc:
-                failures.append(exc)
-                logger.warning(
-                    "Failed to close queue %s during cleanup", queue, exc_info=True
-                )
+        attempt("broker_resources", self._close_owned_broker_resources)
         self._owned_queue_names.clear()
         self._queue_cache.clear()
         self._spilled_output_dirs.clear()
@@ -921,7 +967,12 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         self._cleanup_task_resources(deadline)
 
-    def _finalize_task_once(self, deadline: float) -> bool:
+    def _finalize_task_once(
+        self,
+        deadline: float,
+        *,
+        exiting_drive_scope: bool = False,
+    ) -> bool:
         """Finalize task-owned resources at most once.
 
         Spec:
@@ -939,6 +990,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 or self._turn_active
                 or self._wait_active
                 or self._drive_loop_active
+                or (self._drive_scope_active and not exiting_drive_scope)
             ):
                 return False
             self._task_lifecycle = TaskReactorLifecycle.FINALIZING
@@ -1007,6 +1059,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 or self._turn_active
                 or self._wait_active
                 or self._drive_loop_active
+                or self._drive_scope_active
             )
 
         self._stop_event.set()
@@ -1028,6 +1081,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 or self._turn_active
                 or self._wait_active
                 or self._drive_loop_active
+                or self._drive_scope_active
             )
         if active:
             if join and self._remaining_deadline(deadline) <= 0:
@@ -1123,69 +1177,100 @@ class BaseTask(MultiQueueWatcher, ABC):
         - docs/specifications/07-System_Invariants.md [IMPL.10]
         """
 
-        current = threading.current_thread()
-        with self._task_lifecycle_lock:
-            self._claim_or_verify_drive_owner_locked(current)
-            if self._drive_loop_active or self._turn_active or self._wait_active:
-                raise RuntimeError(f"Task {self.tid} reactor drive loop is reentrant")
-            self._start_pending = False
-            self._drive_loop_active = True
-            self._drive_owner_ident = current.ident
-            if self._task_lifecycle is TaskReactorLifecycle.STARTING:
-                self._task_lifecycle = TaskReactorLifecycle.DRIVING
-        self._running_event.set()
+        with self.drive_scope():
+            current = threading.current_thread()
+            with self._task_lifecycle_lock:
+                if self._drive_loop_active or self._turn_active or self._wait_active:
+                    raise RuntimeError(
+                        f"Task {self.tid} reactor drive loop is reentrant"
+                    )
+                self._start_pending = False
+                self._drive_loop_active = True
+                self._drive_owner_ident = current.ident
+                if self._task_lifecycle is TaskReactorLifecycle.STARTING:
+                    self._task_lifecycle = TaskReactorLifecycle.DRIVING
+            self._running_event.set()
 
-        iterations = 0
-        try:
-            while True:
-                with self._task_lifecycle_lock:
-                    lifecycle = self._task_lifecycle
-                if lifecycle in {
-                    TaskReactorLifecycle.FINALIZING,
-                    TaskReactorLifecycle.CLOSED,
-                }:
-                    break
-                if max_iterations is not None and iterations >= max_iterations:
-                    break
+            iterations = 0
+            try:
+                while True:
+                    with self._task_lifecycle_lock:
+                        lifecycle = self._task_lifecycle
+                    if lifecycle in {
+                        TaskReactorLifecycle.FINALIZING,
+                        TaskReactorLifecycle.CLOSED,
+                    }:
+                        break
+                    if max_iterations is not None and iterations >= max_iterations:
+                        break
 
-                pending_termination = self._has_pending_termination_request()
-                if not pending_termination:
+                    pending_termination = self._has_pending_termination_request()
+                    if not pending_termination:
+                        if self._stop_event.is_set():
+                            break
+                        if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
+                            break
+                        if self.should_stop and not self._has_worker_activity():
+                            break
+
+                    self.process_once()
+                    iterations += 1
+                    if max_iterations is not None and iterations >= max_iterations:
+                        break
+
+                    if self._has_pending_termination_request():
+                        continue
                     if self._stop_event.is_set():
                         break
                     if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
                         break
                     if self.should_stop and not self._has_worker_activity():
                         break
+                    if self._has_pending_worker_results():
+                        continue
 
-                self.process_once()
-                iterations += 1
-                if max_iterations is not None and iterations >= max_iterations:
-                    break
+                    wait_timeout: float | None = poll_interval
+                    candidate_timeout = self.next_wait_timeout()
+                    if candidate_timeout is not None:
+                        wait_timeout = max(0.0, float(candidate_timeout))
+                    if wait_timeout is not None and (
+                        wait_timeout > 0 or candidate_timeout is not None
+                    ):
+                        self.wait_for_activity(timeout=wait_timeout)
+            finally:
+                with self._task_lifecycle_lock:
+                    self._drive_loop_active = False
+                    self._start_pending = False
 
-                if self._has_pending_termination_request():
-                    continue
-                if self._stop_event.is_set():
-                    break
-                if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
-                    break
-                if self.should_stop and not self._has_worker_activity():
-                    break
-                if self._has_pending_worker_results():
-                    continue
+    @final
+    @contextmanager
+    def drive_scope(self) -> Iterator[None]:
+        """Own one complete manual or automatic reactor-driving lifetime."""
 
-                wait_timeout: float | None = poll_interval
-                candidate_timeout = self.next_wait_timeout()
-                if candidate_timeout is not None:
-                    wait_timeout = max(0.0, float(candidate_timeout))
-                if wait_timeout is not None and (
-                    wait_timeout > 0 or candidate_timeout is not None
-                ):
-                    self.wait_for_activity(timeout=wait_timeout)
+        current = threading.current_thread()
+        with self._task_lifecycle_lock:
+            self._claim_or_verify_drive_owner_locked(current)
+            if (
+                self._drive_scope_active
+                or self._drive_loop_active
+                or self._turn_active
+                or self._wait_active
+            ):
+                raise RuntimeError(f"Task {self.tid} reactor drive scope is reentrant")
+            self._drive_scope_active = True
+
+        try:
+            with self._task_context().session():
+                try:
+                    yield
+                finally:
+                    self._finalize_task_once(
+                        time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS,
+                        exiting_drive_scope=True,
+                    )
         finally:
             with self._task_lifecycle_lock:
-                self._drive_loop_active = False
-                self._start_pending = False
-            self._finalize_task_once(time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS)
+                self._drive_scope_active = False
 
     def run_in_thread(self) -> threading.Thread:
         """Start the canonical BaseTask drive loop in a background thread."""
@@ -1329,6 +1414,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 self._turn_active = False
                 if (
                     not self._drive_loop_active
+                    and not self._drive_scope_active
                     and self._task_lifecycle is TaskReactorLifecycle.STOP_REQUESTED
                 ):
                     finalize_manual_turn = True
@@ -1419,6 +1505,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 self._wait_active = False
                 if (
                     not self._drive_loop_active
+                    and not self._drive_scope_active
                     and self._task_lifecycle is TaskReactorLifecycle.STOP_REQUESTED
                 ):
                     finalize_standalone_wait = True

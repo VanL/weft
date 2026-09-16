@@ -1683,6 +1683,30 @@ def test_inline_manager_exposes_supervisor_liveness_without_ping(
         assert [item["tid"] for item in records] == [record["tid"]]
 
 
+@pytest.mark.shared
+def test_inline_manager_observers_close_before_driver_scope_exit() -> None:
+    """Bounded harness observers end before the inline driver's owned teardown."""
+
+    harness = WeftTestHarness()
+    harness.__enter__()
+    try:
+        record = harness.ensure_foreground_manager()
+        manager, thread, _stop = harness._inline_managers[0]
+        assert [item["tid"] for item in harness._list_active_manager_records()] == [
+            record["tid"]
+        ]
+
+        harness.cleanup()
+
+        assert not thread.is_alive()
+        assert manager._task_lifecycle.value == "closed"
+        assert manager._cleanup_errors == ()
+        assert manager._broker_session is None
+    finally:
+        if not harness._closed:
+            harness.cleanup()
+
+
 def _inline_runtime_handle(tid: str) -> RunnerHandle:
     return RunnerHandle(
         runner="host",

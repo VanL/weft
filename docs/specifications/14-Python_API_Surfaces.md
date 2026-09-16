@@ -54,7 +54,14 @@ unprefixed keys, as specified in [SB-0.4]. Create a new context to apply changed
 configuration; copying its values does not reconfigure live handles. Broker
 types remain SimpleBroker's public contracts.
 
+`WeftContext.session()` returns a new SimpleBroker `BrokerSession` bound to the
+context's resolved target and `Config`. It is intended for a `with` block
+entered and exited by the executing thread. `WeftContext` and `WeftClient` do
+not cache a live session. Existing `queue()` and `broker()` ownership and
+defaults are unchanged.
+
 Related plan: [SimpleBroker configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
+Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
 Extension value types preserve their existing fields and behavior.
 `CommandSessionProtocol` exposes readonly `pid`, `handle`, `last_metrics`;

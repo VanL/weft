@@ -54,6 +54,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from simplebroker import (
+    BrokerSession,
     BrokerTarget,
     Config,
     Queue,
@@ -157,6 +158,16 @@ class WeftContext:
             persistent=persistent,
             config=self.broker_config,
         )
+
+    def session(self) -> BrokerSession:
+        """Return a caller-owned broker session bound to this context snapshot.
+
+        Enter and exit the session on the thread that performs broker work.
+
+        Spec: docs/specifications/14-Python_API_Surfaces.md [PY-1].
+        """
+
+        return BrokerSession.connect(self.broker_target, config=self.broker_config)
 
     @contextmanager
     def broker(self) -> Iterator[Any]:

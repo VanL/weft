@@ -301,12 +301,10 @@ class WeftTestHarness:
         stop_event = threading.Event()
 
         def _serve_inline_manager() -> None:
-            try:
+            with manager.drive_scope():
                 while not stop_event.is_set() and not manager.should_stop:
                     manager.process_once()
                     time.sleep(0.01)
-            finally:
-                manager.cleanup()
 
         thread = threading.Thread(
             target=_serve_inline_manager,

@@ -122,6 +122,12 @@ class LivenessMonitor(ServiceTask):
         self._next_full_reconcile_at = self._monotonic()
         self._next_state_refresh_at = self._next_full_reconcile_at
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
+        with self._initialization_scope():
+            self._initialize_liveness_runtime()
+
+    def _initialize_liveness_runtime(self) -> None:
+        """Start the probe lane and publish the eager service lifecycle."""
+
         self._register_service_worker(
             ServiceWorkerSpec(
                 name=LIVENESS_PROBE_WORKER_NAME,

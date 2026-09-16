@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import sqlite3
+import threading
 import time
 import weakref
 from collections.abc import Iterator
@@ -14,7 +15,7 @@ from typing import Any, Literal
 
 import pytest
 
-from simplebroker import Config, Queue
+from simplebroker import BrokerSession, Config, Queue
 from tests.core.test_manager import make_manager_spec
 from tests.tasks.test_liveness_monitor import _mapping, _taskspec
 from weft._constants import PIPELINE_RUNTIME_METADATA_KEY, WEFT_CONFIG_DEFAULTS
@@ -101,12 +102,292 @@ def test_consumer_cleanup_releases_thread_core_with_surviving_owner(
         assert owner.read_one() == "still usable"
 
 
-@pytest.mark.parametrize("failure", ["none", "cleanup", "close", "both"])
-def test_consumer_queue_cleanup_attempts_each_handle_once_after_failure(
+def test_consumer_drive_scope_releases_driver_core_after_cross_thread_construction(
     counted_connections: tuple[WeftContext, list[Any]],
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    failure: str,
+) -> None:
+    ctx, _connections = counted_connections
+    construction_thread = threading.get_ident()
+    recycled_threads: list[int] = []
+    original_recycle = BrokerSession.recycle_thread
+
+    def recycle(session: BrokerSession) -> None:
+        recycled_threads.append(threading.get_ident())
+        original_recycle(session)
+
+    monkeypatch.setattr(BrokerSession, "recycle_thread", recycle)
+    task = Consumer(
+        ctx.broker_target,
+        _taskspec(str(time.time_ns()), ctx.root),
+        config=ctx.config,
+    )
+    assert recycled_threads
+    assert set(recycled_threads) == {construction_thread}
+    with ctx.queue("drive.scope.keeper", persistent=True) as keeper:
+        with keeper.get_connection() as keeper_core:
+            keeper_core.list_queues()
+
+        def drive() -> tuple[weakref.ReferenceType[Any], int]:
+            with task._get_connected_queue().get_connection() as driver_core:
+                assert driver_core is not keeper_core
+                driver_core.list_queues()
+                reference = weakref.ref(driver_core)
+            task.run_until_stopped(poll_interval=0.0, max_iterations=1)
+            return reference, threading.get_ident()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            driver_reference, driver_thread = executor.submit(drive).result()
+
+        assert driver_thread != construction_thread
+        gc.collect()
+        assert driver_reference() is None
+        assert task._cleanup_errors == ()
+        assert task._task_lifecycle.value == "closed"
+        with keeper.get_connection() as current:
+            assert current is keeper_core
+
+
+def test_consumer_drive_scope_reuses_one_core_across_successive_turns(
+    counted_connections: tuple[WeftContext, list[Any]],
+) -> None:
+    ctx, connections = counted_connections
+    task = Consumer(
+        ctx.broker_target,
+        _taskspec(str(time.time_ns()), ctx.root),
+        config=ctx.config,
+    )
+
+    with task.drive_scope():
+        task.process_once()
+        with task._get_connected_queue().get_connection() as first_core:
+            first_core.list_queues()
+        opened_after_first_turn = len(connections)
+
+        task.process_once()
+        with task._get_connected_queue().get_connection() as second_core:
+            second_core.list_queues()
+
+        assert second_core is first_core
+        assert len(connections) == opened_after_first_turn
+
+    assert task._task_lifecycle.value == "closed"
+    assert task._cleanup_errors == ()
+
+
+def test_consumer_drive_scope_rejects_nested_entry(
+    counted_connections: tuple[WeftContext, list[Any]],
+) -> None:
+    ctx, _connections = counted_connections
+    task = Consumer(
+        ctx.broker_target,
+        _taskspec(str(time.time_ns()), ctx.root),
+        config=ctx.config,
+    )
+
+    with (
+        task.drive_scope(),
+        pytest.raises(RuntimeError, match="drive scope is reentrant"),
+        task.drive_scope(),
+    ):
+        pass
+
+
+def test_consumer_drive_scope_rejects_entry_during_active_turn(
+    counted_connections: tuple[WeftContext, list[Any]],
+) -> None:
+    ctx, _connections = counted_connections
+    task = Consumer(
+        ctx.broker_target,
+        _taskspec(str(time.time_ns()), ctx.root),
+        config=ctx.config,
+    )
+    task._turn_active = True
+    try:
+        with (
+            pytest.raises(RuntimeError, match="drive scope is reentrant"),
+            task.drive_scope(),
+        ):
+            pass
+    finally:
+        task._turn_active = False
+        task.stop(join=False)
+
+
+def test_initialization_recycle_failure_unwinds_inventory_session(
+    counted_connections: tuple[WeftContext, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, _connections = counted_connections
+    original_recycle = BrokerSession.recycle_thread
+    recycle_calls = 0
+
+    def recycle(session: BrokerSession) -> None:
+        nonlocal recycle_calls
+        recycle_calls += 1
+        if recycle_calls == 2:
+            raise RuntimeError("injected initialization recycle failure")
+        original_recycle(session)
+
+    monkeypatch.setattr(BrokerSession, "recycle_thread", recycle)
+    with pytest.raises(RuntimeError, match="initialization recycle failure"):
+        Consumer(
+            ctx.broker_target,
+            _taskspec(str(time.time_ns()), ctx.root),
+            config=ctx.config,
+        )
+
+    assert recycle_calls == 2
+
+
+@pytest.mark.parametrize(
+    ("body_failure", "close_failure", "expected"),
+    [
+        (None, RuntimeError("driver close failed"), RuntimeError),
+        (ValueError("body failed"), RuntimeError("driver close failed"), ValueError),
+        (ValueError("body failed"), KeyboardInterrupt(), KeyboardInterrupt),
+    ],
+)
+def test_consumer_drive_scope_preserves_session_exit_failure_priority(
+    counted_connections: tuple[WeftContext, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    body_failure: BaseException | None,
+    close_failure: BaseException,
+    expected: type[BaseException],
+) -> None:
+    ctx, _connections = counted_connections
+    task = Consumer(
+        ctx.broker_target,
+        _taskspec(str(time.time_ns()), ctx.root),
+        config=ctx.config,
+    )
+    inventory_session = task._broker_session
+    original_close = BrokerSession.close
+    failed_driver_sessions: list[BrokerSession] = []
+
+    def close(session: BrokerSession) -> None:
+        if session is inventory_session:
+            original_close(session)
+            return
+        failed_driver_sessions.append(session)
+        raise close_failure
+
+    monkeypatch.setattr(BrokerSession, "close", close)
+    with pytest.raises(expected) as exc_info, task.drive_scope():
+        if body_failure is not None:
+            raise body_failure
+
+    if expected is ValueError:
+        assert exc_info.value is body_failure
+        notes = getattr(exc_info.value, "__notes__", ())
+        assert any("driver close failed" in note for note in notes)
+    else:
+        assert exc_info.value is close_failure
+    assert len(failed_driver_sessions) == 1
+    original_close(failed_driver_sessions[0])
+
+
+def test_foreign_stop_with_same_key_operation_records_refused_inventory_close(
+    counted_connections: tuple[WeftContext, list[Any]],
+) -> None:
+    ctx, _connections = counted_connections
+    task = Consumer(
+        ctx.broker_target,
+        _taskspec(str(time.time_ns()), ctx.root),
+        config=ctx.config,
+    )
+    task.process_once()
+    with ctx.queue("foreign.stop.keeper", persistent=True) as keeper:
+        with keeper.get_connection() as keeper_core:
+            keeper_core.list_queues()
+
+        def stop_from_foreign_operation() -> None:
+            with ctx.queue("foreign.stop.operation", persistent=True) as observer:
+                observer.write("held")
+                rows = observer.peek_generator()
+                assert next(rows) == "held"
+                try:
+                    task.stop(join=False)
+                finally:
+                    rows.close()
+
+                assert task._task_lifecycle.value == "closed"
+                assert task._cleanup_errors
+                assert task._broker_session is not None
+                task.stop(join=False)
+                assert task._cleanup_errors
+                with pytest.raises(RuntimeError, match="reactor is closed"):
+                    task.process_once()
+                # Test teardown explicitly releases the retained handle after
+                # proving task lifecycle calls do not retry CLOSED finalization.
+                task._broker_session.close()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(stop_from_foreign_operation).result()
+
+        with keeper.get_connection() as current:
+            assert current is keeper_core
+
+
+def test_foreign_stop_defers_idle_active_scope_finalization_to_owner(
+    counted_connections: tuple[WeftContext, list[Any]],
+) -> None:
+    ctx, _connections = counted_connections
+    task = Consumer(
+        ctx.broker_target,
+        _taskspec(str(time.time_ns()), ctx.root),
+        config=ctx.config,
+    )
+    scope_entered = threading.Event()
+    release_scope = threading.Event()
+
+    def own_idle_scope() -> None:
+        with task.drive_scope():
+            scope_entered.set()
+            assert release_scope.wait(timeout=5.0)
+
+    owner = threading.Thread(target=own_idle_scope)
+    owner.start()
+    assert scope_entered.wait(timeout=2.0)
+
+    task.stop(join=False)
+
+    assert task._task_lifecycle.value == "stop_requested"
+    assert task._cleanup_errors == ()
+    assert task._broker_session is not None
+
+    release_scope.set()
+    owner.join(timeout=5.0)
+    assert not owner.is_alive()
+    assert task._task_lifecycle.value == "closed"
+    assert task._cleanup_errors == ()
+    assert task._broker_session is None
+
+
+def test_post_super_initialization_failure_releases_owned_resources(
+    counted_connections: tuple[WeftContext, list[Any]],
+) -> None:
+    ctx, _connections = counted_connections
+
+    class FailingConsumer(Consumer):
+        def __init__(self) -> None:
+            super().__init__(
+                ctx.broker_target,
+                _taskspec(str(time.time_ns()), ctx.root),
+                config=ctx.config,
+            )
+            with self._initialization_scope():
+                self._queue("failing.consumer.extra").has_pending()
+                raise RuntimeError("injected post-super initialization failure")
+
+    with pytest.raises(RuntimeError, match="post-super initialization failure"):
+        FailingConsumer()
+
+
+@pytest.mark.parametrize("fail_primary_close", [False, True])
+def test_consumer_closes_each_queue_before_inventory_session_after_failure(
+    counted_connections: tuple[WeftContext, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    fail_primary_close: bool,
 ) -> None:
     ctx, _connections = counted_connections
     task = Consumer(
@@ -117,39 +398,36 @@ def test_consumer_queue_cleanup_attempts_each_handle_once_after_failure(
     primary = task._queue_obj
     extra = task._queue("cleanup.extra")
     handles = {id(primary), id(extra)}
-    attempts: dict[int, list[str]] = {key: [] for key in handles}
-    original_cleanup = Queue.cleanup_connections
+    attempts: dict[int, int] = dict.fromkeys(handles, 0)
+    session_close_entries: list[dict[int, int]] = []
     original_close = Queue.close
-
-    def cleanup(queue: Queue) -> None:
-        if id(queue) in handles:
-            attempts[id(queue)].append("cleanup")
-        original_cleanup(queue)
-        if queue is primary and failure in {"cleanup", "both"}:
-            raise RuntimeError("injected connection cleanup failure")
+    original_session_close = BrokerSession.close
 
     def close(queue: Queue) -> None:
         if id(queue) in handles:
-            attempts[id(queue)].append("close")
+            attempts[id(queue)] += 1
         original_close(queue)
-        if queue is primary and failure in {"close", "both"}:
+        if queue is primary and fail_primary_close:
             raise RuntimeError("injected queue close failure")
 
-    monkeypatch.setattr(Queue, "cleanup_connections", cleanup)
+    def close_session(session: BrokerSession) -> None:
+        session_close_entries.append(dict(attempts))
+        original_session_close(session)
+
     monkeypatch.setattr(Queue, "close", close)
+    monkeypatch.setattr(BrokerSession, "close", close_session)
     task.stop(join=False)
     task.cleanup()
-    assert attempts == {key: ["cleanup", "close"] for key in handles}
+    assert session_close_entries == [dict.fromkeys(handles, 1)]
+    assert attempts[id(extra)] == 1
+    assert attempts[id(primary)] >= 1
     assert task._queue_cache == {}
     assert task._task_lifecycle.value == "closed"
-    if failure == "none":
-        assert task._cleanup_errors == ()
+    if fail_primary_close:
+        assert task._cleanup_errors
+        assert "injected queue close failure" in str(task._cleanup_errors[0])
     else:
-        assert len(task._cleanup_errors) == 1
-        if failure in {"cleanup", "both"}:
-            assert "injected connection cleanup failure" in caplog.text
-        if failure in {"close", "both"}:
-            assert "injected queue close failure" in caplog.text
+        assert task._cleanup_errors == ()
 
 
 def test_manager_dynamic_control_queues_reuse_task_connection(

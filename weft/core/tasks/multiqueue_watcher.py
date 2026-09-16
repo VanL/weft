@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import (
+    BrokerSession,
     BrokerTarget,
     Config,
     Queue,
@@ -171,6 +172,9 @@ class MultiQueueWatcher(BaseWatcher):
         self._default_error_handler = default_error_handler_fn
         self._handler: Callable[[str, int], None] | None = None
         self._error_handler: Callable[[Exception, str, int], bool | None] | None = None
+        self._broker_session: BrokerSession | None = None
+        self._owned_fixed_queues: list[Queue] = []
+        self._owned_dynamic_queues: dict[int, Queue] = {}
 
         # Establish primary queue and shared broker target
         first_queue_name = next(iter(queue_configs.keys()))
@@ -178,129 +182,175 @@ class MultiQueueWatcher(BaseWatcher):
             db,
             resolve_context_broker_target(Path.cwd(), config=broker_config),
         )
-        # Direct Queue ok here: MultiQueueWatcher is creating its owned primary
-        # handle; see runtime-and-context-patterns.md section 2.
-        initial_queue = Queue(
-            first_queue_name,
-            db_path=shared_target,
-            persistent=persistent,
-            config=broker_config,
-        )
-
-        super().__init__(
-            initial_queue,
-            stop_event=stop_event,
-            polling_strategy=polling_strategy,
-            config=broker_config,
-        )
-        _detach_queue_stop_event(initial_queue)
-
-        self._db_path = initial_queue.db_target
-
-        # Build runtime configs for each queue
-        self._queues: dict[str, QueueRuntimeConfig] = {}
-        for queue_name, raw_config in queue_configs.items():
-            handler_obj = raw_config.get("handler")
-            if not callable(handler_obj):
-                raise TypeError(
-                    f"handler for queue '{queue_name}' must be callable, "
-                    f"got {type(handler_obj).__name__}"
+        try:
+            if persistent:
+                self._broker_session = BrokerSession.connect(
+                    shared_target,
+                    config=broker_config,
                 )
-            handler = cast(Callable[[str, int, QueueMessageContext], None], handler_obj)
-
-            mode_value = raw_config.get("mode", QueueMode.READ)
-            mode = (
-                mode_value
-                if isinstance(mode_value, QueueMode)
-                else QueueMode(str(mode_value))
-            )
-
-            if queue_name == first_queue_name:
-                queue_obj = initial_queue
+                initial_queue = self._open_fixed_queue(first_queue_name)
             else:
-                # Direct Queue ok here: MultiQueueWatcher owns watched queue
-                # handles by design; see runtime-and-context-patterns.md section 2.
-                queue_obj = Queue(
+                initial_queue = Queue(
+                    first_queue_name,
+                    db_path=shared_target,
+                    persistent=False,
+                    config=broker_config,
+                )
+                self._owned_fixed_queues.append(initial_queue)
+
+            super().__init__(
+                initial_queue,
+                stop_event=stop_event,
+                polling_strategy=polling_strategy,
+                config=broker_config,
+            )
+            _detach_queue_stop_event(initial_queue)
+
+            self._db_path = initial_queue.db_target
+
+            # Build runtime configs for each queue
+            self._queues: dict[str, QueueRuntimeConfig] = {}
+            for queue_name, raw_config in queue_configs.items():
+                self._add_initial_runtime_config(
                     queue_name,
-                    db_path=self._db_path,
-                    persistent=persistent,
-                    config=self._broker_config,
+                    raw_config,
+                    first_queue_name=first_queue_name,
+                    initial_queue=initial_queue,
+                    default_error_handler_fn=default_error_handler_fn,
                 )
 
-            _detach_queue_stop_event(queue_obj)
+            # Processing state
+            self._active_queues: list[str] = []
+            self._queue_iterator: itertools.cycle[str] = itertools.cycle([])
+            self._queue_generation = 0
+            self._multi_activity_waiter: Any | None = None
+            self._multi_activity_waiter_generation: int | None = None
+            self._multi_activity_waiter_signature: tuple[str, ...] | None = None
+            self._pending_messages_precheck_confirmed = False
+            self._next_inactive_probe_at = time.monotonic()
+            self._topology_lock = threading.RLock()
+            self._topology_mutations: deque[_TopologyMutation] = deque()
+            self._topology_pending = threading.Event()
+            self._topology_inflight: _TopologyMutation | None = None
+            self._topology_owner_thread: threading.Thread | None = None
+            self._topology_reserved_thread: threading.Thread | None = None
+            self._topology_manual_wait_thread: threading.Thread | None = None
+            self._topology_stopping = False
+            self._topology_sigint_critical = False
+            self._topology_deferred_sigint = False
 
-            error_handler_obj = raw_config.get("error_handler")
-            if error_handler_obj is not None and not callable(error_handler_obj):
-                raise TypeError(
-                    f"error_handler for queue '{queue_name}' must be callable, "
-                    f"got {type(error_handler_obj).__name__}"
-                )
-            error_handler = (
-                cast(Callable[[Exception, str, int], bool | None], error_handler_obj)
-                if error_handler_obj is not None
-                else None
+            logger.debug(
+                "MultiQueueWatcher initialized with queues: %s",
+                list(self._queues.keys()),
             )
-
-            reserved_name_obj = raw_config.get("reserved_queue")
-            reserved_name: str | None
-            if reserved_name_obj is None:
-                reserved_name = None
-            elif isinstance(reserved_name_obj, str):
-                reserved_name = reserved_name_obj
-            else:
-                raise TypeError(
-                    f"reserved_queue for '{queue_name}' must be a string, "
-                    f"got {type(reserved_name_obj).__name__}"
+            self._ensure_multi_activity_waiter()
+            if self._broker_session is not None:
+                self._broker_session.recycle_thread()
+        except BaseException as exc:
+            try:
+                self._close_owned_broker_resources()
+            except BaseException as cleanup_exc:  # noqa: BLE001 - cleanup boundary
+                exc.add_note(
+                    "MultiQueueWatcher construction cleanup also failed: "
+                    f"{cleanup_exc!r}"
                 )
+            raise
 
-            if mode is QueueMode.RESERVE and not reserved_name:
-                raise ValueError(
-                    f"Queue '{queue_name}' configured in reserve mode must supply 'reserved_queue'"
-                )
+    def _open_fixed_queue(self, queue_name: str) -> Queue:
+        """Open one construction-fixed queue under the inventory owner."""
 
-            priority_obj = raw_config.get("priority", QUEUE_PRIORITY_NORMAL)
-            if not isinstance(priority_obj, int):
-                raise TypeError(
-                    f"priority for '{queue_name}' must be an int, "
-                    f"got {type(priority_obj).__name__}"
-                )
-
-            runtime_config = QueueRuntimeConfig(
-                name=queue_name,
-                queue=queue_obj,
-                handler=handler,
-                mode=mode,
-                error_handler=error_handler or default_error_handler_fn,
-                reserved_queue_name=reserved_name,
-                priority=priority_obj,
+        session = self._broker_session
+        if session is None:
+            queue = Queue(
+                queue_name,
+                db_path=self._db_path,
+                persistent=self._persistent,
+                config=self._broker_config,
             )
-            self._queues[queue_name] = runtime_config
+        else:
+            queue = session.queue(queue_name)
+        self._owned_fixed_queues.append(queue)
+        return queue
 
-        # Processing state
-        self._active_queues: list[str] = []
-        self._queue_iterator: itertools.cycle[str] = itertools.cycle([])
-        self._queue_generation = 0
-        self._multi_activity_waiter: Any | None = None
-        self._multi_activity_waiter_generation: int | None = None
-        self._multi_activity_waiter_signature: tuple[str, ...] | None = None
-        self._pending_messages_precheck_confirmed = False
-        self._next_inactive_probe_at = time.monotonic()
-        self._topology_lock = threading.RLock()
-        self._topology_mutations: deque[_TopologyMutation] = deque()
-        self._topology_pending = threading.Event()
-        self._topology_inflight: _TopologyMutation | None = None
-        self._topology_owner_thread: threading.Thread | None = None
-        self._topology_reserved_thread: threading.Thread | None = None
-        self._topology_manual_wait_thread: threading.Thread | None = None
-        self._topology_stopping = False
-        self._topology_sigint_critical = False
-        self._topology_deferred_sigint = False
+    def _add_initial_runtime_config(
+        self,
+        queue_name: str,
+        raw_config: Mapping[str, object],
+        *,
+        first_queue_name: str,
+        initial_queue: Queue,
+        default_error_handler_fn: Callable[[Exception, str, int], bool | None],
+    ) -> None:
+        """Validate and install one construction-fixed queue configuration."""
 
-        logger.debug(
-            "MultiQueueWatcher initialized with queues: %s",
-            list(self._queues.keys()),
+        handler_obj = raw_config.get("handler")
+        if not callable(handler_obj):
+            raise TypeError(
+                f"handler for queue '{queue_name}' must be callable, "
+                f"got {type(handler_obj).__name__}"
+            )
+        handler = cast(Callable[[str, int, QueueMessageContext], None], handler_obj)
+
+        mode_value = raw_config.get("mode", QueueMode.READ)
+        mode = (
+            mode_value
+            if isinstance(mode_value, QueueMode)
+            else QueueMode(str(mode_value))
         )
-        self._ensure_multi_activity_waiter()
+
+        if queue_name == first_queue_name:
+            queue_obj = initial_queue
+        else:
+            queue_obj = self._open_fixed_queue(queue_name)
+
+        _detach_queue_stop_event(queue_obj)
+
+        error_handler_obj = raw_config.get("error_handler")
+        if error_handler_obj is not None and not callable(error_handler_obj):
+            raise TypeError(
+                f"error_handler for queue '{queue_name}' must be callable, "
+                f"got {type(error_handler_obj).__name__}"
+            )
+        error_handler = (
+            cast(Callable[[Exception, str, int], bool | None], error_handler_obj)
+            if error_handler_obj is not None
+            else None
+        )
+
+        reserved_name_obj = raw_config.get("reserved_queue")
+        reserved_name: str | None
+        if reserved_name_obj is None:
+            reserved_name = None
+        elif isinstance(reserved_name_obj, str):
+            reserved_name = reserved_name_obj
+        else:
+            raise TypeError(
+                f"reserved_queue for '{queue_name}' must be a string, "
+                f"got {type(reserved_name_obj).__name__}"
+            )
+
+        if mode is QueueMode.RESERVE and not reserved_name:
+            raise ValueError(
+                f"Queue '{queue_name}' configured in reserve mode must supply 'reserved_queue'"
+            )
+
+        priority_obj = raw_config.get("priority", QUEUE_PRIORITY_NORMAL)
+        if not isinstance(priority_obj, int):
+            raise TypeError(
+                f"priority for '{queue_name}' must be an int, "
+                f"got {type(priority_obj).__name__}"
+            )
+
+        runtime_config = QueueRuntimeConfig(
+            name=queue_name,
+            queue=queue_obj,
+            handler=handler,
+            mode=mode,
+            error_handler=error_handler or default_error_handler_fn,
+            reserved_queue_name=reserved_name,
+            priority=priority_obj,
+        )
+        self._queues[queue_name] = runtime_config
 
     @property
     def _broker_config(self) -> Config:
@@ -418,6 +468,26 @@ class MultiQueueWatcher(BaseWatcher):
             priority=request.priority,
         )
 
+    def _register_dynamic_queue(self, queue: Queue) -> None:
+        """Retain one dynamic queue until removal or watcher teardown."""
+
+        self._owned_dynamic_queues[id(queue)] = queue
+
+    def _close_dynamic_queue(self, queue: Queue) -> None:
+        """Release one displaced dynamic queue, retaining it after failure."""
+
+        try:
+            queue.close()
+        except BaseException:
+            logger.warning(
+                "Failed to close removed queue %s; retaining it for teardown",
+                queue.name,
+                exc_info=True,
+            )
+            raise
+        else:
+            self._owned_dynamic_queues.pop(id(queue), None)
+
     def _submit_topology_mutation(self, request: _TopologyMutation) -> None:
         """Apply before drive start or synchronously submit to the drive owner."""
         current = threading.current_thread()
@@ -452,12 +522,14 @@ class MultiQueueWatcher(BaseWatcher):
         if request.kind == "add":
             if request.queue_name in self._queues:
                 raise ValueError(f"Queue '{request.queue_name}' already exists")
-            self._queues[request.queue_name] = self._open_runtime_config(request)
+            runtime = self._open_runtime_config(request)
+            self._queues[request.queue_name] = runtime
+            self._register_dynamic_queue(runtime.queue)
             self._pending_messages_precheck_confirmed = True
         elif request.kind == "remove":
             if request.queue_name not in self._queues:
                 raise ValueError(f"Queue '{request.queue_name}' not found")
-            del self._queues[request.queue_name]
+            runtime = self._queues.pop(request.queue_name)
             self._active_queues = [
                 name for name in self._active_queues if name != request.queue_name
             ]
@@ -466,6 +538,8 @@ class MultiQueueWatcher(BaseWatcher):
             raise RuntimeError(f"unknown topology mutation: {request.kind}")
         self._queue_generation += 1
         self._reset_multi_activity_waiter()
+        if request.kind == "remove":
+            self._close_dynamic_queue(runtime.queue)
 
     def _create_candidate_activity_waiter(
         self,
@@ -634,6 +708,11 @@ class MultiQueueWatcher(BaseWatcher):
                     close_candidates.append(waiter)
             for waiter in close_candidates:
                 self._close_activity_waiter_once(waiter)
+            if request.kind == "add":
+                assert candidate_config is not None
+                self._register_dynamic_queue(candidate_config.queue)
+            else:
+                self._close_dynamic_queue(prior_mapping[request.queue_name].queue)
         finally:
             if not topology_published:
                 if candidate_waiter is not None and not candidate_installed:  # noqa: SIM102 approved [TS-3.1] [RUFF-SUP-242] exception
@@ -884,6 +963,74 @@ class MultiQueueWatcher(BaseWatcher):
 
         self._reset_multi_activity_waiter()
         super()._cleanup_runtime_resources()
+
+    def _close_owned_broker_resources(self) -> None:
+        """Close every queue lease before the inventory session lease."""
+
+        failures: list[BaseException] = []
+        queues = [*self._owned_fixed_queues, *self._owned_dynamic_queues.values()]
+        seen: set[int] = set()
+        for queue in queues:
+            queue_id = id(queue)
+            if queue_id in seen:
+                continue
+            seen.add(queue_id)
+            try:
+                queue.close()
+            except BaseException as exc:
+                failures.append(exc)
+                logger.warning(
+                    "Failed to close owned queue %s",
+                    queue.name,
+                    exc_info=True,
+                )
+
+        session = self._broker_session
+        if session is not None:
+            try:
+                session.close()
+            except BaseException as exc:
+                failures.append(exc)
+                logger.warning("Failed to close watcher broker session", exc_info=True)
+            else:
+                self._broker_session = None
+
+        if not failures:
+            self._owned_fixed_queues.clear()
+            self._owned_dynamic_queues.clear()
+            return
+        primary = failures[0]
+        for secondary in failures[1:]:
+            primary.add_note(f"Additional broker cleanup failure: {secondary!r}")
+        raise primary
+
+    def _cleanup_owned_resources(self) -> None:
+        """Attempt strategy and broker cleanup without skipping later phases."""
+
+        failures: list[BaseException] = []
+        for operation in (
+            self._cleanup_runtime_resources,
+            self._close_owned_broker_resources,
+        ):
+            try:
+                operation()
+            except BaseException as exc:  # noqa: BLE001 - cleanup boundary
+                failures.append(exc)
+        if failures:
+            primary = failures[0]
+            for secondary in failures[1:]:
+                primary.add_note(f"Additional watcher cleanup failure: {secondary!r}")
+            raise primary
+
+    def _cleanup_stop_resources(self) -> None:
+        """Release idle watcher resources without claiming another thread's cache."""
+
+        self._cleanup_owned_resources()
+
+    def _cleanup_run_resources(self) -> None:
+        """Release run-thread resources through the inventory session owner."""
+
+        self._cleanup_owned_resources()
 
     def _wait_for_activity_body(self, timeout: float | None) -> None:
         """Execute the shared broker wait without standalone ownership policy.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,6 +18,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     LIVENESS_MONITOR_MAX_IN_FLIGHT_PROBES,
+    LIVENESS_PROBE_WORKER_NAME,
 )
 from weft.context import WeftContext, build_context
 from weft.core.task_state import task_state_queue_name
@@ -32,6 +34,39 @@ from weft.liveness.models import LivenessObservation
 from weft.liveness.policy import UnknownDeadlineState
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_liveness_constructor_failure_stops_started_service_workers(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(spec_context=workdir)
+    worker_threads: list[threading.Thread] = []
+    worker_stop_events: list[threading.Event] = []
+
+    def fail_after_worker_start(self: LivenessMonitor) -> None:
+        with self._service_worker_lock:
+            registration = self._service_worker_registrations[
+                LIVENESS_PROBE_WORKER_NAME
+            ]
+            worker_threads.extend(registration.threads)
+            worker_stop_events.append(registration.stop_event)
+        raise RuntimeError("injected liveness initialization failure")
+
+    monkeypatch.setattr(
+        LivenessMonitor, "_activate_service_task", fail_after_worker_start
+    )
+
+    with pytest.raises(RuntimeError, match="liveness initialization failure"):
+        LivenessMonitor(
+            context.broker_target,
+            _taskspec(str(time.time_ns()), workdir),
+            config=context.config,
+        )
+
+    assert len(worker_threads) == LIVENESS_MONITOR_MAX_IN_FLIGHT_PROBES
+    assert all(stop_event.is_set() for stop_event in worker_stop_events)
+    assert all(not thread.is_alive() for thread in worker_threads)
 
 
 @pytest.fixture

@@ -207,6 +207,12 @@ rolled-back state. Empty membership uses polling state without invoking the
 multi-queue waiter factory with an empty list. `BaseTask` topology remains fixed
 and rejects both mutators.
 
+`MultiQueueWatcher` owns every queue lease it constructs. SimpleBroker treating
+a passed primary `Queue` as borrowed does not transfer Weft's ownership. Normal
+drive exit releases the drive thread's cache; idle stop closes owned leases
+without claiming cleanup of another thread. Dynamic remove releases displaced
+resources at the existing serialized topology boundary.
+
 Why this exists:
 
 - queue semantics differ by surface (`inbox` is not `ctrl_in`)
@@ -272,6 +278,7 @@ role inventory (`weft/core/tasks/base.py::BaseTask._reactor_queue_roles`,
 turn/lifecycle templates (`weft/core/tasks/base.py::BaseTask.process_once`,
 `weft/core/tasks/base.py::BaseTask.wait_for_activity`,
 `weft/core/tasks/base.py::BaseTask.run_until_stopped`,
+`weft/core/tasks/base.py::BaseTask.drive_scope`,
 `weft/core/tasks/base.py::BaseTask.stop`,
 `weft/core/tasks/base.py::BaseTask.cleanup`), the drive-owner state machine,
 and the once-only watcher/resource finalizer
@@ -309,6 +316,51 @@ lifecycle lock before entering the protected wait and clears it in `finally`; a
 pending stop is finalized there when no drive loop owns the reactor. Numeric
 thread ident and raw `Thread.is_alive()` are diagnostic only.
 
+`BaseTask` owns one shared `drive_scope()` implementation. Normal run loops
+enter it automatically; manual driving may use it around the complete driver
+lifetime without starting a background thread. It preserves the existing
+driving-thread identity and performs caller-thread cache cleanup on exit once
+active same-key operations have ended, even if a foreign stop has already
+finalized an idle task. Cleanup failures remain observable. It does not grant
+worker threads broker authority or change per-turn control policy. Bare
+`process_once()` remains supported, but thread abandonment without an
+owner-thread lifetime boundary cannot guarantee cache release while sibling
+sessions live. Existing task context-manager background-start behavior remains
+unchanged.
+
+Fixed queue inventory and drive-thread cleanup have separate session handles
+sharing one process-session key, not separate pools. Releasing the inventory
+cannot release the still-active driver's independent cleanup guard.
+
+Base-resource cleanup attempts each owned queue close before inventory-session
+close, after ending owned operations and completing final writes. It attempts
+remaining cleanup despite individual failures. Already-closed minted queues can
+be closed again by the session. If inventory close is refused, successful queue
+closes have still released their leases; the inventory lease and cached
+resources may remain. `CLOSED` means reactor driving has ended and once-only
+finalization was attempted, not that every resource was released. Cleanup
+failures remain recorded and logged, and stop or cleanup on `CLOSED` does not
+retry partial finalization. Collection is not an owner-thread cleanup guarantee.
+The independent driver guard releases only its own handle and caller-thread
+cache; it cannot repair a refused foreign-thread inventory close.
+
+Driver-session exit follows SimpleBroker's exception priority: ordinary cleanup
+exceptions propagate when no body failure exists and remain secondary to a body
+failure otherwise. Cleanup `BaseException` instances outside `Exception`
+propagate from the driver scope, including when its body also failed. This does
+not change the task finalizer's existing `BaseException`-recording convention.
+
+Shared initialization scopes recycle construction-thread caches through the
+still-live inventory session without another session handle or deferring eager
+lifecycle publication. Owned operations end before recycling; caller-owned
+active operations can defer disposal until they end. Partial initialization
+unwinds acquired resources and closes the inventory session without invoking
+full task finalization. First-party constructors cover broker-using or fallible
+post-super setup; downstream constructors use the protected initialization
+scope for equivalent work.
+
+Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
+
 A live task reactor has fixed, declared construction topology. BaseTask declares
 `inbox`, `reserved`, `outbox`, `ctrl_in`, and `ctrl_out`, plus its fixed support
 routes for lifecycle logs, TID mappings, streaming sessions, and endpoint
@@ -332,8 +384,8 @@ task family. Background `run_forever()` and the spawned-task launcher delegate
 to that loop. Stop first records intent and wakes the loop. Finalization joins an
 external drive thread when requested, stops and joins local workers, and drains
 or terminates Manager children within one absolute remaining deadline, then
-closes reactor-owned resources exactly once only after no startup, turn, wait, or
-drive loop can still touch them. A timed-out active driver or standalone waiter
+closes reactor-owned resources exactly once only after no startup, turn, wait,
+drive scope, or drive loop can still touch them. A timed-out active driver or standalone waiter
 retains its resources until its own finalizer runs; an idle manual owner's
 still-live application thread does not block finalization. For compatibility,
 `stop()` retains its

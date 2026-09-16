@@ -92,6 +92,12 @@ class PipelineEdgeTask(BaseTask):
         runtime_payload = taskspec.metadata.get(PIPELINE_EDGE_RUNTIME_METADATA_KEY)
         self._runtime = PipelineEdgeRuntimeConfig.model_validate(runtime_payload or {})
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
+        with self._initialization_scope():
+            self._initialize_edge_runtime()
+
+    def _initialize_edge_runtime(self) -> None:
+        """Activate one edge and publish its eager pipeline lifecycle."""
+
         self._activate_waiter()
         self._set_activity("waiting", waiting_on=self._runtime.source_queue)
         self._emit_pipeline_started_event()
@@ -317,6 +323,12 @@ class PipelineTask(BaseTask):
         self._registry_message_id: int | None = None
         self._status_snapshot = self._build_initial_snapshot()
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
+        with self._initialization_scope():
+            self._initialize_pipeline_runtime()
+
+    def _initialize_pipeline_runtime(self) -> None:
+        """Activate the compiled pipeline after shared task initialization."""
+
         self._activate_runtime()
 
     def _build_initial_snapshot(self) -> dict[str, Any]:

@@ -1221,12 +1221,13 @@ _WORKER_SNAPSHOT_OPTIONAL_CALLABLE_FIELDS: Final[frozenset[str]] = frozenset(
 
 _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     """
-    _active_queues _activity _caller_pid
+    _active_queues _activity _broker_session _caller_pid
     _cleanup_errors _config _weft_config
     _ctrl_out_queue_obj
     _db_path _default_error_handler
     _deferred_task_log_last_error _deferred_task_log_last_flush_at
     _deferred_task_log_pending _drive_loop_active _drive_owner_ident
+    _drive_scope_active
     _drive_owner_thread _endpoint_registration_message_id
     _endpoint_registration_metadata _endpoint_registration_name _error_handler
     _external_stop_handled _external_task_log_sink _external_task_log_status
@@ -1234,7 +1235,7 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _external_task_log_worker_total_blocked_deletions
     _external_task_log_worker_total_emitted _finalizer _first_cycle_pending
     _handler _has_thread_db _heartbeat_error _heartbeat_id _heartbeat_registered
-    _inactive_probe_interval _kill_requested _last_candidate_class_counts
+    _fixed_queue_names _inactive_probe_interval _kill_requested _last_candidate_class_counts
     _last_candidates_seen _last_catchup_pending _last_checkpoint
     _last_cleanup_policy_stats _last_cleanup_queue_stats
     _last_collation_rows_processed _last_collation_store_error
@@ -1265,7 +1266,8 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _multi_activity_waiter_generation _multi_activity_waiter_signature
     _next_cycle_due_monotonic _next_heartbeat_registration_attempt_monotonic
     _next_inactive_probe_at _next_maintenance_due_monotonic
-    _next_runtime_cleanup_queue_discovery_due_monotonic _owned_queue_names
+    _next_runtime_cleanup_queue_discovery_due_monotonic _owned_dynamic_queues
+    _owned_fixed_queues _owned_queue_names _owns_queue
     _parent_loss_watch_active _paused _pending_messages_precheck_confirmed
     _pending_termination_sources _persistent
     _persistent_service _pong_extension_provider _queue_cache _queue_generation
@@ -1296,18 +1298,19 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
 
 _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     """
-    _active_queues _cleanup_errors _weft_config
+    _active_queues _broker_session _cleanup_errors _weft_config
     _ctrl_out_queue_obj
-    _drive_loop_active _drive_owner_ident _drive_owner_thread
+    _drive_loop_active _drive_owner_ident _drive_owner_thread _drive_scope_active
     _endpoint_registration_message_id _endpoint_registration_metadata
     _endpoint_registration_name _error_handler _external_stop_handled
     _external_task_log_sink _external_task_log_status
     _external_task_log_worker_latest_status
     _external_task_log_worker_total_blocked_deletions
     _external_task_log_worker_total_emitted _finalizer _handler _has_thread_db
-    _kill_requested _monitor_config _monitor_store _multi_activity_waiter
+    _fixed_queue_names _kill_requested _monitor_config _monitor_store _multi_activity_waiter
     _multi_activity_waiter_generation _multi_activity_waiter_signature
-    _owned_queue_names _parent_loss_watch_active _paused
+    _owned_dynamic_queues _owned_fixed_queues _owned_queue_names _owns_queue
+    _parent_loss_watch_active _paused
     _pending_messages_precheck_confirmed _pending_termination_sources
     _pong_extension_provider _queue_cache
     _queue_iterator _queue_obj _queues _resource_monitor _run_thread _running_event

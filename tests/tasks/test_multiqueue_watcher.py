@@ -2732,6 +2732,68 @@ def test_queue_set_changes_close_stale_multi_queue_waiter(
     assert [waiter.close_calls for waiter in waiters] == [1, 1, 1]
 
 
+def test_dynamic_queue_removal_does_not_retain_historical_facades(
+    broker_env: BrokerEnv,
+) -> None:
+    db_path, _make_queue = broker_env
+    watcher = MultiQueueWatcher(
+        queue_configs={"dynamic.fixed": {"handler": lambda *_args: None}},
+        db=db_path,
+    )
+
+    try:
+        for index in range(5):
+            name = f"dynamic.churn.{index}"
+            watcher.add_queue(name, lambda *_args: None)
+            queue = watcher.get_queue(name)
+            assert queue is not None
+            assert watcher._owned_dynamic_queues == {id(queue): queue}
+
+            watcher.remove_queue(name)
+            assert watcher._owned_dynamic_queues == {}
+    finally:
+        watcher.stop(join=False)
+
+    assert watcher._owned_fixed_queues == []
+    assert watcher._broker_session is None
+
+
+def test_prestart_remove_close_failure_still_commits_coherent_topology(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    watcher = MultiQueueWatcher(
+        queue_configs={"remove.fixed": {"handler": lambda *_args: None}},
+        db=db_path,
+    )
+    watcher.add_queue("remove.dynamic", lambda *_args: None)
+    removed = watcher.get_queue("remove.dynamic")
+    assert removed is not None
+    generation = watcher._queue_generation
+    original_close = Queue.close
+    failed_once = False
+
+    def fail_removed_close(queue: Queue) -> None:
+        nonlocal failed_once
+        original_close(queue)
+        if queue is removed and not failed_once:
+            failed_once = True
+            raise OSError("injected removed queue close failure")
+
+    monkeypatch.setattr(Queue, "close", fail_removed_close)
+    try:
+        with pytest.raises(OSError, match="removed queue close failure"):
+            watcher.remove_queue("remove.dynamic")
+
+        assert watcher.list_queues() == ["remove.fixed"]
+        assert watcher._queue_generation == generation + 1
+        assert id(removed) in watcher._owned_dynamic_queues
+    finally:
+        monkeypatch.setattr(Queue, "close", original_close)
+        watcher.stop(join=False)
+
+
 def test_stop_closes_multi_queue_waiter(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,

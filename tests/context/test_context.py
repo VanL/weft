@@ -13,7 +13,7 @@ from typing import cast
 
 import pytest
 
-from simplebroker import BrokerTarget, Config
+from simplebroker import BrokerSession, BrokerTarget, Config
 from tests.helpers.test_backend import prepare_project_root
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +35,24 @@ pytestmark = [pytest.mark.shared]
 def test_context_exposes_only_build_context_constructor() -> None:
     assert "get_context" not in context_module.__dict__
     assert "get_context" not in context_module.__all__
+
+
+def test_context_session_binds_snapshot_and_closes_owned_queues(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+
+    with ctx.session() as session:
+        assert isinstance(session, BrokerSession)
+        assert session.target == ctx.broker_target
+        assert session.config is ctx.broker_config
+        queue = session.queue("context.session")
+        queue.write("value")
+        assert queue.read_one() == "value"
+
+    with pytest.raises(RuntimeError, match="BrokerSession is closed"):
+        session.queue("context.closed")
 
 
 def _write_broker_project_config(

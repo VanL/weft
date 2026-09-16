@@ -814,7 +814,7 @@ def write_file_atomically(
                     raise
                 time.sleep(retry_sleep_seconds)
 
-        log_debug(
+        logger.debug(
             f"Atomically wrote {'binary' if is_binary else 'text'} to {target_path}"
         )
     finally:

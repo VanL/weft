@@ -750,6 +750,12 @@ class TaskMonitor(ServiceTask):
         self._serve_log_last_state: dict[str, str] = {}
         self._worker_lane_snapshot_only = False
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
+        with self._initialization_scope():
+            self._initialize_task_monitor_runtime()
+
+    def _initialize_task_monitor_runtime(self) -> None:
+        """Initialize Monitor-owned workers, sink, and eager service state."""
+
         self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._weft_config)
         self._register_task_monitor_service_workers()
         self._configure_external_task_log_sink()
@@ -765,6 +771,12 @@ class TaskMonitor(ServiceTask):
 
         self._close_external_task_log_sink()
         super()._cleanup_task_resources(deadline)
+
+    def _abort_partial_initialization(self) -> None:
+        """Release a sink acquired by post-super Monitor initialization."""
+
+        self._close_external_task_log_sink()
+        super()._abort_partial_initialization()
 
     def _close_external_task_log_sink(self) -> None:
         """Close the external task-log sink owned by the reactor instance."""
@@ -884,6 +896,11 @@ class TaskMonitor(ServiceTask):
         worker._monitor_store = None
         worker._handler = None
         worker._error_handler = None
+        worker._broker_session = None
+        worker._owned_fixed_queues = []
+        worker._owned_dynamic_queues = {}
+        worker._fixed_queue_names = set(self._fixed_queue_names)
+        worker._owns_queue = True
         object.__setattr__(worker, "_queue_obj", None)
         worker._queues = {}
         worker._queue_cache = {}
@@ -924,6 +941,7 @@ class TaskMonitor(ServiceTask):
         worker._turn_active = False
         worker._wait_active = False
         worker._drive_loop_active = False
+        worker._drive_scope_active = False
         worker._strategy_started = False
         worker._pending_termination_sources = deque()
         worker._parent_loss_watch_active = False
