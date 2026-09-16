@@ -1445,13 +1445,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
         for step in build_postupdate_steps():
             run_command(step.command, cwd=step.cwd, dry_run=True)
         if version_changed:
-            release_paths = [
-                str(primary_target.pyproject_path.relative_to(PROJECT_ROOT))
-            ]
+            release_paths = [_display_path(primary_target.pyproject_path)]
             if primary_target.constants_path is not None:
-                release_paths.append(
-                    str(primary_target.constants_path.relative_to(PROJECT_ROOT))
-                )
+                release_paths.append(_display_path(primary_target.constants_path))
             release_paths.append("uv.lock")
             run_command(
                 ("git", "add", *release_paths),
@@ -1508,11 +1504,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [TS-3.1] 
         run_command(step.command, cwd=step.cwd)
 
     if version_changed:
-        release_paths = [str(primary_target.pyproject_path.relative_to(PROJECT_ROOT))]
+        release_paths = [_display_path(primary_target.pyproject_path)]
         if primary_target.constants_path is not None:
-            release_paths.append(
-                str(primary_target.constants_path.relative_to(PROJECT_ROOT))
-            )
+            release_paths.append(_display_path(primary_target.constants_path))
         release_paths.append("uv.lock")
         run_command(("git", "add", *release_paths))
         run_command(("git", "commit", "-m", f"Release {target_version}"))
