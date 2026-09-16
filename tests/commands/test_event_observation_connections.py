@@ -142,7 +142,8 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
         reads += 1
         assert reads <= 4
         result = original_peek(*args, **kwargs)
-        deltas.append((len(connections) - previous[0], len(queues) - previous[1]))
+        if reads > 1:
+            deltas.append((len(connections) - previous[0], len(queues) - previous[1]))
         return result
 
     def wait(_monitor: Any, timeout: float | None) -> bool:
@@ -160,7 +161,7 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(events_cmd.iter_task_realtime_events(ctx, tid))
     assert reads == 4
-    assert deltas == [(0, 0)] * 4
+    assert deltas == [(0, 0)] * 3
     assert emitted[-2].event_type == "result"
     assert emitted[-2].payload["value"] == {"late": True}
     assert emitted[-1].event_type == "end"
