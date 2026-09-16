@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import platform
 import subprocess
 import sys
 from importlib.util import find_spec
@@ -102,8 +103,8 @@ def test_incompatible_bootstrap_fails_explicitly(source: str) -> None:
         xdist_titles.without_worker_titles(source)
 
 
-@pytest.mark.timeout(900, method="signal")
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS native worker handoff")
+@pytest.mark.timeout(900, method="thread")
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS native worker handoff")
 def test_real_worker_preserves_production_title_handoff(tmp_path: Path) -> None:
     """Exercise production native writers inside a freshly bootstrapped worker."""
     config = tmp_path / "pytest.ini"

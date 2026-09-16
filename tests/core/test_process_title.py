@@ -187,7 +187,7 @@ def test_false_native_return_is_an_error(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # Use the PG suite's whole-test watchdog, not a LaunchServices latency SLA.
-@pytest.mark.timeout(900, method="signal")
+@pytest.mark.timeout(900, method="thread")
 @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS native handoff")
 def test_real_native_handoff_preserves_full_weft_titles() -> None:
     script = """
