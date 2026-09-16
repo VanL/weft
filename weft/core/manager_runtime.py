@@ -238,6 +238,8 @@ def _snapshot_registry(
     snapshot: dict[str, dict[str, Any]] = {}
     with ExitStack() as scope:
         if broker is None:
+            if queue is None:
+                scope.enter_context(context.session())
             registry_queue = queue or _registry_queue(context)
             if queue is None:
                 scope.callback(registry_queue.close)
@@ -800,11 +802,12 @@ def _manager_ctrl_out_queue_name(tid: str, record: dict[str, Any] | None = None)
 def _send_stop(
     context: WeftContext, tid: str, *, record: dict[str, Any] | None
 ) -> None:
-    queue = context.queue(_manager_ctrl_queue_name(tid, record), persistent=True)
-    try:
-        queue.write(encode_control_message("STOP"))
-    finally:
-        queue.close()
+    with context.session():
+        queue = context.queue(_manager_ctrl_queue_name(tid, record), persistent=True)
+        try:
+            queue.write(encode_control_message("STOP"))
+        finally:
+            queue.close()
 
 
 def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] exception
@@ -816,8 +819,10 @@ def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] except
 ) -> bool:
     """Append terminal service evidence without deleting owner rows ([MF-3.1])."""
 
-    registry_queue = _registry_queue(context)
-    try:
+    with ExitStack() as resources:
+        resources.enter_context(context.session())
+        registry_queue = _registry_queue(context)
+        resources.callback(registry_queue.close)
         latest_record = record
         for data, timestamp in iter_queue_json_entries(registry_queue):
             normalized = normalize_manager_registry_record(
@@ -889,8 +894,6 @@ def _mark_manager_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-017] except
             )
             return False
         return True
-    finally:
-        registry_queue.close()
 
 
 def build_manager_spec(
@@ -1267,6 +1270,7 @@ def _await_manager_start_settlement(
     *,
     manager_tid: str,
     deadline: float,
+    session_owned: bool = False,
 ) -> dict[str, Any] | None:
     grace_deadline = min(
         deadline,
@@ -1275,6 +1279,8 @@ def _await_manager_start_settlement(
     last_active: dict[str, Any] | None = None
     probe_cache: dict[str, int | None] = {}
     with ExitStack() as resources:
+        if not session_owned:
+            resources.enter_context(context.session())
         registry_queue = _registry_queue(context)
         resources.callback(registry_queue.close)
         monitor = QueueChangeMonitor([registry_queue], config=context.config)
@@ -1327,6 +1333,7 @@ def _await_manager_stop_confirmation(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-
     last_record = initial_record
     pid_checked_at = 0.0
     with ExitStack() as resources:
+        resources.enter_context(context.session())
         registry_queue = _registry_queue(context)
         resources.callback(registry_queue.close)
         monitor = QueueChangeMonitor([registry_queue], config=context.config)
@@ -1636,6 +1643,7 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
     last_selected_proof: bool | None = None
     probe_cache: dict[str, int | None] = {}
     with ExitStack() as resources:
+        resources.enter_context(context.session())
         registry_queue = _registry_queue(context)
         resources.callback(registry_queue.close)
         monitor = QueueChangeMonitor([registry_queue], config=context.config)
@@ -1683,6 +1691,7 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                                 context,
                                 manager_tid=manager_tid,
                                 deadline=deadline,
+                                session_owned=True,
                             )
                             if (
                                 settled_record is not None
@@ -1729,6 +1738,7 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                         context,
                         manager_tid=manager_tid,
                         deadline=deadline,
+                        session_owned=True,
                     )
                 if competing_record is not None:
                     _cleanup_startup_stderr(launch.stderr_path)
@@ -1745,6 +1755,7 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                         context,
                         manager_tid=manager_tid,
                         deadline=deadline,
+                        session_owned=True,
                     )
                 if competing_record is not None:
                     _send_launcher_signal(

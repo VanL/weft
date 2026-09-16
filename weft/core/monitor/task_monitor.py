@@ -1608,14 +1608,13 @@ class TaskMonitor(ServiceTask):
 
         queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
         count = 0
-        for message, timestamp in iter_queue_entries(
-            queue,
-            since_timestamp=since_timestamp,
-        ):
-            self._task_observer(WEFT_GLOBAL_LOG_QUEUE, message, timestamp)
-            count += 1
-            if limit is not None and count >= limit:
-                break
+        entries = iter_queue_entries(queue, since_timestamp=since_timestamp)
+        with closing_queue_iterator(entries) as rows:
+            for message, timestamp in rows:
+                self._task_observer(WEFT_GLOBAL_LOG_QUEUE, message, timestamp)
+                count += 1
+                if limit is not None and count >= limit:
+                    break
         return count
 
     def _process_reactor_turn(self) -> None:

@@ -51,6 +51,7 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
     exact_status: bool = False,
     reconcile_missing: bool = False,
     broker: Any | None = None,
+    _session_owned: bool = False,
 ) -> list[AppliedCandidate]:
     """Delete exact prune candidates and return caller-shaped apply results.
 
@@ -80,6 +81,19 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
 
     Spec: [OBS.13], [OBS.16], [OBS.17]
     """
+
+    if broker is None and not _session_owned:
+        with ctx.session():
+            return apply_exact_prune_candidates(
+                ctx,
+                candidates,
+                apply_result=apply_result,
+                force=force,
+                exact_status=exact_status,
+                reconcile_missing=reconcile_missing,
+                broker=None,
+                _session_owned=True,
+            )
 
     by_queue: dict[str, list[Candidate]] = defaultdict(list)
     for candidate in candidates:

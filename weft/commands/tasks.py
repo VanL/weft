@@ -390,7 +390,10 @@ def task_terminal_snapshot(
         )
 
     deadline = time.monotonic() + timeout if timeout > 0 else None
-    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log_queue:
+    with (
+        ctx.session(),
+        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log_queue,
+    ):
         while True:
             with log_queue.get_connection() as broker:
                 taskspec_payload = _load_taskspec_payload_bounded(
@@ -979,6 +982,7 @@ def watch_task_status(
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     deadline = _deadline_from_timeout(timeout)
     with ExitStack() as stack:
+        stack.enter_context(ctx.session())
         log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
         stack.callback(log_queue.close)
         monitor_queues = [log_queue]
@@ -1479,88 +1483,93 @@ def _await_control_surface(
         else None,
     )
     public_signal_deadline: float | None = None
-    resources = _ControlSurfaceResources(
-        ctx,
-        state_queue_name=state_queue_name,
-        ctrl_out_name=watched_ctrl_out_queue,
-        pipeline_status_name=watched_pipeline_status_queue,
-    )
-    try:
-        kill_ack_deadline: float | None = None
-        while True:
-            with resources.log_queue.get_connection() as broker:
-                taskspec_payload = (
-                    load_latest_taskspec_payload(ctx, tid, broker=broker) or {}
+    with ctx.session():
+        resources = _ControlSurfaceResources(
+            ctx,
+            state_queue_name=state_queue_name,
+            ctrl_out_name=watched_ctrl_out_queue,
+            pipeline_status_name=watched_pipeline_status_queue,
+        )
+        try:
+            kill_ack_deadline: float | None = None
+            while True:
+                with resources.log_queue.get_connection() as broker:
+                    taskspec_payload = (
+                        load_latest_taskspec_payload(ctx, tid, broker=broker) or {}
+                    )
+                pipeline_status_queue = pipeline_status_queue_name(
+                    tid, taskspec_payload
                 )
-            pipeline_status_queue = pipeline_status_queue_name(tid, taskspec_payload)
-            ctrl_out_queue = _ctrl_out_for_tid(
-                ctx,
-                tid,
-                taskspec=taskspec_payload
-                if isinstance(taskspec_payload, dict)
-                else None,
-            )
-            if not resources.matches(
-                state_queue_name=state_queue_name,
-                ctrl_out_name=ctrl_out_queue,
-                pipeline_status_name=pipeline_status_queue,
-            ):
-                resources.close()
-                resources = _ControlSurfaceResources(
+                ctrl_out_queue = _ctrl_out_for_tid(
                     ctx,
+                    tid,
+                    taskspec=taskspec_payload
+                    if isinstance(taskspec_payload, dict)
+                    else None,
+                )
+                if not resources.matches(
                     state_queue_name=state_queue_name,
                     ctrl_out_name=ctrl_out_queue,
                     pipeline_status_name=pipeline_status_queue,
-                )
-
-            observation = _observe_control_envelopes(
-                resources.ctrl_out_queue,
-                tid=tid,
-                taskspec_payload=taskspec_payload
-                if isinstance(taskspec_payload, dict)
-                else {},
-            )
-            if observation.terminal_snapshot is not None:
-                return latest_entry, observation.terminal_snapshot
-            if observation.public_signal_observed_at is not None:
-                public_signal_deadline = (
-                    observation.public_signal_observed_at
-                    + CONTROL_SURFACE_WAIT_INTERVAL
-                )
-            if observation.kill_ack_observed_at is not None:
-                kill_ack_deadline = (
-                    observation.kill_ack_observed_at + CONTROL_SURFACE_WAIT_INTERVAL
-                )
-
-            with resources.log_queue.get_connection() as broker:
-                latest_entry = mapping_for_tid(ctx, tid, broker=broker) or latest_entry
-                snapshot = _task_status(
-                    tid,
-                    context=ctx,
-                    broker=broker,
-                    observation_queue=resources.log_queue,
-                )
-            if snapshot is not None:
-                latest_snapshot = snapshot
-                if snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
-                    return latest_entry, latest_snapshot
-                if (
-                    kill_ack_deadline is not None
-                    and time.monotonic() >= kill_ack_deadline
                 ):
+                    resources.close()
+                    resources = _ControlSurfaceResources(
+                        ctx,
+                        state_queue_name=state_queue_name,
+                        ctrl_out_name=ctrl_out_queue,
+                        pipeline_status_name=pipeline_status_queue,
+                    )
+
+                observation = _observe_control_envelopes(
+                    resources.ctrl_out_queue,
+                    tid=tid,
+                    taskspec_payload=taskspec_payload
+                    if isinstance(taskspec_payload, dict)
+                    else {},
+                )
+                if observation.terminal_snapshot is not None:
+                    return latest_entry, observation.terminal_snapshot
+                if observation.public_signal_observed_at is not None:
+                    public_signal_deadline = (
+                        observation.public_signal_observed_at
+                        + CONTROL_SURFACE_WAIT_INTERVAL
+                    )
+                if observation.kill_ack_observed_at is not None:
+                    kill_ack_deadline = (
+                        observation.kill_ack_observed_at + CONTROL_SURFACE_WAIT_INTERVAL
+                    )
+
+                with resources.log_queue.get_connection() as broker:
+                    latest_entry = (
+                        mapping_for_tid(ctx, tid, broker=broker) or latest_entry
+                    )
+                    snapshot = _task_status(
+                        tid,
+                        context=ctx,
+                        broker=broker,
+                        observation_queue=resources.log_queue,
+                    )
+                if snapshot is not None:
+                    latest_snapshot = snapshot
+                    if snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
+                        return latest_entry, latest_snapshot
+                    if (
+                        kill_ack_deadline is not None
+                        and time.monotonic() >= kill_ack_deadline
+                    ):
+                        return latest_entry, latest_snapshot
+                wait_timeout = _control_surface_wait_timeout(
+                    overall_deadline=deadline,
+                    public_signal_deadline=public_signal_deadline,
+                    kill_ack_deadline=kill_ack_deadline,
+                    now=time.monotonic(),
+                    interval=CONTROL_SURFACE_WAIT_INTERVAL,
+                )
+                if wait_timeout is None:
                     return latest_entry, latest_snapshot
-            wait_timeout = _control_surface_wait_timeout(
-                overall_deadline=deadline,
-                public_signal_deadline=public_signal_deadline,
-                kill_ack_deadline=kill_ack_deadline,
-                now=time.monotonic(),
-                interval=CONTROL_SURFACE_WAIT_INTERVAL,
-            )
-            if wait_timeout is None:
-                return latest_entry, latest_snapshot
-            resources.wait(wait_timeout)
-    finally:
-        resources.close()
+                resources.wait(wait_timeout)
+        finally:
+            resources.close()
 
 
 def _latest_task_entry(

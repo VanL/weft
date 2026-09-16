@@ -254,6 +254,7 @@ def reconcile_submitted_spawn(
     deadline = time.monotonic() + max(timeout, 0.0)
     last_reserved: SpawnSubmissionReconciliation | None = None
     with (
+        context.session(),
         context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log_queue,
         ExitStack() as monitor_resources,
     ):

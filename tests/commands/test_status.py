@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Generator, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal, Never
+from typing import Any, Literal, Never, cast
 
 import psutil
 import pytest
@@ -2613,6 +2614,67 @@ def test_watch_task_events_reports_unexpected_watch_loop_failure(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_public_status_stream_close_exposes_session_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1844674407370955167"
+
+    class _Queue:
+        name = "weft.log.tasks"
+
+        def close(self) -> None:
+            return
+
+    class _Context:
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {}
+
+        @contextmanager
+        def session(self) -> Iterator[None]:
+            try:
+                yield
+            finally:
+                raise RuntimeError("session cleanup failed")
+
+        def queue(self, _name: str, *, persistent: bool = True) -> _Queue:
+            del persistent
+            return _Queue()
+
+    def events(
+        _queue: Any, *, since_timestamp: int | None = None
+    ) -> list[tuple[dict[str, Any], int]]:
+        del since_timestamp
+        return [
+            (
+                {
+                    "tid": tid,
+                    "status": "running",
+                    "event": "work_started",
+                },
+                123,
+            )
+        ]
+
+    monkeypatch.setattr(status_cmd, "_iter_log_events", events)
+    monkeypatch.setattr(status_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
+    iterator = cast(
+        Generator[TaskEvent, None, None],
+        status_cmd._iter_public_status_events(
+            cast(WeftContext, _Context()),
+            status_filter=None,
+            interval=0.25,
+        ),
+    )
+    assert next(iterator).event_type == "work_started"
+
+    with pytest.raises(
+        CommandExecutionError, match="session cleanup failed"
+    ) as exc_info:
+        iterator.close()
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
 def test_cmd_status_reports_unexpected_status_source_failure(

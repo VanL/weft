@@ -129,6 +129,7 @@ def await_one_shot_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-106] except
     """Wait for a one-shot task to publish a terminal result."""
     resources = ExitStack()
     try:
+        resources.enter_context(context.session())
         outbox_queue = context.queue(outbox_name, persistent=True)
         resources.callback(outbox_queue.close)
         ctrl_queue = (

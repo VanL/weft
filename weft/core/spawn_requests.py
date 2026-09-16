@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from simplebroker import BrokerTarget, Queue
+from simplebroker import BrokerSession, BrokerTarget, Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
@@ -96,12 +96,15 @@ def _spawn_broker(
     if broker is not None:
         yield broker
         return
+    target = _normalize_broker_target(broker_target)
+    resolved_config = resolve_runtime_config(config)
     with (
+        BrokerSession.connect(target, config=resolved_config),
         Queue(
             queue_name,
-            db_path=_normalize_broker_target(broker_target),
+            db_path=target,
             persistent=True,
-            config=resolve_runtime_config(config),
+            config=resolved_config,
         ) as queue,
         queue.get_connection() as opened,
     ):

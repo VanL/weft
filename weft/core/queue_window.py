@@ -45,6 +45,7 @@ def queue_broker(
         yield broker
         return
     with (
+        ctx.session(),
         ctx.queue(queue_name, persistent=persistent) as queue,
         queue.get_connection() as db,
     ):

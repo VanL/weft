@@ -1017,6 +1017,19 @@ Event types should include:
 - `result`
 - `end`
 
+Transport ownership rule:
+
+- WSGI uses a synchronous iterator whose creation, advancement, and final
+  closure stay on the request handler thread. The wrapper explicitly closes
+  its inner Weft stream.
+- ASGI uses an asynchronous response iterator backed by one per-stream worker.
+  That worker creates, advances, and closes the blocking Weft iterator in
+  serialized order, with no concurrent close and no unbounded prefetch.
+- response cancellation requests closure but does not claim that an active
+  backend call has already ended. Cleanup ownership remains retained until the
+  worker unwinds, and cleanup failures are logged or propagated by the owning
+  boundary rather than hidden by response shutdown.
+
 ### Optional transport: WebSocket [DJ-12.2]
 
 WebSocket support should be optional and require Django Channels.
@@ -1047,6 +1060,15 @@ Lifecycle rule:
 - it must cancel the Weft follow iterator on disconnect
 - it must not run the whole `follow=True` iterator synchronously inside
   `connect()`
+- iterator creation, every advance, and final closure must run on one private
+  per-stream worker. Disconnect sets cancellation and queues closure behind any
+  active advance; it never calls `generator.close()` concurrently from the
+  event-loop thread.
+
+SSE and Channels wrappers explicitly propagate close to their inner streams.
+Generator exit is lifecycle control: a cleanup failure remains observable to
+the stream owner, while a genuine application or send failure remains primary
+and records secondary cleanup diagnostics.
 
 ### Realtime payload contract [DJ-12.3]
 

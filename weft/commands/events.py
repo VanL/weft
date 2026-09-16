@@ -36,6 +36,7 @@ from weft.core.task_evidence import (
 )
 from weft.helpers import iter_queue_json_entries
 
+from ._resources import command_resource_scope
 from ._result_wait import (
     append_public_value,
     terminal_error_message,
@@ -250,8 +251,8 @@ def iter_task_events(
 
     normalized_tid = normalize_tid(tid)
     deadline = task_ops._deadline_from_timeout(timeout)
-    resources = ExitStack()
-    try:
+    with command_resource_scope() as resources:
+        resources.enter_context(context.session())
         log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
         resources.callback(log_queue.close)
         monitor = QueueChangeMonitor([log_queue], config=context.config)
@@ -298,8 +299,6 @@ def iter_task_events(
                 remaining = task_ops._remaining_timeout(deadline)
                 wait_timeout = 0.1 if remaining is None else min(0.1, remaining)
                 monitor.wait(wait_timeout)
-    finally:
-        resources.close()
 
 
 def follow_task_events(
@@ -431,8 +430,8 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
     )
 
     snapshot_emitted = False
-    resources = ExitStack()
-    try:
+    with command_resource_scope() as resources:
+        resources.enter_context(context.session())
         log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
         resources.callback(log_queue.close)
         with log_queue.get_connection() as broker:
@@ -781,5 +780,3 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 wait_timeout = 0.1 if remaining is None else min(0.1, remaining)
                 if monitor.wait(wait_timeout):
                     evidence_scan_pending = True
-    finally:
-        resources.close()

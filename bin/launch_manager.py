@@ -65,44 +65,44 @@ def _build_manager_spec(context: WeftContext, tid: str, name: str) -> TaskSpec:
 def _wait_for_registry(
     context: WeftContext, tid: str, timeout: float = 5.0
 ) -> dict[str, Any] | None:
-    queue = Queue(
-        WEFT_SERVICES_REGISTRY_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
-    deadline = time.time() + timeout
-    latest: dict[str, Any] | None = None
-    while time.time() < deadline:
-        try:
-            raw_entries = cast(
-                Sequence[tuple[str, int]] | None,
-                queue.peek_many(limit=1000, with_timestamps=True),
-            )
-        except (BrokerError, OSError, RuntimeError):
-            raw_entries = None
+    with (
+        context.session(),
+        Queue(
+            WEFT_SERVICES_REGISTRY_QUEUE,
+            db_path=context.broker_target,
+            persistent=False,
+            config=context.broker_config,
+        ) as queue,
+    ):
+        deadline = time.time() + timeout
+        latest: dict[str, Any] | None = None
+        while time.time() < deadline:
+            try:
+                raw_entries = cast(
+                    Sequence[tuple[str, int]] | None,
+                    queue.peek_many(limit=1000, with_timestamps=True),
+                )
+            except (BrokerError, OSError, RuntimeError):
+                raw_entries = None
 
-        if raw_entries:
-            for entry, timestamp in raw_entries:
-                try:
-                    data = cast(dict[str, Any], json.loads(entry))
-                except json.JSONDecodeError:
-                    continue
-                # Manager records live in the shared services registry as
-                # schema-validated service-owner rows; match the canonical fields
-                # (service_type + owner_tid) the runtime uses, not the legacy
-                # top-level "tid" alias.
-                record = parse_service_owner_record(data, timestamp=timestamp)
-                if (
-                    record is not None
-                    and record.service_type == SERVICE_TYPE_MANAGER
-                    and record.owner_tid == tid
-                ):
-                    latest = data
-        if latest and latest.get("status") == SERVICE_STATUS_ACTIVE:
-            return latest
-        time.sleep(0.1)
-    return latest
+            if raw_entries:
+                for entry, timestamp in raw_entries:
+                    try:
+                        data = cast(dict[str, Any], json.loads(entry))
+                    except json.JSONDecodeError:
+                        continue
+                    # Match the canonical owner fields, not the legacy tid alias.
+                    record = parse_service_owner_record(data, timestamp=timestamp)
+                    if (
+                        record is not None
+                        and record.service_type == SERVICE_TYPE_MANAGER
+                        and record.owner_tid == tid
+                    ):
+                        latest = data
+            if latest and latest.get("status") == SERVICE_STATUS_ACTIVE:
+                return latest
+            time.sleep(0.1)
+        return latest
 
 
 def _spawn_manager_subprocess(

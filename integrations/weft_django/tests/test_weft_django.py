@@ -66,7 +66,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connections, transaction
-from django.test import Client, override_settings
+from django.test import AsyncClient, Client, override_settings
 from fixture_project import authz as fixture_authz
 from fixture_project import request_id_provider
 from testapp.models import EventRecord
@@ -92,6 +92,8 @@ from weft_django import (
 from weft_django.client import get_core_client
 from weft_django.conf import get_realtime_transport
 from weft_django.registry import TaskRegistry, is_registered
+
+weft_django_sse = importlib.import_module("weft_django.sse")
 
 pytestmark = [pytest.mark.shared]
 
@@ -1023,6 +1025,122 @@ def test_http_detail_and_sse_views_are_read_only_diagnostics() -> None:
 
 
 @pytest.mark.shared
+def test_asgi_sse_uses_async_streaming_content() -> None:
+    task = echo_task.enqueue("asgi-http")
+    _wait_for_snapshot(task.tid)
+
+    async def collect() -> tuple[bool, bytes]:
+        response = await AsyncClient().get(f"/weft/tasks/{task.tid}/events/")
+        try:
+            chunks = [chunk async for chunk in response.streaming_content]
+            return response.is_async, b"".join(chunks)
+        finally:
+            response.close()
+
+    is_async, payload = asyncio.run(collect())
+
+    assert is_async is True
+    assert b"event: snapshot" in payload
+    assert b"event: end" in payload
+    assert task.result(timeout=30.0).value == "asgi-http"
+
+
+@pytest.mark.shared
+def test_asgi_handler_cancellation_serializes_stream_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advance_started = threading.Event()
+    release_advance = threading.Event()
+    closed = threading.Event()
+    owner_threads: list[int] = []
+
+    class _Iterator:
+        def __iter__(self) -> _Iterator:
+            return self
+
+        def __next__(self) -> bytes:
+            owner_threads.append(threading.get_ident())
+            advance_started.set()
+            release_advance.wait(timeout=2.0)
+            return b"event: state\ndata: {}\n\n"
+
+        def close(self) -> None:
+            owner_threads.append(threading.get_ident())
+            closed.set()
+
+    monkeypatch.setattr(
+        weft_django_sse, "event_stream", lambda *args, **kwargs: _Iterator()
+    )
+
+    async def _run() -> None:
+        response = weft_django_sse.sse_response("123", asynchronous=True)
+
+        async def send(_message: dict[str, Any]) -> None:
+            return
+
+        asgi_handler = importlib.import_module(
+            "django.core.handlers.asgi"
+        ).ASGIHandler()
+        send_task = asyncio.create_task(asgi_handler.send_response(response, send))
+        assert await asyncio.to_thread(advance_started.wait, 1.0)
+        send_task.cancel()
+        await asyncio.sleep(0)
+        assert not closed.is_set()
+        release_advance.set()
+        with pytest.raises(asyncio.CancelledError):
+            await send_task
+        response.close()
+        assert await asyncio.to_thread(closed.wait, 1.0)
+
+    asyncio.run(_run())
+
+    assert len(owner_threads) == 2
+    assert owner_threads[0] == owner_threads[1]
+
+
+@pytest.mark.shared
+def test_wsgi_response_early_close_stays_on_handler_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_threads: list[int] = []
+    closed = threading.Event()
+
+    def payloads(*args: Any, **kwargs: Any) -> Iterator[dict[str, Any]]:
+        del args, kwargs
+        try:
+            owner_threads.append(threading.get_ident())
+            yield {
+                "tid": "123",
+                "event_type": "state",
+                "timestamp": 1,
+                "payload": {},
+            }
+            yield {
+                "tid": "123",
+                "event_type": "state",
+                "timestamp": 2,
+                "payload": {},
+            }
+        finally:
+            owner_threads.append(threading.get_ident())
+            closed.set()
+
+    monkeypatch.setattr(weft_django_sse, "iter_task_event_payloads", payloads)
+    monkeypatch.setattr(
+        weft_django_sse,
+        "get_core_client",
+        lambda: type("Client", (), {"task": lambda self, tid: object()})(),
+    )
+    response = weft_django_sse.sse_response("123", asynchronous=False)
+    assert response.streaming
+    assert next(iter(response.streaming_content)).startswith(b"event: state")
+    response.close()
+
+    assert closed.is_set()
+    assert owner_threads == [threading.get_ident(), threading.get_ident()]
+
+
+@pytest.mark.shared
 def test_sse_stream_emits_stdout_and_stderr_events_without_consuming_result() -> None:
     core_task = get_core_client().submit_command(
         [
@@ -1214,10 +1332,28 @@ def test_channels_stream_cancellation_propagates_after_iterator_close(
         pytest.skip("Channels extra is not installed")
 
     cancel_event = threading.Event()
+    advance_started = threading.Event()
+    release_advance = threading.Event()
     closed = threading.Event()
+    owner_threads: list[int] = []
 
     class _Iterator:
+        def __iter__(self) -> _Iterator:
+            return self
+
+        def __next__(self) -> dict[str, Any]:
+            owner_threads.append(threading.get_ident())
+            advance_started.set()
+            release_advance.wait(timeout=2.0)
+            return {
+                "tid": "1234567890123456789",
+                "event_type": "state",
+                "timestamp": 1,
+                "payload": {"status": "running"},
+            }
+
         def close(self) -> None:
+            owner_threads.append(threading.get_ident())
             closed.set()
 
     iterator = _Iterator()
@@ -1227,21 +1363,223 @@ def test_channels_stream_cancellation_propagates_after_iterator_close(
         lambda *args, **kwargs: iterator,
     )
 
-    async def cancelled_to_thread(*args: Any, **kwargs: Any) -> Any:
-        del args, kwargs
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(module.asyncio, "to_thread", cancelled_to_thread)
-
     async def _run() -> None:
         consumer = module.TaskEventsConsumer()
+        stream_task = asyncio.create_task(
+            consumer._stream_events(object(), cancel_event)
+        )
+        assert await asyncio.to_thread(advance_started.wait, 1.0)
+        stream_task.cancel()
+        asyncio.get_running_loop().call_later(0.05, release_advance.set)
         with pytest.raises(asyncio.CancelledError):
-            await consumer._stream_events(object(), cancel_event)
+            await stream_task
 
     asyncio.run(_run())
 
     assert cancel_event.is_set()
     assert closed.is_set()
+    assert len(owner_threads) == 2
+    assert owner_threads[0] == owner_threads[1]
+
+
+@pytest.mark.shared
+def test_channels_disconnect_returns_while_serialized_cleanup_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sys.modules.pop("weft_django.channels", None)
+    try:
+        module = importlib.import_module("weft_django.channels")
+    except ImproperlyConfigured:
+        pytest.skip("Channels extra is not installed")
+
+    async def _run() -> None:
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        async def stream() -> None:
+            try:
+                await asyncio.Future()
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+
+        async def immediate_timeout(
+            futures: set[asyncio.Task[None]], *, timeout: float
+        ) -> tuple[set[asyncio.Task[None]], set[asyncio.Task[None]]]:
+            assert timeout == 1.0
+            return set(), futures
+
+        monkeypatch.setattr(module.asyncio, "wait", immediate_timeout)
+        consumer = module.TaskEventsConsumer()
+        consumer._stream_cancel = threading.Event()
+        stream_task = asyncio.create_task(stream())
+        consumer._stream_task = stream_task
+        await asyncio.sleep(0)
+
+        await consumer.disconnect(1000)
+
+        assert consumer._stream_cancel.is_set()
+        await cleanup_started.wait()
+        assert not stream_task.done()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await stream_task
+
+    asyncio.run(_run())
+
+
+@pytest.mark.shared
+def test_channels_detached_cleanup_failure_is_reported_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sys.modules.pop("weft_django.channels", None)
+    try:
+        module = importlib.import_module("weft_django.channels")
+    except ImproperlyConfigured:
+        pytest.skip("Channels extra is not installed")
+
+    advance_started = threading.Event()
+    release_advance = threading.Event()
+
+    class _Iterator:
+        def __iter__(self) -> _Iterator:
+            return self
+
+        def __next__(self) -> dict[str, Any]:
+            advance_started.set()
+            release_advance.wait(timeout=2.0)
+            return {
+                "tid": "123",
+                "event_type": "state",
+                "timestamp": 1,
+                "payload": {},
+            }
+
+        def close(self) -> None:
+            raise RuntimeError("delayed cleanup failed")
+
+    monkeypatch.setattr(
+        module,
+        "iter_task_event_payloads",
+        lambda *args, **kwargs: _Iterator(),
+    )
+
+    async def _run() -> None:
+        async def immediate_timeout(
+            futures: set[asyncio.Task[None]], *, timeout: float
+        ) -> tuple[set[asyncio.Task[None]], set[asyncio.Task[None]]]:
+            assert timeout == 1.0
+            return set(), futures
+
+        monkeypatch.setattr(module.asyncio, "wait", immediate_timeout)
+        consumer = module.TaskEventsConsumer()
+        cancel_event = threading.Event()
+        consumer._stream_cancel = cancel_event
+        stream_task = asyncio.create_task(
+            consumer._stream_events(object(), cancel_event)
+        )
+        consumer._stream_task = stream_task
+        assert await asyncio.to_thread(advance_started.wait, 1.0)
+
+        await consumer.disconnect(1000)
+        assert not stream_task.done()
+        release_advance.set()
+        while not stream_task.done():
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(_run())
+
+    matching = [
+        record
+        for record in caplog.records
+        if "Django realtime stream cleanup failed" in record.getMessage()
+    ]
+    assert len(matching) == 1
+    assert matching[0].name == "weft_django.channels"
+    exc_info = matching[0].exc_info
+    assert exc_info is not None
+    assert isinstance(exc_info[1], RuntimeError)
+
+
+@pytest.mark.shared
+def test_async_iterator_owner_close_edges_and_stream_isolation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def _run() -> None:
+        never_created = False
+
+        def should_not_create() -> Iterator[int]:
+            nonlocal never_created
+            never_created = True
+            return iter(())
+
+        unopened = weft_django_sse.AsyncIteratorOwner(
+            should_not_create,
+            cancel_event=threading.Event(),
+        )
+        await unopened.aclose()
+        await unopened.aclose()
+        assert not never_created
+
+        failing = weft_django_sse.AsyncIteratorOwner(
+            lambda: (_ for _ in ()).throw(RuntimeError("setup failed")),
+            cancel_event=threading.Event(),
+        )
+        with pytest.raises(RuntimeError, match="setup failed"):
+            await failing.__anext__()
+        await failing.aclose()
+
+        class _CloseFailure:
+            def __init__(self) -> None:
+                self._values = iter((3,))
+
+            def __iter__(self) -> _CloseFailure:
+                return self
+
+            def __next__(self) -> int:
+                return next(self._values)
+
+            def close(self) -> None:
+                raise RuntimeError("mixed close failed")
+
+        mixed = weft_django_sse.AsyncIteratorOwner(
+            _CloseFailure,
+            cancel_event=threading.Event(),
+        )
+        assert await mixed.__anext__() == 3
+        assert mixed.request_close() is not None
+        with pytest.raises(RuntimeError, match="mixed close failed"):
+            await mixed.aclose()
+
+        release_first = threading.Event()
+        first_started = threading.Event()
+
+        def blocked() -> Iterator[int]:
+            first_started.set()
+            release_first.wait(timeout=2.0)
+            yield 1
+
+        first = weft_django_sse.AsyncIteratorOwner(
+            blocked, cancel_event=threading.Event()
+        )
+        second = weft_django_sse.AsyncIteratorOwner(
+            lambda: iter((2,)), cancel_event=threading.Event()
+        )
+        first_advance = asyncio.create_task(first.__anext__())
+        assert await asyncio.to_thread(first_started.wait, 1.0)
+        assert await second.__anext__() == 2
+        await second.aclose()
+        release_first.set()
+        assert await first_advance == 1
+        await first.aclose()
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(_run())
+
+    assert not any(record.name == "weft_django.realtime" for record in caplog.records)
 
 
 @pytest.mark.shared

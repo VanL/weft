@@ -160,6 +160,12 @@ New/refined exact contracts:
   arguments: tuple[Mapping[str, Any], ...], stdin: Mapping[str, Any] | None)`.
 - `CommandStream[T]` is an iterator with idempotent `close()`; exhaustion and
   close release resources and iteration failures use typed command errors.
+  Broker-backed stream advancement and final closure share an executing-thread
+  owner. Transport adapters preserve that ownership across async delivery and
+  cancellation; they do not close an iterator concurrently with an active
+  advance. A genuine stream-body failure stays primary when cleanup also
+  fails; a cleanup failure during lifecycle-only generator closure remains
+  observable to the close caller.
 - `RunSession` exposes `tid`, `events() -> CommandStream[TaskEvent]`,
   `send_input(text)`, `close_input()`, `stop() -> TaskControlResult`,
   `wait(timeout=None) -> RunExecutionResult`, and idempotent `close()`. Close
@@ -378,6 +384,8 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
+- [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 
 - [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
 

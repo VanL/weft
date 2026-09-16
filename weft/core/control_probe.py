@@ -229,6 +229,7 @@ def _probe_broker(
         yield broker
         return
     with (
+        ctx.session(),
         ctx.queue(ctrl_in_name, persistent=True) as queue,
         queue.get_connection() as opened,
     ):

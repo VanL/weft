@@ -810,7 +810,7 @@ had been implemented.
 
 ## Implementation Checkpoint
 
-Slices 1-3 are implemented. The dependency floors, public
+Slices 1-4 are implemented. The dependency floors, public
 context session factory, fixed watcher/task inventory ownership, task drive
 scope, constructor unwind, harness driver ownership, and minimum Monitor clone
 compatibility are present. The user confirmed all remaining slices after the
@@ -818,7 +818,11 @@ slice-2 gate. Slice 3 adds one automatic worker-local session scope for both
 Monitor maintenance lanes; MonitorStore borrows the owner session through a
 session-minted persistent sidecar anchor; queue, sink, store, and session close
 failures remain typed before result publication. The [IMPL.11] and [SB-0.4a]
-spec deltas are promoted. Slices 4-5 remain.
+spec deltas are promoted. Slice 4 adds command-owned session scopes to bounded
+and streaming command paths, bounded standalone core-helper fallbacks, and
+owner-thread Django ASGI/Channels iterator bridges while retaining direct
+handler-thread WSGI iteration. The [PY-2], [DJ-12.1], and [DJ-12.2] spec deltas
+are promoted. Slice 5 remains.
 
 The slice-2 gate passed after independent review remediation. SQLite evidence:
 656 passed and 4 skipped across the core, Liveness, Monitor, ownership, and
@@ -839,6 +843,19 @@ Ruff check/format, six plan/spec hygiene tests, and git diff check pass.
 Independent review findings on owner-identity validation, clone acquisition
 unwind, and BaseException-safe cleanup were remediated with firing tests. The
 final slice-3 re-review returned PASS with no remaining findings.
+
+Slice-4 SQLite evidence passed the command, observer, Manager, Monitor-helper,
+queue-wait, and full Django integration matrix with only backend-specific
+skips. PostgreSQL evidence passed 786 tests with one SQLite-only skip. The
+matrix includes suspended public generator close, body-versus-cleanup exception
+priority, Manager partial setup, real ASGI ``send_response()`` cancellation,
+early WSGI response close, close-before-first-advance, duplicate close, setup
+failure, independent streams, bounded Channels disconnect, and delayed cleanup
+diagnostics. Ruff check/format, full configured mypy, policy/spec hygiene, and
+git diff checks pass. Independent review found and drove fixes for an unbounded
+Channels cancellation wait, Manager partial-setup leakage, missing public
+boundary tests, and duplicate detached-cleanup diagnostics; final re-review is
+complete and returned PASS with no remaining findings.
 
 ## Deviation Log
 

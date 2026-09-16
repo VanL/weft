@@ -80,6 +80,7 @@ from weft.helpers import (
 from weft.helpers.message_ids import is_task_tid
 
 from ._boundary import typed_command_errors
+from ._resources import command_resource_scope
 from ._task_snapshot_reducer import (
     CollectedTaskSnapshot,
     FoldedTaskRecord,
@@ -1401,7 +1402,7 @@ def _public_status_event(
     )
 
 
-def _iter_public_status_events(
+def _iter_public_status_events_owned(
     context: WeftContext,
     *,
     status_filter: str | None,
@@ -1410,10 +1411,13 @@ def _iter_public_status_events(
     """Iterate structured project-wide task events."""
 
     last_timestamp = 0
-    queue = _queue(context, WEFT_GLOBAL_LOG_QUEUE)
-    monitor: QueueChangeMonitor | None = None
-    try:
+    with command_resource_scope() as resources:
+        resources.enter_context(context.session())
+        queue = _queue(context, WEFT_GLOBAL_LOG_QUEUE)
+        resources.callback(queue.close)
+        monitor: QueueChangeMonitor | None = None
         monitor = QueueChangeMonitor([queue], config=context.config)
+        resources.callback(monitor.close)
         while True:
             emitted = False
             for payload, timestamp in _iter_log_events(
@@ -1433,14 +1437,26 @@ def _iter_public_status_events(
                     emitted = True
             if not emitted:
                 monitor.wait(max(STATUS_WATCH_MIN_INTERVAL, interval))
+
+
+def _iter_public_status_events(
+    context: WeftContext,
+    *,
+    status_filter: str | None,
+    interval: float,
+) -> Iterator[TaskEvent]:
+    """Map owned status-stream failures to the public command boundary."""
+
+    try:
+        yield from _iter_public_status_events_owned(
+            context,
+            status_filter=status_filter,
+            interval=interval,
+        )
     except CommandError:
         raise
     except Exception as exc:
         raise CommandExecutionError(f"status watch failed: {exc}") from exc
-    finally:
-        if monitor is not None:
-            monitor.close()
-        queue.close()
 
 
 def _status_event_stream(

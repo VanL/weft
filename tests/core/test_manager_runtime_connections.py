@@ -7,8 +7,9 @@ import os
 import sqlite3
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -90,6 +91,38 @@ def _manager_payload(ctx: WeftContext) -> dict[str, Any]:
             "metadata": {},
         },
     )
+
+
+def test_mark_manager_stopped_unwinds_session_when_queue_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = False
+    exited = False
+
+    class _Context:
+        @contextmanager
+        def session(self) -> Iterator[None]:
+            nonlocal entered, exited
+            entered = True
+            try:
+                yield
+            finally:
+                exited = True
+
+    def fail_queue(_context: Any) -> None:
+        raise RuntimeError("registry setup failed")
+
+    monkeypatch.setattr(manager_runtime, "_registry_queue", fail_queue)
+
+    with pytest.raises(RuntimeError, match="registry setup failed"):
+        manager_runtime._mark_manager_stopped(
+            cast(WeftContext, _Context()),
+            _TID,
+            record=None,
+        )
+
+    assert entered
+    assert exited
 
 
 @pytest.mark.parametrize("heartbeat_fallback", [False, True])

@@ -199,6 +199,7 @@ def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108
     poll_interval = effective_result_surface_wait_interval(timeout)
     resources = ExitStack()
     try:
+        resources.enter_context(context.session())
         log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
         resources.callback(log_queue.close)
         # Retain the lease, not a transaction; each poll reads fresh committed data.
@@ -475,6 +476,7 @@ def _await_single_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-109] excepti
 
     resources = ExitStack()
     try:
+        resources.enter_context(context.session())
         outbox_queue = context.queue(outbox_name, persistent=True)
         resources.callback(outbox_queue.close)
         ctrl_queue = context.queue(ctrl_out_name, persistent=True)

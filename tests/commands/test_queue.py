@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import sys
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Never, cast
@@ -298,6 +299,9 @@ def test_public_queue_watch_returns_closable_structured_stream(
         def __init__(self) -> None:
             self.config: dict[str, Any] = {}
             self._queues = [data_queue, monitor_queue]
+
+        def session(self) -> Any:
+            return nullcontext()
 
         def queue(self, _name: str, *, persistent: bool = True) -> _FakeWatchQueue:
             del persistent
@@ -803,6 +807,9 @@ def test_exact_queue_message_inputs_normalize_strings_before_queue_calls() -> No
             return
 
     class _ExactContext:
+        def session(self) -> Any:
+            return nullcontext()
+
         def queue(self, _name: str, *, persistent: bool = True) -> _ExactQueue:
             del persistent
             return _ExactQueue()
@@ -872,6 +879,9 @@ def test_watch_queue_uses_queue_monitor(
             self.config: dict[str, Any] = {}
             self._queues = [data_queue, monitor_queue]
 
+        def session(self) -> Any:
+            return nullcontext()
+
         def queue(self, _name: str, *, persistent: bool = True) -> _FakeWatchQueue:
             del persistent
             return self._queues.pop(0)
@@ -914,6 +924,9 @@ def test_watch_queue_closes_generator_when_limit_stops_iteration(
             self.config: dict[str, Any] = {}
             self._queues = [data_queue, monitor_queue]
 
+        def session(self) -> Any:
+            return nullcontext()
+
         def queue(self, _name: str, *, persistent: bool = True) -> _FakeWatchQueue:
             del persistent
             return self._queues.pop(0)
@@ -936,6 +949,115 @@ def test_watch_queue_closes_generator_when_limit_stops_iteration(
     assert data_queue.generators[0].closed
     assert data_queue.closed
     assert monitor_queue.closed
+
+
+def test_watch_queue_close_propagates_session_failure_after_owned_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    class _TrackingQueue(_FakeWatchQueue):
+        def close(self) -> None:
+            order.append(f"queue:{self.name}:{len(order)}")
+            super().close()
+
+    data_queue = _TrackingQueue("watch.queue", [[("payload", 5)]])
+    monitor_queue = _TrackingQueue("watch.queue", [])
+
+    class _TrackingMonitor(_FakeQueueChangeMonitor):
+        def close(self) -> None:
+            order.append("monitor")
+
+    class _Context:
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {}
+            self._queues = [data_queue, monitor_queue]
+
+        @contextmanager
+        def session(self) -> Iterator[None]:
+            try:
+                yield
+            finally:
+                order.append("session")
+                raise RuntimeError("session cleanup failed")
+
+        def queue(self, _name: str, *, persistent: bool = True) -> _FakeWatchQueue:
+            del persistent
+            return self._queues.pop(0)
+
+    monkeypatch.setattr(queue_cmd, "QueueChangeMonitor", _TrackingMonitor)
+    iterator = cast(
+        Generator[queue_cmd.QueueMessage, None, None],
+        queue_cmd.watch_queue(
+            cast(WeftContext, _Context()),
+            "watch.queue",
+            with_timestamps=True,
+        ),
+    )
+    assert next(iterator).body == "payload"
+
+    with pytest.raises(RuntimeError, match="session cleanup failed"):
+        iterator.close()
+
+    assert order[0] == "monitor"
+    assert order[-1] == "session"
+    assert data_queue.closed
+    assert monitor_queue.closed
+
+
+def test_watch_queue_body_failure_remains_primary_over_session_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body_failure = ValueError("watch body failed")
+
+    class _FailingIterator:
+        def __iter__(self) -> _FailingIterator:
+            return self
+
+        def __next__(self) -> tuple[str, int]:
+            raise body_failure
+
+        def close(self) -> None:
+            return
+
+    class _FailingQueue(_FakeWatchQueue):
+        def read_generator(self, **kwargs: Any) -> _FailingIterator:
+            del kwargs
+            return _FailingIterator()
+
+    class _Context:
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {}
+            self._queues = [
+                _FailingQueue("watch.queue", []),
+                _FakeWatchQueue("watch.queue", []),
+            ]
+
+        @contextmanager
+        def session(self) -> Iterator[None]:
+            try:
+                yield
+            finally:
+                raise RuntimeError("session cleanup failed")
+
+        def queue(self, _name: str, *, persistent: bool = True) -> _FakeWatchQueue:
+            del persistent
+            return self._queues.pop(0)
+
+    monkeypatch.setattr(queue_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
+
+    with pytest.raises(ValueError, match="watch body failed") as exc_info:
+        list(
+            queue_cmd.watch_queue(
+                cast(WeftContext, _Context()),
+                "watch.queue",
+            )
+        )
+
+    assert exc_info.value is body_failure
+    assert body_failure.__notes__ == [
+        "Command resource cleanup failed: RuntimeError('session cleanup failed')"
+    ]
 
 
 def test_write_command_rejects_omitted_message_without_reading_stdin(

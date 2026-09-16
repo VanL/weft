@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -43,6 +44,7 @@ from weft._constants import (
 )
 from weft._exceptions import CommandUsageError, SubmissionError
 from weft.commands._boundary import typed_command_errors
+from weft.commands._resources import close_command_resources
 from weft.commands._result_wait import await_one_shot_result
 from weft.commands._streaming import (
     collect_interactive_queue_output as _collect_interactive_queue_output,
@@ -378,6 +380,13 @@ class _LiveRunSession:
         self._streams: list[CommandStream[TaskEvent]] = []
         self._result: RunExecutionResult | None = None
         self._closed = False
+        with ExitStack() as resources:
+            resources.enter_context(context.session())
+            self._input_queue = context.queue(
+                f"T{self.tid}.{QUEUE_INBOX_SUFFIX}", persistent=True
+            )
+            resources.callback(self._input_queue.close)
+            self._input_resources = resources.pop_all()
 
     def events(self) -> CommandStream[TaskEvent]:
         # Late import breaks the real result/events cycle.
@@ -391,22 +400,10 @@ class _LiveRunSession:
         return stream
 
     def send_input(self, text: str) -> None:
-        queue = self._context.queue(
-            f"T{self.tid}.{QUEUE_INBOX_SUFFIX}", persistent=True
-        )
-        try:
-            queue.write(json.dumps({"stdin": text}))
-        finally:
-            queue.close()
+        self._input_queue.write(json.dumps({"stdin": text}))
 
     def close_input(self) -> None:
-        queue = self._context.queue(
-            f"T{self.tid}.{QUEUE_INBOX_SUFFIX}", persistent=True
-        )
-        try:
-            queue.write(json.dumps({"close": True}))
-        finally:
-            queue.close()
+        self._input_queue.write(json.dumps({"close": True}))
 
     @typed_command_errors
     def stop(self) -> TaskControlResult:
@@ -445,9 +442,12 @@ class _LiveRunSession:
         if self._closed:
             return
         self._closed = True
+        resources = ExitStack()
+        resources.callback(self._input_resources.close)
         for stream in self._streams:
-            stream.close()
+            resources.callback(stream.close)
         self._streams.clear()
+        resources.close()
 
 
 # -----------------------------------------------------------------------------
@@ -655,14 +655,16 @@ class _InteractiveRunLifecycle:
             on_stderr=self._on_stderr,
             on_state=self._on_state,
         )
+        self._resources = ExitStack()
         try:
+            self._resources.enter_context(context.session())
             self._log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+            self._resources.callback(self._log_queue.close)
         except BaseException as error:
-            try:
-                self._client.stop()
-            except BaseException as cleanup_error:
-                error.add_note(f"Interactive client cleanup failed: {cleanup_error!r}")
-                raise error from cleanup_error
+            cleanup = ExitStack()
+            cleanup.callback(self._client.stop)
+            cleanup.callback(self._resources.close)
+            close_command_resources(cleanup, body_error=error)
             raise
 
     def start(self) -> None:
@@ -673,8 +675,10 @@ class _InteractiveRunLifecycle:
     def close(self) -> None:
         """Close resources in the existing client-then-log order."""
 
-        self._client.stop()
-        self._log_queue.close()
+        cleanup = ExitStack()
+        cleanup.callback(self._resources.close)
+        cleanup.callback(self._client.stop)
+        cleanup.close()
         if self._use_prompt:
             return
         if self._stdout_chunks:
@@ -777,7 +781,8 @@ class _InteractiveRunLifecycle:
     ) -> None:
         """Wait for completion and safely wake the prompt event loop."""
 
-        self.wait_for_completion()
+        with self._context.session():
+            self.wait_for_completion()
         completion_event.set()
         loop = session.app.loop
         if loop is None:
@@ -801,11 +806,12 @@ class _InteractiveRunLifecycle:
     def collect_piped_result(self) -> Any | None:
         """Fill an empty captured result from the final outbox snapshot."""
 
-        outbox_queue = self._context.queue(self._outbox_name, persistent=True)
-        try:
-            collected = _collect_interactive_queue_output(outbox_queue)
-        finally:
-            outbox_queue.close()
+        with self._context.session():
+            outbox_queue = self._context.queue(self._outbox_name, persistent=True)
+            try:
+                collected = _collect_interactive_queue_output(outbox_queue)
+            finally:
+                outbox_queue.close()
         if collected and not self._result:
             self._result = "".join(collected)
         return self._result
@@ -990,6 +996,7 @@ def _run_interactive_session(
 
     lifecycle = _InteractiveRunLifecycle(context, taskspec, use_prompt=use_prompt)
     quit_requested = False
+    body_error: BaseException | None = None
     try:
         lifecycle.start()
         if use_prompt:
@@ -997,8 +1004,18 @@ def _run_interactive_session(
         else:
             _run_interactive_piped(lifecycle, stdin_data, auto_close=auto_close)
         status, error = lifecycle.outcome(quit_requested=quit_requested)
+    except BaseException as exc:
+        body_error = exc
+        raise
     finally:
-        lifecycle.close()
+        try:
+            lifecycle.close()
+        except BaseException as cleanup_error:
+            if body_error is None:
+                raise
+            body_error.add_note(
+                f"Interactive lifecycle cleanup failed: {cleanup_error!r}"
+            )
 
     result = None if use_prompt else lifecycle.collect_piped_result()
     return status, result, error

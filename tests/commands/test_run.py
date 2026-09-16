@@ -508,6 +508,9 @@ class _PromptCompletionContext:
         self.config: dict[str, Any] = {}
         self._log_queue = log_queue
 
+    def session(self) -> Any:
+        return nullcontext()
+
     def queue(self, name: str, *, persistent: bool) -> _PromptCompletionQueue:
         assert name == WEFT_GLOBAL_LOG_QUEUE
         assert persistent is True
@@ -538,6 +541,9 @@ class _InteractiveExitContext:
         self.log_queue = _InteractiveExitQueue()
         self.control_queues: list[_InteractiveExitQueue] = []
         self._commands = commands
+
+    def session(self) -> Any:
+        return nullcontext()
 
     def queue(self, name: str, *, persistent: bool) -> _InteractiveExitQueue:
         if name == WEFT_GLOBAL_LOG_QUEUE:
@@ -1753,7 +1759,7 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime._await_manager_start_settlement",
-        lambda context, *, manager_tid, deadline: competing_record,
+        lambda context, *, manager_tid, deadline, session_owned=False: competing_record,
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime.pid_is_live",

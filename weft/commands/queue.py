@@ -14,15 +14,17 @@ Spec references:
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, cast
+from functools import wraps
+from typing import Any, Concatenate, cast
 
 from simplebroker import CloseableIterator, format_message_id
 from simplebroker.ext import TimestampError, TimestampGenerator
 from weft._constants import WEFT_CONTEXT_ENV
 from weft._exceptions import CommandExecutionError, CommandUsageError
 from weft.commands._boundary import typed_queue_command_errors
+from weft.commands._resources import command_resource_scope
 from weft.commands.types import (
     CommandStream,
     EndpointResolution,
@@ -136,6 +138,20 @@ def _endpoint_resolution(record: ResolvedEndpoint) -> EndpointResolution:
     )
 
 
+def _session_scoped[**P, R](
+    operation: Callable[Concatenate[WeftContext, P], R],
+) -> Callable[Concatenate[WeftContext, P], R]:
+    """Give one bounded queue operation a caller-thread session lifetime."""
+
+    @wraps(operation)
+    def wrapped(ctx: WeftContext, *args: P.args, **kwargs: P.kwargs) -> R:
+        with ctx.session():
+            return operation(ctx, *args, **kwargs)
+
+    return wrapped
+
+
+@_session_scoped
 def read_messages(
     ctx: WeftContext,
     queue_name: str,
@@ -173,6 +189,7 @@ def read_messages(
         queue.close()
 
 
+@_session_scoped
 def read_queue(
     ctx: WeftContext,
     queue_name: str,
@@ -224,6 +241,7 @@ def read_queue(
         queue.close()
 
 
+@_session_scoped
 def write_message(ctx: WeftContext, queue_name: str, message: str) -> None:
     queue = ctx.queue(queue_name, persistent=True)
     try:
@@ -253,6 +271,7 @@ def write_endpoint(
     return write_queue(ctx, resolved.record.inbox, message)
 
 
+@_session_scoped
 def peek_messages(
     ctx: WeftContext,
     queue_name: str,
@@ -290,6 +309,7 @@ def peek_messages(
         queue.close()
 
 
+@_session_scoped
 def peek_queue(
     ctx: WeftContext,
     queue_name: str,
@@ -342,6 +362,7 @@ def peek_queue(
 
 
 @typed_queue_command_errors
+@_session_scoped
 def move_queue_entries(
     ctx: WeftContext,
     source: str,
@@ -541,11 +562,15 @@ def watch_queue(
     before: int | None = None,
     move_to: str | None = None,
 ) -> Iterator[QueueMessage]:
-    queue = ctx.queue(queue_name, persistent=True)
-    watch_queue = ctx.queue(queue_name, persistent=True)
-    monitor: QueueChangeMonitor | None = None
-    try:
+    with command_resource_scope() as resources:
+        resources.enter_context(ctx.session())
+        queue = ctx.queue(queue_name, persistent=True)
+        resources.callback(queue.close)
+        watch_queue = ctx.queue(queue_name, persistent=True)
+        resources.callback(watch_queue.close)
+        monitor: QueueChangeMonitor | None = None
         monitor = QueueChangeMonitor([watch_queue], config=ctx.config)
+        resources.callback(monitor.close)
         emitted = 0
         last_timestamp = after
 
@@ -593,11 +618,6 @@ def watch_queue(
 
             if not found:
                 monitor.wait(interval)
-    finally:
-        if monitor is not None:
-            monitor.close()
-        watch_queue.close()
-        queue.close()
 
 
 def watch_queue_entries(
@@ -640,6 +660,7 @@ def resolve_queue_endpoint(
     return _endpoint_resolution(resolved)
 
 
+@_session_scoped
 def delete_queue_messages(
     ctx: WeftContext,
     queue_name: str | None = None,

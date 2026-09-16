@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from django.core.handlers.asgi import ASGIRequest
 from django.http import Http404, HttpRequest, HttpResponseForbidden, JsonResponse
 
 from weft_django.client import get_core_client
@@ -44,4 +45,4 @@ def task_events_view(request: HttpRequest, tid: str) -> Any:
     if get_realtime_transport() != "sse":
         raise Http404("SSE transport is not enabled")
     _task_snapshot_or_404(tid)
-    return sse_response(tid)
+    return sse_response(tid, asynchronous=isinstance(request, ASGIRequest))
