@@ -146,10 +146,10 @@
   without recycling another thread's core.
   Task shutdown also closes configured watched queues that were never cached,
   including pipeline event queues.
-- Optional `processtitle` loading is type-checkable on non-macOS CI without
-  making the platform-specific dependency mandatory at runtime. Platform-native
-  process-title coverage is scoped to the actual Darwin host, and external-runner
-  command tests no longer require a live Docker daemon.
+- `processtitle` is now declared as a package dependency while remaining loaded
+  only through the deferred loader. Platform-native process-title coverage is
+  scoped to the actual Darwin host, and external-runner command tests no longer
+  require a live Docker daemon.
 - Manager lifecycle, task status/control, submission reconciliation, results,
   and realtime observation retain their connections through bounded waits while
   reading fresh evidence. Activity-monitor construction and replacement failures
