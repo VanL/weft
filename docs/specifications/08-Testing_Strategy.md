@@ -69,12 +69,13 @@ see.
 
 ### Staged CI and Release Proof [TS-4]
 
-The `Test` workflow is the sole automated test owner. Its main stage runs the
-multi-platform Python matrix, every SQLite test including the slow marker on
-one canonical Linux/Python lane, the PostgreSQL-compatible suite through
-`bin/pytest-pg`, coverage aggregation, and repository static gates. The Django,
-Docker, macOS sandbox, and Microsandbox suites all require that complete main
-stage and then fan out in parallel. Release workflows do not run pytest.
+The `Test` workflow is the sole automated test owner. Repository static gates
+run first. Only after they succeed does the workflow run the multi-platform
+Python matrix, every SQLite test including the slow marker on one canonical
+Linux/Python lane, and the PostgreSQL-compatible suite through `bin/pytest-pg`.
+Coverage aggregation follows the main matrix. The Django, Docker, macOS
+sandbox, and Microsandbox suites all require that complete main stage and then
+fan out in parallel. Release workflows do not run pytest.
 
 The release helper accepts one explicit package target (`core`, `django`,
 `docker`, `macos-sandbox`, or `microsandbox`) or `all`, defaulting to `core`.

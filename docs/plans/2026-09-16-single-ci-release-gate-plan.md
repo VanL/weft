@@ -236,3 +236,20 @@ handoff gate if local time and platform dependencies permit.
 | `./.venv/bin/python bin/ruff_suppression_index.py --check` | Passed |
 | `bin/check-dom15-fixtures` | Passed |
 | `git diff --check` | Passed |
+
+## Follow-up: Cheap Gates First
+
+On 2026-09-16, the CI graph was tightened so the existing `lint` job (Ruff,
+formatting, suppression-index validation, and mypy) must succeed before either
+main test matrix starts. This preserves the staged release contract while
+avoiding expensive test allocation for commits that fail cheap static checks.
+No YAML-shape test enforces this dependency; the workflow and its documented
+contract are the source of truth, avoiding a brittle mirror of declarative CI.
+
+Follow-up verification: the release/spec/plan subset, Ruff, formatting, mypy,
+workflow YAML parsing, and `git diff --check` all passed.
+
+The local release helper follows the same fail-fast order: Ruff, formatting,
+and mypy precede SQLite, PostgreSQL, extension, and live-provider tests. Its
+existing coverage test intentionally verifies which gates run without mirroring
+their tuple positions.

@@ -91,42 +91,6 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "macos-sandbox",
         "--extra",
         "microsandbox",
-        "pytest",
-        "-v",
-        "--tb=short",
-        "-m",
-        "",
-        "--override-ini=addopts=-ra -q --strict-markers -n logical --dist load",
-    ),
-    (
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "--extra",
-        "docker",
-        "--extra",
-        "django",
-        "--extra",
-        "macos-sandbox",
-        "--extra",
-        "microsandbox",
-        "bin/pytest-pg",
-        "--all",
-    ),
-    (
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "--extra",
-        "docker",
-        "--extra",
-        "django",
-        "--extra",
-        "macos-sandbox",
-        "--extra",
-        "microsandbox",
         "ruff",
         "check",
         "weft",
@@ -182,6 +146,42 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "extensions/weft_microsandbox/weft_microsandbox",
         "--config-file",
         "pyproject.toml",
+    ),
+    (
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "--extra",
+        "docker",
+        "--extra",
+        "django",
+        "--extra",
+        "macos-sandbox",
+        "--extra",
+        "microsandbox",
+        "pytest",
+        "-v",
+        "--tb=short",
+        "-m",
+        "",
+        "--override-ini=addopts=-ra -q --strict-markers -n logical --dist load",
+    ),
+    (
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "--extra",
+        "docker",
+        "--extra",
+        "django",
+        "--extra",
+        "macos-sandbox",
+        "--extra",
+        "microsandbox",
+        "bin/pytest-pg",
+        "--all",
     ),
     LIVE_PROVIDER_CLI_TEST_COMMAND,
 )
@@ -572,8 +572,8 @@ def build_precheck_commands(
     """Return the release-helper precheck commands for the current host."""
 
     commands = list(BASE_PRECHECK_COMMANDS)
-    commands.insert(2, DJANGO_INTEGRATION_TEST_COMMAND)
-    commands.insert(3, MICROSANDBOX_EXTENSION_TEST_COMMAND)
+    commands.insert(-1, DJANGO_INTEGRATION_TEST_COMMAND)
+    commands.insert(-1, MICROSANDBOX_EXTENSION_TEST_COMMAND)
 
     if include_docker_extension_tests is None:
         include_docker_extension_tests = _docker_available_for_tests()
@@ -581,10 +581,9 @@ def build_precheck_commands(
         include_macos_sandbox_extension_tests = _host_supports_macos_sandbox_tests()
 
     if include_docker_extension_tests:
-        commands.insert(4, DOCKER_EXTENSION_TEST_COMMAND)
+        commands.insert(-1, DOCKER_EXTENSION_TEST_COMMAND)
     if include_macos_sandbox_extension_tests:
-        insert_at = 5 if include_docker_extension_tests else 4
-        commands.insert(insert_at, MACOS_SANDBOX_EXTENSION_TEST_COMMAND)
+        commands.insert(-1, MACOS_SANDBOX_EXTENSION_TEST_COMMAND)
 
     return tuple(commands)
 

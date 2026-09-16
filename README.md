@@ -1189,11 +1189,11 @@ uv build
 Weft uses a tag-driven release flow in GitHub Actions:
 
 - [`.github/workflows/test.yml`](./.github/workflows/test.yml) is the only
-  automated test workflow. It runs the main multi-platform suite, the complete
-  SQLite suite on the canonical coverage lane, PostgreSQL-compatible tests,
-  coverage, lint, formatting, and type checks first. After that stage succeeds,
-  it runs the Django, Docker, macOS sandbox, and Microsandbox suites in
-  parallel.
+  automated test workflow. It runs lint, formatting, and type checks first.
+  After those pass, it runs the main multi-platform suite, the complete SQLite
+  suite on the canonical coverage lane, PostgreSQL-compatible tests, and
+  coverage. It then runs the Django, Docker, macOS sandbox, and Microsandbox
+  suites in parallel.
 - [`.github/workflows/release-gate.yml`](./.github/workflows/release-gate.yml)
   runs on pushed `v*` tags and invokes the `weft` publish workflow. It does not
   rerun tests.
@@ -1273,14 +1273,14 @@ version sources:
 
 Before it pushes the release commit, the helper runs:
 
-1. The SQLite release precheck with xdist
-2. The PG-compatible release precheck with `uv run bin/pytest-pg --all`
-3. The Django integration tests
-4. The Microsandbox extension tests
-5. The Docker extension tests when Docker is available locally
-6. The macOS sandbox extension tests when running on macOS
-7. The ruff check, ruff format, and mypy gates across the core package,
+1. The ruff check, ruff format, and mypy gates across the core package,
    integrations, and extensions
+2. The SQLite release precheck with xdist
+3. The PG-compatible release precheck with `uv run bin/pytest-pg --all`
+4. The Django integration tests
+5. The Microsandbox extension tests
+6. The Docker extension tests when Docker is available locally
+7. The macOS sandbox extension tests when running on macOS
 8. The live provider CLI tests for every registered provider executable on
    `PATH` (always last, after every deterministic gate)
 

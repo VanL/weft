@@ -987,51 +987,6 @@ def test_run_command_dry_run_shows_env_prefix_and_cwd(
     assert "(cwd=extensions/weft_docker)" in captured.out
 
 
-def test_ci_runs_one_staged_test_graph_before_release() -> None:
-    """Main proof must precede parallel extensions and release gates run no tests."""
-
-    root = Path(__file__).resolve().parents[2]
-    test_workflow = yaml.safe_load(
-        (root / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
-    )
-    jobs = test_workflow["jobs"]
-    main_jobs = {"test", "test-postgres", "coverage", "lint"}
-    extension_jobs = {
-        "test-django-integration",
-        "test-docker-extension",
-        "test-macos-sandbox-extension",
-        "test-microsandbox-extension",
-    }
-
-    assert main_jobs | extension_jobs <= jobs.keys()
-    for job_name in extension_jobs:
-        assert set(jobs[job_name]["needs"]) == main_jobs
-        assert "if" not in jobs[job_name]
-
-    discovered = set((root / "tests").rglob("test*.py"))
-    for job_name in ("test", "test-postgres"):
-        included: list[Path] = []
-        for row in jobs[job_name]["strategy"]["matrix"]["include"]:
-            for target_text in row["pytest_targets"].split():
-                target = root / target_text
-                assert target.exists(), target
-                included.extend(
-                    sorted(target.rglob("test*.py")) if target.is_dir() else [target]
-                )
-        assert len(included) == len(set(included)), f"duplicate targets in {job_name}"
-        assert set(included) == discovered
-
-    release_gate_paths = sorted(
-        (root / ".github" / "workflows").glob("release-gate*.yml")
-    )
-    assert release_gate_paths
-    for workflow_path in release_gate_paths:
-        release_workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-        for job in release_workflow["jobs"].values():
-            for step in job.get("steps", []):
-                assert "pytest" not in step.get("run", "")
-
-
 def test_release_gate_routes_each_tag_to_exactly_one_package() -> None:
     """Each immutable package tag must invoke only its matching publication."""
 

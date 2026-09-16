@@ -13,6 +13,7 @@ env:
 jobs:
   test:
     name: test (${{ matrix.os }}, ${{ matrix.python-version }}, ${{ matrix.test_slice }})
+    needs: lint
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     strategy:
@@ -167,6 +168,7 @@ jobs:
 
   test-postgres:
     name: test-postgres (${{ matrix.test_slice }})
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
