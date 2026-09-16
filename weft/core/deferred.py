@@ -16,5 +16,5 @@ def get_setproctitle() -> ModuleType:
 
 def get_processtitle() -> ModuleType:
     """Load the macOS Unix-only title backend without preparing it."""
-    # Platform-specific optional dependency, installed only on macOS.
+    # Native dependency loaded lazily so process-title setup stays explicit.
     return import_module("processtitle")
