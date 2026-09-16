@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -128,7 +129,12 @@ def test_consumer_publishes_and_matches_new_short_title(
             process.pid, process.create_time(), expected_tid=tid
         )
         assert observation.evidence == "live"
-        assert observation.reason == "identity_match_title_match"
+        expected_reason = (
+            "identity_match_title_unconfirmed"
+            if sys.platform == "win32"
+            else "identity_match_title_match"
+        )
+        assert observation.reason == expected_reason
     finally:
         task.enable_process_title = False
         setproctitle.setproctitle(original_title)

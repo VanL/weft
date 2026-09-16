@@ -353,7 +353,7 @@ def test_interactive_session_start_failure_uses_canonical_terminal_writer(
         ),
     )
     try:
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(OSError):
             task._interactive_ensure_session(1)
         assert task.taskspec.state.status == "failed"
         ordinary.taskspec.mark_failed(error=task.taskspec.state.error)

@@ -984,6 +984,8 @@ def test_build_context_resolves_config_context_path_at_construction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelling: str
 ) -> None:
     """Config retains path text; construction resolves it without stripping spaces."""
+    if sys.platform == "win32" and spelling in {"spaces", "whitespace"}:
+        pytest.skip("Windows cannot materialize trailing-space path components")
     load_cwd = tmp_path / "load-cwd"
     build_cwd = tmp_path / "build-cwd"
     home = tmp_path / "home"
@@ -1000,13 +1002,14 @@ def test_build_context_resolves_config_context_path_at_construction(
     )
     monkeypatch.chdir(load_cwd)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     snapshot = resolve_runtime_config({"CONTEXT": path_text})
     assert snapshot["CONTEXT"] == path_text
     assert list(load_cwd.iterdir()) == []
     assert list(home.iterdir()) == []
     monkeypatch.chdir(build_cwd)
 
-    ctx = build_context(config=snapshot, create_database=False)
+    ctx = build_context(config=snapshot, create_dirs=False, create_database=False)
 
     assert ctx.root == expected_root.resolve()
     assert ctx.weft_dir == expected_root.resolve() / ".weft"

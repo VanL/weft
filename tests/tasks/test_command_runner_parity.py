@@ -390,6 +390,8 @@ def test_docker_runner_preflight_rejects_missing_build_context(
 def test_docker_command_runner_build_profile_materializes_mounts(
     tmp_path: Path,
 ) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Docker runner is currently unsupported on Windows")
     plugin_module = pytest.importorskip("weft_docker.plugin")
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM busybox\n", encoding="utf-8")
