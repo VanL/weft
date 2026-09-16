@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 import weft_microsandbox
-from weft.ext import RunnerHandle
+from weft.ext import RunnerHandle, RunnerPlugin, TaskRunnerBackend
 from weft.liveness import registry as liveness_registry
 from weft_microsandbox import _runtime
 from weft_microsandbox import plugin as plugin_module
@@ -126,7 +127,9 @@ def test_validate_preflight_uses_runtime_gate(
     assert calls == ["preflight"]
 
 
-def test_factory_restores_replaced_liveness_registry(monkeypatch) -> None:
+def test_factory_restores_replaced_liveness_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
     get_runner_plugin()
     liveness_registry.register_runtime_liveness_probe(
@@ -141,15 +144,17 @@ def test_factory_restores_replaced_liveness_registry(monkeypatch) -> None:
     "state,expected", [("running", "live"), ("stopped", "stale"), (None, "unknown")]
 )
 def test_alias_routed_microsandbox_liveness_classifies_sdk_evidence(
-    monkeypatch, state, expected
+    monkeypatch: pytest.MonkeyPatch,
+    state: str | None,
+    expected: str,
 ) -> None:
     class Sandbox:
         @staticmethod
-        async def get(sandbox_id):
+        async def get(sandbox_id: str) -> Sandbox:
             assert sandbox_id == "alias-sandbox"
             return Sandbox()
 
-        async def refresh(self):
+        async def refresh(self) -> SimpleNamespace:
             return SimpleNamespace(status=state)
 
     monkeypatch.setattr(_runtime, "_load_sdk", lambda: SimpleNamespace(Sandbox=Sandbox))
@@ -167,8 +172,12 @@ def test_alias_routed_microsandbox_liveness_classifies_sdk_evidence(
     assert liveness_registry.runtime_liveness_from_registered_probe(handle) == expected
 
 
-def _create_command_runner_for_validation(runner_plugin, options, **overrides):
-    kwargs = {
+def _create_command_runner_for_validation(
+    runner_plugin: RunnerPlugin,
+    options: dict[str, Any],
+    **overrides: Any,
+) -> TaskRunnerBackend:
+    kwargs: dict[str, Any] = {
         "target_type": "command",
         "tid": "1770000000000000001",
         "function_target": None,
@@ -192,7 +201,7 @@ def _create_command_runner_for_validation(runner_plugin, options, **overrides):
 
 
 @pytest.mark.parametrize("capability", ["persistent", "interactive"])
-def test_microsandbox_preserves_both_capability_checks(capability):
+def test_microsandbox_preserves_both_capability_checks(capability: str) -> None:
     runner_plugin = get_runner_plugin()
     with pytest.raises(ValueError, match=capability):
         runner_plugin.validate_taskspec(_payload(**{capability: True}))

@@ -44,32 +44,32 @@ pg = [
     "simplebroker-pg>=4.3.1",
 ]
 docker = [
-    "weft-docker>=0.9.74",
+    "weft-docker>=0.9.75",
 ]
 django = [
-    "weft-django>=0.9.34",
+    "weft-django>=0.9.35",
 ]
 django-channels = [
-    "weft-django[channels]>=0.9.34",
+    "weft-django[channels]>=0.9.35",
 ]
 macos-sandbox = [
-    "weft-macos-sandbox>=0.6.3",
+    "weft-macos-sandbox>=0.6.4",
 ]
 microsandbox = [
-    "weft-microsandbox>=0.5.4; platform_system != 'Windows'",
+    "weft-microsandbox>=0.5.5; platform_system != 'Windows'",
 ]
 all = [
     "simplebroker-pg>=4.3.1",
-    "weft-docker>=0.9.74",
-    "weft-django>=0.9.34",
-    "weft-macos-sandbox>=0.6.3",
-    "weft-microsandbox>=0.5.4; platform_system != 'Windows'",
+    "weft-docker>=0.9.75",
+    "weft-django>=0.9.35",
+    "weft-macos-sandbox>=0.6.4",
+    "weft-microsandbox>=0.5.5; platform_system != 'Windows'",
 ]
 dev = [
     "simplebroker-pg>=4.3.1",
-    "weft-docker>=0.9.74",
-    "weft-macos-sandbox>=0.6.3",
-    "weft-microsandbox>=0.5.4; platform_system != 'Windows'",
+    "weft-docker>=0.9.75",
+    "weft-macos-sandbox>=0.6.4",
+    "weft-microsandbox>=0.5.5; platform_system != 'Windows'",
     "hypothesis>=6.168.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",

@@ -12,6 +12,7 @@ import weft_macos_sandbox
 from weft_macos_sandbox import plugin
 from weft_macos_sandbox.plugin import get_runner_plugin
 
+from weft.ext import RunnerPlugin, TaskRunnerBackend
 from weft.liveness import registry as liveness_registry
 from weft.liveness.models import HostProcessObservation
 
@@ -385,7 +386,9 @@ def test_sandbox_env_passthrough_must_be_string_list(tmp_path: Path) -> None:
         )
 
 
-def test_factory_restores_replaced_liveness_registry(monkeypatch) -> None:
+def test_factory_restores_replaced_liveness_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
     get_runner_plugin()
     liveness_registry.register_runtime_liveness_probe(
@@ -401,7 +404,9 @@ def test_factory_restores_replaced_liveness_registry(monkeypatch) -> None:
     [("matching", "live"), ("mismatched", "stale"), ("malformed", "unknown")],
 )
 def test_alias_routed_macos_liveness_uses_real_identity(
-    monkeypatch, evidence, expected
+    monkeypatch: pytest.MonkeyPatch,
+    evidence: str,
+    expected: str,
 ) -> None:
     monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
     liveness_registry.register_runtime_liveness_probe(
@@ -429,8 +434,12 @@ def test_alias_routed_macos_liveness_uses_real_identity(
     assert liveness_registry.runtime_liveness_from_registered_probe(handle) == expected
 
 
-def _create_command_runner_for_validation(runner_plugin, options, **overrides):
-    kwargs = {
+def _create_command_runner_for_validation(
+    runner_plugin: RunnerPlugin,
+    options: dict[str, Any],
+    **overrides: Any,
+) -> TaskRunnerBackend:
+    kwargs: dict[str, Any] = {
         "target_type": "command",
         "tid": "1770000000000000001",
         "function_target": None,
@@ -462,7 +471,9 @@ def _create_command_runner_for_validation(runner_plugin, options, **overrides):
         {"profile": "profile.sb", "env_passthrough": [""]},
     ],
 )
-def test_macos_option_rejections_match_validate_create_sequence(options):
+def test_macos_option_rejections_match_validate_create_sequence(
+    options: dict[str, Any],
+) -> None:
     runner_plugin = get_runner_plugin()
     with pytest.raises(ValueError) as validated:
         runner_plugin.validate_taskspec(
@@ -474,7 +485,7 @@ def test_macos_option_rejections_match_validate_create_sequence(options):
 
 
 @pytest.mark.parametrize("capability", ["persistent", "interactive"])
-def test_macos_preserves_direct_create_capability_behavior(capability):
+def test_macos_preserves_direct_create_capability_behavior(capability: str) -> None:
     runner_plugin = get_runner_plugin()
     options = {"profile": "profile.sb"}
     with pytest.raises(ValueError, match=capability):

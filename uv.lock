@@ -1791,7 +1791,7 @@ provides-extras = ["pg", "docker", "django", "django-channels", "macos-sandbox",
 
 [[package]]
 name = "weft-django"
-version = "0.9.34"
+version = "0.9.35"
 source = { editable = "integrations/weft_django" }
 dependencies = [
     { name = "django" },
@@ -1815,7 +1815,7 @@ provides-extras = ["channels", "realtime", "dev"]
 
 [[package]]
 name = "weft-docker"
-version = "0.9.74"
+version = "0.9.75"
 source = { editable = "extensions/weft_docker" }
 dependencies = [
     { name = "docker" },
@@ -1832,7 +1832,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "weft-macos-sandbox"
-version = "0.6.3"
+version = "0.6.4"
 source = { editable = "extensions/weft_macos_sandbox" }
 dependencies = [
     { name = "weft" },
@@ -1847,7 +1847,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "weft-microsandbox"
-version = "0.5.4"
+version = "0.5.5"
 source = { editable = "extensions/weft_microsandbox" }
 dependencies = [
     { name = "microsandbox" },

@@ -2,38 +2,14 @@
 
 ## Unreleased
 
+## [0.9.100] - 2026-09-16
+
 ### Added
 
 - `WeftContext.session()` exposes a SimpleBroker `BrokerSession` bound to the
   context's resolved target and immutable configuration for explicit embedding
   lifetimes. Session work and cleanup stay on the calling thread; the context
   and client do not cache a live session.
-
-### Changed
-
-- Weft now requires SimpleBroker 8.3.0 or newer and `simplebroker-pg` 4.3.0 or
-  newer when PostgreSQL support is installed.
-- All task families use shared persistent session ownership for their fixed
-  queue inventory and executing-thread lifetime. Manual task drivers can use
-  `BaseTask.drive_scope()` around the complete drive lifetime; normal run paths
-  enter that scope automatically. TaskMonitor's two maintenance lanes each own
-  an independent worker-local session while their stores borrow that owner.
-
-### Fixed
-
-- Long-lived command, Manager, result, status, queue-watch, and realtime
-  observers now reuse one persistent connection scope while keeping every
-  transaction bounded. Partial setup and generator-close failures unwind in
-  owner order and remain observable.
-- Django ASGI SSE and Channels streams create, advance, and close each blocking
-  broker iterator on one per-stream worker. Disconnect no longer closes a
-  generator concurrently or waits past its deadline for a blocked advance;
-  retained cleanup reports failures after the worker unwinds. WSGI preserves
-  direct request-thread iteration and closure.
-
-## [0.9.100] - 2026-09-14
-
-### Added
 
 - Task state now includes nullable `process_title_error`, the last detected
   nonfatal title-update failure. Full task state/logs, summaries, and live
@@ -47,6 +23,16 @@
 
 ### Changed
 
+- Weft now requires SimpleBroker 8.3.1 or newer and `simplebroker-pg` 4.3.1 or
+  newer when PostgreSQL support is installed.
+- All task families use shared persistent session ownership for their fixed
+  queue inventory and executing-thread lifetime. Manual task drivers can use
+  `BaseTask.drive_scope()` around the complete drive lifetime; normal run paths
+  enter that scope automatically. TaskMonitor's two maintenance lanes each own
+  an independent worker-local session while their stores borrow that owner.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.35`, `weft-docker 0.9.75`,
+  `weft-macos-sandbox 0.6.4`, and `weft-microsandbox 0.5.5`.
 - **Breaking:** task runtime state moves from `weft.state.tid_mappings` to
   `weft.state.tasks.<tid>`. Known-TID runtime reads are local to that task;
   short-ID resolution derives candidates from valid queue-name suffixes,
@@ -86,7 +72,7 @@
   validated TaskSpec payload (`tid: None`, `io`, `state`, defaulted `spec`
   fields) rather than the compact builder dict. The export still builds no Weft
   context, reads no Weft configuration, opens no broker, and writes nothing. The
-  private override copy was removed; `weft-django 0.9.34` requires
+  private override copy was removed; `weft-django 0.9.35` requires
   `weft>=0.9.100`.
 
 - Short TIDs now fold the hybrid timestamp grain and logical counter into
@@ -144,6 +130,15 @@
 
 ### Fixed
 
+- Long-lived command, Manager, result, status, queue-watch, and realtime
+  observers now reuse one persistent connection scope while keeping every
+  transaction bounded. Partial setup and generator-close failures unwind in
+  owner order and remain observable.
+- Django ASGI SSE and Channels streams create, advance, and close each blocking
+  broker iterator on one per-stream worker. Disconnect no longer closes a
+  generator concurrently or waits past its deadline for a blocked advance;
+  retained cleanup reports failures after the worker unwinds. WSGI preserves
+  direct request-thread iteration and closure.
 - Task runtime helpers and Monitor sidecars reuse their owned persistent broker
   connections instead of reconnecting during repeated scans and cleanup.
   Sidecar transactions remain bounded per operation. Task and Monitor worker

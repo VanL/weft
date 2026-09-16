@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft-microsandbox"
-version = "0.5.4"
+version = "0.5.5"
 description = "Microsandbox runner plugin for Weft"
 readme = "README.md"
 requires-python = ">=3.12"

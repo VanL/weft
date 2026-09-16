@@ -18,7 +18,12 @@ from weft_docker import _sdk as docker_sdk
 from weft_docker import plugin
 from weft_docker.plugin import get_runner_plugin
 
-from weft.ext import RunnerHandle, RunnerRuntimeDescription
+from weft.ext import (
+    RunnerHandle,
+    RunnerPlugin,
+    RunnerRuntimeDescription,
+    TaskRunnerBackend,
+)
 from weft.liveness import registry as liveness_registry
 
 pytestmark = [pytest.mark.shared]
@@ -1544,7 +1549,9 @@ def test_command_runner_cleans_up_container_when_runtime_start_fails(
     assert removed == [(fake_client, "weft-cleanup-test")]
 
 
-def test_factory_restores_replaced_liveness_registry(monkeypatch) -> None:
+def test_factory_restores_replaced_liveness_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(liveness_registry, "_runtime_liveness_probes", {})
     get_runner_plugin()
     liveness_registry.register_runtime_liveness_probe(
@@ -1559,7 +1566,9 @@ def test_factory_restores_replaced_liveness_registry(monkeypatch) -> None:
     "state,expected", [(True, "live"), (False, "stale"), (None, "unknown")]
 )
 def test_alias_routed_docker_liveness_classifies_container_evidence(
-    monkeypatch, state, expected
+    monkeypatch: pytest.MonkeyPatch,
+    state: bool | None,
+    expected: str,
 ) -> None:
     monkeypatch.setattr(plugin, "_load_docker_sdk", lambda: None)
     monkeypatch.setattr(plugin, "_docker_client", lambda timeout: _fake_docker_client())
@@ -1582,8 +1591,12 @@ def test_alias_routed_docker_liveness_classifies_container_evidence(
     assert liveness_registry.runtime_liveness_from_registered_probe(handle) == expected
 
 
-def _create_command_runner_for_validation(runner_plugin, options, **overrides):
-    kwargs = {
+def _create_command_runner_for_validation(
+    runner_plugin: RunnerPlugin,
+    options: dict[str, Any],
+    **overrides: Any,
+) -> TaskRunnerBackend:
+    kwargs: dict[str, Any] = {
         "target_type": "command",
         "tid": "1770000000000000001",
         "function_target": None,
@@ -1606,7 +1619,9 @@ def _create_command_runner_for_validation(runner_plugin, options, **overrides):
     return runner_plugin.create_runner(**kwargs)
 
 
-def test_profile_conflict_has_same_error_in_validation_and_creation(tmp_path):
+def test_profile_conflict_has_same_error_in_validation_and_creation(
+    tmp_path: Path,
+) -> None:
     profile = tmp_path / "docker-profiles.toml"
     profile.write_text(
         'version = 1\n[profiles.ops]\nimage = "busybox"\n[profiles.ops.build]\ncontext = "."\n'
@@ -1634,7 +1649,9 @@ def test_profile_conflict_has_same_error_in_validation_and_creation(tmp_path):
         {"image": "busybox", "network": 42},
     ],
 )
-def test_docker_option_rejections_match_validate_create_sequence(options):
+def test_docker_option_rejections_match_validate_create_sequence(
+    options: dict[str, Any],
+) -> None:
     runner_plugin = get_runner_plugin()
     with pytest.raises(ValueError) as validated:
         runner_plugin.validate_taskspec(
@@ -1646,7 +1663,7 @@ def test_docker_option_rejections_match_validate_create_sequence(options):
 
 
 @pytest.mark.parametrize("capability", ["persistent", "interactive"])
-def test_docker_preserves_direct_create_capability_behavior(capability):
+def test_docker_preserves_direct_create_capability_behavior(capability: str) -> None:
     runner_plugin = get_runner_plugin()
     options = {"image": "busybox"}
     with pytest.raises(ValueError, match=capability):
