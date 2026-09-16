@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 import types
@@ -187,7 +188,7 @@ def test_false_native_return_is_an_error(monkeypatch: pytest.MonkeyPatch) -> Non
 
 # Use the PG suite's whole-test watchdog, not a LaunchServices latency SLA.
 @pytest.mark.timeout(900, method="signal")
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS native handoff")
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS native handoff")
 def test_real_native_handoff_preserves_full_weft_titles() -> None:
     script = """
 import json, sys

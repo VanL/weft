@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 from types import ModuleType
 
 
@@ -16,6 +17,4 @@ def get_setproctitle() -> ModuleType:
 def get_processtitle() -> ModuleType:
     """Load the macOS Unix-only title backend without preparing it."""
     # Platform-specific optional dependency, installed only on macOS.
-    import processtitle
-
-    return processtitle
+    return import_module("processtitle")
