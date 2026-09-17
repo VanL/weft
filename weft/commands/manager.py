@@ -150,8 +150,12 @@ def cmd_manager_list(
 def start_manager(context: WeftContext) -> ManagerSnapshot:
     """Ensure a canonical manager exists and return its registry snapshot."""
 
-    record, _started_here, _process_handle = manager_runtime.ensure_manager(context)
-    return _manager_snapshot(record)
+    result = manager_runtime.ensure_manager(context)
+    if result.outcome != "ready" or result.manager_record is None:
+        raise ManagerStartFailed(
+            f"Manager readiness could not be established: {result.reason}"
+        )
+    return _manager_snapshot(result.manager_record)
 
 
 @typed_command_errors
@@ -172,7 +176,13 @@ def cmd_manager_start(
             raise ManagerStartFailed(message or "Manager replacement failed")
         record, started_here, _process_handle = manager_runtime.start_manager(resolved)
     else:
-        record, started_here, _process_handle = manager_runtime.ensure_manager(resolved)
+        result = manager_runtime.ensure_manager(resolved)
+        if result.outcome != "ready" or result.manager_record is None:
+            raise ManagerStartFailed(
+                f"Manager readiness could not be established: {result.reason}"
+            )
+        record = result.manager_record
+        started_here = result.started_here
     snapshot = _manager_snapshot(record)
     return dataclass_replace(snapshot, started_here=started_here)
 

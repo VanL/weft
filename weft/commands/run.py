@@ -56,10 +56,11 @@ from weft.commands._task_history import is_pipeline_taskspec_payload
 from weft.commands.interactive import InteractiveStreamClient
 from weft.commands.result import await_task_result
 from weft.commands.submission import (
-    _initial_work_payload as _submission_initial_work_payload,
+    _annotate_accepted_submission_error,
+    _resolve_submission_runtime_root,
 )
 from weft.commands.submission import (
-    _resolve_submission_runtime_root,
+    _initial_work_payload as _submission_initial_work_payload,
 )
 from weft.commands.submission import (
     ensure_manager_after_submission as _shared_ensure_manager_after_submission,
@@ -162,12 +163,23 @@ def _run_with_managed_execution(
     process_handle: subprocess.Popen[bytes] | None = None
     failed = False
     manager_started_payload: dict[str, Any] | None = None
+    accepted_tid: str | None = None
 
     try:
         tid_int = submit()
-        manager_record, started_here, process_handle = _ensure_manager_after_submission(
+        accepted_tid = str(tid_int)
+        availability = _ensure_manager_after_submission(
             context,
             submitted_tid=tid_int,
+        )
+        manager_record = availability.manager_record
+        started_here = availability.started_here
+        process_handle = availability.process_handle
+        availability_warning = (
+            f"Task {tid_int} was accepted, but manager readiness is degraded: "
+            f"{availability.reason}"
+            if availability.outcome == "uncertain"
+            else None
         )
         if emit_verbose and started_here and verbose and manager_record is not None:
             _emit_manager_started(manager_record)
@@ -181,6 +193,7 @@ def _run_with_managed_execution(
             return RunExecutionResult(
                 tid=tid,
                 manager_started_payload=manager_started_payload,
+                availability_warning=availability_warning,
             )
 
         if wait_for_completion is None:  # pragma: no cover - caller contract guard
@@ -193,8 +206,11 @@ def _run_with_managed_execution(
             result_value=result_value,
             error_message=error_message,
             manager_started_payload=manager_started_payload,
+            availability_warning=availability_warning,
         )
-    except Exception:  # pragma: no cover - managed execution cleanup
+    except Exception as exc:  # pragma: no cover - managed execution cleanup
+        if accepted_tid is not None:
+            _annotate_accepted_submission_error(exc, accepted_tid)
         failed = True
         if started_here and manager_record is not None:
             manager_runtime.stop_manager(context, manager_record, process_handle)
@@ -571,14 +587,12 @@ def _ensure_manager_after_submission(
     context: WeftContext,
     *,
     submitted_tid: str | int,
-) -> tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]:
+) -> manager_runtime.ManagerEnsureResult:
     """Wire queue-first recovery to the manager and request cleanup owners."""
 
     return _shared_ensure_manager_after_submission(
         context,
         submitted_tid=submitted_tid,
-        ensure_manager_fn=manager_runtime.ensure_manager,
-        delete_spawn_request_fn=_delete_spawn_request,
     )
 
 

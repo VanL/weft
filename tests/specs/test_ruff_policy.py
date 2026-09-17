@@ -74,6 +74,7 @@ EXPECTED_GROUP_IDS = [
         not in {
             243,
             353,
+            354,
             351,
             337,
             336,
@@ -104,10 +105,11 @@ EXPECTED_GROUP_IDS = [
     "RUFF-SUP-372",
     "RUFF-SUP-373",
     "RUFF-SUP-374",
+    "RUFF-SUP-375",
 ]
 EXPECTED_GROUP_COUNT = 208
 EXPECTED_DIRECTIVE_COUNT = 341
-EXPECTED_C901_DIRECTIVE_COUNT = 126
+EXPECTED_C901_DIRECTIVE_COUNT = 127
 TAGGED_C901 = re.compile(
     r"#\s*noqa:\s*[^#\n]*\bC901\b[^#\n]*"
     r"approved\s+\[TS-3\.1\]\s+\[RUFF-SUP-(\d{3})\]\s+exception\b"

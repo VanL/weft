@@ -77,12 +77,15 @@ TaskSpec, uses the spawn-request message ID as the task TID, seeds the initial
 inbox payload when provided, and records the lifecycle event in
 `weft.log.tasks`.
 
-Queue-first ordering is deliberate. `weft run` writes the spawn request before
-manager bootstrap proof completes. Once the request is written, later CLI
-error handling reconciles that submitted TID against durable task, log, and
-queue surfaces instead of assuming the public inbox delete path can always roll
-the request back. Only requests still provably present in
-`weft.spawn.requests` are safe to delete as rollback.
+Queue-first ordering is deliberate. A successful spawn-request write commits
+acceptance under its returned TID before manager bootstrap proof completes.
+Manager discovery and bootstrap are post-acceptance availability work. A later
+readiness failure must not delete, resubmit, or rewrite the accepted request or
+remove its TID from the caller result. Reconciliation by that TID distinguishes
+spawned, queued, reserved, rejected, and unknown-location evidence. All but an
+authoritative rejection retain historical acceptance; read failure also
+preserves acceptance with an explicit diagnostic. Spawn-write failure or an
+ambiguous write outcome remains a pre-acceptance error.
 
 Public spawn submission is also a trust boundary. Submission strips reserved
 internal runtime, endpoint-claim, manager-service, and autostart authority
@@ -91,7 +94,8 @@ spawn paths may still use those keys inside explicit internal runtime
 envelopes.
 
 _Implementation mapping_: `weft/commands/run.py::_enqueue_taskspec`;
-`weft/commands/_spawn_submission.py` `reconcile_submitted_spawn`;
+`weft/commands/submission.py::ensure_manager_after_submission`;
+`weft/commands/_spawn_submission.py::reconcile_submitted_spawn`;
 `weft/core/spawn_requests.py` `submit_spawn_request`,
 `delete_spawn_request`;
 `weft/core/manager.py` `Manager._handle_work_message`,
@@ -195,6 +199,17 @@ The control plane is explicit:
   `command="PING"`, `status="ok"`, `message="PONG"`, the requested `request_id`,
   and the target `tid`. Readers ignore normalized or otherwise malformed reply
   noise rather than turning it into liveness proof
+- automatic manager recovery has at most two keyed proof rounds. Each uses the
+  control-surface timeout rather than the shorter competing-launch settlement
+  grace. Timeout and I/O failure remain distinct, and reply matching remains
+  separate from manager dispatch eligibility. A timeout's final read evaluates
+  a matching reply before sweeping rows owned by that request, so valid proof
+  wins; cleanup never downgrades proof or deletes another request's reply.
+  Manager reactor probe scheduling is unchanged
+- an abnormal automatic-start decision emits one structured diagnostic with the
+  incumbent TID, submitted TID when known, last probe request ID, and decision
+  reason. It contains no control payload or secret and does not alter proof or
+  acceptance
 - runner-specific PONG `runtime` details must come from the existing runner
   handle/plugin description contract, such as Docker's
   `RunnerRuntimeDescription`; failure to collect those details must not
@@ -987,13 +1002,17 @@ Current submission-reconciliation rules:
   the submission is treated as spawned
 - if a manager has already emitted `task_spawn_rejected` for that child TID,
   the submission is treated as rejected
-- if the exact message is still in `weft.spawn.requests`, the CLI may delete it
-  and report submission failure
-- if the exact message has moved into a manager reserved queue, the CLI must
-  not claim rollback succeeded; it observes for spawned/rejected child
-  evidence before surfacing manual recovery from that reserved queue
-- if none of those surfaces prove success or rollback, the CLI reports an
-  explicit unknown submission outcome keyed by TID
+- if the exact message is still in `weft.spawn.requests`, it remains accepted
+  under its original TID; post-acceptance recovery does not delete or requeue it
+- if the exact message has moved into a manager reserved queue, it remains
+  accepted and ends further manager-start attempts for that submission;
+  execution observation and reserved recovery remain with their existing owners
+- if none of those surfaces locate the accepted request, the caller reports an
+  explicit unknown location keyed by TID without treating that as queued or
+  authorizing another manager
+- an authoritative `task_spawn_rejected` event raises the existing typed
+  submission error with the accepted TID and rejection reason
+- reconciliation read failure retains acceptance and reports a diagnostic
 
 Current manager-dispatch rules:
 
@@ -1038,7 +1057,8 @@ Current manager-dispatch rules:
   be interpreted as `task_spawn_rejected`
 
 The reconciliation helper reads only durable surfaces. It does not guess from
-in-memory startup state.
+in-memory startup state. Submission-scoped recovery never consumes, moves, or
+deletes a reserved request.
 
 Autostart manifests follow the same overall spawn path. Current autostart
 runtime support covers stored task specs and stored pipeline targets. Pipeline
@@ -1062,7 +1082,8 @@ _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_messa
 `weft/core/manager.py::Manager._process_reactor_turn`;
 `weft/core/manager_services.py`;
 `weft/core/spawn_requests.py`;
-`weft/cli/run.py`; `weft/commands/_spawn_submission.py` —
+`weft/cli/run.py`; `weft/commands/submission.py::ensure_manager_after_submission`;
+`weft/commands/_spawn_submission.py` —
 `_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`;
 `tests/core/test_manager.py`.
 
@@ -1073,9 +1094,10 @@ Implementation plan backlinks:
 
 ### 7. Manager Bootstrap Flow [MF-7]
 
-`weft run` and `weft manager start` ensure a manager exists through the shared
-bootstrap helper. `weft manager serve` runs the same canonical manager runtime
-in the foreground for supervision.
+`weft run` performs post-acceptance manager availability recovery through the
+shared bootstrap helper. Direct `weft manager start` still requires readiness.
+`weft manager serve` runs the same canonical manager runtime in the foreground
+for supervision.
 
 Current rules:
 
@@ -1111,10 +1133,11 @@ Current rules:
   the row with a bounded keyed PING/PONG when the PONG proves manager role,
   queue identity, context, and non-terminal status. If the row is fresh but
   remains namespace-ambiguous, `ensure_manager` must not start a competing
-  manager just because it cannot prove the incumbent live. That suppression is
-  bounded by pending work: if public spawn backlog remains pending past the
-  namespace-ambiguity grace window and the incumbent still lacks PONG/runtime
-  proof, startup may launch another manager to recover progress.
+  manager just because it cannot prove the incumbent live. Automatic recovery
+  follows [MA-1]: two proof rounds at most, the first round counts toward the
+  namespace-ambiguity grace, and final fresh registry and backlog evidence
+  controls any helper launch. Submission recovery also requires the exact
+  accepted TID to remain queued immediately before launch.
 - detached-launcher acknowledgement and startup-stderr cleanup are best-effort
   post-proof steps; they may warn, but they do not downgrade a successfully
   proven manager start into submission failure
@@ -1124,12 +1147,16 @@ Current rules:
 - the shared lifecycle helper owns manager discovery, bootstrap, and stop
   observation
 
-_Implementation mapping_: `weft/core/manager_runtime.py`,
+_Implementation mapping_: `weft/core/manager_runtime.py` —
+`observe_manager_availability`, `decide_manager_recovery`, `ensure_manager`;
+`weft/core/control_probe.py::send_keyed_ping_probe`;
+`weft/commands/submission.py::ensure_manager_after_submission`,
 `weft/cli/run.py`, `weft/commands/manager.py`,
 `weft/commands/serve.py`, `weft/manager_detached_launcher.py`,
 `weft/manager_process.py`.
 
 Plan backlink:
+[`docs/plans/2026-09-17-manager-discovery-and-durable-submission-plan.md`](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md);
 [`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md);
 [`docs/plans/2026-05-09-runtime-liveness-probe-registry-plan.md`](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md).
 

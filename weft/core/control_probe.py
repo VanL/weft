@@ -182,36 +182,51 @@ def _retire_reply_row(broker: Any, ctrl_out_name: str, message_id: int) -> None:
         )
 
 
-def _sweep_own_replies(broker: Any, ctrl_out_name: str, request_id: str) -> None:
-    """Best-effort single sweep deleting every row keyed to ``request_id``.
+def _finalize_own_replies(
+    broker: Any,
+    ctrl_out_name: str,
+    *,
+    tid: str,
+    request_id: str,
+) -> MatchedPong | None:
+    """Evaluate a final matching PONG, then sweep probe-owned reply rows.
 
-    Runs once at probe timeout to cover the reply-arrived-after-last-peek
-    window. Rows keyed to other request ids are never touched. Failures are
-    swallowed so a clean timeout result stays a timeout; an unswept reply's
-    lifetime is bounded by task-exit purge and terminal/dead-TID cleanup.
+    Runs once at the probe deadline to cover the reply-arrived-after-last-peek
+    window. A valid matching PONG is captured before all rows keyed to this
+    request are retired. Rows keyed to other request ids are never touched.
+    Cleanup failure cannot downgrade a captured proof.
 
     Spec: [MF-3]
     """
 
     reply_ids: list[int] = []
-    try:
-        iterator = broker.peek_generator(ctrl_out_name, with_timestamps=True)
-        with closing_queue_iterator(iterator) as rows:
-            for item in rows:
-                if not isinstance(item, tuple) or len(item) != 2:
-                    continue
-                body, timestamp = item
-                if reply_bears_request_id(str(body), request_id=request_id):
-                    reply_ids.append(int(timestamp))
-    except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
-        logger.debug(
-            "Failed to sweep keyed probe replies",
-            extra={"queue": ctrl_out_name, "request_id": request_id},
-            exc_info=True,
-        )
-        return
+    matched: MatchedPong | None = None
+    iterator = broker.peek_generator(ctrl_out_name, with_timestamps=True)
+    with closing_queue_iterator(iterator) as rows:
+        for item in rows:
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            body, timestamp = item
+            raw = str(body)
+            if not reply_bears_request_id(raw, request_id=request_id):
+                continue
+            message_id = int(timestamp)
+            reply_ids.append(message_id)
+            if matched is None:
+                payload = coerce_pong_response(
+                    raw,
+                    tid=tid,
+                    request_id=request_id,
+                )
+                if payload is not None:
+                    matched = MatchedPong(
+                        payload=payload,
+                        observed_at=message_id,
+                        request_id=request_id,
+                    )
     for message_id in reply_ids:
         _retire_reply_row(broker, ctrl_out_name, message_id)
+    return matched
 
 
 @contextmanager
@@ -304,11 +319,21 @@ def send_keyed_ping_probe(
                     )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    _sweep_own_replies(db, ctrl_out_name, probe_request_id)
+                    matched = _finalize_own_replies(
+                        db,
+                        ctrl_out_name,
+                        tid=tid,
+                        request_id=probe_request_id,
+                    )
+                    if matched is not None:
+                        return ControlProbeResult(
+                            request_id=probe_request_id,
+                            matched=matched,
+                        )
                     return ControlProbeResult(
                         request_id=probe_request_id,
                         timed_out=True,
                     )
                 time.sleep(min(CONTROL_SURFACE_WAIT_INTERVAL, remaining))
-    except (BrokerError, OSError, RuntimeError) as exc:
+    except (BrokerError, OSError) as exc:
         return ControlProbeResult(request_id=probe_request_id, error=str(exc))

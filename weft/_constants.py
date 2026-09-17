@@ -701,7 +701,7 @@ detection prompt.
 """
 
 CONTROL_SURFACE_WAIT_TIMEOUT: Final[float] = 2.0
-"""Maximum time to wait for durable terminal task state before CLI fallback."""
+"""Bound for caller-side control proof, distinct from launch settlement grace."""
 
 PONG_EXTENSION_KEY: Final[str] = "extended"
 """Optional PONG payload key for task-registered extension data."""
@@ -831,7 +831,7 @@ MANAGER_COMPETING_STARTUP_GRACE_SECONDS: Final[float] = 0.5
 """Grace window for concurrent manager starts to yield to an existing winner."""
 
 MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS: Final[float] = 2.0
-"""Maximum ambiguous-incumbent age before pending public spawn backlog may start a helper manager."""
+"""Caller-observed ambiguity grace; the first control probe normally subsumes it."""
 
 MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS: Final[float] = 0.05
 """Short PING budget for manager-owned leadership liveness fallback."""

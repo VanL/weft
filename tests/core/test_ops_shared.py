@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -41,17 +39,16 @@ def test_run_adapter_routes_manager_recovery_through_shared_submission(
         context: WeftContext,
         *,
         submitted_tid: str | int,
-        ensure_manager_fn: Callable[
-            ..., tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]
-        ]
-        | None = None,
-        delete_spawn_request_fn: Callable[[WeftContext, int], bool] | None = None,
-    ) -> tuple[dict[str, str], bool, None]:
+    ) -> manager_runtime.ManagerEnsureResult:
         captured["context"] = context
         captured["submitted_tid"] = submitted_tid
-        captured["ensure_manager_fn"] = ensure_manager_fn
-        captured["delete_spawn_request_fn"] = delete_spawn_request_fn
-        return ({"tid": "1776000000000000000"}, False, None)
+        return manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record={"tid": "1776000000000000000"},
+            started_here=False,
+            process_handle=None,
+            reason="ready",
+        )
 
     monkeypatch.setattr(
         run_mod,
@@ -65,11 +62,9 @@ def test_run_adapter_routes_manager_recovery_through_shared_submission(
         submitted_tid="1776000000000000001",
     )
 
-    assert result == ({"tid": "1776000000000000000"}, False, None)
+    assert result.manager_record == {"tid": "1776000000000000000"}
     assert captured["context"] is context
     assert captured["submitted_tid"] == "1776000000000000001"
-    assert captured["ensure_manager_fn"] is manager_runtime.ensure_manager
-    assert captured["delete_spawn_request_fn"] is run_mod._delete_spawn_request
 
 
 def test_client_submission_and_shared_result_wait_match() -> None:

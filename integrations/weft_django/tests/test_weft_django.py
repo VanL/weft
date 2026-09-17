@@ -72,11 +72,17 @@ from fixture_project import request_id_provider
 from testapp.models import EventRecord
 from testapp.weft_tasks import declared_task, echo_current_request_id, echo_task
 
+import weft.commands.submission as submission_commands
 import weft_django
 import weft_django.client as weft_django_client
-from weft._constants import SUBMIT_OVERRIDE_NAMES, WEFT_CONFIG_FIELDS
+from weft._constants import (
+    SUBMIT_OVERRIDE_NAMES,
+    WEFT_CONFIG_FIELDS,
+    WEFT_SPAWN_REQUESTS_QUEUE,
+)
 from weft.client import SpecNotFound, SubmissionValidationError, WeftClient
 from weft.commands.types import TaskTerminalSnapshot
+from weft.core.manager_runtime import ManagerEnsureResult
 from weft.core.taskspec import TaskSpec
 from weft.core.taskspec.transport import validate_taskspec_payload
 from weft_django import (
@@ -437,6 +443,48 @@ def test_enqueue_on_commit_rollbacks_do_not_bind() -> None:
         raise RuntimeError("rollback")
 
     assert deferred.task is None
+
+
+def test_readiness_degradation_in_middle_commit_callback_preserves_all_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness-only degradation binds its TID and does not stop later callbacks."""
+    calls = 0
+
+    def _availability(*_args: object, **_kwargs: object) -> ManagerEnsureResult:
+        nonlocal calls
+        calls += 1
+        return ManagerEnsureResult(
+            outcome="uncertain" if calls == 2 else "ready",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="manager_start_failed:read-only" if calls == 2 else "ready",
+        )
+
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        _availability,
+    )
+    with (
+        WeftTestHarness() as harness,
+        override_settings(WEFT_DJANGO=_fixture_weft_settings(CONTEXT=harness.root)),
+    ):
+        with transaction.atomic():
+            deferred = [echo_task.enqueue_on_commit(str(index)) for index in range(3)]
+            assert all(item.task is None for item in deferred)
+
+        assert calls == 3
+        assert all(item.task is not None for item in deferred)
+        tids = [item.task.tid for item in deferred if item.task is not None]
+        queue = harness.context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+        try:
+            assert all(
+                queue.peek_one(exact_timestamp=int(tid)) is not None for tid in tids
+            )
+        finally:
+            queue.close()
 
 
 @pytest.mark.shared

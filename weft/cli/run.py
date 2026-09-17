@@ -65,6 +65,8 @@ def render_run_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-367] exception
         typer.echo(json.dumps(execution.manager_started_payload, ensure_ascii=False))
     if verbose and execution.submitted_payload is not None:
         typer.echo(json.dumps(execution.submitted_payload, indent=2))
+    if execution.availability_warning is not None:
+        typer.echo(execution.availability_warning, err=True)
 
     if not wait:
         if json_output:

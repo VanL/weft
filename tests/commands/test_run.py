@@ -85,6 +85,76 @@ from weft.liveness.models import HostProcessObservation
 pytestmark = [pytest.mark.shared]
 
 
+def _ready_manager_result(
+    record: dict[str, Any] | None = None,
+    *,
+    started_here: bool = False,
+) -> core_manager_runtime.ManagerEnsureResult:
+    return core_manager_runtime.ManagerEnsureResult(
+        outcome="ready",
+        manager_record=record,
+        started_here=started_here,
+        process_handle=None,
+        reason="ready",
+    )
+
+
+def test_run_renderer_keeps_json_receipt_clean_when_readiness_degrades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepted no-wait work keeps stdout JSON stable and warns on stderr."""
+    rendered: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        "weft.cli.run.typer.echo",
+        lambda message="", err=False, **_kwargs: rendered.append((message, err)),
+    )
+
+    exit_code = render_run_result(
+        RunExecutionResult(
+            tid="1780000000000000999",
+            availability_warning="Task accepted; manager readiness is degraded",
+        ),
+        wait=False,
+        json_output=True,
+        verbose=False,
+    )
+
+    assert exit_code == 0
+    stdout = [message for message, is_error in rendered if not is_error]
+    stderr = [message for message, is_error in rendered if is_error]
+    assert json.loads(stdout[0]) == {
+        "tid": "1780000000000000999",
+        "status": "queued",
+    }
+    assert stderr == ["Task accepted; manager readiness is degraded"]
+
+
+def test_unexpected_post_acceptance_failure_names_committed_tid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmer defects stay typed and identify already accepted work."""
+    context = build_context(prepare_project_root(tmp_path))
+    tid = "1780000000000000998"
+    defect = RuntimeError("programmer defect")
+    monkeypatch.setattr(
+        run_cmd,
+        "_ensure_manager_after_submission",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(defect),
+    )
+
+    with pytest.raises(RuntimeError, match=f"accepted_tid={tid}") as exc_info:
+        run_cmd._run_with_managed_execution(
+            context=context,
+            submit=lambda: int(tid),
+            verbose=False,
+            wait=False,
+            reuse_enabled=True,
+        )
+
+    assert exc_info.value is defect
+
+
 @pytest.mark.parametrize(
     "category",
     (
@@ -2301,16 +2371,19 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
         calls.append("enqueue")
         return 1775679597297004544
 
-    def _fake_ensure(context_arg: WeftContext) -> tuple[dict[str, object], bool, None]:
+    def _fake_ensure(
+        context_arg: WeftContext, *, submitted_tid: str | int
+    ) -> core_manager_runtime.ManagerEnsureResult:
+        del context_arg, submitted_tid
         calls.append("ensure")
-        return (
-            {"tid": "1775679596841701376", "ctrl_in": "Tmanager.ctrl_in"},
-            False,
-            None,
+        return _ready_manager_result(
+            {"tid": "1775679596841701376", "ctrl_in": "Tmanager.ctrl_in"}
         )
 
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _fake_enqueue)
-    monkeypatch.setattr("weft.core.manager_runtime.ensure_manager", _fake_ensure)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager_after_submission", _fake_ensure
+    )
 
     _execute_inline(
         command=(),
@@ -2863,6 +2936,52 @@ def test_reconcile_submitted_spawn_can_wait_past_reserved_claim(
     assert created_monitors[0].wait_calls
 
 
+def test_reconcile_submitted_spawn_can_wait_past_queued_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery can keep watching while the accepted request stays queued."""
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    submitted_tid = str(time.time_ns())
+    results = iter(
+        [
+            SpawnSubmissionReconciliation(outcome="queued", tid=submitted_tid),
+            SpawnSubmissionReconciliation(outcome="spawned", tid=submitted_tid),
+        ]
+    )
+
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "time",
+        SimpleNamespace(monotonic=lambda: 0.0),
+    )
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "_reconcile_submitted_spawn_once",
+        lambda *_args, **_kwargs: next(results),
+    )
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "_spawn_reconciliation_queue_specs",
+        lambda _context, _tid, **_kwargs: ((WEFT_SPAWN_REQUESTS_QUEUE, False),),
+    )
+
+    result = reconcile_submitted_spawn(
+        context,
+        submitted_tid,
+        timeout=0.1,
+        queued_is_terminal=False,
+    )
+
+    assert result.outcome == "spawned"
+
+
 def test_reconcile_submitted_spawn_reports_rejected_from_manager_log(
     tmp_path: Path,
 ) -> None:
@@ -3045,7 +3164,7 @@ def test_reconcile_submitted_spawn_rebuilds_monitor_when_reserved_queues_change(
     ]
 
 
-def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
+def test_run_inline_retains_spawn_request_when_manager_readiness_degrades(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3058,39 +3177,45 @@ def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
     )
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "weft.core.manager_runtime.ensure_manager",
-        lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
+        "weft.commands.run._ensure_manager_after_submission",
+        lambda context_arg, *, submitted_tid: core_manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="manager_start_failed:read-only",
+        ),
     )
 
-    with pytest.raises(SubmissionError, match="Error submitting task: boom"):
-        _execute_inline(
-            command=(),
-            function_target="tests.tasks.sample_targets:echo_payload",
-            args=(),
-            kwargs=(),
-            env=(),
-            name=None,
-            interactive=False,
-            stream_output=None,
-            timeout=None,
-            memory=None,
-            cpu=None,
-            tags=(),
-            context_dir=root,
-            wait=False,
-            json_output=False,
-            verbose=False,
-            autostart_enabled=True,
-        )
+    execution = _execute_inline(
+        command=(),
+        function_target="tests.tasks.sample_targets:echo_payload",
+        args=(),
+        kwargs=(),
+        env=(),
+        name=None,
+        interactive=False,
+        stream_output=None,
+        timeout=None,
+        memory=None,
+        cpu=None,
+        tags=(),
+        context_dir=root,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        autostart_enabled=True,
+    )
 
     queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
     try:
-        assert queue.read_one() is None
+        assert queue.peek_one(exact_timestamp=int(execution.tid)) is not None
     finally:
         queue.close()
+    assert execution.availability_warning is not None
 
 
-def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
+def test_run_spec_via_manager_retains_request_when_readiness_degrades(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3115,24 +3240,29 @@ def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
     )
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "weft.core.manager_runtime.ensure_manager",
-        lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
+        "weft.commands.run._ensure_manager_after_submission",
+        lambda context_arg, *, submitted_tid: core_manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="manager_start_failed:read-only",
+        ),
     )
 
-    with pytest.raises(SubmissionError, match="Error submitting TaskSpec: boom"):
-        _execute_spec_via_manager(
-            spec_path,
-            name=None,
-            verbose=False,
-            wait=False,
-            json_output=False,
-            autostart_enabled=True,
-            persistent_override=None,
-        )
+    execution = _execute_spec_via_manager(
+        spec_path,
+        name=None,
+        verbose=False,
+        wait=False,
+        json_output=False,
+        autostart_enabled=True,
+        persistent_override=None,
+    )
 
     queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
     try:
-        assert queue.read_one() is None
+        assert queue.peek_one(exact_timestamp=int(execution.tid)) is not None
     finally:
         queue.close()
 
@@ -3203,7 +3333,7 @@ def test_run_spec_via_manager_returns_timeout_exit_code(
 
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid: (None, False, None),
+        lambda context, *, submitted_tid: _ready_manager_result(),
     )
     monkeypatch.setattr(
         "weft.commands.run._enqueue_taskspec",
@@ -3277,7 +3407,7 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
     )
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid: (None, False, None),
+        lambda context, *, submitted_tid: _ready_manager_result(),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
@@ -3337,7 +3467,7 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
     )
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid: (None, False, None),
+        lambda context, *, submitted_tid: _ready_manager_result(),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
@@ -3398,7 +3528,7 @@ def test_run_spec_via_manager_rejects_reserved_internal_name_prefix(
         )
 
 
-def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
+def test_run_pipeline_retains_request_when_manager_readiness_degrades(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3430,25 +3560,30 @@ def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
         lambda spec_context=None, autostart=True: context,
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime.ensure_manager",
-        lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
+        "weft.commands.run._ensure_manager_after_submission",
+        lambda context_arg, *, submitted_tid: core_manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="manager_start_failed:read-only",
+        ),
     )
 
-    with pytest.raises(RuntimeError, match="boom"):
-        _execute_pipeline(
-            pipeline_path,
-            name=None,
-            pipeline_input=None,
-            context_dir=root,
-            wait=True,
-            json_output=False,
-            verbose=False,
-            autostart_enabled=True,
-        )
+    execution = _execute_pipeline(
+        pipeline_path,
+        name=None,
+        pipeline_input=None,
+        context_dir=root,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        autostart_enabled=True,
+    )
 
     queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
     try:
-        assert queue.read_one() is None
+        assert queue.peek_one(exact_timestamp=int(execution.tid)) is not None
     finally:
         queue.close()
 
@@ -3497,7 +3632,7 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
 
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid: (None, False, None),
+        lambda context, *, submitted_tid: _ready_manager_result(),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
@@ -3549,24 +3684,26 @@ def test_run_pipeline_without_input_does_not_inject_work_envelope_start(
         lambda spec_context=None, autostart=True: context,
     )
     monkeypatch.setattr(
-        "weft.core.manager_runtime.ensure_manager",
-        lambda context_arg: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
-    monkeypatch.setattr(
-        "weft.commands.run._delete_spawn_request", lambda *args, **kwargs: None
+        "weft.commands.run._ensure_manager_after_submission",
+        lambda context_arg, *, submitted_tid: core_manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="manager_start_failed:read-only",
+        ),
     )
 
-    with pytest.raises(RuntimeError, match="rollback could not be confirmed"):
-        _execute_pipeline(
-            pipeline_path,
-            name=None,
-            pipeline_input=None,
-            context_dir=root,
-            wait=False,
-            json_output=False,
-            verbose=False,
-            autostart_enabled=True,
-        )
+    _execute_pipeline(
+        pipeline_path,
+        name=None,
+        pipeline_input=None,
+        context_dir=root,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        autostart_enabled=True,
+    )
 
     queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
     try:

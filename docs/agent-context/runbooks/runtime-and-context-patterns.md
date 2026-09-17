@@ -189,12 +189,15 @@ Rules:
   enqueue step unless the spec changes.
 - Once the spawn request write returns, treat that submitted TID as durable
   user intent.
-- Post-enqueue failures must reconcile by submitted TID using durable surfaces:
+- Post-enqueue availability failures must reconcile by submitted TID using durable surfaces:
   task logs, TID mappings, `weft.spawn.requests`, and manager reserved queues.
-- Only requests still provably present in `weft.spawn.requests` are safe to
-  delete as rollback.
-- If the request is already in a manager reserved queue, do not claim cleanup
-  succeeded. That is an operator recovery case.
+- Do not delete or resubmit an accepted request because manager readiness could
+  not be proved. Queued, reserved, spawned, and unknown-location observations
+  retain the accepted TID.
+- A reserved request ends submission-scoped manager startup. Its execution and
+  recovery stay with the existing manager and reserved-queue owners.
+- An authoritative manager rejection remains a typed submission error keyed by
+  the accepted TID.
 
 Why:
 

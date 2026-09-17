@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Never
 
@@ -11,7 +13,14 @@ import pytest
 
 import weft.commands.submission as submission_mod
 from tests.helpers.weft_harness import WeftTestHarness
-from weft._exceptions import CommandUsageError, InvalidTID, SubmissionValidationError
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_SPAWN_REQUESTS_QUEUE
+from weft._exceptions import (
+    CommandUsageError,
+    InvalidTID,
+    ManagerStartFailed,
+    SubmissionManagerError,
+    SubmissionValidationError,
+)
 from weft.client import normalize_taskspec_payload
 from weft.commands._spawn_submission import SpawnSubmissionReconciliation
 from weft.commands.types import PreparedSubmissionRequest
@@ -22,6 +31,7 @@ from weft.core.taskspec import (
     resolve_taskspec_payload,
     validate_taskspec_payload,
 )
+from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -741,11 +751,11 @@ def test_plain_submission_name_does_not_require_endpoint_syntax(
     assert prepared.taskspec.name == "nightly report"
 
 
-def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
+def test_ensure_manager_propagates_programmer_runtime_error_without_reconciliation(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A post-enqueue startup failure yields to durable spawned evidence."""
+    """An unclassified runtime defect remains visible after acceptance."""
 
     context = weft_harness.context
     tid = "1777000000000000789"
@@ -756,57 +766,254 @@ def test_ensure_manager_reconciles_ordinary_startup_failure_as_spawned(
         calls.append("ensure")
         raise startup_error
 
-    def reconcile(_context: object, submitted_tid: str, **kwargs: object) -> object:
-        assert kwargs == {}
-        calls.append(f"reconcile:{submitted_tid}")
-        return SpawnSubmissionReconciliation(outcome="spawned", tid=submitted_tid)
-
-    monkeypatch.setattr(submission_mod, "reconcile_submitted_spawn", reconcile)
-
-    result = submission_mod.ensure_manager_after_submission(
-        context,
-        submitted_tid=tid,
-        ensure_manager_fn=fail_startup,
-        delete_spawn_request_fn=lambda *_args, **_kwargs: pytest.fail(
-            "spawned evidence must not delete the committed request"
-        ),
-    )
-
-    assert result == (None, False, None)
-    assert calls == ["ensure", f"reconcile:{tid}"]
-
-
-def test_ensure_manager_rejected_result_preserves_startup_failure_as_cause(
-    weft_harness: WeftTestHarness,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A manager rejection stays primary while retaining the startup failure."""
-
-    context = weft_harness.context
-    tid = "1777000000000000790"
-    startup_error = ManagerStartupFailure("startup detail")
-
-    def fail_startup(_context: object) -> Never:
-        raise startup_error
-
     monkeypatch.setattr(
         submission_mod,
         "reconcile_submitted_spawn",
-        lambda _context, submitted_tid: SpawnSubmissionReconciliation(
-            outcome="rejected",
-            tid=submitted_tid,
-            error="manager rejection detail",
+        lambda *_args, **_kwargs: pytest.fail(
+            "programmer errors must not be relabeled as availability"
         ),
     )
 
-    with pytest.raises(RuntimeError, match="^manager rejection detail$") as exc_info:
+    with pytest.raises(ManagerStartupFailure, match="startup detail"):
         submission_mod.ensure_manager_after_submission(
             context,
             submitted_tid=tid,
             ensure_manager_fn=fail_startup,
         )
 
-    assert exc_info.value.__cause__ is startup_error
+    assert calls == ["ensure"]
+
+
+def test_ensure_manager_rejected_result_includes_accepted_tid(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An authoritative rejection remains a typed error keyed by accepted TID."""
+
+    context = weft_harness.context
+    tid = "1777000000000000790"
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "observe_manager_availability",
+        lambda _context: core_manager_runtime.ManagerAvailabilityObservation(
+            outcome="absent",
+            manager_record=None,
+            first_uncertain_at=None,
+            backlog_pending=None,
+            reason="absent",
+        ),
+    )
+    monkeypatch.setattr(
+        submission_mod,
+        "reconcile_submitted_spawn",
+        lambda _context, submitted_tid, **_kwargs: SpawnSubmissionReconciliation(
+            outcome="rejected",
+            tid=submitted_tid,
+            error="manager rejection detail",
+        ),
+    )
+
+    with pytest.raises(
+        SubmissionManagerError,
+        match=f"{tid}: manager rejection detail",
+    ):
+        submission_mod.ensure_manager_after_submission(
+            context,
+            submitted_tid=tid,
+        )
+
+
+def test_ensure_manager_start_failure_preserves_queued_acceptance(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recognized launch failure returns degradation and never deletes work."""
+    context = weft_harness.context
+    tid = "1777000000000000792"
+    observation = core_manager_runtime.ManagerAvailabilityObservation(
+        outcome="absent",
+        manager_record=None,
+        first_uncertain_at=None,
+        backlog_pending=None,
+        reason="absent",
+    )
+    decision = core_manager_runtime.ManagerRecoveryDecision(
+        outcome="launch",
+        manager_record=None,
+        reason="confirmed_absent",
+    )
+    reconciliations = iter(
+        [
+            SpawnSubmissionReconciliation(outcome="queued", tid=tid),
+            SpawnSubmissionReconciliation(outcome="queued", tid=tid),
+        ]
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "observe_manager_availability",
+        lambda _context: observation,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "decide_manager_recovery",
+        lambda _context, _observation: decision,
+    )
+    monkeypatch.setattr(
+        submission_mod,
+        "reconcile_submitted_spawn",
+        lambda *_args, **_kwargs: next(reconciliations),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "start_manager",
+        lambda _context: (_ for _ in ()).throw(ManagerStartFailed("read-only")),
+    )
+
+    result = submission_mod.ensure_manager_after_submission(
+        context,
+        submitted_tid=tid,
+        delete_spawn_request_fn=lambda *_args, **_kwargs: pytest.fail(
+            "accepted work must never be deleted"
+        ),
+    )
+
+    assert result.outcome == "uncertain"
+    assert result.reason == "manager_start_failed:read-only"
+
+
+def test_accepted_request_executes_after_later_manager_recovery(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch failure retains one exact request for a later real manager."""
+    context = weft_harness.context
+    observation = core_manager_runtime.ManagerAvailabilityObservation(
+        outcome="absent",
+        manager_record=None,
+        first_uncertain_at=None,
+        backlog_pending=None,
+        reason="absent",
+    )
+    decision = core_manager_runtime.ManagerRecoveryDecision(
+        outcome="launch",
+        manager_record=None,
+        reason="confirmed_absent",
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            core_manager_runtime,
+            "observe_manager_availability",
+            lambda _context: observation,
+        )
+        patch.setattr(
+            core_manager_runtime,
+            "decide_manager_recovery",
+            lambda _context, _observation: decision,
+        )
+        patch.setattr(
+            core_manager_runtime,
+            "start_manager",
+            lambda _context: (_ for _ in ()).throw(
+                ManagerStartFailed("read-only startup directory")
+            ),
+        )
+        receipt = submission_mod.submit(
+            context,
+            {
+                "name": "retained-after-readiness-failure",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            },
+            payload="retained",
+        )
+
+    weft_harness.register_tid(receipt.tid)
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        assert queue.peek_one(exact_timestamp=int(receipt.tid)) is not None
+    finally:
+        queue.close()
+
+    weft_harness.ensure_foreground_manager()
+    weft_harness.wait_for_completion(receipt.tid, timeout=30.0)
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        assert queue.peek_one(exact_timestamp=int(receipt.tid)) is None
+    finally:
+        queue.close()
+
+
+def test_concurrent_accepted_requests_converge_and_execute_once(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent recovery retains and executes each exact request once [MF-1]."""
+
+    context = weft_harness.context
+    writes_committed = threading.Barrier(2)
+    launch_lock = threading.Lock()
+    real_submit_spawn_request = submission_mod.submit_spawn_request
+
+    def submit_then_converge(*args: Any, **kwargs: Any) -> int:
+        message_id = real_submit_spawn_request(*args, **kwargs)
+        writes_committed.wait(timeout=10.0)
+        return message_id
+
+    def start_one_inline_manager(
+        _context: WeftContext,
+    ) -> tuple[dict[str, object], bool, None]:
+        with launch_lock:
+            record = weft_harness.ensure_foreground_manager()
+        return record, False, None
+
+    monkeypatch.setattr(
+        submission_mod,
+        "submit_spawn_request",
+        submit_then_converge,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "start_manager",
+        start_one_inline_manager,
+    )
+
+    def submit(value: str) -> str:
+        receipt = submission_mod.submit(
+            context,
+            {
+                "name": f"concurrent-recovery-{value}",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            },
+            payload=value,
+        )
+        return receipt.tid
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        tids = tuple(executor.map(submit, ("one", "two")))
+
+    assert len(set(tids)) == 2
+    for tid in tids:
+        weft_harness.register_tid(tid)
+        weft_harness.wait_for_completion(tid, timeout=30.0)
+
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False) as queue:
+        for tid in tids:
+            assert queue.peek_one(exact_timestamp=int(tid)) is None
+
+    with context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as queue:
+        events = [payload for payload, _timestamp in iter_queue_json_entries(queue)]
+    for tid in tids:
+        spawn_events = [
+            event
+            for event in events
+            if event.get("event") == "task_spawned" and event.get("child_tid") == tid
+        ]
+        assert len(spawn_events) == 1
 
 
 def test_ensure_manager_propagates_fatal_startup_signal_without_reconciliation(
@@ -872,8 +1079,17 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
         captured["submit_kwargs"] = kwargs
         return committed_id
 
-    def fake_ensure(_context: WeftContext, *, submitted_tid: str | int) -> None:
+    def fake_ensure(
+        _context: WeftContext, *, submitted_tid: str | int
+    ) -> core_manager_runtime.ManagerEnsureResult:
         captured["reconciled_tid"] = submitted_tid
+        return core_manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record={"tid": "manager"},
+            started_here=False,
+            process_handle=None,
+            reason="ready",
+        )
 
     monkeypatch.setattr(core_manager_runtime, "generate_tid", fail_preallocation)
     monkeypatch.setattr(submission_mod, "submit_spawn_request", fake_submit)
@@ -920,8 +1136,17 @@ def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(
         captured["submit_kwargs"] = kwargs
         return int(explicit_tid)
 
-    def fake_ensure(_context: WeftContext, *, submitted_tid: str | int) -> None:
+    def fake_ensure(
+        _context: WeftContext, *, submitted_tid: str | int
+    ) -> core_manager_runtime.ManagerEnsureResult:
         captured["reconciled_tid"] = submitted_tid
+        return core_manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record={"tid": "manager"},
+            started_here=False,
+            process_handle=None,
+            reason="ready",
+        )
 
     monkeypatch.setattr(submission_mod, "submit_spawn_request", fake_submit)
     monkeypatch.setattr(submission_mod, "ensure_manager_after_submission", fake_ensure)
@@ -931,6 +1156,40 @@ def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(
     assert captured["submit_kwargs"]["tid"] == explicit_tid
     assert captured["reconciled_tid"] == explicit_tid
     assert receipt.tid == explicit_tid
+
+
+def test_submit_prepared_programmer_error_names_committed_tid(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = weft_harness.context
+    tid = "1777000000000000813"
+    prepared = submission_mod.prepare(
+        context,
+        {
+            "name": "diagnostic-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+    )
+    defect = RuntimeError("programmer defect")
+    monkeypatch.setattr(
+        submission_mod,
+        "submit_spawn_request",
+        lambda *_args, **_kwargs: int(tid),
+    )
+    monkeypatch.setattr(
+        submission_mod,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(defect),
+    )
+
+    with pytest.raises(RuntimeError, match=f"accepted_tid={tid}") as exc_info:
+        submission_mod.submit_prepared(context, prepared)
+
+    assert exc_info.value is defect
 
 
 @pytest.mark.parametrize(

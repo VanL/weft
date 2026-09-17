@@ -35,6 +35,8 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
+
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Liveness Reaper And TID-Mapping Custody Split Plan](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md) - adds LivenessMonitor as a third built-in persistent service and moves tid-mapping cleanup custody to it.
@@ -188,17 +190,33 @@ Key responsibilities implemented in `weft/core/manager.py`:
    outbox queues, required matching context, `task_status` exactly `created`,
    `spawning`, or `running`, and `should_stop is False`. An absent, malformed,
    non-matching, draining, or stopping PONG is not negative proof and does not
-   authorize unsafe takeover by itself. Manager startup must distinguish
-   "no active canonical manager exists" from "a fresh canonical incumbent is
-   namespace-ambiguous"; the latter must not launch another manager merely
-   because the caller cannot prove the incumbent dead from its PID namespace
-   while there is no public spawn backlog. Manager-owned liveness PINGs are
+   authorize unsafe takeover by itself. Automatic manager recovery reduces the
+   latest canonical records and applies the existing 300-second unknown-record
+   age cutoff. An older unknown row no longer suppresses automatic startup, but
+   expiry remains recovery policy rather than proof that its process died.
+   Registry read failure is uncertainty, not an empty registry.
+
+   For a fresh uncertain incumbent, the caller records monotonic time and
+   pending public work before one keyed proof attempt. Positive proof reuses the
+   manager. If proof remains uncertain and work was and remains pending, the
+   caller waits only the remainder of the namespace-ambiguity grace from that
+   first observation, attempts keyed proof once more against fresh registry
+   evidence, and then decides. The first probe's elapsed time counts toward the
+   grace; the sequence does not restart or insert intermediate probes. Fresh
+   proof wins. Empty backlog, failed final reads, or a changed unproved
+   incumbent suppress helper startup. An expired or absent incumbent permits
+   ordinary startup after a successful fresh registry check. The same unproved
+   incumbent plus pending work at both observations permits a helper after the
+   grace. Presence is not proof of stalled dispatch: a busy healthy manager may
+   qualify. Existing atomic reservation and convergence remain authoritative.
+   Submission callers additionally reconcile their exact TID before startup;
+   reserved, spawned, rejected, or unknown-location work cannot authorize a
+   helper for that submission. Core discovery receives no submission predicate.
+
+   Manager-owned liveness PINGs are
    non-blocking reactor probes: one turn writes a keyed PING, later turns peek
    for the matching PONG until the probe deadline, and `ping_pending` remains
-   unknown evidence rather than stale proof. When public spawn backlog remains
-   pending past a short namespace-ambiguity grace window and the incumbent
-   still lacks PONG/runtime proof, startup may launch a helper manager so
-   queued work can make progress. Canonical ownership is lowest-live-TID among
+   unknown evidence rather than stale proof. Canonical ownership is lowest-live-TID among
    canonical dispatch-eligible claimants for status, selection, and
    duplicate-manager convergence. It is advisory for public dispatch because
    atomic queue reservation owns public spawn exclusivity.
@@ -522,8 +540,10 @@ _Implementation mapping_:
 
 _Implementation maintenance_: [Load-Sensitive Test Lifecycle Fixes](../plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) bounds the detached launcher first-event read and retains child cleanup ownership before registry readiness.
 
-`weft run` guarantees that a manager is available by minting a manager TaskSpec
-and launching a short-lived detached bootstrap helper when required. That
+After accepting a spawn request, `weft run` attempts to make a manager
+available by minting a manager TaskSpec and launching a short-lived detached
+bootstrap helper when required. A readiness-only failure does not revoke the
+accepted TID. That
 helper starts `weft.manager_process`, then the shared lifecycle code waits for a
 stronger startup proof than "registry entry appeared once": the launched manager
 PID must still be live and the canonical registry record for the requested
@@ -611,6 +631,8 @@ _Implementation mapping_:
   `weft/core/manager_runtime.py::generate_tid`,
   `weft/core/manager_runtime.py::build_manager_spec`,
   `weft/core/manager_runtime.py::select_active_manager`,
+  `weft/core/manager_runtime.py::observe_manager_availability`,
+  `weft/core/manager_runtime.py::decide_manager_recovery`,
   `weft/core/manager_runtime.py::ensure_manager`,
   `weft/core/manager_runtime.py::start_manager`,
   `weft/core/manager_runtime.py::replace_active_manager`,

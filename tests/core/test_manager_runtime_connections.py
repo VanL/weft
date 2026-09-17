@@ -144,12 +144,11 @@ def test_active_manager_fallback_opens_no_connections(
                             ctx, startup_timeout=0, broker=broker
                         )
                 else:
-                    record, started, process = manager_runtime.ensure_manager(
-                        ctx, broker=broker
-                    )
-                    assert record["tid"] == _TID
-                    assert not started
-                    assert process is None
+                    result = manager_runtime.ensure_manager(ctx, broker=broker)
+                    assert result.manager_record is not None
+                    assert result.manager_record["tid"] == _TID
+                    assert not result.started_here
+                    assert result.process_handle is None
             assert len(connections) == before
             assert owner.stats().pending == 1
 
@@ -163,7 +162,9 @@ def test_borrowed_registry_preserves_schema_discard_and_future_guard(
         v1 = owner.write(json.dumps({"schema": "weft.service_owner.v1"}))
         with owner.get_connection() as broker:
             before = len(connections)
-            assert manager_runtime.ensure_manager(ctx, broker=broker)[0]["tid"] == _TID
+            result = manager_runtime.ensure_manager(ctx, broker=broker)
+            assert result.manager_record is not None
+            assert result.manager_record["tid"] == _TID
             assert owner.peek_one(exact_timestamp=v1) is None
             v1 = owner.write(json.dumps({"schema": "weft.service_owner.v1"}))
             future = owner.write(json.dumps({"schema": "weft.service_owner.v3"}))
@@ -208,12 +209,11 @@ def test_borrowed_manager_probe_reuses_connection_and_retires_reply(
                         }
                     ),
                 )
-                record, started, process = manager_runtime.ensure_manager(
-                    ctx, broker=broker
-                )
-                assert record["tid"] == _TID
-                assert not started
-                assert process is None
+                result = manager_runtime.ensure_manager(ctx, broker=broker)
+                assert result.manager_record is not None
+                assert result.manager_record["tid"] == _TID
+                assert not result.started_here
+                assert result.process_handle is None
                 assert broker.peek_one(f"T{_TID}.ctrl_out") is None
             assert broker.get_queue_stat(f"T{_TID}.ctrl_in").pending == 3
             assert len(connections) == before

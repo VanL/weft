@@ -9,12 +9,37 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.helpers.test_backend import prepare_project_root
+from weft import commands
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.cli.app import app
+from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_run_live_cli_keeps_degraded_receipt_machine_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readiness warning stays on stderr after the CLI accepts work [CLI-1.1.1]."""
+
+    tid = "1777000000000000999"
+    warning = f"Task {tid} was accepted; manager availability is uncertain."
+    monkeypatch.setattr(
+        commands,
+        "cmd_run",
+        lambda *_args, **_kwargs: RunExecutionResult(
+            tid=tid,
+            availability_warning=warning,
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["run", "--no-wait", "--json", "echo", "ok"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"tid": tid, "status": "queued"}
+    assert result.stderr == f"{warning}\n"
 
 
 @pytest.mark.parametrize("mode", ["populated", "empty", "claimed"])
@@ -56,9 +81,15 @@ def test_manager_start_live_cli_preserves_bootstrap_text(
     tid = "1761000000000000000"
     calls: list[Path] = []
 
-    def ensure_manager(context: WeftContext) -> tuple[dict[str, str], bool, None]:
+    def ensure_manager(context: WeftContext) -> manager_runtime.ManagerEnsureResult:
         calls.append(context.root)
-        return {"tid": tid, "status": "active", "name": "manager"}, started_here, None
+        return manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record={"tid": tid, "status": "active", "name": "manager"},
+            started_here=started_here,
+            process_handle=None,
+            reason="ready",
+        )
 
     monkeypatch.setattr(manager_runtime, "ensure_manager", ensure_manager)
     result = CliRunner().invoke(app, ["manager", "start", "--context", str(root)])

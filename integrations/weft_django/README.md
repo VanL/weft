@@ -117,6 +117,11 @@ timestamps.
 and gains `tid` plus task methods after the outer transaction commits. Calling
 result-like methods before commit raises a local `RuntimeError`.
 
+A successful Weft broker write binds the deferred TID even if manager readiness
+then degrades. That readiness warning does not raise from the commit callback or
+stop later callbacks. Broker-write failure and authoritative manager rejection
+still raise. The hook is not a durable outbox or an atomic cross-database write.
+
 Deferred helpers validate and snapshot before registering Django's
 `transaction.on_commit()` callback. Missing spec references, invalid overrides,
 and unserializable payloads fail before the app transaction commits. Mutating

@@ -682,14 +682,14 @@ def test_keyed_probe_wait_retains_connection_between_polls(
             raise RuntimeError("injected wait failure")
 
     monkeypatch.setattr("weft.core.control_probe.time.sleep", observe_wait)
-    result = send_keyed_ping_probe(
-        ctx,
-        tid=str(time.time_ns()),
-        ctrl_in_name="probe.in",
-        ctrl_out_name="probe.out",
-        timeout=10.0,
-    )
-    assert result.error == "injected wait failure"
+    with pytest.raises(RuntimeError, match="injected wait failure"):
+        send_keyed_ping_probe(
+            ctx,
+            tid=str(time.time_ns()),
+            ctrl_in_name="probe.in",
+            ctrl_out_name="probe.out",
+            timeout=10.0,
+        )
     assert len(observations) == 3
     assert observations == [observations[0]] * 3
 
@@ -726,18 +726,30 @@ def test_keyed_probe_never_closes_borrowed_broker(
                 ),
             )
         initial_connections = len(connections)
-        result = send_keyed_ping_probe(
-            ctx,
-            tid=tid,
-            ctrl_in_name="probe.in",
-            ctrl_out_name="probe.out",
-            request_id="borrowed",
-            timeout=10.0 if outcome == "error" else 0.0,
-            broker=broker,
-        )
-        assert (result.matched is not None) == (outcome == "matched")
-        assert result.timed_out == (outcome == "timeout")
-        assert (result.error is not None) == (outcome == "error")
+        if outcome == "error":
+            with pytest.raises(RuntimeError, match="injected wait failure"):
+                send_keyed_ping_probe(
+                    ctx,
+                    tid=tid,
+                    ctrl_in_name="probe.in",
+                    ctrl_out_name="probe.out",
+                    request_id="borrowed",
+                    timeout=10.0,
+                    broker=broker,
+                )
+        else:
+            result = send_keyed_ping_probe(
+                ctx,
+                tid=tid,
+                ctrl_in_name="probe.in",
+                ctrl_out_name="probe.out",
+                request_id="borrowed",
+                timeout=0.0,
+                broker=broker,
+            )
+            assert (result.matched is not None) == (outcome == "matched")
+            assert result.timed_out == (outcome == "timeout")
+            assert result.error is None
         assert broker.peek_one("probe.out") is None
         broker.write("probe.owner", "still open")
         observed = broker.peek_one("probe.owner")

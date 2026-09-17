@@ -865,8 +865,16 @@ _Implementation mapping_: `weft/core/manager.py`,
   not visible from the current PID namespace, but it is not a lease, election
   vote, or substitute for lowest-TID ownership reduction. Startup must not
   convert a fresh namespace-ambiguous canonical incumbent into permission to
-  launch another manager unless public spawn backlog remains pending past the
-  bounded namespace-ambiguity grace window. Pong-proof probes retire their
+  launch another manager unless public spawn backlog remains pending through
+  the bounded two-round recovery sequence. The first keyed proof round counts
+  toward the namespace-ambiguity grace; a second round uses fresh registry
+  evidence and is followed by a fresh backlog read. Positive proof wins. Empty
+  backlog, read failure, a changed unproved incumbent, or an accepted request
+  that is reserved, spawned, rejected, or of unknown location suppresses helper
+  startup for that submission. The same still-unproved incumbent plus pending
+  work at both observations may permit a helper after the grace, including when
+  the incumbent is healthy but busy. The existing 300-second unknown-record age
+  cutoff remains recovery policy, not proof of process death. Pong-proof probes retire their
   replies: a matched keyed PONG is deleted on match, and the prober sweeps
   rows bearing its own request id when a pending probe times out or is
   abandoned.
@@ -1168,6 +1176,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
 
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 

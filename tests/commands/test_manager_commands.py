@@ -21,10 +21,16 @@ from weft._constants import (
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     SERVICE_STATUS_SUPERSEDED,
+    WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
-from weft._exceptions import ControlRejected, ManagerNotRunning, WeftError
+from weft._exceptions import (
+    ControlRejected,
+    ManagerNotRunning,
+    ManagerStartFailed,
+    WeftError,
+)
 from weft.commands import manager as manager_cmd
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
@@ -42,6 +48,15 @@ from weft.helpers import iter_queue_json_entries, process_create_time
 from weft.liveness.models import HostProcessObservation, RuntimeLiveness
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_manager_discovery_phase_names_are_public_core_exports() -> None:
+    assert {
+        "ManagerAvailabilityObservation",
+        "ManagerRecoveryDecision",
+        "observe_manager_availability",
+        "decide_manager_recovery",
+    } <= set(core_manager_runtime.__all__)
 
 
 class _CleanupProcess:
@@ -242,7 +257,13 @@ def test_cmd_manager_start_returns_structured_snapshot(
     monkeypatch.setattr(
         core_manager_runtime,
         "ensure_manager",
-        lambda context_arg: (record, True, None),
+        lambda context_arg: core_manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=record,
+            started_here=True,
+            process_handle=None,
+            reason="started",
+        ),
     )
 
     result = manager_cmd.cmd_manager_start(context=context_root)
@@ -250,6 +271,29 @@ def test_cmd_manager_start_returns_structured_snapshot(
     assert result.tid == "1761000000000000002"
     assert result.status == "active"
     assert result.started_here is True
+
+
+def test_cmd_manager_start_requires_ready_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "proj")
+    context = build_context(context_root)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "ensure_manager",
+        lambda _context: core_manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="registry_read_error",
+        ),
+    )
+
+    with pytest.raises(ManagerStartFailed, match="registry_read_error"):
+        manager_cmd.cmd_manager_start(context=context_root)
 
 
 def test_cmd_manager_stop_returns_none_when_active_manager_is_absent(
@@ -1212,16 +1256,20 @@ def test_start_command_delegates_to_shared_bootstrap(
 
     monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
-    def _fake_ensure(context_arg: WeftContext) -> tuple[dict[str, object], bool, None]:
+    def _fake_ensure(
+        context_arg: WeftContext,
+    ) -> core_manager_runtime.ManagerEnsureResult:
         assert context_arg is context
         calls.append("ensure")
-        return (
-            {
+        return core_manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record={
                 "tid": "1761000000000000000",
                 "runtime_handle": _host_runtime_handle(12345),
             },
-            True,
-            None,
+            started_here=True,
+            process_handle=None,
+            reason="started",
         )
 
     monkeypatch.setattr(core_manager_runtime, "ensure_manager", _fake_ensure)
@@ -1243,13 +1291,15 @@ def test_start_command_reports_existing_manager(
     monkeypatch.setattr(
         core_manager_runtime,
         "ensure_manager",
-        lambda context_arg: (
-            {
+        lambda context_arg: core_manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record={
                 "tid": "1761000000000000001",
                 "runtime_handle": _host_runtime_handle(54321),
             },
-            False,
-            None,
+            started_here=False,
+            process_handle=None,
+            reason="manager_ready",
         ),
     )
 
@@ -2025,12 +2075,12 @@ def test_ensure_manager_does_not_start_when_host_pid_incumbent_is_namespace_ambi
         ),
     )
 
-    record, started, process = core_manager_runtime.ensure_manager(context)
+    result = core_manager_runtime.ensure_manager(context)
 
-    assert record is not None
-    assert record["tid"] == tid
-    assert started is False
-    assert process is None
+    assert result.outcome == "not_needed"
+    assert result.manager_record is None
+    assert result.started_here is False
+    assert result.process_handle is None
 
 
 def test_ensure_manager_starts_when_ambiguous_incumbent_strands_spawn_backlog(
@@ -2081,12 +2131,319 @@ def test_ensure_manager_starts_when_ambiguous_incumbent_strands_spawn_backlog(
 
     monkeypatch.setattr(core_manager_runtime, "start_manager", _start_replacement)
 
-    record, started, process = core_manager_runtime.ensure_manager(context)
+    result = core_manager_runtime.ensure_manager(context)
 
-    assert record is not None
-    assert record["tid"] == replacement_tid
-    assert started is True
-    assert process is None
+    assert result.manager_record is not None
+    assert result.manager_record["tid"] == replacement_tid
+    assert result.started_here is True
+    assert result.process_handle is None
+
+
+def test_recovery_uses_two_probe_rounds_and_counts_first_toward_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stable uncertain incumbent gets exactly two bounded proof rounds."""
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    record = {
+        "tid": "1761000000000000124",
+        "status": "active",
+        "role": "manager",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+    }
+    reads = iter(
+        [
+            ("uncertain", record),
+            ("uncertain", record),
+            ("uncertain", record),
+        ]
+    )
+    probe_results = iter(
+        [
+            ControlProbeResult(request_id="first", timed_out=True),
+            ControlProbeResult(request_id="second", timed_out=True),
+        ]
+    )
+    probe_ids: list[str] = []
+    slept: list[float] = []
+    monotonic_values = iter([10.0, 12.0])
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_read_recovery_snapshot",
+        lambda *_args, **_kwargs: next(reads),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_read_public_spawn_backlog",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def _probe(*_args: object, **_kwargs: object) -> ControlProbeResult:
+        result = next(probe_results)
+        probe_ids.append(result.request_id)
+        return result
+
+    monkeypatch.setattr(core_manager_runtime, "_probe_recovery_candidate", _probe)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_probe_proves_recovery_candidate",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(core_manager_runtime.time, "sleep", slept.append)
+
+    observation = core_manager_runtime.observe_manager_availability(context)
+    decision = core_manager_runtime.decide_manager_recovery(context, observation)
+
+    assert probe_ids == ["first", "second"]
+    assert slept == []
+    assert decision.outcome == "launch"
+    assert decision.reason == "unproved_incumbent_with_pending_backlog"
+
+
+def test_observation_uses_full_control_timeout_for_first_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery does not inherit the shorter competing-start settlement clamp."""
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    tid = "1761000000000000125"
+    record = {
+        "tid": tid,
+        "status": "active",
+        "role": "manager",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+        "ctrl_in": f"T{tid}.ctrl_in",
+        "ctrl_out": f"T{tid}.ctrl_out",
+        "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+        "weft_context": str(context.root),
+    }
+    captured: dict[str, float] = {}
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_read_recovery_snapshot",
+        lambda *_args, **_kwargs: ("uncertain", record),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_read_public_spawn_backlog",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def _probe(*_args: object, timeout: float, **_kwargs: object) -> ControlProbeResult:
+        captured["timeout"] = timeout
+        return ControlProbeResult(
+            request_id="late-valid",
+            matched=MatchedPong(
+                payload={
+                    "command": "PING",
+                    "status": "ok",
+                    "message": "PONG",
+                    "request_id": "late-valid",
+                    "tid": tid,
+                    "task_status": "running",
+                    "should_stop": False,
+                    "role": "manager",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "ctrl_in": f"T{tid}.ctrl_in",
+                    "ctrl_out": f"T{tid}.ctrl_out",
+                    "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+                    "weft_context": str(context.root),
+                },
+                observed_at=125,
+                request_id="late-valid",
+            ),
+        )
+
+    monkeypatch.setattr(core_manager_runtime, "send_keyed_ping_probe", _probe)
+
+    observation = core_manager_runtime.observe_manager_availability(context)
+
+    assert captured["timeout"] == 2.0
+    assert observation.outcome == "ready"
+    assert observation.reason == "first_probe_ready"
+
+
+def test_backlog_read_error_suppresses_recovery_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    observation = core_manager_runtime.ManagerAvailabilityObservation(
+        outcome="uncertain",
+        manager_record={"tid": "1761000000000000126", "status": "active"},
+        first_uncertain_at=10.0,
+        backlog_pending=None,
+        reason="backlog_read_error:unavailable",
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_read_recovery_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an initial evidence read error must suppress startup in this attempt"
+        ),
+    )
+
+    decision = core_manager_runtime.decide_manager_recovery(context, observation)
+
+    assert decision.outcome == "no_start"
+    assert decision.reason == "backlog_read_error:unavailable"
+
+
+@pytest.mark.parametrize("absence_after_second_probe", [False, True])
+def test_recovery_launch_preserves_incumbent_probe_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absence_after_second_probe: bool,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    record = {"tid": "1761000000000000127", "status": "active"}
+    observation = core_manager_runtime.ManagerAvailabilityObservation(
+        outcome="uncertain",
+        manager_record=record,
+        first_uncertain_at=0.0,
+        backlog_pending=True,
+        reason="first_probe_timeout",
+        probe_result=ControlProbeResult(request_id="first", timed_out=True),
+    )
+    snapshots = (
+        iter([("uncertain", record), ("absent", None)])
+        if absence_after_second_probe
+        else iter([("absent", None)])
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_read_recovery_snapshot",
+        lambda *_args, **_kwargs: next(snapshots),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_probe_recovery_candidate",
+        lambda *_args, **_kwargs: ControlProbeResult(
+            request_id="second", timed_out=True
+        ),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_probe_proves_recovery_candidate",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(core_manager_runtime.time, "monotonic", lambda: 10.0)
+
+    decision = core_manager_runtime.decide_manager_recovery(context, observation)
+
+    assert decision.outcome == "launch"
+    assert decision.manager_record is record
+    assert decision.probe_request_id == (
+        "second" if absence_after_second_probe else "first"
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_reason"),
+    [
+        ("changed", "incumbent_changed"),
+        ("registry_error", "final_registry_read_error:read failed"),
+        ("empty_backlog", "no_pending_backlog"),
+        ("final_read_error", "final_evidence_read_error:read failed"),
+    ],
+)
+def test_recovery_safety_branches_do_not_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    expected_reason: str,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / scenario))
+    record = {"tid": "1761000000000000128", "status": "active"}
+    changed = {"tid": "1761000000000000129", "status": "active"}
+    observation = core_manager_runtime.ManagerAvailabilityObservation(
+        outcome="uncertain",
+        manager_record=record,
+        first_uncertain_at=0.0,
+        backlog_pending=True,
+        reason="first_probe_timeout",
+        probe_result=ControlProbeResult(request_id="first", timed_out=True),
+    )
+    read_calls = 0
+
+    def _read(*_args: object, **_kwargs: object) -> tuple[str, object]:
+        nonlocal read_calls
+        read_calls += 1
+        if scenario == "registry_error" and read_calls == 1:
+            raise BrokerError("read failed")
+        if scenario == "changed":
+            return "uncertain", changed
+        if scenario == "final_read_error" and read_calls == 2:
+            raise BrokerError("read failed")
+        return "uncertain", record
+
+    monkeypatch.setattr(core_manager_runtime, "_read_recovery_snapshot", _read)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_probe_recovery_candidate",
+        lambda *_args, **_kwargs: ControlProbeResult(
+            request_id="second", timed_out=True
+        ),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_probe_proves_recovery_candidate",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_read_public_spawn_backlog",
+        lambda *_args, **_kwargs: scenario != "empty_backlog",
+    )
+    monkeypatch.setattr(core_manager_runtime.time, "monotonic", lambda: 10.0)
+
+    decision = core_manager_runtime.decide_manager_recovery(context, observation)
+
+    assert decision.outcome == "no_start"
+    assert decision.reason == expected_reason
+
+
+def test_second_recovery_probe_can_reuse_incumbent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(prepare_project_root(tmp_path / "ctx"))
+    record = {"tid": "1761000000000000130", "status": "active"}
+    observation = core_manager_runtime.ManagerAvailabilityObservation(
+        outcome="uncertain",
+        manager_record=record,
+        first_uncertain_at=0.0,
+        backlog_pending=True,
+        reason="first_probe_timeout",
+    )
+    second = ControlProbeResult(request_id="second", timed_out=False)
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_read_recovery_snapshot",
+        lambda *_args, **_kwargs: ("uncertain", record),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_probe_recovery_candidate",
+        lambda *_args, **_kwargs: second,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_probe_proves_recovery_candidate",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(core_manager_runtime.time, "monotonic", lambda: 10.0)
+
+    decision = core_manager_runtime.decide_manager_recovery(context, observation)
+
+    assert decision.outcome == "reuse"
+    assert decision.manager_record is record
+    assert decision.probe_request_id == "second"
 
 
 def test_stop_command_force_reports_fresh_external_supervisor_without_host_pid(

@@ -820,6 +820,13 @@ commit. An explicitly different TaskSpec runtime root continues to have its brok
 resolved by core with the captured Config; this rule does not snapshot broker project
 files.
 
+When the core broker write succeeds, deferred submission binds the accepted TID
+even if subsequent manager readiness cannot be established. Readiness-only
+degradation must not raise from that commit callback or prevent later callbacks
+from running. Broker-write errors and authoritative manager rejection retain
+their error behavior. `transaction.on_commit()` remains an in-memory hook; it
+does not provide a durable outbox or atomic cross-database dispatch.
+
 ## Transaction Hooks [DJ-9]
 
 Transaction-aware enqueue is required.
@@ -835,6 +842,11 @@ Behavior:
 - rollback prevents enqueue
 - validation and payload snapshotting happen before the callback is registered,
   so bad Weft submissions do not commit app rows and then fail after commit
+- a successful core broker write binds its accepted TID even when later manager
+  readiness degrades; that degradation does not abort later commit callbacks
+
+Implementation plan backlink:
+[Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md).
 
 This is the default-safe ORM integration point and should be the strongly
 recommended surface for tasks that depend on freshly written database state.

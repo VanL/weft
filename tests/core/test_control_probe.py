@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     SERVICE_STATUS_DRAINING,
@@ -326,6 +327,123 @@ def test_send_keyed_ping_probe_timeout_sweeps_rows_bearing_its_request_id(
     assert result.timed_out is True
     remaining = [json.loads(body) for body in _peek_ctrl_out_bodies(ctx, ctrl_out_name)]
     assert [entry.get("request_id") for entry in remaining] == ["other-request"]
+
+
+def test_send_keyed_ping_probe_final_read_matches_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A matching PONG that appears at the deadline remains positive proof.
+
+    The broker returns no row on the loop read and the valid row on the final
+    timeout read. The probe must evaluate that row before retiring its own
+    replies.
+
+    Spec: [MF-3]
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000107"
+    request_id = "deadline-pong"
+    body = json.dumps(
+        {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "tid": tid,
+            "request_id": request_id,
+            "task_status": "running",
+        }
+    )
+
+    class DeadlineBroker:
+        def __init__(self) -> None:
+            self.peek_count = 0
+            self.deleted: list[int] = []
+
+        def write(self, queue_name: str, message: str) -> None:
+            del queue_name, message
+
+        def peek_generator(
+            self, queue_name: str, *, with_timestamps: bool = False
+        ) -> object:
+            del queue_name, with_timestamps
+            self.peek_count += 1
+            return iter(()) if self.peek_count == 1 else iter(((body, 107),))
+
+        def delete_message_ids(self, queue_name: str, message_ids: list[int]) -> None:
+            del queue_name
+            self.deleted.extend(message_ids)
+
+    broker = DeadlineBroker()
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=f"T{tid}.ctrl_in",
+        ctrl_out_name=f"T{tid}.ctrl_out",
+        request_id=request_id,
+        timeout=0.0,
+        broker=broker,
+    )
+
+    assert result.timed_out is False
+    assert result.matched is not None
+    assert result.matched.payload["request_id"] == request_id
+    assert broker.deleted == [107]
+
+
+def test_send_keyed_ping_probe_does_not_relabel_programmer_runtime_error(
+    tmp_path: Path,
+) -> None:
+    """Arbitrary RuntimeError is not converted into an availability result."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+
+    class BrokenBroker:
+        def write(self, queue_name: str, message: str) -> None:
+            del queue_name, message
+            raise RuntimeError("programmer defect")
+
+    with pytest.raises(RuntimeError, match="programmer defect"):
+        send_keyed_ping_probe(
+            ctx,
+            tid="1775622400000000108",
+            ctrl_in_name="T1775622400000000108.ctrl_in",
+            ctrl_out_name="T1775622400000000108.ctrl_out",
+            timeout=0.0,
+            broker=BrokenBroker(),
+        )
+
+
+def test_send_keyed_ping_probe_reports_final_read_io_error(tmp_path: Path) -> None:
+    """A failed deadline read is an I/O error rather than a clean timeout."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+
+    class FinalReadFailureBroker:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def write(self, queue_name: str, message: str) -> None:
+            del queue_name, message
+
+        def peek_generator(
+            self, queue_name: str, *, with_timestamps: bool = False
+        ) -> object:
+            del queue_name, with_timestamps
+            self.reads += 1
+            if self.reads == 1:
+                return iter(())
+            raise BrokerError("deadline read failed")
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid="1775622400000000109",
+        ctrl_in_name="T1775622400000000109.ctrl_in",
+        ctrl_out_name="T1775622400000000109.ctrl_out",
+        timeout=0.0,
+        broker=FinalReadFailureBroker(),
+    )
+
+    assert result.timed_out is False
+    assert result.error == "deadline read failed"
 
 
 def test_coerce_pong_response_rejects_payload_without_task_status() -> None:

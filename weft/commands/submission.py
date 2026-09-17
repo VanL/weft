@@ -10,8 +10,8 @@ Spec references:
 from __future__ import annotations
 
 import json
+import logging
 import shlex
-import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -20,11 +20,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from simplebroker.ext import BrokerError
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
     INTERNAL_ENDPOINT_NAMESPACE_PREFIX,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
-    SPAWN_RESERVED_CLAIM_RECONCILIATION_TIMEOUT,
+    MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
     SUBMIT_OVERRIDE_NAMES,
@@ -32,6 +33,7 @@ from weft._constants import (
 from weft._exceptions import (
     CommandUsageError,
     InvalidTID,
+    ManagerStartFailed,
     SpecNotFound,
     SubmissionManagerError,
     SubmissionValidationError,
@@ -42,7 +44,7 @@ from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
-from weft.core.spawn_requests import delete_spawn_request, submit_spawn_request
+from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
@@ -58,6 +60,21 @@ from weft.helpers.message_ids import normalize_exact_message_id
 
 from ._spawn_submission import reconcile_submitted_spawn
 from .specs import resolve_named_spec, resolve_spec_reference
+
+logger = logging.getLogger(__name__)
+
+
+def _annotate_accepted_submission_error(exc: Exception, tid: str) -> None:
+    """Attach the committed TID to an unexpected post-acceptance failure."""
+
+    marker = f"accepted_tid={tid}"
+    if marker in str(exc):
+        return
+    message = f"{exc} [{marker}; request remains accepted]"
+    exc.args = (message, *exc.args[1:]) if exc.args else (message,)
+    exc.add_note(
+        f"Spawn request {tid} was accepted before this failure; do not resubmit blindly."
+    )
 
 
 def normalize_tid(raw_tid: str) -> str:
@@ -265,94 +282,170 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
     context: WeftContext,
     *,
     submitted_tid: str | int,
-    ensure_manager_fn: Callable[
-        ..., tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]
-    ]
-    | None = None,
+    ensure_manager_fn: Callable[..., manager_runtime.ManagerEnsureResult] | None = None,
     delete_spawn_request_fn: Callable[[WeftContext, int], bool] | None = None,
-) -> tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]:
-    """Ensure a manager or reconcile a queue-first submission failure."""
+) -> manager_runtime.ManagerEnsureResult:
+    """Recover manager availability without revoking accepted queue work.
+
+    The successful spawn write owns acceptance. This function may prove or
+    start a manager, but it never deletes or re-enqueues the accepted request.
+
+    Spec: [MF-1], [MF-6], [MF-7]
+    """
 
     submitted_tid_str = str(submitted_tid)
-    ensure_manager_impl = ensure_manager_fn or manager_runtime.ensure_manager
+    del delete_spawn_request_fn
 
-    def _delete_spawn_request_with_context(
-        context_arg: WeftContext,
-        message_timestamp: int,
-    ) -> bool:
-        return delete_spawn_request(
-            context_arg.broker_target,
-            message_timestamp=message_timestamp,
-            config=context_arg.broker_config,
+    if ensure_manager_fn is not None:
+        return ensure_manager_fn(context)
+
+    observation = manager_runtime.observe_manager_availability(context)
+    if observation.outcome == "ready":
+        return manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=observation.manager_record,
+            started_here=False,
+            process_handle=None,
+            reason=observation.reason,
+            probe_request_id=(
+                observation.probe_result.request_id
+                if observation.probe_result is not None
+                else None
+            ),
         )
 
-    delete_spawn_request_impl = (
-        delete_spawn_request_fn or _delete_spawn_request_with_context
-    )
+    timeout = 0.0
+    if (
+        observation.first_uncertain_at is not None
+        and observation.backlog_pending is True
+    ):
+        timeout = max(
+            0.0,
+            observation.first_uncertain_at
+            + MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS
+            - time.monotonic(),
+        )
+    try:
+        reconciliation = reconcile_submitted_spawn(
+            context,
+            submitted_tid_str,
+            timeout=timeout,
+            queued_is_terminal=False,
+        )
+    except (BrokerError, OSError) as exc:
+        return manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=f"submission_reconciliation_error:{exc}",
+        )
+
+    if reconciliation.outcome == "rejected":
+        reason = reconciliation.error or "manager rejected the spawn request"
+        raise SubmissionManagerError(
+            f"Manager rejected accepted task {submitted_tid_str}: {reason}"
+        )
+    if reconciliation.outcome in {"spawned", "reserved"}:
+        return manager_runtime.ManagerEnsureResult(
+            outcome="not_needed",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=f"accepted_request_{reconciliation.outcome}",
+        )
+    if reconciliation.outcome == "unknown":
+        return manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="accepted_request_location_unknown",
+        )
+
+    decision = manager_runtime.decide_manager_recovery(context, observation)
+    if decision.outcome == "reuse":
+        return manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=decision.manager_record,
+            started_here=False,
+            process_handle=None,
+            reason=decision.reason,
+            probe_request_id=decision.probe_request_id,
+        )
+    if decision.outcome == "no_start":
+        return manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=decision.reason,
+            probe_request_id=decision.probe_request_id,
+        )
 
     try:
-        return ensure_manager_impl(context)
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-354] exception
-        startup_error = exc
+        final_reconciliation = reconcile_submitted_spawn(
+            context,
+            submitted_tid_str,
+            timeout=0.0,
+        )
+    except (BrokerError, OSError) as exc:
+        return manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=f"final_submission_reconciliation_error:{exc}",
+            probe_request_id=decision.probe_request_id,
+        )
+    if final_reconciliation.outcome == "rejected":
+        reason = final_reconciliation.error or "manager rejected the spawn request"
+        raise SubmissionManagerError(
+            f"Manager rejected accepted task {submitted_tid_str}: {reason}"
+        )
+    if final_reconciliation.outcome != "queued":
+        return manager_runtime.ManagerEnsureResult(
+            outcome=(
+                "not_needed"
+                if final_reconciliation.outcome in {"spawned", "reserved"}
+                else "uncertain"
+            ),
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=f"accepted_request_{final_reconciliation.outcome}",
+            probe_request_id=decision.probe_request_id,
+        )
 
-    reconciliation = reconcile_submitted_spawn(context, submitted_tid_str)
-    if reconciliation.outcome == "spawned":
-        return None, False, None
-    if reconciliation.outcome == "rejected":
-        reason = (
-            reconciliation.error
-            or f"Manager rejected submitted task {submitted_tid_str}"
+    if decision.manager_record is not None:
+        logger.warning(
+            "Submission recovery authorized a manager launch",
+            extra={
+                "incumbent_tid": decision.manager_record.get("tid"),
+                "submitted_tid": submitted_tid_str,
+                "probe_request_id": decision.probe_request_id,
+                "decision_reason": decision.reason,
+            },
         )
-        raise RuntimeError(reason) from startup_error
-    if reconciliation.outcome == "queued":
-        deleted = delete_spawn_request_impl(
-            context,
-            int(submitted_tid_str),
+    try:
+        record, started_here, process_handle = manager_runtime.start_manager(context)
+    except (BrokerError, ManagerStartFailed, OSError) as exc:
+        return manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=f"manager_start_failed:{exc}",
+            probe_request_id=decision.probe_request_id,
         )
-        if deleted:
-            raise startup_error
-        reconciliation = reconcile_submitted_spawn(
-            context,
-            submitted_tid_str,
-            timeout=0.2,
-        )
-        if reconciliation.outcome == "spawned":
-            return None, False, None
-        if reconciliation.outcome == "rejected":
-            reason = (
-                reconciliation.error
-                or f"Manager rejected submitted task {submitted_tid_str}"
-            )
-            raise RuntimeError(reason) from startup_error
-    if reconciliation.outcome == "reserved":
-        reconciliation = reconcile_submitted_spawn(
-            context,
-            submitted_tid_str,
-            timeout=SPAWN_RESERVED_CLAIM_RECONCILIATION_TIMEOUT,
-            reserved_is_terminal=False,
-        )
-        if reconciliation.outcome == "spawned":
-            return None, False, None
-        if reconciliation.outcome == "rejected":
-            reason = (
-                reconciliation.error
-                or f"Manager rejected submitted task {submitted_tid_str}"
-            )
-            raise RuntimeError(reason) from startup_error
-    if reconciliation.outcome == "reserved":
-        raise RuntimeError(
-            f"Submitted task {submitted_tid_str} was already claimed into "
-            f"{reconciliation.reserved_queue}; manual recovery is required."
-        ) from startup_error
-    if reconciliation.outcome == "queued":
-        raise RuntimeError(
-            f"Submitted task {submitted_tid_str} is still queued, but rollback could "
-            "not be confirmed."
-        ) from startup_error
-    raise RuntimeError(
-        f"Submitted task {submitted_tid_str} could not be reconciled; rollback "
-        "could not be proven."
-    ) from startup_error
+    return manager_runtime.ManagerEnsureResult(
+        outcome="ready",
+        manager_record=record,
+        started_here=started_here,
+        process_handle=process_handle,
+        reason=decision.reason,
+        probe_request_id=decision.probe_request_id,
+    )
 
 
 def prepare_taskspec(
@@ -424,9 +517,20 @@ def _submit_prepared_outcome(
     )
     task_tid = str(submitted_tid)
     try:
-        ensure_manager_after_submission(runtime_context, submitted_tid=task_tid)
-    except RuntimeError as exc:
-        raise SubmissionManagerError(str(exc)) from exc
+        availability = ensure_manager_after_submission(
+            runtime_context,
+            submitted_tid=task_tid,
+        )
+    except SubmissionManagerError:
+        raise
+    except Exception as exc:
+        _annotate_accepted_submission_error(exc, task_tid)
+        raise
+    if availability.outcome != "ready":
+        logger.warning(
+            "Accepted task while manager readiness is degraded",
+            extra={"tid": task_tid, "reason": availability.reason},
+        )
     return _SubmittedPreparedOutcome(
         receipt=_receipt(prepared.name, task_tid, context_root=runtime_context.root),
         runtime_context=runtime_context,

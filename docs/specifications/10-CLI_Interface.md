@@ -119,11 +119,20 @@ Current behavior:
    user errors fail fast
 3. enqueue the request on `weft.spawn.requests`
 4. use the spawn-request message ID as the task TID
-5. reconcile post-enqueue startup failures by submitted TID instead of assuming
-   the enqueue can always be rolled back
+5. preserve confirmed acceptance under the submitted TID when manager readiness
+   degrades; reconcile that TID for rejection and availability diagnostics
 6. optionally wait for completion using task-local queues and task-log events,
    reusing broker-native queue waiting for those queue-backed boundaries when
    available
+
+A returned submission receipt proves broker acceptance, not manager readiness
+or completed execution. `weft run --no-wait` returns the accepted TID and exit
+0 after confirmed acceptance even when readiness degrades; it writes one
+warning to stderr while keeping stdout and the JSON receipt shape unchanged.
+An authoritative manager rejection returns exit 1 with its TID and reason.
+Waiting execution retains the existing result, task-failure, interruption, and
+timeout behavior; a wait timeout does not cancel accepted work. Direct manager
+lifecycle commands continue to require readiness proof.
 
 Current execution targets:
 
@@ -1054,6 +1063,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 
 ## Related Plans
+
+- [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
 
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 

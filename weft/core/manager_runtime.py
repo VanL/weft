@@ -54,6 +54,7 @@ from weft._exceptions import ManagerStartFailed
 from weft.context import WeftContext
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import (
+    ControlProbeResult,
     pong_proves_dispatch_eligible,
     send_keyed_ping_probe,
 )
@@ -127,6 +128,45 @@ class ManagerRegistryView:
     records: dict[str, dict[str, Any]]
     active_manager: dict[str, Any] | None
     target_record: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagerAvailabilityObservation:
+    """One bounded automatic-recovery observation of manager availability.
+
+    The value is ephemeral caller state. It carries no task-submission policy.
+
+    Spec: [MA-1] item 4, [MA-3]
+    """
+
+    outcome: Literal["ready", "absent", "uncertain"]
+    manager_record: dict[str, Any] | None
+    first_uncertain_at: float | None
+    backlog_pending: bool | None
+    reason: str
+    probe_result: ControlProbeResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagerRecoveryDecision:
+    """Final recovery decision after one prior availability observation."""
+
+    outcome: Literal["reuse", "launch", "no_start"]
+    manager_record: dict[str, Any] | None
+    reason: str
+    probe_request_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagerEnsureResult:
+    """Result of generic manager availability recovery."""
+
+    outcome: Literal["ready", "not_needed", "uncertain"]
+    manager_record: dict[str, Any] | None
+    started_here: bool
+    process_handle: subprocess.Popen[Any] | None
+    reason: str
+    probe_request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -393,6 +433,328 @@ def _namespace_ambiguous_incumbent_should_block_start(
         return True
     grace_ns = int(MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS * 1_000_000_000)
     return time.time_ns() - timestamp <= grace_ns
+
+
+def _classify_recovery_snapshot(
+    context: WeftContext,
+    snapshot: dict[str, dict[str, Any]],
+) -> tuple[Literal["ready", "absent", "uncertain"], dict[str, Any] | None]:
+    """Classify latest manager rows with the existing shape/liveness/age rules."""
+
+    ready = _select_active_manager_from_snapshot(context, snapshot)
+    if ready is not None:
+        return "ready", ready
+    uncertain = [
+        record
+        for record in snapshot.values()
+        if record.get("status") == SERVICE_STATUS_ACTIVE
+        and is_canonical_manager_record(record)
+        and manager_registry_record_liveness(record) == "unknown"
+        and not _manager_record_unknown_is_expired(record)
+    ]
+    if uncertain:
+        return (
+            "uncertain",
+            min(uncertain, key=lambda record: int(str(record.get("tid", "0")))),
+        )
+    return "absent", None
+
+
+def _read_recovery_snapshot(
+    context: WeftContext, *, broker: Any | None
+) -> tuple[Literal["ready", "absent", "uncertain"], dict[str, Any] | None]:
+    snapshot = _snapshot_registry(context, prune_stale=False, broker=broker)
+    return _classify_recovery_snapshot(context, snapshot)
+
+
+def _read_public_spawn_backlog(context: WeftContext, *, broker: Any | None) -> bool:
+    """Read pending public work without converting I/O failure to absence."""
+
+    with ExitStack() as scope:
+        queue = (
+            scope.enter_context(
+                context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True)
+            )
+            if broker is None
+            else None
+        )
+        if queue is not None:
+            return bool(queue.has_pending())
+        assert broker is not None
+        return bool(broker.has_pending_messages(WEFT_SPAWN_REQUESTS_QUEUE))
+
+
+def _probe_recovery_candidate(
+    context: WeftContext,
+    record: dict[str, Any],
+    *,
+    broker: Any | None,
+) -> ControlProbeResult:
+    """Run one full control-surface proof round for automatic recovery."""
+
+    tid = str(record.get("tid", ""))
+    ctrl_in_name = _manager_ctrl_queue_name(tid, record)
+    ctrl_out_name = _manager_ctrl_out_queue_name(tid, record)
+    return send_keyed_ping_probe(
+        context,
+        tid=tid,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+        timeout=CONTROL_SURFACE_WAIT_TIMEOUT,
+        broker=broker,
+    )
+
+
+def _probe_proves_recovery_candidate(
+    context: WeftContext,
+    record: dict[str, Any],
+    result: ControlProbeResult,
+) -> bool:
+    if result.matched is None:
+        return False
+    tid = str(record.get("tid", ""))
+    return pong_proves_dispatch_eligible(
+        result.matched.payload,
+        record=record,
+        ctrl_in_name=_manager_ctrl_queue_name(tid, record),
+        ctrl_out_name=_manager_ctrl_out_queue_name(tid, record),
+        outbox_name=WEFT_MANAGER_OUTBOX_QUEUE,
+        root_context=str(context.root),
+    )
+
+
+def observe_manager_availability(
+    context: WeftContext,
+    *,
+    broker: Any | None = None,
+) -> ManagerAvailabilityObservation:
+    """Observe availability and run at most the first keyed proof round.
+
+    Registry and backlog read failures are returned as uncertainty. Arbitrary
+    runtime defects propagate to the caller.
+
+    Spec: [MA-1] item 4, [MA-3], [MANAGER.8]
+    """
+
+    try:
+        outcome, record = _read_recovery_snapshot(context, broker=broker)
+    except (BrokerError, OSError) as exc:
+        return ManagerAvailabilityObservation(
+            outcome="uncertain",
+            manager_record=None,
+            first_uncertain_at=None,
+            backlog_pending=None,
+            reason=f"registry_read_error:{exc}",
+        )
+    if outcome == "ready":
+        return ManagerAvailabilityObservation(
+            outcome="ready",
+            manager_record=record,
+            first_uncertain_at=None,
+            backlog_pending=None,
+            reason="manager_ready",
+        )
+    if outcome == "absent":
+        return ManagerAvailabilityObservation(
+            outcome="absent",
+            manager_record=None,
+            first_uncertain_at=None,
+            backlog_pending=None,
+            reason="no_policy_eligible_incumbent",
+        )
+
+    assert record is not None
+    first_uncertain_at = time.monotonic()
+    try:
+        backlog_pending = _read_public_spawn_backlog(context, broker=broker)
+    except (BrokerError, OSError) as exc:
+        return ManagerAvailabilityObservation(
+            outcome="uncertain",
+            manager_record=record,
+            first_uncertain_at=first_uncertain_at,
+            backlog_pending=None,
+            reason=f"backlog_read_error:{exc}",
+        )
+    probe_result = _probe_recovery_candidate(context, record, broker=broker)
+    if _probe_proves_recovery_candidate(context, record, probe_result):
+        return ManagerAvailabilityObservation(
+            outcome="ready",
+            manager_record=record,
+            first_uncertain_at=first_uncertain_at,
+            backlog_pending=backlog_pending,
+            reason="first_probe_ready",
+            probe_result=probe_result,
+        )
+    reason = (
+        "first_probe_error" if probe_result.error is not None else "first_probe_timeout"
+    )
+    return ManagerAvailabilityObservation(
+        outcome="uncertain",
+        manager_record=record,
+        first_uncertain_at=first_uncertain_at,
+        backlog_pending=backlog_pending,
+        reason=reason,
+        probe_result=probe_result,
+    )
+
+
+def decide_manager_recovery(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-375] exception
+    context: WeftContext,
+    observation: ManagerAvailabilityObservation,
+    *,
+    broker: Any | None = None,
+) -> ManagerRecoveryDecision:
+    """Refresh evidence and make the final reuse/launch/no-start decision.
+
+    For uncertain pending work, the first proof round normally consumes the
+    whole namespace-ambiguity grace, so the additional wait is usually zero.
+
+    Spec: [MA-1] item 4, [MA-3], [MANAGER.8]
+    """
+
+    if observation.outcome == "ready":
+        return ManagerRecoveryDecision(
+            outcome="reuse",
+            manager_record=observation.manager_record,
+            reason=observation.reason,
+            probe_request_id=(
+                observation.probe_result.request_id
+                if observation.probe_result is not None
+                else None
+            ),
+        )
+    if observation.manager_record is None and observation.outcome == "uncertain":
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=None,
+            reason=observation.reason,
+        )
+    if observation.outcome == "uncertain" and observation.backlog_pending is None:
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=observation.manager_record,
+            reason=observation.reason,
+        )
+    if (
+        observation.manager_record is not None
+        and observation.backlog_pending
+        and observation.first_uncertain_at is not None
+    ):
+        remaining_grace = max(
+            0.0,
+            observation.first_uncertain_at
+            + MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS
+            - time.monotonic(),
+        )
+        if remaining_grace:
+            time.sleep(remaining_grace)
+
+    try:
+        outcome, record = _read_recovery_snapshot(context, broker=broker)
+    except (BrokerError, OSError) as exc:
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=None,
+            reason=f"final_registry_read_error:{exc}",
+        )
+    if outcome == "ready":
+        return ManagerRecoveryDecision(
+            outcome="reuse",
+            manager_record=record,
+            reason="final_runtime_ready",
+        )
+    if outcome == "absent":
+        return ManagerRecoveryDecision(
+            outcome="launch",
+            manager_record=observation.manager_record,
+            reason="confirmed_absent",
+            probe_request_id=(
+                observation.probe_result.request_id
+                if observation.probe_result is not None
+                else None
+            ),
+        )
+
+    assert record is not None
+    initial_tid = (
+        str(observation.manager_record.get("tid"))
+        if observation.manager_record is not None
+        else None
+    )
+    final_tid = str(record.get("tid"))
+    if initial_tid != final_tid:
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=record,
+            reason="incumbent_changed",
+        )
+    if observation.backlog_pending is not True:
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=record,
+            reason="no_pending_backlog",
+        )
+    second_probe = _probe_recovery_candidate(context, record, broker=broker)
+    if _probe_proves_recovery_candidate(context, record, second_probe):
+        return ManagerRecoveryDecision(
+            outcome="reuse",
+            manager_record=record,
+            reason="second_probe_ready",
+            probe_request_id=second_probe.request_id,
+        )
+    if second_probe.error is not None:
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=record,
+            reason="second_probe_error",
+            probe_request_id=second_probe.request_id,
+        )
+
+    try:
+        final_outcome, final_record = _read_recovery_snapshot(context, broker=broker)
+        backlog_pending = _read_public_spawn_backlog(context, broker=broker)
+    except (BrokerError, OSError) as exc:
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=record,
+            reason=f"final_evidence_read_error:{exc}",
+            probe_request_id=second_probe.request_id,
+        )
+    if final_outcome == "ready":
+        return ManagerRecoveryDecision(
+            outcome="reuse",
+            manager_record=final_record,
+            reason="final_runtime_ready",
+            probe_request_id=second_probe.request_id,
+        )
+    if final_outcome == "absent":
+        return ManagerRecoveryDecision(
+            outcome="launch",
+            manager_record=record,
+            reason="incumbent_expired_or_absent",
+            probe_request_id=second_probe.request_id,
+        )
+    assert final_record is not None
+    if str(final_record.get("tid")) != final_tid:
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=final_record,
+            reason="incumbent_changed_after_probe",
+            probe_request_id=second_probe.request_id,
+        )
+    if not backlog_pending:
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=final_record,
+            reason="no_pending_backlog",
+            probe_request_id=second_probe.request_id,
+        )
+    return ManagerRecoveryDecision(
+        outcome="launch",
+        manager_record=final_record,
+        reason="unproved_incumbent_with_pending_backlog",
+        probe_request_id=second_probe.request_id,
+    )
 
 
 def _manager_record_diagnostic(
@@ -1145,23 +1507,28 @@ def _await_launcher_first_line(
         startup_stderr = _tail_startup_stderr(stderr_path)
         if startup_stderr:
             details.append(startup_stderr)
-        raise RuntimeError("\n".join(details)) from exc
+        raise ManagerStartFailed("\n".join(details)) from exc
 
 
 def _launch_detached_manager(
     context: WeftContext,
     invocation: ManagerRuntimeInvocation,
 ) -> DetachedManagerLaunch:
-    stderr_path = _manager_startup_stderr_path(context, invocation.tid)
-    launcher_process = subprocess.Popen(
-        _build_manager_detached_launcher_command(context, invocation, stderr_path),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        stderr_path = _manager_startup_stderr_path(context, invocation.tid)
+        launcher_process = subprocess.Popen(
+            _build_manager_detached_launcher_command(context, invocation, stderr_path),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        raise ManagerStartFailed(
+            f"Failed to start Manager process: detached launcher setup failed: {exc}"
+        ) from exc
     first_line = _await_launcher_first_line(launcher_process, stderr_path)
     event = _parse_launcher_event(first_line)
     if event is None or event.get("event") != "spawned":
@@ -1177,12 +1544,12 @@ def _launch_detached_manager(
         details = [f"Failed to start Manager process: {error}"]
         if stderr_text.strip():
             details.append(stderr_text.strip())
-        raise RuntimeError("\n".join(details))
+        raise ManagerStartFailed("\n".join(details))
 
     pid = event.get("pid")
     if not isinstance(pid, int) or pid <= 0:
         _abort_unconfirmed_launcher(launcher_process)
-        raise RuntimeError(
+        raise ManagerStartFailed(
             "Failed to start Manager process: detached launcher reported an invalid PID."
         )
 
@@ -1834,32 +2201,53 @@ def ensure_manager(
     context: WeftContext,
     *,
     broker: Any | None = None,
-) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
+) -> ManagerEnsureResult:
     """Reuse an active manager through a borrowed scope, or start a new process.
 
     The caller owns the borrowed connection. Startup retains its separate
     bounded registry/watcher ownership. Spec: [MA-3], [SB-0.4].
     """
-    probe_cache: dict[str, int | None] = {}
-    view = _registry_view(
-        context,
-        probe_stale=True,
-        probe_cache=probe_cache,
-        broker=broker,
-    )
-    record = view.active_manager
-    if record:
-        return record, False, None
-    uncertain_record = _select_uncertain_active_manager_from_snapshot(view.records)
-    if uncertain_record is not None:
-        should_block = _namespace_ambiguous_incumbent_should_block_start(
-            context,
-            uncertain_record,
-            broker=broker,
+    observation = observe_manager_availability(context, broker=broker)
+    decision = decide_manager_recovery(context, observation, broker=broker)
+    if decision.outcome == "reuse":
+        return ManagerEnsureResult(
+            outcome="ready",
+            manager_record=decision.manager_record,
+            started_here=False,
+            process_handle=None,
+            reason=decision.reason,
+            probe_request_id=decision.probe_request_id,
         )
-        if should_block:
-            return uncertain_record, False, None
-    return start_manager(context)
+    if decision.outcome == "no_start":
+        return ManagerEnsureResult(
+            outcome=(
+                "not_needed" if decision.reason == "no_pending_backlog" else "uncertain"
+            ),
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=decision.reason,
+            probe_request_id=decision.probe_request_id,
+        )
+    if decision.manager_record is not None:
+        logger.warning(
+            "Automatic manager recovery authorized a launch",
+            extra={
+                "incumbent_tid": decision.manager_record.get("tid"),
+                "submitted_tid": None,
+                "probe_request_id": decision.probe_request_id,
+                "decision_reason": decision.reason,
+            },
+        )
+    record, started_here, process_handle = start_manager(context)
+    return ManagerEnsureResult(
+        outcome="ready",
+        manager_record=record,
+        started_here=started_here,
+        process_handle=process_handle,
+        reason=decision.reason,
+        probe_request_id=decision.probe_request_id,
+    )
 
 
 def _run_manager_process_foreground(
@@ -2124,9 +2512,13 @@ def _external_supervisor_record_is_unconfirmed(record: dict[str, Any] | None) ->
 
 __all__ = [
     "DetachedManagerLaunch",
+    "ManagerAvailabilityObservation",
+    "ManagerEnsureResult",
+    "ManagerRecoveryDecision",
     "ManagerRegistryView",
     "ManagerRuntimeInvocation",
     "build_manager_spec",
+    "decide_manager_recovery",
     "ensure_manager",
     "generate_tid",
     "list_manager_records",
@@ -2135,6 +2527,7 @@ __all__ = [
     "manager_registry_record_is_stale",
     "manager_registry_record_liveness",
     "normalize_manager_registry_record",
+    "observe_manager_availability",
     "replace_active_manager",
     "select_active_manager",
     "serve_manager_foreground",

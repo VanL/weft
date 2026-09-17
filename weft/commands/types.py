@@ -186,6 +186,7 @@ class RunExecutionResult:
     error_prefix: str = "Error executing task"
     submitted_payload: dict[str, Any] | None = None
     manager_started_payload: dict[str, Any] | None = None
+    availability_warning: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -136,6 +136,14 @@ keyword-only. No command accepts `**kwargs`. Presentation-only `--json`,
 `--quiet`, `--verbose`, `--error`, and `--timestamps` are excluded. Task-list
 `--stats` is also presentation-only; queue-list `--stats` remains semantic.
 
+Submission receipts and returned `Task` objects prove broker acceptance, not
+manager readiness or completed execution. Confirmed acceptance survives a
+post-write readiness failure without changing receipt fields or assigning a
+second TID. Readiness-only failures are availability diagnostics rather than
+submission errors. An authoritative manager rejection retains its typed error
+and includes the accepted TID and rejection reason in the message. Direct
+manager lifecycle commands continue to require readiness proof.
+
 The exact signature exceptions are: `cmd_run` has `spec_args=()`,
 `describe=False`, and `stdin_text=None`;
 `cmd_queue_write(queue_name, message=None, *, endpoint=None)` exposes its
@@ -398,6 +406,8 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
+- [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
 
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 
