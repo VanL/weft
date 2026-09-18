@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from tests.conftest import REPO_ROOT, run_cli
@@ -741,14 +742,22 @@ def test_serve_sigterm_drains_children_cleanly(
         )
         assert started_tid == tid
 
+        child_pids = [
+            child.pid for child in psutil.Process(process.pid).children(recursive=True)
+        ]
+        assert child_pids
         process.terminate()
         stdout, stderr = _stop_process(process)
         assert process.returncode == 0
         assert stdout == ""
         assert stderr == "" or "STOP command received" in stderr
 
-        with pytest.raises(RuntimeError, match=rf"Task {tid} reported control_stop"):
-            weft_harness.wait_for_completion(tid, timeout=10.0)
+        # [MA-3] permits SIGTERM escalation while the manager drains children.
+        # Either STOP delivery path must cancel the child before manager exit.
+        weft_harness.wait_for_terminal_state(
+            tid, timeout=10.0, expected_status="cancelled"
+        )
+        assert not [pid for pid in child_pids if pid_is_live(pid)]
     finally:
         if process.poll() is None:
             process.terminate()

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -12,8 +14,8 @@ import psutil
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from tests.helpers.typing import BrokerEnv, TaskFactory
-from tests.helpers.weft_harness import WeftTestHarness
+from tests.helpers.typing import BrokerEnv
+from tests.helpers.weft_harness import DEFAULT_TASK_COMPLETION_TIMEOUT, WeftTestHarness
 from weft.commands.tasks import resolve_full_tid
 from weft.context import build_context
 from weft.core.task_state import task_state_queue_name
@@ -85,10 +87,10 @@ def test_old_stored_short_resolves_from_full_tid(tmp_path: Path) -> None:
 
 
 def test_consumer_publishes_and_matches_new_short_title(
-    broker_env: BrokerEnv, task_factory: TaskFactory, weft_harness: WeftTestHarness
+    broker_env: BrokerEnv, weft_harness: WeftTestHarness
 ) -> None:
-    # The OS title dependency is optional; exercise its real implementation.
-    setproctitle = pytest.importorskip("setproctitle")
+    if importlib.util.find_spec("setproctitle") is None:
+        pytest.skip("setproctitle is not installed")
     tid = str(time.time_ns())
     spec = TaskSpec(
         tid=tid,
@@ -105,7 +107,53 @@ def test_consumer_publishes_and_matches_new_short_title(
             control={"ctrl_in": f"T{tid}.ctrl_in", "ctrl_out": f"T{tid}.ctrl_out"},
         ),
     )
-    task = task_factory(spec)
+    # Native title libraries own process-global argv memory. Importing stock
+    # setproctitle after another test started macOS's deferred writer bypasses
+    # its padded handoff and can permanently truncate subsequent titles.
+    script = """
+import os
+import sys
+import psutil
+import setproctitle
+from weft.context import build_context
+from weft.core.tasks import Consumer
+from weft.core.taskspec import TaskSpec
+from weft.helpers import tid_short_form
+from weft.liveness.host import inspect_host_process
+
+spec = TaskSpec.model_validate_json(sys.stdin.read())
+context = build_context(spec_context=spec.spec.weft_context)
+task = Consumer(context.broker_target, spec)
+try:
+    task.enable_process_title = True
+    task._update_process_title("running")
+    assert (
+        f"-{tid_short_form(task.tid)}:short-form-test:running"
+        in setproctitle.getproctitle()
+    ), setproctitle.getproctitle()
+    process = psutil.Process(os.getpid())
+    observation = inspect_host_process(
+        process.pid, process.create_time(), expected_tid=task.tid
+    )
+    assert observation.evidence == "live", observation
+    expected_reason = (
+        "identity_match_title_unconfirmed"
+        if sys.platform == "win32"
+        else "identity_match_title_match"
+    )
+    assert observation.reason == expected_reason, observation
+finally:
+    task.stop()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        input=spec.model_dump_json(),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=DEFAULT_TASK_COMPLETION_TIMEOUT,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
     _target, make_queue = broker_env
     queue = make_queue(task_state_queue_name(tid))
     rows = [
@@ -115,26 +163,3 @@ def test_consumer_publishes_and_matches_new_short_title(
     # An old display field remains usable after a real Consumer publication.
     queue.write(json.dumps({**rows[-1], "short": tid[-10:]}))
     assert resolve_full_tid(weft_harness.context, tid_short_form(tid)) == tid
-
-    original_title = setproctitle.getproctitle()
-    process = psutil.Process(os.getpid())
-    try:
-        task.enable_process_title = True
-        task._update_process_title("running")
-        assert (
-            f"-{tid_short_form(tid)}:short-form-test:running"
-            in setproctitle.getproctitle()
-        )
-        observation = inspect_host_process(
-            process.pid, process.create_time(), expected_tid=tid
-        )
-        assert observation.evidence == "live"
-        expected_reason = (
-            "identity_match_title_unconfirmed"
-            if sys.platform == "win32"
-            else "identity_match_title_match"
-        )
-        assert observation.reason == expected_reason
-    finally:
-        task.enable_process_title = False
-        setproctitle.setproctitle(original_title)
