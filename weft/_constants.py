@@ -588,6 +588,9 @@ CONTROL_CONVERGENCE_ACTION_VALUES: Final[frozenset[str]] = frozenset(
 TASK_CLEANUP_TIMEOUT_SECONDS: Final[float] = 2.0
 """Default absolute wait budget for task finalization."""
 
+MANAGER_CHILD_SENTINEL_OBSERVER_CLOSE_TIMEOUT_SECONDS: Final[float] = 0.5
+"""Minimum close wait for the manager's local child-sentinel observer thread."""
+
 TASK_POLL_INTERVAL_NONE_TOKEN: Final[str] = "none"
 """Detached-process transport token for an unbounded reactor wait."""
 

@@ -65,6 +65,7 @@ from weft._constants import (
     MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS,
     MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT,
     MANAGER_CHILD_LAUNCH_WORKER_LANE,
+    MANAGER_CHILD_SENTINEL_OBSERVER_CLOSE_TIMEOUT_SECONDS,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
     MANAGER_CHILD_STOP_ESCALATION_SECONDS,
     MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS,
@@ -6948,7 +6949,10 @@ class Manager(ServiceTask):
         attempt(self._unregister_manager)
         attempt(
             lambda: self._child_sentinel_adapter.close(
-                timeout=self._remaining_deadline(deadline)
+                timeout=max(
+                    self._remaining_deadline(deadline),
+                    MANAGER_CHILD_SENTINEL_OBSERVER_CLOSE_TIMEOUT_SECONDS,
+                )
             )
         )
         attempt(lambda: super(Manager, self)._cleanup_task_resources(deadline))
