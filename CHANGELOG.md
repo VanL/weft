@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## [0.9.102] - 2026-09-19
+
+### Fixed
+
+- Restored the watcher reactor path and event-routed PONG replies so manager
+  control responses continue to flow through the active reactor under monitor
+  and event-queue load.
+- Hardened manager discovery and durable submission against stale manager
+  records and foreground-manager edge cases, including Django integration
+  callers that submit through embedded configuration.
+- Updated native process-title and shutdown test assumptions for the current
+  dependency set without weakening production process-title behavior.
+
+### Changed
+
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.37`, `weft-docker 0.9.77`,
+  `weft-macos-sandbox 0.6.6`, and `weft-microsandbox 0.5.7`.
+
 ## [0.9.101] - 2026-09-16
 
 ### Changed
