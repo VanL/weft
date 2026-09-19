@@ -16,6 +16,7 @@ from tests.helpers.reactor_driver import drive_until
 from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
+    ACTIVE_CONTROL_POLL_INTERVAL,
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
@@ -94,6 +95,32 @@ def _drive_interactive(task: Consumer, ready: Callable[[], bool]) -> None:
 
 def _finished(task: Consumer) -> bool:
     return task.should_stop and task._interactive_session is None
+
+
+def test_interactive_session_caps_broker_wait_for_local_process_exit(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interactive subprocess exit is local state and must wake without queue IO."""
+
+    db_path, _queue_factory = broker_env
+    task = Consumer(db_path, make_interactive_spec(unique_tid))
+    task._interactive_session = cast(Any, object())
+    observed: list[float | None] = []
+
+    def wait(self: BaseTask, timeout: float | None) -> None:
+        del self
+        observed.append(timeout)
+
+    monkeypatch.setattr(BaseTask, "_wait_for_reactor_activity", wait)
+
+    try:
+        task._wait_for_reactor_activity(timeout=None)
+    finally:
+        task._interactive_session = None
+
+    assert observed == [ACTIVE_CONTROL_POLL_INTERVAL]
 
 
 def _instrument_streaming_queue(

@@ -22,6 +22,7 @@ from typing import Any, Literal, NoReturn, cast
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    ACTIVE_CONTROL_POLL_INTERVAL,
     CONSUMER_ACTIVE_WORKER_LANE,
     CONSUMER_WORKER_EVENT_LANE,
     CONTROL_KILL,
@@ -168,6 +169,20 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if getattr(self, "_active_work_in_flight", False):
             return config.name == self._queue_names["ctrl_in"]
         return super()._queue_counts_as_wait_activity(config)
+
+    def _wait_for_reactor_activity(self, timeout: float | None) -> None:
+        """Wake periodically while an interactive subprocess owns local state."""
+
+        if (
+            self._interactive_mode
+            and getattr(self, "_interactive_session", None) is not None
+        ):
+            timeout = (
+                ACTIVE_CONTROL_POLL_INTERVAL
+                if timeout is None
+                else min(timeout, ACTIVE_CONTROL_POLL_INTERVAL)
+            )
+        super()._wait_for_reactor_activity(timeout)
 
     def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext
