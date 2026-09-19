@@ -607,6 +607,14 @@ state and preserves existing current/initial fallback and authorization.
 _Implementation mapping_: `weft/commands/tasks.py`,
 `weft/commands/manager.py`.
 
+A synchronous keyed PING owns an ephemeral reply queue whose lifetime is
+bounded by the dead-task cleanup age. `--timeout` must be finite and satisfy
+`0 <= timeout <= CONTROL_PING_MAX_TIMEOUT_SECONDS`. A value outside that
+inclusive range is rejected with `CommandUsageError` before any queue is
+created; it is not clamped and is distinct from a probe that times out.
+
+Implementation plan: [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md).
+
 Current task-control surfaces:
 
 - `weft task stop TID`
@@ -1063,6 +1071,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 
 ## Related Plans
+
+- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 
 - [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
 

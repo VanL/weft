@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from simplebroker import (
     BrokerSession,
@@ -226,6 +226,9 @@ class MultiQueueWatcher(BaseWatcher):
             self._multi_activity_waiter: Any | None = None
             self._multi_activity_waiter_generation: int | None = None
             self._multi_activity_waiter_signature: tuple[str, ...] | None = None
+            self._strategy_started = False
+            self._data_version_activity_pending = False
+            self._native_activity_degraded = False
             self._pending_messages_precheck_confirmed = False
             self._next_inactive_probe_at = time.monotonic()
             self._topology_lock = threading.RLock()
@@ -544,12 +547,12 @@ class MultiQueueWatcher(BaseWatcher):
     def _create_candidate_activity_waiter(
         self,
         mapping: Mapping[str, QueueRuntimeConfig],
-    ) -> tuple[Any | None, tuple[str, ...]]:
+    ) -> tuple[Any | None, tuple[str, ...], bool]:
         """Build the optional native waiter for an exact candidate mapping."""
         wait_configs = self._activity_wait_configs(mapping=mapping)
         signature = tuple(config.name for config in wait_configs)
         if not wait_configs:
-            return None, signature
+            return None, signature, False
         try:
             waiter = create_activity_waiter_for_queues(
                 [config.queue for config in wait_configs],
@@ -561,7 +564,8 @@ class MultiQueueWatcher(BaseWatcher):
                 exc_info=True,
             )
             waiter = None
-        return waiter, signature
+            return waiter, signature, True
+        return waiter, signature, False
 
     @staticmethod
     def _close_candidate_resource_once(resource: Any | None) -> None:
@@ -596,6 +600,7 @@ class MultiQueueWatcher(BaseWatcher):
         active_queues: list[str],
         queue_iterator: itertools.cycle[str],
         force_discovery: bool,
+        native_degraded: bool,
     ) -> None:
         """Publish prebuilt topology state after strategy replacement."""
         self._queues = mapping
@@ -603,6 +608,7 @@ class MultiQueueWatcher(BaseWatcher):
         self._multi_activity_waiter = waiter
         self._multi_activity_waiter_generation = generation
         self._multi_activity_waiter_signature = signature
+        self._native_activity_degraded = native_degraded
         self._active_queues = active_queues
         self._queue_iterator = queue_iterator
         if force_discovery:
@@ -645,9 +651,11 @@ class MultiQueueWatcher(BaseWatcher):
             else:
                 del candidate_mapping[request.queue_name]
 
-            candidate_waiter, signature = self._create_candidate_activity_waiter(
-                candidate_mapping
-            )
+            (
+                candidate_waiter,
+                signature,
+                native_degraded,
+            ) = self._create_candidate_activity_waiter(candidate_mapping)
             candidate_rollback_owned = (
                 candidate_waiter is not None
                 and candidate_waiter is not prior_cached_waiter
@@ -683,6 +691,7 @@ class MultiQueueWatcher(BaseWatcher):
                             active_queues=active_queues,
                             queue_iterator=queue_iterator,
                             force_discovery=request.kind == "add",
+                            native_degraded=native_degraded,
                         )
                         topology_published = True
                     except BaseException:
@@ -877,6 +886,9 @@ class MultiQueueWatcher(BaseWatcher):
                 exc_info=True,
             )
             self._multi_activity_waiter = None
+            self._native_activity_degraded = True
+        else:
+            self._native_activity_degraded = False
         return self._multi_activity_waiter
 
     def _create_activity_waiter(self, queue: Queue) -> Any | None:
@@ -884,6 +896,20 @@ class MultiQueueWatcher(BaseWatcher):
         del queue
         self._apply_pending_topology_mutations()
         return self._ensure_multi_activity_waiter()
+
+    def _start_strategy(self) -> None:
+        """Start or restart the retained strategy and record successful ownership."""
+
+        super()._start_strategy()
+        self._strategy_started = True
+        if self._strategy.uses_native_activity():
+            self._native_activity_degraded = False
+
+    def _on_data_version_change(self, queue: Queue) -> None:
+        """Record one SQLite backend hint after inherited cache synchronization."""
+
+        super()._on_data_version_change(queue)
+        self._data_version_activity_pending = True
 
     def run_in_thread(self) -> threading.Thread:
         """Reserve and start exactly one background drive thread.
@@ -961,8 +987,11 @@ class MultiQueueWatcher(BaseWatcher):
     def _cleanup_runtime_resources(self) -> None:
         """Detach Weft-owned waiters before inherited strategy cleanup."""
 
-        self._reset_multi_activity_waiter()
-        super()._cleanup_runtime_resources()
+        try:
+            self._reset_multi_activity_waiter()
+            super()._cleanup_runtime_resources()
+        finally:
+            self._strategy_started = False
 
     def _close_owned_broker_resources(self) -> None:
         """Close every queue lease before the inventory session lease."""
@@ -1033,35 +1062,103 @@ class MultiQueueWatcher(BaseWatcher):
         self._cleanup_owned_resources()
 
     def _wait_for_activity_body(self, timeout: float | None) -> None:
-        """Execute the shared broker wait without standalone ownership policy.
+        """Drive the retained strategy until broker, local, stop, or timer work.
 
-        Native waiters are hints only. Callers must still use the ordinary
-        pending/drain path after this method returns.
+        Strategy returns are readiness hints. Backend hints are confirmed with
+        live queue state before dispatch, while a consumed local hint always
+        returns to the owner so broker-free source state can run.
 
         Spec: [CC-2.1], [SB-0.4]
         """
-        if timeout is None or timeout <= 0:
+        if self._stop_event.is_set() or (timeout is not None and timeout <= 0):
             return
 
-        waiter = self._ensure_multi_activity_waiter()
+        self._ensure_wait_strategy_started()
 
-        if waiter is not None:
-            try:
-                if waiter.wait(timeout):
-                    self._mark_pending_messages_prechecked()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self._stop_event.is_set():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 return
+
+            try:
+                self._strategy.wait_for_activity(timeout=remaining)
             except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
+                if self._multi_activity_waiter is None:
+                    raise
                 logger.debug(
                     "Multi-queue activity waiter failed; falling back to polling",
                     exc_info=True,
                 )
+                self._native_activity_degraded = True
                 self._reset_multi_activity_waiter()
+                continue
 
-        if self._has_pending_messages():
-            self._mark_pending_messages_prechecked()
+            if self._stop_event.is_set():
+                return
+
+            if self._activity_hint_action(deadline=deadline) == "return":
+                return
+
+    def _ensure_wait_strategy_started(self) -> None:
+        """Start the strategy or reinstall a waiter displaced by topology."""
+
+        if not self._strategy_started:
+            self._start_strategy()
             return
+        waiter = self._ensure_multi_activity_waiter()
+        if waiter is None or self._strategy.uses_native_activity():
+            return
+        displaced = self._strategy.replace_activity_waiter(waiter)
+        if displaced is not None and displaced is not waiter:
+            self._close_activity_waiter_once(displaced)
 
-        self._stop_event.wait(timeout)
+    def _activity_hint_action(
+        self,
+        *,
+        deadline: float | None,
+    ) -> Literal["return", "continue"]:
+        """Validate strategy hints and decide whether the owner gets a turn."""
+
+        local_hint = self._strategy.consume_local_activity_hint()
+        native_hint = self._strategy.consume_native_activity_hint()
+        data_version_hint = self._data_version_activity_pending
+        self._data_version_activity_pending = False
+
+        if local_hint:
+            if self._has_pending_messages():
+                self._mark_pending_messages_prechecked()
+            return "return"
+
+        if native_hint or data_version_hint:
+            if self._has_pending_messages():
+                self._mark_pending_messages_prechecked()
+                return "return"
+            return "continue"
+
+        deadline_reached = deadline is not None and time.monotonic() >= deadline
+        if self._strategy.uses_native_activity() and not deadline_reached:
+            if self._has_pending_messages():
+                self._mark_pending_messages_prechecked()
+                return "return"
+            return "continue"
+        if deadline_reached:
+            return "return"
+        # A nonpersistent SQLite queue opens a fresh connection for each
+        # operation, so its connection-local PRAGMA data_version cannot be a
+        # durable change detector across strategy turns. Confirm readiness at
+        # the end of each fallback turn. PostgreSQL still uses its native
+        # activity waiter, and persistent SQLite tasks retain data_version as
+        # their quiet-path filter.
+        transient_fallback = (
+            not self._persistent and not self._strategy.uses_native_activity()
+        )
+        if (
+            self._native_activity_degraded or transient_fallback
+        ) and self._has_pending_messages():
+            self._mark_pending_messages_prechecked()
+            return "return"
+        return "continue"
 
     def wait_for_activity(self, timeout: float | None) -> None:
         """Run one manual wait while excluding drive and topology ownership.

@@ -33,6 +33,8 @@ See also:
   [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
 - related reactive task-loop hot-probe plan:
   [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
+- event-routed PING/PONG plan:
+  [`docs/plans/2026-09-18-event-routed-manager-pong-plan.md`](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 
 ## Table of Contents
 
@@ -101,6 +103,11 @@ _Implementation mapping_: `weft/commands/run.py::_enqueue_taskspec`;
 `weft/core/manager.py` `Manager._handle_work_message`,
 `Manager._build_child_spec`, `Manager._launch_child_task`.
 
+Implementation resource-ownership note: the initial availability check borrows
+from the prepared submission's session, ending that connection operation before
+per-TID reconciliation or startup. See the
+[submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
+
 ### 2. Message Processing Flow with Reservation [MF-2]
 
 Current flow:
@@ -158,34 +165,42 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
 Current flow:
 
 ```text
-Controller -> T{tid}.ctrl_in -> Task -> T{tid}.ctrl_out
-                                  \-> weft.log.tasks
+requester ctrl_in  <---- PONG ----  target task
+       ^                              ^
+       |                              |
+ task reactor             PING {request_id, reply_to}
 ```
 
 The control plane is explicit:
 
-- `ctrl_in` accepts one structured JSON object shape containing exactly the
-  required `command` key and optional `request_id` key. `command` is exactly
-  one of `PING`, `STATUS`, `STOP`, `KILL`, `PAUSE`, or `RESUME` without case
-  normalization. When present, `request_id` is a string containing at least
-  one non-whitespace character. Raw command
-  strings, extra keys, and alternate casing are not supported requests.
+- a PING request is exactly `{command, request_id, reply_to}`. `command` is
+  exactly `PING`; `request_id` and `reply_to` are nonblank strings; and
+  `reply_to` is the requester's own `ctrl_in` queue. Other control requests
+  retain the exact `{command}` or `{command, request_id}` envelopes. Raw
+  command strings, extra keys, and alternate casing are not supported.
 - every Weft-owned controller uses the shared control-envelope encoder.
   `BaseTask` uses the matching parser and rejects malformed, non-object, or
   unsupported envelopes without treating them as commands. A rejected row is
   exact-acknowledged without a `ctrl_out` reply so it cannot block a later
   valid request.
-- `ctrl_out` carries task-local replies and terminal notifications. Readers
-  ignore malformed or unrelated replies as protocol noise; this robustness
-  does not make removed reply formats current contracts.
+- `ctrl_out` carries non-PONG task-local replies and terminal notifications.
+  Readers ignore malformed or unrelated replies as protocol noise; this
+  robustness does not make removed reply formats current contracts.
 - `weft.log.tasks` remains the runtime lifecycle evidence stream rather than
   the interactive reply channel. It is durable while retained, but it is not
   legal, forensic, or audit-retention evidence.
-- `PING` replies with a JSON `PONG` control response containing `tid`,
+- a requester sends a keyed PING to the target's `ctrl_in` and names its own
+  `ctrl_in` in `reply_to`. A long-lived task names its configured queue. A
+  synchronous probe mints a TID, owns `T{tid}.ctrl_in` for the duration of the
+  probe, drains it through `MultiQueueWatcher`, and deletes it on every exit
+  path. The ephemeral requester registers no task record and creates no other
+  task queue. Requester death or a reply written after requester cleanup may
+  leave an orphan row; the existing name-derived dead-task sweep retires it.
+- `PING` writes exactly one JSON `PONG` control response to `reply_to`, never
+  to the target's `ctrl_out`. The response contains `tid`,
   `timestamp`, `task_status`, `paused`, `should_stop`, `runner`, optional
   `activity`, optional `waiting_on`, and optional best-effort `runtime`
-  details from the active runner; structured PING envelopes with `request_id`
-  must echo the same `request_id` in the PONG
+  details from the active runner; it echoes `request_id` and omits `reply_to`
 - a manager PONG contains `role="manager"`, `requests`, `ctrl_in`, `ctrl_out`,
   `outbox`, `weft_context`, `task_status`, and `should_stop`. A matched PONG
   proves manager selection authority only when every field is present with its
@@ -199,13 +214,13 @@ The control plane is explicit:
   `command="PING"`, `status="ok"`, `message="PONG"`, the requested `request_id`,
   and the target `tid`. Readers ignore normalized or otherwise malformed reply
   noise rather than turning it into liveness proof
-- automatic manager recovery has at most two keyed proof rounds. Each uses the
+- automatic manager recovery has at most two keyed proof rounds. Each uses an
+  ephemeral requester and the
   control-surface timeout rather than the shorter competing-launch settlement
   grace. Timeout and I/O failure remain distinct, and reply matching remains
-  separate from manager dispatch eligibility. A timeout's final read evaluates
-  a matching reply before sweeping rows owned by that request, so valid proof
-  wins; cleanup never downgrades proof or deletes another request's reply.
-  Manager reactor probe scheduling is unchanged
+  separate from manager dispatch eligibility. These synchronous client probes
+  are separate from Manager reactor probes, whose absence is evaluated by the
+  existing leadership or active-service policy cadence
 - an abnormal automatic-start decision emits one structured diagnostic with the
   incumbent TID, submitted TID when known, last probe request ID, and decision
   reason. It contains no control payload or secret and does not alter proof or
@@ -226,13 +241,19 @@ The control plane is explicit:
   terminal proof exists alongside the `work_completed` task-log event
 - readers must ignore ordinary control replies, malformed JSON, and unrelated
   `ctrl_out` payloads when looking for terminal state
-- keyed control replies are owned and retired by the prober that issued the
-  `request_id` (single-reader rule): a matched keyed PONG is deleted by exact
-  message ID on match, and the prober sweeps rows bearing its own
-  `request_id` once at timeout or probe abandonment. Rows keyed to other
-  request ids and terminal envelopes are never touched by that sweep. A reply
-  landing after the final sweep is bounded by task-exit
-  purge and terminal/dead-TID cleanup
+- after strict request parsing, a non-request `ctrl_in` row is passed to the
+  task's protected reply hook and acknowledged once. A reactor-integrated
+  requester matches PONG there; a synchronous requester reads its own
+  ephemeral queue after the same watcher wait. Malformed and unmatched replies,
+  plus late replies that arrive while the requester still exists, are consumed
+  without a state transition. A reply written after an ephemeral requester has
+  exited remains under that requester's queue name until the name-derived
+  dead-task sweep retires it. PING/PONG uses no target-`ctrl_out` scan, reply
+  sweep, dynamic watcher membership, or separate polling loop
+- non-PONG keyed control replies remain owned and retired by the prober that
+  issued the `request_id`: an exact matching reply is deleted on match, and the
+  prober may sweep rows bearing its own request ID at timeout or abandonment.
+  Rows keyed to another request and terminal envelopes remain untouched
 - non-interactive command `stream_output` writes stdout and stderr stream frames
   to `T{tid}.outbox`; stderr frames are diagnostics for live/event consumers
   and do not become the public task result
@@ -1030,15 +1051,26 @@ Current manager-dispatch rules:
   SimpleBroker queues, mutate TaskSpec state, report task-log events, or send
   control responses. Those effects belong to the manager reactor.
 - manager-to-manager liveness PINGs are reactor state, not blocking helper
-  calls. The probing manager writes one keyed PING, stores the pending request,
-  and peeks for the matching PONG on later turns until the deadline. Pending
-  probes are unknown evidence; they must not immediately prune or supersede the
-  target manager.
+  calls. The probing manager writes one keyed PING with `reply_to` set to its
+  configured `ctrl_in`, stores the pending request, and receives the matching
+  PONG through its ordinary control drain. Pending probes are unknown evidence;
+  they must not immediately prune or supersede the target manager. Lack of a
+  PONG is evaluated by the ordinary leadership cadence; the probe adds no
+  private deadline.
 - service-owner liveness PINGs use the same non-blocking pattern. The manager
-  writes one keyed PING to a candidate service owner, stores the pending probe,
-  and checks for the matching PONG on later service-convergence turns. Pending
-  service probes are uncertain evidence; after timeout, ordinary recent/stale
-  candidate classification resumes.
+  writes one keyed PING with the same Manager `reply_to`, stores the pending
+  probe, and receives the matching PONG through its ordinary control drain.
+  Pending service probes are uncertain evidence and select the existing active
+  service cadence. Lack of a PONG is evaluated only by that cadence.
+- constructor bootstrap anchors the applicable leadership or service cadence
+  after it creates a probe, so the first reactor turn cannot classify that new
+  probe as no-PONG. A stored PONG makes its owning reducer actionable without
+  moving that cadence. Within the current reconciliation scope, pending service
+  probes keep their service keys in evidence collection. When autostart is
+  included, a stored PONG for a known autostart source bypasses the
+  manifest-scan throttle so the reply is reduced against current source
+  evidence. A successful complete owning-policy scan may retire a probe whose
+  source is absent; failed, throttled, and partial scans retain it.
 - STOP/KILL control that arrives after reservation but before launch still wins:
   a draining or stopped manager must not start a new child from the in-flight
   reserved request
@@ -1598,6 +1630,10 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes PONG through requester-owned `ctrl_in` queues and returns Manager probe absence to the existing owning-policy cadence.
+
+- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - makes the watcher reactor the single task wait owner and publishes the remaining service clocks as reactor deadlines.
+
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 
 - [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
@@ -1682,3 +1718,5 @@ management live in the companion doc:
 - [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
 - [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
+
+- [Manager Polling Latency](../plans/2026-09-17-manager-polling-latency-plan.md)

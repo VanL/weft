@@ -302,12 +302,15 @@ def discard_v1_service_registry_rows(
         raise ValueError(
             f"future service-owner schema v{min(future_versions)} is unsupported"
         )
-    if v1_ids:
-        if broker is None:
-            assert queue is not None
-            queue.delete_many(v1_ids)
-        else:
-            broker.delete_message_ids(queue_name, v1_ids)
+    if not v1_ids:
+        # This complete scan already verified absence. Only deletion needs a
+        # second scan to detect incomplete cleanup or reappearing v1 writers.
+        return
+    if broker is None:
+        assert queue is not None
+        queue.delete_many(v1_ids)
+    else:
+        broker.delete_message_ids(queue_name, v1_ids)
 
     schema_rows = scan_schema_rows()
     remaining_v1_ids = [

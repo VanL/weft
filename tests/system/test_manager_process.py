@@ -222,7 +222,7 @@ def test_main_preserves_parent_config_over_ambient_values(
         _broker_target: object,
         _spec: TaskSpec,
         decoded: Mapping[str, Any] | None,
-        _poll_interval: float,
+        _poll_interval: float | None,
         *,
         hard_exit_on_return: bool,
     ) -> None:
@@ -236,6 +236,38 @@ def test_main_preserves_parent_config_over_ambient_values(
     assert decoded.prefix == "WEFT"
     assert decoded["CACHE_MB"] == 17
     assert decoded["TASK_MONITOR_BATCH_SIZE"] == 37
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [("none", None), ("0.125", 0.125)],
+)
+def test_main_preserves_explicit_poll_interval_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    token: str,
+    expected: float | None,
+) -> None:
+    args = _args()
+    args[2] = _encoded(json.dumps(encode_taskspec_transport_payload(_valid_spec())))
+    args[4] = token
+    captured: list[float | None] = []
+
+    def capture_run(
+        _task_cls_path: str,
+        _broker_target: object,
+        _spec: TaskSpec,
+        _config: Mapping[str, Any] | None,
+        poll_interval: float | None,
+        *,
+        hard_exit_on_return: bool,
+    ) -> None:
+        assert hard_exit_on_return is True
+        captured.append(poll_interval)
+
+    monkeypatch.setattr(manager_process, "run_manager_process", capture_run)
+
+    assert manager_process.main(args) == 0
+    assert captured == [expected]
 
 
 def test_main_renders_invalid_taskspec(
@@ -305,7 +337,7 @@ def test_main_decodes_canonical_taskspec_transport_payload(
         _broker_target: object,
         spec: TaskSpec,
         _config: object,
-        _poll_interval: float,
+        _poll_interval: float | None,
         *,
         hard_exit_on_return: bool,
     ) -> None:
@@ -345,7 +377,7 @@ def test_run_manager_process_preserves_bundle_provenance_at_task_entry(
         _broker_target: object,
         spec_json: str,
         config_json: str,
-        _poll_interval: float,
+        _poll_interval: float | None,
         _hard_exit_on_return: bool,
     ) -> None:
         captured_json.append(spec_json)

@@ -339,12 +339,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             ),
         )
         try:
-            while self._active_work_in_flight or self._has_worker_activity():
-                self.process_once()
-                if self._direct_work_exception is not None:
-                    raise self._direct_work_exception
-                if self._active_work_in_flight or self._has_worker_activity():
-                    self.wait_for_activity(timeout=0.05)
+            self._drive_reactor_until(
+                completion_predicate=lambda: (
+                    not self._active_work_in_flight and not self._has_worker_activity()
+                )
+            )
             if self._direct_work_exception is not None:
                 raise self._direct_work_exception
             return self._direct_work_value
@@ -630,7 +629,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         timestamp_int = int(timestamp)
         request = parse_control_request(raw_message)
         if request is None:
-            self._ack_control_message(queue_name, timestamp_int)
+            context = QueueMessageContext(
+                queue_name=queue_name,
+                queue=ctrl_queue,
+                mode=QueueMode.PEEK,
+                timestamp=timestamp_int,
+            )
+            self._handle_control_message(raw_message, timestamp_int, context)
             return
         command = request.command
         if command in {CONTROL_STOP, CONTROL_KILL}:

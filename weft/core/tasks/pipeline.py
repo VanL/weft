@@ -21,7 +21,6 @@ from pydantic import BaseModel, ConfigDict
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
-    CONTROL_PING,
     CONTROL_STATUS,
     CONTROL_STOP,
     FAILURE_LIKE_TASK_STATUSES,
@@ -896,13 +895,6 @@ class PipelineTask(BaseTask):
         self, request: ControlRequest, context: QueueMessageContext
     ) -> bool:
         command = request.command
-        if command == CONTROL_PING:
-            self._send_control_response(
-                CONTROL_PING,
-                "ok",
-                **self._control_response_extras(request, message="PONG"),
-            )
-            return True
         if command == CONTROL_STATUS:
             self._publish_pipeline_snapshot()
             self._send_control_response(

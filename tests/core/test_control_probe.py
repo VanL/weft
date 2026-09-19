@@ -3,401 +3,396 @@
 from __future__ import annotations
 
 import json
+import math
+import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import weft.core.control_probe as control_probe_mod
 from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    CONTROL_PING_MAX_TIMEOUT_SECONDS,
     SERVICE_STATUS_DRAINING,
-    TERMINAL_ENVELOPE_TYPE,
+    TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft._exceptions import CommandUsageError
+from weft.commands.tasks import list_tasks
 from weft.context import WeftContext, build_context
 from weft.core.control_probe import (
     coerce_pong_response,
     pong_proves_dispatch_eligible,
-    reply_bears_request_id,
     send_keyed_ping_probe,
+)
+from weft.core.monitor.policies.runtime_control import (
+    select_runtime_dead_task_cleanup_candidates,
 )
 
 pytestmark = [pytest.mark.shared]
 
 
-def _write_ctrl_out_rows(
+def _queue_names(ctx: WeftContext) -> set[str]:
+    with ctx.broker() as broker:
+        return set(broker.list_queues())
+
+
+def _start_pong_responder(
     ctx: WeftContext,
-    ctrl_out_name: str,
-    rows: list[str],
+    *,
+    tid: str,
+    rows_before_pong: tuple[str, ...] = (),
+) -> tuple[threading.Thread, list[dict[str, Any]]]:
+    observed: list[dict[str, Any]] = []
+
+    def respond() -> None:
+        ctrl_in = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
+        try:
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                raw = ctrl_in.read_one()
+                if raw is None:
+                    time.sleep(0.001)
+                    continue
+                request = json.loads(str(raw))
+                observed.append(request)
+                reply = ctx.queue(request["reply_to"], persistent=False)
+                try:
+                    for row in rows_before_pong:
+                        reply.write(row)
+                    reply.write(
+                        json.dumps(
+                            {
+                                "command": "PING",
+                                "status": "ok",
+                                "message": "PONG",
+                                "tid": tid,
+                                "request_id": request["request_id"],
+                                "task_status": "running",
+                            }
+                        )
+                    )
+                finally:
+                    reply.close()
+                return
+            raise AssertionError("probe PING did not arrive")
+        finally:
+            ctrl_in.close()
+
+    thread = threading.Thread(target=respond, daemon=True)
+    thread.start()
+    return thread, observed
+
+
+def test_send_keyed_ping_probe_routes_pong_to_ephemeral_ctrl_in(
+    tmp_path: Path,
 ) -> None:
-    queue = ctx.queue(ctrl_out_name, persistent=False)
-    try:
-        for row in rows:
-            queue.write(row)
-    finally:
-        queue.close()
-
-
-def _peek_ctrl_out_bodies(ctx: WeftContext, ctrl_out_name: str) -> list[str]:
-    queue = ctx.queue(ctrl_out_name, persistent=False)
-    try:
-        return [str(item) for item in queue.peek_generator()]
-    finally:
-        queue.close()
-
-
-def test_reply_ownership_accepts_malformed_body_only_with_one_exact_request_id() -> (
-    None
-):
-    assert (
-        reply_bears_request_id(
-            '{"command":"PING","command":"STATUS","request_id":"owned"}',
-            request_id="owned",
-        )
-        is True
-    )
-    assert (
-        reply_bears_request_id(
-            '{"request_id":"other","request_id":"owned"}',
-            request_id="owned",
-        )
-        is False
-    )
-    assert (
-        reply_bears_request_id('[["request_id","owned"]]', request_id="owned") is False
-    )
-
-
-def test_send_keyed_ping_probe_matches_expected_pong(tmp_path: Path) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
     tid = "1775622400000000101"
-    ctrl_in_name = f"T{tid}.ctrl_in"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    request_id = "probe-request-1"
-
-    ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
-    try:
-        ctrl_out.write(
-            json.dumps(
-                {
-                    "command": "PING",
-                    "status": "ok",
-                    "message": "PONG",
-                    "tid": tid,
-                    "request_id": request_id,
-                    "task_status": "running",
-                }
-            )
-        )
-    finally:
-        ctrl_out.close()
-
-    result = send_keyed_ping_probe(
+    thread, observed = _start_pong_responder(
         ctx,
         tid=tid,
-        ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
-        request_id=request_id,
-        timeout=0.0,
+        rows_before_pong=("not-json",),
     )
 
-    assert result.error is None
-    assert result.timed_out is False
-    assert result.matched is not None
-    assert result.matched.request_id == request_id
-    assert result.matched.payload["task_status"] == "running"
-    assert result.matched.observed_at is not None
-
-    ctrl_in = ctx.queue(ctrl_in_name, persistent=True)
-    try:
-        ping_payload = json.loads(str(ctrl_in.read_one()))
-    finally:
-        ctrl_in.close()
-    assert ping_payload == {"command": "PING", "request_id": request_id}
-
-
-def test_send_keyed_ping_probe_ignores_unmatched_pongs(tmp_path: Path) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = "1775622400000000102"
-    ctrl_in_name = f"T{tid}.ctrl_in"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-
-    ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
-    try:
-        ctrl_out.write("not-json")
-        ctrl_out.write(
-            json.dumps(
-                {
-                    "command": "PING",
-                    "status": "ok",
-                    "message": "PONG",
-                    "tid": tid,
-                    "request_id": "other-request",
-                    "task_status": "running",
-                }
-            )
-        )
-        ctrl_out.write(
-            json.dumps(
-                {
-                    "command": "PING",
-                    "status": "ok",
-                    "message": "PONG",
-                    "tid": "different-tid",
-                    "request_id": "wanted-request",
-                    "task_status": "running",
-                }
-            )
-        )
-    finally:
-        ctrl_out.close()
-
-    result = send_keyed_ping_probe(
-        ctx,
-        tid=tid,
-        ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
-        request_id="wanted-request",
-        timeout=0.0,
-    )
-
-    assert result.error is None
-    assert result.matched is None
-    assert result.timed_out is True
-
-
-def test_send_keyed_ping_probe_consumes_matched_pong(tmp_path: Path) -> None:
-    """A matched keyed PONG is retired from ctrl_out by the probe itself.
-
-    Single-reader contract: the prober that issued the request_id owns the
-    matched reply's lifecycle and deletes it by exact message id on match.
-
-    Spec: [MF-3], [MANAGER.8]
-    """
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = "1775622400000000104"
-    ctrl_in_name = f"T{tid}.ctrl_in"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    request_id = "probe-request-consumed"
-    _write_ctrl_out_rows(
-        ctx,
-        ctrl_out_name,
-        [
-            json.dumps(
-                {
-                    "command": "PING",
-                    "status": "ok",
-                    "message": "PONG",
-                    "tid": tid,
-                    "request_id": request_id,
-                    "task_status": "running",
-                }
-            )
-        ],
-    )
-
-    result = send_keyed_ping_probe(
-        ctx,
-        tid=tid,
-        ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
-        request_id=request_id,
-        timeout=0.0,
-    )
-
-    assert result.error is None
-    assert result.timed_out is False
-    assert result.matched is not None
-    assert result.matched.request_id == request_id
-    assert _peek_ctrl_out_bodies(ctx, ctrl_out_name) == []
-
-
-def test_send_keyed_ping_probe_leaves_bystander_rows_untouched(
-    tmp_path: Path,
-) -> None:
-    """Non-matching pongs and terminal envelopes survive a probe untouched.
-
-    The single-reader contract only covers replies keyed to this probe's
-    request_id; messages owned by other ctrl_out readers (other probes'
-    replies, terminal-envelope scanners) must stay visible after the probe
-    completes, including after its timeout sweep.
-
-    Spec: [MF-3]
-    """
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = "1775622400000000105"
-    ctrl_in_name = f"T{tid}.ctrl_in"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    bystander_pong = json.dumps(
-        {
-            "command": "PING",
-            "status": "ok",
-            "message": "PONG",
-            "tid": tid,
-            "request_id": "other-request",
-            "task_status": "running",
-        }
-    )
-    terminal_envelope = json.dumps(
-        {
-            "type": TERMINAL_ENVELOPE_TYPE,
-            "source": "task",
-            "tid": tid,
-            "status": "completed",
-            "timestamp": 1,
-        }
-    )
-    _write_ctrl_out_rows(ctx, ctrl_out_name, [bystander_pong, terminal_envelope])
-
-    result = send_keyed_ping_probe(
-        ctx,
-        tid=tid,
-        ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
-        request_id="wanted-request",
-        timeout=0.0,
-    )
-
-    assert result.error is None
-    assert result.matched is None
-    assert result.timed_out is True
-    assert _peek_ctrl_out_bodies(ctx, ctrl_out_name) == [
-        bystander_pong,
-        terminal_envelope,
-    ]
-
-
-def test_send_keyed_ping_probe_timeout_sweeps_rows_bearing_its_request_id(
-    tmp_path: Path,
-) -> None:
-    """After the probe returns, no row bearing its request_id remains.
-
-    The sweep runs once at timeout-return, so the swept row must already be
-    in ctrl_out while the probe waits. A reply keyed to this probe's
-    request_id that cannot coerce to a matched PONG (missing task_status)
-    exercises exactly that window: the probe cannot match it, times out, and
-    must still retire it. A reply keyed to another request_id survives.
-
-    Spec: [MF-3]
-    """
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = "1775622400000000106"
-    ctrl_in_name = f"T{tid}.ctrl_in"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    request_id = "swept-request"
-    own_unmatchable_reply = json.dumps(
-        {
-            "command": "PING",
-            "status": "ok",
-            "message": "PONG",
-            "tid": tid,
-            "request_id": request_id,
-        }
-    )
-    bystander_pong = json.dumps(
-        {
-            "command": "PING",
-            "status": "ok",
-            "message": "PONG",
-            "tid": tid,
-            "request_id": "other-request",
-            "task_status": "running",
-        }
-    )
-    _write_ctrl_out_rows(ctx, ctrl_out_name, [own_unmatchable_reply, bystander_pong])
-
-    result = send_keyed_ping_probe(
-        ctx,
-        tid=tid,
-        ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
-        request_id=request_id,
-        timeout=0.0,
-    )
-
-    assert result.error is None
-    assert result.matched is None
-    assert result.timed_out is True
-    remaining = [json.loads(body) for body in _peek_ctrl_out_bodies(ctx, ctrl_out_name)]
-    assert [entry.get("request_id") for entry in remaining] == ["other-request"]
-
-
-def test_send_keyed_ping_probe_final_read_matches_before_cleanup(
-    tmp_path: Path,
-) -> None:
-    """A matching PONG that appears at the deadline remains positive proof.
-
-    The broker returns no row on the loop read and the valid row on the final
-    timeout read. The probe must evaluate that row before retiring its own
-    replies.
-
-    Spec: [MF-3]
-    """
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = "1775622400000000107"
-    request_id = "deadline-pong"
-    body = json.dumps(
-        {
-            "command": "PING",
-            "status": "ok",
-            "message": "PONG",
-            "tid": tid,
-            "request_id": request_id,
-            "task_status": "running",
-        }
-    )
-
-    class DeadlineBroker:
-        def __init__(self) -> None:
-            self.peek_count = 0
-            self.deleted: list[int] = []
-
-        def write(self, queue_name: str, message: str) -> None:
-            del queue_name, message
-
-        def peek_generator(
-            self, queue_name: str, *, with_timestamps: bool = False
-        ) -> object:
-            del queue_name, with_timestamps
-            self.peek_count += 1
-            return iter(()) if self.peek_count == 1 else iter(((body, 107),))
-
-        def delete_message_ids(self, queue_name: str, message_ids: list[int]) -> None:
-            del queue_name
-            self.deleted.extend(message_ids)
-
-    broker = DeadlineBroker()
     result = send_keyed_ping_probe(
         ctx,
         tid=tid,
         ctrl_in_name=f"T{tid}.ctrl_in",
-        ctrl_out_name=f"T{tid}.ctrl_out",
-        request_id=request_id,
-        timeout=0.0,
-        broker=broker,
+        request_id="probe-request-1",
+        timeout=1.0,
     )
+    thread.join(timeout=3.0)
 
+    assert not thread.is_alive()
+    assert result.error is None
     assert result.timed_out is False
     assert result.matched is not None
-    assert result.matched.payload["request_id"] == request_id
-    assert broker.deleted == [107]
+    assert result.matched.payload["task_status"] == "running"
+    assert len(observed) == 1
+    assert observed[0] == {
+        "command": "PING",
+        "request_id": "probe-request-1",
+        "reply_to": observed[0]["reply_to"],
+    }
+    reply_to = observed[0]["reply_to"]
+    assert reply_to.startswith("T") and reply_to.endswith(".ctrl_in")
+    assert reply_to not in _queue_names(ctx)
+    assert f"T{tid}.ctrl_out" not in _queue_names(ctx)
+
+
+def test_send_keyed_ping_probe_timeout_retires_ephemeral_queue(tmp_path: Path) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "1775622400000000102"
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=f"T{tid}.ctrl_in",
+        timeout=0.0,
+    )
+
+    assert result.matched is None
+    assert result.timed_out is True
+    assert not any(
+        name.endswith(".ctrl_in") and name != f"T{tid}.ctrl_in"
+        for name in _queue_names(ctx)
+    )
+
+
+def test_ephemeral_probe_creates_no_task_identity_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    requester_tid = "1775622400000000109"
+    monkeypatch.setattr(
+        control_probe_mod,
+        "generate_spawn_request_timestamp",
+        lambda *_args, **_kwargs: int(requester_tid),
+    )
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid="1775622400000000110",
+        ctrl_in_name="T1775622400000000110.ctrl_in",
+        timeout=0.0,
+    )
+
+    assert result.timed_out
+    assert not any(name.startswith(f"T{requester_tid}.") for name in _queue_names(ctx))
+    assert all(snapshot.tid != requester_tid for snapshot in list_tasks(context=ctx))
+
+
+def test_ephemeral_probe_uses_manual_wait_without_starting_drive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    monkeypatch.setattr(
+        control_probe_mod.MultiQueueWatcher,
+        "run_in_thread",
+        lambda *_args, **_kwargs: pytest.fail("probe must not start a drive thread"),
+    )
+    monkeypatch.setattr(
+        control_probe_mod.MultiQueueWatcher,
+        "run_forever",
+        lambda *_args, **_kwargs: pytest.fail("probe must not start a drive loop"),
+    )
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid="1775622400000000111",
+        ctrl_in_name="T1775622400000000111.ctrl_in",
+        timeout=0.0,
+    )
+
+    assert result.timed_out
+
+
+def test_probe_broker_error_after_watcher_setup_retires_reply_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    requester_tid = "1775622400000000112"
+    monkeypatch.setattr(
+        control_probe_mod,
+        "generate_spawn_request_timestamp",
+        lambda *_args, **_kwargs: int(requester_tid),
+    )
+    monkeypatch.setattr(
+        control_probe_mod,
+        "_write_probe_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(BrokerError("write failed")),
+    )
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid="1775622400000000113",
+        ctrl_in_name="T1775622400000000113.ctrl_in",
+        timeout=1.0,
+    )
+
+    assert result.error == "write failed"
+    assert not any(name.startswith(f"T{requester_tid}.") for name in _queue_names(ctx))
+
+
+def test_cleanup_failures_do_not_replace_matched_probe_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "1775622400000000114"
+    thread, _observed = _start_pong_responder(ctx, tid=tid)
+    original_stop = control_probe_mod.MultiQueueWatcher.stop
+    stop_calls = 0
+
+    def flaky_stop(watcher: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal stop_calls
+        stop_calls += 1
+        if stop_calls == 1:
+            raise RuntimeError("first cleanup attempt failed")
+        original_stop(watcher, *args, **kwargs)
+
+    monkeypatch.setattr(control_probe_mod.MultiQueueWatcher, "stop", flaky_stop)
+    monkeypatch.setattr(
+        control_probe_mod,
+        "_retire_probe_reply_queue",
+        lambda _queue: None,
+    )
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=f"T{tid}.ctrl_in",
+        request_id="cleanup-result",
+        timeout=1.0,
+    )
+    thread.join(timeout=3.0)
+
+    assert result.matched is not None
+    assert stop_calls == 2
+
+
+def test_late_pong_stays_with_dead_requester_until_existing_sweep_selects_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    requester_tid = "1775622400000000115"
+    target_tid = "1775622400000000116"
+    monkeypatch.setattr(
+        control_probe_mod,
+        "generate_spawn_request_timestamp",
+        lambda *_args, **_kwargs: int(requester_tid),
+    )
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=target_tid,
+        ctrl_in_name=f"T{target_tid}.ctrl_in",
+        timeout=0.0,
+    )
+    target = ctx.queue(f"T{target_tid}.ctrl_in")
+    raw = target.read_one()
+    target.close()
+    assert raw is not None
+    request = json.loads(str(raw))
+    reply_to = str(request["reply_to"])
+    late = ctx.queue(reply_to)
+    late.write(
+        json.dumps(
+            {
+                "command": "PING",
+                "status": "ok",
+                "message": "PONG",
+                "tid": target_tid,
+                "request_id": request["request_id"],
+                "task_status": "running",
+            }
+        )
+    )
+    late.close()
+
+    assert result.timed_out
+    assert reply_to in _queue_names(ctx)
+    age_ns = int(TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS * 1_000_000_000)
+    young = select_runtime_dead_task_cleanup_candidates(
+        (reply_to,),
+        now_ns=int(requester_tid) + age_ns - 1,
+        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
+        retention_seconds=172800.0,
+        limit=1,
+        active_tids=set(),
+        task_record=lambda _tid: None,
+        deadline_reached=lambda: False,
+    )
+    old = select_runtime_dead_task_cleanup_candidates(
+        (reply_to,),
+        now_ns=int(requester_tid) + age_ns + 1,
+        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
+        retention_seconds=172800.0,
+        limit=1,
+        active_tids=set(),
+        task_record=lambda _tid: None,
+        deadline_reached=lambda: False,
+    )
+
+    assert young.tids == ()
+    assert old.tids == (requester_tid,)
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [-1.0, math.nan, math.inf, -math.inf, CONTROL_PING_MAX_TIMEOUT_SECONDS + 0.001],
+)
+def test_send_keyed_ping_probe_rejects_invalid_timeout_before_minting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout: float,
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    monkeypatch.setattr(
+        control_probe_mod,
+        "generate_spawn_request_timestamp",
+        lambda *args, **kwargs: pytest.fail("invalid timeout must fail before minting"),
+    )
+
+    with pytest.raises(CommandUsageError):
+        send_keyed_ping_probe(
+            ctx,
+            tid="1775622400000000103",
+            ctrl_in_name="T1775622400000000103.ctrl_in",
+            timeout=timeout,
+        )
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [0.0, CONTROL_PING_MAX_TIMEOUT_SECONDS - 0.001, CONTROL_PING_MAX_TIMEOUT_SECONDS],
+)
+def test_send_keyed_ping_probe_accepts_timeout_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout: float,
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+
+    def accepted(*args: object, **kwargs: object) -> int:
+        del args, kwargs
+        raise BrokerError("accepted")
+
+    monkeypatch.setattr(control_probe_mod, "generate_spawn_request_timestamp", accepted)
+    result = send_keyed_ping_probe(
+        ctx,
+        tid="1775622400000000104",
+        ctrl_in_name="T1775622400000000104.ctrl_in",
+        timeout=timeout,
+    )
+    assert result.error == "accepted"
+
+
+def test_control_ping_max_timeout_tracks_cleanup_age() -> None:
+    assert CONTROL_PING_MAX_TIMEOUT_SECONDS == (
+        TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS / 2
+    )
 
 
 def test_send_keyed_ping_probe_does_not_relabel_programmer_runtime_error(
     tmp_path: Path,
 ) -> None:
-    """Arbitrary RuntimeError is not converted into an availability result."""
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
 
     class BrokenBroker:
+        def generate_timestamp(self) -> int:
+            return 1775622400000000108
+
         def write(self, queue_name: str, message: str) -> None:
             del queue_name, message
             raise RuntimeError("programmer defect")
@@ -407,43 +402,9 @@ def test_send_keyed_ping_probe_does_not_relabel_programmer_runtime_error(
             ctx,
             tid="1775622400000000108",
             ctrl_in_name="T1775622400000000108.ctrl_in",
-            ctrl_out_name="T1775622400000000108.ctrl_out",
             timeout=0.0,
             broker=BrokenBroker(),
         )
-
-
-def test_send_keyed_ping_probe_reports_final_read_io_error(tmp_path: Path) -> None:
-    """A failed deadline read is an I/O error rather than a clean timeout."""
-    ctx = build_context(spec_context=prepare_project_root(tmp_path))
-
-    class FinalReadFailureBroker:
-        def __init__(self) -> None:
-            self.reads = 0
-
-        def write(self, queue_name: str, message: str) -> None:
-            del queue_name, message
-
-        def peek_generator(
-            self, queue_name: str, *, with_timestamps: bool = False
-        ) -> object:
-            del queue_name, with_timestamps
-            self.reads += 1
-            if self.reads == 1:
-                return iter(())
-            raise BrokerError("deadline read failed")
-
-    result = send_keyed_ping_probe(
-        ctx,
-        tid="1775622400000000109",
-        ctrl_in_name="T1775622400000000109.ctrl_in",
-        ctrl_out_name="T1775622400000000109.ctrl_out",
-        timeout=0.0,
-        broker=FinalReadFailureBroker(),
-    )
-
-    assert result.timed_out is False
-    assert result.error == "deadline read failed"
 
 
 def test_coerce_pong_response_rejects_payload_without_task_status() -> None:

@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from simplebroker import BrokerTarget, deserialize_broker_target, serialize_config
-from weft._constants import resolve_runtime_config
+from weft._constants import TASK_POLL_INTERVAL_NONE_TOKEN, resolve_runtime_config
 from weft.core.launcher import _task_process_entry
 from weft.core.taskspec import (
     TaskSpec,
@@ -29,7 +29,7 @@ def run_manager_process(
     broker_target: BrokerTarget | str,
     spec: TaskSpec,
     config: Mapping[str, Any] | None,
-    poll_interval: float,
+    poll_interval: float | None,
     *,
     hard_exit_on_return: bool = False,
 ) -> None:
@@ -61,7 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         broker_target = deserialize_broker_target(broker_target_json)
         spec_json = base64.b64decode(spec_b64).decode("utf-8")
         config_json = base64.b64decode(config_b64).decode("utf-8")
-        poll_interval = float(poll_interval_s)
+        poll_interval = (
+            None
+            if poll_interval_s == TASK_POLL_INTERVAL_NONE_TOKEN
+            else float(poll_interval_s)
+        )
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"Invalid manager arguments: {exc}\n")
         return 2

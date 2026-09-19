@@ -659,7 +659,7 @@ def test_concurrent_archive_appends_produce_complete_jsonl_lines(
         assert len(summaries) == 1
 
 
-def test_ctrl_out_terminal_with_log_is_deleted_and_pong_is_preserved(
+def test_ctrl_out_terminal_with_log_is_deleted_and_unrelated_row_is_preserved(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -676,7 +676,7 @@ def test_ctrl_out_terminal_with_log_is_deleted_and_pong_is_preserved(
             "status": "completed",
         },
     )
-    pong_id = _write_raw(ctx, f"T{tid}.ctrl_out", "PONG")
+    unrelated_id = _write_raw(ctx, f"T{tid}.ctrl_out", "unrelated-control-row")
 
     result = run_retention_prune(
         RetentionPruneConfig(
@@ -694,7 +694,7 @@ def test_ctrl_out_terminal_with_log_is_deleted_and_pong_is_preserved(
     )
     remaining = _read_ids(ctx, f"T{tid}.ctrl_out")
     assert terminal_id not in remaining
-    assert pong_id in remaining
+    assert unrelated_id in remaining
 
 
 def test_ctrl_out_without_log_is_report_only_unless_force(tmp_path: Path) -> None:

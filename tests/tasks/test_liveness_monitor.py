@@ -27,7 +27,7 @@ from weft.core.tasks.liveness_monitor import (
     ProbeResult,
     ProbeWork,
 )
-from weft.core.tasks.service import ServiceWorkerEvent
+from weft.core.tasks.service import ServiceTask, ServiceWorkerEvent
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import tid_short_form
 from weft.liveness.models import LivenessObservation
@@ -130,6 +130,39 @@ def _mapping(tid: str) -> dict[str, object]:
             "metadata": {},
         },
     }
+
+
+def test_liveness_next_wait_timeout_publishes_only_real_deadlines(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _context, monitor, _queue, tid, now = namespace_case
+    monitor._drain_worker_results()
+    monitor._due_heap = [(12.0, tid, "generation")]
+    monitor._next_state_refresh_at = 13.0
+    monitor._next_full_reconcile_at = 14.0
+
+    assert monitor.next_wait_timeout() == pytest.approx(2.0)
+
+    monitor._due_heap.clear()
+    assert monitor.next_wait_timeout() == pytest.approx(3.0)
+    monitor._next_state_refresh_at = 15.0
+    assert monitor.next_wait_timeout() == pytest.approx(4.0)
+
+    monkeypatch.setattr(ServiceTask, "next_wait_timeout", lambda _self: 1.5)
+    assert monitor.next_wait_timeout() == pytest.approx(1.5)
+
+    monitor._paused = True
+    monitor._due_heap = [(now[0] - 1.0, tid, "generation")]
+    monitor._next_state_refresh_at = now[0] - 1.0
+    monitor._next_full_reconcile_at = now[0] - 1.0
+    assert monitor.next_wait_timeout() == pytest.approx(1.5)
+
+    monitor._paused = False
+    assert monitor.next_wait_timeout() == 0.0
+
+    monkeypatch.setattr(monitor, "_has_pending_worker_results", lambda: True)
+    assert monitor.next_wait_timeout() == 0.0
 
 
 def test_reconcile_discovers_task_state_namespace(workdir: Path) -> None:

@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import pytest
@@ -1163,7 +1164,7 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
     context = build_context(prepare_project_root(tmp_path / "ctx"))
     tid = "1761000000000000109"
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
-    probe_calls: list[tuple[str, str, str]] = []
+    probe_calls: list[tuple[str, str]] = []
     probe_cache: dict[str, int | None] = {}
     observed_at = 1761000000000000199
 
@@ -1183,13 +1184,12 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
         *,
         tid: str,
         ctrl_in_name: str,
-        ctrl_out_name: str,
         timeout: float,
         request_id: str | None = None,
         broker: Any | None = None,
     ) -> ControlProbeResult:
         del timeout, request_id
-        probe_calls.append((tid, ctrl_in_name, ctrl_out_name))
+        probe_calls.append((tid, ctrl_in_name))
         if pong_kind == "absent":
             return ControlProbeResult(request_id="probe", timed_out=True)
         payload: dict[str, Any] = {
@@ -1202,7 +1202,7 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
             "role": "manager",
             "requests": WEFT_SPAWN_REQUESTS_QUEUE,
             "ctrl_in": ctrl_in_name,
-            "ctrl_out": ctrl_out_name,
+            "ctrl_out": f"T{tid}.ctrl_out",
             "outbox": "weft.manager.outbox",
             "weft_context": str(context.root),
             "should_stop": False,
@@ -1242,7 +1242,7 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
         queue.close()
 
     assert (tid in snapshot) is expected_in_view
-    assert probe_calls == [(tid, f"T{tid}.ctrl_in", f"T{tid}.ctrl_out")]
+    assert probe_calls == [(tid, f"T{tid}.ctrl_in")]
     assert probe_cache == {tid: observed_at if expected_in_view else None}
     assert remaining_ids == [message_id]
 
@@ -2189,12 +2189,15 @@ def test_recovery_uses_two_probe_rounds_and_counts_first_toward_grace(
         "_probe_proves_recovery_candidate",
         lambda *_args, **_kwargs: False,
     )
+    # Keep the two-value policy clock out of real broker setup and cleanup.
     monkeypatch.setattr(
-        core_manager_runtime.time,
-        "monotonic",
-        lambda: next(monotonic_values),
+        core_manager_runtime,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: next(monotonic_values),
+            sleep=slept.append,
+        ),
     )
-    monkeypatch.setattr(core_manager_runtime.time, "sleep", slept.append)
 
     observation = core_manager_runtime.observe_manager_availability(context)
     decision = core_manager_runtime.decide_manager_recovery(context, observation)

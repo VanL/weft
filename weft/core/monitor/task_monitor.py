@@ -59,10 +59,10 @@ from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
     RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-    TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
     TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
     TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
+    TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     TASK_MONITOR_LOG_SUBDIR,
     TASK_MONITOR_MAINTENANCE_PARTIAL_BATCH_ERROR_PREFIX,
@@ -938,6 +938,8 @@ class TaskMonitor(ServiceTask):
         worker._multi_activity_waiter = None
         worker._multi_activity_waiter_generation = None
         worker._multi_activity_waiter_signature = None
+        worker._data_version_activity_pending = False
+        worker._native_activity_degraded = False
         worker._pending_messages_precheck_confirmed = False
         worker._topology_lock = threading.RLock()
         worker._topology_mutations = deque()
@@ -971,7 +973,6 @@ class TaskMonitor(ServiceTask):
         worker._drive_scope_active = False
         worker._strategy_started = False
         worker._pending_termination_sources = deque()
-        worker._parent_loss_watch_active = False
         worker._cleanup_errors = ()
         worker._pong_extension_provider = None
         worker._task_observer = worker._ignore_task_log_entry
@@ -1589,7 +1590,7 @@ class TaskMonitor(ServiceTask):
             ),
         }
 
-    def next_wait_timeout(self) -> float:
+    def next_wait_timeout(self) -> float | None:
         """Return the launcher wait timeout for the next monitor turn.
 
         The monitor is reactive to task-local wakeups and its heartbeat-driven
@@ -1599,20 +1600,25 @@ class TaskMonitor(ServiceTask):
 
         if self._has_pending_worker_results():
             return 0.0
+        timeouts: list[float] = []
+        base_timeout = super().next_wait_timeout()
+        if base_timeout is not None:
+            timeouts.append(base_timeout)
         if not self._monitor_config.enabled:
-            return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
+            return max(0.0, min(timeouts)) if timeouts else None
+        now = time.monotonic()
+        if not self._heartbeat_registered:
+            timeouts.append(self._next_heartbeat_registration_attempt_monotonic - now)
         if (
             self._builtin_cycle_work_in_flight is not None
             or self._processor_work_in_flight is not None
             or self._control_cleanup_work_in_flight is not None
         ):
-            return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
+            return max(0.0, min(timeouts)) if timeouts else None
         if self._first_cycle_pending or self._wake_requested:
             return 0.0
-        remaining = self._next_cycle_due_monotonic - time.monotonic()
-        if remaining <= 0:
-            return 0.0
-        return min(remaining, TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS)
+        timeouts.append(self._next_cycle_due_monotonic - now)
+        return max(0.0, min(timeouts))
 
     @staticmethod
     def _ignore_task_log_entry(
@@ -4944,7 +4950,7 @@ class TaskMonitor(ServiceTask):
             self._last_error = self._heartbeat_error
             self._heartbeat_registered = False
             self._next_heartbeat_registration_attempt_monotonic = (
-                now_monotonic + TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
+                now_monotonic + TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS
             )
             return
         self._heartbeat_error = None

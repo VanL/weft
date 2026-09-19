@@ -154,7 +154,6 @@ def _heartbeat_endpoint_candidate(
             context,
             tid=record.tid,
             ctrl_in_name=record.ctrl_in,
-            ctrl_out_name=record.ctrl_out,
             timeout=HEARTBEAT_ENDPOINT_PROBE_TIMEOUT,
             broker=broker,
         )

@@ -59,10 +59,10 @@ from weft._constants import (
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
-    MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS,
     MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
     MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS,
+    MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
@@ -258,26 +258,12 @@ def _service_probe_for(
     raise AssertionError(f"No pending service probe for {tid}")
 
 
-def _expire_service_probe(manager: Manager, probe: Any) -> None:
-    manager._service_probe_pending[probe.key] = probe.__class__(
-        key=probe.key,
-        service_key=probe.service_key,
-        tid=probe.tid,
-        row_timestamp=probe.row_timestamp,
-        source=probe.source,
-        ctrl_in_name=probe.ctrl_in_name,
-        ctrl_out_name=probe.ctrl_out_name,
-        request_id=probe.request_id,
-        deadline_ns=time.time_ns() - 1,
-        ctrl_in_message_id=probe.ctrl_in_message_id,
-    )
-
-
 def _write_service_pong(
+    manager: Manager,
     make_queue: Callable[[str], Any],
     probe: Any,
 ) -> None:
-    make_queue(probe.ctrl_out_name).write(
+    make_queue(manager._queue_names["ctrl_in"]).write(
         json.dumps(
             {
                 "command": CONTROL_PING,
@@ -289,6 +275,37 @@ def _write_service_pong(
             }
         )
     )
+    manager._drain_control_queue_first()
+
+
+def _write_manager_pong(
+    manager: Manager,
+    make_queue: Callable[[str], Any],
+    probe: Any,
+    *,
+    ctrl_in_name: str,
+    ctrl_out_name: str,
+) -> None:
+    make_queue(manager._queue_names["ctrl_in"]).write(
+        json.dumps(
+            {
+                "command": CONTROL_PING,
+                "status": "ok",
+                "message": "PONG",
+                "request_id": probe.request_id,
+                "tid": probe.tid,
+                "task_status": "running",
+                "role": "manager",
+                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                "ctrl_in": ctrl_in_name,
+                "ctrl_out": ctrl_out_name,
+                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+                "weft_context": str(manager._manager_context().root),
+                "should_stop": False,
+            }
+        )
+    )
+    manager._drain_control_queue_first()
 
 
 def _external_supervisor_runtime_handle() -> dict[str, object]:
@@ -1190,7 +1207,8 @@ def test_manager_reactor_answers_ping_while_child_launch_is_active(
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     ctrl_in = make_queue(manager._queue_names["ctrl_in"])
-    ctrl_out = make_queue(manager._queue_names["ctrl_out"])
+    reply_name = f"T{int(manager.tid) + 1}.ctrl_in"
+    reply_queue = make_queue(reply_name)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain(log_queue)
     launch_started = threading.Event()
@@ -1214,10 +1232,16 @@ def test_manager_reactor_answers_ping_while_child_launch_is_active(
     assert launch_started.wait(timeout=2.0)
     assert manager._active_child_launches
 
-    ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
+    ctrl_in.write(
+        encode_control_message(
+            CONTROL_PING,
+            request_id="during",
+            reply_to=reply_name,
+        )
+    )
     manager.process_once()
 
-    responses = [json.loads(item) for item in drain(ctrl_out)]
+    responses = [json.loads(item) for item in drain(reply_queue)]
     pong = next(response for response in responses if response["command"] == "PING")
     assert pong["request_id"] == "during"
     assert pong["message"] == "PONG"
@@ -1247,17 +1271,60 @@ def test_manager_reactor_answers_ping_while_draining(
     )
     manager._begin_graceful_shutdown(message_id=None)
     ctrl_in = make_queue(manager._queue_names["ctrl_in"])
-    ctrl_out = make_queue(manager._queue_names["ctrl_out"])
+    reply_name = f"T{int(manager.tid) + 1}.ctrl_in"
+    reply_queue = make_queue(reply_name)
 
-    ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during-drain"))
+    ctrl_in.write(
+        encode_control_message(
+            CONTROL_PING,
+            request_id="during-drain",
+            reply_to=reply_name,
+        )
+    )
     manager.process_once()
 
-    response = json.loads(str(ctrl_out.read_one()))
+    response = json.loads(str(reply_queue.read_one()))
     assert response["command"] == CONTROL_PING
     assert response["request_id"] == "during-drain"
     assert response["message"] == "PONG"
     assert response["should_stop"] is True
     assert response["task_status"] == "running"
+
+
+def test_manager_turn_drains_control_before_registry_cleanup_and_leadership(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    calls: list[str] = []
+    monkeypatch.setattr(manager, "_drain_worker_results", lambda: 0)
+    monkeypatch.setattr(manager, "_retry_stale_child_launches", lambda: False)
+    monkeypatch.setattr(manager, "_emit_manager_loop_summary", lambda: None)
+    monkeypatch.setattr(
+        manager,
+        "_drain_control_queue_first",
+        lambda: calls.append("control"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_refresh_manager_registration",
+        lambda: calls.append("registration"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_cleanup_stale_internal_reserved_queues",
+        lambda: calls.append("reserved_cleanup"),
+    )
+
+    def stop_at_leadership() -> bool:
+        calls.append("leadership")
+        return True
+
+    monkeypatch.setattr(manager, "_maybe_yield_leadership", stop_at_leadership)
+
+    manager._process_manager_reactor_turn()
+
+    assert calls == ["control", "registration", "reserved_cleanup", "leadership"]
 
 
 def test_manager_child_launch_admission_failure_is_returned_locally(
@@ -3363,7 +3430,7 @@ def test_stable_managed_service_convergence_uses_audit_interval(
         lambda: record_and_return(calls, "cleanup", None),
     )
 
-    def reconcile(*, include_autostart: bool = True) -> None:
+    def reconcile(*, include_autostart: bool = True, **_kwargs: object) -> None:
         calls.append(f"reconcile:{include_autostart}")
 
     monkeypatch.setattr(manager, "_reconcile_managed_services", reconcile)
@@ -3411,6 +3478,55 @@ def test_active_managed_service_convergence_uses_active_interval(
     manager._run_managed_service_convergence(include_autostart=False)
 
     assert calls == ["cleanup", "reconcile"]
+
+
+def test_pending_service_pong_selects_active_cadence_and_stored_reply_bypasses_gate(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = time.time_ns()
+    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._task_monitor_enabled = True
+    probe_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=service_key,
+        tid="1777000000000000051",
+        timestamp=1,
+    )
+    manager._service_probe_pending[probe_key] = manager_mod._ServicePendingPongProbe(
+        key=probe_key,
+        service_key=service_key,
+        tid="1777000000000000051",
+        row_timestamp=1,
+        source="service-registry-pong",
+        request_id="pending-service",
+        created_turn=manager._loop_iteration,
+        pong={"message": "PONG"},
+    )
+    previous_policy_ns = now_ns - 500_000_000
+    manager._last_managed_service_convergence_ns = previous_policy_ns
+    calls: list[bool] = []
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    monkeypatch.setattr(manager, "_cleanup_children", lambda: False)
+    monkeypatch.setattr(manager, "_internal_spawn_pending", lambda: False)
+
+    def reconcile(**kwargs: object) -> None:
+        calls.append(bool(kwargs.get("resolve_unanswered")))
+        manager._service_probe_pending.clear()
+
+    monkeypatch.setattr(manager, "_reconcile_managed_services", reconcile)
+
+    reasons = manager._managed_service_convergence_active_reasons(
+        include_autostart=False,
+        include_broker=False,
+    )
+    manager._run_managed_service_convergence(include_autostart=False)
+
+    assert "pong_probe_pending" in reasons
+    assert calls == [False]
+    assert manager._last_managed_service_convergence_ns == previous_policy_ns
 
 
 def test_managed_service_convergence_active_reasons_are_stable(
@@ -3550,7 +3666,7 @@ def test_manager_leadership_yield_rate_gate_precedes_actionable_work(
     monkeypatch.setattr(
         manager,
         "_read_active_manager_records",
-        lambda: pytest.fail("registry read must not run before rate gate"),
+        lambda **_kwargs: pytest.fail("registry read must not run before rate gate"),
     )
 
     assert manager._maybe_yield_leadership() is False
@@ -3634,10 +3750,21 @@ def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
 def _prime_manager_next_wait_baseline(manager: Manager, now_ns: int) -> None:
     manager.should_stop = False
     manager._draining = False
+    manager._drain_immediate_work_pending = False
+    manager._drain_started_ns = None
+    manager._drain_stops_children = True
+    manager._drain_leader_tid = None
+    manager._drain_signaled_children.clear()
+    manager._drain_escalated_children.clear()
+    manager._drain_signal_started_ns.clear()
     manager._pending_termination_sources.clear()
     manager._managed_internal_spawn_enqueued = False
     manager._stalled_control_retry_after_ns = 0
     manager._child_processes.clear()
+    manager._active_child_launches.clear()
+    manager._child_launch_started_ns.clear()
+    manager._leader_probe_pending.clear()
+    manager._service_probe_pending.clear()
     manager._managed_service_state.clear()
     manager._managed_service_duplicate_scan_pending.clear()
     manager._autostart_enabled = False
@@ -3708,14 +3835,40 @@ def test_manager_next_wait_timeout_returns_nearest_due_source(
         ctrl_queue="Tchild.ctrl_in",
         ctrl_out_queue="Tchild.ctrl_out",
         service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        sentinel_observed_ns=now_ns,
     )
     manager._child_processes["1777000000000000051"] = child
     try:
         assert manager.next_wait_timeout() == pytest.approx(
-            MANAGER_CHILD_EXIT_POLL_INTERVAL
+            MANAGER_PID_LIVENESS_RECHECK_INTERVAL
         )
     finally:
         manager._child_processes.pop("1777000000000000051", None)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    child = ManagedChild(
+        process=cast(BaseProcess, SimpleNamespace(pid=1234)),
+        ctrl_queue="Tchild.ctrl_in",
+        ctrl_out_queue="Tchild.ctrl_out",
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        sentinel_observed_ns=now_ns - 1_000_000_000,
+        terminal_proof_missing_since_ns=now_ns,
+    )
+    manager._child_processes["1777000000000000051"] = child
+    try:
+        assert manager.next_wait_timeout() == pytest.approx(
+            MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS
+        )
+    finally:
+        manager._child_processes.pop("1777000000000000051", None)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._active_child_launches["launch"] = cast(Any, object())
+    manager._child_launch_started_ns["launch"] = now_ns - int(
+        (manager_mod.MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS - 0.4) * 1_000_000_000
+    )
+    monkeypatch.setattr(manager, "_has_worker_activity", lambda: False)
+    assert manager.next_wait_timeout() == pytest.approx(0.4)
 
 
 def test_manager_next_wait_timeout_ignores_broker_probe_when_idle_disabled(
@@ -3733,6 +3886,325 @@ def test_manager_next_wait_timeout_ignores_broker_probe_when_idle_disabled(
     wait_timeout = manager.next_wait_timeout()
     assert wait_timeout is not None
     assert wait_timeout > 0.0
+
+
+def test_manager_pending_pong_probes_add_no_private_wait_timeout(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    baseline = manager.next_wait_timeout()
+    manager._leader_probe_pending["leader"] = manager_mod._ManagerPendingPongProbe(
+        tid="leader",
+        row_timestamp=1,
+        request_id="leader-request",
+        created_turn=manager._loop_iteration,
+    )
+    service_key = "source\x1fservice\x1ftid\x1f1"
+    manager._service_probe_pending[service_key] = manager_mod._ServicePendingPongProbe(
+        key=service_key,
+        service_key="service",
+        tid="tid",
+        row_timestamp=1,
+        source="control-pong",
+        request_id="service-request",
+        created_turn=manager._loop_iteration,
+    )
+
+    assert manager.next_wait_timeout() == baseline
+
+    monkeypatch.setattr(manager, "_process_manager_reactor_turn", lambda: None)
+    manager._process_reactor_turn()
+    assert set(manager._leader_probe_pending) == {"leader"}
+    assert set(manager._service_probe_pending) == {service_key}
+
+
+def test_manager_child_sentinel_adapter_coalesces_level_triggered_exit() -> None:
+    notified = threading.Event()
+    adapter = manager_mod._ManagerChildSentinelAdapter(notified.set)
+    assert adapter._thread.is_alive() is True
+    process = multiprocessing.get_context("spawn").Process(
+        target=time.sleep,
+        args=(0.05,),
+    )
+    process.start()
+    sentinel = process.sentinel
+    try:
+        adapter.publish((("child", sentinel),))
+        assert notified.wait(timeout=2.0)
+        results = adapter.drain()
+        assert len(results) == 1
+        result = results[0]
+        assert isinstance(result, manager_mod._ManagerChildSentinelEvent)
+        assert (result.tid, result.sentinel) == ("child", sentinel)
+        process.join(timeout=2.0)
+        assert process.is_alive() is False
+
+        adapter.publish((("child", sentinel),))
+        assert adapter.wait(0.05) is False
+        adapter.publish(())
+        adapter.close(timeout=1.0)
+        adapter.close(timeout=1.0)
+
+        assert adapter._recv_conn.closed is True
+        assert adapter._send_conn.closed is True
+        assert adapter._thread.is_alive() is False
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(timeout=2.0)
+        adapter.close(timeout=1.0)
+
+
+def test_manager_child_sentinel_adapter_reports_fatal_observer_failure(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class SentinelFailure(BaseException):
+        pass
+
+    failure = SentinelFailure("sentinel observer failed")
+    monkeypatch.setattr(
+        manager_mod,
+        "wait_for_connections",
+        lambda _waitables: (_ for _ in ()).throw(failure),
+    )
+    adapter = manager_mod._ManagerChildSentinelAdapter(lambda: None)
+    try:
+        adapter.publish((("child", 123),))
+        assert adapter.wait(1.0) is True
+        results = adapter.drain()
+        assert len(results) == 1
+        assert isinstance(results[0], manager_mod._ManagerChildSentinelFailure)
+        assert results[0].error is failure
+    finally:
+        adapter.close(timeout=1.0)
+
+    manager._child_sentinel_adapter._results.put(
+        manager_mod._ManagerChildSentinelFailure(failure)
+    )
+    with pytest.raises(SentinelFailure) as exc_info:
+        manager._drain_child_sentinel_events()
+    assert exc_info.value is failure
+
+
+def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class SentinelFailure(BaseException):
+        pass
+
+    class LiveProcess:
+        pid = None
+        exitcode = None
+
+        def __init__(self) -> None:
+            self.kill_calls = 0
+
+        def is_alive(self) -> bool:
+            return self.kill_calls == 0
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+    failure = SentinelFailure("sentinel observer failed during shutdown")
+    process = LiveProcess()
+    manager._child_processes["child"] = ManagedChild(
+        process=cast(BaseProcess, process),
+        ctrl_queue="Tchild.ctrl_in",
+    )
+    manager._child_sentinel_adapter._results.put(
+        manager_mod._ManagerChildSentinelFailure(failure)
+    )
+    manager._child_sentinel_adapter._result_event.set()
+    monkeypatch.setattr(manager, "_cleanup_children", lambda **_kwargs: False)
+    monkeypatch.setattr(manager, "_send_stop_command", lambda _queue: None)
+    monkeypatch.setattr(manager, "_managed_pids_for_child", lambda _tid: set())
+
+    with pytest.raises(SentinelFailure) as exc_info:
+        manager._terminate_children(time.monotonic() + 1.0)
+
+    assert exc_info.value is failure
+    assert process.kill_calls == 1
+    assert manager._child_processes == {}
+
+
+def test_manager_sentinel_failure_without_children_is_not_dropped(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class SentinelFailure(BaseException):
+        pass
+
+    failure = SentinelFailure("sentinel observer failed after final child exit")
+    manager._child_sentinel_adapter._results.put(
+        manager_mod._ManagerChildSentinelFailure(failure)
+    )
+    manager._child_sentinel_adapter._result_event.set()
+
+    with pytest.raises(SentinelFailure) as exc_info:
+        manager._terminate_children(time.monotonic() + 1.0)
+
+    assert exc_info.value is failure
+    assert manager._child_sentinel_adapter.drain() == []
+
+
+def test_manager_cleanup_surfaces_sentinel_failure_published_after_termination(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class SentinelFailure(BaseException):
+        pass
+
+    failure = SentinelFailure("sentinel observer failed before adapter close")
+
+    def terminate_children(_deadline: float) -> None:
+        manager._child_sentinel_adapter._results.put(
+            manager_mod._ManagerChildSentinelFailure(failure)
+        )
+        manager._child_sentinel_adapter._result_event.set()
+
+    monkeypatch.setattr(
+        manager, "_drain_active_child_launches_for_cleanup", lambda _: None
+    )
+    monkeypatch.setattr(manager, "_terminate_children", terminate_children)
+    monkeypatch.setattr(manager, "_cleanup_own_internal_reserved_queue", lambda: None)
+    monkeypatch.setattr(manager, "_unregister_manager", lambda: None)
+    monkeypatch.setattr(
+        manager_mod.ServiceTask,
+        "_cleanup_task_resources",
+        lambda _self, _deadline: None,
+    )
+    monkeypatch.setattr(manager, "_unregister_atexit_callback", lambda: None)
+
+    with pytest.raises(SentinelFailure) as exc_info:
+        manager._cleanup_task_resources(time.monotonic() + 1.0)
+
+    assert exc_info.value is failure
+    assert manager._child_sentinel_adapter._recv_conn.closed is True
+    assert manager._child_sentinel_adapter._send_conn.closed is True
+    assert manager._child_sentinel_adapter.drain() == []
+
+
+def test_manager_cleanup_attempts_every_phase_and_raises_first_failure(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FirstFailure(BaseException):
+        pass
+
+    class LaterFailure(BaseException):
+        pass
+
+    first = FirstFailure("first")
+    later = LaterFailure("later")
+    calls: list[str] = []
+
+    def phase(name: str, failure: BaseException | None = None) -> Callable[..., None]:
+        def run(*_args: object, **_kwargs: object) -> None:
+            calls.append(name)
+            if failure is not None:
+                raise failure
+
+        return run
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            manager,
+            "_drain_active_child_launches_for_cleanup",
+            phase("launches", first),
+        )
+        patcher.setattr(manager, "_terminate_children", phase("children"))
+        patcher.setattr(
+            manager,
+            "_cleanup_own_internal_reserved_queue",
+            phase("reserved", later),
+        )
+        patcher.setattr(manager, "_unregister_manager", phase("registry"))
+        patcher.setattr(
+            manager._child_sentinel_adapter,
+            "close",
+            phase("sentinel"),
+        )
+        patcher.setattr(
+            manager_mod.ServiceTask,
+            "_cleanup_task_resources",
+            phase("service"),
+        )
+        patcher.setattr(
+            manager,
+            "_unregister_atexit_callback",
+            phase("atexit"),
+        )
+
+        with pytest.raises(FirstFailure) as exc_info:
+            manager._cleanup_task_resources(time.monotonic() + 1.0)
+
+    manager._draining = False
+    assert exc_info.value is first
+    assert calls == [
+        "launches",
+        "children",
+        "reserved",
+        "registry",
+        "sentinel",
+        "service",
+        "atexit",
+    ]
+
+
+def test_manager_partial_initialization_cleanup_attempts_both_owners(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class AdapterFailure(BaseException):
+        pass
+
+    class BaseFailure(BaseException):
+        pass
+
+    adapter_failure = AdapterFailure("adapter")
+    base_failure = BaseFailure("base")
+    calls: list[str] = []
+
+    def close_adapter(*_args: object, **_kwargs: object) -> None:
+        calls.append("adapter")
+        raise adapter_failure
+
+    def close_base(*_args: object, **_kwargs: object) -> None:
+        calls.append("base")
+        raise base_failure
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(manager._child_sentinel_adapter, "close", close_adapter)
+        patcher.setattr(
+            manager_mod.ServiceTask,
+            "_abort_partial_initialization",
+            close_base,
+        )
+        with pytest.raises(AdapterFailure) as exc_info:
+            manager._abort_partial_initialization()
+
+    assert exc_info.value is adapter_failure
+    assert calls == ["adapter", "base"]
 
 
 def test_manager_init_skips_initial_broker_probe_when_idle_disabled(
@@ -3767,6 +4239,49 @@ def test_manager_init_skips_initial_broker_probe_when_idle_disabled(
         manager.cleanup()
 
 
+def test_manager_constructor_anchors_cadence_for_bootstrap_probes(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+
+    def register(manager: Manager) -> None:
+        manager._leader_probe_pending["bootstrap-leader"] = (
+            manager_mod._ManagerPendingPongProbe(
+                tid="bootstrap-leader",
+                row_timestamp=1,
+                request_id="bootstrap-leader-request",
+                created_turn=manager._loop_iteration,
+            )
+        )
+
+    def reconcile(manager: Manager, **_kwargs: object) -> None:
+        key = "bootstrap-service"
+        manager._service_probe_pending[key] = manager_mod._ServicePendingPongProbe(
+            key=key,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid="bootstrap-service-tid",
+            row_timestamp=1,
+            source="service-registry-pong",
+            request_id="bootstrap-service-request",
+            created_turn=manager._loop_iteration,
+        )
+
+    monkeypatch.setattr(Manager, "_register_manager", register)
+    monkeypatch.setattr(
+        Manager, "_maybe_yield_leadership", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(Manager, "_reconcile_managed_services", reconcile)
+    manager = Manager(db_path, make_manager_spec(unique_tid))
+    try:
+        assert manager._last_leader_check_ns > 0
+        assert manager._last_managed_service_convergence_ns > 0
+        assert manager._loop_iteration == 0
+    finally:
+        manager.cleanup()
+
+
 def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
@@ -3787,7 +4302,7 @@ def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services
     try:
         wait_timeout = manager.next_wait_timeout()
         assert wait_timeout is not None
-        assert wait_timeout > MANAGER_CHILD_EXIT_POLL_INTERVAL
+        assert wait_timeout > MANAGER_PID_LIVENESS_RECHECK_INTERVAL
     finally:
         manager._child_processes.pop("1777000000000000052", None)
 
@@ -3796,12 +4311,10 @@ def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services
     ("attribute", "value"),
     [
         ("should_stop", True),
-        ("_draining", True),
         (
             "_pending_termination_sources",
             deque([("signal", signal.SIGTERM)]),
         ),
-        ("_managed_internal_spawn_enqueued", True),
     ],
 )
 def test_manager_next_wait_timeout_returns_zero_for_immediate_work(
@@ -3817,6 +4330,68 @@ def test_manager_next_wait_timeout_returns_zero_for_immediate_work(
     setattr(manager, attribute, value)
 
     assert manager.next_wait_timeout() == 0.0
+
+
+def test_manager_drain_publishes_only_exact_clocks(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._draining = True
+    manager._drain_stops_children = True
+    manager._drain_started_ns = now_ns
+    manager._child_processes["child"] = ManagedChild(
+        process=cast(BaseProcess, SimpleNamespace(pid=1234)),
+        ctrl_queue="Tchild.ctrl_in",
+    )
+    manager._drain_signaled_children.add("child")
+    manager._drain_signal_started_ns["child"] = now_ns - int(
+        (manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS - 0.35) * 1_000_000_000
+    )
+
+    assert manager.next_wait_timeout() == pytest.approx(0.35)
+
+    manager._drain_escalated_children.add("child")
+    assert manager.next_wait_timeout() == pytest.approx(
+        manager_mod.MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+    )
+
+    manager._drain_stops_children = False
+    manager._drain_leader_tid = "leader"
+    manager._last_leadership_drain_revalidate_ns = now_ns - int(
+        (manager_mod.MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS - 0.2) * 1_000_000_000
+    )
+    assert manager.next_wait_timeout() == pytest.approx(0.2)
+
+
+def test_manager_drain_immediate_continuation_is_one_shot(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._draining = True
+    manager._drain_immediate_work_pending = True
+    manager._drain_started_ns = now_ns
+    manager._child_processes["child"] = ManagedChild(
+        process=cast(BaseProcess, SimpleNamespace(pid=1234)),
+        ctrl_queue="Tchild.ctrl_in",
+    )
+    monkeypatch.setattr(manager, "_revalidate_leadership_drain", lambda: True)
+    monkeypatch.setattr(manager, "_cleanup_children", lambda: False)
+    monkeypatch.setattr(manager, "_send_stop_command", lambda _queue: None)
+
+    assert manager.next_wait_timeout() == 0.0
+    manager._continue_shutdown_drain()
+    assert manager._drain_immediate_work_pending is False
+    assert manager.next_wait_timeout() == pytest.approx(
+        manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS
+    )
 
 
 def test_manager_autostart_due_bypasses_convergence_throttle(
@@ -3859,6 +4434,119 @@ def test_manager_autostart_due_bypasses_convergence_throttle(
     finally:
         manager.stop(join=False)
         manager.cleanup()
+
+
+def test_stored_autostart_pong_bypasses_only_included_manifest_scan(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    source = "/tmp/weft-autostart.yaml"
+    probe_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=source,
+        tid="1777000000000000052",
+        timestamp=1,
+    )
+    manager._autostart_sources = {source}
+    manager._service_probe_pending[probe_key] = manager_mod._ServicePendingPongProbe(
+        key=probe_key,
+        service_key=source,
+        tid="1777000000000000052",
+        row_timestamp=1,
+        source="service-registry-pong",
+        request_id="autostart-pong",
+        created_turn=manager._loop_iteration,
+        pong={"message": "PONG"},
+    )
+    manager._task_monitor_enabled = False
+    manager._liveness_monitor_enabled = False
+    scan_forces: list[bool] = []
+    monkeypatch.setattr(
+        manager,
+        "_desired_autostart_services",
+        lambda *, force=False: record_and_return(scan_forces, force, []),
+    )
+
+    manager._reconcile_managed_services(include_autostart=False)
+    manager._reconcile_managed_services(include_autostart=True)
+
+    assert scan_forces == [True]
+
+
+def test_complete_autostart_scan_retires_absent_unanswered_probe(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager, _make_queue = manager_setup
+    manager._autostart_enabled = True
+    manager._autostart_dir = tmp_path
+    source = "/tmp/removed-weft-autostart.json"
+    probe_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=source,
+        tid="1777000000000000053",
+        timestamp=1,
+    )
+    manager._autostart_sources = {source}
+    manager._service_probe_pending[probe_key] = manager_mod._ServicePendingPongProbe(
+        key=probe_key,
+        service_key=source,
+        tid="1777000000000000053",
+        row_timestamp=1,
+        source="service-registry-pong",
+        request_id="removed-autostart",
+        created_turn=manager._loop_iteration,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_autostart_manifest_path_snapshot",
+        lambda: ([], True),
+    )
+
+    manager._reconcile_managed_services(force=True, include_autostart=True)
+
+    assert probe_key not in manager._service_probe_pending
+    assert source not in manager._autostart_sources
+
+
+def test_failed_autostart_scan_retains_pending_probe_and_source(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager, _make_queue = manager_setup
+    manager._autostart_enabled = True
+    manager._autostart_dir = tmp_path
+    source = "/tmp/unreadable-weft-autostart.json"
+    probe_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=source,
+        tid="1777000000000000054",
+        timestamp=1,
+    )
+    manager._autostart_sources = {source}
+    manager._service_probe_pending[probe_key] = manager_mod._ServicePendingPongProbe(
+        key=probe_key,
+        service_key=source,
+        tid="1777000000000000054",
+        row_timestamp=1,
+        source="service-registry-pong",
+        request_id="unreadable-autostart",
+        created_turn=manager._loop_iteration,
+        pong={"message": "PONG"},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_autostart_manifest_path_snapshot",
+        lambda: ([], False),
+    )
+
+    manager._reconcile_managed_services(force=True, include_autostart=True)
+
+    assert probe_key in manager._service_probe_pending
+    assert source in manager._autostart_sources
 
 
 def test_manager_unscanned_autostart_is_due_without_reading_clock(
@@ -3931,125 +4619,56 @@ def test_manager_clears_dispatch_stall_timer_when_backlog_drains(
     assert wait_timeout > 0.0
 
 
-def test_manager_wait_for_activity_passes_timeout_to_shared_waiter(
+def test_manager_local_notification_wakes_unbounded_shared_wait(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
-    timeouts: list[float | None] = []
-
-    class RecordingWaiter:
-        def wait(self, timeout: float | None) -> None:
-            timeouts.append(timeout)
-
     monkeypatch.setattr(manager, "_has_pending_messages", lambda: False)
+    manager._strategy.notify_activity()
+
+    started_at = time.monotonic()
+    manager._wait_for_reactor_activity(timeout=None)
+
+    assert time.monotonic() - started_at < 0.2
+
+
+@pytest.mark.parametrize("timeout", [0.0, -0.1])
+def test_manager_nonpositive_wait_does_not_probe_or_sleep(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    timeout: float | None,
+) -> None:
+    manager, _make_queue = manager_setup
     monkeypatch.setattr(
         manager,
         "_ensure_multi_activity_waiter",
-        lambda: RecordingWaiter(),
+        lambda: pytest.fail("nonpositive wait probed backend"),
     )
+    monkeypatch.setattr(
+        manager,
+        "_has_pending_messages",
+        lambda: pytest.fail("nonpositive wait scanned queues"),
+    )
+    monkeypatch.setattr(
+        manager._stop_event,
+        "wait",
+        lambda timeout: pytest.fail("nonpositive wait slept"),
+    )
+    manager._wait_for_reactor_activity(timeout=timeout)
 
-    manager._wait_for_reactor_activity(timeout=0.2)
 
-    assert timeouts == [0.2]
-
-
-def test_manager_wait_for_activity_fallback_honors_timeout(
+def test_manager_fallback_pending_work_does_not_sleep(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
-    wait_timeouts: list[float | None] = []
-    reset_calls: list[bool] = []
-
-    class FailingWaiter:
-        def wait(self, timeout: float | None) -> None:
-            raise RuntimeError(f"wait failed after {timeout}")
-
-    class FakeStopEvent:
-        def wait(self, timeout: float | None) -> bool:
-            wait_timeouts.append(timeout)
-            return False
-
-        def is_set(self) -> bool:
-            return False
-
-        def set(self) -> None:
-            pass
-
-    monkeypatch.setattr(manager, "_has_pending_messages", lambda: False)
+    monkeypatch.setattr(manager, "_has_pending_messages", lambda: True)
     monkeypatch.setattr(
-        manager, "_ensure_multi_activity_waiter", lambda: FailingWaiter()
+        manager._stop_event, "wait", lambda timeout: pytest.fail("pending work slept")
     )
-    monkeypatch.setattr(
-        manager, "_reset_multi_activity_waiter", lambda: reset_calls.append(True)
-    )
-    manager._stop_event = cast(threading.Event, FakeStopEvent())
-
-    manager._wait_for_reactor_activity(timeout=0.2)
-
-    assert reset_calls == [True]
-    assert wait_timeouts == [0.2]
-
-
-def test_manager_fallback_wait_suppresses_only_blocked_spawn_source(
-    broker_env: BrokerEnv,
-    unique_tid: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path, make_queue = broker_env
-    manager = Manager(
-        db_path,
-        make_manager_spec(unique_tid, idle_timeout=0.0),
-        config=load_config(
-            {
-                "WEFT_TASK_MONITOR_ENABLED": "0",
-                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
-                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
-            }
-        ),
-    )
-    for config in manager._queues.values():
-        drain(config.queue)
-    public = make_queue(manager._queue_names["inbox"])
-    reserved = make_queue(manager._queue_names["reserved"])
-    public.write("{}")
-    manager._admission_blocked_lanes = {"public"}
-    wait_timeouts: list[float | None] = []
-
-    class FailingWaiter:
-        def wait(self, timeout: float | None) -> None:
-            raise RuntimeError(f"wait failed after {timeout}")
-
-    class FakeStopEvent:
-        def wait(self, timeout: float | None) -> bool:
-            wait_timeouts.append(timeout)
-            return False
-
-        def is_set(self) -> bool:
-            return False
-
-        def set(self) -> None:
-            pass
-
-    monkeypatch.setattr(
-        manager,
-        "_ensure_multi_activity_waiter",
-        lambda: FailingWaiter(),
-    )
-    monkeypatch.setattr(manager, "_reset_multi_activity_waiter", lambda: None)
-    manager._stop_event = cast(threading.Event, FakeStopEvent())
-
-    try:
-        manager._wait_for_reactor_activity(timeout=0.2)
-        assert wait_timeouts == [0.2]
-
-        reserved.write("reserved recovery")
-        manager._wait_for_reactor_activity(timeout=0.2)
-        assert wait_timeouts == [0.2]
-    finally:
-        manager.stop(join=False)
-        manager.cleanup()
+    manager._strategy.notify_activity()
+    manager._wait_for_reactor_activity(timeout=None)
 
 
 def test_manager_leadership_self_owner_skips_actionable_scan_per_turn(
@@ -4061,7 +4680,7 @@ def test_manager_leadership_self_owner_skips_actionable_scan_per_turn(
     current_ns = {"value": now_ns}
     registry_calls = 0
 
-    def count_registry_reads() -> dict[str, dict[str, object]]:
+    def count_registry_reads(**_kwargs: object) -> dict[str, dict[str, object]]:
         nonlocal registry_calls
         registry_calls += 1
         return {manager.tid: {"tid": manager.tid}}
@@ -4114,7 +4733,10 @@ def test_manager_leadership_lower_owner_checks_actionable_work_before_yield(
     monkeypatch.setattr(
         manager,
         "_read_active_manager_records",
-        lambda: {lower_tid: {"tid": lower_tid}, manager.tid: {"tid": manager.tid}},
+        lambda **_kwargs: {
+            lower_tid: {"tid": lower_tid},
+            manager.tid: {"tid": manager.tid},
+        },
     )
     manager._leader_check_interval_ns = int(
         MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS * 1_000_000_000
@@ -4669,10 +5291,17 @@ def test_managed_service_pong_probe_is_nonblocking(
         tid=old_tid,
         source="service-registry-pong",
     )
-    ping_messages = [json.loads(item) for item in drain(make_queue(probe.ctrl_in_name))]
-    assert ping_messages == [{"command": CONTROL_PING, "request_id": probe.request_id}]
+    target_ctrl_in = f"T{old_tid}.ctrl_in"
+    ping_messages = [json.loads(item) for item in drain(make_queue(target_ctrl_in))]
+    assert ping_messages == [
+        {
+            "command": CONTROL_PING,
+            "request_id": probe.request_id,
+            "reply_to": manager._queue_names["ctrl_in"],
+        }
+    ]
 
-    _write_service_pong(make_queue, probe)
+    _write_service_pong(manager, make_queue, probe)
     candidates = manager._observed_service_candidates_by_key({service_key})[service_key]
 
     live_candidate = next(
@@ -4680,7 +5309,59 @@ def test_managed_service_pong_probe_is_nonblocking(
     )
     assert live_candidate.state == "live"
     assert live_candidate.source == "service-registry-pong"
-    assert list(make_queue(probe.ctrl_out_name).peek_generator()) == []
+    assert probe.key not in manager._service_probe_pending
+
+
+def test_pending_service_probe_keeps_live_tracked_key_in_evidence_scope(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._task_monitor_enabled = True
+    probe_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=service_key,
+        tid="1777000000000000159",
+        timestamp=1,
+    )
+    manager._service_probe_pending[probe_key] = manager_mod._ServicePendingPongProbe(
+        key=probe_key,
+        service_key=service_key,
+        tid="1777000000000000159",
+        row_timestamp=1,
+        source="service-registry-pong",
+        request_id="pending-duplicate",
+        created_turn=manager._loop_iteration,
+    )
+    monkeypatch.setattr(
+        manager, "_pending_service_keys", lambda *_args, **_kwargs: set()
+    )
+    monkeypatch.setattr(
+        manager,
+        "_tracked_service_candidate",
+        lambda key, **_kwargs: manager_mod.ServiceCandidate(
+            key=key,
+            tid="1777000000000000100",
+            state="live",
+            source="manager-child",
+        ),
+    )
+    observed_scopes: list[set[str]] = []
+
+    def observe(desired_keys: set[str], **_kwargs: object) -> dict[str, list[Any]]:
+        observed_scopes.append(set(desired_keys))
+        return {key: [] for key in desired_keys}
+
+    monkeypatch.setattr(manager, "_observed_service_candidates_by_key", observe)
+    monkeypatch.setattr(
+        manager, "_tick_managed_service", lambda *_args, **_kwargs: None
+    )
+
+    manager._reconcile_managed_services(include_autostart=False)
+
+    assert observed_scopes == [{service_key}]
 
 
 @pytest.mark.parametrize(
@@ -4704,7 +5385,7 @@ def test_service_candidate_pid_prefers_positive_non_boolean_child_pid(
     assert Manager._service_candidate_pid(payload) == expected
 
 
-def test_managed_service_pong_probe_timeout_deletes_exact_ping(
+def test_managed_service_no_pong_resolves_only_on_later_ordinary_pass(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup
@@ -4726,43 +5407,33 @@ def test_managed_service_pong_probe_timeout_deletes_exact_ping(
         tid=old_tid,
         source="service-registry-pong",
     )
-    assert make_queue(probe.ctrl_in_name).stats().total == 1
-    expired_probe = probe.__class__(
-        key=probe.key,
-        service_key=probe.service_key,
-        tid=probe.tid,
-        row_timestamp=probe.row_timestamp,
-        source=probe.source,
-        ctrl_in_name=probe.ctrl_in_name,
-        ctrl_out_name=probe.ctrl_out_name,
-        request_id=probe.request_id,
-        deadline_ns=time.time_ns() - 1,
-        ctrl_in_message_id=probe.ctrl_in_message_id,
-    )
+    target_ctrl_in = f"T{old_tid}.ctrl_in"
+    assert make_queue(target_ctrl_in).stats().total == 1
+    manager._loop_iteration += 1
 
-    candidate = manager._advance_service_pong_probe(
-        expired_probe,
+    pending = manager._advance_service_pong_probe(
+        probe,
         timestamp=probe.row_timestamp,
         metadata={},
-        now_ns=time.time_ns(),
+        resolve_unanswered=False,
     )
+    assert pending is not None and pending.reason == "ping_pending"
+    assert probe.key in manager._service_probe_pending
 
+    candidate = manager._advance_service_pong_probe(
+        probe,
+        timestamp=probe.row_timestamp,
+        metadata={},
+        resolve_unanswered=True,
+    )
     assert candidate is None
-    assert make_queue(probe.ctrl_in_name).stats().total == 0
+    assert make_queue(target_ctrl_in).stats().total == 1
     assert probe.key not in manager._service_probe_pending
 
 
-def test_managed_service_pong_probe_timeout_sweeps_own_keyed_reply(
+def test_managed_service_malformed_pong_is_consumed_without_resolving_probe(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
-    """A timed-out service probe retires ctrl_out replies keyed to it.
-
-    A reply bearing the probe's request_id that cannot coerce to a matched
-    PONG (missing task_status) must still be swept at timeout so keyed
-    replies never accumulate in the target's ctrl_out.
-
-    Spec: [MF-3], [MANAGER.8]
-    """
     manager, make_queue = manager_setup
     service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
     old_tid = "1777000000000000152"
@@ -4782,7 +5453,8 @@ def test_managed_service_pong_probe_timeout_sweeps_own_keyed_reply(
         tid=old_tid,
         source="service-registry-pong",
     )
-    make_queue(probe.ctrl_out_name).write(
+    manager_ctrl_in = make_queue(manager._queue_names["ctrl_in"])
+    manager_ctrl_in.write(
         json.dumps(
             {
                 "command": CONTROL_PING,
@@ -4793,30 +5465,124 @@ def test_managed_service_pong_probe_timeout_sweeps_own_keyed_reply(
             }
         )
     )
-    expired_probe = probe.__class__(
-        key=probe.key,
-        service_key=probe.service_key,
-        tid=probe.tid,
-        row_timestamp=probe.row_timestamp,
-        source=probe.source,
-        ctrl_in_name=probe.ctrl_in_name,
-        ctrl_out_name=probe.ctrl_out_name,
-        request_id=probe.request_id,
-        deadline_ns=time.time_ns() - 1,
-        ctrl_in_message_id=probe.ctrl_in_message_id,
+    manager._drain_control_queue_first()
+
+    assert manager_ctrl_in.peek_one() is None
+    assert manager._service_probe_pending[probe.key].pong is None
+
+
+def test_complete_service_scan_retires_absent_probe_but_failed_scan_retains_it(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+    probe_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=service_key,
+        tid="1777000000000000199",
+        timestamp=1,
     )
 
-    candidate = manager._advance_service_pong_probe(
-        expired_probe,
-        timestamp=probe.row_timestamp,
-        metadata={},
-        now_ns=time.time_ns(),
+    def add_pending() -> None:
+        manager._service_probe_pending[probe_key] = (
+            manager_mod._ServicePendingPongProbe(
+                key=probe_key,
+                service_key=service_key,
+                tid="1777000000000000199",
+                row_timestamp=1,
+                source="service-registry-pong",
+                request_id="missing-service",
+                created_turn=manager._loop_iteration,
+            )
+        )
+
+    drain(make_queue(WEFT_SERVICES_REGISTRY_QUEUE))
+    add_pending()
+    manager._observed_service_candidates_by_key({service_key})
+    assert probe_key not in manager._service_probe_pending
+
+    class FailedRegistryQueue:
+        def peek_generator(self, **_kwargs: object) -> Iterator[tuple[str, int]]:
+            raise RuntimeError("registry unavailable")
+
+    original_queue = manager._queue
+    add_pending()
+    monkeypatch.setattr(
+        manager,
+        "_queue",
+        lambda name: (
+            cast(Queue, FailedRegistryQueue())
+            if name == WEFT_SERVICES_REGISTRY_QUEUE
+            else original_queue(name)
+        ),
+    )
+    candidates = manager._observed_service_candidates_by_key({service_key})
+    assert probe_key in manager._service_probe_pending
+    assert [
+        (candidate.tid, candidate.state, candidate.reason)
+        for candidate in candidates[service_key]
+    ] == [("1777000000000000199", "uncertain", "ping_pending")]
+
+
+def test_failed_service_registry_scan_does_not_spawn_over_pending_probe(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+    tid = "1777000000000000201"
+    probe_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=service_key,
+        tid=tid,
+        timestamp=1,
+    )
+    manager._service_probe_pending[probe_key] = manager_mod._ServicePendingPongProbe(
+        key=probe_key,
+        service_key=service_key,
+        tid=tid,
+        row_timestamp=1,
+        source="service-registry-pong",
+        request_id="pending-service",
+        created_turn=manager._loop_iteration,
+    )
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+
+    class FailedRegistryQueue:
+        def peek_generator(self, **_kwargs: object) -> Iterator[tuple[str, int]]:
+            raise RuntimeError("registry unavailable")
+
+    original_queue = manager._queue
+    monkeypatch.setattr(
+        manager,
+        "_queue",
+        lambda name: (
+            cast(Queue, FailedRegistryQueue())
+            if name == WEFT_SERVICES_REGISTRY_QUEUE
+            else original_queue(name)
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_pending_service_keys",
+        lambda *_args, **_kwargs: {INTERNAL_SERVICE_KEY_HEARTBEAT},
+    )
+    monkeypatch.setattr(
+        manager, "_tracked_service_candidate", lambda *_args, **_kwargs: None
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: record_and_return(enqueued, service.key, True),
     )
 
-    assert candidate is None
-    assert make_queue(probe.ctrl_in_name).stats().total == 0
-    assert list(make_queue(probe.ctrl_out_name).peek_generator()) == []
-    assert probe.key not in manager._service_probe_pending
+    manager._reconcile_managed_services(include_autostart=False)
+
+    assert service_key not in enqueued
+    assert probe_key in manager._service_probe_pending
 
 
 def test_managed_service_observation_preserves_other_owner_history(
@@ -5401,7 +6167,7 @@ def test_process_once_reconciles_internal_services_before_user_spawn_work(
         manager.cleanup()
 
 
-def test_process_once_launches_service_spawn_in_same_reconcile_turn(
+def test_process_once_launches_service_spawn_after_shared_self_write_wake(
     broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -5417,6 +6183,7 @@ def test_process_once_launches_service_spawn_in_same_reconcile_turn(
     drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
     manager._task_monitor_enabled = True
     manager._task_monitor_restart_backoff_ns = 0
+    manager._last_managed_service_convergence_ns = 0
     monkeypatch.setattr(
         manager,
         "_evaluate_dispatch_ownership",
@@ -5432,6 +6199,12 @@ def test_process_once_launches_service_spawn_in_same_reconcile_turn(
 
     try:
         manager.process_once()
+        assert launched == []
+        for _ in range(3):
+            manager.wait_for_activity(timeout=None)
+            manager.process_once()
+            if "task-monitor" in launched:
+                break
     finally:
         manager.stop(join=False)
         manager.cleanup()
@@ -6338,13 +7111,11 @@ def test_manager_registers_when_lower_canonical_manager_is_stale(
 
     pending = manager._leader_probe_pending.get(lower_tid)
     assert pending is not None
-    manager._leader_probe_pending[lower_tid] = pending.__class__(
-        tid=pending.tid,
-        row_timestamp=pending.row_timestamp,
-        ctrl_in_name=pending.ctrl_in_name,
-        ctrl_out_name=pending.ctrl_out_name,
-        request_id=pending.request_id,
-        deadline_ns=time.time_ns() - 1,
+    manager._loop_iteration += 1
+    manager._active_dispatch_manager_records(
+        consume_stored=True,
+        resolve_unanswered=True,
+        retire_absent=True,
     )
     manager._refresh_manager_registration()
 
@@ -6354,9 +7125,8 @@ def test_manager_registers_when_lower_canonical_manager_is_stale(
     assert manager.tid in tids
 
 
-def test_manager_leadership_ping_probe_is_nonblocking(
+def test_manager_leadership_ping_probe_is_event_routed_and_cadence_owned(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     lower_tid = str(int(manager.tid) - 1)
@@ -6377,179 +7147,36 @@ def test_manager_leadership_ping_probe_is_nonblocking(
     pending = manager._leader_probe_pending[lower_tid]
     ping_messages = [json.loads(item) for item in drain(make_queue(ctrl_in_name))]
     assert ping_messages == [
-        {"command": CONTROL_PING, "request_id": pending.request_id}
-    ]
-
-    manager._leader_probe_pending[lower_tid] = pending.__class__(
-        tid=pending.tid,
-        row_timestamp=pending.row_timestamp,
-        ctrl_in_name=pending.ctrl_in_name,
-        ctrl_out_name=pending.ctrl_out_name,
-        request_id=pending.request_id,
-        deadline_ns=time.time_ns() - 1,
-    )
-    expired = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
-
-    assert expired.liveness == "unknown"
-    assert expired.reason == "ping_timeout"
-    assert lower_tid not in manager._leader_probe_pending
-
-
-def test_manager_leadership_ping_probe_timeout_deletes_exact_ping(
-    manager_setup: tuple[Manager, Callable[[str], Queue]],
-) -> None:
-    manager, make_queue = manager_setup
-    lower_tid = str(int(manager.tid) - 1)
-    ctrl_in_name = f"T{lower_tid}.ctrl_in"
-    ctrl_out_name = f"T{lower_tid}.ctrl_out"
-    record = _manager_service_record(
-        manager,
-        tid=lower_tid,
-        runtime_handle=_external_supervisor_runtime_handle(),
-        ctrl_in=ctrl_in_name,
-        ctrl_out=ctrl_out_name,
-    )
-
-    initial = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
-    assert initial.reason == "ping_pending"
-    pending = manager._leader_probe_pending[lower_tid]
-    assert make_queue(ctrl_in_name).stats().total == 1
-    manager._leader_probe_pending[lower_tid] = pending.__class__(
-        tid=pending.tid,
-        row_timestamp=pending.row_timestamp,
-        ctrl_in_name=pending.ctrl_in_name,
-        ctrl_out_name=pending.ctrl_out_name,
-        request_id=pending.request_id,
-        deadline_ns=time.time_ns() - 1,
-        ctrl_in_message_id=pending.ctrl_in_message_id,
-    )
-
-    expired = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
-
-    assert expired.reason == "ping_timeout"
-    assert make_queue(ctrl_in_name).stats().total == 0
-    assert lower_tid not in manager._leader_probe_pending
-
-
-def test_manager_leadership_probe_timeout_sweeps_own_keyed_reply(
-    manager_setup: tuple[Manager, Callable[[str], Queue]],
-) -> None:
-    """A timed-out leadership probe retires ctrl_out replies keyed to it.
-
-    A reply bearing the probe's request_id that cannot coerce to a matched
-    PONG (missing task_status) must still be swept at timeout; replies keyed
-    to other request_ids survive untouched.
-
-    Spec: [MF-3], [MANAGER.8]
-    """
-    manager, make_queue = manager_setup
-    lower_tid = str(int(manager.tid) - 1)
-    ctrl_in_name = f"T{lower_tid}.ctrl_in"
-    ctrl_out_name = f"T{lower_tid}.ctrl_out"
-    record = _manager_service_record(
-        manager,
-        tid=lower_tid,
-        runtime_handle=_external_supervisor_runtime_handle(),
-        ctrl_in=ctrl_in_name,
-        ctrl_out=ctrl_out_name,
-    )
-
-    initial = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
-    assert initial.reason == "ping_pending"
-    pending = manager._leader_probe_pending[lower_tid]
-    make_queue(ctrl_out_name).write(
-        json.dumps(
-            {
-                "command": CONTROL_PING,
-                "status": "ok",
-                "message": "PONG",
-                "request_id": pending.request_id,
-                "tid": lower_tid,
-            }
-        )
-    )
-    bystander_pong = json.dumps(
         {
             "command": CONTROL_PING,
-            "status": "ok",
-            "message": "PONG",
-            "request_id": "bystander-request",
-            "tid": lower_tid,
-            "task_status": "running",
+            "request_id": pending.request_id,
+            "reply_to": manager._queue_names["ctrl_in"],
         }
-    )
-    make_queue(ctrl_out_name).write(bystander_pong)
-    manager._leader_probe_pending[lower_tid] = pending.__class__(
-        tid=pending.tid,
-        row_timestamp=pending.row_timestamp,
-        ctrl_in_name=pending.ctrl_in_name,
-        ctrl_out_name=pending.ctrl_out_name,
-        request_id=pending.request_id,
-        deadline_ns=time.time_ns() - 1,
-        ctrl_in_message_id=pending.ctrl_in_message_id,
-    )
+    ]
 
-    expired = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+    same_turn = manager._manager_pong_dispatch_proof(
+        record,
+        now_ns=time.time_ns(),
+        consume_stored=True,
+        resolve_unanswered=True,
+    )
+    assert same_turn.reason == "ping_pending"
+    assert lower_tid in manager._leader_probe_pending
 
-    assert expired.reason == "ping_timeout"
-    assert make_queue(ctrl_in_name).stats().total == 0
+    manager._loop_iteration += 1
+    unanswered = manager._manager_pong_dispatch_proof(
+        record,
+        now_ns=time.time_ns(),
+        consume_stored=True,
+        resolve_unanswered=True,
+    )
+    assert unanswered.liveness == "unknown"
+    assert unanswered.reason == "ping_unanswered"
     assert lower_tid not in manager._leader_probe_pending
-    assert list(make_queue(ctrl_out_name).peek_generator()) == [bystander_pong]
 
 
-def test_manager_leadership_probe_abandonment_sweeps_own_keyed_reply(
+def test_manager_leadership_stores_pong_until_owning_reducer_runs(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
-) -> None:
-    """An abandoned leadership probe retires ctrl_out replies keyed to it.
-
-    When the target registry row timestamp moves, the pending probe is
-    abandoned; a pong that already arrived for it must be swept so the
-    abandoned probe's keyed reply does not accumulate in ctrl_out.
-
-    Spec: [MF-3], [MANAGER.8]
-    """
-    manager, make_queue = manager_setup
-    lower_tid = str(int(manager.tid) - 1)
-    ctrl_in_name = f"T{lower_tid}.ctrl_in"
-    ctrl_out_name = f"T{lower_tid}.ctrl_out"
-    record = _manager_service_record(
-        manager,
-        tid=lower_tid,
-        runtime_handle=_external_supervisor_runtime_handle(),
-        ctrl_in=ctrl_in_name,
-        ctrl_out=ctrl_out_name,
-    )
-    record["_timestamp"] = 111
-
-    initial = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
-    assert initial.reason == "ping_pending"
-    pending = manager._leader_probe_pending[lower_tid]
-    assert pending.row_timestamp == 111
-    make_queue(ctrl_out_name).write(
-        json.dumps(
-            {
-                "command": CONTROL_PING,
-                "status": "ok",
-                "message": "PONG",
-                "request_id": pending.request_id,
-                "tid": lower_tid,
-                "task_status": "running",
-            }
-        )
-    )
-
-    moved = dict(record, _timestamp=222)
-    proof = manager._manager_pong_dispatch_proof(moved, now_ns=time.time_ns())
-
-    assert proof.reason == "leadership_ping_budget_exhausted"
-    assert lower_tid not in manager._leader_probe_pending
-    assert make_queue(ctrl_in_name).stats().total == 0
-    assert list(make_queue(ctrl_out_name).peek_generator()) == []
-
-
-def test_manager_leadership_ping_probe_accepts_later_pong(
-    manager_setup: tuple[Manager, Callable[[str], Queue]],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     lower_tid = str(int(manager.tid) - 1)
@@ -6562,40 +7189,116 @@ def test_manager_leadership_ping_probe_accepts_later_pong(
         ctrl_in=ctrl_in_name,
         ctrl_out=ctrl_out_name,
     )
-
     initial = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
     assert initial.reason == "ping_pending"
     pending = manager._leader_probe_pending[lower_tid]
-    make_queue(ctrl_out_name).write(
-        json.dumps(
-            {
-                "command": CONTROL_PING,
-                "status": "ok",
-                "message": "PONG",
-                "request_id": pending.request_id,
-                "tid": lower_tid,
-                "task_status": "running",
-                "role": "manager",
-                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                "ctrl_in": ctrl_in_name,
-                "ctrl_out": ctrl_out_name,
-                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
-                "weft_context": str(manager._manager_context().root),
-                "should_stop": False,
-            }
-        )
+    _write_manager_pong(
+        manager,
+        make_queue,
+        pending,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
     )
 
-    proof = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+    stored = manager._leader_probe_pending[lower_tid]
+    assert stored.pong is not None
+    nonowning = manager._manager_pong_dispatch_proof(
+        record,
+        now_ns=time.time_ns(),
+    )
+    assert nonowning.reason == "ping_pending"
+    assert manager._leader_probe_pending[lower_tid].pong is not None
 
+    proof = manager._manager_pong_dispatch_proof(
+        record,
+        now_ns=time.time_ns(),
+        consume_stored=True,
+    )
     assert proof.liveness == "live"
     assert proof.dispatch_eligible is True
     assert proof.source == "control-pong"
     assert lower_tid not in manager._leader_probe_pending
-    assert list(make_queue(ctrl_out_name).peek_generator()) == []
 
 
-def test_manager_leadership_keeps_namespace_ambiguous_host_row_after_ping_timeout(
+def test_manager_control_reply_drops_ambiguous_pong(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    manager, make_queue = manager_setup
+    target_tid = str(int(manager.tid) - 1)
+    request_id = "shared-request"
+    manager._leader_probe_pending[target_tid] = manager_mod._ManagerPendingPongProbe(
+        tid=target_tid,
+        row_timestamp=1,
+        request_id=request_id,
+        created_turn=manager._loop_iteration,
+    )
+    service_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        tid=target_tid,
+        timestamp=1,
+    )
+    manager._service_probe_pending[service_key] = manager_mod._ServicePendingPongProbe(
+        key=service_key,
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        tid=target_tid,
+        row_timestamp=1,
+        source="service-registry-pong",
+        request_id=request_id,
+        created_turn=manager._loop_iteration,
+    )
+    make_queue(manager._queue_names["ctrl_in"]).write(
+        json.dumps(
+            {
+                "command": CONTROL_PING,
+                "status": "ok",
+                "message": "PONG",
+                "request_id": request_id,
+                "tid": target_tid,
+                "task_status": "running",
+            }
+        )
+    )
+
+    manager._drain_control_queue_first()
+
+    assert manager._leader_probe_pending[target_tid].pong is None
+    assert manager._service_probe_pending[service_key].pong is None
+
+
+def test_complete_leadership_scan_retires_absent_probe_but_failed_scan_retains_it(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    missing_tid = str(int(manager.tid) - 100)
+
+    def add_pending() -> None:
+        manager._leader_probe_pending[missing_tid] = (
+            manager_mod._ManagerPendingPongProbe(
+                tid=missing_tid,
+                row_timestamp=1,
+                request_id="missing-manager",
+                created_turn=manager._loop_iteration,
+            )
+        )
+
+    manager._manager_registry_snapshot = {}
+    add_pending()
+    monkeypatch.setattr(manager, "_update_manager_registry_snapshot", lambda: True)
+
+    manager._active_dispatch_manager_records(retire_absent=True)
+
+    assert missing_tid not in manager._leader_probe_pending
+
+    add_pending()
+    monkeypatch.setattr(manager, "_update_manager_registry_snapshot", lambda: False)
+
+    assert manager._active_dispatch_manager_records(retire_absent=True) is None
+    assert missing_tid in manager._leader_probe_pending
+
+
+def test_manager_forced_leadership_pass_does_not_manufacture_no_pong(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6628,16 +7331,10 @@ def test_manager_leadership_keeps_namespace_ambiguous_host_row_after_ping_timeou
 
     assert manager._maybe_yield_leadership(force=True) is False
     pending = manager._leader_probe_pending[lower_tid]
-    manager._leader_probe_pending[lower_tid] = pending.__class__(
-        tid=pending.tid,
-        row_timestamp=pending.row_timestamp,
-        ctrl_in_name=pending.ctrl_in_name,
-        ctrl_out_name=pending.ctrl_out_name,
-        request_id=pending.request_id,
-        deadline_ns=time.time_ns() - 1,
-    )
+    manager._loop_iteration += 1
 
     assert manager._maybe_yield_leadership(force=True) is False
+    assert manager._leader_probe_pending[lower_tid] == pending
     assert manager.should_stop is False
     rows = _managed_service_owner_rows(make_queue)
     assert any(row.get("owner_tid") == lower_tid for row in rows)
@@ -7410,6 +8107,16 @@ def test_manager_child_termination_uses_one_deadline_for_multiple_children(
     monkeypatch.setattr(manager_mod, "time", fake_time)
     monkeypatch.setattr(base_task_mod, "time", fake_time)
 
+    def advance_sentinel_wait(timeout: float) -> bool:
+        clock["now"] += timeout
+        return False
+
+    monkeypatch.setattr(
+        manager._child_sentinel_adapter,
+        "wait",
+        advance_sentinel_wait,
+    )
+
     deadline = clock["now"] + 0.08
     manager._terminate_children(deadline)
 
@@ -7994,7 +8701,11 @@ def test_manager_public_dispatch_steals_work_when_registry_ownership_is_unproved
         launched.append(child_spec.tid)
         return True
 
-    monkeypatch.setattr(manager, "_read_active_manager_records", lambda: active_records)
+    monkeypatch.setattr(
+        manager,
+        "_read_active_manager_records",
+        lambda **_kwargs: active_records,
+    )
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
 
     try:
@@ -8049,12 +8760,12 @@ def test_manager_leadership_yields_when_only_public_backlog_is_pending(
     monkeypatch.setattr(
         manager,
         "_read_active_manager_records",
-        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+        lambda **_kwargs: {lower_leader_tid: {"tid": lower_leader_tid}},
     )
     monkeypatch.setattr(
         manager,
         "_active_dispatch_manager_records",
-        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+        lambda **_kwargs: {lower_leader_tid: {"tid": lower_leader_tid}},
     )
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
 
@@ -8110,7 +8821,7 @@ def test_manager_leadership_requeues_reserved_public_work_before_yield(
     monkeypatch.setattr(
         manager,
         "_read_active_manager_records",
-        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+        lambda **_kwargs: {lower_leader_tid: {"tid": lower_leader_tid}},
     )
 
     try:
@@ -8133,7 +8844,7 @@ def test_manager_leadership_waits_while_child_launch_is_in_flight(
     manager, _make_queue = manager_setup
     manager._active_child_launches["pending-child"] = object()  # type: ignore[assignment]
 
-    def fail_read_active_records() -> dict[str, dict[str, Any]]:
+    def fail_read_active_records(**_kwargs: object) -> dict[str, dict[str, Any]]:
         raise AssertionError("active child launch should block leadership yield check")
 
     monkeypatch.setattr(
@@ -8454,7 +9165,7 @@ def test_manager_deletes_stale_internal_reserved_for_inactive_manager(
     monkeypatch.setattr(
         manager,
         "_read_active_manager_records",
-        lambda: {
+        lambda **_kwargs: {
             manager.tid: {"tid": manager.tid},
             active_tid: {"tid": active_tid},
         },
@@ -8484,7 +9195,11 @@ def test_manager_keeps_internal_reserved_when_manager_liveness_unknown(
     stale_reserved = make_queue(f"T{stale_tid}.internal_reserved")
     drain(stale_reserved)
     stale_reserved.write("unknown")
-    monkeypatch.setattr(manager, "_read_active_manager_records", lambda: None)
+    monkeypatch.setattr(
+        manager,
+        "_read_active_manager_records",
+        lambda **_kwargs: None,
+    )
 
     try:
         manager._cleanup_stale_internal_reserved_queues(force=True)
@@ -8609,7 +9324,7 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     monkeypatch.setattr(
         manager,
         "_read_active_manager_records",
-        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+        lambda **_kwargs: {lower_leader_tid: {"tid": lower_leader_tid}},
     )
     monkeypatch.setattr(
         manager,
@@ -8824,30 +9539,63 @@ def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
 
     assert manager._maybe_yield_leadership(force=True) is False
     pending = manager._leader_probe_pending[lower_tid]
-    assert pending.ctrl_out_name == f"T{lower_tid}.ctrl_out"
-    make_queue(pending.ctrl_out_name).write(
-        json.dumps(
-            {
-                "command": CONTROL_PING,
-                "status": "ok",
-                "message": "PONG",
-                "request_id": pending.request_id,
-                "tid": lower_tid,
-                "task_status": "running",
-                "role": "manager",
-                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                "ctrl_in": f"T{lower_tid}.ctrl_in",
-                "ctrl_out": pending.ctrl_out_name,
-                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
-                "weft_context": str(manager._manager_context().root),
-                "should_stop": False,
-            }
-        )
+    _write_manager_pong(
+        manager,
+        make_queue,
+        pending,
+        ctrl_in_name=f"T{lower_tid}.ctrl_in",
+        ctrl_out_name=f"T{lower_tid}.ctrl_out",
     )
 
     yielded = manager._maybe_yield_leadership(force=True)
     assert yielded is True
     assert manager.should_stop is True
+
+
+def test_active_child_launch_preserves_stored_leadership_pong_and_policy_clock(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    lower_tid = str(int(manager.tid) - 1)
+    ctrl_in_name = f"T{lower_tid}.ctrl_in"
+    ctrl_out_name = f"T{lower_tid}.ctrl_out"
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=lower_tid,
+                runtime_handle=_host_runtime_handle(987654321),
+            )
+        )
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "handle_has_live_host_process",
+        lambda _handle: False,
+    )
+    assert manager._maybe_yield_leadership(force=True) is False
+    pending = manager._leader_probe_pending[lower_tid]
+    _write_manager_pong(
+        manager,
+        make_queue,
+        pending,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+    )
+    previous_policy_ns = time.time_ns()
+    manager._last_leader_check_ns = previous_policy_ns
+    manager._active_child_launches["pending-child"] = cast(Any, object())
+
+    assert manager._maybe_yield_leadership() is False
+    assert manager._leader_probe_pending[lower_tid].pong is not None
+    assert manager._last_leader_check_ns == previous_policy_ns
+
+    manager._active_child_launches.clear()
+    assert manager._maybe_yield_leadership() is True
+    assert lower_tid not in manager._leader_probe_pending
+    assert manager._last_leader_check_ns == previous_policy_ns
 
 
 def test_manager_superseded_self_record_stops_without_republishing_active(
@@ -9191,7 +9939,8 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
 ) -> None:
     manager, make_queue = manager_setup
     ctrl_name = manager._queue_names["ctrl_in"]
-    ctrl_out = make_queue(manager._queue_names["ctrl_out"])
+    reply_name = f"T{int(manager.tid) + 1}.ctrl_in"
+    reply_queue = make_queue(reply_name)
     stuck_timestamp = 1777000000000005000
 
     class StuckControlQueue:
@@ -9201,7 +9950,11 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
             self.delete_calls = 0
 
         def peek_one(self, *, with_timestamps: bool = False) -> str | tuple[str, int]:
-            payload = encode_control_message(CONTROL_PING, request_id="stuck-control")
+            payload = encode_control_message(
+                CONTROL_PING,
+                request_id="stuck-control",
+                reply_to=reply_name,
+            )
             if with_timestamps:
                 return payload, stuck_timestamp
             return payload
@@ -9226,7 +9979,7 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
 
     assert time.monotonic() - start < 2.0
     assert stuck_queue.delete_calls == 1
-    raw_response = ctrl_out.read_one()
+    raw_response = reply_queue.read_one()
     assert raw_response is not None
     response = json.loads(raw_response)
     assert response["command"] == CONTROL_PING
@@ -9236,7 +9989,7 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
     manager._drain_control_queue_first()
 
     assert stuck_queue.delete_calls == 1
-    assert ctrl_out.read_one() is None
+    assert reply_queue.read_one() is None
     assert manager._has_pending_messages() is False
     assert manager._control_allows_child_launch() is True
 
@@ -10727,6 +11480,7 @@ def test_manager_leadership_unknown_expiry_controls_ping_without_changing_eviden
             {
                 "command": CONTROL_PING,
                 "request_id": manager._leader_probe_pending[tid].request_id,
+                "reply_to": manager._queue_names["ctrl_in"],
             }
         ]
 

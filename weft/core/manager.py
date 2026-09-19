@@ -16,12 +16,15 @@ import logging
 import math
 import multiprocessing
 import os
+import queue as thread_queue
 import signal
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from multiprocessing.connection import Connection
+from multiprocessing.connection import wait as wait_for_connections
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -55,16 +58,15 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
-    MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
     MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_ADMISSION_RECHECK_SECONDS,
-    MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_CHILD_INBOX_SEED_ATTEMPTS,
     MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS,
     MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT,
     MANAGER_CHILD_LAUNCH_WORKER_LANE,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
+    MANAGER_CHILD_STOP_ESCALATION_SECONDS,
     MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS,
     MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
     MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
@@ -73,7 +75,6 @@ from weft._constants import (
     MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS,
     MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS,
     MANAGER_LEADERSHIP_PING_CACHE_TTL_SECONDS,
-    MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
@@ -137,11 +138,13 @@ from weft.helpers import (
 )
 from weft.liveness.policy import mapping_row_is_live
 
-from .control_messages import ControlRequest, encode_control_message
+from .control_messages import (
+    ControlRequest,
+    encode_control_message,
+)
 from .control_probe import (
     coerce_pong_response,
     pong_proves_dispatch_eligible,
-    reply_bears_request_id,
 )
 from .launcher import launch_task_process
 from .manager_services import (
@@ -254,6 +257,7 @@ class ManagedChild:
     launched_ns: int = 0
     last_liveness_probe_ns: int = 0
     terminal_proof_missing_since_ns: int = 0
+    sentinel_observed_ns: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,11 +312,9 @@ class _ManagerPendingPongProbe:
 
     tid: str
     row_timestamp: int | None
-    ctrl_in_name: str
-    ctrl_out_name: str
     request_id: str
-    deadline_ns: int
-    ctrl_in_message_id: int | None = None
+    created_turn: int
+    pong: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,11 +326,161 @@ class _ServicePendingPongProbe:
     tid: str
     row_timestamp: int | None
     source: Literal["control-pong", "service-registry-pong"]
-    ctrl_in_name: str
-    ctrl_out_name: str
     request_id: str
-    deadline_ns: int
-    ctrl_in_message_id: int | None = None
+    created_turn: int
+    pong: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagerChildSentinelEvent:
+    """One child-sentinel readiness event observed off the reactor thread."""
+
+    tid: str
+    sentinel: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagerChildSentinelFailure:
+    """Fatal observer failure delivered back to the Manager reactor."""
+
+    error: BaseException
+
+
+class _ManagerChildSentinelAdapter:
+    """Bridge child process sentinels into the Manager's local wake source.
+
+    The observer owns only immutable ``(tid, sentinel)`` identities. The
+    Manager reactor remains the sole owner of Process objects, registry
+    mutation, liveness checks, and reaping.
+    """
+
+    def __init__(self, notify_activity: Callable[[], None]) -> None:
+        recv_conn, send_conn = multiprocessing.Pipe(duplex=False)
+        self._recv_conn: Connection = recv_conn
+        self._send_conn: Connection = send_conn
+        self._notify_activity = notify_activity
+        self._lock = threading.Lock()
+        self._membership: tuple[tuple[str, int], ...] = ()
+        self._suppressed: set[tuple[str, int]] = set()
+        self._wake_token_pending = False
+        self._stopping = False
+        self._closed = False
+        self._results: thread_queue.Queue[
+            _ManagerChildSentinelEvent | _ManagerChildSentinelFailure
+        ] = thread_queue.Queue()
+        self._result_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._observe,
+            name="weft-manager-child-sentinels",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def publish(self, membership: Sequence[tuple[str, int]]) -> None:
+        """Publish a complete immutable sentinel-membership snapshot."""
+
+        snapshot = tuple(dict.fromkeys(membership))
+        with self._lock:
+            if self._stopping or self._closed:
+                return
+            self._membership = snapshot
+            self._suppressed.intersection_update(snapshot)
+            self._wake_observer_locked()
+
+    def drain(
+        self,
+    ) -> list[_ManagerChildSentinelEvent | _ManagerChildSentinelFailure]:
+        """Drain all observer results without blocking."""
+
+        results: list[_ManagerChildSentinelEvent | _ManagerChildSentinelFailure] = []
+        while True:
+            try:
+                results.append(self._results.get_nowait())
+            except thread_queue.Empty:
+                self._result_event.clear()
+                try:
+                    results.append(self._results.get_nowait())
+                except thread_queue.Empty:
+                    return results
+                self._result_event.set()
+
+    def wait(self, timeout: float) -> bool:
+        """Wait for an observed sentinel or observer failure."""
+
+        return self._result_event.wait(timeout=max(0.0, timeout))
+
+    def close(self, *, timeout: float | None = None) -> None:
+        """Stop the observer, close its pipe, and surface a fatal failure."""
+
+        with self._lock:
+            if self._closed:
+                return
+            self._stopping = True
+            self._wake_observer_locked()
+            thread = self._thread
+        if thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                raise RuntimeError("Manager child-sentinel observer did not stop")
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._recv_conn.close()
+        self._send_conn.close()
+        for result in self.drain():
+            if isinstance(result, _ManagerChildSentinelFailure):
+                raise result.error
+
+    def _wake_observer_locked(self) -> None:
+        if self._wake_token_pending or self._closed:
+            return
+        try:
+            self._send_conn.send_bytes(b"w")
+        except (BrokenPipeError, EOFError, OSError) as exc:
+            self._publish_failure(exc)
+            return
+        self._wake_token_pending = True
+
+    def _publish_failure(self, error: BaseException) -> None:
+        self._results.put(_ManagerChildSentinelFailure(error))
+        self._result_event.set()
+        self._notify_activity()
+
+    def _observe(self) -> None:
+        try:
+            while True:
+                with self._lock:
+                    if self._stopping:
+                        return
+                    membership = tuple(
+                        item
+                        for item in self._membership
+                        if item not in self._suppressed
+                    )
+                waitables: list[Any] = [self._recv_conn]
+                waitables.extend(sentinel for _tid, sentinel in membership)
+                ready = wait_for_connections(waitables)
+                if self._recv_conn in ready:
+                    while self._recv_conn.poll():
+                        self._recv_conn.recv_bytes()
+                    with self._lock:
+                        self._wake_token_pending = False
+                        if self._stopping:
+                            return
+                fired = [item for item in membership if item[1] in ready]
+                if not fired:
+                    continue
+                with self._lock:
+                    current = set(self._membership)
+                    fired = [item for item in fired if item in current]
+                    self._suppressed.update(fired)
+                for tid, sentinel in fired:
+                    self._results.put(_ManagerChildSentinelEvent(tid, sentinel))
+                self._result_event.set()
+                self._notify_activity()
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-376] exception
+            self._publish_failure(exc)
 
 
 class Manager(ServiceTask):
@@ -386,6 +538,9 @@ class Manager(ServiceTask):
             )
         )
         self._child_processes: dict[str, ManagedChild] = {}
+        self._child_sentinel_adapter = _ManagerChildSentinelAdapter(
+            self._strategy.notify_activity
+        )
         self._active_child_launches: dict[str, _ManagerChildLaunchRequest] = {}
         self._admission_max_connections = int(
             self._weft_config.get("ADMISSION_MAX_CONNECTIONS", 0)
@@ -425,8 +580,10 @@ class Manager(ServiceTask):
         self._drain_stops_children = True
         self._drain_leader_tid: str | None = None
         self._drain_signaled_children: set[str] = set()
+        self._drain_escalated_children: set[str] = set()
         self._drain_signal_started_ns: dict[str, int] = {}
         self._drain_started_ns: int | None = None
+        self._drain_immediate_work_pending = False
         self._stalled_control_message_id: int | None = None
         self._stalled_control_retry_after_ns = 0
         self._stalled_control_last_log_ns = 0
@@ -443,6 +600,7 @@ class Manager(ServiceTask):
         self._managed_internal_spawn_enqueued = False
         self._last_managed_service_convergence_ns = 0
         self._autostart_last_scan_ns = 0
+        self._autostart_last_scan_complete = False
         self._autostart_scan_interval_ns = 1_000_000_000
         self._task_monitor_enabled = bool(
             self._weft_config.get("TASK_MONITOR_ENABLED", True)
@@ -488,12 +646,18 @@ class Manager(ServiceTask):
             self._last_broker_timestamp = 0
             self._last_broker_probe_ns = 0
         self._manager_service_key = manager_service_key(self._manager_context())
+        leader_probes_before = set(self._leader_probe_pending)
         self._register_manager()
         if self._maybe_yield_leadership(force=True):
             return
+        if set(self._leader_probe_pending) - leader_probes_before:
+            self._last_leader_check_ns = time.time_ns()
         self._activate_service_task(set_spawning_title=True)
         self._emit_manager_loop_summary(force=True)
+        service_probes_before = set(self._service_probe_pending)
         self._reconcile_managed_services(force=True)
+        if set(self._service_probe_pending) - service_probes_before:
+            self._last_managed_service_convergence_ns = time.time_ns()
         self._managed_service_duplicate_scan_pending.clear()
         self._managed_internal_spawn_enqueued = False
         self._register_atexit_callback()
@@ -1051,6 +1215,54 @@ class Manager(ServiceTask):
             return True
         return super()._handle_control_command(request, context)
 
+    def _handle_control_reply(
+        self, message: str, timestamp: int, context: QueueMessageContext
+    ) -> None:
+        """Store one exactly matched PONG for the owning policy reducer.
+
+        Reply dispatch remains an in-memory operation. The shared control
+        handler owns acknowledgement of the source row.
+
+        Spec: [MA-1.4], [MA-1.6a], [MF-6], [MANAGER.8], [MANAGER.15]
+        """
+
+        del timestamp, context
+        matches: list[tuple[str, str, dict[str, Any]]] = []
+        for key, leader_probe in self._leader_probe_pending.items():
+            payload = coerce_pong_response(
+                message,
+                tid=leader_probe.tid,
+                request_id=leader_probe.request_id,
+            )
+            if payload is not None:
+                matches.append(("leader", key, payload))
+        for key, service_probe in self._service_probe_pending.items():
+            payload = coerce_pong_response(
+                message,
+                tid=service_probe.tid,
+                request_id=service_probe.request_id,
+            )
+            if payload is not None:
+                matches.append(("service", key, payload))
+        if len(matches) != 1:
+            return
+
+        kind, key, payload = matches[0]
+        if kind == "leader":
+            stored_leader_probe = self._leader_probe_pending.get(key)
+            if stored_leader_probe is not None:
+                self._leader_probe_pending[key] = replace(
+                    stored_leader_probe,
+                    pong=payload,
+                )
+            return
+        stored_service_probe = self._service_probe_pending.get(key)
+        if stored_service_probe is not None:
+            self._service_probe_pending[key] = replace(
+                stored_service_probe,
+                pong=payload,
+            )
+
     def _launch_child_task(
         self,
         child_spec: TaskSpec,
@@ -1259,6 +1471,7 @@ class Manager(ServiceTask):
             message_timestamp=request.message_timestamp,
             launched_ns=result.launched_ns or time.time_ns(),
         )
+        self._publish_child_sentinel_membership()
         self._clear_admission_retry()
         self._invalidate_leadership_work_cache()
         if request.service_key is not None:
@@ -2512,6 +2725,8 @@ class Manager(ServiceTask):
         record: Mapping[str, Any],
         *,
         now_ns: int,
+        consume_stored: bool = False,
+        resolve_unanswered: bool = False,
     ) -> ManagerLeadershipProof:
         tid = record.get("tid")
         timestamp = record.get("_timestamp", record.get("timestamp"))
@@ -2532,12 +2747,9 @@ class Manager(ServiceTask):
                     pending,
                     record=record,
                     now_ns=now_ns,
+                    consume_stored=consume_stored,
+                    resolve_unanswered=resolve_unanswered,
                 )
-            self._delete_exact_probe_message(
-                pending.ctrl_in_name,
-                pending.ctrl_in_message_id,
-            )
-            self._sweep_probe_reply_rows(pending.ctrl_out_name, pending.request_id)
             self._leader_probe_pending.pop(cache_key, None)
         if self._leader_probe_used_this_turn:
             return ManagerLeadershipProof(
@@ -2547,9 +2759,12 @@ class Manager(ServiceTask):
             )
         self._leader_probe_used_this_turn = True
         ctrl_in_name = self._manager_ctrl_queue_name(tid, record)
-        ctrl_out_name = self._manager_ctrl_out_queue_name(tid, record)
         request_id = uuid.uuid4().hex
-        ping_message = encode_control_message(CONTROL_PING, request_id=request_id)
+        ping_message = encode_control_message(
+            CONTROL_PING,
+            request_id=request_id,
+            reply_to=self._queue_names["ctrl_in"],
+        )
         try:
             with self._get_connected_queue().get_connection() as broker:
                 broker.write(ctrl_in_name, ping_message)
@@ -2561,20 +2776,11 @@ class Manager(ServiceTask):
             )
             self._leader_probe_cache[cache_key] = (now_ns, row_timestamp, proof)
             return proof
-        ctrl_in_message_id = self._find_exact_probe_message_id(
-            ctrl_in_name,
-            ping_message,
-        )
-
-        timeout_ns = int(MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS * 1_000_000_000)
         self._leader_probe_pending[cache_key] = _ManagerPendingPongProbe(
             tid=tid,
             row_timestamp=row_timestamp,
-            ctrl_in_name=ctrl_in_name,
-            ctrl_out_name=ctrl_out_name,
             request_id=request_id,
-            deadline_ns=now_ns + max(0, timeout_ns),
-            ctrl_in_message_id=ctrl_in_message_id,
+            created_turn=self._loop_iteration,
         )
         return ManagerLeadershipProof(
             "unknown",
@@ -2582,96 +2788,35 @@ class Manager(ServiceTask):
             reason="ping_pending",
         )
 
-    def _find_exact_probe_message_id(
-        self,
-        queue_name: str,
-        message: str,
-    ) -> int | None:
-        """Find the exact row id for a manager-owned probe payload."""
-
-        try:
-            latest_message_id: int | None = None
-            with self._get_connected_queue().get_connection() as broker:
-                iterator = broker.peek_generator(queue_name, with_timestamps=True)
-                with closing_queue_iterator(iterator) as rows:
-                    for item in rows:
-                        body, message_id = cast(tuple[str, int], item)
-                        if body == message:
-                            latest_message_id = message_id
-            return latest_message_id
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to locate internal probe row",
-                extra={"queue": queue_name},
-                exc_info=True,
-            )
-            return None
-
     def _advance_manager_pong_probe(
         self,
         probe: _ManagerPendingPongProbe,
         *,
         record: Mapping[str, Any],
         now_ns: int,
+        consume_stored: bool,
+        resolve_unanswered: bool,
     ) -> ManagerLeadershipProof:
-        """Advance one non-blocking manager PING probe without sleeping."""
+        """Advance one event-fed manager PING on its owning policy cadence."""
 
-        matched_proof: ManagerLeadershipProof | None = None
-        matched_message_id: int | None = None
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                iterator = broker.peek_generator(
-                    probe.ctrl_out_name, with_timestamps=True
-                )
-                with closing_queue_iterator(iterator) as rows:
-                    for item in rows:
-                        if not isinstance(item, tuple) or len(item) != 2:
-                            continue
-                        body, _timestamp = item
-                        payload = coerce_pong_response(
-                            str(body),
-                            tid=probe.tid,
-                            request_id=probe.request_id,
-                        )
-                        if payload is None:
-                            continue
-                        matched_proof = self._manager_pong_payload_proof(
-                            payload,
-                            record=record,
-                            ctrl_in_name=probe.ctrl_in_name,
-                            ctrl_out_name=probe.ctrl_out_name,
-                        )
-                        matched_message_id = int(_timestamp)
-                        break
-        except (BrokerError, OSError, RuntimeError) as exc:
-            proof = ManagerLeadershipProof(
-                "unknown",
-                source="control-pong",
-                reason=str(exc),
-            )
-            self._delete_exact_probe_message(
-                probe.ctrl_in_name,
-                probe.ctrl_in_message_id,
+        if consume_stored and probe.pong is not None:
+            ctrl_in_name = self._manager_ctrl_queue_name(probe.tid, record)
+            ctrl_out_name = self._manager_ctrl_out_queue_name(probe.tid, record)
+            proof = self._manager_pong_payload_proof(
+                probe.pong,
+                record=record,
+                ctrl_in_name=ctrl_in_name,
+                ctrl_out_name=ctrl_out_name,
             )
             self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
             return proof
 
-        if matched_proof is not None:
-            self._delete_exact_probe_message(probe.ctrl_out_name, matched_message_id)
-            self._complete_manager_pong_probe(probe, matched_proof, now_ns=now_ns)
-            return matched_proof
-
-        if now_ns >= probe.deadline_ns:
+        if resolve_unanswered and probe.created_turn < self._loop_iteration:
             proof = ManagerLeadershipProof(
                 "unknown",
                 source="control-pong",
-                reason="ping_timeout",
+                reason="ping_unanswered",
             )
-            self._delete_exact_probe_message(
-                probe.ctrl_in_name,
-                probe.ctrl_in_message_id,
-            )
-            self._sweep_probe_reply_rows(probe.ctrl_out_name, probe.request_id)
             self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
             return proof
 
@@ -2707,55 +2852,6 @@ class Manager(ServiceTask):
             reason="pong_not_dispatch_eligible",
         )
 
-    def _delete_exact_probe_message(
-        self,
-        queue_name: str,
-        message_id: int | None,
-    ) -> None:
-        """Best-effort exact cleanup for manager-owned internal probe rows."""
-
-        if message_id is None:
-            return
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                broker.delete_message_ids(queue_name, [message_id])
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to delete internal probe row",
-                extra={"queue": queue_name, "message_id": message_id},
-                exc_info=True,
-            )
-
-    def _sweep_probe_reply_rows(self, ctrl_out_name: str, request_id: str) -> None:
-        """Best-effort sweep of ctrl_out rows keyed to one finished probe.
-
-        Retires late or unmatched keyed replies when a pending probe is
-        abandoned or times out (single-reader contract): every row whose
-        payload bears the probe's exact ``request_id`` is deleted by exact
-        message ID; all other rows stay untouched. A reply landing after this
-        sweep is bounded by task-exit purge and terminal/dead-TID cleanup.
-
-        Spec: [MF-3], [MANAGER.8]
-        """
-
-        reply_ids: list[int] = []
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                iterator = broker.peek_generator(ctrl_out_name, with_timestamps=True)
-                with closing_queue_iterator(iterator) as rows:
-                    for item in rows:
-                        body, message_id = cast(tuple[str, int], item)
-                        if reply_bears_request_id(body, request_id=request_id):
-                            reply_ids.append(message_id)
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to scan ctrl_out for keyed probe replies",
-                extra={"queue": ctrl_out_name, "request_id": request_id},
-                exc_info=True,
-            )
-        for message_id in reply_ids:
-            self._delete_exact_probe_message(ctrl_out_name, message_id)
-
     def _complete_manager_pong_probe(
         self,
         probe: _ManagerPendingPongProbe,
@@ -2776,6 +2872,8 @@ class Manager(ServiceTask):
         *,
         now_ns: int,
         allow_ping: bool,
+        consume_stored: bool = False,
+        resolve_unanswered: bool = False,
     ) -> ManagerLeadershipProof:
         if record.get("status") != "active":
             return ManagerLeadershipProof("stale", reason="not_active")
@@ -2798,7 +2896,12 @@ class Manager(ServiceTask):
                 "stale", source="registry-heartbeat", reason="expired"
             )
         if allow_ping:
-            return self._manager_pong_dispatch_proof(record, now_ns=now_ns)
+            return self._manager_pong_dispatch_proof(
+                record,
+                now_ns=now_ns,
+                consume_stored=consume_stored,
+                resolve_unanswered=resolve_unanswered,
+            )
         return ManagerLeadershipProof("unknown", source="runtime-handle")
 
     def _update_manager_registry_snapshot(
@@ -3003,7 +3106,13 @@ class Manager(ServiceTask):
             return True
         return not self._registry_entry_is_expired(timestamp, now_ns=now_ns)
 
-    def _active_dispatch_manager_records(self) -> dict[str, dict[str, Any]] | None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-007] exception
+    def _active_dispatch_manager_records(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-007] exception
+        self,
+        *,
+        consume_stored: bool = False,
+        resolve_unanswered: bool = False,
+        retire_absent: bool = False,
+    ) -> dict[str, dict[str, Any]] | None:
         now_ns = time.time_ns()
         if not self._update_manager_registry_snapshot():
             return None
@@ -3014,6 +3123,7 @@ class Manager(ServiceTask):
         active: dict[str, dict[str, Any]] = {}
         stale_timestamps: list[int] = []
         unknown_seen = False
+        observed_probe_sources: set[tuple[str, int | None]] = set()
         for tid, record in list(self._manager_registry_snapshot.items()):
             timestamp = record.get("_timestamp")
             if isinstance(timestamp, int) and self._registry_entry_is_expired(
@@ -3025,6 +3135,10 @@ class Manager(ServiceTask):
                 continue
             if record.get("status") != SERVICE_STATUS_ACTIVE:
                 continue
+            if is_canonical_manager_record(record):
+                observed_probe_sources.add(
+                    (tid, timestamp if isinstance(timestamp, int) else None)
+                )
             if tid == self.tid and not self._unregistered and not self.should_stop:
                 if record.get("status") == "active" and is_canonical_manager_record(
                     record
@@ -3035,6 +3149,8 @@ class Manager(ServiceTask):
                 record,
                 now_ns=now_ns,
                 allow_ping=True,
+                consume_stored=consume_stored,
+                resolve_unanswered=resolve_unanswered,
             )
             if proof.liveness == "stale":
                 if isinstance(timestamp, int):
@@ -3046,6 +3162,11 @@ class Manager(ServiceTask):
                 continue
             if proof.dispatch_eligible:
                 active[tid] = record
+
+        if retire_absent:
+            for key, probe in tuple(self._leader_probe_pending.items()):
+                if (probe.tid, probe.row_timestamp) not in observed_probe_sources:
+                    self._leader_probe_pending.pop(key, None)
 
         active_tids = sorted(active)
         leader_tid = canonical_owner_tid(active)
@@ -3068,12 +3189,22 @@ class Manager(ServiceTask):
             return None
         return active
 
-    def _read_active_manager_records(self) -> dict[str, dict[str, Any]] | None:
+    def _read_active_manager_records(
+        self,
+        *,
+        consume_stored: bool = False,
+        resolve_unanswered: bool = False,
+        retire_absent: bool = False,
+    ) -> dict[str, dict[str, Any]] | None:
         """Return the live canonical manager snapshot or ``None`` on read failure.
 
         Spec: [MA-1.4], [MA-3]
         """
-        return self._active_dispatch_manager_records()
+        return self._active_dispatch_manager_records(
+            consume_stored=consume_stored,
+            resolve_unanswered=resolve_unanswered,
+            retire_absent=retire_absent,
+        )
 
     def _active_manager_records(self) -> dict[str, dict[str, Any]]:
         active = self._read_active_manager_records()
@@ -3225,20 +3356,35 @@ class Manager(ServiceTask):
             or the check interval has not elapsed.
         """
         now_ns = time.time_ns()
-        if (
-            not force
-            and now_ns - self._last_leader_check_ns < self._leader_check_interval_ns
-        ):
+        ordinary_due = not force and (
+            self._last_leader_check_ns <= 0
+            or now_ns - self._last_leader_check_ns >= self._leader_check_interval_ns
+        )
+        stored_reply_due = any(
+            probe.pong is not None for probe in self._leader_probe_pending.values()
+        )
+        if not force and not ordinary_due and not stored_reply_due:
             return self.should_stop
-        if not force and self._leader_check_turn == self._loop_iteration:
-            return self.should_stop
-        self._last_leader_check_ns = now_ns
-        self._leader_check_turn = self._loop_iteration
+        if ordinary_due and self._leader_check_turn == self._loop_iteration:
+            ordinary_due = False
+            if not stored_reply_due:
+                return self.should_stop
 
         if self._has_active_child_launches():
+            if ordinary_due:
+                self._last_leader_check_ns = now_ns
+                self._leader_check_turn = self._loop_iteration
             return False
 
-        active = self._read_active_manager_records()
+        if ordinary_due:
+            self._last_leader_check_ns = now_ns
+            self._leader_check_turn = self._loop_iteration
+
+        active = self._read_active_manager_records(
+            consume_stored=True,
+            resolve_unanswered=ordinary_due,
+            retire_absent=True,
+        )
         if active is None:
             self._emit_manager_ownership_decision(
                 DispatchOwnership(state="unknown"),
@@ -3374,6 +3520,40 @@ class Manager(ServiceTask):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _publish_child_sentinel_membership(self) -> None:
+        """Publish the complete tracked-child sentinel set to the adapter."""
+
+        membership: list[tuple[str, int]] = []
+        for tid, child in self._child_processes.items():
+            try:
+                sentinel = child.process.sentinel
+            except (AttributeError, ValueError):
+                continue
+            if isinstance(sentinel, int):
+                membership.append((tid, sentinel))
+        self._child_sentinel_adapter.publish(membership)
+
+    def _drain_child_sentinel_events(self) -> int:
+        """Record current child-sentinel events on the Manager reactor."""
+
+        observed = 0
+        for result in self._child_sentinel_adapter.drain():
+            if isinstance(result, _ManagerChildSentinelFailure):
+                raise result.error
+            child = self._child_processes.get(result.tid)
+            if child is None:
+                continue
+            try:
+                current_sentinel = child.process.sentinel
+            except (AttributeError, ValueError):
+                continue
+            if current_sentinel != result.sentinel:
+                continue
+            child.sentinel_observed_ns = time.time_ns()
+            child.last_liveness_probe_ns = 0
+            observed += 1
+        return observed
+
     def _child_has_exited(self, child: ManagedChild) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-008] exception
         """Return True when the child process is no longer live.
 
@@ -3604,6 +3784,7 @@ class Manager(ServiceTask):
             # autostart child exits instead of waiting for the next scan interval.
             self._autostart_last_scan_ns = 0
         if child_exited:
+            self._publish_child_sentinel_membership()
             # Child completion is activity. The manager should only begin its idle
             # countdown after in-flight work has actually finished.
             self._last_activity_ns = time.time_ns()
@@ -3622,6 +3803,17 @@ class Manager(ServiceTask):
             tid: self._managed_pids_for_child(tid) for tid in children
         }
 
+        observer_failure: BaseException | None = None
+        try:
+            self._drain_child_sentinel_events()
+        except BaseException as exc:
+            observer_failure = exc
+            logger.warning(
+                "Child-sentinel observer failed during Manager cleanup; "
+                "continuing child termination",
+                exc_info=True,
+            )
+
         self._cleanup_children(deadline=deadline)
         children.update(self._child_processes)
         for tid in self._child_processes:
@@ -3630,13 +3822,24 @@ class Manager(ServiceTask):
             )
 
         if not children:
+            if observer_failure is not None:
+                raise observer_failure
             return
 
         for tid, child in list(self._child_processes.items()):
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
         grace_deadline = time.monotonic() + (self._remaining_deadline(deadline) / 2.0)
-        self._wait_for_children_to_exit(min(deadline, grace_deadline))
+        try:
+            self._wait_for_children_to_exit(min(deadline, grace_deadline))
+        except BaseException as exc:
+            if observer_failure is None:
+                observer_failure = exc
+            logger.warning(
+                "Child-sentinel observer failed during Manager cleanup; "
+                "continuing child termination",
+                exc_info=True,
+            )
         children.update(self._child_processes)
         for tid in children:
             managed_pids.setdefault(tid, set()).update(
@@ -3711,6 +3914,8 @@ class Manager(ServiceTask):
             finally:
                 self._child_processes.pop(tid, None)
 
+        self._publish_child_sentinel_membership()
+
         self._last_child_cleanup_survivors = tuple(survivors)
         if survivors:
             logger.warning(
@@ -3718,26 +3923,29 @@ class Manager(ServiceTask):
                 self.tid,
                 survivors,
             )
+        if observer_failure is not None:
+            raise observer_failure
 
     def _wait_for_children_to_exit(self, deadline: float) -> None:
         while self._child_processes and self._remaining_deadline(deadline) > 0:
+            self._drain_child_sentinel_events()
             self._cleanup_children(deadline=deadline)
             if not self._child_processes:
                 return
-            time.sleep(
-                min(
-                    MANAGER_CHILD_EXIT_POLL_INTERVAL,
-                    self._remaining_deadline(deadline),
-                )
-            )
+            self._child_sentinel_adapter.wait(self._remaining_deadline(deadline))
 
     def _signal_children_to_stop(self) -> None:
         """Best-effort STOP broadcast to currently tracked child tasks."""
 
         for tid, child in list(self._child_processes.items()):
             if tid in self._drain_signaled_children:
+                if tid in self._drain_escalated_children:
+                    continue
                 started_ns = self._drain_signal_started_ns.get(tid, time.time_ns())
-                if time.time_ns() - started_ns > 2_000_000_000:
+                escalation_ns = int(
+                    MANAGER_CHILD_STOP_ESCALATION_SECONDS * 1_000_000_000
+                )
+                if time.time_ns() - started_ns >= escalation_ns:
                     pid = child.process.pid
                     if isinstance(pid, int) and pid > 0:
                         # SIGTERM only at this rung. Task processes defer
@@ -3749,6 +3957,7 @@ class Manager(ServiceTask):
                         # The hard-kill rung stays at drain timeout via
                         # _terminate_children.
                         terminate_process_tree(pid, timeout=0.2, kill_after=False)
+                    self._drain_escalated_children.add(tid)
                 continue
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
@@ -3776,8 +3985,10 @@ class Manager(ServiceTask):
 
         self._draining = True
         self._drain_signaled_children.clear()
+        self._drain_escalated_children.clear()
         self._drain_signal_started_ns.clear()
         self._drain_started_ns = time.time_ns()
+        self._drain_immediate_work_pending = True
         self._drain_reason = reason
         self._drain_completion_event = completion_event
         self._drain_stops_children = True
@@ -3810,8 +4021,10 @@ class Manager(ServiceTask):
 
         self._draining = True
         self._drain_signaled_children.clear()
+        self._drain_escalated_children.clear()
         self._drain_signal_started_ns.clear()
         self._drain_started_ns = time.time_ns()
+        self._drain_immediate_work_pending = True
         self._drain_reason = f"Superseded by lower-TID manager {leader_tid}"
         self._drain_completion_event = "manager_leadership_drained"
         self._drain_stops_children = False
@@ -3835,8 +4048,10 @@ class Manager(ServiceTask):
         if self._user_work_children():
             self._draining = True
             self._drain_signaled_children.clear()
+            self._drain_escalated_children.clear()
             self._drain_signal_started_ns.clear()
             self._drain_started_ns = time.time_ns()
+            self._drain_immediate_work_pending = True
             self._drain_reason = "Superseded by replacement manager"
             self._drain_completion_event = "manager_superseded_drained"
             self._drain_stops_children = False
@@ -3860,6 +4075,10 @@ class Manager(ServiceTask):
             self._report_state_change(event=self._drain_completion_event)
             self._update_process_title("cancelled")
         self._drain_started_ns = None
+        self._drain_immediate_work_pending = False
+        self._drain_signaled_children.clear()
+        self._drain_escalated_children.clear()
+        self._drain_signal_started_ns.clear()
         self._drain_stops_children = True
         self.should_stop = True
 
@@ -4793,10 +5012,10 @@ class Manager(ServiceTask):
             self._queue(queue_name).write(
                 json.dumps(service.spawn_payload, ensure_ascii=False)
             )
-            self._mark_pending_messages_prechecked()
             if queue_name == self._queue_names.get("internal_inbox"):
                 self._managed_internal_spawn_enqueued = True
             self._invalidate_leadership_work_cache()
+            self._strategy.notify_activity()
         except (BrokerError, OSError, RuntimeError):
             logger.warning(
                 "Failed to enqueue managed service %s", service.key, exc_info=True
@@ -5020,13 +5239,14 @@ class Manager(ServiceTask):
         timestamp: int | None,
         metadata: dict[str, Any],
         ctrl_in_name: str,
-        ctrl_out_name: str,
         source: Literal["control-pong", "service-registry-pong"],
+        resolve_unanswered: bool = False,
     ) -> ServiceCandidate | None:
         """Advance or start one non-blocking service-owner PING probe.
 
         A pending probe is unknown service evidence. The caller falls through
-        to normal recent/stale classification only after the probe deadline.
+        to normal recent/stale classification only on the next eligible
+        ordinary active-service evaluation.
         """
 
         key = self._service_probe_key(
@@ -5035,18 +5255,21 @@ class Manager(ServiceTask):
             tid=tid,
             timestamp=timestamp,
         )
-        now_ns = time.time_ns()
         pending = self._service_probe_pending.get(key)
         if pending is not None:
             return self._advance_service_pong_probe(
                 pending,
                 timestamp=timestamp,
                 metadata=metadata,
-                now_ns=now_ns,
+                resolve_unanswered=resolve_unanswered,
             )
 
         request_id = uuid.uuid4().hex
-        ping_message = encode_control_message(CONTROL_PING, request_id=request_id)
+        ping_message = encode_control_message(
+            CONTROL_PING,
+            request_id=request_id,
+            reply_to=self._queue_names["ctrl_in"],
+        )
         try:
             with self._get_connected_queue().get_connection() as broker:
                 broker.write(ctrl_in_name, ping_message)
@@ -5060,23 +5283,14 @@ class Manager(ServiceTask):
                 reason=str(exc),
                 metadata=metadata,
             )
-        ctrl_in_message_id = self._find_exact_probe_message_id(
-            ctrl_in_name,
-            ping_message,
-        )
-
-        timeout_ns = int(MANAGED_SERVICE_PING_TIMEOUT_SECONDS * 1_000_000_000)
         self._service_probe_pending[key] = _ServicePendingPongProbe(
             key=key,
             service_key=service_key,
             tid=tid,
             row_timestamp=timestamp,
             source=source,
-            ctrl_in_name=ctrl_in_name,
-            ctrl_out_name=ctrl_out_name,
             request_id=request_id,
-            deadline_ns=now_ns + max(0, timeout_ns),
-            ctrl_in_message_id=ctrl_in_message_id,
+            created_turn=self._loop_iteration,
         )
         return ServiceCandidate(
             key=service_key,
@@ -5094,53 +5308,11 @@ class Manager(ServiceTask):
         *,
         timestamp: int | None,
         metadata: dict[str, Any],
-        now_ns: int,
+        resolve_unanswered: bool,
     ) -> ServiceCandidate | None:
-        """Advance one pending service-owner PING without sleeping."""
+        """Advance one event-fed service PING on its owning policy cadence."""
 
-        matched_message_id: int | None = None
-        matched = False
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                iterator = broker.peek_generator(
-                    probe.ctrl_out_name, with_timestamps=True
-                )
-                with closing_queue_iterator(iterator) as rows:
-                    for item in rows:
-                        if not isinstance(item, tuple) or len(item) != 2:
-                            continue
-                        body, _message_timestamp = item
-                        payload = coerce_pong_response(
-                            str(body),
-                            tid=probe.tid,
-                            request_id=probe.request_id,
-                        )
-                        if payload is None:
-                            continue
-                        matched_message_id = int(_message_timestamp)
-                        matched = True
-                        break
-        except (BrokerError, OSError, RuntimeError) as exc:
-            self._delete_exact_probe_message(
-                probe.ctrl_in_name,
-                probe.ctrl_in_message_id,
-            )
-            self._service_probe_pending.pop(probe.key, None)
-            return ServiceCandidate(
-                key=probe.service_key,
-                tid=probe.tid,
-                state="uncertain",
-                source=probe.source,
-                timestamp=timestamp,
-                reason=str(exc),
-                metadata=metadata,
-            )
-
-        if matched:
-            self._delete_exact_probe_message(
-                probe.ctrl_out_name,
-                matched_message_id,
-            )
+        if probe.pong is not None:
             self._service_probe_pending.pop(probe.key, None)
             return ServiceCandidate(
                 key=probe.service_key,
@@ -5151,12 +5323,7 @@ class Manager(ServiceTask):
                 metadata=metadata,
             )
 
-        if now_ns >= probe.deadline_ns:
-            self._delete_exact_probe_message(
-                probe.ctrl_in_name,
-                probe.ctrl_in_message_id,
-            )
-            self._sweep_probe_reply_rows(probe.ctrl_out_name, probe.request_id)
+        if resolve_unanswered and probe.created_turn < self._loop_iteration:
             self._service_probe_pending.pop(probe.key, None)
             return None
 
@@ -5178,6 +5345,7 @@ class Manager(ServiceTask):
         payload: Mapping[str, Any],
         timestamp: int,
         runtime_handle: RunnerHandle | None = None,
+        resolve_unanswered: bool = False,
     ) -> ServiceCandidate:
         candidate_metadata = self._service_candidate_metadata(payload)
         ctrl_queues = self._service_candidate_control_queues(payload)
@@ -5209,15 +5377,15 @@ class Manager(ServiceTask):
             )
 
         if ctrl_queues is not None:
-            ctrl_in_name, ctrl_out_name = ctrl_queues
+            ctrl_in_name, _ctrl_out_name = ctrl_queues
             probe_candidate = self._service_pong_candidate(
                 service_key=service_key,
                 tid=tid,
                 timestamp=timestamp,
                 metadata=candidate_metadata,
                 ctrl_in_name=ctrl_in_name,
-                ctrl_out_name=ctrl_out_name,
                 source="control-pong",
+                resolve_unanswered=resolve_unanswered,
             )
             if probe_candidate is not None:
                 return probe_candidate
@@ -5249,6 +5417,8 @@ class Manager(ServiceTask):
     def _service_candidate_from_service_owner_record(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-012] exception
         self,
         record: ServiceOwnerRecord,
+        *,
+        resolve_unanswered: bool = False,
     ) -> ServiceCandidate:
         """Project one service-owner row into managed-service evidence."""
 
@@ -5312,8 +5482,8 @@ class Manager(ServiceTask):
                 timestamp=record.timestamp,
                 metadata=metadata,
                 ctrl_in_name=metadata["ctrl_in"],
-                ctrl_out_name=metadata["ctrl_out"],
                 source="service-registry-pong",
+                resolve_unanswered=resolve_unanswered,
             )
             if probe_candidate is not None:
                 return probe_candidate
@@ -5587,12 +5757,31 @@ class Manager(ServiceTask):
     def _manager_context(self) -> WeftContext:
         return self._task_context()
 
+    def _preserve_pending_service_probes_after_failed_scan(
+        self,
+        candidates_by_key: dict[str, list[ServiceCandidate]],
+    ) -> None:
+        """Keep pending probes as evidence when a registry scan proves nothing."""
+
+        for probe in tuple(self._service_probe_pending.values()):
+            if probe.service_key not in candidates_by_key:
+                continue
+            candidate = self._advance_service_pong_probe(
+                probe,
+                timestamp=probe.row_timestamp,
+                metadata={},
+                resolve_unanswered=False,
+            )
+            if candidate is not None:
+                candidates_by_key[probe.service_key].append(candidate)
+
     def _observed_service_candidates_by_key(
         self,
         desired_keys: set[str],
         *,
         tracked_by_key: Mapping[str, ServiceCandidate | None] | None = None,
         scan_terminal_proof: bool = False,
+        resolve_unanswered: bool = False,
     ) -> dict[str, list[ServiceCandidate]]:
         candidates_by_key: dict[str, list[ServiceCandidate]] = {
             key: [] for key in desired_keys
@@ -5610,12 +5799,18 @@ class Manager(ServiceTask):
                 candidates_by_key[service_key].append(tracked)
 
         queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
-        registry_entries = tuple(iter_queue_json_entries(queue))
+        try:
+            registry_entries = tuple(iter_queue_json_entries(queue, strict=True))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to scan service-owner registry", exc_info=True)
+            self._preserve_pending_service_probes_after_failed_scan(candidates_by_key)
+            return candidates_by_key
         read = collect_service_owner_records(
             registry_entries,
             service_type=SERVICE_TYPE_MANAGED,
         )
         now_ns = time.time_ns()
+        observed_probe_sources: set[str] = set()
         for service_key in desired_keys:
             decision = reduce_service_ownership(
                 service_key,
@@ -5626,6 +5821,14 @@ class Manager(ServiceTask):
                 read_failed=read.read_failed,
             )
             for record in decision.records:
+                observed_probe_sources.add(
+                    self._service_probe_key(
+                        source="service-registry-pong",
+                        service_key=record.service_key,
+                        tid=record.owner_tid,
+                        timestamp=record.timestamp,
+                    )
+                )
                 state = self._service_state(record.service_key)
                 tid = record.owner_tid
                 if tid in state.locally_terminal_tids:
@@ -5641,8 +5844,18 @@ class Manager(ServiceTask):
                     )
                     continue
                 candidates_by_key.setdefault(record.service_key, []).append(
-                    self._service_candidate_from_service_owner_record(record)
+                    self._service_candidate_from_service_owner_record(
+                        record,
+                        resolve_unanswered=resolve_unanswered,
+                    )
                 )
+        for key, probe in tuple(self._service_probe_pending.items()):
+            if (
+                probe.source == "service-registry-pong"
+                and probe.service_key in desired_keys
+                and key not in observed_probe_sources
+            ):
+                self._service_probe_pending.pop(key, None)
         return candidates_by_key
 
     def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:
@@ -5769,6 +5982,7 @@ class Manager(ServiceTask):
         include_internal: bool = True,
         include_autostart: bool = True,
         scan_terminal_proof: bool = False,
+        resolve_unanswered: bool = False,
     ) -> None:
         """Reconcile all Manager-owned singleton services through one path."""
 
@@ -5778,6 +5992,11 @@ class Manager(ServiceTask):
         services: list[ManagedServiceSpec] = []
         internal_services: list[ManagedServiceSpec] = []
         autostart_services: list[ManagedServiceSpec] = []
+        known_autostart_sources = set(self._autostart_sources)
+        stored_autostart_reply = include_autostart and any(
+            probe.pong is not None and probe.service_key in known_autostart_sources
+            for probe in self._service_probe_pending.values()
+        )
         if include_internal and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
             # TaskMonitor is the only internal heartbeat dependent; LivenessMonitor
             # schedules from its own due heap. Do not run heartbeat as standalone
@@ -5789,7 +6008,18 @@ class Manager(ServiceTask):
             if self._liveness_monitor_enabled:
                 internal_services.append(self._liveness_monitor_service_spec())
         if include_autostart:
-            autostart_services.extend(self._desired_autostart_services(force=force))
+            autostart_services.extend(
+                self._desired_autostart_services(
+                    force=force or stored_autostart_reply,
+                )
+            )
+            if self._autostart_last_scan_complete:
+                for key, probe in tuple(self._service_probe_pending.items()):
+                    if (
+                        probe.service_key in known_autostart_sources
+                        and probe.service_key not in self._autostart_sources
+                    ):
+                        self._service_probe_pending.pop(key, None)
         services.extend(internal_services)
         services.extend(autostart_services)
         if not services:
@@ -5839,6 +6069,11 @@ class Manager(ServiceTask):
             if service.lifecycle == "once" and state.launched_once:
                 continue
             keys_needing_evidence.add(service.key)
+        keys_needing_evidence.update(
+            probe.service_key
+            for probe in self._service_probe_pending.values()
+            if probe.service_key in desired_keys
+        )
 
         self._emit_serve_log(
             "managed_service_reconcile",
@@ -5856,6 +6091,7 @@ class Manager(ServiceTask):
                 keys_needing_evidence,
                 tracked_by_key=tracked_by_key,
                 scan_terminal_proof=scan_terminal_proof,
+                resolve_unanswered=resolve_unanswered,
             )
             if keys_needing_evidence
             else {}
@@ -6107,18 +6343,27 @@ class Manager(ServiceTask):
         return str(path.resolve(strict=False))
 
     def _autostart_manifest_paths(self) -> list[Path]:
+        paths, _complete = self._autostart_manifest_path_snapshot()
+        return paths
+
+    def _autostart_manifest_path_snapshot(self) -> tuple[list[Path], bool]:
+        """Return manifest paths and whether absence is authoritative."""
+
         directory = self._autostart_dir
         if not directory or not directory.exists():
-            return []
+            return [], True
         try:
-            return sorted(path for path in directory.glob("*.json") if path.is_file())
+            return (
+                sorted(path for path in directory.glob("*.json") if path.is_file()),
+                True,
+            )
         except OSError:
             logger.debug(
                 "Failed to enumerate autostart manifests in %s",
                 directory,
                 exc_info=True,
             )
-            return []
+            return [], False
 
     def _autostart_ensure_obligation_pending(self) -> bool:
         """Return whether an ensure autostart manifest still requires supervision."""
@@ -6221,6 +6466,7 @@ class Manager(ServiceTask):
     ) -> list[ManagedServiceSpec]:
         """Return desired autostart services after manifest and policy checks."""
 
+        self._autostart_last_scan_complete = False
         if not self._autostart_enabled:
             return []
         now_ns = time.time_ns()
@@ -6236,11 +6482,15 @@ class Manager(ServiceTask):
             return []
         if not directory.exists():
             self._prune_autostart_state(set())
+            self._autostart_last_scan_complete = True
             return []
 
-        manifests = self._autostart_manifest_paths()
+        manifests, scan_complete = self._autostart_manifest_path_snapshot()
+        if not scan_complete:
+            return []
         manifest_sources = {self._autostart_manifest_source(path) for path in manifests}
         self._prune_autostart_state(manifest_sources)
+        self._autostart_last_scan_complete = True
 
         services: list[ManagedServiceSpec] = []
         for manifest_path in manifests:
@@ -6341,6 +6591,43 @@ class Manager(ServiceTask):
             include_autostart=True,
         )
 
+    def _pending_service_probes_for_scope(
+        self,
+        *,
+        include_autostart: bool,
+    ) -> tuple[_ServicePendingPongProbe, ...]:
+        """Return pending probes owned by the current convergence scope."""
+
+        internal_keys: set[str] = set()
+        if self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
+            if self._task_monitor_enabled:
+                internal_keys.update(
+                    {
+                        INTERNAL_SERVICE_KEY_HEARTBEAT,
+                        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                    }
+                )
+            if self._liveness_monitor_enabled:
+                internal_keys.add(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR)
+        return tuple(
+            probe
+            for probe in self._service_probe_pending.values()
+            if probe.service_key in internal_keys
+            or include_autostart
+            and probe.service_key in self._autostart_sources
+        )
+
+    def _pending_service_probe_active_reasons(
+        self,
+        *,
+        include_autostart: bool,
+    ) -> tuple[str, ...]:
+        """Return the convergence reason contributed by pending PONG probes."""
+
+        if self._pending_service_probes_for_scope(include_autostart=include_autostart):
+            return ("pong_probe_pending",)
+        return ()
+
     def _managed_service_convergence_active_reasons(
         self,
         *,
@@ -6350,7 +6637,11 @@ class Manager(ServiceTask):
     ) -> tuple[str, ...]:
         """Return why manager-owned service convergence is active."""
 
-        reasons: list[str] = []
+        reasons = list(
+            self._pending_service_probe_active_reasons(
+                include_autostart=include_autostart
+            )
+        )
         if self._managed_internal_spawn_enqueued:
             reasons.append("internal_spawn_enqueued")
         if include_broker and internal_spawn_pending is None:
@@ -6494,12 +6785,22 @@ class Manager(ServiceTask):
         )
         interval_ns = int(interval_seconds * 1_000_000_000)
         autostart_scan_due = "autostart_scan_due" in local_active_reasons
+        stored_reply_due = any(
+            probe.pong is not None
+            for probe in self._pending_service_probes_for_scope(
+                include_autostart=include_autostart
+            )
+        )
+        ordinary_due = (
+            self._last_managed_service_convergence_ns <= 0
+            or now_ns - self._last_managed_service_convergence_ns >= interval_ns
+        )
         if (
             not force
             and not self._managed_internal_spawn_enqueued
             and not autostart_scan_due
-            and self._last_managed_service_convergence_ns
-            and now_ns - self._last_managed_service_convergence_ns < interval_ns
+            and not stored_reply_due
+            and not ordinary_due
         ):
             fields = {
                 "active": active,
@@ -6518,7 +6819,10 @@ class Manager(ServiceTask):
                 log_fields=fields,
             )
             return
-        self._last_managed_service_convergence_ns = now_ns
+        if not force and (
+            ordinary_due or self._managed_internal_spawn_enqueued or autostart_scan_due
+        ):
+            self._last_managed_service_convergence_ns = now_ns
         internal_spawn_pending = self._internal_spawn_pending()
         if internal_spawn_pending:
             self._mark_pending_messages_prechecked()
@@ -6543,7 +6847,10 @@ class Manager(ServiceTask):
 
             state_before = self._managed_service_state_snapshot()
             enqueued_before = self._managed_internal_spawn_enqueued
-            self._reconcile_managed_services(include_autostart=include_autostart)
+            self._reconcile_managed_services(
+                include_autostart=include_autostart,
+                resolve_unanswered=ordinary_due,
+            )
             service_request_enqueued = (
                 self._managed_internal_spawn_enqueued and not enqueued_before
             )
@@ -6627,12 +6934,44 @@ class Manager(ServiceTask):
 
         self._draining = True
         self._active_cleanup_deadline = deadline
-        self._drain_active_child_launches_for_cleanup(deadline)
-        self._terminate_children(deadline)
-        self._cleanup_own_internal_reserved_queue()
-        self._unregister_manager()
-        super()._cleanup_task_resources(deadline)
-        self._unregister_atexit_callback()
+        failures: list[BaseException] = []
+
+        def attempt(operation: Callable[[], None]) -> None:
+            try:
+                operation()
+            except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-377] exception
+                failures.append(exc)
+
+        attempt(lambda: self._drain_active_child_launches_for_cleanup(deadline))
+        attempt(lambda: self._terminate_children(deadline))
+        attempt(self._cleanup_own_internal_reserved_queue)
+        attempt(self._unregister_manager)
+        attempt(
+            lambda: self._child_sentinel_adapter.close(
+                timeout=self._remaining_deadline(deadline)
+            )
+        )
+        attempt(lambda: super(Manager, self)._cleanup_task_resources(deadline))
+        attempt(self._unregister_atexit_callback)
+        if failures:
+            raise failures[0]
+
+    def _abort_partial_initialization(self) -> None:
+        """Close Manager-owned adapters during constructor unwind."""
+
+        failures: list[BaseException] = []
+        adapter = getattr(self, "_child_sentinel_adapter", None)
+        if adapter is not None:
+            try:
+                adapter.close(timeout=0.05)
+            except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-377] exception
+                failures.append(exc)
+        try:
+            super()._abort_partial_initialization()
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-377] exception
+            failures.append(exc)
+        if failures:
+            raise failures[0]
 
     def _admission_retry_timeouts(self, *, now_ns: int) -> list[float]:
         """Return the optional admission deadline as a timeout list."""
@@ -6650,15 +6989,11 @@ class Manager(ServiceTask):
         """Return the next manager due timer for the shared task loop."""
 
         now_ns = time.time_ns()
-        timeouts: list[float] = []
-        if (
-            self.should_stop
-            or self._draining
-            or self._has_pending_termination_request()
-        ):
+        timeouts = self._manager_child_timeouts(now_ns=now_ns)
+        if self.should_stop or self._has_pending_termination_request():
             return 0.0
-        if self._managed_internal_spawn_enqueued:
-            return 0.0
+        timeouts.extend(self._manager_drain_timeouts(now_ns=now_ns))
+        timeouts.extend(self._stale_child_launch_timeouts(now_ns=now_ns))
         if self._stalled_control_retry_after_ns > 0:
             timeouts.append(
                 self._timeout_until_ns(
@@ -6666,10 +7001,12 @@ class Manager(ServiceTask):
                     now_ns=now_ns,
                 )
             )
+        if self._draining:
+            return min(timeouts) if timeouts else None
         timeouts.extend(self._admission_retry_timeouts(now_ns=now_ns))
-        if self._user_work_children():
-            timeouts.append(MANAGER_CHILD_EXIT_POLL_INTERVAL)
-
+        base_timeout = super().next_wait_timeout()
+        if base_timeout is not None:
+            timeouts.append(base_timeout)
         local_active_reasons = self._managed_service_convergence_active_reasons(
             include_autostart=True,
             include_broker=False,
@@ -6738,7 +7075,101 @@ class Manager(ServiceTask):
             )
         return min(timeouts) if timeouts else None
 
-    def _process_reactor_turn(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-014] exception
+    def _manager_drain_timeouts(self, *, now_ns: int) -> list[float]:
+        """Return exact clocks needed while a Manager drain is in progress."""
+
+        if not self._draining:
+            return []
+        if self._drain_immediate_work_pending:
+            return [0.0]
+
+        timeouts: list[float] = []
+        if self._drain_stops_children:
+            if self._child_processes and self._drain_started_ns is not None:
+                shutdown_ns = int(
+                    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS * 1_000_000_000
+                )
+                timeouts.append(
+                    self._timeout_until_ns(
+                        self._drain_started_ns + shutdown_ns,
+                        now_ns=now_ns,
+                    )
+                )
+            escalation_ns = int(MANAGER_CHILD_STOP_ESCALATION_SECONDS * 1_000_000_000)
+            for tid in self._child_processes:
+                if tid in self._drain_escalated_children:
+                    continue
+                started_ns = self._drain_signal_started_ns.get(tid)
+                if started_ns is None:
+                    continue
+                timeouts.append(
+                    self._timeout_until_ns(
+                        started_ns + escalation_ns,
+                        now_ns=now_ns,
+                    )
+                )
+            return timeouts
+
+        if self._drain_leader_tid is not None:
+            if self._last_leadership_drain_revalidate_ns <= 0:
+                timeouts.append(0.0)
+            else:
+                interval_ns = int(
+                    MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS * 1_000_000_000
+                )
+                timeouts.append(
+                    self._timeout_until_ns(
+                        self._last_leadership_drain_revalidate_ns + interval_ns,
+                        now_ns=now_ns,
+                    )
+                )
+        return timeouts
+
+    def _stale_child_launch_timeouts(self, *, now_ns: int) -> list[float]:
+        """Return recovery deadlines for launch workers that retired silently."""
+
+        if not self._active_child_launches or self._has_worker_activity():
+            return []
+        grace_ns = int(MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS * 1_000_000_000)
+        return [
+            self._timeout_until_ns(started_ns + grace_ns, now_ns=now_ns)
+            for tid in self._active_child_launches
+            if (started_ns := self._child_launch_started_ns.get(tid, 0)) > 0
+        ]
+
+    def _manager_child_timeouts(self, *, now_ns: int) -> list[float]:
+        """Return child sentinel and post-exit deadlines."""
+
+        timeouts: list[float] = []
+        sentinel_recheck_ns = int(MANAGER_PID_LIVENESS_RECHECK_INTERVAL * 1_000_000_000)
+        terminal_grace_ns = int(
+            MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS * 1_000_000_000
+        )
+        for child in self._child_processes.values():
+            if (
+                child.sentinel_observed_ns > 0
+                and child.terminal_proof_missing_since_ns <= 0
+            ):
+                due_ns = (
+                    max(
+                        child.sentinel_observed_ns,
+                        child.last_liveness_probe_ns,
+                    )
+                    + sentinel_recheck_ns
+                )
+                timeouts.append(self._timeout_until_ns(due_ns, now_ns=now_ns))
+            if child.terminal_proof_missing_since_ns > 0:
+                due_ns = child.terminal_proof_missing_since_ns + terminal_grace_ns
+                timeouts.append(self._timeout_until_ns(due_ns, now_ns=now_ns))
+        return timeouts
+
+    def _process_reactor_turn(self) -> None:
+        """Run one Manager reactor turn."""
+
+        self._drain_child_sentinel_events()
+        self._process_manager_reactor_turn()
+
+    def _process_manager_reactor_turn(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-014] exception
         """Run one Manager turn behind the owner-enforcing template.
 
         Spec:
@@ -6753,23 +7184,18 @@ class Manager(ServiceTask):
         self._leader_check_turn = None
         self._drain_worker_results()
         self._retry_stale_child_launches()
-        self._emit_manager_loop_summary()
-        self._refresh_manager_registration()
-        self._cleanup_stale_internal_reserved_queues()
+        self._drain_control_queue_first()
         if self._draining:
             # Finish an in-flight drain before reevaluating leadership. Otherwise a
             # slow turn can re-enter the yield path and skip the corresponding
             # *_drained completion event once children are gone.
-            self._drain_control_queue_first()
             self._continue_shutdown_drain()
             self._drain_worker_results()
             return
+        self._emit_manager_loop_summary()
+        self._refresh_manager_registration()
+        self._cleanup_stale_internal_reserved_queues()
         if self._maybe_yield_leadership():
-            self._drain_worker_results()
-            return
-        self._drain_control_queue_first()
-        if self._draining:
-            self._continue_shutdown_drain()
             self._drain_worker_results()
             return
         if self._cleanup_children():
@@ -7005,8 +7431,10 @@ class Manager(ServiceTask):
         leader_tid = self._drain_leader_tid
         self._draining = False
         self._drain_signaled_children.clear()
+        self._drain_escalated_children.clear()
         self._drain_signal_started_ns.clear()
         self._drain_started_ns = None
+        self._drain_immediate_work_pending = False
         self._drain_reason = None
         self._drain_completion_event = "manager_stop_drained"
         self._drain_stops_children = True
@@ -7048,6 +7476,7 @@ class Manager(ServiceTask):
         return False
 
     def _continue_shutdown_drain(self) -> None:
+        self._drain_immediate_work_pending = False
         if not self._revalidate_leadership_drain():
             return
         if self._drain_stops_children:

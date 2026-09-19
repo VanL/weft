@@ -851,7 +851,7 @@ def test_ensure_manager_start_failure_preserves_queued_acceptance(
     monkeypatch.setattr(
         core_manager_runtime,
         "observe_manager_availability",
-        lambda _context: observation,
+        lambda _context, **_kwargs: observation,
     )
     monkeypatch.setattr(
         core_manager_runtime,
@@ -903,7 +903,7 @@ def test_accepted_request_executes_after_later_manager_recovery(
         patch.setattr(
             core_manager_runtime,
             "observe_manager_availability",
-            lambda _context: observation,
+            lambda _context, **_kwargs: observation,
         )
         patch.setattr(
             core_manager_runtime,
@@ -1080,7 +1080,7 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
         return committed_id
 
     def fake_ensure(
-        _context: WeftContext, *, submitted_tid: str | int
+        _context: WeftContext, *, submitted_tid: str | int, **_kwargs: Any
     ) -> core_manager_runtime.ManagerEnsureResult:
         captured["reconciled_tid"] = submitted_tid
         return core_manager_runtime.ManagerEnsureResult(
@@ -1137,7 +1137,7 @@ def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(
         return int(explicit_tid)
 
     def fake_ensure(
-        _context: WeftContext, *, submitted_tid: str | int
+        _context: WeftContext, *, submitted_tid: str | int, **_kwargs: Any
     ) -> core_manager_runtime.ManagerEnsureResult:
         captured["reconciled_tid"] = submitted_tid
         return core_manager_runtime.ManagerEnsureResult(

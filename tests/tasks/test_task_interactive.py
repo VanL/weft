@@ -470,26 +470,35 @@ def test_interactive_control_commands_report_live_status(
     inbox = make_queue(spec.io.inputs["inbox"])
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    ping_reply = make_queue(f"test.{unique_tid}.ping.ctrl_in")
 
     try:
         inbox.write(json.dumps({"stdin": "hello\n"}))
         _drive_interactive(task, lambda: task._interactive_session is not None)
 
         ctrl_in.write(encode_control_message("STATUS"))
-        ctrl_in.write(encode_control_message("PING"))
+        ctrl_in.write(
+            encode_control_message(
+                "PING",
+                request_id="interactive-ping",
+                reply_to=f"test.{unique_tid}.ping.ctrl_in",
+            )
+        )
         responses: list[dict[str, object]] = []
+        ping_responses: list[dict[str, object]] = []
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             task.process_once()
             task.wait_for_activity(timeout=0.02)
             responses = [json.loads(msg) for msg in ctrl_out.peek_generator()]
+            ping_responses = [json.loads(msg) for msg in ping_reply.peek_generator()]
             if any(r.get("command") == "STATUS" for r in responses) and any(
-                r.get("command") == "PING" for r in responses
+                r.get("command") == "PING" for r in ping_responses
             ):
                 break
 
         status_response = next(r for r in responses if r.get("command") == "STATUS")
-        ping_response = next(r for r in responses if r.get("command") == "PING")
+        ping_response = next(r for r in ping_responses if r.get("command") == "PING")
 
         assert status_response["status"] == "ok"
         assert status_response["task_status"] == "running"
@@ -499,6 +508,7 @@ def test_interactive_control_commands_report_live_status(
         inbox.write(json.dumps({"stdin": "quit\n"}))
         _drive_interactive(task, lambda: _finished(task))
         task.stop(join=False)
+        ping_reply.close()
 
 
 def test_interactive_late_input_is_dropped_after_completion(

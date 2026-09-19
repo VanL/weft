@@ -23,6 +23,7 @@ from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     CONTROL_KILL,
+    CONTROL_PING,
     CONTROL_STOP,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
     PIPELINE_OWNER_METADATA_KEY,
@@ -1580,6 +1581,56 @@ def test_pipeline_task_fails_fast_when_child_edge_fails(tmp_path: Path) -> None:
     assert latest["status"] == "failed"
     assert latest["failure"]["child_kind"] == "edge"
     assert latest["failure"]["child_name"] == compiled.runtime.edges[-1].name
+
+
+def test_pipeline_task_routes_pong_to_requester_control_queue(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    _write_json(ctx.weft_dir / "tasks" / "first.json", _task_payload())
+    compiled = compile_linear_pipeline(
+        load_pipeline_spec_payload(
+            {"name": "pipe", "stages": [{"name": "first", "task": "first"}]}
+        ),
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+    task = PipelineTask(
+        ctx.broker_target, compiled.pipeline_taskspec, config=ctx.broker_config
+    )
+    task.process_once()
+    reply_to = f"T{compiled.pipeline_tid}.probe.ctrl_in"
+    replies = ctx.queue(reply_to, persistent=True)
+    ctrl_out = ctx.queue(compiled.runtime.queues.ctrl_out, persistent=True)
+
+    ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(
+        encode_control_message(
+            CONTROL_PING,
+            request_id="pipeline-ping",
+            reply_to=reply_to,
+        )
+    )
+    drive_until(
+        replies.peek_one,
+        lambda message: message is not None,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=3.0,
+        wait_slice=0.05,
+    )
+
+    responses = _drain_json(replies)
+    assert len(responses) == 1
+    pong = responses[0]
+    assert pong["command"] == CONTROL_PING
+    assert pong["status"] == "ok"
+    assert pong["message"] == "PONG"
+    assert pong["request_id"] == "pipeline-ping"
+    assert pong["tid"] == compiled.pipeline_tid
+    assert pong["task_status"] == task.taskspec.state.status
+    assert "reply_to" not in pong
+    assert not any(
+        response.get("command") == CONTROL_PING for response in _drain_json(ctrl_out)
+    )
 
 
 def test_pipeline_task_stop_propagates_to_waiting_children(tmp_path: Path) -> None:

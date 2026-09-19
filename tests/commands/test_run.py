@@ -40,6 +40,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
+    TASK_POLL_INTERVAL_NONE_TOKEN,
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -371,7 +372,6 @@ def _select_active_manager_while_answering_probe(
         *,
         tid: str,
         ctrl_in_name: str,
-        ctrl_out_name: str,
         timeout: float,
         request_id: str | None = None,
         broker: Any | None = None,
@@ -392,7 +392,7 @@ def _select_active_manager_while_answering_probe(
             "role": "manager",
             "requests": WEFT_SPAWN_REQUESTS_QUEUE,
             "ctrl_in": ctrl_in_name,
-            "ctrl_out": ctrl_out_name,
+            "ctrl_out": f"T{tid}.ctrl_out",
             "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
             "weft_context": str(ctx.root),
             "should_stop": False,
@@ -1601,6 +1601,7 @@ def test_build_manager_process_command_preserves_bundle_transport_provenance(
     assert TASKSPEC_BUNDLE_ROOT_FIELD not in taskspec.model_dump(mode="json")
     config_payload = json.loads(base64.b64decode(command[6]).decode("utf-8"))
     assert config_payload == {"prefix": "WEFT", "values": dict(context.config)}
+    assert command[7] == TASK_POLL_INTERVAL_NONE_TOKEN
 
 
 class _FakePopen:

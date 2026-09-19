@@ -55,9 +55,9 @@ from weft._constants import (
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGED,
     STALE_SERVICE_OWNER_DISPOSITION_REASONS,
-    TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_CLEANUP_POLICY_NAMES,
     TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
+    TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -70,6 +70,7 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.control_messages import encode_control_message
+from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.monitor.collation import update_from_task_log_payload
 from weft.core.monitor.policies.dead_task import DeadTaskLogCoalesceGroup
 from weft.core.monitor.runtime import (
@@ -108,6 +109,96 @@ BLOCKING_PROCESSOR_RELEASE = threading.Event()
 BLOCKING_PROCESSOR_TIMEOUT_SECONDS = 5.0
 CONTROL_REPLY_TIMEOUT_SECONDS = 3.0
 CONTROL_REPLY_WAIT_SLICE_SECONDS = 0.1
+
+
+def test_task_monitor_stop_survives_blocking_heartbeat_probe(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synchronous probe drains only its ephemeral requester ctrl_in."""
+
+    db_path, make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999399"),
+        observer=lambda _queue, _message, _timestamp: None,
+    )
+    heartbeat_tid = "1778089999999999398"
+    ping_seen = threading.Event()
+    release_pong = threading.Event()
+    probe_reply_to: list[str] = []
+
+    def respond() -> None:
+        target = make_queue(f"T{heartbeat_tid}.ctrl_in")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            raw = target.read_one()
+            if raw is None:
+                time.sleep(0.001)
+                continue
+            request = json.loads(str(raw))
+            probe_reply_to.append(str(request["reply_to"]))
+            ping_seen.set()
+            assert release_pong.wait(timeout=5.0)
+            make_queue(probe_reply_to[0]).write(
+                json.dumps(
+                    {
+                        "command": CONTROL_PING,
+                        "status": "ok",
+                        "message": "PONG",
+                        "tid": heartbeat_tid,
+                        "request_id": request["request_id"],
+                        "task_status": "running",
+                    }
+                )
+            )
+            return
+        raise AssertionError("heartbeat probe PING did not arrive")
+
+    def blocking_upsert(
+        context: WeftContext,
+        **kwargs: Any,
+    ) -> None:
+        result = send_keyed_ping_probe(
+            context,
+            tid=heartbeat_tid,
+            ctrl_in_name=f"T{heartbeat_tid}.ctrl_in",
+            timeout=5.0,
+            broker=kwargs["broker"],
+        )
+        assert result.matched is not None
+
+    monkeypatch.setattr(task_monitor_mod, "upsert_heartbeat", blocking_upsert)
+    monkeypatch.setattr(
+        task,
+        "_cancel_heartbeat",
+        lambda: setattr(task, "_heartbeat_registered", False),
+    )
+    responder = threading.Thread(target=respond, daemon=True)
+    registrar = threading.Thread(target=task._ensure_heartbeat_registered, daemon=True)
+    responder.start()
+    registrar.start()
+    try:
+        assert ping_seen.wait(timeout=5.0)
+        task_ctrl_in = task._queue_names["ctrl_in"]
+        assert len(probe_reply_to) == 1
+        assert probe_reply_to[0] != task_ctrl_in
+        make_queue(task_ctrl_in).write(encode_control_message(CONTROL_STOP))
+        assert make_queue(task_ctrl_in).stats().pending == 1
+
+        release_pong.set()
+        registrar.join(timeout=5.0)
+        responder.join(timeout=5.0)
+        assert not registrar.is_alive()
+        assert not responder.is_alive()
+        assert make_queue(task_ctrl_in).stats().pending == 1
+
+        task.process_once()
+
+        assert task.should_stop
+    finally:
+        release_pong.set()
+        task.stop()
 
 
 class _CloseRecordingProxy:
@@ -271,7 +362,8 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
         "_wait_active",
         "_drive_loop_active",
         "_strategy_started",
-        "_parent_loss_watch_active",
+        "_data_version_activity_pending",
+        "_native_activity_degraded",
         "_paused",
         "_kill_requested",
         "_external_stop_handled",
@@ -1746,10 +1838,11 @@ def drive_task_monitor_until_observed(
             return
         attempts += 1
         remaining = deadline - time.monotonic()
+        task_timeout = task.next_wait_timeout()
         wait_timeout = min(
             CONTROL_REPLY_WAIT_SLICE_SECONDS,
-            max(0.0, task.next_wait_timeout()),
             remaining,
+            *(() if task_timeout is None else (max(0.0, task_timeout),)),
         )
         task.wait_for_activity(timeout=wait_timeout)
         task.process_once()
@@ -1767,25 +1860,39 @@ def _read_control_reply(
     *,
     command: str,
     request_id: str,
+    reply_queue: Any | None = None,
 ) -> dict[str, Any]:
     """Round-trip one control request through the production multi-turn loop."""
 
-    ctrl_in.write(encode_control_message(command, request_id=request_id))
+    if command == CONTROL_PING:
+        assert reply_queue is not None
+        ctrl_in.write(
+            encode_control_message(
+                command,
+                request_id=request_id,
+                reply_to=reply_queue.name,
+            )
+        )
+        response_queue = reply_queue
+    else:
+        ctrl_in.write(encode_control_message(command, request_id=request_id))
+        response_queue = ctrl_out
     deadline = time.monotonic() + CONTROL_REPLY_TIMEOUT_SECONDS
     attempts = 0
     responses: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
         attempts += 1
         remaining = deadline - time.monotonic()
+        task_timeout = task.next_wait_timeout()
         wait_timeout = min(
             CONTROL_REPLY_WAIT_SLICE_SECONDS,
-            max(0.0, task.next_wait_timeout()),
             remaining,
+            *(() if task_timeout is None else (max(0.0, task_timeout),)),
         )
         task.wait_for_activity(timeout=wait_timeout)
         task.process_once()
         drive_task_monitor_until_idle(task)
-        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        responses = [json.loads(item) for item in response_queue.peek_generator()]
         response = next(
             (
                 candidate
@@ -2221,7 +2328,7 @@ def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
     assert task._last_retained_task_log_ingest.malformed_deleted == 0
 
 
-def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
+def test_task_monitor_next_wait_timeout_publishes_cycle_deadline(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2246,7 +2353,9 @@ def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
         task.process_once()
         drive_task_monitor_until_idle(task)
 
-        assert 0.0 < task.next_wait_timeout() <= 1.0
+        wait_timeout = task.next_wait_timeout()
+        assert wait_timeout is not None
+        assert 59.0 <= wait_timeout <= 60.0
     finally:
         task.stop()
 
@@ -2279,7 +2388,9 @@ def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
             json.dumps({"type": "task_monitor_wakeup"})
         )
 
-        assert task.next_wait_timeout() == pytest.approx(1.0)
+        wait_timeout = task.next_wait_timeout()
+        assert wait_timeout is not None
+        assert 59.0 <= wait_timeout <= 60.0
         drive_task_monitor_until_observed(
             task,
             lambda: len(PROCESSOR_REQUESTS) == 2,
@@ -2289,7 +2400,7 @@ def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
         task.stop()
 
 
-def test_task_monitor_disabled_uses_wait_cap_without_scanning(
+def test_task_monitor_disabled_has_no_private_timer_and_still_wakes(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2320,15 +2431,15 @@ def test_task_monitor_disabled_uses_wait_cap_without_scanning(
     try:
         task.process_once()
 
-        assert task.next_wait_timeout() == 1.0
+        assert task.next_wait_timeout() is None
 
         make_queue(task.taskspec.io.inputs["inbox"]).write(
             json.dumps({"type": "task_monitor_wakeup"})
         )
-        assert task.next_wait_timeout() == 1.0
-        task.wait_for_activity(timeout=task.next_wait_timeout())
+        assert task.next_wait_timeout() is None
+        task.wait_for_activity(timeout=0.5)
         task.process_once()
-        assert task.next_wait_timeout() == 1.0
+        assert task.next_wait_timeout() is None
     finally:
         task.stop()
 
@@ -2354,7 +2465,14 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     log_queue.write(json.dumps({"event": "work_started", "tid": "1778084345905438720"}))
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    ctrl_in.write(encode_control_message(CONTROL_PING, request_id="ping-before"))
+    ping_reply = make_queue("test.task-monitor.ping-before.ctrl_in")
+    ctrl_in.write(
+        encode_control_message(
+            CONTROL_PING,
+            request_id="ping-before",
+            reply_to=ping_reply.name,
+        )
+    )
 
     task = TaskMonitor(db_path, spec, config=config)
     responses: list[dict[str, object]] = []
@@ -2367,8 +2485,9 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
             ctrl_out,
             command=CONTROL_PING,
             request_id="ping-after",
+            reply_queue=ping_reply,
         )
-        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        responses = [json.loads(item) for item in ping_reply.peek_generator()]
     finally:
         task.stop()
 
@@ -2486,6 +2605,7 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
     )
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    ping_reply = make_queue("test.task-monitor.store-ping.ctrl_in")
 
     task = TaskMonitor(db_path, spec, config=config)
     responses: list[dict[str, object]] = []
@@ -2504,8 +2624,9 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
             ctrl_out,
             command=CONTROL_PING,
             request_id="store",
+            reply_queue=ping_reply,
         )
-        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        responses = [json.loads(item) for item in ping_reply.peek_generator()]
     finally:
         task.stop()
 
@@ -2897,6 +3018,7 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
         assert task._last_catchup_pending is True
         assert task._next_cycle_due_monotonic > cycle_started_at
         next_wait = task.next_wait_timeout()
+        assert next_wait is not None
         assert next_wait >= 0.0
         assert next_wait <= 0.201
     finally:
@@ -8324,6 +8446,7 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
     spec = make_task_monitor_taskspec("1778089999999999964")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    ping_reply = make_queue("test.task-monitor.cleanup-worker.ctrl_in")
     task = TaskMonitor(db_path, spec, config=config)
     started = threading.Event()
     release = threading.Event()
@@ -8366,7 +8489,13 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
             task.process_once()
         owner_lifecycle_after_drive = task._task_lifecycle
 
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
+        ctrl_in.write(
+            encode_control_message(
+                CONTROL_PING,
+                request_id="during",
+                reply_to=ping_reply.name,
+            )
+        )
         ctrl_in.write(
             encode_control_message(CONTROL_STATUS, request_id="during-status")
         )
@@ -8374,13 +8503,17 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
         status = None
         deadline = time.monotonic() + 3.0
         while (pong is None or status is None) and time.monotonic() < deadline:
-            task.wait_for_activity(timeout=min(0.1, task.next_wait_timeout()))
+            task_timeout = task.next_wait_timeout()
+            task.wait_for_activity(
+                timeout=0.1 if task_timeout is None else min(0.1, task_timeout)
+            )
             task.process_once()
             responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+            pong_responses = [json.loads(item) for item in ping_reply.peek_generator()]
             pong = next(
                 (
                     response
-                    for response in responses
+                    for response in pong_responses
                     if response["command"] == CONTROL_PING
                     and response.get("request_id") == "during"
                 ),
@@ -8510,7 +8643,7 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
         json.dumps({"event": "work_started", "tid": "1778084345905438752"})
     )
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    ping_reply = make_queue("test.task-monitor.builtin-worker.ctrl_in")
     task = TaskMonitor(db_path, spec, config=config)
     started = threading.Event()
     release = threading.Event()
@@ -8538,13 +8671,22 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
         assert started.wait(timeout=0.1)
         assert task._builtin_cycle_work_in_flight is not None
 
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
+        ctrl_in.write(
+            encode_control_message(
+                CONTROL_PING,
+                request_id="during",
+                reply_to=ping_reply.name,
+            )
+        )
         pong = None
         deadline = time.monotonic() + 3.0
         while pong is None and time.monotonic() < deadline:
-            task.wait_for_activity(timeout=min(0.1, task.next_wait_timeout()))
+            task_timeout = task.next_wait_timeout()
+            task.wait_for_activity(
+                timeout=0.1 if task_timeout is None else min(0.1, task_timeout)
+            )
             task.process_once()
-            responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+            responses = [json.loads(item) for item in ping_reply.peek_generator()]
             pong = next(
                 (
                     response
@@ -8567,7 +8709,7 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
         assert task._last_processor_success is None
 
         task._wake_requested = True
-        assert task.next_wait_timeout() == TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
+        assert task.next_wait_timeout() is None
 
         release.set()
         drive_task_monitor_until_idle(task)
@@ -8823,7 +8965,7 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     log_queue.write("{not-json")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    ping_reply = make_queue("test.task-monitor.cached.ctrl_in")
 
     task = TaskMonitor(db_path, spec, config=config)
     pong: dict[str, object] | None = None
@@ -8839,12 +8981,21 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
         monkeypatch.setattr(
             task_monitor_mod.GeneratorTaskLogScanner, "scan_window", fail_cleanup
         )
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="cached"))
+        ctrl_in.write(
+            encode_control_message(
+                CONTROL_PING,
+                request_id="cached",
+                reply_to=ping_reply.name,
+            )
+        )
         deadline = time.monotonic() + 3.0
         while pong is None and time.monotonic() < deadline:
-            task.wait_for_activity(timeout=min(0.1, task.next_wait_timeout()))
+            task_timeout = task.next_wait_timeout()
+            task.wait_for_activity(
+                timeout=0.1 if task_timeout is None else min(0.1, task_timeout)
+            )
             task.process_once()
-            responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+            responses = [json.loads(item) for item in ping_reply.peek_generator()]
             pong = next(
                 (
                     response
@@ -8891,7 +9042,7 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     log_queue.write(json.dumps({"event": "work_started", "tid": "1778084345905438720"}))
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
-    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    ping_reply = make_queue("test.task-monitor.processor.ctrl_in")
 
     task = TaskMonitor(db_path, spec, config=config)
     try:
@@ -8903,13 +9054,22 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
         assert BLOCKING_PROCESSOR_STARTED.wait(timeout=2.0)
         assert task._processor_work_in_flight is not None
 
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
+        ctrl_in.write(
+            encode_control_message(
+                CONTROL_PING,
+                request_id="during",
+                reply_to=ping_reply.name,
+            )
+        )
         pong = None
         deadline = time.monotonic() + 3.0
         while pong is None and time.monotonic() < deadline:
-            task.wait_for_activity(timeout=min(0.1, task.next_wait_timeout()))
+            task_timeout = task.next_wait_timeout()
+            task.wait_for_activity(
+                timeout=0.1 if task_timeout is None else min(0.1, task_timeout)
+            )
             task.process_once()
-            responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+            responses = [json.loads(item) for item in ping_reply.peek_generator()]
             pong = next(
                 (
                     response
@@ -9060,6 +9220,9 @@ def test_task_monitor_heartbeat_failure_records_health_but_still_cycles(
         assert (
             task._last_error == "heartbeat registration failed: heartbeat unavailable"
         )
+        wait_timeout = task.next_wait_timeout()
+        assert wait_timeout is not None
+        assert 0.0 < wait_timeout <= TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS
     finally:
         task.stop()
 
@@ -10434,7 +10597,7 @@ def test_status_reply_helper_drives_past_zero_timeout_local_turn(
     real_next_wait_timeout = task.next_wait_timeout
     first_wait = True
 
-    def next_wait_timeout() -> float:
+    def next_wait_timeout() -> float | None:
         nonlocal first_wait
         if first_wait:
             first_wait = False

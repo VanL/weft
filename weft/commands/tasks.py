@@ -736,7 +736,7 @@ def task_ping(
     taskspec_payload = (
         load_latest_taskspec_payload(ctx, full_tid) if is_task_tid(full_tid) else None
     )
-    ctrl_in_name, ctrl_out_name = task_evidence.control_queue_names_for_tid(
+    ctrl_in_name, _ctrl_out_name = task_evidence.control_queue_names_for_tid(
         full_tid,
         taskspec_payload,
     )
@@ -744,7 +744,6 @@ def task_ping(
         ctx,
         tid=full_tid,
         ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
         timeout=timeout,
     )
     return {

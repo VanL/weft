@@ -3,6 +3,7 @@
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
 - docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-6]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-1], [PL-4.1]
 - docs/specifications/14-Python_API_Surfaces.md [PY-3]
 """
@@ -284,13 +285,17 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
     submitted_tid: str | int,
     ensure_manager_fn: Callable[..., manager_runtime.ManagerEnsureResult] | None = None,
     delete_spawn_request_fn: Callable[[WeftContext, int], bool] | None = None,
+    observation: manager_runtime.ManagerAvailabilityObservation | None = None,
 ) -> manager_runtime.ManagerEnsureResult:
     """Recover manager availability without revoking accepted queue work.
 
     The successful spawn write owns acceptance. This function may prove or
     start a manager, but it never deletes or re-enqueues the accepted request.
+    A supplied observation is from this submission's immediately preceding
+    enqueue/observation operation in the exact runtime context, never a cached
+    result. That operation must end before recovery can close same-key sessions.
 
-    Spec: [MF-1], [MF-6], [MF-7]
+    Spec: [MF-1], [MF-6], [MF-7], [SB-0.4]
     """
 
     submitted_tid_str = str(submitted_tid)
@@ -299,7 +304,8 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
     if ensure_manager_fn is not None:
         return ensure_manager_fn(context)
 
-    observation = manager_runtime.observe_manager_availability(context)
+    if observation is None:
+        observation = manager_runtime.observe_manager_availability(context)
     if observation.outcome == "ready":
         return manager_runtime.ManagerEnsureResult(
             outcome="ready",
@@ -492,7 +498,13 @@ def _submit_prepared_outcome(
     context: WeftContext,
     prepared: PreparedSubmissionRequest,
 ) -> _SubmittedPreparedOutcome:
-    """Submit and retain the exact live runtime context for client handles."""
+    """Submit and retain the exact live runtime context for client handles.
+
+    Enqueue and initial availability share one bounded session. Individual
+    operations commit independently and end before recovery or session cleanup.
+
+    Spec: [PY-3], [MF-1], [SB-0.4]
+    """
 
     normalized = normalize_taskspec(prepared.taskspec)
     runtime_root = _resolve_submission_runtime_root(normalized, context)
@@ -505,26 +517,36 @@ def _submit_prepared_outcome(
             autostart=context.autostart_enabled,
         )
     )
-    submitted_tid = submit_spawn_request(
-        runtime_context.broker_target,
-        taskspec=normalized,
-        work_payload=prepared.payload,
-        config=runtime_context.broker_config,
-        tid=normalized.tid,
-        inherited_weft_context=normalized.spec.weft_context,
-        seed_start_envelope=prepared.seed_start_envelope,
-        allow_internal_runtime=prepared.allow_internal_runtime,
-    )
-    task_tid = str(submitted_tid)
+    task_tid: str | None = None
     try:
-        availability = ensure_manager_after_submission(
-            runtime_context,
-            submitted_tid=task_tid,
-        )
+        with runtime_context.session() as session:
+            with session.connection() as broker:
+                submitted_tid = submit_spawn_request(
+                    runtime_context.broker_target,
+                    taskspec=normalized,
+                    work_payload=prepared.payload,
+                    config=runtime_context.broker_config,
+                    tid=normalized.tid,
+                    inherited_weft_context=normalized.spec.weft_context,
+                    seed_start_envelope=prepared.seed_start_envelope,
+                    allow_internal_runtime=prepared.allow_internal_runtime,
+                    broker=broker,
+                )
+                # Capture acceptance before either resource scope can fail exit.
+                task_tid = str(submitted_tid)
+                observation = manager_runtime.observe_manager_availability(
+                    runtime_context, broker=broker
+                )
+            availability = ensure_manager_after_submission(
+                runtime_context,
+                submitted_tid=task_tid,
+                observation=observation,
+            )
     except SubmissionManagerError:
         raise
     except Exception as exc:
-        _annotate_accepted_submission_error(exc, task_tid)
+        if task_tid is not None:
+            _annotate_accepted_submission_error(exc, task_tid)
         raise
     if availability.outcome != "ready":
         logger.warning(

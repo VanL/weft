@@ -23,7 +23,7 @@ from simplebroker import BrokerTarget, serialize_config
 from weft._constants import (
     PARENT_LOSS_WAKE_INTERVAL_CEILING,
     PARENT_LOSS_WAKE_INTERVAL_FLOOR,
-    TASK_PROCESS_POLL_INTERVAL,
+    PARENT_LOSS_WATCH_INTERVAL_SECONDS,
     resolve_runtime_config,
 )
 from weft.helpers import reload_config
@@ -75,14 +75,11 @@ def _start_parent_loss_watcher(
     task: Any,
     *,
     initial_parent_pid: int,
-    poll_interval: float,
+    watch_interval: float,
 ) -> threading.Event:
     parent_lost = threading.Event()
-    enable_watch = getattr(task, "enable_parent_loss_watch", None)
-    if callable(enable_watch):
-        enable_watch()
     wake_interval = min(
-        max(poll_interval, PARENT_LOSS_WAKE_INTERVAL_FLOOR),
+        max(watch_interval, PARENT_LOSS_WAKE_INTERVAL_FLOOR),
         PARENT_LOSS_WAKE_INTERVAL_CEILING,
     )
 
@@ -118,7 +115,7 @@ def _task_process_entry(
     db_path: BrokerTarget | str,
     spec_json: str,
     config: str,
-    poll_interval: float,
+    poll_interval: float | None,
     hard_exit_on_return: bool = False,
     detach_stdio: bool = False,
 ) -> None:
@@ -147,7 +144,7 @@ def _task_process_entry(
         _start_parent_loss_watcher(
             task,
             initial_parent_pid=initial_parent_pid,
-            poll_interval=poll_interval,
+            watch_interval=PARENT_LOSS_WATCH_INTERVAL_SECONDS,
         )
 
     task.run_until_stopped(poll_interval=poll_interval)
@@ -162,7 +159,7 @@ def launch_task_process(
     spec: TaskSpec,
     *,
     config: Mapping[str, Any] | None = None,
-    poll_interval: float = TASK_PROCESS_POLL_INTERVAL,
+    poll_interval: float | None = None,
     detach_stdio: bool = True,
 ) -> BaseProcess:
     """Launch *task_cls* in a new spawn-process and return the Process object.
@@ -217,8 +214,8 @@ def _install_signal_handlers(task: Any) -> None:
             # termination work runs makes the watcher treat itself as already
             # stopped (active queues emptied, pending checks short-circuited)
             # so the terminal transition could not complete its queue writes.
-            # The run loop's bounded wait interval guarantees the recorded
-            # signum is observed promptly.
+            # The retained strategy's local notification makes the recorded
+            # signum observable by the owner promptly.
             note(signum)
             return
         handler = getattr(task, "handle_termination_signal", None)

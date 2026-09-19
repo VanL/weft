@@ -365,14 +365,13 @@ def test_interactive_client_waits_for_matching_request_id(
     )
 
     try:
-        # Seed before start so this test verifies ctrl_out replay and matching,
-        # not watcher startup timing under backend load.
+        # Seed before start so this test verifies generic ctrl_out replay and
+        # request-id matching, not watcher startup timing under backend load.
         ctrl_out.write(
             json.dumps(
                 {
-                    "command": "PING",
+                    "command": "STATUS",
                     "status": "ok",
-                    "message": "PONG",
                     "request_id": "old",
                     "tid": tid,
                     "timestamp": time.time_ns(),
@@ -382,9 +381,8 @@ def test_interactive_client_waits_for_matching_request_id(
         ctrl_out.write(
             json.dumps(
                 {
-                    "command": "PING",
+                    "command": "STATUS",
                     "status": "ok",
-                    "message": "PONG",
                     "request_id": "new",
                     "tid": tid,
                     "timestamp": time.time_ns(),
@@ -393,7 +391,7 @@ def test_interactive_client_waits_for_matching_request_id(
         )
         client.start()
         response = client.wait_for_control_response(
-            "PING",
+            "STATUS",
             status="ok",
             request_id="new",
             timeout=5.0,

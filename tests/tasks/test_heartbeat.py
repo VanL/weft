@@ -22,8 +22,8 @@ import weft.core.tasks.heartbeat as heartbeat_module
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     CONTROL_PING,
-    HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS,
     HEARTBEAT_MIN_INTERVAL_SECONDS,
+    HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
@@ -38,6 +38,13 @@ from weft.core.tasks import HeartbeatTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 pytestmark = [pytest.mark.shared]
+
+
+def assert_heartbeat_ownership_wait_timeout(timeout: float | None) -> None:
+    """Assert the ownership deadline contract without assuming turn duration."""
+
+    assert timeout is not None
+    assert 0.0 < timeout <= HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS
 
 
 def make_heartbeat_taskspec(tid: str, root: Path) -> TaskSpec:
@@ -480,7 +487,8 @@ def test_heartbeat_run_until_stopped_uses_next_wait_timeout(
     try:
         task.run_until_stopped(poll_interval=9.0)
 
-        assert wait_calls == [pytest.approx(HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS)]
+        assert len(wait_calls) == 1
+        assert_heartbeat_ownership_wait_timeout(wait_calls[0])
     finally:
         task.stop(join=False)
         task.cleanup()
@@ -495,18 +503,15 @@ def test_heartbeat_pending_input_wakes_through_reactor_wait(
     inbox = context.queue(f"T{tid}.inbox", persistent=False)
 
     try:
-        assert task.next_wait_timeout() == pytest.approx(
-            HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS
-        )
+        assert task.next_wait_timeout() == 0.0
         task.process_once()
 
         inbox.write(json.dumps({"action": "cancel", "heartbeat_id": "build"}))
 
-        assert task.next_wait_timeout() == pytest.approx(
-            HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS
-        )
+        wait_timeout = task.next_wait_timeout()
+        assert_heartbeat_ownership_wait_timeout(wait_timeout)
         started_at = time.monotonic()
-        task.wait_for_activity(timeout=task.next_wait_timeout())
+        task.wait_for_activity(timeout=wait_timeout)
         assert time.monotonic() - started_at < 0.5
     finally:
         task.stop(join=False)
@@ -553,20 +558,27 @@ def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     ctrl_in = context.queue(f"T{tid}.ctrl_in", persistent=False)
     ctrl_out = context.queue(f"T{tid}.ctrl_out", persistent=False)
+    reply_to = f"test.heartbeat.{tid}.ctrl_in"
+    reply_queue = context.queue(reply_to, persistent=False)
 
     try:
         task.process_once()
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="ping"))
-
-        assert task.next_wait_timeout() == pytest.approx(
-            HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS
+        ctrl_in.write(
+            encode_control_message(
+                CONTROL_PING,
+                request_id="ping",
+                reply_to=reply_to,
+            )
         )
+
+        wait_timeout = task.next_wait_timeout()
+        assert_heartbeat_ownership_wait_timeout(wait_timeout)
         started_at = time.monotonic()
-        task.wait_for_activity(timeout=task.next_wait_timeout())
+        task.wait_for_activity(timeout=wait_timeout)
         assert time.monotonic() - started_at < 0.5
         task.process_once()
 
-        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        responses = [json.loads(item) for item in reply_queue.peek_generator()]
         pong = next(response for response in responses if response["command"] == "PING")
         assert pong["status"] == "ok"
         assert pong["message"] == "PONG"
@@ -576,6 +588,7 @@ def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None
         task.cleanup()
         ctrl_in.close()
         ctrl_out.close()
+        reply_queue.close()
 
 
 def test_heartbeat_failed_exact_ack_preserves_reserved_row(

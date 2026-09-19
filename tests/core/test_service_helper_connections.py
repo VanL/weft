@@ -388,7 +388,13 @@ def test_known_tid_ping_borrows_probe_and_preserves_timestamp_precedence(
     tid = str(time.time_ns())
     request_id = UUID("12345678-1234-5678-1234-567812345678")
     monkeypatch.setattr(control_probe.uuid, "uuid4", lambda: request_id)
-    ctrl_out = f"T{tid}.ctrl_out"
+    requester_tid = "1780000000000000401"
+    reply_queue = f"T{requester_tid}.ctrl_in"
+    monkeypatch.setattr(
+        control_probe,
+        "generate_spawn_request_timestamp",
+        lambda *_args, **_kwargs: int(requester_tid),
+    )
     pong = json.dumps(
         {
             "tid": tid,
@@ -404,26 +410,31 @@ def test_known_tid_ping_borrows_probe_and_preserves_timestamp_precedence(
         owner.get_connection() as broker,
     ):
         if pong_order == "before-terminal":
-            broker.write(ctrl_out, pong)
+            broker.write(reply_queue, pong)
         terminal_id = owner.write(json.dumps({"tid": tid, "status": "completed"}))
         if pong_order == "after-terminal":
-            broker.write(ctrl_out, pong)
-        unrelated_id = broker.write(ctrl_out, json.dumps({"request_id": "unrelated"}))
+            broker.write(reply_queue, pong)
+        broker.write(reply_queue, json.dumps({"request_id": "unrelated"}))
         before = len(connections)
         evidence = task_evidence.known_tid_evidence(
             ctx, tid=tid, ping=True, probe_timeout=0, broker=broker
         )
-        assert len(connections) == before
+        opened = connections[before:]
+        for connection in opened:
+            if ctx.backend_name == "postgres":
+                assert connection.closed
+            else:
+                with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                    connection.execute("SELECT 1")
         assert evidence is not None
         if pong_order == "after-terminal":
             assert evidence.status == "running"
             assert evidence.classification == "live_pong"
+            assert evidence.source == "control-pong"
         else:
             assert evidence.status == "completed"
             assert evidence.observed_at == terminal_id
-        assert list(broker.peek_generator(ctrl_out, with_timestamps=True)) == [
-            (json.dumps({"request_id": "unrelated"}), unrelated_id)
-        ]
+        assert reply_queue not in broker.list_queues()
         assert broker.get_queue_stat(f"T{tid}.ctrl_in").pending == 1
         owner.write("owner remains usable")
 

@@ -263,7 +263,6 @@ def _live_service_records(
             context,
             tid=tid,
             ctrl_in_name=ctrl_in,
-            ctrl_out_name=ctrl_out,
             timeout=1.0,
         )
         pid = record.get("pid")

@@ -203,7 +203,12 @@ and `integrations/weft_django/tests/test_weft_django.py`.
   [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md).
 - `TaskPingResult(tid: str, acknowledged: bool, timed_out: bool,
   error: str | None, observed_at: int | None, pong: Mapping[str, Any] | None,
-  snapshot: TaskSnapshot | None)`.
+  snapshot: TaskSnapshot | None)`. A synchronous keyed PING owns an ephemeral
+  reply queue whose lifetime is bounded by the dead-task cleanup age. Its
+  timeout must be finite and satisfy
+  `0 <= timeout <= CONTROL_PING_MAX_TIMEOUT_SECONDS`. A value outside that
+  inclusive range raises `CommandUsageError` before any queue is created; it
+  is not clamped and is distinct from a probe timeout.
 - `TaskControlFailure(tid: str, error: str, error_type: str)` records a
   selected task whose control attempt could not be confirmed. `error` is the
   rendered failure message and `error_type` is the exception class name.
@@ -391,6 +396,15 @@ and `weft/commands/submission.py::prepare_pipeline`. Related preparation input a
 error contracts are covered by `weft/ext.py`, `tests/core/test_client.py`, and
 `tests/commands/test_submission.py`.
 
+Implementation note for [PY-3]:
+`weft/commands/submission.py::_submit_prepared_outcome` shares one bounded broker
+session and connection across the committed spawn write and initial manager
+observation. The
+accepted TID is captured before connection exit, so subsequent operation or
+session cleanup failures retain the accepted-TID annotation. This also serves
+`PreparedSubmission.submit()` and its Django on-commit adapter.
+See the [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
+
 ## Layering [PY-4]
 
 Runtime imports are one-way: `cli -> commands -> core`,
@@ -406,6 +420,8 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
+- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 
 - [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
 

@@ -585,14 +585,14 @@ CONTROL_CONVERGENCE_ACTION_VALUES: Final[frozenset[str]] = frozenset(
 )
 """Command-control convergence reducer action values."""
 
-TASK_PROCESS_POLL_INTERVAL: Final[float] = 0.05
-"""Polling interval for spawned task-process main loops between `process_once` calls."""
-
 TASK_CLEANUP_TIMEOUT_SECONDS: Final[float] = 2.0
 """Default absolute wait budget for task finalization."""
 
-TASK_REACTOR_WAKEUP_MAX_SECONDS: Final[float] = 0.05
-"""Maximum wait chunk while task worker lanes may produce local reactor results."""
+TASK_POLL_INTERVAL_NONE_TOKEN: Final[str] = "none"
+"""Detached-process transport token for an unbounded reactor wait."""
+
+LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS: Final[float] = 0.05
+"""Bounded wait for broker-free worker/source-adapter queue operations."""
 
 LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 """Cooperative budget passed to runtime-specific liveness probes."""
@@ -641,9 +641,6 @@ TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE: Final[str] = "task_monitor.builtin_cycle
 
 TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE: Final[str] = "task_monitor.control_cleanup"
 """Worker lane name for TaskMonitor terminal task-local control cleanup."""
-
-MANAGER_POLL_INTERVAL: Final[float] = TASK_PROCESS_POLL_INTERVAL
-"""Polling interval for foreground manager-service loops."""
 
 TASK_EVIDENCE_POLL_INTERVAL: Final[float] = 0.05
 """Poll tick while waiting for terminal task evidence to appear.
@@ -699,6 +696,9 @@ Parent-process death has no portable notification, so the watcher polls;
 the floor keeps the thread from spinning, the ceiling keeps orphan
 detection prompt.
 """
+
+PARENT_LOSS_WATCH_INTERVAL_SECONDS: Final[float] = 0.05
+"""Launcher-owned parent-process observation cadence before floor/ceiling clamp."""
 
 CONTROL_SURFACE_WAIT_TIMEOUT: Final[float] = 2.0
 """Bound for caller-side control proof, distinct from launch settlement grace."""
@@ -757,9 +757,6 @@ MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS: Final[float] = 300.0
 MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 """Throttle for repeated PID-liveness probes during stop-if-absent manager waits."""
 
-MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
-"""Timer cadence for Manager parent-side user child process reaping."""
-
 MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT: Final[int] = 1
 """Retries for a child-launch worker that disappears before returning a result."""
 
@@ -808,6 +805,9 @@ MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS: Final[float] = 1.0
 MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS: Final[float] = 15.0
 """Grace window for terminal proof after a clean Manager child wrapper exit."""
 
+MANAGER_CHILD_STOP_ESCALATION_SECONDS: Final[float] = 2.0
+"""Delay after a child STOP request before Manager sends host SIGTERM."""
+
 MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: Final[float] = 15.0
 """Maximum time a Manager drain waits before forcefully reaping child processes.
 
@@ -832,9 +832,6 @@ MANAGER_COMPETING_STARTUP_GRACE_SECONDS: Final[float] = 0.5
 
 MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS: Final[float] = 2.0
 """Caller-observed ambiguity grace; the first control probe normally subsumes it."""
-
-MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS: Final[float] = 0.05
-"""Short PING budget for manager-owned leadership liveness fallback."""
 
 MANAGER_LEADERSHIP_PING_CACHE_TTL_SECONDS: Final[float] = 1.0
 """How long manager-owned leadership checks reuse a candidate PING outcome."""
@@ -1264,11 +1261,12 @@ _WORKER_SNAPSHOT_EXPECTED_FIELDS: Final[frozenset[str]] = frozenset(
     _last_terminal_families_disposed _last_warnings _managed_pids
     _monitor_config _monitor_store _monitor_store_status _multi_activity_waiter
     _multi_activity_waiter_generation _multi_activity_waiter_signature
+    _data_version_activity_pending _native_activity_degraded
     _next_cycle_due_monotonic _next_heartbeat_registration_attempt_monotonic
     _next_inactive_probe_at _next_maintenance_due_monotonic
     _next_runtime_cleanup_queue_discovery_due_monotonic _owned_dynamic_queues
     _owned_fixed_queues _owned_queue_names _owns_queue
-    _parent_loss_watch_active _paused _prior_queue_stop_event
+    _paused _prior_queue_stop_event
     _pending_messages_precheck_confirmed
     _pending_termination_sources _persistent
     _persistent_service _pong_extension_provider _queue_cache _queue_generation
@@ -1310,8 +1308,9 @@ _WORKER_SNAPSHOT_REPLACED_FIELDS: Final[frozenset[str]] = frozenset(
     _external_task_log_worker_total_emitted _finalizer _handler _has_thread_db
     _fixed_queue_names _kill_requested _monitor_config _monitor_store _multi_activity_waiter
     _multi_activity_waiter_generation _multi_activity_waiter_signature
+    _data_version_activity_pending _native_activity_degraded
     _owned_dynamic_queues _owned_fixed_queues _owned_queue_names _owns_queue
-    _parent_loss_watch_active _paused _prior_queue_stop_event
+    _paused _prior_queue_stop_event
     _pending_messages_precheck_confirmed _pending_termination_sources
     _pong_extension_provider _queue_cache
     _queue_iterator _queue_obj _queues _resource_monitor _run_thread _running_event
@@ -1431,14 +1430,11 @@ MANAGER_SERVE_LOG_COMPONENTS: Final[frozenset[str]] = frozenset(
 )
 """Allowed foreground manager operational-log component labels."""
 
-TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS: Final[float] = 1.0
-"""Maximum launcher wait for TaskMonitor when no queue wake is observed."""
+TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS: Final[float] = 1.0
+"""Delay before TaskMonitor retries a failed heartbeat registration."""
 
 TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS: Final[float] = 0.5
 """Bounded heartbeat lookup budget used by TaskMonitor before retrying later."""
-
-MANAGED_SERVICE_PING_TIMEOUT_SECONDS: Final[float] = 0.15
-"""Bounded PING/PONG probe budget for manager-supervised singleton evidence."""
 
 MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS: Final[float] = 5.0
 """Window where nonterminal service rows without live proof remain uncertain."""
@@ -1743,8 +1739,8 @@ HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 HEARTBEAT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
 """Idle timeout after the last registration before the heartbeat service exits."""
 
-HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS: Final[float] = 1.0
-"""Maximum HeartbeatTask wait chunk between supersession and idle checks."""
+HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS: Final[float] = 1.0
+"""Clock cadence for HeartbeatTask endpoint-ownership reconciliation."""
 
 HEARTBEAT_ENDPOINT_PROBE_TIMEOUT: Final[float] = 0.25
 """Bounded PING/PONG probe timeout used when validating a heartbeat endpoint."""
@@ -1919,6 +1915,11 @@ TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS: Final[float] = (
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 2
 )
 """Minimum age before TaskMonitor considers record-less task-local cleanup."""
+
+CONTROL_PING_MAX_TIMEOUT_SECONDS: Final[float] = (
+    TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS / 2
+)
+"""Longest synchronous PING wait before its ephemeral reply TID nears cleanup."""
 
 LIVENESS_MAPPING_MIN_AGE_SECONDS: Final[float] = (
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 2

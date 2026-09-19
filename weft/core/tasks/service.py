@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from weft._constants import TASK_REACTOR_WAKEUP_MAX_SECONDS
+from weft._constants import LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS
 from weft.core.taskspec import TaskSpec
 
 from .base import BaseTask, TaskWorkerResult
@@ -66,7 +66,9 @@ class ServiceWorkerContext:
 
         while not self.stop_requested():
             try:
-                item = self.input_queue.get(timeout=TASK_REACTOR_WAKEUP_MAX_SECONDS)
+                item = self.input_queue.get(
+                    timeout=LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS
+                )
             except thread_queue.Empty:
                 continue
             if item is _service_worker_stop:
@@ -192,6 +194,11 @@ class ServiceTask(BaseTask):
         """
 
         return
+
+    def next_wait_timeout(self) -> float | None:
+        """Suppress the BaseTask poll-report timer that services do not emit."""
+
+        return None
 
     def _emit_activity_event(self) -> None:
         """Keep service activity live-only instead of writing task-log rows.
@@ -452,10 +459,10 @@ class ServiceTask(BaseTask):
                         break
                     put_timeout = min(
                         remaining,
-                        TASK_REACTOR_WAKEUP_MAX_SECONDS,
+                        LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS,
                     )
                 else:
-                    put_timeout = TASK_REACTOR_WAKEUP_MAX_SECONDS
+                    put_timeout = LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS
                 try:
                     input_queue.put(
                         _service_worker_stop,
@@ -478,7 +485,7 @@ class ServiceTask(BaseTask):
                 if handled == 0:
                     if not self._has_active_worker_threads():
                         return
-                    wait_timeout = TASK_REACTOR_WAKEUP_MAX_SECONDS
+                    wait_timeout = LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS
                     if deadline is not None:
                         wait_timeout = min(
                             wait_timeout,
@@ -641,7 +648,7 @@ class ServiceTask(BaseTask):
         """Stop service workers before shared constructor unwind closes queues."""
 
         failures: list[BaseException] = []
-        deadline = time.monotonic() + TASK_REACTOR_WAKEUP_MAX_SECONDS
+        deadline = time.monotonic() + LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS
         for name in tuple(self._service_worker_registrations):
             try:
                 self._stop_service_worker(name, deadline=deadline)

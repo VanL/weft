@@ -17,6 +17,7 @@ from typing import Any, cast
 
 from weft._constants import (
     CONTROL_COMMANDS,
+    CONTROL_PING,
 )
 
 
@@ -26,6 +27,7 @@ class ControlRequest:
 
     command: str
     request_id: str | None = None
+    reply_to: str | None = None
 
 
 def _validate_control_request(request: ControlRequest) -> None:
@@ -35,9 +37,23 @@ def _validate_control_request(request: ControlRequest) -> None:
         not isinstance(request.request_id, str) or not request.request_id.strip()
     ):
         raise ValueError("request_id must contain a non-whitespace character")
+    if request.reply_to is not None and (
+        not isinstance(request.reply_to, str) or not request.reply_to.strip()
+    ):
+        raise ValueError("reply_to must contain a non-whitespace character")
+    if request.command == CONTROL_PING:
+        if request.request_id is None or request.reply_to is None:
+            raise ValueError("PING requires request_id and reply_to")
+    elif request.reply_to is not None:
+        raise ValueError("reply_to is only valid for PING")
 
 
-def encode_control_message(command: str, *, request_id: str | None = None) -> str:
+def encode_control_message(
+    command: str,
+    *,
+    request_id: str | None = None,
+    reply_to: str | None = None,
+) -> str:
     """Encode one canonical control request.
 
     Raises:
@@ -46,11 +62,17 @@ def encode_control_message(command: str, *, request_id: str | None = None) -> st
     Spec: [QUEUE.2a]
     """
 
-    request = ControlRequest(command=command, request_id=request_id)
+    request = ControlRequest(
+        command=command,
+        request_id=request_id,
+        reply_to=reply_to,
+    )
     _validate_control_request(request)
     payload = {"command": command}
     if request_id is not None:
         payload["request_id"] = request_id
+    if reply_to is not None:
+        payload["reply_to"] = reply_to
     return json.dumps(payload)
 
 
@@ -87,16 +109,25 @@ def parse_control_request(raw: str) -> ControlRequest | None:
     payload = decode_control_object(raw)
     if payload is None:
         return None
-    keys = set(payload)
-    if keys not in ({"command"}, {"command", "request_id"}):
+    command = payload.get("command")
+    if command == CONTROL_PING:
+        if set(payload) != {"command", "request_id", "reply_to"}:
+            return None
+    elif set(payload) not in ({"command"}, {"command", "request_id"}):
         return None
-    command = payload["command"]
     request_id = payload.get("request_id")
+    reply_to = payload.get("reply_to")
     if not isinstance(command, str):
         return None
     if "request_id" in payload and not isinstance(request_id, str):
         return None
-    request = ControlRequest(command=command, request_id=request_id)
+    if "reply_to" in payload and not isinstance(reply_to, str):
+        return None
+    request = ControlRequest(
+        command=command,
+        request_id=request_id,
+        reply_to=reply_to,
+    )
     try:
         _validate_control_request(request)
     except ValueError:

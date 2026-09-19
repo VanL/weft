@@ -13,7 +13,7 @@ Per-task queues (generated from TID):
 | `T{tid}.reserved` | WIP / reserved messages (DLQ-style recovery) |
 | `T{tid}.outbox` | Final task output |
 | `T{tid}.ctrl_in` | Control messages (STOP, KILL, STATUS, PING, PAUSE, RESUME) |
-| `T{tid}.ctrl_out` | Control responses |
+| `T{tid}.ctrl_out` | Non-PONG control responses and terminal notifications |
 
 Per-pipeline queues (generated from pipeline TID):
 
@@ -22,7 +22,7 @@ Per-pipeline queues (generated from pipeline TID):
 | `P{tid}.inbox` | Pipeline input messages |
 | `P{tid}.outbox` | Final pipeline result |
 | `P{tid}.ctrl_in` | Pipeline control messages (same control set) |
-| `P{tid}.ctrl_out` | Pipeline control replies |
+| `P{tid}.ctrl_out` | Non-PONG pipeline control replies |
 | `P{tid}.status` | Retained pipeline status snapshots |
 | `P{tid}.events` | Private child-owner coordination |
 
@@ -146,18 +146,19 @@ State transitions and rules live in `05-Message_Flow_and_State.md`.
 
 ## Control Messages
 
-Every request is a JSON object containing exactly `command` and, when keyed,
-`request_id`. `command` is one of the exact uppercase values below;
-`request_id`, when present, is a string containing at least one non-whitespace
-character. Raw strings, extra keys, and
-case-normalized command variants are not current request formats.
+Every non-PING request is a JSON object containing exactly `command` and, when
+keyed, `request_id`. A PING is exactly `{command, request_id, reply_to}`;
+`request_id` and `reply_to` are nonblank strings, and `reply_to` is the
+requester's own `ctrl_in`. `command` is one of the exact uppercase values
+below. Raw strings, extra keys, and case-normalized variants are not current
+request formats.
 
 | Message | Effect |
 |---------|--------|
 | `STOP` | Graceful shutdown (task cancels and reports) |
 | `KILL` | Force terminate the task |
 | `STATUS` | Emit current task-local status on `ctrl_out` |
-| `PING` | Health check; responds `PONG` with a live task-local status snapshot, echoes `request_id` for structured requests, includes manager-selection fields for Manager tasks, and may include task-registered extension data under `extended` |
+| `PING` | Health check; writes one `PONG` to the requester's named `reply_to`, echoes `request_id`, includes manager-selection fields for Manager tasks, and may include task-registered extension data under `extended` |
 | `PAUSE` | Pause task processing |
 | `RESUME` | Resume a paused task |
 
@@ -238,6 +239,8 @@ indexed here; `WEFT_MANAGER_RUNTIME_HANDLE_JSON` is documented in
 _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* fields), `weft/core/targets.py` (argv construction).
 
 ## Related Plans
+
+- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
 

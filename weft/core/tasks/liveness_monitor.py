@@ -33,7 +33,6 @@ from weft._constants import (
     LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
     LIVENESS_STATE_REFRESH_INTERVAL_SECONDS,
     LIVENESS_UNKNOWN_TIMEOUT_SECONDS,
-    TASK_REACTOR_WAKEUP_MAX_SECONDS,
     WEFT_TASK_STATE_QUEUE_PREFIX,
 )
 from weft._runner_plugins import get_runner_plugin
@@ -559,21 +558,22 @@ class LivenessMonitor(ServiceTask):
             )
             return False
 
-    def next_wait_timeout(self) -> float:
+    def next_wait_timeout(self) -> float | None:
         """Return the next local liveness scheduling deadline."""
 
         if self._has_pending_worker_results():
             return 0.0
+        base_timeout = super().next_wait_timeout()
+        if self._paused:
+            return base_timeout
         now = self._monotonic()
         due = self._due_heap[0][0] - now if self._due_heap else None
         full = self._next_full_reconcile_at - now
-        values = [
-            TASK_REACTOR_WAKEUP_MAX_SECONDS,
-            full,
-            self._next_state_refresh_at - now,
-        ]
+        values = [full, self._next_state_refresh_at - now]
         if due is not None:
             values.append(due)
+        if base_timeout is not None:
+            values.append(base_timeout)
         return max(0.0, min(values))
 
 

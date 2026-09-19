@@ -216,6 +216,7 @@ def test_service_task_poll_reporting_is_disabled(
     try:
         task._last_poll_report_at = 0.0
         monkeypatch.setattr("weft.core.tasks.base.time.monotonic", lambda: 60.0)
+        assert task.next_wait_timeout() is None
         task.process_once()
     finally:
         task.stop()

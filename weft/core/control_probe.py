@@ -8,25 +8,27 @@ Spec references:
 
 from __future__ import annotations
 
-import json
 import logging
+import math
 import time
 import uuid
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_PING,
-    CONTROL_SURFACE_WAIT_INTERVAL,
+    CONTROL_PING_MAX_TIMEOUT_SECONDS,
     CONTROL_SURFACE_WAIT_TIMEOUT,
+    QUEUE_CTRL_IN_SUFFIX,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft._exceptions import CommandUsageError
 from weft.context import WeftContext
 from weft.core.control_messages import decode_control_object, encode_control_message
-from weft.helpers import closing_queue_iterator
+from weft.core.spawn_requests import generate_spawn_request_timestamp
+from weft.core.tasks.multiqueue_watcher import MultiQueueWatcher, QueueMessageContext
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +61,9 @@ def coerce_pong_response(
     """Return a matched structured PONG response or None.
 
     A matched PONG is a positive liveness proof for the exact task and probe.
-    Non-matching, malformed, stale, or noncanonical responses remain visible in the
-    broker and are ignored by this helper.
+    Non-matching, malformed, stale, or noncanonical responses are ignored by this
+    helper. The owning requester decides whether those private queue rows are
+    consumed or retained.
 
     Spec: [MF-3]
     """
@@ -91,32 +94,6 @@ def coerce_pong_response(
     }:
         return None
     return payload
-
-
-def reply_bears_request_id(raw: str, *, request_id: str) -> bool:
-    """Whether a ctrl_out row is a keyed reply to the given probe request.
-
-    Sweep predicate for keyed-reply retirement: the prober that issued
-    ``request_id`` owns every reply keyed to it, including malformed or late
-    ones that ``coerce_pong_response`` would reject. A row matches only when it
-    contains exactly one ``request_id`` with the requested value. Other probes'
-    replies, terminal envelopes without that key, duplicate request IDs, and
-    non-JSON bodies never match; unrelated noncanonical fields do not change
-    keyed ownership.
-
-    Spec: [MF-3], [MANAGER.8]
-    """
-
-    try:
-        payload = json.loads(raw, object_pairs_hook=list)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return False
-    if not isinstance(payload, list) or not all(
-        isinstance(item, tuple) and len(item) == 2 for item in payload
-    ):
-        return False
-    request_ids = [value for key, value in payload if key == "request_id"]
-    return request_ids == [request_id]
 
 
 def pong_proves_dispatch_eligible(
@@ -164,91 +141,102 @@ def pong_proves_dispatch_eligible(
     return payload.get("weft_context") == expected_context
 
 
-def _retire_reply_row(broker: Any, ctrl_out_name: str, message_id: int) -> None:
-    """Best-effort exact-ID delete of one probe-owned ctrl_out reply row.
+def _unused_probe_handler(
+    _message: str,
+    _timestamp: int,
+    _context: QueueMessageContext,
+) -> None:
+    """Satisfy the watcher contract; manual probe waits dispatch no handlers."""
 
-    Retirement is hygiene, not proof: failures never change the caller's
-    probe outcome, so a matched probe stays matched even if the delete loses
-    a race with task-exit purge or terminal/dead-TID cleanup.
-    """
+
+def _validate_probe_timeout(timeout: float) -> float:
+    """Return a valid synchronous probe timeout or raise a usage error."""
 
     try:
-        broker.delete_message_ids(ctrl_out_name, [message_id])
-    except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
-        logger.debug(
-            "Failed to retire keyed probe reply",
-            extra={"queue": ctrl_out_name, "message_id": message_id},
-            exc_info=True,
+        value = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise CommandUsageError("PING timeout must be a finite number") from exc
+    if (
+        not math.isfinite(value)
+        or value < 0
+        or value > CONTROL_PING_MAX_TIMEOUT_SECONDS
+    ):
+        raise CommandUsageError(
+            "PING timeout must be between 0 and "
+            f"{CONTROL_PING_MAX_TIMEOUT_SECONDS:g} seconds"
         )
+    return value
 
 
-def _finalize_own_replies(
-    broker: Any,
-    ctrl_out_name: str,
+def _write_probe_request(
+    reply_queue: Any,
+    *,
+    broker: Any | None,
+    ctrl_in_name: str,
+    message: str,
+) -> None:
+    """Write one PING through a borrowed broker or the watcher-owned queue."""
+
+    if broker is not None:
+        broker.write(ctrl_in_name, message)
+        return
+    with reply_queue.get_connection() as opened:
+        opened.write(ctrl_in_name, message)
+
+
+def _read_matching_pong(
+    reply_queue: Any,
     *,
     tid: str,
     request_id: str,
 ) -> MatchedPong | None:
-    """Evaluate a final matching PONG, then sweep probe-owned reply rows.
+    """Consume ready reply rows and return the first exact PONG match."""
 
-    Runs once at the probe deadline to cover the reply-arrived-after-last-peek
-    window. A valid matching PONG is captured before all rows keyed to this
-    request are retired. Rows keyed to other request ids are never touched.
-    Cleanup failure cannot downgrade a captured proof.
-
-    Spec: [MF-3]
-    """
-
-    reply_ids: list[int] = []
-    matched: MatchedPong | None = None
-    iterator = broker.peek_generator(ctrl_out_name, with_timestamps=True)
-    with closing_queue_iterator(iterator) as rows:
-        for item in rows:
-            if not isinstance(item, tuple) or len(item) != 2:
-                continue
-            body, timestamp = item
-            raw = str(body)
-            if not reply_bears_request_id(raw, request_id=request_id):
-                continue
-            message_id = int(timestamp)
-            reply_ids.append(message_id)
-            if matched is None:
-                payload = coerce_pong_response(
-                    raw,
-                    tid=tid,
-                    request_id=request_id,
-                )
-                if payload is not None:
-                    matched = MatchedPong(
-                        payload=payload,
-                        observed_at=message_id,
-                        request_id=request_id,
-                    )
-    for message_id in reply_ids:
-        _retire_reply_row(broker, ctrl_out_name, message_id)
-    return matched
+    while True:
+        item = reply_queue.read_one(with_timestamps=True)
+        if item is None:
+            return None
+        body, timestamp = item
+        payload = coerce_pong_response(str(body), tid=tid, request_id=request_id)
+        if payload is not None:
+            return MatchedPong(
+                payload=payload,
+                observed_at=int(timestamp),
+                request_id=request_id,
+            )
 
 
-@contextmanager
-def _probe_broker(
-    ctx: WeftContext, ctrl_in_name: str, broker: Any | None
-) -> Iterator[Any]:
-    """Borrow the caller's broker or own one bounded persistent queue lease.
+def _retire_probe_reply_queue(reply_queue: Any) -> None:
+    """Best-effort cleanup after the watcher has released its queue lease."""
 
-    Connection lifetime spans polling, not a transaction. Borrowed brokers
-    must belong to the calling thread and are never closed here.
+    try:
+        reply_queue.delete()
+    except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
+        logger.debug(
+            "Failed to retire ephemeral PING reply queue",
+            exc_info=True,
+        )
+    finally:
+        try:
+            reply_queue.close()
+        except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
+            logger.debug(
+                "Failed to close ephemeral PING reply queue",
+                exc_info=True,
+            )
 
-    Spec: [SB-0.4]
-    """
-    if broker is not None:
-        yield broker
-        return
-    with (
-        ctx.session(),
-        ctx.queue(ctrl_in_name, persistent=True) as queue,
-        queue.get_connection() as opened,
-    ):
-        yield opened
+
+def _stop_probe_watcher(watcher: MultiQueueWatcher) -> None:
+    """Best-effort release without replacing the probe's primary outcome."""
+
+    try:
+        watcher.stop()
+    except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
+        logger.debug("Failed to stop ephemeral PING watcher", exc_info=True)
+        try:
+            watcher.stop()
+        except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
+            logger.debug("Failed to retry ephemeral PING watcher stop", exc_info=True)
 
 
 def send_keyed_ping_probe(
@@ -256,84 +244,80 @@ def send_keyed_ping_probe(
     *,
     tid: str,
     ctrl_in_name: str,
-    ctrl_out_name: str,
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     request_id: str | None = None,
     broker: Any | None = None,
 ) -> ControlProbeResult:
-    """Send a keyed PING, wait for a matching PONG, and retire keyed replies.
+    """Send a keyed PING and wait on an ephemeral requester control queue.
 
-    The probe writes one structured PING to ``ctrl_in_name`` and peeks
-    ``ctrl_out_name`` until it sees a matching keyed PONG or the bounded wait
-    expires. The prober owns the lifecycle of replies keyed to its
-    ``request_id`` (single-reader contract): a matched PONG is deleted by
-    exact message id on match, and one final sweep at timeout deletes any
-    remaining row bearing this probe's ``request_id``. Rows keyed to other
-    request ids — other probes' replies, terminal envelopes, noncanonical
-    responses — are never touched. A reply landing after the final sweep can
-    still remain; its lifetime is bounded by task-exit purge and
-    terminal/dead-TID cleanup. Queue I/O errors are returned as probe errors
-    so caller-side liveness decisions can stay conservative.
-    Task callers pass their thread-owned broker; standalone calls own a
-    persistent lease until the probe finishes. No transaction spans the wait.
+    The synchronous caller mints a task-shaped requester identity, owns its
+    ``T{tid}.ctrl_in`` queue, and waits through the same watcher path used by
+    long-lived tasks. The target writes its PONG directly to that queue. The
+    watcher and reply rows are retired on every exit path.
 
     Spec: [MF-3], [MANAGER.8]
     """
 
+    probe_timeout = _validate_probe_timeout(timeout)
     probe_request_id = request_id or uuid.uuid4().hex
+    watcher: MultiQueueWatcher | None = None
+    reply_queue: Any | None = None
     try:
-        with _probe_broker(ctx, ctrl_in_name, broker) as db:
-            db.write(
-                ctrl_in_name,
-                encode_control_message(CONTROL_PING, request_id=probe_request_id),
+        requester_tid = generate_spawn_request_timestamp(
+            ctx.broker_target,
+            config=ctx.broker_config,
+            broker=broker,
+        )
+        reply_queue_name = f"T{requester_tid}.{QUEUE_CTRL_IN_SUFFIX}"
+        watcher = MultiQueueWatcher(
+            {
+                reply_queue_name: {
+                    # Manual waits only observe readiness; they never dispatch.
+                    "handler": _unused_probe_handler,
+                }
+            },
+            db=ctx.broker_target,
+            persistent=False,
+            config=ctx.broker_config,
+        )
+        reply_queue = watcher.get_queue(reply_queue_name)
+        assert reply_queue is not None  # constructor invariant
+
+        ping = encode_control_message(
+            CONTROL_PING,
+            request_id=probe_request_id,
+            reply_to=reply_queue_name,
+        )
+        _write_probe_request(
+            reply_queue,
+            broker=broker,
+            ctrl_in_name=ctrl_in_name,
+            message=ping,
+        )
+
+        deadline = time.monotonic() + probe_timeout
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            watcher.wait_for_activity(remaining)
+            matched = _read_matching_pong(
+                reply_queue,
+                tid=tid,
+                request_id=probe_request_id,
             )
-            deadline = time.monotonic() + max(0.0, timeout)
-            while True:
-                matched_payload: dict[str, Any] | None = None
-                matched_message_id: int | None = None
-                iterator = db.peek_generator(ctrl_out_name, with_timestamps=True)
-                with closing_queue_iterator(iterator) as rows:
-                    for item in rows:
-                        if not isinstance(item, tuple) or len(item) != 2:
-                            continue
-                        body, timestamp = item
-                        payload = coerce_pong_response(
-                            str(body),
-                            tid=tid,
-                            request_id=probe_request_id,
-                        )
-                        if payload is None:
-                            continue
-                        matched_payload = payload
-                        matched_message_id = int(timestamp)
-                        break
-                if matched_payload is not None and matched_message_id is not None:
-                    _retire_reply_row(db, ctrl_out_name, matched_message_id)
-                    return ControlProbeResult(
-                        request_id=probe_request_id,
-                        matched=MatchedPong(
-                            payload=matched_payload,
-                            observed_at=matched_message_id,
-                            request_id=probe_request_id,
-                        ),
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    matched = _finalize_own_replies(
-                        db,
-                        ctrl_out_name,
-                        tid=tid,
-                        request_id=probe_request_id,
-                    )
-                    if matched is not None:
-                        return ControlProbeResult(
-                            request_id=probe_request_id,
-                            matched=matched,
-                        )
-                    return ControlProbeResult(
-                        request_id=probe_request_id,
-                        timed_out=True,
-                    )
-                time.sleep(min(CONTROL_SURFACE_WAIT_INTERVAL, remaining))
+            if matched is not None:
+                return ControlProbeResult(
+                    request_id=probe_request_id,
+                    matched=matched,
+                )
+            if time.monotonic() >= deadline:
+                return ControlProbeResult(
+                    request_id=probe_request_id,
+                    timed_out=True,
+                )
     except (BrokerError, OSError) as exc:
         return ControlProbeResult(request_id=probe_request_id, error=str(exc))
+    finally:
+        if watcher is not None:
+            _stop_probe_watcher(watcher)
+        if reply_queue is not None:
+            _retire_probe_reply_queue(reply_queue)

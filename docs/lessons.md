@@ -374,12 +374,15 @@ index is not a dated section and does not count toward the coalescing trigger.
   launch work for that turn. Do not accept another spawn request before control
   has had a chance to run; otherwise a fast child-launch worker can recreate a
   same-turn STOP race.
-- Manager-to-manager liveness probes should be non-blocking reactor state. A
-  stale-looking registry row that has a keyed PING in flight is still unknown
-  until the probe deadline, not stale proof to prune or supersede immediately.
-- Service-owner PING fallback follows the same rule. A candidate with
-  `ping_pending` is uncertain evidence; only after the pending probe expires
-  should normal recent/stale classification decide whether it blocks restart.
+- Revised 2026-09-19: Manager-to-manager liveness probes are non-blocking
+  reactor state. A stale-looking registry row with a keyed PING in flight stays
+  unknown until a matching PONG or the next ordinary leadership evaluation; a
+  PONG-specific deadline is unnecessary once the reply is routed through the
+  Manager's watched `ctrl_in`.
+- Revised 2026-09-19: service-owner PING fallback follows the same rule. A
+  `ping_pending` candidate stays uncertain until a matching PONG or the next
+  ordinary active-service evaluation. The active-service cadence owns absence;
+  the probe does not add another timer.
 - TaskMonitor custom processors can be worker-lane work only after the reactor
   has built a complete candidate snapshot. Checkpoint advancement, cached PONG
   diagnostics, built-in cleanup, and exact deletes must stay on the
@@ -1381,3 +1384,30 @@ and `tests/system/test_config_transport.py`.
   unwinds, and give exactly one boundary responsibility for propagating or
   logging cleanup failure. See the
   [explicit broker session lifetime plan](plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
+
+
+## 2026-09-17 Reactor Waiting and Polling Policy
+
+- The manager latency investigation found that BaseTask started SimpleBroker's
+  adaptive strategy but manually waited through a different native-or-sleep
+  path; synchronous PONG callers had a third scan/sleep loop. A shorter sleep
+  improved latency while increasing full reactor turns, so it measured a
+  different cost from cheap data-version polling. Follow the actual production
+  wait path before choosing intervals. Single-thread ownership alone does not
+  prove that wake sources share one policy.
+- An apparently redundant periodic rescan may mask incomplete subscriptions or
+  a dead native observer. Repair interest coverage, local interruption, deadline
+  composition and failure fallback before removing that rescan.
+- Keep task-reactor deadlines distinct from source-adapter and finalization
+  bounds. A parent watcher may poll the OS and a bounded worker queue may use a
+  timed operation without scheduling task policy turns. The source adapter must
+  record authoritative local state before notifying the retained strategy. See
+  the [watcher reactor restoration plan](plans/2026-09-17-watcher-reactor-restoration-plan.md).
+- Do not preserve a polling fallback by relabeling it as a domain timeout after
+  the missing event route is repaired. Manager PONG arrival is backend activity;
+  unanswered-probe policy already has leadership and active-service reactor
+  timers. Reuse those owning-policy turns for absence, and keep reply-driven or
+  incidental work from resetting the timer or concluding another probe early.
+  Measured queue-wakeup latency is diagnostic evidence, not a reason to create
+  a response deadline. See the
+  [event-routed Manager PONG plan](plans/2026-09-18-event-routed-manager-pong-plan.md).

@@ -31,7 +31,6 @@ from weft._constants import (
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
-    MANAGER_POLL_INTERVAL,
     MANAGER_PONG_LIVE_AT_KEY,
     MANAGER_REGISTRY_POLL_INTERVAL,
     MANAGER_STARTUP_LOG_DIRNAME,
@@ -44,7 +43,7 @@ from weft._constants import (
     SERVICE_STATUS_DRAINING,
     SERVICE_STATUS_STOPPED,
     SERVICE_STATUS_SUPERSEDED,
-    TASK_PROCESS_POLL_INTERVAL,
+    TASK_POLL_INTERVAL_NONE_TOKEN,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -494,12 +493,10 @@ def _probe_recovery_candidate(
 
     tid = str(record.get("tid", ""))
     ctrl_in_name = _manager_ctrl_queue_name(tid, record)
-    ctrl_out_name = _manager_ctrl_out_queue_name(tid, record)
     return send_keyed_ping_probe(
         context,
         tid=tid,
         ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
         timeout=CONTROL_SURFACE_WAIT_TIMEOUT,
         broker=broker,
     )
@@ -533,10 +530,17 @@ def observe_manager_availability(
     Registry and backlog read failures are returned as uncertainty. Arbitrary
     runtime defects propagate to the caller.
 
-    Spec: [MA-1] item 4, [MA-3], [MANAGER.8]
+    Standalone observation owns one connection across registry, backlog and
+    PING reads. Borrowed connections remain caller-owned; no transaction spans
+    the control wait.
+
+    Spec: [MA-1] item 4, [MA-3], [MANAGER.8], [SB-0.4]
     """
 
     try:
+        if broker is None:
+            with context.session() as session, session.connection() as opened:
+                return observe_manager_availability(context, broker=opened)
         outcome, record = _read_recovery_snapshot(context, broker=broker)
     except (BrokerError, OSError) as exc:
         return ManagerAvailabilityObservation(
@@ -1031,7 +1035,6 @@ def _manager_record_has_matched_pong(
         context,
         tid=tid,
         ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
         broker=broker,
         timeout=max(
             0.0,
@@ -1354,7 +1357,7 @@ def _build_manager_process_command(
         broker_target_b64,
         spec_b64,
         config_b64,
-        str(TASK_PROCESS_POLL_INTERVAL),
+        TASK_POLL_INTERVAL_NONE_TOKEN,
     ]
 
 
@@ -2263,7 +2266,7 @@ def _run_manager_process_foreground(
         context.broker_target,
         invocation.spec,
         context.config,
-        MANAGER_POLL_INTERVAL,
+        None,
         hard_exit_on_return=True,
     )
 

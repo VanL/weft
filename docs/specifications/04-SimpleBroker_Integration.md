@@ -236,12 +236,19 @@ Standalone fallback scopes are owned by `weft/core/control_probe.py`,
   strategy data-version callbacks and local wake hints intact and accepts
   `None` for polling fallback. Weft does not call backend-specific listener
   APIs and does not use `PollingStrategy.start()` as a live replacement
-- when the backend returns a native activity waiter, Weft waits on that waiter
-  and treats a `True` result as a queue-discovery hint; it must not perform a
-  pre-wait SQL pending scan on every wait cycle
-- when no native activity waiter is available, Weft may perform a bounded
-  positive-timeout pending precheck as the fallback polling path. Zero-timeout
-  local timer wakes still return immediately without queue probes
+- `MultiQueueWatcher` drives its retained SimpleBroker `PollingStrategy` for
+  every backend. It installs the optional multi-queue activity waiter through
+  the strategy lifecycle seam and never waits on that native waiter directly.
+  A service timer is passed as the optional strategy deadline; polling
+  fallback keeps its configured one-pass cadence rather than adopting a
+  second Weft polling interval.
+- Native notifications, SQLite `data_version` changes and local notifications
+  are readiness hints. The owner performs a live watched-queue pending check
+  before queue dispatch; local-hint consumption performs the same check so a
+  same-connection self-write can activate an inactive watched queue. Quiet,
+  empty, unrelated and timer-deadline returns do not assert durable work or
+  reset useful-activity state. Zero-timeout local timer boundaries return
+  without queue probes.
 
 `build_context()` owns root selection: an explicit `spec_context` argument takes
 precedence over the resolved Config's `CONTEXT` (`WEFT_CONTEXT` input). In the absence
@@ -293,6 +300,15 @@ key as its single Postgres usage value. The operator-configured
 `WEFT_ADMISSION_MAX_CONNECTIONS`, not the helper's `max_connections`,
 `superuser_reserved_connections`, or `reserved_connections` values, controls
 the Weft lane limits. Weft adds no prospective per-launch connection charge.
+
+Implementation note for [SB-0.4]:
+`weft/commands/submission.py::_submit_prepared_outcome` owns the effective-context
+session and connection across enqueue and initial availability. That connection
+operation ends before `ensure_manager_after_submission` receives the same-call
+observation and enters recovery. Standalone
+`weft/core/manager_runtime.py::observe_manager_availability` owns its own bounded
+session/connection. Coverage lives in `tests/core/test_manager_runtime_connections.py`.
+See the [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
 
 ### Weft-Owned Operational Tables [SB-0.4a]
 
@@ -791,6 +807,8 @@ connection-pooling designs are tracked in the companion doc:
 - [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
 
 ## Related Plans
+
+- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - makes the retained `PollingStrategy` the one backend-neutral wake arbiter and defines notifications as hints validated against live watched-queue state.
 
 - [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
 

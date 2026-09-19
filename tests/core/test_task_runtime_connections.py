@@ -477,12 +477,11 @@ def test_manager_dynamic_control_queues_reuse_task_connection(
         initial_connections = len(connections)
         for index in range(5):
             name = f"connection-test.{index}.ctrl"
-            manager._send_child_control_command(name, "PING")
-            message = encode_control_message("PING")
-            message_id = manager._find_exact_probe_message_id(name, message)
-            assert message_id is not None
-            manager._delete_exact_probe_message(name, message_id)
-            assert manager._find_exact_probe_message_id(name, message) is None
+            manager._send_child_control_command(name, "STATUS")
+            with manager._get_connected_queue().get_connection() as broker:
+                observed = broker.peek_one(name)
+                assert isinstance(observed, tuple)
+                assert observed[0] == encode_control_message("STATUS")
         assert len(connections) == initial_connections
         assert set(manager._queue_cache) == cached_names
         manager._get_connected_queue().write("owner remains usable")
@@ -660,14 +659,14 @@ def test_manager_child_seed_and_stale_cleanup_do_not_cache_dynamic_queues(
         manager.cleanup()
 
 
-def test_keyed_probe_wait_retains_connection_between_polls(
+def test_keyed_probe_manual_wait_releases_transient_connections(
     counted_connections: tuple[WeftContext, list[Any]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx, connections = counted_connections
     observations: list[int] = []
 
-    def observe_wait(_seconds: float) -> None:
+    def fail_wait(_watcher: Any, _seconds: float) -> None:
         for connection in connections:
             if ctx.backend_name == "postgres":
                 if not connection.closed:
@@ -678,20 +677,28 @@ def test_keyed_probe_wait_retains_connection_between_polls(
                 except sqlite3.ProgrammingError:
                     pass
         observations.append(len(connections))
-        if len(observations) == 3:
-            raise RuntimeError("injected wait failure")
+        raise RuntimeError("injected wait failure")
 
-    monkeypatch.setattr("weft.core.control_probe.time.sleep", observe_wait)
+    initial_connections = len(connections)
+    monkeypatch.setattr(
+        "weft.core.control_probe.MultiQueueWatcher.wait_for_activity",
+        fail_wait,
+    )
     with pytest.raises(RuntimeError, match="injected wait failure"):
         send_keyed_ping_probe(
             ctx,
             tid=str(time.time_ns()),
             ctrl_in_name="probe.in",
-            ctrl_out_name="probe.out",
             timeout=10.0,
         )
-    assert len(observations) == 3
-    assert observations == [observations[0]] * 3
+    assert len(observations) == 1
+    assert observations[0] > initial_connections
+    for connection in connections[initial_connections:]:
+        if ctx.backend_name == "postgres":
+            assert connection.closed
+        else:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
 
 
 @pytest.mark.parametrize("outcome", ["matched", "timeout", "error"])
@@ -703,36 +710,60 @@ def test_keyed_probe_never_closes_borrowed_broker(
     ctx, connections = counted_connections
     tid = str(time.time_ns())
 
-    def fail_wait(_seconds: float) -> None:
+    def fail_wait(_watcher: Any, _seconds: float) -> None:
         raise RuntimeError("injected wait failure")
 
-    monkeypatch.setattr("weft.core.control_probe.time.sleep", fail_wait)
     with (
         ctx.queue("probe.owner", persistent=True) as owner,
         owner.get_connection() as broker,
     ):
+        responder: threading.Thread | None = None
         if outcome == "matched":
-            broker.write(
-                "probe.out",
-                json.dumps(
-                    {
-                        "command": "PING",
-                        "status": "ok",
-                        "message": "PONG",
-                        "tid": tid,
-                        "request_id": "borrowed",
-                        "task_status": "running",
-                    }
-                ),
-            )
+
+            def respond() -> None:
+                target = ctx.queue("probe.in", persistent=False)
+                try:
+                    deadline = time.monotonic() + 3.0
+                    while time.monotonic() < deadline:
+                        raw = target.read_one()
+                        if raw is None:
+                            time.sleep(0.001)
+                            continue
+                        request = json.loads(str(raw))
+                        reply = ctx.queue(request["reply_to"], persistent=False)
+                        try:
+                            reply.write(
+                                json.dumps(
+                                    {
+                                        "command": "PING",
+                                        "status": "ok",
+                                        "message": "PONG",
+                                        "tid": tid,
+                                        "request_id": "borrowed",
+                                        "task_status": "running",
+                                    }
+                                )
+                            )
+                        finally:
+                            reply.close()
+                        return
+                    raise AssertionError("probe PING did not arrive")
+                finally:
+                    target.close()
+
+            responder = threading.Thread(target=respond, daemon=True)
+            responder.start()
         initial_connections = len(connections)
         if outcome == "error":
+            monkeypatch.setattr(
+                "weft.core.control_probe.MultiQueueWatcher.wait_for_activity",
+                fail_wait,
+            )
             with pytest.raises(RuntimeError, match="injected wait failure"):
                 send_keyed_ping_probe(
                     ctx,
                     tid=tid,
                     ctrl_in_name="probe.in",
-                    ctrl_out_name="probe.out",
                     request_id="borrowed",
                     timeout=10.0,
                     broker=broker,
@@ -742,19 +773,26 @@ def test_keyed_probe_never_closes_borrowed_broker(
                 ctx,
                 tid=tid,
                 ctrl_in_name="probe.in",
-                ctrl_out_name="probe.out",
                 request_id="borrowed",
-                timeout=0.0,
+                timeout=1.0 if outcome == "matched" else 0.0,
                 broker=broker,
             )
             assert (result.matched is not None) == (outcome == "matched")
             assert result.timed_out == (outcome == "timeout")
             assert result.error is None
-        assert broker.peek_one("probe.out") is None
+        if responder is not None:
+            responder.join(timeout=3.0)
+            assert not responder.is_alive()
         broker.write("probe.owner", "still open")
         observed = broker.peek_one("probe.owner")
         assert isinstance(observed, tuple) and observed[0] == "still open"
-        assert len(connections) == initial_connections
+        assert len(connections) >= initial_connections
+        for connection in connections[initial_connections:]:
+            if ctx.backend_name == "postgres":
+                assert connection.closed
+            else:
+                with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                    connection.execute("SELECT 1")
 
 
 @pytest.mark.parametrize("kind", ["manager", "service"])
@@ -772,6 +810,9 @@ def test_manager_probe_advancement_and_state_helpers_reuse_connection(
     try:
         with manager._get_connected_queue().get_connection() as broker:
             broker.write(task_state_queue_name(tid), json.dumps(_mapping(tid)))
+        # Prime the control drain's backend resources before measuring whether
+        # repeated probe advancement opens additional connections.
+        manager._drain_control_queue_first()
         cached_names = set(manager._queue_cache)
         initial_connections = len(connections)
         for _ in range(3):
@@ -795,20 +836,26 @@ def test_manager_probe_advancement_and_state_helpers_reuse_connection(
                 timestamp=None,
                 metadata={},
                 ctrl_in_name="target.in",
-                ctrl_out_name="target.out",
                 source="control-pong",
             )
             assert candidate is not None and candidate.reason == "ping_pending"
-            service_pending = next(iter(manager._service_probe_pending.values()))
+            service_pending = next(
+                probe
+                for probe in manager._service_probe_pending.values()
+                if probe.service_key == "test-service"
+            )
             request_id = service_pending.request_id
             for _ in range(3):
                 candidate = manager._advance_service_pong_probe(
-                    service_pending, timestamp=None, metadata={}, now_ns=now_ns
+                    service_pending,
+                    timestamp=None,
+                    metadata={},
+                    resolve_unanswered=False,
                 )
                 assert candidate is not None and candidate.reason == "ping_pending"
         with manager._get_connected_queue().get_connection() as broker:
             broker.write(
-                "target.out",
+                manager._queue_names["ctrl_in"],
                 json.dumps(
                     {
                         "command": "PING",
@@ -821,16 +868,23 @@ def test_manager_probe_advancement_and_state_helpers_reuse_connection(
                 ),
             )
         if kind == "manager":
-            proof = manager._manager_pong_dispatch_proof(record, now_ns=now_ns)
+            manager._drain_control_queue_first()
+            proof = manager._manager_pong_dispatch_proof(
+                record,
+                now_ns=now_ns,
+                consume_stored=True,
+            )
             assert proof.liveness == "live"
         else:
+            manager._drain_control_queue_first()
+            service_pending = manager._service_probe_pending[service_pending.key]
             candidate = manager._advance_service_pong_probe(
-                service_pending, timestamp=None, metadata={}, now_ns=now_ns
+                service_pending,
+                timestamp=None,
+                metadata={},
+                resolve_unanswered=False,
             )
             assert candidate is not None and candidate.state == "live"
-        with manager._get_connected_queue().get_connection() as broker:
-            assert broker.peek_one("target.out") is None
-        manager._sweep_probe_reply_rows("target.out", request_id)
         manager._cleanup_stale_internal_reserved_queues(force=True)
         assert len(connections) == initial_connections
         assert set(manager._queue_cache) == cached_names

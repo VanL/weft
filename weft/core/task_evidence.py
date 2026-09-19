@@ -425,7 +425,7 @@ def reconciliation_for_live_pong(
         "classification": "live_pong",
         "reason": reason,
         "lifecycle_status": snapshot.status,
-        "evidence_source": "ctrl_out",
+        "evidence_source": "control-pong",
     }
     request_id = snapshot.metadata.get("request_id")
     if isinstance(request_id, str):
@@ -458,7 +458,7 @@ def _live_pong_snapshot(
         tid=tid,
         status=status,
         classification="live_pong",
-        source="ctrl_out",
+        source="control-pong",
         terminal=status in TERMINAL_TASK_STATUSES,
         taskspec_payload=taskspec_payload,
         activity=activity if isinstance(activity, str) and activity else None,
@@ -480,12 +480,11 @@ def ping_pong_evidence(
 ) -> TaskEvidenceSnapshot | None:
     """Send a keyed PING and return matching live PONG evidence if visible."""
 
-    ctrl_in_name, ctrl_out_name = control_queue_names_for_tid(tid, taskspec_payload)
+    ctrl_in_name, _ctrl_out_name = control_queue_names_for_tid(tid, taskspec_payload)
     result = send_keyed_ping_probe(
         ctx,
         tid=tid,
         ctrl_in_name=ctrl_in_name,
-        ctrl_out_name=ctrl_out_name,
         timeout=timeout,
         broker=broker,
     )

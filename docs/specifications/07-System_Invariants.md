@@ -106,11 +106,16 @@ _Implementation mapping_: `weft/core/taskspec/model.py`,
 
 #### Strict control envelope [QUEUE.2a]
 
-Every `ctrl_in` request is the one strict control envelope: exactly `command`
-plus optional nonblank-string `request_id`, with `command` exactly one of
-`PING`, `STATUS`, `STOP`, `KILL`, `PAUSE`, or `RESUME`. Rejected rows are
-exact-acknowledged without dispatch or reply. Every reply to a valid keyed
-request echoes its `request_id`.
+A PING request is exactly `{command, request_id, reply_to}` with `command`
+exactly `PING` and both other values nonblank strings. `reply_to` is the
+requester's own `ctrl_in`: a long-lived task's configured queue or an
+ephemeral requester's `T{tid}.ctrl_in`. The requester is the sole reader. The
+target writes exactly one PONG there and never to its own `ctrl_out`. Other requests are exactly `command` plus optional
+nonblank-string `request_id`, with `command` one of `STATUS`, `STOP`, `KILL`,
+`PAUSE`, or `RESUME`. Rejected rows are passed to reply dispatch, then
+exact-acknowledged once. Every reply to a valid keyed request echoes its
+`request_id`; PONG does not echo `reply_to`, never enters PING request dispatch,
+and never produces another PONG.
 
 _Implementation mapping_: `weft/core/control_messages.py::ControlRequest`,
 `weft/core/control_messages.py::encode_control_message`,
@@ -743,6 +748,14 @@ the sole exact-delete executor for TID mappings),
   overridden; task-specific waiting and shutdown extend protected owned-wait
   and deadline-aware cleanup hooks.
 
+  `poll_interval` is an optional manual or embedding deadline, not the
+  production scheduler. Production tasks derive waits from watcher policy and
+  published timers. The deferred-signal handler records plain in-memory state
+  and sets the strategy's coalescing local-activity latch; it performs no
+  Event, lock, wait, I/O, clock, random or broker operation. The launcher's
+  parent-loss watcher cadence is independently named and does not derive from
+  `poll_interval`.
+
   _Implementation mapping_: `BaseTask.process_once()`, `wait_for_activity()`,
   `run_until_stopped()`, `run_forever()`, `stop()`, `cleanup()`, and
   `_finalize_task_once()` in `weft/core/tasks/base.py` enforce drive
@@ -756,8 +769,8 @@ the sole exact-delete executor for TID mappings),
   wrapper registration.
   Manager's protected termination-policy hook
   (`weft/core/manager.py::Manager._apply_termination_request`) preserves
-  graceful drain and SIGUSR1 priority; Manager launch drain, child-exit
-  polling, joins, and process-tree escalation consume the same absolute
+  graceful drain and SIGUSR1 priority; Manager launch drain, sentinel-driven
+  child-exit handling, joins, and process-tree escalation consume the same absolute
   cleanup deadline with within-budget SIGKILL escalation for TERM-resistant
   descendants; `Manager._run_child_launch_service_worker()` owns the
   after-deadline zero-wait tree kill for newly completed launches. Cleanup
@@ -874,10 +887,10 @@ _Implementation mapping_: `weft/core/manager.py`,
   startup for that submission. The same still-unproved incumbent plus pending
   work at both observations may permit a helper after the grace, including when
   the incumbent is healthy but busy. The existing 300-second unknown-record age
-  cutoff remains recovery policy, not proof of process death. Pong-proof probes retire their
-  replies: a matched keyed PONG is deleted on match, and the prober sweeps
-  rows bearing its own request id when a pending probe times out or is
-  abandoned.
+  cutoff remains recovery policy, not proof of process death. Manager reactor
+  probes route PONG to the probing Manager's watched `ctrl_in`; PONG arrival is
+  reduced immediately while absence is evaluated by the existing owning
+  policy cadence. These probes add no reply poll or private deadline.
 - **MANAGER.8a**: a lower-TID live canonical manager may proactively publish a
   `superseded` manager service-owner row for a higher-TID manager when it
   observes a newly published canonical `active` row for that higher TID after
@@ -927,8 +940,13 @@ _Implementation mapping_: `weft/core/manager.py`,
   but restart backoff is scheduled from the manager's observation clock. A
   stable singleton audit may run on a slower cadence than active convergence,
   but pending spawn work, missing required owners, duplicate scans, uncertain
-  evidence, or due autostart scans must return the manager to the active
-  convergence cadence. Manager-authored internal runtime envelopes,
+  evidence, a pending service PONG probe, or due autostart scans must return the
+  manager to the active convergence cadence. Pending service probes keep their
+  service keys in the current evidence scope. A stored PONG makes reduction
+  actionable without moving the periodic clock; for an included known
+  autostart source it also bypasses the manifest-scan throttle so current source
+  evidence is collected. Constructor-created probes anchor the owning cadence
+  so the first reactor turn cannot classify them as no-PONG. Manager-authored internal runtime envelopes,
   manager-authored autostart metadata, tracked children, runtime handles, and
   keyed PONG replies may establish singleton service authority; caller-owned
   TaskSpec metadata alone must not. A manager-authored `task_spawned` row with a
@@ -1177,6 +1195,8 @@ doc:
 
 ## Related Plans
 
+- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores one task wake arbiter, classifies backend/local/timer inputs, and removes task-reactor polling caps.
+
 - [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
 
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
@@ -1253,6 +1273,7 @@ doc:
 - [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
 - [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
 - [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
+- [`docs/plans/2026-09-18-event-routed-manager-pong-plan.md`](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 - [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
 
 ## Related Documents

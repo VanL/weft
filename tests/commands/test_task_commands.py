@@ -1148,7 +1148,6 @@ def test_task_ping_returns_probe_payload(
         *,
         tid: str,
         ctrl_in_name: str,
-        ctrl_out_name: str,
         timeout: float,
     ) -> ControlProbeResult:
         calls.append(
@@ -1156,7 +1155,6 @@ def test_task_ping_returns_probe_payload(
                 "ctx": ctx_arg,
                 "tid": tid,
                 "ctrl_in_name": ctrl_in_name,
-                "ctrl_out_name": ctrl_out_name,
                 "timeout": timeout,
             }
         )
@@ -1201,7 +1199,6 @@ def test_task_ping_returns_probe_payload(
             "ctx": ctx,
             "tid": tid,
             "ctrl_in_name": f"T{tid}.ctrl_in",
-            "ctrl_out_name": f"T{tid}.ctrl_out",
             "timeout": 0.25,
         }
     ]

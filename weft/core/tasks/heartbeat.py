@@ -27,9 +27,9 @@ from pydantic import (
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS,
     HEARTBEAT_IDLE_TIMEOUT_SECONDS,
     HEARTBEAT_MIN_INTERVAL_SECONDS,
+    HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_QUEUE_NAMESPACE_PREFIX,
@@ -126,6 +126,7 @@ class HeartbeatTask(ServiceTask):
             )
         )
         self._empty_since_monotonic: float | None = time.monotonic()
+        self._next_ownership_audit_at = time.monotonic()
         self._activate_waiter()
         self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
 
@@ -453,6 +454,9 @@ class HeartbeatTask(ServiceTask):
 
     def _exit_if_superseded(self) -> bool:
         ownership_state, owner_tid = self._service_ownership()
+        self._next_ownership_audit_at = (
+            time.monotonic() + HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS
+        )
         if ownership_state != "other":
             return False
         self.taskspec.mark_completed(return_code=0)
@@ -486,7 +490,7 @@ class HeartbeatTask(ServiceTask):
         self.should_stop = True
         return True
 
-    def next_wait_timeout(self) -> float:
+    def next_wait_timeout(self) -> float | None:
         """Return the outer-loop wait timeout for the next heartbeat turn."""
 
         if self._has_pending_worker_results():
@@ -494,15 +498,19 @@ class HeartbeatTask(ServiceTask):
         now = time.monotonic()
         next_due = None if self._paused else self._next_due_timeout(now=now)
         idle_timeout = self._next_idle_timeout(now=now)
+        base_timeout = super().next_wait_timeout()
         timeouts = [
             value
             for value in (
+                base_timeout,
                 next_due,
                 idle_timeout,
-                HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS,
+                self._next_ownership_audit_at - now,
             )
             if value is not None
         ]
+        if not timeouts:
+            return None
         return max(0.0, min(timeouts))
 
     def _next_due_timeout(self, *, now: float) -> float | None:

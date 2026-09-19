@@ -45,6 +45,7 @@ class _TopologyUpdate(TypedDict):
     active_queues: list[str]
     queue_iterator: itertools.cycle[str]
     force_discovery: bool
+    native_degraded: bool
 
 
 def run_single_drain(watcher: MultiQueueWatcher) -> None:
@@ -101,6 +102,16 @@ class BlockingWaiter(FakeWaiter):
             self.close_overlapped_wait = True
         self.close_threads.append(threading.get_ident())
         super().close()
+
+
+class TimeoutWaiter(FakeWaiter):
+    """Native waiter that consumes the timeout before reporting no activity."""
+
+    def wait(self, timeout: float | None) -> bool:
+        self.wait_calls.append(timeout)
+        self.wait_entered.set()
+        threading.Event().wait(timeout=timeout)
+        return False
 
 
 class RaisingCloseWaiter(BlockingWaiter):
@@ -2396,7 +2407,7 @@ def test_wait_for_activity_uses_simplebroker_multi_queue_waiter(
 ) -> None:
     db_path, _make_queue = broker_env
     received: dict[str, object] = {}
-    fake_waiter = FakeWaiter()
+    fake_waiter = TimeoutWaiter()
     stop_event = threading.Event()
 
     def handler(
@@ -2428,7 +2439,7 @@ def test_wait_for_activity_uses_simplebroker_multi_queue_waiter(
     )
 
     try:
-        watcher.wait_for_activity(timeout=0.25)
+        watcher.wait_for_activity(timeout=0.02)
     finally:
         watcher.stop(join=False)
 
@@ -2437,7 +2448,11 @@ def test_wait_for_activity_uses_simplebroker_multi_queue_waiter(
         "wait.two",
     ]
     assert received["stop_event"] is stop_event
-    assert fake_waiter.wait_calls == [0.25]
+    assert fake_waiter.wait_calls
+    assert all(
+        timeout is not None and 0.0 <= timeout <= 0.02
+        for timeout in fake_waiter.wait_calls
+    )
 
 
 def test_start_strategy_uses_multi_queue_activity_waiter(
@@ -2524,7 +2539,7 @@ def test_reset_multi_activity_waiter_detaches_strategy_waiter(
         watcher.stop(join=False)
 
 
-def test_wait_for_activity_positive_timeout_uses_waiter_without_precheck(
+def test_wait_for_activity_native_hint_validates_pending_queue(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2532,7 +2547,7 @@ def test_wait_for_activity_positive_timeout_uses_waiter_without_precheck(
     queue = make_queue("pending.one")
     queue.write("ready")
     create_calls = 0
-    fake_waiter = FakeWaiter()
+    fake_waiter = FakeWaiter(result=True)
 
     def handler(
         _message: str,
@@ -2564,7 +2579,8 @@ def test_wait_for_activity_positive_timeout_uses_waiter_without_precheck(
         watcher.stop(join=False)
 
     assert create_calls == 1
-    assert fake_waiter.wait_calls == [0.25]
+    assert len(fake_waiter.wait_calls) == 1
+    assert 0.0 <= cast(float, fake_waiter.wait_calls[0]) <= 0.25
     assert queue.peek_one() == "ready"
 
 
@@ -2634,7 +2650,8 @@ def test_native_waiter_activity_forces_inactive_queue_probe(
         watcher.stop(join=False)
 
     assert seen == ["ready"]
-    assert fake_waiter.wait_calls == [0.25]
+    assert len(fake_waiter.wait_calls) == 1
+    assert 0.0 <= cast(float, fake_waiter.wait_calls[0]) <= 0.25
 
 
 def test_native_waiter_timeout_does_not_probe_inactive_queues_before_deadline(
@@ -2642,7 +2659,7 @@ def test_native_waiter_timeout_does_not_probe_inactive_queues_before_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    fake_waiter = FakeWaiter(result=False)
+    fake_waiter = TimeoutWaiter()
 
     def handler(
         _message: str,
@@ -2674,7 +2691,11 @@ def test_native_waiter_timeout_does_not_probe_inactive_queues_before_deadline(
     finally:
         watcher.stop(join=False)
 
-    assert fake_waiter.wait_calls == [0.01]
+    assert fake_waiter.wait_calls
+    assert all(
+        timeout is not None and 0.0 <= timeout <= 0.01
+        for timeout in fake_waiter.wait_calls
+    )
 
 
 def test_inactive_queue_discovery_is_time_bounded(
@@ -2735,16 +2756,51 @@ def test_wait_for_activity_falls_back_when_helper_returns_none(
         db=db_path,
     )
 
-    waits: list[float | None] = []
-    monkeypatch.setattr(
-        watcher._stop_event, "wait", lambda timeout: waits.append(timeout)
-    )
+    started_at = time.monotonic()
     try:
-        watcher.wait_for_activity(timeout=0.01)
+        watcher.wait_for_activity(timeout=0.2)
     finally:
         watcher.stop(join=False)
 
-    assert waits == [0.01]
+    assert time.monotonic() - started_at >= 0.19
+
+
+def test_nonpersistent_fallback_confirms_pending_after_one_strategy_turn(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient SQLite-style watcher cannot rely on connection-local data_version."""
+
+    db_path, make_queue = broker_env
+    queue_name = "fallback.transient"
+    writer = make_queue(queue_name)
+    watcher = MultiQueueWatcher(
+        queue_configs={queue_name: {"handler": lambda *_args: None}},
+        db=db_path,
+        persistent=False,
+    )
+    wait_calls = 0
+
+    def publish_after_one_turn(*, timeout: float | None = None) -> None:
+        nonlocal wait_calls
+        del timeout
+        wait_calls += 1
+        writer.write("ready")
+
+    monkeypatch.setattr(watcher._strategy, "wait_for_activity", publish_after_one_turn)
+    monkeypatch.setattr(watcher._strategy, "consume_local_activity_hint", lambda: False)
+    monkeypatch.setattr(
+        watcher._strategy, "consume_native_activity_hint", lambda: False
+    )
+    monkeypatch.setattr(watcher._strategy, "uses_native_activity", lambda: False)
+
+    try:
+        watcher.wait_for_activity(timeout=1.0)
+    finally:
+        watcher.stop(join=False)
+
+    assert wait_calls == 1
+    assert writer.peek_one() == "ready"
 
 
 @pytest.mark.parametrize("reuse_id", [False, True])
@@ -2791,6 +2847,7 @@ def test_queue_set_changes_close_stale_multi_queue_waiter(
         watcher.wait_for_activity(timeout=0.01)
         watcher.add_queue("dynamic.three", handler)
         watcher.wait_for_activity(timeout=0.01)
+        assert watcher._strategy.uses_native_activity() is True
     finally:
         watcher.stop(join=False)
 
@@ -2917,7 +2974,9 @@ def test_wait_for_activity_falls_back_when_waiter_raises(
     finally:
         watcher.stop(join=False)
 
-    assert fake_waiter.wait_calls == [0.01]
+    assert len(fake_waiter.wait_calls) == 1
+    assert fake_waiter.wait_calls[0] is not None
+    assert 0.0 <= fake_waiter.wait_calls[0] <= 0.01
     assert fake_waiter.close_calls == 1
 
 

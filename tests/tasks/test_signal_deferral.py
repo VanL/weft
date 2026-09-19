@@ -61,7 +61,6 @@ from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.test_task_execution import make_command_taskspec
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
-    TASK_PROCESS_POLL_INTERVAL,
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.commands import tasks as task_cmd
@@ -436,7 +435,7 @@ def test_process_once_applies_pending_signal_and_clears_it(
             task.process_once()
             if task.taskspec.state.status == "cancelled":
                 break
-            task.wait_for_activity(timeout=TASK_PROCESS_POLL_INTERVAL)
+            task.wait_for_activity(timeout=None)
 
         assert task.taskspec.state.status == "cancelled"
         assert task._has_pending_termination_request() is False

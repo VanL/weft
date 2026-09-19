@@ -35,6 +35,10 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes Manager and service probe replies through the Manager's existing control watcher and removes probe-specific polling deadlines.
+
+- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores the Manager to the shared watcher reactor, publishes the remaining service clocks as deadlines, and routes child exit through one local sentinel adapter.
+
 - [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
 
 - [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
@@ -213,10 +217,13 @@ Key responsibilities implemented in `weft/core/manager.py`:
    reserved, spawned, rejected, or unknown-location work cannot authorize a
    helper for that submission. Core discovery receives no submission predicate.
 
-   Manager-owned liveness PINGs are
-   non-blocking reactor probes: one turn writes a keyed PING, later turns peek
-   for the matching PONG until the probe deadline, and `ping_pending` remains
-   unknown evidence rather than stale proof. Canonical ownership is lowest-live-TID among
+   Manager-owned liveness PINGs are non-blocking reactor probes: one turn
+   writes a keyed PING with `reply_to` set to the probing Manager's configured
+   `ctrl_in`; the matching PONG arrives through the Manager's existing watcher
+   and is stored on the pending probe before the leadership reducer runs.
+   `ping_pending` remains unknown evidence until a matching PONG or the next
+   eligible ordinary leadership evaluation. The probe contributes no private
+   deadline to `next_wait_timeout()`. Canonical ownership is lowest-live-TID among
    canonical dispatch-eligible claimants for status, selection, and
    duplicate-manager convergence. It is advisory for public dispatch because
    atomic queue reservation owns public spawn exclusivity.
@@ -294,12 +301,36 @@ Key responsibilities implemented in `weft/core/manager.py`:
    the task loop on a zero timeout. Manager due timers are exposed
    through `Manager.next_wait_timeout()` and then bounded by the shared
    `BaseTask`/`MultiQueueWatcher` activity wait path. Backend activity waiters
-   are hints, not the clock that drives service supervision. Parent-side
-   cleanup for user child process handles may use the fast child-reap cadence,
-   but supervision-only service children do not force that cadence; ordinary
+   are hints, not the clock that drives service supervision. Child-process exit
+   reaches the Manager reactor as a local event from one Manager-owned sentinel
+   adapter; post-exit terminal-proof grace remains a published timer. Ordinary
    service reconciliation and leadership convergence run on the slower
    approximately one-second timer while idle. Queue activity still wakes the
-   manager promptly through the shared watcher. When foreground service mode
+   manager promptly through the shared watcher. PONG arrival makes its owning
+   reducer actionable immediately without moving the periodic policy clock.
+   An unanswered leadership probe is evaluated only by the next eligible
+   ordinary leadership pass; an unanswered service probe is evaluated only by
+   the next eligible ordinary active-service pass. PING/PONG contributes no
+   timeout to `next_wait_timeout()` and has no manager-specific fallback poll
+   interval. A successful complete owning-policy scan may retire pending probes
+   whose source is no longer present; a failed or partial scan retains them.
+   The sentinel adapter has one observer
+   thread, immutable membership snapshots, a coalesced membership/stop wake
+   token and fired `(tid, sentinel)` identities; the Manager reactor alone
+   validates identities, mutates the child registry and reaps children. Adapter
+   failure is fatal, and shutdown joins it and closes its endpoints before the
+   retained strategy closes.
+   Drain progress is deadline-driven rather than turn-driven. A newly entered
+   drain publishes one immediate continuation, then only the deadlines that can
+   change its state: child STOP-to-SIGTERM escalation, the bounded shutdown
+   window, or leadership-drain revalidation. A child whose sentinel has fired
+   publishes the PID-liveness recheck only until terminal-proof grace begins;
+   terminal-proof grace then becomes the sole child deadline. If a child-launch
+   worker retires without publishing a result, the launch-start grace is also a
+   published recovery deadline. These clocks must not be replaced by an
+   unconditional zero timeout.
+   Housekeeping keeps its own due timers; unrelated wakes do not accelerate
+   leadership or service audit intervals. When foreground service mode
    disables idle shutdown, stale broker-probe timestamps must not schedule an
    immediate wait timeout.
    Ordinary manager-tracked service convergence should use local child liveness
@@ -331,14 +362,25 @@ Key responsibilities implemented in `weft/core/manager.py`:
    same-service owner, but that is public read-model reconciliation, not a
    manager lifecycle transition or cleanup effect.
    Service-candidate PING fallback is also non-blocking reactor state: the
-   manager writes one keyed PING, records the pending service probe, and peeks
-   for the matching PONG on later service-convergence turns. `ping_pending`
-   candidates are uncertain evidence and do not become stale or terminal proof
-   until the probe deadline has passed.
+   manager writes one keyed PING with its configured `ctrl_in` as `reply_to`,
+   records the pending service probe, and receives the matching PONG through
+   its ordinary control drain. A pending service probe selects the existing
+   active-service cadence and keeps its service key in the current evidence
+   scope. `ping_pending` candidates remain uncertain evidence until a matching
+   PONG or the next eligible ordinary active-service evaluation.
+   Constructor bootstrap anchors the applicable cadence after creating a probe,
+   so the first reactor turn cannot classify it as no-PONG. A stored PONG makes
+   its owning reducer actionable without moving the periodic policy clock.
+   Within the current reconciliation scope, pending service probes keep their
+   service keys in evidence collection. When autostart is included, a stored
+   PONG for a known autostart source bypasses the manifest-scan throttle so the
+   reply is reduced against current source evidence. A successful complete
+   owning-policy scan may retire a probe whose source is absent; failed,
+   throttled, and partial scans retain it.
 8. **Control channel** – In addition to STOP/STATUS, managers inherit the
   task control contract: `PING` replies with `PONG` plus a live task-local
-  status snapshot on `ctrl_out`, echoing `request_id` for structured PING
-  envelopes. Manager PONG snapshots also include manager-selection fields
+  status snapshot on the requester's named `ctrl_in`, echoing `request_id` and
+  omitting `reply_to`. Manager PONG snapshots also include manager-selection fields
   (`role`, `requests`, `ctrl_in`, `ctrl_out`, `outbox`, and required
   `weft_context`) so external selection code can validate the
   responding task without importing command-layer helpers.
@@ -401,13 +443,25 @@ _Implementation mapping_:
 - [MA-1.4] Registry heartbeat and leadership view — `weft/core/service_convergence.py::build_service_owner_payload`, `weft/core/service_convergence.py::build_manager_service_payload`, `weft/core/service_convergence.py::parse_service_owner_row`, `weft/core/service_convergence.py::project_manager_service_record`, and `weft/core/service_convergence.py::discard_v1_service_registry_rows`; Manager bootstrap plus `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._update_manager_registry_snapshot`, `Manager._publish_superseded_manager_record`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._manager_pong_dispatch_proof`, `Manager._advance_manager_pong_probe`, and `Manager._maybe_yield_leadership`; `weft/core/manager_runtime.py::_registry_queue`, `weft/core/manager_runtime.py::_snapshot_registry`, `weft/core/manager_runtime.py::_manager_registry_disposition`, and `weft/core/manager_runtime.py::_retain_latest_included_manager_record`; `weft/commands/system.py::_collect_service_registry_evidence`; and `weft/core/monitor/task_monitor.py::TaskMonitor._latest_service_owner_records`. The one complete PONG dispatch-eligibility gate is `weft/core/control_probe.py::pong_proves_dispatch_eligible`; manager and manager-runtime selection paths delegate to it without adding a second narrowing rule. Registry-record context fallback may help resolve the expected context, but a manager PONG without its own exact matching `weft_context` never proves authority.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`, `Manager._managed_service_convergence_active` (active convergence resets idle activity), `Manager._manager_owned_work_pending`, `Manager._autostart_ensure_obligation_pending`.
 - [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. `weft/core/manager_services.py::ManagedServiceState` is the sole launch/restart/backoff state owner for autostarts and built-ins; `weft/core/manager.py` retains autostart source identity only, while `reduce_managed_service_state` owns transition selection.
-- [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._build_liveness_monitor_spawn_payload`, `Manager._liveness_monitor_service_spec`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, LivenessMonitor runtime behavior lives in `weft/core/tasks/liveness_monitor.py` with pure evidence and policy in `weft/liveness/`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
+- [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._build_liveness_monitor_spawn_payload`, `Manager._liveness_monitor_service_spec`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager._drain_child_sentinel_events`, `Manager._publish_child_sentinel_membership`, `Manager._retire_expired_unvisited_probes`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; `_ManagerChildSentinelAdapter` is the broker-free local child-exit source; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, LivenessMonitor runtime behavior lives in `weft/core/tasks/liveness_monitor.py` with pure evidence and policy in `weft/liveness/`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 - [MA-1.8] Admission control — `Manager` configuration loading, backend-specific pre-reservation usage observation, lane decisions, universal retry scheduling, child/launch-worker progress wakes, fallback pending-work suppression, duplicate-manager owned-work checks, and rate-limited operational transition/failure logs in `weft/core/manager.py`; constants and environment keys in `weft/_constants.py`; SQLite current-state collection propagates read failures from `weft/core/task_state.py::latest_task_state_rows` filtered through the shared `weft/liveness/policy.py::mapping_row_is_live` probe (memoized in `Manager._admission_mapping_is_live`) and unioned with `Manager._active_child_launches` plus `Manager._child_processes`. `BaseTask` owns the additive terminal mapping publication. Admission adds no Manager PING/STATUS field and no liveness policy beyond the shared probe.
 
 Implementation plan backlink for [MA-1.4]:
 [Registry Selection And Pruning Authority Refactor Plan](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)
 and [Canonical Contract And Dead-Code Cleanup Plan](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md).
+
+Implementation note for [MA-1.4]:
+`weft/core/service_convergence.py::discard_v1_service_registry_rows` uses its
+initial complete scan as absence verification when there is nothing to delete;
+a deletion retains the separate verification scan. Manager selection still
+performs its own pending-row read. `weft/core/manager_runtime.py::observe_manager_availability`
+shares one bounded outer connection across its registry and backlog reads. A
+synchronous keyed proof owns a temporary nonpersistent `MultiQueueWatcher` and
+listener, which it releases before returning. Nonpersistent mode lets the
+watcher close while an outer caller-owned broker operation remains open on the
+same thread.
+See the [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
 
 Implementation plans for [MA-1.6a]:
 [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md),
@@ -595,8 +649,11 @@ proved; if that proof disappears, the manager publishes
 `manager_leadership_resumed`, restores active ownership, and resumes serving.
 `SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP. A
 manager drain has a bounded child-exit window; if child tasks do not exit after
-STOP is broadcast and the drain window expires, the Manager forcefully reaps
-tracked child process trees before publishing its drained terminal event.
+STOP is broadcast, the Manager sends host SIGTERM after the named escalation
+delay. If the drain window then expires, the Manager forcefully reaps tracked
+child process trees before publishing its drained terminal event. A fatal child
+sentinel observer error is preserved as the cleanup failure, but it cannot skip
+that termination and reap sequence.
 `SIGUSR1` retains immediate kill semantics. Caller-facing manager stop defaults
 must be materially longer than the internal manager drain window, because a
 Manager may use the full drain budget before publishing its stopped registry

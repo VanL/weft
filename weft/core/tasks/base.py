@@ -52,7 +52,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
-    PARENT_LOSS_WAKE_INTERVAL_CEILING,
+    LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS,
     PIPELINE_OWNER_METADATA_KEY,
     PONG_EXTENSION_KEY,
     PROCESS_TITLE_CONTEXT_LENGTH,
@@ -66,8 +66,6 @@ from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     STREAM_CHUNK_SIZE_BYTES,
     TASK_CLEANUP_TIMEOUT_SECONDS,
-    TASK_PROCESS_POLL_INTERVAL,
-    TASK_REACTOR_WAKEUP_MAX_SECONDS,
     TASK_WORKER_RESULT_DRAIN_MAX_PER_TURN,
     TASK_WORKER_RESULT_QUEUE_MAXSIZE,
     TERMINAL_ENVELOPE_TYPE,
@@ -300,9 +298,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._wait_active = False
         self._drive_loop_active = False
         self._drive_scope_active = False
-        self._strategy_started = False
         self._pending_termination_sources: deque[TerminationRequestSource] = deque()
-        self._parent_loss_watch_active = False
         self._cleanup_errors: tuple[BaseException, ...] = ()
 
         self._queue_names = self._resolve_queue_names()
@@ -753,6 +749,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 current = threading.current_thread()
                 with self._worker_lock:
                     self._worker_threads.discard(current)
+                self._strategy.notify_activity()
 
         thread = threading.Thread(
             target=runner,
@@ -790,23 +787,21 @@ class BaseTask(MultiQueueWatcher, ABC):
         """Publish a local worker result or progress event to the reactor."""
         result = TaskWorkerResult(lane=lane, value=value, error=error)
         while not self._worker_stopping.is_set():
-            self._worker_result_event.set()
             try:
                 self._worker_result_queue.put(
                     result,
-                    timeout=TASK_REACTOR_WAKEUP_MAX_SECONDS,
+                    timeout=LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS,
                 )
             except thread_queue.Full:
                 continue
             self._worker_result_event.set()
+            self._strategy.notify_activity()
             return True
         return False
 
     def _has_pending_worker_results(self) -> bool:
         """Return whether a worker lane has queued results for the reactor."""
-        return (
-            self._worker_result_event.is_set() or not self._worker_result_queue.empty()
-        )
+        return not self._worker_result_queue.empty()
 
     def _has_worker_activity(self) -> bool:
         """Return whether worker lanes still need a reactor turn."""
@@ -947,11 +942,8 @@ class BaseTask(MultiQueueWatcher, ABC):
                     exc_info=True,
                 )
 
-        attempt("activity_waiter", self._reset_multi_activity_waiter)
-        strategy = getattr(self, "_strategy", None)
-        if strategy is not None and hasattr(strategy, "close"):
-            attempt("polling_strategy", strategy.close)
         attempt("worker_lanes", lambda: self._stop_worker_lanes(deadline))
+        attempt("watcher_runtime", self._cleanup_runtime_resources)
         attempt("endpoint", self.unregister_endpoint_name)
         attempt("streaming_session", self._end_streaming_session)
         attempt("control_queues", self._cleanup_standard_control_queues_on_exit)
@@ -1160,16 +1152,16 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
         return self._queue(self._queue_names["reserved"])
 
-    def run_until_stopped(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-041] exception
+    def run_until_stopped(
         self,
         *,
-        poll_interval: float = TASK_PROCESS_POLL_INTERVAL,
+        poll_interval: float | None = None,
         max_iterations: int | None = None,
     ) -> None:
         """Repeatedly call :meth:`process_once` until the task stops.
 
         Args:
-            poll_interval: Sleep duration between iterations to avoid busy loops.
+            poll_interval: Optional manual/embedding deadline between turns.
             max_iterations: Optional safety cap, primarily for tests.
 
         Spec:
@@ -1178,69 +1170,87 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
 
         with self.drive_scope():
-            current = threading.current_thread()
-            with self._task_lifecycle_lock:
-                if self._drive_loop_active or self._turn_active or self._wait_active:
-                    raise RuntimeError(
-                        f"Task {self.tid} reactor drive loop is reentrant"
-                    )
-                self._start_pending = False
-                self._drive_loop_active = True
-                self._drive_owner_ident = current.ident
-                if self._task_lifecycle is TaskReactorLifecycle.STARTING:
-                    self._task_lifecycle = TaskReactorLifecycle.DRIVING
             self._running_event.set()
+            self._drive_reactor_until(
+                completion_predicate=self._default_drive_complete,
+                poll_interval=poll_interval,
+                max_iterations=max_iterations,
+            )
 
-            iterations = 0
-            try:
-                while True:
-                    with self._task_lifecycle_lock:
-                        lifecycle = self._task_lifecycle
-                    if lifecycle in {
-                        TaskReactorLifecycle.FINALIZING,
-                        TaskReactorLifecycle.CLOSED,
-                    }:
-                        break
-                    if max_iterations is not None and iterations >= max_iterations:
-                        break
+    def _default_drive_complete(self) -> bool:
+        """Return whether the ordinary task driver has reached its stop boundary."""
 
-                    pending_termination = self._has_pending_termination_request()
-                    if not pending_termination:
-                        if self._stop_event.is_set():
-                            break
-                        if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
-                            break
-                        if self.should_stop and not self._has_worker_activity():
-                            break
+        with self._task_lifecycle_lock:
+            lifecycle = self._task_lifecycle
+        if lifecycle in {
+            TaskReactorLifecycle.FINALIZING,
+            TaskReactorLifecycle.CLOSED,
+        }:
+            return True
+        if self._has_pending_termination_request():
+            return False
+        if self._stop_event.is_set():
+            return True
+        if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
+            return True
+        return self.should_stop and not self._has_worker_activity()
 
-                    self.process_once()
-                    iterations += 1
-                    if max_iterations is not None and iterations >= max_iterations:
-                        break
+    def _drive_reactor_until(
+        self,
+        *,
+        completion_predicate: Callable[[], bool],
+        poll_interval: float | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Drive the one task reactor until the caller's completion boundary."""
 
-                    if self._has_pending_termination_request():
-                        continue
-                    if self._stop_event.is_set():
-                        break
-                    if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
-                        break
-                    if self.should_stop and not self._has_worker_activity():
-                        break
-                    if self._has_pending_worker_results():
-                        continue
+        current = threading.current_thread()
+        with self._task_lifecycle_lock:
+            self._claim_or_verify_drive_owner_locked(current)
+            if self._drive_loop_active or self._turn_active or self._wait_active:
+                raise RuntimeError(f"Task {self.tid} reactor drive loop is reentrant")
+            self._start_pending = False
+            self._drive_loop_active = True
+            self._drive_owner_ident = current.ident
+            if self._task_lifecycle is TaskReactorLifecycle.STARTING:
+                self._task_lifecycle = TaskReactorLifecycle.DRIVING
+        iterations = 0
+        try:
+            while not completion_predicate():
+                if max_iterations is not None and iterations >= max_iterations:
+                    break
 
-                    wait_timeout: float | None = poll_interval
-                    candidate_timeout = self.next_wait_timeout()
-                    if candidate_timeout is not None:
-                        wait_timeout = max(0.0, float(candidate_timeout))
-                    if wait_timeout is not None and (
-                        wait_timeout > 0 or candidate_timeout is not None
-                    ):
-                        self.wait_for_activity(timeout=wait_timeout)
-            finally:
-                with self._task_lifecycle_lock:
-                    self._drive_loop_active = False
-                    self._start_pending = False
+                self.process_once()
+                iterations += 1
+                if completion_predicate():
+                    break
+                if max_iterations is not None and iterations >= max_iterations:
+                    break
+                if self._has_pending_termination_request():
+                    continue
+                if self._has_pending_worker_results():
+                    continue
+
+                self.wait_for_activity(
+                    timeout=self._next_reactor_wait_timeout(poll_interval)
+                )
+        finally:
+            with self._task_lifecycle_lock:
+                self._drive_loop_active = False
+                self._start_pending = False
+
+    def _next_reactor_wait_timeout(
+        self,
+        poll_interval: float | None,
+    ) -> float | None:
+        """Compose caller and task deadlines for one reactor wait."""
+
+        wait_timeouts = [
+            max(0.0, float(value))
+            for value in (poll_interval, self.next_wait_timeout())
+            if value is not None
+        ]
+        return min(wait_timeouts) if wait_timeouts else None
 
     @final
     @contextmanager
@@ -1332,14 +1342,18 @@ class BaseTask(MultiQueueWatcher, ABC):
     def next_wait_timeout(self) -> float | None:
         """Return an optional wait timeout for the next task-loop turn.
 
-        The default preserves the caller-provided polling interval. Persistent
-        tasks with their own due timers can override this hook so both the
-        launcher loop and ``run_until_stopped()`` use the same reactive contract.
+        The base task publishes only configured poll-report timing. Persistent
+        tasks compose their own clock work with this value.
 
         Spec: [CC-2.5]
         """
 
-        return None
+        if getattr(self.taskspec.spec, "reporting_interval", "transition") != "poll":
+            return None
+        interval = getattr(self.taskspec.spec, "polling_interval", 1.0) or 1.0
+        return max(
+            0.0, float(interval) - (time.monotonic() - self._last_poll_report_at)
+        )
 
     def _claim_or_verify_drive_owner_locked(
         self,
@@ -1447,7 +1461,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._start_strategy()
         except StopWatching:
             return False
-        self._strategy_started = True
         return True
 
     def _process_reactor_turn(self) -> None:
@@ -1479,9 +1492,9 @@ class BaseTask(MultiQueueWatcher, ABC):
     def wait_for_activity(self, timeout: float | None) -> None:
         """Wait for queue activity or local worker-result activity.
 
-        ``MultiQueueWatcher`` remains the broker wait owner. Bound the wait for
-        worker results and any pending GUI title activation so both can be
-        handled on the next drive turn.
+        ``MultiQueueWatcher`` remains the broker wait owner. Local sources wake
+        its retained strategy after publishing their state; process-title work
+        contributes its own clock deadline when one is due.
 
         Spec:
         - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.2.1], [CC-2.5]
@@ -1531,17 +1544,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         if self._has_pending_worker_results():
             return
 
-        wait_timeout = timeout
-        if self._parent_loss_watch_active and (
-            wait_timeout is None or wait_timeout > PARENT_LOSS_WAKE_INTERVAL_CEILING
-        ):
-            wait_timeout = PARENT_LOSS_WAKE_INTERVAL_CEILING
-        if self._has_active_worker_threads() and (
-            wait_timeout is None or wait_timeout > TASK_REACTOR_WAKEUP_MAX_SECONDS
-        ):
-            wait_timeout = TASK_REACTOR_WAKEUP_MAX_SECONDS
-
-        self._wait_for_activity_body(timeout=wait_timeout)
+        self._wait_for_activity_body(timeout=timeout)
         if self._has_pending_worker_results():
             return
 
@@ -1654,11 +1657,29 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
         request = parse_control_request(message)
         if request is None:
+            self._handle_control_reply(message, timestamp, context)
             self._ack_control_message(context.queue_name, context.timestamp)
             return
 
         self._handle_control_command(request, context)
         self._ack_control_message(context.queue_name, context.timestamp)
+
+    def _handle_control_reply(
+        self,
+        message: str,
+        timestamp: int,
+        context: QueueMessageContext,
+    ) -> None:
+        """Handle a non-request control row before its single acknowledgement.
+
+        Subclasses may override this hook to match response envelopes. The
+        default task behavior consumes unmatched or malformed rows without
+        side effects.
+
+        Spec: [CC-2.4], [MF-3]
+        """
+
+        del message, timestamp, context
 
     def _handle_control_command(
         self, request: ControlRequest, context: QueueMessageContext
@@ -1681,7 +1702,9 @@ class BaseTask(MultiQueueWatcher, ABC):
             return True
 
         if command == CONTROL_PING:
-            self._send_control_response(
+            assert request.reply_to is not None
+            self._send_control_reply(
+                request.reply_to,
                 CONTROL_PING,
                 "ok",
                 **self._control_response_extras(request, message="PONG"),
@@ -2010,13 +2033,14 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._last_poll_report_at = time.monotonic()
         self._last_reported_status = self.taskspec.state.status
 
-    def _send_control_response(
-        self, command: str, status: str, /, **extra: Any
-    ) -> None:
-        """Publish a control response on ``ctrl_out`` for observability/testing.
+    def _control_response_payload(
+        self,
+        command: str,
+        status: str,
+        extra: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build the shared task control-response payload."""
 
-        Spec: [CC-2.4], [MF-3]
-        """
         payload = {
             "command": command,
             "status": status,
@@ -2031,11 +2055,47 @@ class BaseTask(MultiQueueWatcher, ABC):
             if self._waiting_on is not None:
                 payload.setdefault("waiting_on", self._waiting_on)
         payload.update(extra)
+        return payload
+
+    def _send_control_response(
+        self, command: str, status: str, /, **extra: Any
+    ) -> None:
+        """Publish a control response on ``ctrl_out`` for observability/testing.
+
+        Spec: [CC-2.4], [MF-3]
+        """
+        payload = self._control_response_payload(command, status, extra)
         serialized_payload = json.dumps(payload)
         try:
             self._ctrl_out_queue.write(serialized_payload)
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to write control response %s", payload, exc_info=True)
+
+    def _send_control_reply(
+        self,
+        reply_to: str,
+        command: str,
+        status: str,
+        /,
+        **extra: Any,
+    ) -> None:
+        """Publish a directed control reply without retaining a queue facade.
+
+        Spec: [CC-2.4], [MF-3]
+        """
+
+        payload = self._control_response_payload(command, status, extra)
+        serialized_payload = json.dumps(payload)
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                broker.write(reply_to, serialized_payload)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to write directed control reply %s to %s",
+                payload,
+                reply_to,
+                exc_info=True,
+            )
 
     def _send_terminal_envelope(self, *, source: str = "task") -> None:
         """Publish task-local terminal observation on ctrl_out.
@@ -2073,7 +2133,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         re-enter backend drivers such as psycopg, since SimpleBroker's
         runner lock is non-reentrant and its transactions span multiple
         Python calls. Keep this handler to plain in-memory state; the run
-        loop's next iteration (or bounded wait return) owns the
+        loop's next notified turn owns the
         broker-visible shutdown work via ``handle_termination_signal``.
 
         The signal-frame path only appends a plain source entry. The owner
@@ -2082,16 +2142,13 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
 
         self._pending_termination_sources.append(("signal", signum))
+        self._strategy.notify_activity()
 
     def note_parent_loss(self) -> None:
         """Record parent loss for owner-thread termination policy."""
 
         self._pending_termination_sources.append(("parent_loss", None))
-
-    def enable_parent_loss_watch(self) -> None:
-        """Bound future waits so a parent-loss note is observed promptly."""
-
-        self._parent_loss_watch_active = True
+        self._strategy.notify_activity()
 
     def _has_pending_termination_request(self) -> bool:
         """Return whether a signal or parent-loss source awaits owner handling."""

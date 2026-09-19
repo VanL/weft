@@ -35,6 +35,10 @@ See also:
 
 ## Related Plans
 
+- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes each PONG to the requester's own watched `ctrl_in` and removes target-`ctrl_out` polling.
+
+- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores the retained SimpleBroker strategy as the task reactor's single wake arbiter, routes local events through its notification seam, and publishes service clocks as explicit deadlines.
+
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 
 - [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
@@ -173,15 +177,26 @@ Current role:
 
 - monitor multiple queues on one resolved broker target
 - support `READ`, `PEEK`, and reserve-oriented processing semantics
-- own a backend-neutral wait seam that uses SimpleBroker's multi-queue
-  activity waiter when available and falls back to polling otherwise
-- treat native waiter activity as a hard scheduling hint: the next drain may
-  run broad inactive-queue discovery for queues that count as ordinary wait
-  activity, rather than waiting for the periodic discovery interval
-- treat zero-timeout waits as local due-timer boundaries only. They must not
-  scan queues. Backends without a native waiter may still perform a bounded
-  positive-timeout pending precheck as the portable polling fallback
 - expose a small scheduling primitive that higher-level tasks reuse
+
+A running watcher or task has one drive owner and one wake arbiter. The owner
+drives the retained SimpleBroker `PollingStrategy`; it does not create a second
+broker polling loop and does not slice the wait to poll local state. The
+strategy owns SQLite `data_version`, burst and backoff behavior, PostgreSQL
+native activity waiting and its slow safety recheck. Its wait accepts the
+owner's next timer as an optional deadline. Native notifications and
+data-version changes are readiness hints only: the owner checks current durable
+queue state before dispatch. Consuming a local notification also performs one
+live watched-queue check so a same-connection self-write can activate an
+inactive queue even though SQLite `data_version` does not change. Empty,
+unrelated and deadline wakes do not reset useful-activity state.
+`MultiQueueWatcher` owns strategy start, restart and final-close state across
+inherited background driving, manual waits and `BaseTask`; no entry path owns a
+parallel started flag. `BaseTask` invokes the same protected wait under its
+reactor lifecycle guard; the public manual wrapper retains its separate
+ownership exclusion and `None` compatibility. A finite positive manual timeout
+is exact for a native waiter and is observed after at most one configured quiet
+pass on polling fallback; zero returns without queue I/O.
 
 Standalone `MultiQueueWatcher` topology may change at runtime, but a running
 watcher's drive owner alone applies membership and waiter effects. Before a
@@ -317,6 +332,19 @@ reactor resources. `wait_for_activity()` publishes wait-active under the
 lifecycle lock before entering the protected wait and clears it in `finally`; a
 pending stop is finalized there when no drive loop owns the reactor. Numeric
 thread ident and raw `Thread.is_alive()` are diagnostic only.
+
+Every task wait input is a backend event, a local event or a timer. Local
+events (worker result publication, finite worker-lane retirement, deferred
+signals, parent loss, stop, child-process exit, and a task's own write to a
+watched queue) wake the wait through the retained strategy's coalescing
+local-activity notification; no task-reactor wait cap exists for them. Timers
+are published through `next_wait_timeout()` and passed as the wait deadline. A
+task that publishes no timer waits without a deadline and runs no policy turn
+while all wake inputs are silent. Only durable eligible work, a local event,
+stop or a due timer returns control to the policy loop. Direct Consumer work
+uses the same driver with its own result-settled completion predicate, so a
+persistent Consumer returns from `run_work_item()` after that item without
+terminating the task.
 
 `BaseTask` owns one shared `drive_scope()` implementation. Normal run loops
 enter it automatically; manual driving may use it around the complete driver
@@ -488,7 +516,10 @@ Current task families:
   update activity for process titles, PONG/status responses, and TID mappings,
   but the service layer suppresses `task_activity` and poll-report rows in
   `weft.log.tasks` so long-lived manager, heartbeat, and TaskMonitor work
-  cannot amplify the lifecycle log that cleanup itself consumes. It does not
+  cannot amplify the lifecycle log that cleanup itself consumes. Because that
+  report is suppressed, `ServiceTask.next_wait_timeout()` also suppresses the
+  inherited `BaseTask` poll-report deadline. Each concrete service composes
+  only the clocks for work it actually performs. It does not
   implement a reactor turn policy and does not know about manager leadership,
   service keys, cleanup selection, heartbeat registration, or queue scheduling
   policy.
@@ -616,20 +647,29 @@ the same session helpers in `weft/core/tasks/sessions.py`.
 
 Current required control behavior:
 
-- `ctrl_in` accepts one structured JSON object shape containing exactly the
-  required `command` key and optional `request_id` key. `command` is exactly
-  one of `PING`, `STATUS`, `STOP`, `KILL`, `PAUSE`, or `RESUME` without case
-  normalization. When present, `request_id` is a string containing at least
-  one non-whitespace character. Raw command
-  strings, extra keys, and alternate casing are not supported requests
+- `ctrl_in` accepts strict structured JSON request envelopes. A PING request is
+  exactly `{command, request_id, reply_to}`. `command` is exactly `PING`;
+  `request_id` and `reply_to` are nonblank strings; and `reply_to` is the
+  requester's own `ctrl_in` queue: the configured queue of a long-lived task,
+  or `T{tid}.ctrl_in` for an ephemeral requester that minted a TID for this
+  probe. In both cases the requester is the sole reader of that queue. Other
+  requests contain exactly the required `command` key and optional
+  nonblank-string `request_id`, with `command` exactly one of `STATUS`, `STOP`,
+  `KILL`, `PAUSE`, or `RESUME`. Raw command strings, extra keys, and alternate
+  casing are not supported requests
 - every Weft-owned controller uses the shared control-envelope encoder.
   `BaseTask` uses the matching parser and rejects malformed, non-object, or
-  unsupported envelopes without treating them as commands. A rejected row is
-  exact-acknowledged without a `ctrl_out` reply so it cannot block a later
-  valid request
-- `ctrl_out` carries task-local replies and terminal notifications. Readers
-  ignore malformed or unrelated replies as protocol noise; this robustness
-  does not make removed reply formats current contracts
+  unsupported envelopes without treating them as commands. After strict
+  request parsing, a non-request row is passed to the task's protected reply
+  hook and then exact-acknowledged once so it cannot block a later valid
+  request. A PONG never enters PING request dispatch and never produces a
+  response
+- a valid PING writes exactly one PONG to `reply_to`; it never writes that
+  PONG to the responder's `ctrl_out`. The PONG echoes `request_id` and does not
+  echo `reply_to`
+- `ctrl_out` carries other task-local replies and terminal notifications.
+  Readers ignore malformed or unrelated replies as protocol noise; this
+  robustness does not make removed reply formats current contracts
 - `STOP`, `KILL`, `STATUS`, and `PING` round trips exist for live tasks
 - `PAUSE` and `RESUME` are supported on task types that opt into live pausing
 - durable `state.status` remains the canonical lifecycle state
@@ -789,13 +829,14 @@ publication. Payload construction and serialization defects remain visible
 internal failures under [OBS.6a].
 
 _Implementation mapping_: `weft/core/tasks/base.py` owns the shared task-loop
-entry points and worker-result reactor lane. While worker lanes are active,
-`BaseTask.wait_for_activity()` bounds queue waits to the fast task-reactor wake
-cap so child/process completion is observed promptly without task-specific
-poll loops. Worker-result delivery uses a bounded local Python queue and a
-per-turn drain budget; full queues apply backpressure to worker lanes rather
-than growing process memory without bound. `weft/core/tasks/multiqueue_watcher.py`
-owns queue readiness and lets task subclasses narrow what counts as wait
+entry points, common completion-predicate driver, and worker-result reactor
+lane. The worker-result queue is authoritative: a worker publishes its result
+before notifying the retained strategy, and finite worker-lane retirement is
+recorded before its own notification. Worker-result delivery uses a bounded
+local Python queue and a per-turn drain budget; full queues apply backpressure
+to worker lanes rather than growing process memory without bound.
+`weft/core/tasks/multiqueue_watcher.py` owns the retained strategy lifecycle
+and queue readiness, and lets task subclasses narrow what counts as wait
 activity when a queue already contains work owned by the current reactor turn,
 such as a Consumer reserved message while its worker lane is active.
 `weft/core/launcher.py` constructs the task, installs process-level signal and
@@ -806,7 +847,7 @@ activity waiting, and finalization. The launcher must not maintain a parallel
 task-loop policy; launcher delegation is fired by
 `tests/tasks/test_task_execution.py`.
 `weft/core/tasks/consumer.py` owns
-work-item reservation, worker dispatch,
+work-item reservation, worker dispatch, direct-work use of the common driver,
 main-thread finalization, and active control; `weft/core/tasks/runner.py` owns
 runner dispatch; `weft/cli/run.py` owns CLI submission and wait behavior.
 

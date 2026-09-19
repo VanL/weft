@@ -36,7 +36,7 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_PING,
     CONTROL_STOP,
-    PARENT_LOSS_WAKE_INTERVAL_CEILING,
+    PARENT_LOSS_WATCH_INTERVAL_SECONDS,
     PIPELINE_OWNER_METADATA_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
@@ -118,7 +118,7 @@ class LauncherWaitTask:
         del join
         self.should_stop = True
 
-    def run_until_stopped(self, *, poll_interval: float) -> None:
+    def run_until_stopped(self, *, poll_interval: float | None) -> None:
         global _launcher_process_calls, _launcher_run_calls
         _launcher_run_calls += 1
         _launcher_process_calls = 2
@@ -132,7 +132,7 @@ class LauncherTerminalTask(LauncherWaitTask):
         _launcher_process_calls = self.process_calls
         self.taskspec.mark_completed(return_code=0)
 
-    def run_until_stopped(self, *, poll_interval: float) -> None:
+    def run_until_stopped(self, *, poll_interval: float | None) -> None:
         global _launcher_process_calls, _launcher_run_calls
         del poll_interval
         _launcher_run_calls += 1
@@ -633,6 +633,49 @@ def test_base_task_run_until_stopped_finalizes_on_iteration_limit(
     assert task._queue_cache == {}
     assert task.is_running() is False
     task.stop()
+
+
+def test_idle_ordinary_task_runs_no_policy_turns_without_events(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+) -> None:
+    """A silent task remains inside the watcher strategy after its first turn."""
+
+    del thread_exception_guard
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    task.enable_process_title = False
+    entered_wait = threading.Event()
+    quiet_window_elapsed = threading.Event()
+    original_wait = task._wait_for_reactor_activity
+
+    def observed_wait(timeout: float | None) -> None:
+        assert timeout is None
+        entered_wait.set()
+        original_wait(timeout)
+
+    monkeypatch.setattr(task, "_wait_for_reactor_activity", observed_wait)
+    owner = threading.Thread(target=task.run_until_stopped)
+    owner.start()
+    try:
+        assert entered_wait.wait(timeout=2.0)
+        baseline = task.reactor_turn_count
+        assert baseline == 1
+        assert quiet_window_elapsed.wait(timeout=0.25) is False
+        assert task.reactor_turn_count == baseline
+    finally:
+        task.stop(join=False)
+        owner.join(timeout=2.0)
+
+    assert owner.is_alive() is False
 
 
 def test_stopping_turn_policy_is_shared_by_all_concrete_task_families() -> None:
@@ -3473,6 +3516,33 @@ def test_task_run_until_stopped_waits_through_activity_seam(
     assert wait_calls == [0.25]
 
 
+def test_task_run_until_stopped_passes_unbounded_wait_without_deadlines(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    wait_calls: list[float | None] = []
+
+    def fake_wait(timeout: float | None) -> None:
+        wait_calls.append(timeout)
+        task.should_stop = True
+
+    monkeypatch.setattr(task, "next_wait_timeout", lambda: None)
+    monkeypatch.setattr(task, "wait_for_activity", fake_wait)
+
+    task.run_until_stopped(max_iterations=5)
+
+    assert wait_calls == [None]
+
+
 def test_task_run_until_stopped_uses_next_wait_timeout(
     broker_env: BrokerEnv,
     unique_tid: str,
@@ -3495,7 +3565,7 @@ def test_task_run_until_stopped_uses_next_wait_timeout(
 
     task.run_until_stopped(poll_interval=0.25, max_iterations=5)
 
-    assert wait_calls == [0.75]
+    assert wait_calls == [0.25]
 
 
 def test_task_run_until_stopped_waits_for_zero_next_timeout(
@@ -3587,6 +3657,8 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
     inbox = make_queue(spec.io.inputs["inbox"])
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    reply_to = f"T{unique_tid}.active-command.ctrl_in"
+    replies = make_queue(reply_to)
     outbox = make_queue(spec.io.outputs["outbox"])
     inbox.write(json.dumps({"args": []}))
 
@@ -3599,14 +3671,22 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
     assert task._has_worker_activity() is True
     assert outbox.read_one() is None
 
-    ctrl_in.write(encode_control_message(CONTROL_PING, request_id="during"))
+    ctrl_in.write(
+        encode_control_message(
+            CONTROL_PING,
+            request_id="during",
+            reply_to=reply_to,
+        )
+    )
     task.process_once()
 
-    responses = [json.loads(msg) for msg in drain_queue(ctrl_out)]
+    responses = [json.loads(msg) for msg in drain_queue(replies)]
     pong = next(response for response in responses if response["command"] == "PING")
     assert pong["request_id"] == "during"
     assert pong["message"] == "PONG"
     assert pong["task_status"] == "running"
+    assert "reply_to" not in pong
+    assert drain_queue(ctrl_out) == []
 
     _drive_consumer_until(
         task,
@@ -3716,6 +3796,8 @@ def test_consumer_active_wait_activity_ignores_reserved_work_queue(
     inbox = make_queue(spec.io.inputs["inbox"])
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    reply_to = f"T{unique_tid}.active-pending.ctrl_in"
+    make_queue(reply_to)
     worker_started = threading.Event()
     release_worker = threading.Event()
 
@@ -3753,7 +3835,13 @@ def test_consumer_active_wait_activity_ignores_reserved_work_queue(
         assert reserved.has_pending() is True
         assert task._has_pending_messages() is False
 
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="active"))
+        ctrl_in.write(
+            encode_control_message(
+                CONTROL_PING,
+                request_id="active",
+                reply_to=reply_to,
+            )
+        )
         assert task._has_pending_messages() is True
     finally:
         release_worker.set()
@@ -3762,6 +3850,44 @@ def test_consumer_active_wait_activity_ignores_reserved_work_queue(
         task,
         lambda: task.taskspec.state.status == "completed",
     )
+
+
+def test_consumer_active_control_delegates_nonrequest_to_reply_hook(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_command_taskspec(unique_tid, sys.executable),
+    )
+    ctrl_in = make_queue(task.taskspec.io.control["ctrl_in"])
+    observed: list[tuple[str, int]] = []
+
+    def capture_reply(
+        message: str,
+        timestamp: int,
+        _context: QueueMessageContext,
+    ) -> None:
+        observed.append((message, timestamp))
+
+    monkeypatch.setattr(task, "_handle_control_reply", capture_reply)
+    raw = json.dumps(
+        {
+            "command": CONTROL_PING,
+            "status": "ok",
+            "message": "PONG",
+            "request_id": "active-reply",
+            "tid": "target",
+        }
+    )
+    message_id = int(ctrl_in.write(raw))
+
+    task._poll_active_control_once()
+
+    assert observed == [(raw, message_id)]
+    assert ctrl_in.peek_one() is None
 
 
 def test_consumer_keeps_one_inflight_item_and_commits_in_source_order(
@@ -3845,6 +3971,8 @@ def test_consumer_active_control_gets_turn_while_stream_events_remain(
     inbox = make_queue(spec.io.inputs["inbox"])
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    reply_to = f"T{unique_tid}.active-stream.ctrl_in"
+    replies = make_queue(reply_to)
     release_worker = threading.Event()
 
     class StreamingTaskRunner:
@@ -3884,13 +4012,20 @@ def test_consumer_active_control_gets_turn_while_stream_events_remain(
             time.sleep(0.01)
         assert task._worker_result_queue.qsize() >= 6
 
-        ctrl_in.write(encode_control_message(CONTROL_PING, request_id="stream"))
+        ctrl_in.write(
+            encode_control_message(
+                CONTROL_PING,
+                request_id="stream",
+                reply_to=reply_to,
+            )
+        )
         task.process_once()
 
-        responses = [json.loads(msg) for msg in drain_queue(ctrl_out)]
+        responses = [json.loads(msg) for msg in drain_queue(replies)]
         pong = next(response for response in responses if response["command"] == "PING")
         assert pong["request_id"] == "stream"
         assert pong["message"] == "PONG"
+        assert drain_queue(ctrl_out) == []
         assert task._has_pending_worker_results() is True
     finally:
         release_worker.set()
@@ -4003,10 +4138,9 @@ def test_base_task_worker_lane_delivers_errors_on_main_thread(
     assert task.worker_result_thread_ids == [main_thread_id]
 
 
-def test_base_task_wait_for_activity_caps_wait_while_worker_is_active(
+def test_base_task_worker_result_wakes_unbounded_reactor_wait(
     broker_env: BrokerEnv,
     unique_tid: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     spec = make_function_taskspec(
@@ -4016,7 +4150,6 @@ def test_base_task_wait_for_activity_caps_wait_while_worker_is_active(
     task = ReactorTestTask(db_path, spec)
     worker_started = threading.Event()
     release_worker = threading.Event()
-    monkeypatch.setattr(base_module, "TASK_REACTOR_WAKEUP_MAX_SECONDS", 0.02)
 
     def worker_body() -> str:
         worker_started.set()
@@ -4026,21 +4159,78 @@ def test_base_task_wait_for_activity_caps_wait_while_worker_is_active(
     task._submit_worker_call("blocked", worker_body)
     assert worker_started.wait(timeout=2.0)
 
+    def release() -> None:
+        time.sleep(0.05)
+        release_worker.set()
+
+    notifier = threading.Thread(target=release)
+    notifier.start()
     started_at = time.monotonic()
-    task._wait_for_reactor_activity(timeout=5.0)
+    task._wait_for_reactor_activity(timeout=None)
     elapsed = time.monotonic() - started_at
+    notifier.join(timeout=2.0)
+    task.process_once()
 
     assert elapsed < 0.5
-    assert task.worker_results == []
-
-    release_worker.set()
-    deadline = time.monotonic() + 2.0
-    while not task.worker_results and time.monotonic() < deadline:
-        task.process_once()
-        if not task.worker_results:
-            task.wait_for_activity(timeout=0.01)
-
     assert task.worker_results[0].value == "done"
+
+
+def test_worker_retirement_supplies_second_unbounded_reactor_wake(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ReactorTestTask(
+        db_path,
+        make_function_taskspec(
+            unique_tid,
+            "tests.tasks.sample_targets:echo_payload",
+        ),
+    )
+    result_published = threading.Event()
+    release_publisher = threading.Event()
+    entered_wait = threading.Event()
+    original_publish = task._publish_worker_result
+    original_wait = task._wait_for_reactor_activity
+
+    def held_publish(
+        lane: str,
+        *,
+        value: Any = None,
+        error: BaseException | None = None,
+    ) -> bool:
+        published = original_publish(lane, value=value, error=error)
+        result_published.set()
+        assert release_publisher.wait(timeout=2.0)
+        return published
+
+    def observed_wait(timeout: float | None) -> None:
+        entered_wait.set()
+        original_wait(timeout)
+
+    monkeypatch.setattr(task, "_publish_worker_result", held_publish)
+    monkeypatch.setattr(task, "_wait_for_reactor_activity", observed_wait)
+    task._submit_worker_call("retirement", lambda: "done")
+    assert result_published.wait(timeout=2.0)
+
+    def drive() -> None:
+        with task.drive_scope():
+            task._drive_reactor_until(
+                completion_predicate=lambda: (
+                    bool(task.worker_results) and not task._has_worker_activity()
+                ),
+            )
+
+    owner = threading.Thread(target=drive)
+    owner.start()
+    assert entered_wait.wait(timeout=2.0)
+    assert task.worker_results[0].value == "done"
+
+    release_publisher.set()
+    owner.join(timeout=2.0)
+
+    assert owner.is_alive() is False
 
 
 def test_base_task_worker_result_drain_is_budgeted(
@@ -4405,6 +4595,50 @@ def test_task_process_entry_does_not_wait_after_terminal_turn(
     assert _launcher_run_calls == 1
 
 
+def test_task_process_entry_passes_unbounded_wait_and_parent_watch_cadence(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    global _launcher_process_calls, _launcher_run_calls
+    db_path, _make_queue = broker_env
+    _launcher_wait_calls.clear()
+    _launcher_process_calls = 0
+    _launcher_run_calls = 0
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    spec.metadata["foreground_serve"] = True
+    parent_watch_calls: list[tuple[int, float]] = []
+
+    def capture_parent_watch(
+        _task: object,
+        *,
+        initial_parent_pid: int,
+        watch_interval: float,
+    ) -> threading.Event:
+        parent_watch_calls.append((initial_parent_pid, watch_interval))
+        return threading.Event()
+
+    monkeypatch.setattr(
+        launcher_module,
+        "_start_parent_loss_watcher",
+        capture_parent_watch,
+    )
+
+    _task_process_entry(
+        f"{LauncherWaitTask.__module__}.{LauncherWaitTask.__qualname__}",
+        db_path,
+        spec.model_dump_json(),
+        serialize_config(resolve_runtime_config({})),
+        None,
+    )
+
+    assert _launcher_wait_calls == [None]
+    assert parent_watch_calls == [(os.getppid(), PARENT_LOSS_WATCH_INTERVAL_SECONDS)]
+
+
 def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
     broker_env: BrokerEnv,
     unique_tid: str,
@@ -4471,10 +4705,9 @@ def test_parent_loss_shutdown_records_without_setting_task_stop_event() -> None:
     assert task._stop_event.is_set() is False
 
 
-def test_parent_loss_is_observed_after_bounded_owner_wait(
+def test_parent_loss_wakes_unbounded_owner_wait(
     broker_env: BrokerEnv,
     unique_tid: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
     task = ReactorTestTask(
@@ -4485,40 +4718,23 @@ def test_parent_loss_is_observed_after_bounded_owner_wait(
         ),
     )
     task.process_once()
-    task.enable_parent_loss_watch()
-    entered_wait = threading.Event()
     noted_parent_loss = threading.Event()
-    wait_timeouts: list[float | None] = []
-
-    class BlockingWaiter:
-        def wait(self, timeout: float | None) -> bool:
-            wait_timeouts.append(timeout)
-            entered_wait.set()
-            threading.Event().wait(timeout=timeout)
-            return False
-
-    monkeypatch.setattr(
-        task,
-        "_ensure_multi_activity_waiter",
-        lambda: BlockingWaiter(),
-    )
 
     def note_parent_loss() -> None:
-        assert entered_wait.wait(timeout=2.0)
+        time.sleep(0.05)
         task.note_parent_loss()
         noted_parent_loss.set()
 
     notifier = threading.Thread(target=note_parent_loss)
     notifier.start()
     started_at = time.monotonic()
-    task.wait_for_activity(timeout=5.0)
+    task._wait_for_reactor_activity(timeout=None)
     elapsed = time.monotonic() - started_at
     notifier.join(timeout=2.0)
 
     try:
         assert noted_parent_loss.is_set()
-        assert wait_timeouts == [PARENT_LOSS_WAKE_INTERVAL_CEILING]
-        assert elapsed < PARENT_LOSS_WAKE_INTERVAL_CEILING + 0.3
+        assert elapsed < 0.5
         task.process_once()
         assert task.taskspec.state.status == "cancelled"
         assert task._has_pending_termination_request() is False
@@ -4959,7 +5175,13 @@ def test_task_cleanup_removes_standard_control_queues_after_success(
         task,
         lambda: task.taskspec.state.status == "completed",
     )
-    ctrl_in.write(encode_control_message(CONTROL_PING))
+    ctrl_in.write(
+        encode_control_message(
+            CONTROL_PING,
+            request_id="cleanup-pending",
+            reply_to=f"T{unique_tid}.cleanup-pending.ctrl_in",
+        )
+    )
 
     assert ctrl_in.stats().total == 1
     assert ctrl_out.stats().total > 0

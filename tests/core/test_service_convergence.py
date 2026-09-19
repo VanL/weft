@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -564,3 +564,35 @@ def test_none_and_unknown_registry_states_are_distinct() -> None:
 
     assert none_decision.state == "none"
     assert unknown_decision.state == "unknown"
+
+
+def test_clean_service_schema_bootstrap_scans_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An absence scan already verifies that there are no v1 rows to discard."""
+    with Queue("weft.state.services", db_path=str(tmp_path / "weft.db")) as queue:
+        current_id = _write_schema_row(queue, SERVICE_OWNER_SCHEMA)
+        malformed_id = int(queue.write("not-json"))
+        scans = 0
+        original_peek = Queue.peek_generator
+
+        def peek(self: Queue, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            nonlocal scans
+            scans += 1
+            yield from original_peek(self, *args, **kwargs)
+
+        monkeypatch.setattr(Queue, "peek_generator", peek)
+        discard_v1_service_registry_rows(queue)
+        assert scans == 1
+        assert _all_queue_message_ids(queue) == {current_id, malformed_id}
+
+
+def test_claimed_future_schema_prevents_v1_discard(tmp_path: Path) -> None:
+    """Claimed future rows still prevent deletion of any retired evidence."""
+    with Queue("weft.state.services", db_path=str(tmp_path / "weft.db")) as queue:
+        v1_id = _write_schema_row(queue, "weft.service_owner.v1")
+        future_id = _write_schema_row(queue, "weft.service_owner.v3")
+        assert queue.read_one(exact_timestamp=future_id) is not None
+        with pytest.raises(ValueError, match="future service-owner schema"):
+            discard_v1_service_registry_rows(queue)
+        assert _all_queue_message_ids(queue) == {v1_id, future_id}

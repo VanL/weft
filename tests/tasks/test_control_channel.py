@@ -39,6 +39,15 @@ def _read_all(queue: Queue) -> list[str]:
     return messages
 
 
+def _requester_queue(
+    make_queue: Callable[[str], Queue],
+    tid: str,
+    label: str,
+) -> tuple[str, Queue]:
+    queue_name = f"T{tid}.{label}.ctrl_in"
+    return queue_name, make_queue(queue_name)
+
+
 def _drive_task_until(
     task: Consumer, predicate: Callable[[], bool], *, timeout: float = 5.0
 ) -> None:
@@ -217,11 +226,14 @@ def test_ping_control_command_returns_pong(
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "basic-ping")
 
-    ctrl_in.write(encode_control_message("PING"))
+    ctrl_in.write(
+        encode_control_message("PING", request_id="ping-1", reply_to=reply_to)
+    )
     task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+    responses = [json.loads(msg) for msg in _read_all(replies)]
     ping_response = next(r for r in responses if r.get("command") == "PING")
     assert ping_response["status"] == "ok"
     assert ping_response["message"] == "PONG"
@@ -229,6 +241,9 @@ def test_ping_control_command_returns_pong(
     assert ping_response["paused"] is False
     assert ping_response["should_stop"] is False
     assert ping_response["runner"]
+    assert ping_response["request_id"] == "ping-1"
+    assert "reply_to" not in ping_response
+    assert _read_all(ctrl_out) == []
 
 
 def test_structured_ping_echoes_request_id_and_snapshot(
@@ -241,11 +256,18 @@ def test_structured_ping_echoes_request_id_and_snapshot(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
     request_id = "req-123"
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "structured-ping")
 
-    ctrl_in.write(encode_control_message("PING", request_id=request_id))
+    ctrl_in.write(
+        encode_control_message(
+            "PING",
+            request_id=request_id,
+            reply_to=reply_to,
+        )
+    )
     task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+    responses = [json.loads(msg) for msg in _read_all(replies)]
     ping_response = next(r for r in responses if r.get("command") == "PING")
     assert ping_response["status"] == "ok"
     assert ping_response["message"] == "PONG"
@@ -254,6 +276,8 @@ def test_structured_ping_echoes_request_id_and_snapshot(
     assert ping_response["paused"] is False
     assert ping_response["should_stop"] is False
     assert ping_response["runner"]
+    assert "reply_to" not in ping_response
+    assert _read_all(ctrl_out) == []
 
 
 @pytest.mark.parametrize(
@@ -285,10 +309,15 @@ def test_invalid_control_payload_is_acked_without_reply_and_does_not_block(
     task = Consumer(db_path, spec)
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "progress")
 
     try:
         invalid_id = int(ctrl_in.write(payload))
-        progress_body = encode_control_message("PING", request_id="progress")
+        progress_body = encode_control_message(
+            "PING",
+            request_id="progress",
+            reply_to=reply_to,
+        )
         progress_id = int(ctrl_in.write(progress_body))
         task.process_once()
 
@@ -297,17 +326,62 @@ def test_invalid_control_payload_is_acked_without_reply_and_does_not_block(
         assert remaining == [(progress_body, progress_id)]
         assert invalid_id != progress_id
 
-        _drive_task_until(task, lambda: ctrl_out.peek_one() is not None)
+        _drive_task_until(task, lambda: replies.peek_one() is not None)
 
-        progress_responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        progress_responses = [json.loads(msg) for msg in _read_all(replies)]
         assert any(
             response.get("message") == "PONG"
             and response.get("request_id") == "progress"
             for response in progress_responses
         )
         assert ctrl_in.peek_one() is None
+        assert _read_all(ctrl_out) == []
     finally:
         task.cleanup()
+
+
+def test_nonrequest_control_row_reaches_reply_hook_then_is_acked_once(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
+    task = Consumer(db_path, spec)
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    observed: list[tuple[str, int, str]] = []
+    acknowledgements: list[tuple[str, int]] = []
+    original_ack = task._ack_control_message
+
+    def capture_reply(
+        message: str,
+        timestamp: int,
+        context: QueueMessageContext,
+    ) -> None:
+        observed.append((message, timestamp, context.queue_name))
+
+    def capture_ack(queue_name: str, timestamp: int) -> None:
+        acknowledgements.append((queue_name, timestamp))
+        original_ack(queue_name, timestamp)
+
+    monkeypatch.setattr(task, "_handle_control_reply", capture_reply)
+    monkeypatch.setattr(task, "_ack_control_message", capture_ack)
+    raw = json.dumps(
+        {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "request_id": "reply-1",
+            "tid": "target",
+        }
+    )
+    message_id = int(ctrl_in.write(raw))
+
+    task.process_once()
+
+    assert observed == [(raw, message_id, spec.io.control["ctrl_in"])]
+    assert acknowledgements == [(spec.io.control["ctrl_in"], message_id)]
+    assert ctrl_in.peek_one() is None
 
 
 def test_control_ack_survives_task_reconstruction_without_replay(
@@ -339,31 +413,45 @@ def test_control_ack_survives_task_reconstruction_without_replay(
     ctrl_out = make_queue(ctrl_out_name)
     default_ctrl_in = make_queue(f"T{unique_tid}.ctrl_in")
     default_ctrl_out = make_queue(f"T{unique_tid}.ctrl_out")
-    default_trap = encode_control_message("PING", request_id="default-trap")
+    trap_reply_to, _trap_replies = _requester_queue(
+        make_queue, unique_tid, "default-trap"
+    )
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "restart")
+    default_trap = encode_control_message(
+        "PING",
+        request_id="default-trap",
+        reply_to=trap_reply_to,
+    )
     default_ctrl_in.write(default_trap)
     first = Consumer(db_path, make_spec())
     try:
-        ctrl_in.write(encode_control_message("PING", request_id="first"))
+        ctrl_in.write(
+            encode_control_message("PING", request_id="first", reply_to=reply_to)
+        )
         first.process_once()
         assert ctrl_in.peek_one() is None
-        raw_first_response = ctrl_out.read_one()
+        raw_first_response = replies.read_one()
         assert raw_first_response is not None
         first_response = json.loads(raw_first_response)
         assert first_response["request_id"] == "first"
         assert default_ctrl_in.peek_one() == default_trap
+        assert ctrl_out.peek_one() is None
         assert default_ctrl_out.peek_one() is None
     finally:
         first.cleanup()
 
     replacement = Consumer(db_path, make_spec())
     try:
-        ctrl_in.write(encode_control_message("PING", request_id="barrier"))
+        ctrl_in.write(
+            encode_control_message("PING", request_id="barrier", reply_to=reply_to)
+        )
         replacement.process_once()
 
-        responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        responses = [json.loads(msg) for msg in _read_all(replies)]
         assert [response.get("request_id") for response in responses] == ["barrier"]
         assert ctrl_in.peek_one() is None
         assert default_ctrl_in.peek_one() == default_trap
+        assert ctrl_out.peek_one() is None
         assert default_ctrl_out.peek_one() is None
     finally:
         replacement.cleanup()
@@ -378,14 +466,21 @@ def test_task_can_register_pong_extension_provider(
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "extended")
     task.register_pong_extension_provider(
         lambda: {"queue_depth": 3, "notes": {"mode": "diagnostic"}}
     )
 
-    ctrl_in.write(encode_control_message("PING", request_id="extended-ping"))
+    ctrl_in.write(
+        encode_control_message(
+            "PING",
+            request_id="extended-ping",
+            reply_to=reply_to,
+        )
+    )
     task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+    responses = [json.loads(msg) for msg in _read_all(replies)]
     ping_response = next(r for r in responses if r.get("command") == "PING")
     assert ping_response["message"] == "PONG"
     assert ping_response[PONG_EXTENSION_KEY] == {
@@ -394,6 +489,7 @@ def test_task_can_register_pong_extension_provider(
     }
     assert ping_response["request_id"] == "extended-ping"
     assert ping_response["task_status"] == task.taskspec.state.status
+    assert _read_all(ctrl_out) == []
 
 
 def test_bad_pong_extension_provider_error_stays_nested(
@@ -405,16 +501,24 @@ def test_bad_pong_extension_provider_error_stays_nested(
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "bad-extension")
     task.register_pong_extension_provider(lambda: {"bad": {object()}})
 
-    ctrl_in.write(encode_control_message("PING"))
+    ctrl_in.write(
+        encode_control_message(
+            "PING",
+            request_id="bad-extension",
+            reply_to=reply_to,
+        )
+    )
     task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+    responses = [json.loads(msg) for msg in _read_all(replies)]
     ping_response = next(r for r in responses if r.get("command") == "PING")
     assert "error" in ping_response[PONG_EXTENSION_KEY]
     assert ping_response["message"] == "PONG"
     assert ping_response["task_status"] == task.taskspec.state.status
+    assert _read_all(ctrl_out) == []
 
 
 def test_pong_extension_provider_failure_is_local_but_fatal_exit_propagates(
@@ -426,6 +530,7 @@ def test_pong_extension_provider_failure_is_local_but_fatal_exit_propagates(
     task = Consumer(db_path, spec)
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "failing-extension")
     ordinary = LookupError("verbatim extension failure")
 
     def fail_ordinary() -> None:
@@ -442,10 +547,14 @@ def test_pong_extension_provider_failure_is_local_but_fatal_exit_propagates(
     try:
         task.register_pong_extension_provider(fail_ordinary)
         ctrl_in.write(
-            encode_control_message("PING", request_id="failing-extension-provider")
+            encode_control_message(
+                "PING",
+                request_id="failing-extension-provider",
+                reply_to=reply_to,
+            )
         )
         task.process_once()
-        responses = [json.loads(message) for message in _read_all(ctrl_out)]
+        responses = [json.loads(message) for message in _read_all(replies)]
         assert len(responses) == 1
         pong = responses[0]
         assert pong["command"] == "PING"
@@ -458,6 +567,7 @@ def test_pong_extension_provider_failure_is_local_but_fatal_exit_propagates(
         assert pong["runner"] == task.taskspec.spec.runner.name
         assert pong["request_id"] == "failing-extension-provider"
         assert pong[PONG_EXTENSION_KEY] == {"error": "verbatim extension failure"}
+        assert _read_all(ctrl_out) == []
 
         task.register_pong_extension_provider(fail_fatal)
         with pytest.raises(FatalExtensionExit) as exc_info:
@@ -486,12 +596,19 @@ def test_manager_ping_includes_manager_selection_fields(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
     request_id = "manager-probe-request"
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "manager-probe")
 
     try:
-        ctrl_in.write(encode_control_message("PING", request_id=request_id))
+        ctrl_in.write(
+            encode_control_message(
+                "PING",
+                request_id=request_id,
+                reply_to=reply_to,
+            )
+        )
         task.process_once()
 
-        responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        responses = [json.loads(msg) for msg in _read_all(replies)]
         ping_response = next(r for r in responses if r.get("command") == "PING")
         assert ping_response["status"] == "ok"
         assert ping_response["message"] == "PONG"
@@ -502,6 +619,7 @@ def test_manager_ping_includes_manager_selection_fields(
         assert ping_response["ctrl_out"] == f"T{unique_tid}.ctrl_out"
         assert ping_response["outbox"] == WEFT_MANAGER_OUTBOX_QUEUE
         assert ping_response["weft_context"] == "."
+        assert _read_all(ctrl_out) == []
 
         assert task._handle_control_command(
             ControlRequest("STOP", "manager-stop"),
@@ -561,17 +679,25 @@ def test_ping_includes_runtime_summary_from_runner_plugin(
     )
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
+    reply_to, replies = _requester_queue(make_queue, unique_tid, "runtime-summary")
 
-    ctrl_in.write(encode_control_message("PING"))
+    ctrl_in.write(
+        encode_control_message(
+            "PING",
+            request_id="runtime-summary",
+            reply_to=reply_to,
+        )
+    )
     task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+    responses = [json.loads(msg) for msg in _read_all(replies)]
     ping_response = next(r for r in responses if r.get("command") == "PING")
     assert ping_response["runtime"]["runner"] == "fake-runtime"
     assert ping_response["runtime"]["id"] == "runtime-1"
     assert ping_response["runtime"]["state"] == "running"
     assert ping_response["runtime"]["metadata"]["container_id"] == "abc123"
     assert ping_response["runtime"]["metadata"]["memory_usage_mb"] == 12.5
+    assert _read_all(ctrl_out) == []
 
 
 @pytest.fixture
