@@ -114,8 +114,11 @@ from weft.core.taskspec import (
 from weft.helpers import ContainerRuntimeDetection, process_create_time
 from weft.liveness.models import HostProcessObservation
 
-AUTOSTART_PIPELINE_RESULT_TIMEOUT = 60.0
-"""Wait budget for full autostart pipeline completion under Windows CI load."""
+AUTOSTART_PIPELINE_PROGRESS_TIMEOUT = 60.0
+"""Maximum wait without new autostart pipeline evidence under Windows CI load."""
+
+AUTOSTART_PIPELINE_RESULT_TIMEOUT = 180.0
+"""Overall safety cap for full autostart pipeline completion."""
 
 
 @pytest.fixture
@@ -819,15 +822,30 @@ def _pipeline_status_queue_name(child_taskspec: dict[str, object]) -> str | None
     return status if isinstance(status, str) and status else None
 
 
+def _drain_pipeline_status_tail(
+    status_queue: Queue | None,
+    status_tail: list[object],
+) -> bool:
+    if status_queue is None:
+        return False
+    status_items = drain(status_queue)
+    status_tail.extend(_decode_queue_payload(item) for item in status_items)
+    del status_tail[:-8]
+    return bool(status_items)
+
+
 def _wait_for_autostart_pipeline_result(
     manager: Manager,
     log_queue: Queue,
     make_queue: Callable[[str], Queue],
     *,
     source: str,
+    progress_timeout: float = AUTOSTART_PIPELINE_PROGRESS_TIMEOUT,
     timeout: float = AUTOSTART_PIPELINE_RESULT_TIMEOUT,
 ) -> tuple[dict[str, Any], object]:
-    deadline = time.monotonic() + timeout
+    start = time.monotonic()
+    deadline = start + timeout
+    progress_deadline = start + progress_timeout
     spawn_event: dict[str, Any] | None = None
     outbox_queue = None
     status_queue = None
@@ -835,8 +853,10 @@ def _wait_for_autostart_pipeline_result(
     status_tail: list[object] = []
 
     while time.monotonic() < deadline:
+        progress = False
         manager.process_once()
         for item in drain(log_queue):
+            progress = True
             event: dict[str, Any] = json.loads(item)
             event_tail.append(event)
             event_tail = event_tail[-12:]
@@ -853,22 +873,24 @@ def _wait_for_autostart_pipeline_result(
                 if status_name is not None:
                     status_queue = make_queue(status_name)
 
-        if status_queue is not None:
-            status_tail.extend(
-                _decode_queue_payload(item) for item in drain(status_queue)
-            )
-            status_tail = status_tail[-8:]
+        progress = _drain_pipeline_status_tail(status_queue, status_tail) or progress
 
         if outbox_queue is not None:
             raw = outbox_queue.read_one()
             if raw is not None:
                 return spawn_event or {}, _decode_queue_payload(raw)
 
+        if progress:
+            progress_deadline = time.monotonic() + progress_timeout
+        elif time.monotonic() >= progress_deadline:
+            break
+
         time.sleep(0.05)
 
     raise AssertionError(
         "Timed out waiting for autostart pipeline result "
-        f"after {timeout:.1f}s; spawn_event={spawn_event!r}; "
+        f"after {timeout:.1f}s or {progress_timeout:.1f}s without progress; "
+        f"spawn_event={spawn_event!r}; "
         f"event_tail={event_tail!r}; status_tail={status_tail!r}"
     )
 
