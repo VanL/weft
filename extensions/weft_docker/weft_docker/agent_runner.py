@@ -370,7 +370,10 @@ class DockerProviderCLIRunner:
                     except Exception:  # pragma: no cover - best effort cleanup  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-281] exception
                         logger.warning("Docker agent container cleanup failed")
 
-    def start_session(self) -> CommandSessionProtocol:
+    def start_session(
+        self, *, on_activity: Callable[[], None]
+    ) -> CommandSessionProtocol:
+        del on_activity
         raise ValueError("Docker runner does not support interactive sessions")
 
     def start_agent_session(self) -> AgentSessionProtocol:

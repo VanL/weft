@@ -111,7 +111,10 @@ class Backend:
             on_stdout_chunk("streamed", True)
         return self.run(work_item)
 
-    def start_session(self) -> CommandSession:
+    def start_session(
+        self, *, on_activity: Callable[[], None]
+    ) -> CommandSession:
+        on_activity()
         return CommandSession()
 
     def start_agent_session(self) -> AgentSession:

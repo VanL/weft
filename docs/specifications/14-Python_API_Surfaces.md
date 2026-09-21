@@ -82,6 +82,12 @@ Agent callbacks receive the `AgentSection` publicly available from
 First-party runners may still use private implementation under coordinated
 versioning; these exports do not promise a complete standalone backend SDK.
 
+`TaskRunnerBackend.start_session(*, on_activity)` requires a zero-argument
+callback and returns `CommandSessionProtocol`. An interactive backend publishes
+session-observable stream or tracked-runtime-exit state before invoking the
+callback. `TaskRunner.start_session()` forwards it unchanged.
+`CommandSessionProtocol` gains no notification registration or wait method.
+
 Implementation: `weft/client/__init__.py` re-exports the schema from
 `weft/core/taskspec/model.py` and context from `weft/context.py`.
 `weft/ext.py` owns the public extension values and protocols;
@@ -420,6 +426,8 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
+- [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md)
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 

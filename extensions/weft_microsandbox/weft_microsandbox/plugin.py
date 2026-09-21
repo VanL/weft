@@ -124,7 +124,10 @@ class MicrosandboxRunner:
             on_stderr_chunk=on_stderr_chunk,
         )
 
-    def start_session(self) -> CommandSessionProtocol:
+    def start_session(
+        self, *, on_activity: Callable[[], None]
+    ) -> CommandSessionProtocol:
+        del on_activity
         raise ValueError("Microsandbox runner does not support interactive sessions")
 
     def start_agent_session(self) -> AgentSessionProtocol:

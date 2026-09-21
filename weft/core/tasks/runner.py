@@ -178,9 +178,11 @@ class TaskRunner:
         parameters = inspect.signature(self._backend.run_with_hooks).parameters
         return "on_stdout_chunk" in parameters and "on_stderr_chunk" in parameters
 
-    def start_session(self) -> CommandSessionProtocol:
+    def start_session(
+        self, *, on_activity: Callable[[], None]
+    ) -> CommandSessionProtocol:
         """Start an interactive command session for the configured runner."""
-        return self._backend.start_session()
+        return self._backend.start_session(on_activity=on_activity)
 
     def start_agent_session(self) -> AgentSessionProtocol:
         """Start a long-lived agent session for the configured runner."""

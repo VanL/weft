@@ -12,7 +12,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from simplebroker import Queue
@@ -51,6 +51,7 @@ class InteractiveTaskMixin(ABC):
     _interactive_stdout_final_sent: bool
     _interactive_stderr_final_sent: bool
     _interactive_total_stdout_bytes: int
+    _interactive_next_limit_check_at: float | None
     _stop_event: threading.Event
 
     @property
@@ -158,12 +159,18 @@ class InteractiveTaskMixin(ABC):
         self._interactive_stdout_final_sent = False
         self._interactive_stderr_final_sent = False
         self._interactive_total_stdout_bytes = 0
+        self._interactive_next_limit_check_at = None
 
     # ------------------------------------------------------------------
     # Interactive helpers
     # ------------------------------------------------------------------
     def _interactive_maybe_handle_message(
-        self, message: str, timestamp: int, context: QueueMessageContext
+        self,
+        message: str,
+        timestamp: int,
+        context: QueueMessageContext,
+        *,
+        on_activity: Callable[[], None],
     ) -> bool:
         if not getattr(self, "_interactive_mode", False):
             return False
@@ -183,7 +190,14 @@ class InteractiveTaskMixin(ABC):
                 )
             return True
 
-        session = self._interactive_ensure_session(timestamp)
+        session = self._interactive_ensure_session(
+            timestamp,
+            on_activity=on_activity,
+        )
+        if self._interactive_next_limit_check_at is None:
+            self._interactive_next_limit_check_at = (
+                time.monotonic() + float(self.taskspec.spec.polling_interval)
+            )
 
         payload = decode_work_message(message)
         if isinstance(payload, dict):
@@ -215,7 +229,12 @@ class InteractiveTaskMixin(ABC):
         self._interactive_flush_outputs()
         return True
 
-    def _interactive_ensure_session(self, message_id: int) -> CommandSessionProtocol:
+    def _interactive_ensure_session(
+        self,
+        message_id: int,
+        *,
+        on_activity: Callable[[], None],
+    ) -> CommandSessionProtocol:
         if self._interactive_session is not None:
             return self._interactive_session
 
@@ -225,7 +244,7 @@ class InteractiveTaskMixin(ABC):
 
         runner = self._make_task_runner(interactive=True)
         try:
-            session = runner.start_session()
+            session = runner.start_session(on_activity=on_activity)
         except Exception as exc:
             diagnostics = runner_diagnostics(
                 phase="process_spawn",
@@ -277,21 +296,26 @@ class InteractiveTaskMixin(ABC):
         outbox_queue = self._queue(self._queue_names["outbox"])
         self._interactive_emit_chunks(session, outbox_queue)
 
-        ok, violation = session.poll_limits()
-        if not ok and violation:
-            self.taskspec.mark_killed(reason=violation)
-            self._report_state_change(
-                event="work_limit_violation",
-                message_id=time.time_ns(),
-                error=violation,
+        deadline = self._interactive_next_limit_check_at
+        if deadline is not None and time.monotonic() >= deadline:
+            ok, violation = session.poll_limits()
+            self._interactive_next_limit_check_at = (
+                time.monotonic() + float(self.taskspec.spec.polling_interval)
             )
-            policy = self.taskspec.spec.reserved_policy_on_error
-            self._apply_reserved_policy(policy)
-            self._update_process_title("killed", "limit")
-            session.terminate()
-            session.stop_monitor()
-            self._interactive_finalize_session(failure_reason=violation)
-            return
+            if not ok and violation:
+                self.taskspec.mark_killed(reason=violation)
+                self._report_state_change(
+                    event="work_limit_violation",
+                    message_id=time.time_ns(),
+                    error=violation,
+                )
+                policy = self.taskspec.spec.reserved_policy_on_error
+                self._apply_reserved_policy(policy)
+                self._update_process_title("killed", "limit")
+                session.terminate()
+                session.stop_monitor()
+                self._interactive_finalize_session(failure_reason=violation)
+                return
 
         metrics = session.last_metrics
         if metrics is not None:
@@ -442,6 +466,7 @@ class InteractiveTaskMixin(ABC):
 
         self.should_stop = True
         self._interactive_completion_reported = True
+        self._interactive_next_limit_check_at = None
         self._interactive_session = None
         self._interactive_runner = None
         self._end_streaming_session()
@@ -449,6 +474,16 @@ class InteractiveTaskMixin(ABC):
             session.close()
         except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive session resources", exc_info=True)
+
+    def _interactive_limit_timeout(self, *, now: float) -> float | None:
+        """Return time remaining until interactive resource sampling is due."""
+
+        if self._interactive_session is None:
+            return None
+        deadline = self._interactive_next_limit_check_at
+        if deadline is None:
+            return None
+        return max(0.0, deadline - now)
 
     def _interactive_shutdown(
         self,

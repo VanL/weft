@@ -166,6 +166,11 @@ Enforcement mechanics and security boundary:
   `weft/_constants.py`, threaded through as `spec.polling_interval` and
   `run_monitored_subprocess`'s `monitor_interval`). Each poll takes one
   `ResourceMetrics` snapshot and calls `check_limits()`.
+- For an interactive command session, Consumer publishes the next resource
+  sample through `next_wait_timeout()` and calls the session's `poll_limits()`
+  only when that absolute deadline is due. Stream, control, backend, and process
+  exit activity do not move the resource-sampling deadline or cause additional
+  samples.
 - Memory and file-descriptor/connection limits are enforced on a **single
   sample**: `ResourceMonitor.check_limits` kills the runtime the first
   poll where `metrics.memory_mb` (or `open_files`/`connections`) exceeds the
@@ -319,6 +324,8 @@ controls stay here only when they are already shipped and observable:
 - [`06A-Resource_Management_Planned.md`](06A-Resource_Management_Planned.md)
 
 ## Related Plans
+
+- [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md)
 
 - [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
 

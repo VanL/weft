@@ -192,7 +192,10 @@ class MacOSSandboxRunner:
             worker_pid=process.pid,
         )
 
-    def start_session(self) -> CommandSessionProtocol:
+    def start_session(
+        self, *, on_activity: Callable[[], None]
+    ) -> CommandSessionProtocol:
+        del on_activity
         raise ValueError("macOS sandbox runner does not support interactive sessions")
 
     def start_agent_session(self) -> AgentSessionProtocol:

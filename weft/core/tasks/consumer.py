@@ -22,7 +22,6 @@ from typing import Any, Literal, NoReturn, cast
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    ACTIVE_CONTROL_POLL_INTERVAL,
     CONSUMER_ACTIVE_WORKER_LANE,
     CONSUMER_WORKER_EVENT_LANE,
     CONTROL_KILL,
@@ -170,19 +169,16 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return config.name == self._queue_names["ctrl_in"]
         return super()._queue_counts_as_wait_activity(config)
 
-    def _wait_for_reactor_activity(self, timeout: float | None) -> None:
-        """Wake periodically while an interactive subprocess owns local state."""
+    def next_wait_timeout(self) -> float | None:
+        """Compose base clock work with interactive resource sampling."""
 
-        if (
-            self._interactive_mode
-            and getattr(self, "_interactive_session", None) is not None
-        ):
-            timeout = (
-                ACTIVE_CONTROL_POLL_INTERVAL
-                if timeout is None
-                else min(timeout, ACTIVE_CONTROL_POLL_INTERVAL)
-            )
-        super()._wait_for_reactor_activity(timeout)
+        base_timeout = super().next_wait_timeout()
+        interactive_timeout = self._interactive_limit_timeout(now=time.monotonic())
+        if base_timeout is None:
+            return interactive_timeout
+        if interactive_timeout is None:
+            return base_timeout
+        return min(base_timeout, interactive_timeout)
 
     def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext
@@ -213,7 +209,12 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                     )
             return
 
-        if self._interactive_maybe_handle_message(message, timestamp, context):
+        if self._interactive_maybe_handle_message(
+            message,
+            timestamp,
+            context,
+            on_activity=self._strategy.notify_activity,
+        ):
             return
 
         if self._active_work_in_flight:

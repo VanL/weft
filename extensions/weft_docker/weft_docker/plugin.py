@@ -310,7 +310,10 @@ class DockerCommandRunner:
                 _cleanup_process(process)
                 _remove_container(client, container_name)
 
-    def start_session(self) -> CommandSessionProtocol:
+    def start_session(
+        self, *, on_activity: Callable[[], None]
+    ) -> CommandSessionProtocol:
+        del on_activity
         raise ValueError("Docker runner does not support interactive sessions")
 
     def start_agent_session(self) -> AgentSessionProtocol:

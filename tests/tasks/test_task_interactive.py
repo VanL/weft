@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 
@@ -16,7 +17,6 @@ from tests.helpers.reactor_driver import drive_until
 from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
-    ACTIVE_CONTROL_POLL_INTERVAL,
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
@@ -25,6 +25,7 @@ from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
+from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import (
     IOSection,
     LimitsSection,
@@ -97,30 +98,84 @@ def _finished(task: Consumer) -> bool:
     return task.should_stop and task._interactive_session is None
 
 
-def test_interactive_session_caps_broker_wait_for_local_process_exit(
+def test_consumer_does_not_override_reactor_wait() -> None:
+    """Interactive sources use the retained watcher instead of a task wait cap."""
+
+    assert "_wait_for_reactor_activity" not in Consumer.__dict__
+
+
+def test_interactive_limit_deadline_composes_with_base_timeout(
     broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Interactive subprocess exit is local state and must wake without queue IO."""
+    """Interactive monitoring contributes one ordinary reactor deadline."""
 
     db_path, _queue_factory = broker_env
     task = Consumer(db_path, make_interactive_spec(unique_tid))
     task._interactive_session = cast(Any, object())
-    observed: list[float | None] = []
-
-    def wait(self: BaseTask, timeout: float | None) -> None:
-        del self
-        observed.append(timeout)
-
-    monkeypatch.setattr(BaseTask, "_wait_for_reactor_activity", wait)
+    task._interactive_next_limit_check_at = 12.5
+    monkeypatch.setattr(BaseTask, "next_wait_timeout", lambda _self: 1.25)
 
     try:
-        task._wait_for_reactor_activity(timeout=None)
+        assert task._interactive_limit_timeout(now=10.0) == pytest.approx(2.5)
+        with monkeypatch.context() as time_patch:
+            time_patch.setattr(
+                "weft.core.tasks.consumer.time.monotonic",
+                lambda: 10.0,
+            )
+            assert task.next_wait_timeout() == pytest.approx(1.25)
+            monkeypatch.setattr(BaseTask, "next_wait_timeout", lambda _self: 5.0)
+            assert task.next_wait_timeout() == pytest.approx(2.5)
     finally:
         task._interactive_session = None
+        task.cleanup()
 
-    assert observed == [ACTIVE_CONTROL_POLL_INTERVAL]
+
+def test_interactive_limits_poll_only_when_due_and_reschedule_after_poll(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Activity drains streams without moving the resource-sampling clock."""
+
+    db_path, _queue_factory = broker_env
+    task = Consumer(
+        db_path,
+        make_interactive_spec(unique_tid, polling_interval=1.0),
+    )
+    session = Mock()
+    session.poll_stdout.return_value = []
+    session.poll_stderr.return_value = []
+    session.poll_limits.return_value = (True, None)
+    session.last_metrics = None
+    session.is_alive.return_value = True
+    task._interactive_session = cast(Any, session)
+
+    try:
+        task._interactive_next_limit_check_at = 12.0
+        with monkeypatch.context() as time_patch:
+            time_patch.setattr(
+                "weft.core.tasks.interactive.time.monotonic",
+                lambda: 10.0,
+            )
+            task._interactive_flush_outputs()
+        session.poll_limits.assert_not_called()
+        assert task._interactive_next_limit_check_at == 12.0
+
+        task._interactive_next_limit_check_at = 9.0
+        moments = iter((10.0, 20.0))
+        with monkeypatch.context() as time_patch:
+            time_patch.setattr(
+                "weft.core.tasks.interactive.time.monotonic",
+                lambda: next(moments),
+            )
+            task._interactive_flush_outputs()
+        session.poll_limits.assert_called_once_with()
+        assert task._interactive_next_limit_check_at == 21.0
+    finally:
+        task._interactive_session = None
+        task.cleanup()
 
 
 def _instrument_streaming_queue(
@@ -238,6 +293,171 @@ def test_interactive_command_streams_output(
     assert task.taskspec.state.status == "completed"
     assert task.should_stop is True
     task.stop(join=False)
+
+
+def _assert_quiet_interactive_stream_wakes_reactor(
+    *,
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+    tid: str,
+    stream: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    script = tmp_path / f"quiet_{stream}.py"
+    script.write_text(
+        (
+            "import sys, time\n"
+            "time.sleep(0.3)\n"
+            f"sys.{stream}.write('ready\\n')\n"
+            f"sys.{stream}.flush()\n"
+            "sys.stdin.readline()\n"
+        ),
+        encoding="utf-8",
+    )
+    spec = make_interactive_spec(
+        tid,
+        script_path=str(script),
+        polling_interval=10.0,
+    )
+    task = Consumer(db_path, spec)
+    callbacks: list[Callable[[], None]] = []
+    original_start_session = TaskRunner.start_session
+
+    def capture_start_session(
+        runner: TaskRunner,
+        *,
+        on_activity: Callable[[], None],
+    ) -> Any:
+        callbacks.append(on_activity)
+        return original_start_session(runner, on_activity=on_activity)
+
+    monkeypatch.setattr(TaskRunner, "start_session", capture_start_session)
+    output_queue = make_queue(
+        spec.io.outputs["outbox"]
+        if stream == "stdout"
+        else spec.io.control["ctrl_out"]
+    )
+    try:
+        make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": ""}))
+        task.process_once()
+        assert task._interactive_session is not None
+        assert len(callbacks) == 1
+        assert getattr(callbacks[0], "__self__", None) is task._strategy
+        assert getattr(callbacks[0], "__func__", None) is type(
+            task._strategy
+        ).notify_activity
+
+        def stream_messages() -> list[dict[str, Any]]:
+            return [json.loads(raw) for raw in output_queue.peek_generator()]
+
+        drive_until(
+            stream_messages,
+            lambda messages: any(
+                message.get("type") == "stream"
+                and message.get("stream") == stream
+                and message.get("data") == "ready\n"
+                for message in messages
+            ),
+            step=task.process_once,
+            wait=task.wait_for_activity,
+            timeout=2.0,
+            diagnostics=lambda: task.taskspec.state.status,
+        )
+
+        messages = stream_messages()
+        assert any(
+            message.get("type") == "stream"
+            and message.get("stream") == stream
+            and message.get("data") == "ready\n"
+            for message in messages
+        )
+        assert task._interactive_session.is_alive()
+    finally:
+        task.cleanup()
+
+
+def test_quiet_interactive_stdout_wakes_retained_watcher(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_quiet_interactive_stream_wakes_reactor(
+        broker_env=broker_env,
+        tmp_path=tmp_path,
+        tid=unique_tid,
+        stream="stdout",
+        monkeypatch=monkeypatch,
+    )
+
+
+def test_quiet_interactive_stderr_wakes_retained_watcher(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_quiet_interactive_stream_wakes_reactor(
+        broker_env=broker_env,
+        tmp_path=tmp_path,
+        tid=unique_tid,
+        stream="stderr",
+        monkeypatch=monkeypatch,
+    )
+
+
+def test_interactive_parent_exit_finishes_while_descendant_holds_pipes(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+    unique_tid: str,
+) -> None:
+    """Tracked-process exit is sufficient even when inherited pipes remain open."""
+
+    psutil = pytest.importorskip("psutil")
+    db_path, make_queue = broker_env
+    pidfile = tmp_path / "interactive-descendant.pid"
+    script = tmp_path / "interactive_parent_exit.py"
+    script.write_text(
+        (
+            "import subprocess, sys\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen("
+            "[sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            f"Path({str(pidfile)!r}).write_text(str(child.pid), encoding='utf-8')\n"
+        ),
+        encoding="utf-8",
+    )
+    spec = make_interactive_spec(
+        unique_tid,
+        script_path=str(script),
+        polling_interval=5.0,
+    )
+    task = Consumer(db_path, spec)
+    child: Any | None = None
+    try:
+        make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": ""}))
+        task.process_once()
+        pidfile_deadline = time.monotonic() + 5.0
+        while not pidfile.exists() and time.monotonic() < pidfile_deadline:
+            time.sleep(0.01)
+        assert pidfile.exists()
+        child_pid = int(pidfile.read_text(encoding="utf-8"))
+        child = psutil.Process(child_pid)
+
+        _drive_interactive(task, lambda: _finished(task))
+
+        assert child.is_running()
+        assert task.taskspec.state.status == "completed"
+        assert task._interactive_session is None
+    finally:
+        if child is not None:
+            try:
+                child.kill()
+                child.wait(timeout=5.0)
+            except psutil.Error:
+                pass
+        task.cleanup()
 
 
 class _TerminalWriteQueue:
@@ -381,7 +601,7 @@ def test_interactive_session_start_failure_uses_canonical_terminal_writer(
     )
     try:
         with pytest.raises(OSError):
-            task._interactive_ensure_session(1)
+            task._interactive_ensure_session(1, on_activity=lambda: None)
         assert task.taskspec.state.status == "failed"
         ordinary.taskspec.mark_failed(error=task.taskspec.state.error)
         ordinary._send_terminal_envelope()

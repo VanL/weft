@@ -35,6 +35,8 @@ See also:
 
 ## Related Plans
 
+- [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md) - routes interactive stream and process-exit events through the retained watcher and publishes resource checks as reactor deadlines.
+
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes each PONG to the requester's own watched `ctrl_in` and removes target-`ctrl_out` polling.
 
 - [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores the retained SimpleBroker strategy as the task reactor's single wake arbiter, routes local events through its notification seam, and publishes service clocks as explicit deadlines.
@@ -316,6 +318,12 @@ See [QUEUE.7], [IMPL.10], and [IMPL.11] in
 `docs/specifications/07-System_Invariants.md` for the invariant-level
 statements.
 
+Interactive command sessions use the same path. The selected runner publishes
+stream-buffer or tracked-runtime state before invoking the required activity
+callback supplied by Consumer. Consumer re-reads the session through
+`CommandSessionProtocol` on the next reactor turn. Interactive resource checks
+remain timers published through `Consumer.next_wait_timeout()`.
+
 `BaseTask` is the single owner of the public task-reactor interface.
 `process_once()` claims and verifies one driving thread before it invokes a
 concrete task's protected turn policy. After ownership is claimed, a different
@@ -335,8 +343,9 @@ thread ident and raw `Thread.is_alive()` are diagnostic only.
 
 Every task wait input is a backend event, a local event or a timer. Local
 events (worker result publication, finite worker-lane retirement, deferred
-signals, parent loss, stop, child-process exit, and a task's own write to a
-watched queue) wake the wait through the retained strategy's coalescing
+signals, parent loss, stop, child-process exit, interactive child stream
+publication, and a task's own write to a watched queue) publish authoritative
+state before waking the wait through the retained strategy's coalescing
 local-activity notification; no task-reactor wait cap exists for them. Timers
 are published through `next_wait_timeout()` and passed as the wait deadline. A
 task that publishes no timer waits without a deadline and runs no policy turn
@@ -889,6 +898,11 @@ Current rules:
 - runners resolve by name through the plugin surface
 - `host` is always available and is the default
 - plugins own runtime-specific execution details
+- an interactive runner receives one required task-local activity callback when
+  `start_session()` is called. The runner invokes it only after publishing
+  session-observable stream or runtime-exit state. The callback carries no
+  payload and grants no queue, TaskSpec, control, or terminal-state authority to
+  the runner.
 - plugins may materialize runner-specific declarative defaults before runner
   construction, but core still sees ordinary runner options, env, and working
   directory values. The first-party Docker extension owns

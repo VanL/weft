@@ -57,9 +57,11 @@ def test_task_runner_consumes_public_only_plugin(
         runner.run_with_hooks("hooked", on_stdout_chunk=record_chunk).value == "hooked"
     )
     assert chunks == [("streamed", True)]
-    session = runner.start_session()
+    activity: list[str] = []
+    session = runner.start_session(on_activity=lambda: activity.append("session"))
     session.send("hello")
     assert session.poll_stdout() == ["hello"]
+    assert activity == ["session"]
     session.close()
     agent_session = runner.start_agent_session()
     assert agent_session.execute("answer").value == "answer"

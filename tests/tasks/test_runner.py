@@ -1880,7 +1880,7 @@ def test_interactive_session_collects_immediate_exit_stream_tail(
         monitor_class=None,
         monitor_interval=0.05,
     )
-    session = runner.start_session()
+    session = runner.start_session(on_activity=lambda: None)
     assert isinstance(session, sessions_module.CommandSession)
     stdout: list[str] = []
     stderr: list[str] = []
@@ -1903,6 +1903,89 @@ def test_interactive_session_collects_immediate_exit_stream_tail(
     assert "".join(stderr) == "interactive-err"
     assert session._stdout_closed is True
     assert session._stderr_closed is True
+
+
+def _start_interactive_activity_session(
+    tmp_path: Path,
+    source: str,
+) -> tuple[sessions_module.CommandSession, threading.Event]:
+    activity = threading.Event()
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=["-u", "-c", source],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+    session = runner.start_session(on_activity=activity.set)
+    assert isinstance(session, sessions_module.CommandSession)
+    return session, activity
+
+
+def test_interactive_stdout_publication_notifies_activity(tmp_path: Path) -> None:
+    session, activity = _start_interactive_activity_session(
+        tmp_path,
+        "import sys, time; sys.stdout.write('ready\\n'); sys.stdout.flush(); time.sleep(30)",
+    )
+    try:
+        assert activity.wait(5.0)
+        assert "".join(session.poll_stdout()) == "ready\n"
+        assert session.is_alive()
+    finally:
+        session.terminate()
+
+
+def test_interactive_stderr_publication_notifies_activity(tmp_path: Path) -> None:
+    session, activity = _start_interactive_activity_session(
+        tmp_path,
+        "import sys, time; sys.stderr.write('ready\\n'); sys.stderr.flush(); time.sleep(30)",
+    )
+    try:
+        assert activity.wait(5.0)
+        assert "".join(session.poll_stderr()) == "ready\n"
+        assert session.is_alive()
+    finally:
+        session.terminate()
+
+
+def test_interactive_process_exit_notifies_before_inherited_pipes_close(
+    tmp_path: Path,
+) -> None:
+    """Process exit wakes the reactor even while a descendant holds both pipes."""
+
+    pytest.importorskip("psutil")
+    pidfile = tmp_path / "inherited-pipe-child.pid"
+    child_source = "import time; time.sleep(30)"
+    parent_source = (
+        "import subprocess, sys; from pathlib import Path; "
+        f"child = subprocess.Popen([sys.executable, '-c', {child_source!r}]); "
+        f"Path({str(pidfile)!r}).write_text(str(child.pid), encoding='utf-8')"
+    )
+    session, activity = _start_interactive_activity_session(tmp_path, parent_source)
+    child_pid = _wait_for_pidfile(pidfile, timeout=5.0)
+    try:
+        assert activity.wait(5.0)
+        assert session.is_alive() is False
+        assert session.poll_stdout() == []
+        assert session.poll_stderr() == []
+        assert session._stdout_closed is False
+        assert session._stderr_closed is False
+        assert psutil.Process(child_pid).is_running()
+    finally:
+        session.stop_monitor()
+        try:
+            psutil.Process(child_pid).kill()
+        except psutil.Error:
+            pass
+        assert _wait_for_pid_exit(child_pid)
 
 
 def test_task_runner_applies_environment_profile_defaults(tmp_path: Path) -> None:
@@ -2494,7 +2577,7 @@ def test_command_session_terminate_kills_descendants(tmp_path: Path) -> None:
         monitor_interval=0.05,
     )
 
-    session = runner.start_session()
+    session = runner.start_session(on_activity=lambda: None)
     child_pid = _wait_for_pidfile(pidfile)
     try:
         session.terminate()
@@ -2899,7 +2982,7 @@ def test_command_session_monitor_start_failure_clears_session_owner(
     )
 
     with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
-        session = runner.start_session()
+        session = runner.start_session(on_activity=lambda: None)
     try:
         assert session._monitor is None
         assert calls == ["start", "stop"]

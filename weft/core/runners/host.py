@@ -1017,7 +1017,9 @@ class HostTaskRunner:
         except (OSError, ValueError):  # pragma: no cover - platform cleanup
             logger.warning("Failed to close host runner process handle")
 
-    def start_session(self) -> CommandSession:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-035] exception
+    def start_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-035] exception
+        self, *, on_activity: Callable[[], None]
+    ) -> CommandSession:
         """Start a line-oriented interactive command session for streaming IO."""
         if self._spec_data["type"] != "command":
             raise ValueError(
@@ -1068,12 +1070,20 @@ class HostTaskRunner:
         def _reader(stream: TextIO, target_queue: queue.Queue[str | None]) -> None:
             try:
                 while True:
-                    chunk = stream.read(CommandSession._READ_SIZE)
+                    chunk = stream.readline(CommandSession._READ_SIZE)
                     if chunk == "":
                         break
                     target_queue.put(chunk)
+                    on_activity()
             finally:
                 target_queue.put(None)
+                on_activity()
+
+        def _wait_for_exit() -> None:
+            try:
+                process.wait()
+            finally:
+                on_activity()
 
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("Failed to create pipes for interactive session")
@@ -1088,6 +1098,7 @@ class HostTaskRunner:
             args=(process.stderr, stderr_queue),
             daemon=True,
         ).start()
+        threading.Thread(target=_wait_for_exit, daemon=True).start()
 
         monitor = None
         if self._monitor_class:

@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
 from .consumer import Consumer
@@ -17,7 +18,13 @@ class Debugger(Consumer):
 
     _COMMANDS = ("menu", "help", "ping", "info", "queues")
 
-    def _interactive_ensure_session(self, message_id: int) -> CommandSession:
+    def _interactive_ensure_session(
+        self,
+        message_id: int,
+        *,
+        on_activity: Callable[[], None],
+    ) -> CommandSession:
+        del on_activity
         if getattr(self, "_interactive_session", None) is not None:
             return cast(CommandSession, self._interactive_session)
 
