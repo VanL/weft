@@ -355,6 +355,20 @@ uses the same driver with its own result-settled completion predicate, so a
 persistent Consumer returns from `run_work_item()` after that item without
 terminating the task.
 
+The three classes describe what the wait can observe, not where input
+originates. An input that originates outside the process and cannot publish
+itself (a pipe or PTY stream, a process exit, a console read, a child-process
+sentinel) becomes a local event only when an adapter publishes it. Each such
+source has exactly one adapter. The adapter owns that one blocking operation,
+publishes authoritative state and then notifies the retained strategy, and
+holds no broker, queue, TaskSpec or lifecycle authority. It publishes process
+exit separately from end-of-stream, because a descendant can hold inherited
+descriptors open after the tracked process exits, and its final publication is
+not evidence that its thread has retired. A wait cap may be removed only after
+every such source it was covering has a named adapter. Current adapters are the
+host runner's interactive stream readers and exit waiter and the Manager's
+child-sentinel observer.
+
 `BaseTask` owns one shared `drive_scope()` implementation. Normal run loops
 enter it automatically; manual driving may use it around the complete driver
 lifetime without starting a background thread. It preserves the existing

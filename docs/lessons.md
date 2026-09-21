@@ -1411,3 +1411,14 @@ and `tests/system/test_config_transport.py`.
   Measured queue-wakeup latency is diagnostic evidence, not a reason to create
   a response deadline. See the
   [event-routed Manager PONG plan](plans/2026-09-18-event-routed-manager-pong-plan.md).
+- Classifying an input as a "local event" does not make anything publish it.
+  Removing the task wait caps left interactive stdout, stderr and child exit
+  with no publisher, and `54874c2f` restored a 50 ms cap to recover liveness
+  before `e6023028` connected the real sources. Wait inputs have three
+  observable classes but four origins: broker, in-process completion, an
+  OS-level source, and the clock. Only the OS-level origin cannot notify for
+  itself, so audit it separately: before deleting a cap, name the adapter for
+  every pipe, PTY, process exit, console read or sentinel the cap was covering,
+  and test quiet exit and inherited-descriptor cases through the production
+  driver. The rule is recorded in
+  [CC-2.2.1](specifications/01-Core_Components.md).
