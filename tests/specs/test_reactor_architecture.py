@@ -65,7 +65,7 @@ def test_task_ping_responder_is_owned_by_base_task() -> None:
                 ):
                     owners.add(
                         (
-                            str(path.relative_to(REPO_ROOT)),
+                            path.relative_to(REPO_ROOT).as_posix(),
                             f"{class_node.name}.{method.name}",
                         )
                     )
@@ -81,6 +81,6 @@ def test_retired_task_reactor_caps_do_not_return() -> None:
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id in RETIRED_REACTOR_CAPS:
-                found.add((str(path.relative_to(REPO_ROOT)), node.id))
+                found.add((path.relative_to(REPO_ROOT).as_posix(), node.id))
 
     assert found == set()
