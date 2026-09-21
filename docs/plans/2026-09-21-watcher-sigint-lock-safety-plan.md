@@ -1,6 +1,6 @@
 # Watcher SIGINT Lock Safety
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.1]; docs/specifications/07-System_Invariants.md [QUEUE.8]
 Superseded by: none
 
@@ -114,6 +114,14 @@ run concurrently. The main agent owns formatting and final integration.
 - Independent completed-work review: no blocker, no actionable findings.
   Reviewed source, tests and non-normative traceability against the baseline.
   Author final review agrees; no intended behavior or public boundary changed.
+
+- Source fix committed as `8bcf294be08d71c8bb70864ec7b19eb34f771b13`.
+  Taut reactor restoration plan S1 now pins that exact revision and whole-file
+  SHA-256 `72274ae115a7021477afa23fcb3190a92bb9a6d5b350a922d578237d21e3aebb`.
+  Its provenance explicitly requires the standalone held-lock regression and
+  distinguishes the source pin from executing the downstream vendoring slice.
+  Parent verified the pin against `git show`; Taut document-path and explicit
+  pin/digest/checkbox/whitespace checks passed. No Taut runtime copy was made.
 
 ## Deviation Log
 
