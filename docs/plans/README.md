@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 226 plan files in this directory.
+There are currently 227 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 226 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-09-21-watcher-sigint-lock-safety-plan.md`](./2026-09-21-watcher-sigint-lock-safety-plan.md) | Watcher SIGINT Lock Safety | `draft` | none |
 | [`2026-09-19-interactive-source-integration-plan.md`](./2026-09-19-interactive-source-integration-plan.md) | Interactive Source Integration Plan | `completed` | none |
 | [`2026-09-18-event-routed-manager-pong-plan.md`](./2026-09-18-event-routed-manager-pong-plan.md) | Event-Routed PING/PONG Plan | `completed` | none |
 | [`2026-09-17-watcher-reactor-restoration-plan.md`](./2026-09-17-watcher-reactor-restoration-plan.md) | Watcher Reactor Restoration Plan | `completed` | none |

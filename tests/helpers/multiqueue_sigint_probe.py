@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from simplebroker import Queue
 from simplebroker.ext import ActivityWaiter, PollingStrategy
@@ -47,9 +48,12 @@ class InterruptingStrategy(PollingStrategy):
         stop_event: threading.Event,
         *,
         interrupt_on_replace: bool,
+        held_lock: str | None = None,
     ) -> None:
         super().__init__(stop_event)
         self.interrupt_next_replace = interrupt_on_replace
+        self.held_lock = held_lock
+        self.notification_lock = threading.Lock()
 
     def replace_activity_waiter(
         self, activity_waiter: ActivityWaiter | None
@@ -57,8 +61,24 @@ class InterruptingStrategy(PollingStrategy):
         displaced = super().replace_activity_waiter(activity_waiter)
         if self.interrupt_next_replace:
             self.interrupt_next_replace = False
-            signal.raise_signal(signal.SIGINT)
+            if self.held_lock == "stop_event":
+                # Reproduce a signal interrupting Event.set/wait on its own lock.
+                condition = cast(threading.Condition, vars(self._stop_event)["_cond"])
+                with condition:
+                    signal.raise_signal(signal.SIGINT)
+                    signal.raise_signal(signal.SIGINT)
+            elif self.held_lock == "notification":
+                with self.notification_lock:
+                    signal.raise_signal(signal.SIGINT)
+                    signal.raise_signal(signal.SIGINT)
+            else:
+                signal.raise_signal(signal.SIGINT)
         return displaced
+
+    def notify_activity(self) -> None:
+        """Model an embedder strategy whose notification takes a lock."""
+        with self.notification_lock:
+            super().notify_activity()
 
 
 def main() -> int:
@@ -68,11 +88,14 @@ def main() -> int:
         return 0
 
     probe_point = os.environ.get("WEFT_SIGINT_PROBE_POINT", "replace")
-    assert probe_point in {"replace", "close"}
+    assert probe_point in {"replace", "close", "stop_event", "notification"}
     stop_event = threading.Event()
     strategy = InterruptingStrategy(
         stop_event,
-        interrupt_on_replace=probe_point == "replace",
+        interrupt_on_replace=probe_point != "close",
+        held_lock=probe_point
+        if probe_point in {"stop_event", "notification"}
+        else None,
     )
     waiters: list[RecordingWaiter] = []
     signatures: list[tuple[str, ...]] = []

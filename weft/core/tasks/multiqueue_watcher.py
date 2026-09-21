@@ -800,11 +800,15 @@ class MultiQueueWatcher(BaseWatcher):
             raise KeyboardInterrupt
 
     def _sigint_handler(self, signum: int, frame: Any) -> None:
-        """Defer SIGINT only while waiter replacement is half-published."""
+        """Defer SIGINT only while waiter replacement is half-published.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.8]
+        """
         if self._topology_sigint_critical:
+            # Only assign plain state here: Event.set or strategy callbacks can
+            # reacquire a lock held by the interrupted thread. The finish boundary
+            # performs stop/wake effects after the transaction and request settle.
             self._topology_deferred_sigint = True
-            self._stop_event.set()
-            self._strategy.notify_activity()
             return
         super()._sigint_handler(signum, frame)
 

@@ -212,7 +212,8 @@ _Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` owns [QUEUE.8]
 through `MultiQueueWatcher._submit_topology_mutation()`,
 `_apply_pending_topology_mutations()`,
 `_apply_topology_mutation_on_owner()`, `run_in_thread()`, `run_forever()`,
-`wait_for_activity()`, and `stop()`. `tests/tasks/test_multiqueue_watcher.py`
+`wait_for_activity()`, `stop()`, `_sigint_handler()`, and
+`_finish_topology_sigint_critical()`. `tests/tasks/test_multiqueue_watcher.py`
 fires its SQLite, concurrency, cleanup, SIGINT, fallback, and real PostgreSQL
 paths.
 
@@ -1194,6 +1195,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Watcher SIGINT lock safety](../plans/2026-09-21-watcher-sigint-lock-safety-plan.md) - keeps deferred standalone SIGINT handling free of lock-taking operations.
 
 - [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores one task wake arbiter, classifies backend/local/timer inputs, and removes task-reactor polling caps.
 

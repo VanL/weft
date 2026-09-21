@@ -2036,7 +2036,9 @@ def test_same_waiter_replacement_publication_failure_preserves_installed_owner(
     assert waiter.close_calls == 1
 
 
-@pytest.mark.parametrize("probe_point", ["replace", "close"])
+@pytest.mark.parametrize(
+    "probe_point", ["replace", "close", "stop_event", "notification"]
+)
 def test_main_thread_sigint_after_waiter_replace_finishes_consistent_commit(
     probe_point: str,
 ) -> None:

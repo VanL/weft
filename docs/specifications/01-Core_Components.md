@@ -35,6 +35,8 @@ See also:
 
 ## Related Plans
 
+- [Watcher SIGINT lock safety](../plans/2026-09-21-watcher-sigint-lock-safety-plan.md) - keeps deferred standalone SIGINT handling free of lock-taking operations.
+
 - [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md) - routes interactive stream and process-exit events through the retained watcher and publishes resource checks as reactor deadlines.
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes each PONG to the requester's own watched `ctrl_in` and removes target-`ctrl_out` polling.
