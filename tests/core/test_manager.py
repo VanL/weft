@@ -10040,6 +10040,53 @@ def test_manager_idle_shutdown(broker_env: BrokerEnv, unique_tid: str) -> None:
         manager.cleanup()
 
 
+def test_manager_control_replies_do_not_reset_idle_clock(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
+    """Only canonical control requests count as idle activity [MA-1.5].
+
+    Verifies:
+    - a PONG-shaped reply on the manager's own ctrl_in is consumed without
+      resetting the idle clock
+    - an unparseable control row is consumed without resetting it
+    - a canonical control request still resets it
+    """
+    db_path, make_queue = broker_env
+    inbox = f"manager.{unique_tid}.inbox"
+    ctrl_in = f"manager.{unique_tid}.ctrl_in"
+    ctrl_out = f"manager.{unique_tid}.ctrl_out"
+    spec = make_manager_spec(unique_tid, inbox, ctrl_in, ctrl_out, idle_timeout=60.0)
+    manager = Manager(db_path, spec)
+    ctrl_queue = make_queue(ctrl_in)
+    try:
+        manager._last_activity_ns = 1
+        ctrl_queue.write(
+            json.dumps(
+                {
+                    "command": "PING",
+                    "status": "ok",
+                    "message": "PONG",
+                    "tid": "1",
+                    "task_status": "running",
+                    "request_id": "unmatched-probe",
+                }
+            )
+        )
+        ctrl_queue.write("not-a-control-envelope")
+        manager._drain_control_queue_first()
+
+        assert ctrl_queue.peek_one() is None
+        assert manager._last_activity_ns == 1
+
+        ctrl_queue.write(encode_control_message("STATUS"))
+        manager._drain_control_queue_first()
+
+        assert ctrl_queue.peek_one() is None
+        assert manager._last_activity_ns > 1
+    finally:
+        manager.cleanup()
+
+
 def test_build_child_spec_propagates_unexpected_resolution_error(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,

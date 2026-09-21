@@ -170,7 +170,10 @@ Enforcement mechanics and security boundary:
   sample through `next_wait_timeout()` and calls the session's `poll_limits()`
   only when that absolute deadline is due. Stream, control, backend, and process
   exit activity do not move the resource-sampling deadline or cause additional
-  samples.
+  samples. The sampling timer exists only for a session started through
+  `TaskRunner` whose TaskSpec names a `monitor_class`. The built-in Debugger's
+  owner-local session bypasses `TaskRunner` and publishes no sampling timer. A
+  session with no monitor class likewise waits on events alone.
 - Memory and file-descriptor/connection limits are enforced on a **single
   sample**: `ResourceMonitor.check_limits` kills the runtime the first
   poll where `metrics.memory_mb` (or `open_files`/`connections`) exceeds the

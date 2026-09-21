@@ -142,6 +142,7 @@ from weft.liveness.policy import mapping_row_is_live
 from .control_messages import (
     ControlRequest,
     encode_control_message,
+    parse_control_request,
 )
 from .control_probe import (
     coerce_pong_response,
@@ -4213,6 +4214,19 @@ class Manager(ServiceTask):
                 return True
         return self._manager_control_pending_is_actionable()
 
+    def _note_control_request_activity(self, body: str) -> None:
+        """Reset the idle clock for a canonical control request only.
+
+        A reply to this manager's own PING probe, or an unparseable control
+        row, is consumed without counting as activity, so recurring liveness
+        probes cannot hold an otherwise idle manager alive.
+
+        Spec: [MA-1.5]
+        """
+
+        if parse_control_request(body) is not None:
+            self._last_activity_ns = time.time_ns()
+
     def _drain_control_queue_first(self) -> None:
         """Handle pending manager control messages before new spawn work.
 
@@ -4260,7 +4274,7 @@ class Manager(ServiceTask):
                 timestamp=timestamp,
             )
             self._handle_control_message(str(body), timestamp, context)
-            self._last_activity_ns = time.time_ns()
+            self._note_control_request_activity(str(body))
             self._invalidate_leadership_work_cache()
             handled += 1
             if self._draining or self.should_stop:

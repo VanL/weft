@@ -545,5 +545,15 @@ no persisted data migration, queue-format change, or cleanup migration.
 - 2026-09-21 follow-up review: made the fixed-process observer notify from
   `finally`, matching the stream readers, so an observation failure cannot
   suppress the wake hint that makes Consumer re-read authoritative state.
+- 2026-09-21 closeout review: narrowed the resource-timer contract to the
+  built-in Debugger case the implementation can prove. Unmonitored TaskRunner
+  sessions also publish no sampling deadline; monitored TaskRunner sessions
+  keep the existing deadline. Manager idle accounting now treats only parsed
+  control requests as activity, so replies and malformed rows do not extend
+  manager life. The muted-callback test waits for a child-written marker before
+  asserting non-delivery, which proves the event occurred instead of allowing
+  a scheduling false pass. Focused SQLite tests passed (`29 passed`), focused
+  PostgreSQL tests passed (`27 passed`), and Ruff, targeted mypy, and
+  `git diff --check` passed.
 - Implementation and verification completed as one coordinated contract
   change.

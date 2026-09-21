@@ -194,9 +194,12 @@ class InteractiveTaskMixin(ABC):
             timestamp,
             on_activity=on_activity,
         )
-        if self._interactive_next_limit_check_at is None:
-            self._interactive_next_limit_check_at = (
-                time.monotonic() + float(self.taskspec.spec.polling_interval)
+        if (
+            self._interactive_next_limit_check_at is None
+            and self._interactive_session_is_monitored()
+        ):
+            self._interactive_next_limit_check_at = time.monotonic() + float(
+                self.taskspec.spec.polling_interval
             )
 
         payload = decode_work_message(message)
@@ -299,8 +302,8 @@ class InteractiveTaskMixin(ABC):
         deadline = self._interactive_next_limit_check_at
         if deadline is not None and time.monotonic() >= deadline:
             ok, violation = session.poll_limits()
-            self._interactive_next_limit_check_at = (
-                time.monotonic() + float(self.taskspec.spec.polling_interval)
+            self._interactive_next_limit_check_at = time.monotonic() + float(
+                self.taskspec.spec.polling_interval
             )
             if not ok and violation:
                 self.taskspec.mark_killed(reason=violation)
@@ -474,6 +477,20 @@ class InteractiveTaskMixin(ABC):
             session.close()
         except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive session resources", exc_info=True)
+
+    def _interactive_session_is_monitored(self) -> bool:
+        """Return whether resource sampling is clock work for this session.
+
+        Sessions started through TaskRunner attach a monitor only when the
+        TaskSpec names a monitor class. The built-in Debugger's owner-local
+        session bypasses TaskRunner, so it publishes no sampling timer.
+
+        Spec: [CC-2.2.1], [RM-5]
+        """
+
+        return self._interactive_runner is not None and bool(
+            self.taskspec.spec.monitor_class
+        )
 
     def _interactive_limit_timeout(self, *, now: float) -> float | None:
         """Return time remaining until interactive resource sampling is due."""

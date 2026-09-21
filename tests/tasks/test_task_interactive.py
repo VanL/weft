@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -50,7 +51,14 @@ def make_interactive_spec(
     script_path: str | None = None,
     limits: LimitsSection | None = None,
     polling_interval: float = 1.0,
+    monitor_class: str | None = None,
+    enable_process_title: bool | None = None,
 ) -> TaskSpec:
+    monitoring: dict[str, Any] = (
+        {} if monitor_class is None else {"monitor_class": monitor_class}
+    )
+    if enable_process_title is not None:
+        monitoring["enable_process_title"] = enable_process_title
     return TaskSpec(
         tid=tid,
         name="interactive-task",
@@ -63,6 +71,7 @@ def make_interactive_spec(
             cleanup_on_exit=True,
             polling_interval=polling_interval,
             limits=limits or LimitsSection(),
+            **monitoring,
         ),
         io=IOSection(
             inputs={"inbox": f"T{tid}.inbox"},
@@ -334,9 +343,7 @@ def _assert_quiet_interactive_stream_wakes_reactor(
 
     monkeypatch.setattr(TaskRunner, "start_session", capture_start_session)
     output_queue = make_queue(
-        spec.io.outputs["outbox"]
-        if stream == "stdout"
-        else spec.io.control["ctrl_out"]
+        spec.io.outputs["outbox"] if stream == "stdout" else spec.io.control["ctrl_out"]
     )
     try:
         make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": ""}))
@@ -344,9 +351,10 @@ def _assert_quiet_interactive_stream_wakes_reactor(
         assert task._interactive_session is not None
         assert len(callbacks) == 1
         assert getattr(callbacks[0], "__self__", None) is task._strategy
-        assert getattr(callbacks[0], "__func__", None) is type(
-            task._strategy
-        ).notify_activity
+        assert (
+            getattr(callbacks[0], "__func__", None)
+            is type(task._strategy).notify_activity
+        )
 
         def stream_messages() -> list[dict[str, Any]]:
             return [json.loads(raw) for raw in output_queue.peek_generator()]
@@ -373,6 +381,124 @@ def _assert_quiet_interactive_stream_wakes_reactor(
             for message in messages
         )
         assert task._interactive_session.is_alive()
+    finally:
+        task.cleanup()
+
+
+_QUIET_CHILD = (
+    "import sys, time\n"
+    "from pathlib import Path\n"
+    "sys.stdin.readline()\n"
+    "time.sleep(0.3)\n"
+    "Path({marker_path}).write_text('ready', encoding='utf-8')\n"
+    "sys.stdout.write('ready\\n')\n"
+    "sys.stdout.flush()\n"
+    "sys.stdin.readline()\n"
+)
+
+
+@pytest.mark.parametrize("notify", [True, False], ids=["notify", "muted"])
+def test_production_driver_delivers_quiet_output_only_through_notify(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    notify: bool,
+) -> None:
+    """The production driver wakes for session output by event, not by polling.
+
+    ``drive_until`` waits in short slices, so it cannot distinguish an event
+    wake from polling. This drives ``run_until_stopped()`` with no poll
+    interval and a ten-second sampling timer, so the only thing that can wake
+    the reactor for quiet child output is the session's ``on_activity``.
+
+    Verifies:
+    - with the real callback the output row appears promptly
+    - with the callback muted the same output is not delivered, so no hidden
+      poll interval or wait cap is doing the work
+    """
+
+    db_path, make_queue = broker_env
+    script = tmp_path / "quiet_child.py"
+    child_ready = tmp_path / "quiet_child.ready"
+    script.write_text(
+        _QUIET_CHILD.format(marker_path=repr(str(child_ready))),
+        encoding="utf-8",
+    )
+    # The deferred process title is a legitimate one-shot timer that lands in
+    # the first seconds of a process. Disable it so the ten-second sampling
+    # timer is the only deadline and the muted case stays deterministic.
+    spec = make_interactive_spec(
+        unique_tid,
+        script_path=str(script),
+        polling_interval=10.0,
+        enable_process_title=False,
+    )
+    task = Consumer(db_path, spec)
+    if not notify:
+        original_start_session = TaskRunner.start_session
+
+        def start_muted(
+            runner: TaskRunner,
+            *,
+            on_activity: Callable[[], None],
+        ) -> Any:
+            del on_activity
+            return original_start_session(runner, on_activity=lambda: None)
+
+        monkeypatch.setattr(TaskRunner, "start_session", start_muted)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    inbox.write(json.dumps({"stdin": "go\n"}))
+    driver = threading.Thread(target=task.run_until_stopped, daemon=True)
+    driver.start()
+
+    def delivered() -> bool:
+        return any(
+            json.loads(raw).get("data") == "ready\n" for raw in outbox.peek_generator()
+        )
+
+    try:
+        child_deadline = time.monotonic() + 5.0
+        while time.monotonic() < child_deadline and not child_ready.exists():
+            time.sleep(0.01)
+        assert child_ready.exists()
+
+        # The marker is written immediately before stdout. The muted case now
+        # proves the row remains undelivered after the child produced output.
+        deadline = time.monotonic() + (5.0 if notify else 0.5)
+        while time.monotonic() < deadline and not delivered():
+            time.sleep(0.01)
+        assert delivered() is notify
+    finally:
+        task.stop(join=False)
+        driver.join(timeout=5.0)
+        assert not driver.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("monitor_class", "expect_timer"),
+    [(None, True), ("", False)],
+    ids=["monitored", "unmonitored"],
+)
+def test_interactive_sampling_timer_exists_only_for_monitored_session(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monitor_class: str | None,
+    expect_timer: bool,
+) -> None:
+    """An unmonitored session publishes no sampling timer [RM-5]."""
+
+    db_path, make_queue = broker_env
+    spec = make_interactive_spec(unique_tid, monitor_class=monitor_class)
+    task = Consumer(db_path, spec)
+    try:
+        make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": "hello\n"}))
+        _drive_interactive(task, lambda: task._interactive_session is not None)
+
+        assert (task._interactive_next_limit_check_at is not None) is expect_timer
+        assert (task.next_wait_timeout() is not None) is expect_timer
     finally:
         task.cleanup()
 

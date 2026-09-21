@@ -1,6 +1,6 @@
 # Watcher Reactor Restoration Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.2.1], [CC-2.5]; docs/specifications/03-Manager_Architecture.md [MA-1.6a]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]; docs/specifications/05-Message_Flow_and_State.md [MF-3]; docs/specifications/07-System_Invariants.md [IMPL.8], [IMPL.10]
 Superseded by: none
 
@@ -1134,3 +1134,11 @@ Independent review must compare the final implementation to the Design Rule,
 `BaseWatcher._process_messages()` and the existing SimpleBroker responsiveness
 tests. A review that merely checks the new code against this plan, or against
 the 2026-05-05/2026-05-15 plans, is insufficient.
+
+## Completion Record (2026-09-21)
+
+The reactor restoration and reply routing landed in `4370bb0f`. Subsequent
+interactive-source work in `970cc097` applied the same retained-strategy local
+notification rule to session output and process exit. The implementation is
+complete; later work is maintenance of the restored reactor contract rather
+than an open slice of this plan.

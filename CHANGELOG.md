@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Changed
+
+- **Breaking for runner extensions:** `TaskRunnerBackend.start_session()` now
+  requires the keyword argument `on_activity: Callable[[], None]`
+  (`weft/ext.py`). A backend that supports interactive sessions must call it
+  after publishing stdout, stderr, end-of-stream or process-exit state, because
+  the task reactor no longer polls a session on a fixed interval. Backends
+  without interactive support accept and discard it. There is no compatibility
+  shim: a backend with the old signature fails with `TypeError` when an
+  interactive session starts.
+
+### Fixed
+
+- Interactive command sessions wake the task reactor by event. Output,
+  end-of-stream and process exit notify the retained watcher strategy, and
+  resource sampling is a published timer at `polling_interval`. This removes
+  the 50 ms wait cap that 0.9.102 applied while a session was active.
+- An interactive session publishes a resource-sampling timer only when it is
+  started through `TaskRunner` and its TaskSpec names a `monitor_class`.
+  Unmonitored sessions and the built-in Debugger's owner-local session wait on
+  events alone.
+- A reply to the manager's own PING probe, or an unparseable control row, no
+  longer resets the manager idle clock. Recurring liveness probes could
+  previously keep an otherwise idle manager from reaching `idle_timeout`.
+
 ## [0.9.102] - 2026-09-19
 
 ### Fixed

@@ -25,10 +25,10 @@ There are currently 226 plan files in this directory.
 | --- | --- | --- | --- |
 | [`2026-09-19-interactive-source-integration-plan.md`](./2026-09-19-interactive-source-integration-plan.md) | Interactive Source Integration Plan | `completed` | none |
 | [`2026-09-18-event-routed-manager-pong-plan.md`](./2026-09-18-event-routed-manager-pong-plan.md) | Event-Routed PING/PONG Plan | `completed` | none |
-| [`2026-09-17-watcher-reactor-restoration-plan.md`](./2026-09-17-watcher-reactor-restoration-plan.md) | Watcher Reactor Restoration Plan | `draft` | none |
+| [`2026-09-17-watcher-reactor-restoration-plan.md`](./2026-09-17-watcher-reactor-restoration-plan.md) | Watcher Reactor Restoration Plan | `completed` | none |
 | [`2026-09-17-central-reactor-waiting-plan.md`](./2026-09-17-central-reactor-waiting-plan.md) | Central Reactor Waiting: Audit and Implementation Plan | `draft` | [`2026-09-17-watcher-reactor-restoration-plan.md`](./2026-09-17-watcher-reactor-restoration-plan.md) |
 | [`2026-09-17-manager-polling-latency-plan.md`](./2026-09-17-manager-polling-latency-plan.md) | Manager Polling Latency | `draft` | [`2026-09-17-watcher-reactor-restoration-plan.md`](./2026-09-17-watcher-reactor-restoration-plan.md) |
-| [`2026-09-17-submission-manager-check-cost-plan.md`](./2026-09-17-submission-manager-check-cost-plan.md) | Submission Manager Check Cost | `draft` | none |
+| [`2026-09-17-submission-manager-check-cost-plan.md`](./2026-09-17-submission-manager-check-cost-plan.md) | Submission Manager Check Cost | `completed` | none |
 | [`2026-09-17-manager-discovery-and-durable-submission-plan.md`](./2026-09-17-manager-discovery-and-durable-submission-plan.md) | Manager Discovery and Durable Submission | `completed` | none |
 | [`2026-09-16-single-ci-release-gate-plan.md`](./2026-09-16-single-ci-release-gate-plan.md) | Single CI Release Gate | `completed` | none |
 | [`2026-09-15-explicit-broker-session-lifetimes-plan.md`](./2026-09-15-explicit-broker-session-lifetimes-plan.md) | Explicit Broker Session Lifetimes | `completed` | none |

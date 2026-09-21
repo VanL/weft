@@ -258,6 +258,57 @@ def test_borrowed_manager_probe_routes_reply_and_retires_requester_queue(
             broker.write("probe.owner", "owner remains usable")
 
 
+def test_borrowed_probe_watcher_tears_down_inside_open_caller_operation(
+    counted_manager_connections: tuple[WeftContext, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Guard the nonpersistent ephemeral probe watcher [SB-0.4], [MF-3].
+
+    Submission probes while its own ``session.connection()`` is still open on
+    the same thread. A persistent watcher would own a ``BrokerSession`` on the
+    same process-session key, and SimpleBroker refuses to close that session
+    while the caller's operation is open. The probe still returns a result in
+    that case, so only teardown shows the defect.
+
+    Verifies:
+    - the probe watcher stops without raising inside the caller's operation
+    - watcher cleanup logs no warning
+    - the caller's borrowed connection remains usable afterwards
+    """
+    ctx, _connections = counted_manager_connections
+    stop_failures: list[BaseException] = []
+    original_stop = control_probe.MultiQueueWatcher.stop
+
+    def recording_stop(watcher: Any, *args: Any, **kwargs: Any) -> None:
+        try:
+            original_stop(watcher, *args, **kwargs)
+        except BaseException as exc:
+            stop_failures.append(exc)
+            raise
+
+    monkeypatch.setattr(control_probe.MultiQueueWatcher, "stop", recording_stop)
+
+    with (
+        caplog.at_level("WARNING", logger="weft.core.tasks.multiqueue_watcher"),
+        ctx.session() as session,
+        session.connection() as broker,
+    ):
+        result = control_probe.send_keyed_ping_probe(
+            ctx,
+            tid=_TID,
+            ctrl_in_name=f"T{_TID}.ctrl_in",
+            timeout=0.05,
+            broker=broker,
+        )
+        broker.write("probe.owner", "owner remains usable")
+
+    assert result.timed_out
+    assert result.error is None
+    assert stop_failures == []
+    assert [record.getMessage() for record in caplog.records] == []
+
+
 def test_borrowed_ambiguous_backlog_check_opens_no_connections(
     counted_manager_connections: tuple[WeftContext, list[Any]],
 ) -> None:
