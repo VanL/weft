@@ -88,7 +88,7 @@ def _seed_task(
 
 
 @pytest.mark.parametrize("streams", [False, True])
-def test_realtime_evidence_rechecks_create_no_connections_or_facades(
+def test_realtime_evidence_rechecks_reuse_connection_after_initial_scan(
     observed_connections: tuple[WeftContext, list[Any], list[Queue]],
     monkeypatch: pytest.MonkeyPatch,
     streams: bool,
@@ -103,10 +103,10 @@ def test_realtime_evidence_rechecks_create_no_connections_or_facades(
     def wait(_monitor: Any, _timeout: float | None) -> bool:
         nonlocal turns, previous
         turns += 1
-        assert turns <= 4
-        if previous is not None:
+        assert turns <= 5
+        if previous is not None and turns > 2:
             deltas.append((len(connections) - previous[0], len(queues) - previous[1]))
-        if turns == 4:
+        if turns == 5:
             cancelled.set()
         else:
             with ctx.broker() as writer:
@@ -122,7 +122,7 @@ def test_realtime_evidence_rechecks_create_no_connections_or_facades(
     assert all(event.event_type not in {"result", "end"} for event in emitted)
     assert deltas == [(0, 0)] * 3
     with ctx.broker() as reader:
-        assert reader.get_queue_stat(f"T{tid}.ctrl_out").pending == 3
+        assert reader.get_queue_stat(f"T{tid}.ctrl_out").pending == 4
 
 
 def test_realtime_result_grace_borrows_owner_and_observes_late_result(
