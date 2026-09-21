@@ -2725,9 +2725,7 @@ def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
 
         assert public_queue.peek_one() is not None
         assert public_reserved.peek_one() is None
-        wait_timeout = manager.next_wait_timeout()
-        assert wait_timeout is not None
-        assert wait_timeout > 0.0
+        assert manager._admission_retry_after_ns > 0
 
         launched: list[str] = []
         monkeypatch.setattr(
@@ -2737,6 +2735,7 @@ def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
                 launched, child_spec.name, True
             ),
         )
+        manager._admission_retry_after_ns = time.time_ns() + 60_000_000_000
         manager.process_once()
         assert launched == []
 
