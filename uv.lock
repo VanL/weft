@@ -1755,7 +1755,7 @@ wheels = [
 
 [[package]]
 name = "weft"
-version = "0.9.102"
+version = "0.9.103"
 source = { editable = "." }
 dependencies = [
     { name = "llm" },
@@ -1855,7 +1855,7 @@ provides-extras = ["pg", "docker", "django", "django-channels", "macos-sandbox",
 
 [[package]]
 name = "weft-django"
-version = "0.9.37"
+version = "0.9.38"
 source = { editable = "integrations/weft_django" }
 dependencies = [
     { name = "django" },
@@ -1873,13 +1873,13 @@ requires-dist = [
     { name = "channels", marker = "extra == 'realtime'", specifier = ">=4.1,<5" },
     { name = "django", specifier = ">=4.2,<6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.102" },
+    { name = "weft", specifier = ">=0.9.103" },
 ]
 provides-extras = ["channels", "realtime", "dev"]
 
 [[package]]
 name = "weft-docker"
-version = "0.9.77"
+version = "0.9.78"
 source = { editable = "extensions/weft_docker" }
 dependencies = [
     { name = "docker" },
@@ -1890,13 +1890,13 @@ dependencies = [
 requires-dist = [
     { name = "docker", specifier = ">=7.1.0,<8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.102" },
+    { name = "weft", specifier = ">=0.9.103" },
 ]
 provides-extras = ["dev"]
 
 [[package]]
 name = "weft-macos-sandbox"
-version = "0.6.6"
+version = "0.6.7"
 source = { editable = "extensions/weft_macos_sandbox" }
 dependencies = [
     { name = "weft" },
@@ -1905,13 +1905,13 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.102,<1" },
+    { name = "weft", specifier = ">=0.9.103,<1" },
 ]
 provides-extras = ["dev"]
 
 [[package]]
 name = "weft-microsandbox"
-version = "0.5.7"
+version = "0.5.8"
 source = { editable = "extensions/weft_microsandbox" }
 dependencies = [
     { name = "microsandbox" },
@@ -1922,6 +1922,6 @@ dependencies = [
 requires-dist = [
     { name = "microsandbox", specifier = ">=0.5.7,<0.6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.102" },
+    { name = "weft", specifier = ">=0.9.103" },
 ]
 provides-extras = ["dev"]

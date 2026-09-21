@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.9.103] - 2026-09-21
+
 ### Changed
 
 - **Breaking for runner extensions:** `TaskRunnerBackend.start_session()` now
@@ -12,6 +14,10 @@
   without interactive support accept and discard it. There is no compatibility
   shim: a backend with the old signature fails with `TypeError` when an
   interactive session starts.
+- CI now uses `codecov/codecov-action` 7.1.1.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.38`, `weft-docker 0.9.78`,
+  `weft-macos-sandbox 0.6.7`, and `weft-microsandbox 0.5.8`.
 
 ### Fixed
 
