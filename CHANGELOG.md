@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## [0.9.104] - 2026-09-21
+
+### Fixed
+
+- Deferred watcher signal delivery no longer re-enters the watcher topology
+  lock while handling SIGINT. The deferred path now drains pending callbacks
+  outside the lock, preserving watcher ownership and avoiding a deadlock-prone
+  nested acquisition path.
+
+### Changed
+
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.39`, `weft-docker 0.9.79`,
+  `weft-macos-sandbox 0.6.8`, and `weft-microsandbox 0.5.9`.
+
 ## [0.9.103] - 2026-09-21
 
 ### Changed
