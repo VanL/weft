@@ -223,7 +223,7 @@ Files to change:
 Move from `cleanup.py` into `policies/tid_mapping.py`:
 
 - `_tid_mapping_candidates`
-- `_valid_tid_mapping_payload`
+- `_valid_tid_state_payload`
 - any row decoding helper that is only needed for tid mappings
 
 Preferred module API:

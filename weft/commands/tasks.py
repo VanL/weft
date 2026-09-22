@@ -107,7 +107,7 @@ def _coerce_context(
     return _resolve_context(context_path)
 
 
-def _read_tid_mapping_entries(
+def _read_tid_state_entries(
     ctx: WeftContext, tids: Iterable[str] | None = None
 ) -> list[dict[str, Any]]:
     return [
@@ -166,7 +166,7 @@ def resolve_full_tid(
         return None
     if is_task_tid(candidate):
         return candidate
-    matches = system_cmd._read_tid_mappings(ctx, broker=broker).get(candidate, [])
+    matches = system_cmd._read_tid_states(ctx, broker=broker).get(candidate, [])
     if len(matches) > 1:
         raise CommandUsageError(
             f"Ambiguous short TID {candidate}: {', '.join(matches)}"
@@ -193,7 +193,7 @@ def task_tid(
             return tid_short_form(value)
         return None
     if pid is not None:
-        entries = list(_read_tid_mapping_entries(ctx))
+        entries = list(_read_tid_state_entries(ctx))
         for entry in reversed(entries):
             if pid in _host_pids_from_mapping(entry):
                 full = entry.get("full")
@@ -1724,7 +1724,7 @@ def stop_tasks(
     resolved_tids = [
         resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
     ]
-    entries = _read_tid_mapping_entries(ctx, tids=resolved_tids)
+    entries = _read_tid_state_entries(ctx, tids=resolved_tids)
     lookup: dict[str, dict[str, Any]] = {}
     for mapping_entry in entries:
         full_tid = mapping_entry.get("full")
@@ -1824,7 +1824,7 @@ def kill_tasks(
     resolved_tids = [
         resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
     ]
-    entries = _read_tid_mapping_entries(ctx, tids=resolved_tids)
+    entries = _read_tid_state_entries(ctx, tids=resolved_tids)
     lookup: dict[str, dict[str, Any]] = {}
     for mapping_entry in entries:
         full_tid = mapping_entry.get("full")

@@ -110,7 +110,7 @@ able to answer these from the reading and the named code:
    ([QUEUE.6]: the message stays in `T{tid}.reserved` for inspection.)
 4. Where does the liveness evidence for a plain (non-service) running task
    live? (`weft.state.tid_mappings` — one row written at startup by
-   `BaseTask._register_tid_mapping`, refreshed only on activity
+   `BaseTask._register_tid_state`, refreshed only on activity
    *transitions*.)
 
 ## Context and Key Files
@@ -126,7 +126,7 @@ Current structure (read before editing; do not infer):
   (line ~1290) does psutil kills, `mark_cancelled/killed`,
   `_report_state_change` (queue write, line ~1226, failures logged at
   debug), `_send_terminal_envelope` (queue write, line ~1281, same), and
-  reserved-queue policy application. `_register_tid_mapping` (line ~1522)
+  reserved-queue policy application. `_register_tid_state` (line ~1522)
   skips equivalent rewrites; `_set_activity` (line ~1610) re-registers only
   on activity transitions.
 - `weft/core/tasks/consumer.py` — `_poll_active_control_once` (line ~567)
@@ -210,7 +210,7 @@ Must not change:
 Hidden couplings to keep in mind:
 
 - `_active_runtime_tids` (monitor) ← `weft.state.tid_mappings` rows ←
-  `BaseTask._register_tid_mapping` write-once behavior. Task B1 changes the
+  `BaseTask._register_tid_state` write-once behavior. Task B1 changes the
   cleanup side; do NOT also add periodic re-registration (that is a second
   writer path — YAGNI, and it would mask the policy fix).
 - Terminal-status evidence for pruning comes from raw `weft.log.tasks`,

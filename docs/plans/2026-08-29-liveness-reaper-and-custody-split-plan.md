@@ -232,8 +232,8 @@ slice that lands its replacement, and the final gate includes a dead-symbol
 sweep proving nothing references them):
 
 - `weft/runtime_liveness.py` (task 2 — replaced by `weft/liveness/registry.py`).
-- `weft/core/monitor/policies/tid_mapping.py` in full — `decode_tid_mapping_row`,
-  `valid_tid_mapping_payload`, `mapping_row_is_live`,
+- `weft/core/monitor/policies/tid_mapping.py` in full — `decode_tid_state_row`,
+  `valid_tid_state_payload`, `mapping_row_is_live`,
   `_newest_message_id_per_key`, `tid_mapping_candidates`,
   `tid_mapping_streaming_candidates` (task 4 — absorbed by
   `weft/liveness/policy.py`).
@@ -262,7 +262,7 @@ bijection ([PY-2]) is unchanged; the only CLI-contract change is
 
 Read first, with comprehension checks:
 
-- `weft/core/tasks/base.py` `_register_tid_mapping` (~:2258) and its call
+- `weft/core/tasks/base.py` `_register_tid_state` (~:2258) and its call
   sites: why is publication edge-triggered, which edges exist, and why does a
   retired row self-heal without any read-before-write?
 - `weft/core/monitor/policies/tid_mapping.py` and

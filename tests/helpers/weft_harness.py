@@ -409,13 +409,13 @@ class WeftTestHarness:
         if task_state_pid is not None:
             lines.append(f"  latest_task_state_pid={task_state_pid}")
 
-        latest_mapping = self._latest_tid_mapping_payloads().get(tid)
+        latest_mapping = self._latest_tid_state_payloads().get(tid)
         if latest_mapping is None:
-            lines.append("  latest_tid_mapping=<missing>")
+            lines.append("  latest_tid_state=<missing>")
             candidate_pids: list[int] = []
         else:
             lines.append(
-                f"  latest_tid_mapping={self._format_debug_payload(latest_mapping)}"
+                f"  latest_tid_state={self._format_debug_payload(latest_mapping)}"
             )
             candidate_pids = self._mapping_host_pids(latest_mapping)
 
@@ -841,7 +841,7 @@ class WeftTestHarness:
                 pass
             self._orig_cwd = None
 
-    def _load_tid_mapping_entries(self) -> list[tuple[dict[str, object], int]]:
+    def _load_tid_state_entries(self) -> list[tuple[dict[str, object], int]]:
         """Read every mapping row with its broker message id, best effort.
 
         The full lazy generator replaces the old fixed 2,048-row prefix so
@@ -861,12 +861,12 @@ class WeftTestHarness:
             return entries
         return entries
 
-    def _load_tid_mapping_payloads(self) -> list[dict[str, object]]:
-        return [payload for payload, _message_id in self._load_tid_mapping_entries()]
+    def _load_tid_state_payloads(self) -> list[dict[str, object]]:
+        return [payload for payload, _message_id in self._load_tid_state_entries()]
 
-    def _latest_tid_mapping_payloads(self) -> dict[str, dict[str, object]]:
+    def _latest_tid_state_payloads(self) -> dict[str, dict[str, object]]:
         latest: dict[str, tuple[int, dict[str, object]]] = {}
-        for data, message_id in self._load_tid_mapping_entries():
+        for data, message_id in self._load_tid_state_entries():
             full_tid = data.get("full")
             if isinstance(full_tid, str) and full_tid:
                 previous = latest.get(full_tid)
@@ -960,7 +960,7 @@ class WeftTestHarness:
     def _live_task_tids_from_mappings(self) -> list[str]:
         live_tids: list[str] = []
         terminal_events = self._latest_task_events()
-        for full_tid, data in self._latest_tid_mapping_payloads().items():
+        for full_tid, data in self._latest_tid_state_payloads().items():
             if (
                 full_tid in self._registered_manager_tids
                 or self._mapping_role(data) == "manager"
@@ -992,7 +992,7 @@ class WeftTestHarness:
 
         candidate_tids: list[str] = []
         terminal_events = self._latest_task_events()
-        for full_tid, data in self._latest_tid_mapping_payloads().items():
+        for full_tid, data in self._latest_tid_state_payloads().items():
             if (
                 full_tid in self._registered_manager_tids
                 or self._mapping_role(data) == "manager"
@@ -1247,7 +1247,7 @@ class WeftTestHarness:
             queue.close()
 
     def _collect_pid_mappings(self) -> None:
-        for data in self._load_tid_mapping_payloads():
+        for data in self._load_tid_state_payloads():
             full_tid = data.get("full")
             if isinstance(full_tid, str) and full_tid:
                 if self._mapping_role(data) == "manager":

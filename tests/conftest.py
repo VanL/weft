@@ -171,6 +171,7 @@ _SHARED_MODULES = frozenset(
         "tests/tasks/test_control_channel.py",
         "tests/tasks/test_heartbeat.py",
         "tests/tasks/test_liveness_monitor.py",
+        "tests/tasks/test_maintenance_worker.py",
         "tests/tasks/test_task_monitor.py",
         "tests/tasks/test_multiqueue_watcher.py",
         "tests/tasks/test_pipeline_runtime.py",

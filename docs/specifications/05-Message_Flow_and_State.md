@@ -497,9 +497,19 @@ _Implementation mapping_: status and foreground-monitor projection in
 `weft/commands/system.py` and `weft/commands/task_monitor.py`; durable and
 external Monitor projection/restoration in `weft/core/monitor/store.py`,
 `weft/core/monitor/external_log.py`, and
-`weft/core/monitor/lifetime_report.py`; manager operational projection in
+`weft/core/monitor/lifetime_report.py`; maintenance construction, explicit
+`MaintenanceInputs` work records, typed diagnostic results, resource cleanup,
+and owner-thread result merge in `weft/core/monitor/task_monitor.py`
+(`MaintenanceWorker`, `MaintenanceWorker.capture_diagnostics`,
+`_maintenance_worker_scope`, `TaskMonitor._apply_maintenance_diagnostics`,
+`TaskMonitor._handle_builtin_cycle_worker_result`,
+`TaskMonitor._handle_control_cleanup_worker_result`, and
+`TaskMonitor._apply_worker_external_task_log_status`); manager operational projection in
 `weft/core/serve_log.py`; terminal Monitor-store fallback for known full TIDs in
 `weft/commands/tasks.py::_monitor_store_task_snapshot` and `weft/commands/tasks.py::_task_snapshot_from_monitor_store_record`.
+Maintenance input, resource and state-transfer regressions are in
+`tests/tasks/test_maintenance_worker.py`; maintenance policy, scheduling and
+control responsiveness coverage is in `tests/tasks/test_task_monitor.py`.
 
 Current rules:
 
@@ -646,7 +656,20 @@ Current rules:
   TaskMonitor-owned built-in cycle worker group; the reactor stays available
   for task-local PING/STATUS/STOP/KILL, heartbeat registration, and schedule
   bookkeeping while the worker scans, writes Monitor-store rows, and applies
-  exact deletes. For the built-in `delete` mode under collated ownership, retained
+  exact deletes.
+
+  Before submitting maintenance, the TaskMonitor reactor captures explicit
+  configuration, work identity and required state values. A fresh
+  MaintenanceWorker consumes that request with invocation-owned broker resources
+  on the registered lane's per-request thread and returns typed diagnostic
+  updates after cleanup. The synchronous custom-collation adapter instead lends
+  its reactor session on the same thread and closes only invocation-owned
+  resources, preserving reactor connection reuse. State is not transferred
+  by copying the live TaskMonitor or sharing it through a weak proxy. The
+  reactor remains the owner of maintenance deadlines, cleanup continuation,
+  cumulative logging counters and cached public diagnostics.
+
+  For the built-in `delete` mode under collated ownership, retained
   `weft.log.tasks` rows are processed in FIFO order:
   malformed rows are exact-deleted; valid rows are folded into the Monitor
   table and then exact-deleted in the same bounded pass when running the
@@ -1629,6 +1652,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes PONG through requester-owned `ctrl_in` queues and returns Manager probe absence to the existing owning-policy cadence.
 

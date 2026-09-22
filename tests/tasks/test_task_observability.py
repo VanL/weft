@@ -155,7 +155,7 @@ def test_drive_task_until_applies_ready_result_after_wall_deadline(
     assert task.process_calls == 2
 
 
-def test_tid_mapping_written(
+def test_tid_state_written(
     broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
 ) -> None:
     _db_path, make_queue = broker_env
@@ -184,7 +184,7 @@ def test_tid_mapping_written(
     assert "managed_pids" not in data
 
 
-def test_tid_mapping_includes_metadata_role(
+def test_tid_state_includes_metadata_role(
     broker_env: BrokerEnv,
     task_factory: TaskFactory,
     unique_tid: str,
@@ -203,7 +203,7 @@ def test_tid_mapping_includes_metadata_role(
     assert data["role"] == "manager"
 
 
-def test_tid_mapping_records_runtime_identity_from_start_hooks(
+def test_tid_state_records_runtime_identity_from_start_hooks(
     broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
 ) -> None:
     _db_path, make_queue = broker_env
@@ -291,7 +291,7 @@ def _forbid_mapping_history_reads(
         monkeypatch.setattr(queue_type, "peek_many", poisoned_peek_many)
 
 
-def test_tid_mapping_registration_appends_without_history_read(
+def test_tid_state_registration_appends_without_history_read(
     broker_env: BrokerEnv,
     task_factory: TaskFactory,
     unique_tid: str,
@@ -315,7 +315,7 @@ def test_tid_mapping_registration_appends_without_history_read(
     rows = [json.loads(message) for message in drain_queue(mapping_queue)]
     assert rows, "construction must append at least one snapshot"
 
-    assert task._register_tid_mapping() is True
+    assert task._register_tid_state() is True
     equivalent = [json.loads(message) for message in drain_queue(mapping_queue)]
     assert len(equivalent) == 1
 
@@ -443,7 +443,7 @@ def test_terminal_mapping_write_failure_retries_on_next_terminal_report(
     task.taskspec.mark_completed(return_code=0)
     task._report_state_change(event="work_completed")
     assert drain_queue(mapping_queue) == []
-    assert task._terminal_tid_mapping_published is False
+    assert task._terminal_tid_state_published is False
 
     state_events = [json.loads(message) for message in drain_queue(task_log)]
     assert any(event.get("event") == "work_completed" for event in state_events)
@@ -452,10 +452,10 @@ def test_terminal_mapping_write_failure_retries_on_next_terminal_report(
     retried = [json.loads(message) for message in drain_queue(mapping_queue)]
     assert len(retried) == 1
     assert retried[0]["terminal"] is True
-    assert task._terminal_tid_mapping_published is True
+    assert task._terminal_tid_state_published is True
 
 
-def test_terminal_state_report_publishes_terminal_tid_mapping_when_activity_empty(
+def test_terminal_state_report_publishes_terminal_tid_state_when_activity_empty(
     broker_env: BrokerEnv,
     task_factory: TaskFactory,
     unique_tid: str,

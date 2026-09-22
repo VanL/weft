@@ -363,14 +363,14 @@ class BaseTask(MultiQueueWatcher, ABC):
         # ([OBS.6a]): the terminal row is the task's last event, so its
         # publication retries across terminal reports until one write
         # succeeds.
-        self._terminal_tid_mapping_published = False
+        self._terminal_tid_state_published = False
 
         self.enable_process_title = bool(
             getattr(self.taskspec.spec, "enable_process_title", True)
         )
         if self.enable_process_title:
             self._update_process_title("init")
-        self._register_tid_mapping()
+        self._register_tid_state()
         self._claim_configured_runtime_endpoint()
         self._report_state_change(event="task_initialized")
 
@@ -1987,13 +1987,13 @@ class BaseTask(MultiQueueWatcher, ABC):
         Spec: [CC-2.4], [MF-5]
         """
         if (
-            not self._terminal_tid_mapping_published
+            not self._terminal_tid_state_published
             and self.taskspec.state.status in TERMINAL_TASK_STATUSES
         ):
             # The terminal transition publishes exactly once on success; a
             # failed append retries on the next terminal report because this
             # row is the task's final liveness evidence ([OBS.6a]).
-            self._terminal_tid_mapping_published = self._register_tid_mapping()
+            self._terminal_tid_state_published = self._register_tid_state()
 
         taskspec_dump = self.taskspec.model_dump(mode="json")
         payload = {
@@ -2409,7 +2409,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 parts.append(safe_details)
         return ":".join(parts)
 
-    def _register_tid_mapping(self) -> bool:
+    def _register_tid_state(self) -> bool:
         """Append the task's complete mapping snapshot; edge-triggered by design.
 
         Every write is a new fact — a transition or a report — so this
@@ -2429,7 +2429,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.2], [CC-2.5], [MF-5], [OBS.6], [OBS.6a]
         """
-        mapping = self._build_tid_mapping_payload()
+        mapping = self._build_tid_state_payload()
         try:
             self._queue(task_state_queue_name(self.tid)).write(json.dumps(mapping))
         except (BrokerError, OSError, RuntimeError):
@@ -2454,7 +2454,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             existing[pid] if pid in existing else process_create_time(pid)
         )
         self._merge_runtime_handle_host_pid(pid)
-        self._register_tid_mapping()
+        self._register_tid_state()
 
     def register_runtime_handle(self, handle: RunnerHandle | None) -> None:
         """Persist active runtime authority and exact identity evidence [CC-3.2]."""
@@ -2499,9 +2499,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         if self._runtime_handle == merged_handle:
             return
         self._runtime_handle = merged_handle
-        self._register_tid_mapping()
+        self._register_tid_state()
 
-    def _build_tid_mapping_payload(self) -> dict[str, Any]:
+    def _build_tid_state_payload(self) -> dict[str, Any]:
         runtime_handle = self._runtime_handle or self._task_process_runtime_handle()
         role = self.taskspec.metadata.get("role")
         payload = {
@@ -2551,7 +2551,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._activity = normalized_activity
         self._waiting_on = normalized_waiting_on
         self._emit_activity_event()
-        self._register_tid_mapping()
+        self._register_tid_state()
         self._update_process_title(self.taskspec.state.status)
 
     def _clear_activity(self) -> None:

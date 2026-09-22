@@ -130,7 +130,7 @@ Files to read before editing:
 
 - `weft/commands/system.py`
   - `_iter_log_events()` uses generator-based replay. Preserve this.
-  - `_latest_tid_mapping_entries()` reduces `weft.state.tid_mappings`.
+  - `_latest_tid_state_entries()` reduces `weft.state.tid_mappings`.
   - `_runtime_handle_from_mapping()` rejects invalid handle shapes.
   - `_task_process_alive()` currently treats live host PIDs as runtime proof.
   - `_effective_public_status()` currently reanimates terminal non-`completed`

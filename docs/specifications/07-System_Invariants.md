@@ -788,42 +788,77 @@ the sole exact-delete executor for TID mappings),
   `tests/tasks/test_task_execution.py`, `tests/tasks/test_signal_deferral.py`,
   `tests/tasks/test_service_task.py`, and `tests/core/test_manager.py` fire
   this invariant.
-- **IMPL.11**: TaskMonitor maintenance workers close every worker-owned queue,
-  Monitor store, TaskSpec/config snapshot, and external-sink facade in
-  `finally` and never share watcher, lifecycle, queue, store, sink counters,
-  broker session, or mutable task state with the reactor. Both maintenance
-  entry points use one automatic worker-local `BrokerSession` scope. The
-  worker store borrows that session, and typed result publication occurs only
-  after local queue, sink, store, and session cleanup. A worker clone replaces
-  the reactor's ownership/session fields with its own values. Same-path sink
-  facades lease one
-  process-local writer/rotation owner so only one live rotating handler exists
-  per resolved path. Built-in and runtime-cleanup results return frozen typed
-  diagnostics only after worker resources close; close failures produce
-  failed/pending results; cumulative external/deferred status is merged on the
-  reactor thread, including the deferred backing fields and health-transition
-  notification, so a later status refresh cannot revert a worker's result.
+- **IMPL.11**: TaskMonitor maintenance executes in a freshly constructed
+  MaintenanceWorker with explicit detached inputs. The worker has no task or
+  watcher lifecycle and no reference or proxy to reactor task/watcher state.
+  TaskMonitor owns ongoing scheduling, cumulative counters and cached status;
+  requests are captured on the owner thread before submission. Built-in and
+  runtime-cleanup work uses the existing registered service-worker input queues
+  and typed result channel on the registered lane's per-request thread. Each
+  queued invocation owns a BrokerSession, queue facades, Monitor store and
+  external-sink facade. Its store borrows that session. No watcher, lifecycle,
+  queue, store, sink counters, broker session or mutable task state is shared
+  across the reactor/worker thread boundary.
 
-  _Implementation mapping_: TaskMonitor built-in and runtime-cleanup
-  worker-context creation, snapshot/close helpers, typed results, and the
-  owner-thread diagnostic merge
-  (`_apply_worker_external_task_log_status`) live in
-  `weft/core/monitor/task_monitor.py`. Worker TaskSpec snapshots intentionally
-  identity-share the immutable frozen `spec`/`io` interiors while owning a
-  shell copy, deep-copied mutable `state`/`metadata`, and an independent
-  configuration snapshot. The single-handler-per-path writer
-  lease and worker-local sink counters live in
-  `weft/core/monitor/external_log.py`. The worker-snapshot isolation,
+  Synchronous custom-mode collation
+  reuses the same implementation on the reactor thread and explicitly borrows
+  the reactor session; it never closes or recycles that session. It owns its
+  temporary queue facades, store and sink facade, with the store borrowing its
+  cached global-log queue. Its resource scopes preserve the reactor's cached
+  connection and do not accumulate per-invocation queue facades in the reactor
+  session.
+
+  Both adapters close all invocation-owned resources in finally,
+  including after partial initialization. Typed results are applied/published
+  only after owned store, sink, queue and, for queued work, session cleanup.
+  Same-path sink facades lease one process-local writer/rotation owner so only
+  one live rotating handler exists per resolved path. Close failures produce
+  failed/pending results. The reactor applies only the diagnostic groups and
+  scheduling updates produced by that invocation; omitted updates preserve
+  existing values. Cumulative external/deferred status is merged on the reactor
+  thread, including deferred backing fields and health-transition notification,
+  so later status refresh cannot revert a worker's result. Serve-log emission
+  and activity/TID-mapping updates remain on the reactor. Existing cleanup
+  policy, task-control responsiveness and shutdown bounds remain unchanged.
+
+  _Implementation mapping_: `MaintenanceWorker`, `MaintenanceInputs`, and
+  `_maintenance_worker_scope` in `weft/core/monitor/task_monitor.py` own fresh
+  construction, explicit inputs, and invocation resource cleanup. The existing
+  typed diagnostic groups also hold each object's independent state;
+  `capture_diagnostics` detaches produced groups and
+  `_apply_maintenance_diagnostics` applies them after result validation.
+  `_compose_external_task_log_status` shares status assembly, while cumulative
+  merging and notifications remain reactor-owned. Worker
+  operations `run_builtin_cycle`, `run_runtime_cleanup`, and `run_collation`
+  share the maintenance algorithms. `_TaskMonitorBuiltinCycleWork` and
+  `_TaskControlCleanupWork` carry owner-captured inputs through the existing
+  service-worker lanes; their typed result records return produced observations
+  and optional updates. TaskMonitor's `_handle_builtin_cycle_worker_result`,
+  `_handle_control_cleanup_worker_result`, and
+  `_apply_worker_external_task_log_status` own result validation, state merge,
+  scheduling, cumulative counters, and notification. Synchronous custom-mode
+  collation uses the same worker scope with the reactor session lent explicitly;
+  that scope owns temporary queue facades and lends its cached global-log queue
+  to the store. Its status merge leaves notification to the existing custom
+  probe/activity edges; queued result merges notify immediately.
+  `_register_tid_state` publishes snapshots to `weft.state.tasks.<tid>`.
+  The single-handler-per-path writer lease and invocation-local
+  sink counters live in `weft/core/monitor/external_log.py`. The detached-input,
   same-path rotation, jsonl-then-delete, retryable body/close failure,
-  close-order, deferred-status merge, and live-control tests in
-  `tests/tasks/test_task_monitor.py`, `tests/core/test_monitor_external_log.py`,
-  and `tests/core/test_monitor_store.py` fire this invariant.
+  close-order, synchronous connection reuse, deferred-status merge, and
+  live-control tests in `tests/tasks/test_task_monitor.py`,
+  `tests/tasks/test_maintenance_worker.py`,
+  `tests/core/test_monitor_external_log.py`, and
+  `tests/core/test_monitor_store.py` fire this invariant.
 
-  Implementation plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
+  Implementation plans: [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md);
+  [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
-Monitor scheduling implementation notes: `TaskMonitor._run_monitor_store_cycle`
+Monitor scheduling implementation notes: `MaintenanceWorker.run_collation`
 owns collation-family retirement independently of ingestion catchup, using
-the existing per-family store proofs.
+the existing per-family store proofs. TaskMonitor captures the maintenance
+deadline before submission and applies a replacement deadline only when the
+worker reports a completed maintenance pass.
 `TaskMonitor._handle_control_cleanup_worker_result` owns the queue-discovery
 deadline; a skipped discovery pass preserves it, while a completed `dead_tid`
 chain advances it. Real store/worker-result cadence regressions are in
@@ -1201,6 +1236,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 
 - [Owner-thread topology mutation](../plans/2026-09-21-owner-thread-topology-mutation-plan.md) - enables synchronous membership refresh between dispatch passes under [QUEUE.8].
 - [Watcher SIGINT lock safety](../plans/2026-09-21-watcher-sigint-lock-safety-plan.md) - keeps deferred standalone SIGINT handling free of lock-taking operations.

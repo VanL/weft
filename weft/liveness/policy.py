@@ -134,7 +134,7 @@ def reduce_unknown_deadline(
     return state, now_monotonic >= state.deadline_monotonic
 
 
-def decode_tid_mapping_row(
+def decode_tid_state_row(
     row: QueueWindowRow, *, expected_tid: str | None = None
 ) -> DecodedQueueWindowRow:
     """Decode a snapshot and optionally bind its full ID to the queue suffix.
@@ -156,11 +156,11 @@ def decode_tid_mapping_row(
             payload=None,
             malformed_reason="json_not_object",
         )
-    if not valid_tid_mapping_payload(payload):
+    if not valid_tid_state_payload(payload):
         return DecodedQueueWindowRow(
             raw=row,
             payload=payload,
-            malformed_reason="invalid_tid_mapping_shape",
+            malformed_reason="invalid_tid_state_shape",
         )
     if expected_tid is not None and payload["full"] != expected_tid:
         return DecodedQueueWindowRow(
@@ -169,7 +169,7 @@ def decode_tid_mapping_row(
     return DecodedQueueWindowRow(raw=row, payload=payload)
 
 
-def valid_tid_mapping_payload(payload: Mapping[str, Any]) -> bool:
+def valid_tid_state_payload(payload: Mapping[str, Any]) -> bool:
     """Return whether a TID mapping payload has the required Weft shape."""
 
     full = payload.get("full")

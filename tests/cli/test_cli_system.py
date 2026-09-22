@@ -154,7 +154,7 @@ def test_system_builtins_ignores_local_project_shadow(workdir: Path) -> None:
     assert "local-probe-agents" not in {item["name"] for item in payload}
 
 
-def test_system_prune_rejects_retired_tid_mapping_group(workdir: Path) -> None:
+def test_system_prune_rejects_retired_tid_state_group(workdir: Path) -> None:
     rc, out, err = run_cli(
         "system",
         "prune",

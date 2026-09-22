@@ -122,7 +122,7 @@ Task 1, endpoint characterization:
 - read first: `weft/core/endpoints.py`, the `iter_queue_json_entries` queue-entry
   iterator in `weft/helpers/__init__.py`, and the endpoint builders and fixtures
   already used by those three test files; endpoint TID-mapping reduction is
-  local to `weft/core/endpoints.py::_latest_tid_mapping_entries`
+  local to `weft/core/endpoints.py::_latest_tid_state_entries`
 - reuse `build_context`, real nonpersistent registry queues,
   `build_endpoint_record_payload`, and `iter_queue_json_entries`; do not invent
   a fake repository or replace the whole queue scanner
@@ -148,7 +148,7 @@ Task 2, endpoint refactor:
   index rewritten by the repository checker
 - read first: [CC-2.4.1], [SB-0.5], [MF-3.1], the complete current
   `list_resolved_endpoints`, `_record_owner_is_live`,
-  `_latest_task_statuses`, and `_latest_tid_mapping_entries`
+  `_latest_task_statuses`, and `_latest_tid_state_entries`
 - shared path to reuse: `canonical_owner_tid`; do not duplicate its numeric TID
   selection rule
 

@@ -118,7 +118,7 @@ publication path.
 
 ### Current structure
 
-- `weft/core/tasks/base.py::BaseTask._register_tid_mapping()` builds one
+- `weft/core/tasks/base.py::BaseTask._register_tid_state()` builds one
   complete payload, calls `_latest_tid_mapping()`, compares selected fields
   with `_tid_mapping_equivalent()`, and writes only if the comparison differs.
 - `_latest_tid_mapping()` calls the lazy `Queue.peek_generator()` and decodes
@@ -133,7 +133,7 @@ publication path.
   75,441 rows requires 76 `LIMIT/OFFSET` retrievals for one publication
   decision, regardless of how many rows belong to the current TID.
 - `BaseTask._set_activity()` emits `task_activity` and then calls
-  `_register_tid_mapping()`. Consumer startup does this after
+  `_register_tid_state()`. Consumer startup does this after
   `mark_started()` and before `work_started`; terminal paths do it after the
   in-memory terminal transition and before the recognized terminal event.
 - `_tid_mapping_equivalent()` excludes `activity`, `waiting_on`, and the
@@ -205,7 +205,7 @@ publication path.
 ### Read before editing
 
 - `weft/core/tasks/base.py`: constructor publication, `_set_activity()`,
-  `_register_tid_mapping()`, mapping payload construction, terminal STOP/KILL
+  `_register_tid_state()`, mapping payload construction, terminal STOP/KILL
   paths, and queue-handle reuse.
 - `weft/core/tasks/consumer.py`: `_begin_work_item()`, `_finalize_message()`,
   failure/timeout finalization, persistent work-item transitions, and direct
@@ -272,7 +272,7 @@ Comprehension checks before implementation:
   state is the one-bit terminal-published flag, latched only on a successful
   terminal append so the task's final liveness evidence retries across
   terminal reports until written.
-- A direct `_register_tid_mapping()` call always appends a complete valid
+- A direct `_register_tid_state()` call always appends a complete valid
   snapshot, equivalent or not. Duplicate avoidance is exclusively the call
   sites' edge detection; no consumer may rely on uniqueness.
 - Catch only `BrokerError`, `OSError`, and `RuntimeError` around the mapping
@@ -559,7 +559,7 @@ historical review material.
      before implementation.
 
 3. **Remove queue-wide deduplication from the shared writer.**
-   - In `BaseTask._register_tid_mapping()`, retain payload construction, JSON
+   - In `BaseTask._register_tid_state()`, retain payload construction, JSON
      serialization, cached queue acquisition, the single write attempt, and
      the narrow best-effort broker catch.
    - Delete the call to `_latest_tid_mapping()` and remove both
@@ -579,7 +579,7 @@ historical review material.
    - Add only the one-bit terminal-published flag described in the
      invariants; latch it solely on a successful terminal append. No payload
      cache, comparator, index, or shared state.
-   - Add the reciprocal spec references to `_register_tid_mapping()` and the
+   - Add the reciprocal spec references to `_register_tid_state()` and the
      activity boundary. Keep the mapping queue on `BaseTask._queue()`.
    - Run the focused red tests green, then run the neighboring task lifecycle
      suite.
@@ -850,7 +850,7 @@ owner are not active gates and must not be promoted into tests or process.
 | 2026-08-26 | owner | capacity-gate simplification | accepted direction; re-review pending | `R5_future` discarded as overly complex: it required production instrumentation or an authorized replay that the read-only gate proved unavailable. Replaced by fixed margins over recorded production evidence (benchmark depth `>= 2x` recorded rows, cleanup rate `>= 10x` recorded peak output) with live-rate risk owned by canary cleanup-progress stop conditions and the forward-only fallback. Rounds 2-3 above remain the historical record of the superseded measurement design. |
 | 2026-08-26 | Codex (different-family independent reviewer) | reactivated draft, full plan + cited code at `a659a48` | BLOCKED | Accepted P1: 10x-over-deduplicated-rate margin bounds nothing — replaced with an analytical append bound enabled by the adopted owner-local last-written guard, and the canary must span one minimum-age window. Accepted P1: the admission observation sat in the PostgreSQL benchmark where the observer reads `numbackends` — moved to an isolated SQLite benchmark at depth `D`. Accepted P1 (owner escalated to starvation): cleanup retains undecidable newest rows forever, so non-host runtimes ratchet admission usage — resolved by aligning with the admission plan's task-owned `terminal: true` mapping bit (one payload-only rule releasing completed external runners for both counting and age-gated retirement); a registered-probe destruction gate was considered and rejected as a second liveness policy; crash residue stays protected and is watched by the new distinct-TID-growth stop condition; the header claim is qualified. Accepted P1: named `WEFT_ADMISSION_MAX_CONNECTIONS=0` + restart as the authorized no-release interim action and required the fallback branch pre-built. Accepted P1: stale `0f19367a` re-review references advanced to `a659a48`. Accepted P2s: `O(distinct TIDs)` wording with peak-RSS evidence; owner-local last-written guard adopted; redundant default-pytest and duplicate statement probe removed. |
 | 2026-08-26 | Codex (same session, resumed) | re-review of the disposition revision | BLOCKED; residuals accepted | Verified FIXED: SQLite admission benchmark, fallback authorization, memory wording, last-written guard, redundant-gate removal. Accepted residual P1s: the analytical bound now enumerates every producer class with per-class maxima and feeds a retention-window floor into `D`; the canary stop condition now measures the aged non-terminal undecidable cohort with a numeric threshold and window instead of total distinct TIDs; the embedded review prompt now cites `a659a48` plus the admission correction and the current capacity design. Accepted new P1s: `terminal` is explicitly required in the repurposed comparator with a terminal-only-change red test and a rerun of the admission plan's forced terminal-publication regression; a hard dependency gate blocks promotion/implementation until the admission correction slice's commit SHA is recorded with green terminal tests. Accepted new P2: coverage map gains the SQLite burst benchmark. |
-| 2026-08-26 | Codex (same session, third pass) | verification of residual fixes and consistency sweep | BLOCKED; three items accepted | Verified FIXED: crash-residue cohort stop condition, corrected review prompt, terminal comparator seam with regressions, hard cross-plan dependency gate, SQLite benchmark coverage. Accepted P1: producer maxima must be derived from the actual `_register_tid_mapping()` call sites (managed-PID registrations can recur per work item; TaskMonitor publishes more than once per interval) — the plan now requires a reviewed call-site-derived table before `analytical_rate` or `D` is computed, replacing asserted constants. Accepted P2s: the Goal states the guard is the only *additional* registration-level suppression alongside the retained call-site guards, and the guard invariant now names `terminal` with the other compared fields. |
+| 2026-08-26 | Codex (same session, third pass) | verification of residual fixes and consistency sweep | BLOCKED; three items accepted | Verified FIXED: crash-residue cohort stop condition, corrected review prompt, terminal comparator seam with regressions, hard cross-plan dependency gate, SQLite benchmark coverage. Accepted P1: producer maxima must be derived from the actual `_register_tid_state()` call sites (managed-PID registrations can recur per work item; TaskMonitor publishes more than once per interval) — the plan now requires a reviewed call-site-derived table before `analytical_rate` or `D` is computed, replacing asserted constants. Accepted P2s: the Goal states the guard is the only *additional* registration-level suppression alongside the retained call-site guards, and the guard invariant now names `terminal` with the other compared fields. |
 | 2026-08-27 | owner (first-principles review during implementation) | writer publication model | accepted; design reverted to original | The owner-local last-written guard adopted from codex P2-7 was identified as the same oracle pattern as the removed queue-wide dedup, one layer cheaper: a curated comparator field list that must track the payload by hand (the recorded drift history shows it eating `activity`/`waiting_on` for months and nearly eating `terminal`), and semantically wrong for reports, where identical values are still new observations. Reverted to the original edge-triggered design: writes happen because something happened; call sites own edge detection; the writer is a bare append; the terminal transition publishes once, latched only on successful write (stronger delivery for the final liveness row than the guard's incidental retry). Append volume is unchanged because call sites fire on changes either way. Archaeology: the original writer (`4adcf72`, 2025-10-22) was a pure append; the dedup oracle entered in `8a0bb44` (2025-11-06, "Phase 1 basically complete") without spec backing; `_set_activity` and the activity payload fields arrived five months later in `f1baa76` (2026-04-13) and were never added to the comparator — the predicted failure mode, shipped. |
 
 ## Deviation Log

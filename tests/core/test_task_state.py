@@ -92,7 +92,7 @@ def test_unchanged_snapshot_reuses_validated_payload(
         def forbidden_decode(*args: object, **kwargs: object) -> None:
             raise AssertionError("unchanged raw message ID must not be decoded again")
 
-        monkeypatch.setattr(task_state, "decode_tid_mapping_row", forbidden_decode)
+        monkeypatch.setattr(task_state, "decode_tid_state_row", forbidden_decode)
         assert read_task_state_snapshot(ctx, tid, previous=previous) is previous
     finally:
         queue.close()

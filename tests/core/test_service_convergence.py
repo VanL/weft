@@ -14,7 +14,7 @@ from tests.helpers.test_backend import prepare_project_root
 from weft.commands import system as system_commands
 from weft.context import build_context
 from weft.core import manager_runtime
-from weft.core.monitor.task_monitor import TaskMonitor
+from weft.core.monitor.task_monitor import MaintenanceWorker
 from weft.core.service_convergence import (
     LIVE_SERVICE_STATUSES,
     SERVICE_OWNER_SCHEMA,
@@ -391,7 +391,7 @@ def test_service_owner_schema_version_rejects_noncanonical_suffixes(
     assert _service_owner_schema_version(json.dumps({"schema": schema})) is None
 
 
-class _TaskMonitorContextStub:
+class _MaintenanceContextStub:
     def __init__(self, context: Any, registry_queue: Queue) -> None:
         self._context = context
         self._registry_queue = registry_queue
@@ -411,8 +411,8 @@ def _read_service_registry_surface(surface: str, context: Any) -> object:
         return system_commands._collect_service_registry_evidence(context, now_ns=0)
     if surface == "task-monitor":
         with context.queue("weft.state.services", persistent=True) as registry_queue:
-            monitor = _TaskMonitorContextStub(context, registry_queue)
-            return TaskMonitor._latest_service_owner_records(monitor)  # type: ignore[arg-type]
+            worker = _MaintenanceContextStub(context, registry_queue)
+            return MaintenanceWorker._latest_service_owner_records(worker)  # type: ignore[arg-type]
     raise AssertionError(f"unknown service-registry surface: {surface}")
 
 

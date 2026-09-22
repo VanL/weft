@@ -333,7 +333,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             # Sessions use their own teardown; outcomes retain historical handles.
             self._managed_pids.clear()
             self._runtime_handle = None
-            self._register_tid_mapping()
+            self._register_tid_state()
             return
         self.register_runtime_handle(outcome.runtime_handle)
 

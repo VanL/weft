@@ -365,7 +365,7 @@ service section is a summary over them.
      and latest timestamps per service key.
    - Reuse `_is_internal_service_record()`,
      `_runtime_handle_from_mapping()`, `_describe_runtime_handle()`,
-     `_latest_tid_mapping_entries()`, and `iter_queue_json_entries()`.
+     `_latest_tid_state_entries()`, and `iter_queue_json_entries()`.
    - Do not import `weft.core.manager.Manager` into command code.
    - Consider reusing `ServiceCandidate` from `weft.core.manager_services.py`
      only if it does not create an awkward command-to-core coupling. If reuse

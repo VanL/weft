@@ -199,7 +199,7 @@ def _read_rows(
         queue.close()
 
 
-def test_tid_mapping_runtime_prune_group_is_rejected(tmp_path: Path) -> None:
+def test_tid_state_runtime_prune_group_is_rejected(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     result = runtime_pruning.run_runtime_prune_for_context(
         ctx,

@@ -308,14 +308,26 @@ and the once-only watcher/resource finalizer
 adapter. `weft/core/tasks/consumer.py`, `weft/core/manager.py`,
 `weft/core/tasks/heartbeat.py`, `weft/core/tasks/pipeline.py`,
 `weft/core/tasks/service.py`, and `weft/core/tasks/monitor.py` contribute
-protected turn, topology, or cleanup policy without replacing the templates. TaskMonitor worker isolation
-and typed diagnostic return live in `weft/core/monitor/task_monitor.py`;
-worker-local sink counters and the single-handler-per-path writer lease live in
+protected turn, topology, or cleanup policy without replacing the templates.
+`weft/core/monitor/task_monitor.py::MaintenanceWorker` and
+`weft/core/monitor/task_monitor.py::_maintenance_worker_scope` own explicit
+maintenance construction and invocation resource cleanup. TaskMonitor captures
+`MaintenanceInputs` on the reactor, retains scheduling and cached status, and
+applies typed results through `_handle_builtin_cycle_worker_result`,
+`_handle_control_cleanup_worker_result`, and
+`_apply_worker_external_task_log_status`. Existing typed diagnostic groups hold
+independently owned state in both objects; `_compose_external_task_log_status`
+shares status assembly without accumulating counters or emitting notifications.
+Queued invocations own their session;
+synchronous custom collation borrows the reactor session on the same thread
+without closing it. Invocation-local sink counters and the
+single-handler-per-path writer lease live in
 `weft/core/monitor/external_log.py`. Firing coverage is in
 `tests/tasks/test_task_execution.py`, `tests/core/test_manager.py`,
 `tests/tasks/test_pipeline_runtime.py`,
 `tests/tasks/test_task_observer_behavior.py`,
-`tests/tasks/test_signal_deferral.py`, and `tests/tasks/test_task_monitor.py`.
+`tests/tasks/test_signal_deferral.py`, `tests/tasks/test_task_monitor.py`, and
+`tests/tasks/test_maintenance_worker.py`.
 See [QUEUE.7], [IMPL.10], and [IMPL.11] in
 `docs/specifications/07-System_Invariants.md` for the invariant-level
 statements.
@@ -652,6 +664,14 @@ Current task families:
   applies the same exact delete selected by policy. Raw external
   task-log mode is a separate deletion owner: it emits retained raw rows before
   exact deletion and does not write the Monitor collation tables in that cycle.
+
+  TaskMonitor's built-in and runtime-cleanup maintenance is implemented by an
+  internal MaintenanceWorker constructed for each bounded invocation. It is
+  not a BaseTask or a second monitor. TaskMonitor supplies detached inputs and
+  commits returned state updates; the existing ServiceTask worker groups own
+  per-request thread dispatch and in-process queue communication. Synchronous
+  custom collation uses the same implementation on the reactor thread, lending
+  its existing broker session without transferring cleanup ownership.
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
 - `HeartbeatTask`: manager-supervised internal interval emitter for
@@ -761,8 +781,8 @@ _Implementation mapping_: `weft/core/control_messages.py::ControlRequest`,
 shape; `weft/core/tasks/base.py::BaseTask._handle_control_message` and
 `weft/core/tasks/base.py::BaseTask._handle_control_command` own shared task
 policy; specialized policies live on `Manager`, `Consumer`, `PipelineTask`,
-and `Monitor`. `BaseTask._build_tid_mapping_payload`,
-`BaseTask._tid_mapping_equivalent`, and `BaseTask._report_state_change` own the
+and `Monitor`. `BaseTask._build_tid_state_payload`,
+`BaseTask._register_tid_state`, and `BaseTask._report_state_change` own the
 task mapping liveness hint and terminal publication path.
 `weft/core/tasks/base.py::BaseTask._update_process_title` owns formatting and
 records returned title errors; `weft/core/tasks/base.py::BaseTask.process_once` and
@@ -789,7 +809,7 @@ Implementation plan backlinks:
 a stable project-local name.
 
 _Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
-`ResolvedEndpoint`, `latest_tid_mapping_entries_for_endpoint_resolution()`
+`ResolvedEndpoint`, `latest_tid_state_entries_for_endpoint_resolution()`
 (owner payload projection of `weft/core/task_state.py::latest_task_state_rows`),
 `weft/core/endpoints.py::_classify_latest_endpoint_records()`,
 `list_resolved_endpoints()`, `resolve_endpoint()`;
@@ -1188,6 +1208,8 @@ same-turn selectors, and edge-consumption driver;
 observations, apply effects, and own cleanup.
 
 ## Related Plans
+
+- [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)

@@ -649,7 +649,7 @@ def test_latest_mapping_fold_skips_malformed_newer_rows_and_keeps_valid_neighbor
             valid["full"]: (valid_id, valid),
             neighbor["full"]: (neighbor_id, neighbor),
         }
-        assert endpoints_module.latest_tid_mapping_entries_for_endpoint_resolution(
+        assert endpoints_module.latest_tid_state_entries_for_endpoint_resolution(
             context
         ) == {full: row for full, (_timestamp, row) in expected.items()}
     finally:
@@ -723,6 +723,6 @@ def test_endpoint_owner_snapshot_read_errors_propagate(
 
     monkeypatch.setattr(broker_type, "peek_many", failed_peek)
     with pytest.raises(RuntimeError, match="injected mapping read failure"):
-        endpoints_module.latest_tid_mapping_entries_for_endpoint_resolution(
+        endpoints_module.latest_tid_state_entries_for_endpoint_resolution(
             context, tids=[tid]
         )

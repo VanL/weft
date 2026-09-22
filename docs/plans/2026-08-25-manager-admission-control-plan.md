@@ -149,7 +149,7 @@ connection. SQL stays in `simplebroker_pg._sql` with the extension's other SQL.
 The SQLite path keeps one durable liveness hint on the mapping payload rather
 than joining two independently retained histories:
 
-1. `BaseTask._build_tid_mapping_payload()` includes a boolean task-owner
+1. `BaseTask._build_tid_state_payload()` includes a boolean task-owner
    `terminal` hint derived from `TERMINAL_TASK_STATUSES`;
 2. `BaseTask._report_state_change()` forces one best-effort mapping publication
    when the task first reports a terminal transition, even when activity was
@@ -162,7 +162,7 @@ than joining two independently retained histories:
    unprobeable evidence, never an override of a live `(pid, create_time)`. This
    remains one payload-only liveness rule and lets existing mapping cleanup
    retire the newest terminal row after its age gate and wrapper exit;
-4. `latest_tid_mapping_entries_for_endpoint_resolution(ctx, strict=True)`
+4. `latest_tid_state_entries_for_endpoint_resolution(ctx, strict=True)`
    reduces `weft.state.tid_mappings` to the latest payload per full TID;
 5. each latest mapping is kept when the shared
    `weft/core/monitor/policies/tid_mapping.py::mapping_row_is_live` probe
@@ -232,7 +232,7 @@ failure therefore returns `None` and fails closed.
   admission.
 - `TERMINAL_TASK_STATUSES` is the existing forward-only lifecycle boundary;
   do not create a second terminal-status set.
-- `BaseTask._build_tid_mapping_payload()`, `_tid_mapping_equivalent()`, and
+- `BaseTask._build_tid_state_payload()`, `_tid_mapping_equivalent()`, and
   `_report_state_change()` own task mapping shape, change detection, and
   terminal publication; extend that path instead of creating a Manager-owned
   terminal store.
@@ -541,7 +541,7 @@ Specify:
 Map implementation to `Manager._process_queue_message()`, its backend usage
 observer, blocked-lane state, `next_wait_timeout()`, fallback pending-work
 precheck, and duplicate-manager yield ownership check. SQLite reduction uses
-`latest_tid_mapping_entries_for_endpoint_resolution()` in
+`latest_tid_state_entries_for_endpoint_resolution()` in
 `weft/core/endpoints.py`. Admission adds no `_control_snapshot_fields()` data.
 
 ### `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4]

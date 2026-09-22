@@ -111,8 +111,7 @@ def test_resolution_derives_short_and_ignores_newer_malformed_mapping(
     assert mapping is not None
     assert mapping["terminal"] is False
     assert (
-        system_cmd._latest_tid_mapping_entries(mapping_context)[full]["terminal"]
-        is False
+        system_cmd._latest_tid_state_entries(mapping_context)[full]["terminal"] is False
     )
 
 

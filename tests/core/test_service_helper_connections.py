@@ -221,11 +221,11 @@ def test_empty_service_state_queries_do_not_open_connections(
 ) -> None:
     ctx, connections = counted_service_connections
     assert (
-        endpoints.latest_tid_mapping_entries_for_endpoint_resolution(ctx, tids=iter(()))
+        endpoints.latest_tid_state_entries_for_endpoint_resolution(ctx, tids=iter(()))
         == {}
     )
     assert (
-        endpoints.latest_tid_mapping_entries_for_endpoint_resolution(ctx, tids=["bad"])
+        endpoints.latest_tid_state_entries_for_endpoint_resolution(ctx, tids=["bad"])
         == {}
     )
     assert not heartbeat._heartbeat_runtime_handle_is_live(ctx, tid="bad")

@@ -118,7 +118,7 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.endpoints import (
-    latest_tid_mapping_entries_for_endpoint_resolution,
+    latest_tid_state_entries_for_endpoint_resolution,
 )
 from weft.core.manager_runtime import manager_registry_record_liveness
 from weft.core.task_state import read_task_state_snapshot
@@ -1053,10 +1053,10 @@ class Manager(ServiceTask):
             return False
         return super()._queue_counts_as_wait_activity(config)
 
-    def _build_tid_mapping_payload(self) -> dict[str, Any]:
+    def _build_tid_state_payload(self) -> dict[str, Any]:
         """Publish manager identity in tid mappings even without explicit metadata."""
 
-        payload = super()._build_tid_mapping_payload()
+        payload = super()._build_tid_state_payload()
         # Manager role is structural, not advisory metadata.
         payload["role"] = "manager"
         return payload
@@ -1936,7 +1936,7 @@ class Manager(ServiceTask):
 
         try:
             with self._get_connected_queue().get_connection() as broker:
-                mappings = latest_tid_mapping_entries_for_endpoint_resolution(
+                mappings = latest_tid_state_entries_for_endpoint_resolution(
                     self._task_context(), broker=broker
                 )
             live_tids = {

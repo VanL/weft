@@ -107,7 +107,7 @@ Release 6 or a different lifecycle-service design.
 Runtime-only queues currently include:
 
 - `weft.state.tid_mappings`
-  - Producer: `weft/core/tasks/base.py` `_register_tid_mapping()`;
+  - Producer: `weft/core/tasks/base.py` `_register_tid_state()`;
     `weft/core/manager.py` adds `role="manager"` for managers.
   - Consumers: `weft/commands/tasks.py`, `weft/commands/system.py`,
     `weft/core/manager_runtime.py`, `weft/core/endpoints.py`, and status/result
@@ -578,8 +578,8 @@ Code to read:
 - `weft/helpers/__init__.py`, especially `iter_queue_json_entries()`
 - `weft/context.py`, especially `build_context()` and `WeftContext.queue()`
 - `weft/core/tasks/base.py`
-  - `_register_tid_mapping()`
-  - `_build_tid_mapping_payload()`
+  - `_register_tid_state()`
+  - `_build_tid_state_payload()`
   - endpoint registration helpers
   - streaming session helpers
 - `weft/core/manager.py`
@@ -592,7 +592,7 @@ Code to read:
   - `_list_manager_records()`
 - `weft/core/endpoints.py`
   - `_latest_task_statuses()`
-  - `_latest_tid_mapping_entries()`
+  - `_latest_tid_state_entries()`
   - `_record_owner_is_live()`
   - `list_resolved_endpoints()`
 - `weft/commands/tasks.py`

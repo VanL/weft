@@ -102,8 +102,8 @@ Guidance: `docs/agent-context/decision-hierarchy.md` [DOM-15],
 
 Current structure (what exists today):
 
-- `weft/core/tasks/base.py` — `_register_tid_mapping()` (single best-effort
-  append to the flat queue), `_build_tid_mapping_payload()`,
+- `weft/core/tasks/base.py` — `_register_tid_state()` (single best-effort
+  append to the flat queue), `_build_tid_state_payload()`,
   `register_managed_pid()`, `register_runtime_handle()`, `_set_activity()`.
   Publication is edge-triggered at five call sites (construction, terminal
   latch in `_report_state_change`, new PID, changed handle, changed
@@ -480,7 +480,7 @@ not rewrite passages the delta does not touch.
    - Done when: spec text matches the delta; audit results are recorded in
      this plan; `uv run pytest tests/specs -q` passes.
 3. **Per-TID writer in BaseTask.**
-   - Outcome: `_register_tid_mapping()` writes to
+   - Outcome: `_register_tid_state()` writes to
      `f"{WEFT_TID_MAPPINGS_QUEUE_PREFIX}{self.tid}"`, remembers the message
      ID of its last successful append in an owner-local attribute, and
      best-effort exact-deletes the previous ID after each successful append.
@@ -524,7 +524,7 @@ not rewrite passages the delta does not touch.
      Manager admission observer, `endpoints.py`, `pruning/runtime.py`,
      `commands/system.py`, `manager_runtime.py::_lookup_manager_pid`
      (kill-pid resolution), `heartbeat.py::_heartbeat_runtime_handle_is_live`,
-     `commands/tasks.py` (`_read_tid_mapping_entries`, `mapping_for_tid`,
+     `commands/tasks.py` (`_read_tid_state_entries`, `mapping_for_tid`,
      short→full resolution, watch sites), and
      `commands/_spawn_submission.py::_mapping_exists_for_tid` (spawn-loss
      reconciliation — its `since_timestamp` idiom becomes a

@@ -521,7 +521,7 @@ def _streaming_candidates(
         and payload["tid"]
         and is_old_enough(message_id, now_ns, config.min_age_seconds)
     }
-    tid_mappings = _current_task_state_rows(ctx, candidate_tids, broker=broker)
+    tid_states = _current_task_state_rows(ctx, candidate_tids, broker=broker)
     grouped: dict[str, list[tuple[dict[str, Any], int]]] = defaultdict(list)
     for payload, message_id in entries:
         key = payload.get("session_id")
@@ -545,7 +545,7 @@ def _streaming_candidates(
             status = task_statuses.get(tid)
             is_duplicate = message_id not in protected_ids
             owner_terminal = status in TERMINAL_TASK_STATUSES
-            owner_has_no_live_proof = status is None and tid not in tid_mappings
+            owner_has_no_live_proof = status is None and tid not in tid_states
             owner_is_prunable = owner_terminal or owner_has_no_live_proof
             if is_duplicate and not owner_is_prunable:
                 continue
@@ -590,7 +590,7 @@ def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] excepti
         grouped[(record.name, record.tid)].append((payload, message_id))
 
     task_statuses = latest_task_statuses_for_endpoint_resolution(ctx, broker=broker)
-    tid_mappings = {
+    tid_states = {
         tid: payload
         for tid, (_message_id, payload) in _current_task_state_rows(
             ctx,
@@ -639,7 +639,7 @@ def _endpoint_candidates(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-059] excepti
         if endpoint_record_owner_is_live(
             record,
             task_statuses=task_statuses,
-            tid_mappings=tid_mappings,
+            tid_states=tid_states,
         ):
             continue
         candidates.append(

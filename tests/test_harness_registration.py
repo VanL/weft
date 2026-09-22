@@ -117,9 +117,9 @@ def test_mapping_read_failure_closes_broker_and_preserves_error_boundary(
             patch.setattr(type(harness.context), "broker", counted_broker)
             if error is TypeError:
                 with pytest.raises(TypeError, match="mapping read failure"):
-                    harness._load_tid_mapping_payloads()
+                    harness._load_tid_state_payloads()
             else:
-                assert harness._load_tid_mapping_payloads() == []
+                assert harness._load_tid_state_payloads() == []
             assert close_calls == ["close"]
     finally:
         harness._closed = True
@@ -858,10 +858,8 @@ def test_harness_stop_active_managers_skips_terminal_task_tids(
             "full": "1775630560739303424",
             "runtime_handle": _host_runtime_handle(424242),
         }
-        monkeypatch.setattr(
-            harness, "_load_tid_mapping_entries", lambda: [(mapping, 1)]
-        )
-        assert harness._latest_tid_mapping_payloads() == {mapping["full"]: mapping}
+        monkeypatch.setattr(harness, "_load_tid_state_entries", lambda: [(mapping, 1)])
+        assert harness._latest_tid_state_payloads() == {mapping["full"]: mapping}
         assert harness._cleanup_candidate_task_tids() == ["1775630560739303424"]
         monkeypatch.setattr(
             harness,
@@ -921,10 +919,8 @@ def test_harness_stop_active_managers_does_not_fan_out_worker_tid_as_task(
             "full": "1775630560447778816",
             "runtime_handle": _host_runtime_handle(424242),
         }
-        monkeypatch.setattr(
-            harness, "_load_tid_mapping_entries", lambda: [(mapping, 1)]
-        )
-        assert harness._latest_tid_mapping_payloads() == {mapping["full"]: mapping}
+        monkeypatch.setattr(harness, "_load_tid_state_entries", lambda: [(mapping, 1)])
+        assert harness._latest_tid_state_payloads() == {mapping["full"]: mapping}
         monkeypatch.setattr(
             harness,
             "_wait_for_registered_pids_to_exit",
@@ -981,10 +977,8 @@ def test_harness_stop_active_managers_does_not_fan_out_in_process_task_tid(
             "full": "1775630561555555555",
             "runtime_handle": _host_runtime_handle(harness._self_pid),
         }
-        monkeypatch.setattr(
-            harness, "_load_tid_mapping_entries", lambda: [(mapping, 1)]
-        )
-        assert harness._latest_tid_mapping_payloads() == {mapping["full"]: mapping}
+        monkeypatch.setattr(harness, "_load_tid_state_entries", lambda: [(mapping, 1)])
+        assert harness._latest_tid_state_payloads() == {mapping["full"]: mapping}
         monkeypatch.setattr(
             harness,
             "_wait_for_registered_pids_to_exit",
@@ -1236,7 +1230,7 @@ def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
                 "role": "manager",
             },
         ]
-        harness._load_tid_mapping_payloads = lambda: monkeypatch_payloads  # type: ignore[method-assign]
+        harness._load_tid_state_payloads = lambda: monkeypatch_payloads  # type: ignore[method-assign]
 
         harness._collect_pid_mappings()
 
@@ -1256,7 +1250,7 @@ def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
 def test_live_task_tids_ignore_manager_role_mappings() -> None:
     harness = WeftTestHarness()
     try:
-        harness._load_tid_mapping_entries = lambda: [  # type: ignore[method-assign]
+        harness._load_tid_state_entries = lambda: [  # type: ignore[method-assign]
             (
                 {
                     "full": "1775630560739303424",
@@ -1483,7 +1477,7 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
         message = str(exc_info.value)
         assert "Task completion timeout snapshot:" in message
         assert f"  tid={tid}" in message
-        assert "  latest_tid_mapping=" in message
+        assert "  latest_tid_state=" in message
         assert '"host_pids": [424242, 434343]' in message
         assert "  outbox_present=False" in message
         assert "  live_candidate_pids=[424242]" in message
@@ -1596,7 +1590,7 @@ def test_latest_mapping_discovery_reads_past_fixed_prefix() -> None:
         finally:
             queue.close()
 
-        latest = harness._latest_tid_mapping_payloads()
+        latest = harness._latest_tid_state_payloads()
         assert live_tid in latest
         assert latest[live_tid].get("role") == "live-owner"
     finally:

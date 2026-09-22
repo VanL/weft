@@ -253,7 +253,7 @@ def latest_task_statuses_for_endpoint_resolution(
     return _latest_task_statuses(ctx, broker=broker)
 
 
-def latest_tid_mapping_entries_for_endpoint_resolution(
+def latest_tid_state_entries_for_endpoint_resolution(
     ctx: WeftContext, *, tids: Iterable[str] | None = None, broker: Any | None = None
 ) -> dict[str, dict[str, Any]]:
     """Return current candidate snapshots for owner liveness (Spec: [MF-3.1])."""
@@ -269,13 +269,13 @@ def _record_owner_is_live(
     record: EndpointRecord,
     *,
     task_statuses: Mapping[str, str],
-    tid_mappings: Mapping[str, Mapping[str, Any]],
+    tid_states: Mapping[str, Mapping[str, Any]],
 ) -> bool:
     task_status = task_statuses.get(record.tid)
     if task_status in TERMINAL_TASK_STATUSES:
         return False
 
-    mapping = tid_mappings.get(record.tid)
+    mapping = tid_states.get(record.tid)
     if mapping is None:
         return False
 
@@ -298,14 +298,14 @@ def endpoint_record_owner_is_live(
     record: EndpointRecord,
     *,
     task_statuses: Mapping[str, str],
-    tid_mappings: Mapping[str, Mapping[str, Any]],
+    tid_states: Mapping[str, Mapping[str, Any]],
 ) -> bool:
     """Return whether an endpoint record has live owner proof."""
 
     return _record_owner_is_live(
         record,
         task_statuses=task_statuses,
-        tid_mappings=tid_mappings,
+        tid_states=tid_states,
     )
 
 
@@ -313,7 +313,7 @@ def _classify_latest_endpoint_records(
     records: Iterable[EndpointRecord],
     *,
     task_statuses: Mapping[str, str],
-    tid_mappings: Mapping[str, Mapping[str, Any]],
+    tid_states: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, list[EndpointRecord]]:
     """Group latest live claims without acquiring deletion authority."""
 
@@ -324,7 +324,7 @@ def _classify_latest_endpoint_records(
         if _record_owner_is_live(
             record,
             task_statuses=task_statuses,
-            tid_mappings=tid_mappings,
+            tid_states=tid_states,
         ):
             grouped.setdefault(record.name, []).append(record)
 
@@ -360,13 +360,13 @@ def list_resolved_endpoints(
                     latest_by_owner[(record.name, record.tid)] = record
 
         task_statuses = _latest_task_statuses(ctx, broker=db)
-        tid_mappings = latest_tid_mapping_entries_for_endpoint_resolution(
+        tid_states = latest_tid_state_entries_for_endpoint_resolution(
             ctx, tids={record.tid for record in latest_by_owner.values()}, broker=db
         )
         grouped = _classify_latest_endpoint_records(
             latest_by_owner.values(),
             task_statuses=task_statuses,
-            tid_mappings=tid_mappings,
+            tid_states=tid_states,
         )
 
         resolved: list[ResolvedEndpoint] = []
@@ -402,7 +402,7 @@ __all__ = [
     "endpoint_record_owner_is_live",
     "is_reserved_internal_endpoint_name",
     "latest_task_statuses_for_endpoint_resolution",
-    "latest_tid_mapping_entries_for_endpoint_resolution",
+    "latest_tid_state_entries_for_endpoint_resolution",
     "list_resolved_endpoints",
     "normalize_endpoint_name",
     "resolve_endpoint",

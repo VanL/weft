@@ -94,7 +94,7 @@ Read first:
 - `weft/core/tasks/base.py`
   - `_report_state_change()` writes `task_pid`, `managed_pids`, `runner`, and
     `runtime_handle` into `weft.log.tasks`.
-  - `_build_tid_mapping_payload()` writes the same ambiguity into
+  - `_build_tid_state_payload()` writes the same ambiguity into
     `weft.state.tid_mappings`.
   - `_stop_registered_runtime_handle()` already delegates stop/kill to runner
     plugins when a handle exists.
@@ -368,7 +368,7 @@ commit unless a later reviewer explicitly approves it.
      - `tests/tasks/test_task_observability.py`
    - Remove public `pid`, `task_pid`, and unscoped `managed_pids` from:
      - `_report_state_change()`
-     - `_build_tid_mapping_payload()`
+     - `_build_tid_state_payload()`
    - If cleanup still needs host process IDs internally, keep them as private
      task attributes and scoped `runtime_handle.observations.host_pids`.
    - Preserve process title behavior. Process titles are human observability,

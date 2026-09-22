@@ -73,7 +73,7 @@ promotion must be independently reviewable and revertible.
   `_record_owner_is_live` (:294–320), `find_endpoint_registry_message`
   (:217–226, becomes unused), canonical selection (:399–410; `canonical_record`
   reduces to `ordered[0]` — the `None` branch and `next(..., ordered[0])`
-  fallback guard states the TID invariant precludes), `_latest_tid_mapping_entries`
+  fallback guard states the TID invariant precludes), `_latest_tid_state_entries`
   (:264–291, keeps `(message_id, payload)` internally, returns payload map).
 - `weft/core/tasks/base.py` — `register_endpoint_name` (:2549–2586:
   pre-scan, write discarding the returned id at :2558, post-scan,
@@ -138,10 +138,10 @@ promotion must be independently reviewable and revertible.
 
 **Short TIDs and folds.**
 - `weft/commands/tasks.py` — `resolve_full_tid` (:158–170, first-wins),
-  `mapping_for_tid` (:118, last-wins), `_read_tid_mapping_entries` (:107),
+  `mapping_for_tid` (:118, last-wins), `_read_tid_state_entries` (:107),
   `task_tid` PID path (:192, `reversed`).
-- `weft/commands/system.py` — `_read_tid_mappings` (:329, last-wins),
-  `_latest_tid_mapping_entries` (:343, drifted copy: no empty-string check,
+- `weft/commands/system.py` — `_read_tid_states` (:329, last-wins),
+  `_latest_tid_state_entries` (:343, drifted copy: no empty-string check,
   no strict decode, no int cast).
 - `weft/_constants.py::TASKSPEC_TID_SHORT_LENGTH` (:79) = 10 → short =
   `tid[-10:]`; collision odds ~1e-7 per pair, reachable in a long-lived
@@ -161,7 +161,7 @@ process-title *matcher* `weft/liveness/host.py:47`). This plan introduces
 `tid_short_form` with today's formula and repoints all of them; the
 derivation plan later changes only the helper body. Consumers of the
 *stored* `short` (`commands/tasks.py:166`, `commands/system.py:335`)
-switch to deriving from `full`. The reaper's `valid_tid_mapping_payload`
+switch to deriving from `full`. The reaper's `valid_tid_state_payload`
 (`weft/liveness/policy.py:163–170`) requires only that `full` and `short`
 are non-empty strings; existing fixtures include `{"full": "undecidable",
 "short": "undecidable"}` (`tests/core/test_manager.py:2157`, :2691), so a
@@ -196,7 +196,7 @@ are non-empty strings; existing fixtures include `{"full": "undecidable",
 - Resolution computes the short form from a row's `full` at read time and
   **never trusts the stored `short` field**.
 - **Canonical mapping fold validity**: the canonical fold adopts exactly
-  `decode_tid_mapping_row` validity (non-empty `full` and `short`); "any
+  `decode_tid_state_row` validity (non-empty `full` and `short`); "any
   row" in [CLI-1.2.3] means any *valid* newest row, and short resolution
   additionally requires a derivable `full`. Exposing message ids is done
   by adding a tuple-returning fold and keeping the payload-map function as
@@ -431,17 +431,17 @@ promotion (Class 5) and before implementation (hardening).
    the separate short-TID derivation plan.
 7. **Short-TID and folds — three sub-slices** (requires task 6's helper). 7a *canonical fold*: add a
    tuple-returning fold in `endpoints.py` that adopts exactly
-   `decode_tid_mapping_row` validity and keep the payload-map function as
+   `decode_tid_state_row` validity and keep the payload-map function as
    a thin view over it (its three consumers — endpoint liveness, streaming
    pruning, `Manager._observe_admission_usage` — are unchanged); repoint
-   `mapping_for_tid`, `_read_tid_mappings`, system `_latest_tid_mapping_entries`,
+   `mapping_for_tid`, `_read_tid_states`, system `_latest_tid_state_entries`,
    `_latest_tid_runtime_handle`; **delete** `_latest_tid_runtime_handles`
    (zero callers). `_lookup_manager_pid` today means "newest row with a
    live host PID", not "newest row" — repointing changes
    `stop_manager --force` when the newest row's handle has no live PID
    but an older row does; adopt newest-row semantics per [OBS.6] and
    record it as an accepted change (after plan 1 every row carries the
-   manager's own PID, so the live case still resolves). **Every** current-state mapping consumer is repointed to the canonical fold, not only the four named above (Codex round 3 inventory, verified): `TaskMonitor._nonterminal_mapping_row_tids` (task_monitor.py ~:3473 — adopts any dict with a non-empty `full`, so a newer malformed row with `terminal: true` and no `short` strips [OBS.13.7] destruction protection from a TID whose newest *valid* row is non-terminal: red test — older valid non-terminal row plus that malformed row → protection must remain and the family must not be disposed), `weft/core/heartbeat.py::_heartbeat_runtime_handle_is_live` (~:92, duplicate-startup decision), `Manager._managed_pids_for_child` (~:6402, force-kill PID source), and `commands/tasks.py::_read_tid_mapping_entries` (:107, feeds `task_tid --pid`); the residual private folds in `_latest_tid_mapping_entries`/`_read_tid_mappings` go with them (grep gate: no direct `WEFT_TID_MAPPINGS_QUEUE` newest-row reduction outside `endpoints.py` and the reaper). Ambiguity rule: `resolve_full_tid` raises
+   manager's own PID, so the live case still resolves). **Every** current-state mapping consumer is repointed to the canonical fold, not only the four named above (Codex round 3 inventory, verified): `TaskMonitor._nonterminal_mapping_row_tids` (task_monitor.py ~:3473 — adopts any dict with a non-empty `full`, so a newer malformed row with `terminal: true` and no `short` strips [OBS.13.7] destruction protection from a TID whose newest *valid* row is non-terminal: red test — older valid non-terminal row plus that malformed row → protection must remain and the family must not be disposed), `weft/core/heartbeat.py::_heartbeat_runtime_handle_is_live` (~:92, duplicate-startup decision), `Manager._managed_pids_for_child` (~:6402, force-kill PID source), and `commands/tasks.py::_read_tid_state_entries` (:107, feeds `task_tid --pid`); the residual private folds in `_latest_tid_state_entries`/`_read_tid_states` go with them (grep gate: no direct `WEFT_TID_MAPPINGS_QUEUE` newest-row reduction outside `endpoints.py` and the reaper). Ambiguity rule: `resolve_full_tid` raises
    `CommandUsageError` (exists in `weft/_exceptions.py`; `cli/app.py::task_tid`
    already maps it) naming candidates when more than one full TID
    matches; apply the same rule in `weft/commands/system.py::_resolve_tid_filters`
@@ -464,8 +464,8 @@ promotion (Class 5) and before implementation (hardening).
    empty-string TID. Verify the reaper's `_reconcile_mapping_rows` agrees
    with the canonical fold on malformed/newest handling — expect this
    STOP to fire: the endpoints fold adopts any dict with a non-empty
-   `full` while the reaper's `decode_tid_mapping_row` rejects
-   `invalid_tid_mapping_shape`; check whether `strict=True` closes the
+   `full` while the reaper's `decode_tid_state_row` rejects
+   `invalid_tid_state_shape`; check whether `strict=True` closes the
    gap before repointing; if not, report.
 8. **Custody proof and traceability reconciliation** (renumbered: the
    behavioral custody tests formerly task 7 land here alongside the
@@ -539,7 +539,7 @@ monotonic). Dispositions:
 ambiguity error and a folded derivation** `(microseconds + counter ×
 10⁷) mod 10¹⁰`, added as task 7 with the [OBS.5] delta. Verified before
 adding: no short-form helper exists (every site slices digits); the
-reaper's `valid_tid_mapping_payload` checks only that `short` is a
+reaper's `valid_tid_state_payload` checks only that `short` is a
 non-empty string, so the format change does not touch mapping-row
 validity; the stored `short` becomes display-only and resolution derives
 from `full`.
@@ -555,7 +555,7 @@ append-only judged *safer* than today. Dispositions:
 | B2 — custody rule contradicted `discard_v1_service_registry_rows` (spec-mandated reader-side migration delete) and managed-service history rows (`owner_tid` = child TID, no author field) | Applied: three custody classes in the [MA-1] delta; managed-service deletion by retained exact ids; v1 sweep an explicit exception |
 | B3 — boolean "no match" conflated identity mismatch with unobservable namespace; would start duplicate managers from containers; only one of two sites was changed | Applied: tri-state rule in the delta; both `_manager_record_stale_status` and `_manager_record_liveness` in scope |
 | B4 — batch atomicity missed `_task_control_result` (the client path) | Applied: resolution-only first pass + client-batch test |
-| B5 — canonical fold validity unresolved (the predicted STOP fires) | Applied: adopt `decode_tid_mapping_row` validity; "any valid newest row"; tuple fold + payload-map view |
+| B5 — canonical fold validity unresolved (the predicted STOP fires) | Applied: adopt `decode_tid_state_row` validity; "any valid newest row"; tuple fold + payload-map view |
 | B6 — terminal pruning omitted `draining` and did not define the keep-recent override | Applied |
 | S — inventory (`_task_snapshot_reducer`, `commands/task_monitor`, `liveness/host.py` title matcher, `core/pipelines.py` default names, `cli/app.py`); tuple exposure not one-line; existing reader-deletion tests need dispositions; split tasks 4 and 6; compatibility wording (all displayed shorts change); "five spec files"; `_constants.py` docstring | All applied |
 
@@ -598,7 +598,7 @@ Dispositions:
 |---------|-------------|
 | B1 — the reconciliation text made an aged unprobeable `external-supervisor` row both prunable (age branch) and never-prunable (`unknown`); [MA-1] ~:167 defines missing/inconclusive probes as `unknown` | Applied: age→stale conversion removed in 4c; one bounded `unknown` rule (aged past both windows **and** unanswered keyed PING at prune time), replacing the earlier open decision; [MA-1] delta rewritten; **owner-confirm** |
 | B2 — mapping-fold inventory missed `_nonterminal_mapping_row_tids`, `_heartbeat_runtime_handle_is_live`, `_managed_pids_for_child`, `task_tid --pid`; the first strips [OBS.13.7] protection on a malformed newer row | Applied: all four repointed in 7a with the red test; grep gate added |
-| B3 — `short` "display-only" contradicts `decode_tid_mapping_row` validity; "mapping-row shape rule" undefined | Applied: shape defined inline in the [CLI-1.2.3] delta; "required row shape, not resolution authority" |
+| B3 — `short` "display-only" contradicts `decode_tid_state_row` validity; "mapping-row shape rule" undefined | Applied: shape defined inline in the [CLI-1.2.3] delta; "required row shape, not resolution authority" |
 | B4 — pruner deletes malformed v2 service rows while [MF-5] ~:1372 says preserve malformed rows; the plan named no such predicate | Applied: custody class (iv); [MF-5] and [OBS.13.6] deltas authorize schema-tagged-but-invalid rows behind `min_age`; behavior-preserving; **owner-confirm** |
 | S — age-only superseded-manager arm left intact; helper after its consumers; [PY-2] batch semantics; `tests/commands/test_runtime_prune.py` missing; "four files"; 4d replay optimization unrelated risk | All applied: arm replaced; tasks 6/7 swapped; batch-fatal only for ambiguity; test file added; five files; 4d reduced to the test update and copy deletion |
 

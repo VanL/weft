@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Changed
+
+- TaskMonitor maintenance now uses a freshly constructed `MaintenanceWorker`
+  with explicit inputs and typed results. TaskMonitor retains scheduling and
+  cached status, while queued workers own their resources and synchronous
+  custom collation borrows the reactor session without recycling its connection.
+  Both objects reuse the same diagnostic records and external-status assembly.
+- Internal task-state helper names now reflect the per-TID state queues.
+  Queue names and stored payloads are unchanged. Removed obsolete namespace
+  upgrade instructions from the documentation.
+
+### Fixed
+
+- Maintenance construction failures no longer add the monitor's cumulative
+  external-log totals back to themselves. Failed setup preserves the last
+  diagnostics and does not authorize cleanup.
+
 ## [0.9.105] - 2026-09-21
 
 ### Changed
@@ -132,22 +149,6 @@
   reconciliation remains every ten minutes, and all retirement age fences
   remain forty minutes. Bulk reads visit every retained task queue and may
   cost more than a shallow flat history.
-
-  Upgrade each broker context during downtime: stop every task and service,
-  including managers and both monitors; verify all their processes exited;
-  install the new version; run
-  `weft queue delete weft.state.tid_mappings` in that context; then restart
-  services/tasks. Verify new namespace publication, full/short status, spawn
-  reconciliation, and eventual custodian retirement. PING does not republish
-  state. There is no migration or mixed-version support. A missed old process
-  recreates legacy rows while remaining invisible to namespace admission and
-  destruction protection: stop/restart it and repeat legacy deletion.
-
-  Rollback also requires stopping every process. Restore the prior version,
-  remove the new `weft.state.tasks.*` entries using ordinary queue tools, and
-  restart so tasks rebuild flat state. Never delete `weft.log.tasks` for either
-  procedure. Only operator override may delete whole task-state queues;
-  normal cleanup remains LivenessMonitor's exact-ID custody.
 
 - macOS task processes set Unix titles immediately and defer GUI registration
   until a live drive turn after a random deadline between one and three seconds.

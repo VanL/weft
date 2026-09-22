@@ -259,7 +259,7 @@ def test_endpoint_owner_uses_host_runtime_handle_liveness(
     assert endpoint_record_owner_is_live(
         record,
         task_statuses={},
-        tid_mappings={tid: {"runtime_handle": _host_runtime_handle(4242, 1.5)}},
+        tid_states={tid: {"runtime_handle": _host_runtime_handle(4242, 1.5)}},
     )
     assert observed == [(4242,)]
 
@@ -277,7 +277,7 @@ def test_endpoint_owner_rejects_dead_host_runtime_handle(
     assert not endpoint_record_owner_is_live(
         record,
         task_statuses={},
-        tid_mappings={tid: {"runtime_handle": _host_runtime_handle(4242, 1.5)}},
+        tid_states={tid: {"runtime_handle": _host_runtime_handle(4242, 1.5)}},
     )
 
 
@@ -346,7 +346,7 @@ def test_external_supervisor_endpoint_owner_uses_runtime_liveness_probe(
     assert endpoint_record_owner_is_live(
         record,
         task_statuses={},
-        tid_mappings={tid: {"runtime_handle": handle_payload}},
+        tid_states={tid: {"runtime_handle": handle_payload}},
     )
 
 
@@ -376,7 +376,7 @@ def test_external_supervisor_endpoint_owner_rejects_unknown_runtime_liveness(
     assert not endpoint_record_owner_is_live(
         record,
         task_statuses={},
-        tid_mappings={tid: {"runtime_handle": handle_payload}},
+        tid_states={tid: {"runtime_handle": handle_payload}},
     )
 
 

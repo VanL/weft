@@ -262,7 +262,7 @@ def _collect_manager_records(
     )
 
 
-def _read_tid_mappings(
+def _read_tid_states(
     ctx: WeftContext, *, broker: Any | None = None
 ) -> dict[str, list[str]]:
     """Group retained task-state names by derived short form [CLI-1.2.3]."""
@@ -273,7 +273,7 @@ def _read_tid_mappings(
     return {short: sorted(fulls) for short, fulls in mapping.items()}
 
 
-def _latest_tid_mapping_entries(
+def _latest_tid_state_entries(
     ctx: WeftContext, tids: Iterable[str] | None = None, *, broker: Any | None = None
 ) -> dict[str, dict[str, Any]]:
     return {
@@ -292,7 +292,7 @@ def _resolve_tid_filters(ctx: WeftContext, raw: str | None) -> set[str] | None:
         return None
     if is_task_tid(candidate):
         return {candidate}
-    matches = _read_tid_mappings(ctx).get(candidate, [])
+    matches = _read_tid_states(ctx).get(candidate, [])
     if len(matches) > 1:
         raise CommandUsageError(
             f"Ambiguous short TID {candidate}: {', '.join(matches)}"
@@ -737,7 +737,7 @@ def _collect_task_snapshot_records(
     since_timestamp: int | None = None,
     now_ns: int | None = None,
     service_registry_evidence: Sequence[_ServiceEvidence] | None = None,
-    tid_mapping_entries: Mapping[str, Mapping[str, Any]] | None = None,
+    tid_state_entries: Mapping[str, Mapping[str, Any]] | None = None,
     broker: Any | None = None,
 ) -> list[CollectedTaskSnapshot]:
     """Reconstruct current task state from event-sourced log replay.
@@ -787,8 +787,8 @@ def _collect_task_snapshot_records(
             )
             if reduced is not None:
                 records[tid] = reduced
-    if tid_mapping_entries is None:
-        tid_mapping_entries = _latest_tid_mapping_entries(
+    if tid_state_entries is None:
+        tid_state_entries = _latest_tid_state_entries(
             ctx, tids=records if tid_filters is not None else None, broker=broker
         )
     records_out: list[CollectedTaskSnapshot] = []
@@ -798,7 +798,7 @@ def _collect_task_snapshot_records(
         probe_plan, evidence = _collect_snapshot_evidence(
             ctx,
             record,
-            mapping_entry=tid_mapping_entries.get(tid),
+            mapping_entry=tid_state_entries.get(tid),
             selected_active_manager_tid=selected_active_manager_tid,
             service_owner_index=service_owner_index,
             now_ns=now_ns,
@@ -1213,13 +1213,13 @@ def _service_diagnostics_from_mapping(
     *,
     key: str,
     evidence: _ServiceEvidence | None,
-    tid_mapping_entries: Mapping[str, Mapping[str, Any]],
+    tid_state_entries: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any] | None:
     if key != INTERNAL_SERVICE_KEY_TASK_MONITOR or evidence is None:
         return None
     if evidence.tid is None:
         return None
-    mapping = tid_mapping_entries.get(evidence.tid)
+    mapping = tid_state_entries.get(evidence.tid)
     if not isinstance(mapping, Mapping):
         return None
     task_monitor = mapping.get("task_monitor")
@@ -1235,7 +1235,7 @@ def _collect_internal_service_snapshots(  # noqa: C901 approved [TS-3.1] [RUFF-S
     task_records: Sequence[CollectedTaskSnapshot],
     now_ns: int | None = None,
     service_registry_evidence: Sequence[_ServiceEvidence],
-    tid_mapping_entries: Mapping[str, Mapping[str, Any]],
+    tid_state_entries: Mapping[str, Mapping[str, Any]],
 ) -> list[ServiceSnapshot]:
     """Return queue-derived status for manager-owned internal services."""
 
@@ -1312,7 +1312,7 @@ def _collect_internal_service_snapshots(  # noqa: C901 approved [TS-3.1] [RUFF-S
                 diagnostics=_service_diagnostics_from_mapping(
                     key=key,
                     evidence=evidence,
-                    tid_mapping_entries=tid_mapping_entries,
+                    tid_state_entries=tid_state_entries,
                 ),
             )
         )
@@ -1624,14 +1624,14 @@ def system_status(
         context,
         include_stopped=include_stopped_managers,
     )
-    tid_mapping_entries = _latest_tid_mapping_entries(context)
+    tid_state_entries = _latest_tid_state_entries(context)
     task_records = _collect_task_snapshot_records(
         context,
         include_terminal=True,
         tid_filters=None,
         now_ns=now_ns,
         service_registry_evidence=service_registry_evidence,
-        tid_mapping_entries=tid_mapping_entries,
+        tid_state_entries=tid_state_entries,
     )
     services = _collect_internal_service_snapshots(
         context,
@@ -1639,7 +1639,7 @@ def system_status(
         task_records=task_records,
         now_ns=now_ns,
         service_registry_evidence=service_registry_evidence,
-        tid_mapping_entries=tid_mapping_entries,
+        tid_state_entries=tid_state_entries,
     )
     return SystemStatusSnapshot(
         broker=collect_broker_status(context).to_dict(),

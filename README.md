@@ -752,12 +752,6 @@ status and control require valid snapshots and their existing evidence checks. R
 process-local liveness registry. Disable this service with
 `WEFT_LIVENESS_MONITOR_ENABLED=0`.
 
-The task-state namespace requires a downtime upgrade: stop every task and
-service in each broker context and verify process exit before installing the
-new version. Remove the legacy flat queue with
-`weft queue delete weft.state.tid_mappings` in that context, then restart.
-There is no mixed-version support. See [upgrade and rollback notes](CHANGELOG.md).
-
 The supervised TaskMonitor also performs default-on self-maintenance on an
 hourly monotonic deadline: it vacuums claimed broker rows and conservatively
 prunes superseded runtime-state rows (managers, services, streaming,

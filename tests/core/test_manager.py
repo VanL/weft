@@ -2769,7 +2769,7 @@ def test_sqlite_admission_fails_closed_on_expected_observer_errors(
     )
     monkeypatch.setattr(
         manager_mod,
-        "latest_tid_mapping_entries_for_endpoint_resolution",
+        "latest_tid_state_entries_for_endpoint_resolution",
         lambda _ctx, **_kwargs: (_ for _ in ()).throw(failure),
     )
 
@@ -2826,7 +2826,7 @@ def test_sqlite_admission_fails_closed_when_mapping_filter_raises(
     )
     monkeypatch.setattr(
         manager_mod,
-        "latest_tid_mapping_entries_for_endpoint_resolution",
+        "latest_tid_state_entries_for_endpoint_resolution",
         lambda _ctx, **_kwargs: {
             "undecidable": {"full": "undecidable", "short": "undecidable"}
         },
@@ -2859,7 +2859,7 @@ def test_sqlite_admission_does_not_swallow_base_exception(
     )
     monkeypatch.setattr(
         manager_mod,
-        "latest_tid_mapping_entries_for_endpoint_resolution",
+        "latest_tid_state_entries_for_endpoint_resolution",
         lambda _ctx, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
 
@@ -7691,7 +7691,7 @@ def test_manager_unregister_registry_broker_error_is_best_effort(
     assert manager._registry_message_id is None
 
 
-def test_manager_tid_mapping_forces_role_manager(
+def test_manager_tid_state_forces_role_manager(
     broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
@@ -7714,7 +7714,7 @@ def test_manager_tid_mapping_forces_role_manager(
         manager.cleanup()
 
 
-def test_manager_tid_mapping_defaults_role_manager(
+def test_manager_tid_state_defaults_role_manager(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
     manager, make_queue = manager_setup

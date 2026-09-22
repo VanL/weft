@@ -20,7 +20,7 @@ from weft.context import WeftContext
 from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
 from weft.helpers import closing_queue_iterator
 from weft.helpers.message_ids import is_task_tid
-from weft.liveness.policy import decode_tid_mapping_row
+from weft.liveness.policy import decode_tid_state_row
 
 
 def task_state_queue_name(tid: str) -> str:
@@ -75,7 +75,7 @@ def read_task_state_snapshot(
             return previous
         while rows:
             for body, message_id in rows:
-                decoded = decode_tid_mapping_row(
+                decoded = decode_tid_state_row(
                     QueueWindowRow(name, body, int(message_id)), expected_tid=tid
                 )
                 if decoded.malformed_reason is None and decoded.payload is not None:
@@ -123,6 +123,6 @@ def iter_task_state_rows(
         entries = db.peek_generator(name, with_timestamps=True)
         with closing_queue_iterator(entries) as rows:
             for body, message_id in cast(Iterable[tuple[str, int]], rows):
-                yield decode_tid_mapping_row(
+                yield decode_tid_state_row(
                     QueueWindowRow(name, body, int(message_id)), expected_tid=tid
                 )

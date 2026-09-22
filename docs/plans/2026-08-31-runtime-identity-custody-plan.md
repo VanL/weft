@@ -33,7 +33,7 @@ scratchpad dependency):
 2. `Consumer._register_outcome_runtime` (consumer.py ~:301) publishes the
    finished worker's host-pid handle as the task's `_runtime_handle`
    (`register_runtime_handle`, base.py ~:2298; assignment sites ~:2328 and
-   ~:2741 only). `_build_tid_mapping_payload` (~:2331) publishes
+   ~:2741 only). `_build_tid_state_payload` (~:2331) publishes
    `self._runtime_handle or self._task_process_runtime_handle()`, so after
    its first work item a persistent task's mapping row carries only a dead
    PID: `endpoints.py::_record_owner_is_live` classifies the owner dead
@@ -84,7 +84,7 @@ adds no process registry abstraction and does not change any Protocol.
 Files to modify:
 - `weft/core/tasks/base.py` — `register_managed_pid` (~:2286),
   `register_runtime_handle` (~:2298), `_merge_host_process_observations`
-  (~:159), `_build_tid_mapping_payload` (~:2331),
+  (~:159), `_build_tid_state_payload` (~:2331),
   `_task_process_runtime_handle` (~:2704), `handle_termination_signal`
   (~:2026), `_stop_registered_runtime_handle` (~:2750)
 - `weft/core/tasks/consumer.py` — `_register_outcome_runtime` (~:301),
@@ -133,9 +133,9 @@ worker join (~:516–521) to see where reap is confirmed.
 
 Shared paths — reuse, do not duplicate: `inspect_host_process` is the
 identity evaluator; `_stop_registered_runtime_handle` is the plugin-gated
-stop path; `_register_tid_mapping` is the edge-triggered republish
+stop path; `_register_tid_state` is the edge-triggered republish
 ([OBS.6a]). Acquisition uses `register_runtime_handle`; the host outcome
-release clears the active handle and calls `_register_tid_mapping`, whose
+release clears the active handle and calls `_register_tid_state`, whose
 existing fallback publishes the task-process handle. Do not change
 `register_runtime_handle(None)` from its current no-op behavior.
 
@@ -181,7 +181,7 @@ fallback never be installed as that task's active worker-control handle?
   (Codex B4). `RunnerOutcome.runtime_handle` remains historical outcome
   metadata and is not republished for a released worker.
 - The release leaves `_runtime_handle is None`; the task-process handle
-  comes only from `_build_tid_mapping_payload`'s existing fallback. The
+  comes only from `_build_tid_state_payload`'s existing fallback. The
   current task is absent from `_managed_pids` and from task-internal
   worker-control targets. An idle task handles termination by recording
   its terminal state and performing normal cleanup, never by sending a
@@ -290,7 +290,7 @@ workers in tests; external review before implementation.
    outcome commit path, for PIDs registered via `on_worker_started` during
    a one-shot host `run_with_hooks` call that has returned: `pop` the PID
    from the identity store, clear `_runtime_handle` to `None`, and call
-   `_register_tid_mapping()` once for that release edge. Its existing
+   `_register_tid_state()` once for that release edge. Its existing
    fallback publishes the task-process handle without storing self as an
    active worker-control target. Keep the clear and republish together
    at this outcome boundary; do not add a second identity store or change

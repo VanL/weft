@@ -95,7 +95,7 @@ All code paths use the same decoder and queue-name construction.
 | `weft/core/pruning/runtime.py::_streaming_candidates`, `_endpoint_candidates`, `run_runtime_prune_for_context` | Read candidate owner snapshots. Streaming protection requires valid snapshot presence, not merely a queue name. No state deletion by pruning | 05 Cleanup Boundary / Queue Lifecycle; 07 [OBS.16], [OBS.17]; 10-CLI_Interface [CLI-6] |
 | `weft/core/monitor/task_monitor.py` runtime-protection helpers | Candidate snapshots for precheckpoint recovery, stale-open summaries, stale service owners, terminal runtime cleanup, reserved cleanup, dead-task cleanup | 07 [OBS.13.3], [OBS.13.4], [OBS.13.6], [OBS.13.7], [OBS.13.10], [OBS.13.11], [OBS.14], [LIVENESS.R7]; 05 Cleanup Boundary |
 | `weft/core/monitor/policies/runtime_control.py`, `policies/dead_task.py` | Preserve set-valued pure policy inputs. Reuse existing cheap age/shape eligibility to form candidates; do not put broker callbacks in reducers. Dead-task cleanup must still discover residue without a state queue | Same cleanup contracts; 07 [OBS.15] for manager supersession |
-| `weft/commands/system.py::_read_tid_mappings`, `_resolve_tid_filters`, `_collect_task_snapshot_records`, `_collect_internal_service_snapshots` | Names for short IDs; candidate snapshots for filtered collection, bulk for all tasks; reuse a bulk result already obtained in the same collection. Preserve log authority and service projection | 05 [MF-5]; 03 [MA-1.6a]; 10 [CLI-1.2.1], [CLI-1.2.3]; 09-Implementation_Plan [IP-1], [IP-1.0], [IP-1.1] |
+| `weft/commands/system.py::_read_tid_states`, `_resolve_tid_filters`, `_collect_task_snapshot_records`, `_collect_internal_service_snapshots` | Names for short IDs; candidate snapshots for filtered collection, bulk for all tasks; reuse a bulk result already obtained in the same collection. Preserve log authority and service projection | 05 [MF-5]; 03 [MA-1.6a]; 10 [CLI-1.2.1], [CLI-1.2.3]; 09-Implementation_Plan [IP-1], [IP-1.0], [IP-1.1] |
 | `weft/commands/tasks.py` `resolve_full_tid`, `_command_tid`, `task_tid` | Full-ID direct path; short-ID names and canonical short form; PID lookup still reads snapshots newest-first; reverse full-to-short is arithmetic | 07 [OBS.5], [OBS.6]; 10 [CLI-1.2.3] |
 | `weft/commands/tasks.py::mapping_for_tid`, status/snapshot/terminal/ping/pipeline/process helpers | One TID, preserve pipeline precedence, explicit PING, Monitor fallback, and process evidence | 05 [MF-5]; 07 [OBS.10], [OBS.11], [OBS.11a], [OBS.12], [OBS.12a]; 10 [CLI-1.2.3]; 12-Pipeline_Composition_and_UX [PL-5.2], [PL-5.3] |
 | `weft/commands/tasks.py::stop_tasks`, `kill_tasks`, `_latest_task_entry`, `_require_controllable_task`, `_ControlSurfaceResources` | Resolve every ID before batch writes; candidate initial reads. Refresh on escalation; preserve fresh/current/initial fallback and control authorization. Resource owner receives exact state queue explicitly, includes it in identity/rebuild decisions, and retains dynamic pipeline/control routes | 10 [CLI-1.3], [CLI-1.2.3]; 07 [OBS.4], [OBS.12a]; 12 [PL-5.3] |
@@ -263,23 +263,12 @@ then the project's required full verification before implementation completion.
 Tests must assert observable behavior and real broker work, not merely mirror
 helper internals. The draft itself needs plan metadata/spec hygiene and diff checks.
 
-## 7. Rollout and rollback
+## 7. Historical rollout
 
-This is a downtime conversion, not a rolling upgrade. For each broker context,
-stop every task and service, including managers and both monitors, before changing
-code. Verify their processes have exited. Install the new code, explicitly delete
-`weft.state.tid_mappings` with `weft queue delete weft.state.tid_mappings` in that
-context, then restart services/tasks. Verify new publication, full/short status,
-spawn reconciliation, and custodian retirement. PING does not publish state and
-is not a repopulation mechanism. There is no mixed-version support.
-
-A missed old process recreates legacy state and has no namespace-based protection
-or admission visibility. Stop/restart it and remove the legacy residue. Do not
-paper over this with a startup latch. For rollback, stop all processes again,
-restore the previous code, explicitly remove the new runtime namespace entries
-using normal queue tools, and restart to rebuild flat state. Never delete the
-durable task log as part of either direction. Operator verification owns cutover;
-normal Weft components retain sole-custodian state deletion rules.
+The conversion used a downtime cutover because old processes published to the
+retired flat queue. It preserved the durable task log and LivenessMonitor's
+custody of state deletion. The one-time upgrade and rollback procedures are
+obsolete and have been removed.
 
 ## 8. Review, risks, and revision log
 
