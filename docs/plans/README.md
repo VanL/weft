@@ -23,7 +23,7 @@ There are currently 229 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-09-22-task-monitor-maintenance-worker-plan.md`](./2026-09-22-task-monitor-maintenance-worker-plan.md) | TaskMonitor MaintenanceWorker | `draft` | none |
+| [`2026-09-22-task-monitor-maintenance-worker-plan.md`](./2026-09-22-task-monitor-maintenance-worker-plan.md) | TaskMonitor MaintenanceWorker | `completed` | none |
 | [`2026-09-21-owner-thread-topology-mutation-plan.md`](./2026-09-21-owner-thread-topology-mutation-plan.md) | Owner-Thread Topology Mutation Plan | `completed` | none |
 | [`2026-09-21-watcher-sigint-lock-safety-plan.md`](./2026-09-21-watcher-sigint-lock-safety-plan.md) | Watcher SIGINT Lock Safety | `completed` | none |
 | [`2026-09-19-interactive-source-integration-plan.md`](./2026-09-19-interactive-source-integration-plan.md) | Interactive Source Integration Plan | `completed` | none |

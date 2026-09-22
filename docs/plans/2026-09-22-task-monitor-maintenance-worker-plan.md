@@ -1,6 +1,6 @@
 # TaskMonitor MaintenanceWorker
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/07-System_Invariants.md [IMPL.8], [IMPL.9], [IMPL.10], [IMPL.11], [OBS.13.10], [OBS.13.12]; docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]; docs/specifications/05-Message_Flow_and_State.md [MF-5]
 Superseded by: none
 
@@ -28,9 +28,8 @@ strong reference, weak proxy, bound policy callback, or attribute forwarding.
 - [x] Consolidate repeated diagnostic state and shared status assembly (slice 6).
 
 The approved design, implementation sequence and execution evidence are recorded
-below. The plan remains draft until its completion and commit gates are met.
-Slice 6 is implemented and independently reviewed; its verification is recorded
-separately from the earlier extraction evidence below.
+below. All six slices are implemented, independently reviewed and verified.
+Slice 6 verification is recorded separately from the earlier extraction evidence.
 
 ## Source Documents and Baseline
 
@@ -844,8 +843,8 @@ helpers or renamed worker entry points, and that only the three inventory tests
 were retired. No inherited watcher/task resource path remains in the worker.
 The final cleanup-construction catch was simplified to construct an omitted
 store observation directly; both entry-point construction-failure tests passed
-again. Runtime/spec work is verified; plan completion still requires the
-authorized commit and its git verification described in slice 5.
+again. Runtime/spec work passed the extraction gates; the consolidation and
+final commit verification are recorded below.
 
 Final spec snapshots after implementation-mapping reconciliation:
 
@@ -861,8 +860,9 @@ At the user's request, slice 6 adds consolidation of existing functionality
 without changing the architecture or promoted contract. Author fresh-eyes and
 a scoped independent native review found no ambiguity or blocker (PASS).
 Plan metadata and spec hygiene passed all six tests; whitespace checks passed.
-This revision changes only the plan. Consolidation and its runtime verification
-remain pending; the earlier extraction results do not cover it.
+This review covered only the plan revision. The following execution record
+contains consolidation verification; the earlier extraction results do not
+cover it.
 
 ### Slice 6 execution, 2026-09-22
 
@@ -905,7 +905,7 @@ adjacent single-field replacements was considered and left out: the current
 explicit updates are correct, and no additional consolidation is required to
 remove the duplicated schema or shared status behavior. Author final review
 also found no remaining flat diagnostic cache or parallel status assembler.
-Changes remain subject to the existing completion/commit gates.
+Final combined verification and commit evidence follow below.
 
 The final repository-wide Ruff lint and format checks both passed (761 files
 formatted); the earlier two formatting findings were resolved by the concurrent
@@ -941,3 +941,11 @@ At the user's direction, obsolete namespace upgrade and rollback steps were
 removed from the README, release notes and namespace plan. The concise history
 of the queue rename and its original cutover rationale remain because they
 explain older versions. No queue name or stored payload changes in this cleanup.
+
+### Closure, 2026-09-22
+
+Implementation commit `e7023a8a407d34d92f1462f5e533bde7c5966c68` contains the
+MaintenanceWorker extraction, diagnostic consolidation, task-state helper naming
+cleanup, tests, spec promotion and documentation reconciliation. Its existence
+and contents were verified with git before marking this plan and its index
+completed. All requested outcomes and review dispositions are complete.
