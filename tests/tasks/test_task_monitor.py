@@ -362,6 +362,7 @@ def test_task_monitor_worker_local_snapshot_owns_mutable_runtime_resources(  # n
         "_wait_active",
         "_drive_loop_active",
         "_strategy_started",
+        "_topology_dispatch_pass",
         "_data_version_activity_pending",
         "_native_activity_degraded",
         "_paused",

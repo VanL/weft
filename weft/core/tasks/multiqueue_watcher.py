@@ -235,6 +235,7 @@ class MultiQueueWatcher(BaseWatcher):
             self._topology_mutations: deque[_TopologyMutation] = deque()
             self._topology_pending = threading.Event()
             self._topology_inflight: _TopologyMutation | None = None
+            self._topology_dispatch_pass = False
             self._topology_owner_thread: threading.Thread | None = None
             self._topology_reserved_thread: threading.Thread | None = None
             self._topology_manual_wait_thread: threading.Thread | None = None
@@ -500,22 +501,49 @@ class MultiQueueWatcher(BaseWatcher):
             if self._topology_manual_wait_thread is not None:
                 raise RuntimeError("watcher topology is owned by a manual wait")
             if self._topology_owner_thread is current:
-                raise RuntimeError("drive owner cannot mutate topology during dispatch")
-
-            if (
+                self._claim_owner_topology_mutation_locked(request)
+                owner_synchronous = True
+            elif (
                 self._topology_owner_thread is None
                 and self._topology_reserved_thread is None
             ):
                 self._apply_topology_mutation_before_start_locked(request)
                 return
+            else:
+                owner_synchronous = False
+                self._topology_mutations.append(request)
+                self._topology_pending.set()
+                self._strategy.notify_activity()
 
-            self._topology_mutations.append(request)
-            self._topology_pending.set()
-            self._strategy.notify_activity()
-
-        request.done.wait()
+        if owner_synchronous:
+            # The owner applies its own request through the same transaction the
+            # apply loop uses, between dispatch passes, so no deque wait is needed.
+            retry_error, fatal_error = self._run_owner_topology_transaction(request)
+            self._finish_topology_sigint_critical(fatal_error=fatal_error)
+            if retry_error is not None:
+                raise retry_error
+        else:
+            request.done.wait()
         if request.error is not None:
             raise request.error
+
+    def _claim_owner_topology_mutation_locked(self, request: _TopologyMutation) -> None:
+        """Admit one synchronous owner mutation between dispatch passes.
+
+        A handler runs inside a dispatch pass that iterates the active queue set
+        and may hold the Queue a removal would close, so mutation from there is
+        rejected before effects. A second mutation while one transaction is in
+        flight is likewise rejected.
+
+        Spec: [QUEUE.8]
+        """
+        if self._topology_dispatch_pass:
+            raise RuntimeError(
+                "drive owner cannot mutate topology during a dispatch pass"
+            )
+        if self._topology_inflight is not None:
+            raise RuntimeError("topology mutation is reentrant")
+        self._topology_inflight = request
 
     def _apply_topology_mutation_before_start_locked(
         self,
@@ -730,7 +758,7 @@ class MultiQueueWatcher(BaseWatcher):
                 if candidate_config is not None:
                     self._close_candidate_resource_once(candidate_config.queue)
 
-    def _apply_pending_topology_mutations(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-045] exception
+    def _apply_pending_topology_mutations(self) -> None:
         """Complete queued mutations in FIFO order on the drive owner."""
         if threading.current_thread() is not self._topology_owner_thread:
             return
@@ -743,39 +771,52 @@ class MultiQueueWatcher(BaseWatcher):
                     return
                 request = self._topology_mutations.popleft()
                 self._topology_inflight = request
-            retry_error: Exception | None = None
-            fatal_error: BaseException | None = None
-            try:
-                self._apply_topology_mutation_on_owner(request)
-            except _TopologyDriveError as exc:
-                request.error = exc.cause
-                retry_error = exc.cause
-            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-339] exception
-                # One ordinary request failure stays local; later FIFO requests run.
-                request.error = exc
-            except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-339] exception
-                # A fatal owner exit releases every caller before exact re-raise.
-                request.error = RuntimeError(
-                    "watcher drive exited during topology mutation"
-                )
-                with self._topology_lock:
-                    while self._topology_mutations:
-                        pending = self._topology_mutations.popleft()
-                        pending.error = RuntimeError(
-                            "watcher drive exited during topology mutation"
-                        )
-                        pending.done.set()
-                fatal_error = exc
-            finally:
-                with self._topology_lock:
-                    if self._topology_inflight is request:
-                        self._topology_inflight = None
-                    if not self._topology_mutations:
-                        self._topology_pending.clear()
-                request.done.set()
+            retry_error, fatal_error = self._run_owner_topology_transaction(request)
             self._finish_topology_sigint_critical(fatal_error=fatal_error)
             if retry_error is not None:
                 raise retry_error
+
+    def _run_owner_topology_transaction(
+        self, request: _TopologyMutation
+    ) -> tuple[Exception | None, BaseException | None]:
+        """Run one owner transaction with shared error precedence and cleanup.
+
+        Returns ``(retry_error, fatal_error)``. Ordinary failures are recorded
+        on the request only. The caller finishes the SIGINT-critical boundary.
+
+        Spec: [QUEUE.8]
+        """
+        retry_error: Exception | None = None
+        fatal_error: BaseException | None = None
+        try:
+            self._apply_topology_mutation_on_owner(request)
+        except _TopologyDriveError as exc:
+            request.error = exc.cause
+            retry_error = exc.cause
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-339] exception
+            # One ordinary request failure stays local; later FIFO requests run.
+            request.error = exc
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-339] exception
+            # A fatal owner exit releases every caller before exact re-raise.
+            request.error = RuntimeError(
+                "watcher drive exited during topology mutation"
+            )
+            with self._topology_lock:
+                while self._topology_mutations:
+                    pending = self._topology_mutations.popleft()
+                    pending.error = RuntimeError(
+                        "watcher drive exited during topology mutation"
+                    )
+                    pending.done.set()
+            fatal_error = exc
+        finally:
+            with self._topology_lock:
+                if self._topology_inflight is request:
+                    self._topology_inflight = None
+                if not self._topology_mutations:
+                    self._topology_pending.clear()
+            request.done.set()
+        return retry_error, fatal_error
 
     def _finish_topology_sigint_critical(
         self,
@@ -1503,10 +1544,14 @@ class MultiQueueWatcher(BaseWatcher):
         if not self._active_queues:
             return
 
-        if len(self._active_queue_priorities()) <= 1:
-            messages_processed = self._drain_round_robin_pass()
-        else:
-            messages_processed = self._drain_priority_queues()
+        self._topology_dispatch_pass = True
+        try:
+            if len(self._active_queue_priorities()) <= 1:
+                messages_processed = self._drain_round_robin_pass()
+            else:
+                messages_processed = self._drain_priority_queues()
+        finally:
+            self._topology_dispatch_pass = False
 
         if messages_processed > 0:
             self._strategy.notify_activity()

@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from types import SimpleNamespace
-from typing import TypedDict, Unpack, cast
+from typing import Any, TypedDict, Unpack, cast
 
 import pytest
 
@@ -2177,10 +2177,35 @@ def test_stop_join_timeout_does_not_block_on_owner_finalization_lock(
     assert watcher._thread is None
 
 
-def test_postgres_background_dynamic_membership_rebinds_native_waiter(
+class _RecordingNativeWaiter:
+    """Observe real native wakeups and cleanup for one membership signature."""
+
+    def __init__(self, signature: tuple[str, ...], delegate: ActivityWaiter) -> None:
+        self.signature = signature
+        self.delegate = delegate
+        self.true_count = 0
+        self.close_calls = 0
+        self.wait_entered = threading.Event()
+
+    def wait(self, timeout: float | None) -> bool:
+        self.wait_entered.set()
+        assert timeout is not None
+        result = self.delegate.wait(timeout)
+        if result:
+            self.true_count += 1
+        return result
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.delegate.close()
+
+
+@pytest.mark.parametrize("mutation_origin", ["foreign", "owner"])
+def test_postgres_dynamic_membership_rebinds_native_waiter(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     thread_exception_guard: list[threading.ExceptHookArgs],
+    mutation_origin: str,
 ) -> None:
     """Real LISTEN/NOTIFY follows added and removed queue membership."""
     if active_test_backend() != POSTGRES_TEST_BACKEND:
@@ -2188,29 +2213,7 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
     del thread_exception_guard
     db_path, make_queue = broker_env
 
-    class RecordingProxy:
-        def __init__(
-            self, signature: tuple[str, ...], delegate: ActivityWaiter
-        ) -> None:
-            self.signature = signature
-            self.delegate = delegate
-            self.true_count = 0
-            self.close_calls = 0
-            self.wait_entered = threading.Event()
-
-        def wait(self, timeout: float | None) -> bool:
-            self.wait_entered.set()
-            assert timeout is not None
-            result = self.delegate.wait(timeout)
-            if result:
-                self.true_count += 1
-            return result
-
-        def close(self) -> None:
-            self.close_calls += 1
-            self.delegate.close()
-
-    proxies: dict[tuple[str, ...], RecordingProxy] = {}
+    proxies: dict[tuple[str, ...], _RecordingNativeWaiter] = {}
 
     def create_proxy(
         queues: Sequence[Queue], *, stop_event: threading.Event
@@ -2222,7 +2225,7 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
             stop_event=stop_event,
         )
         assert delegate is not None
-        proxy = RecordingProxy(signature, delegate)
+        proxy = _RecordingNativeWaiter(signature, delegate)
         proxies[signature] = proxy
         return proxy
 
@@ -2249,7 +2252,27 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
             handler_errors.append(f"no native wake recorded for {expected!r}")
         (c_first if c_calls == 1 else c_second).set()
 
-    watcher = MultiQueueWatcher(
+    refresh_actions: list[Callable[[], None]] = []
+    refresh_committed = threading.Event()
+    refresh_done = threading.Event()
+    refresh_errors: list[Exception] = []
+
+    class RefreshingWatcher(MultiQueueWatcher):
+        def _drain_queue(self) -> None:
+            while refresh_actions:
+                action = refresh_actions.pop(0)
+                try:
+                    # The trigger must precede the new native subscription so it
+                    # cannot count as evidence of activity on the added queue.
+                    assert refresh_committed.wait(timeout=3.0)
+                    action()
+                except (RuntimeError, ValueError) as exc:
+                    refresh_errors.append(exc)
+                finally:
+                    refresh_done.set()
+            super()._drain_queue()
+
+    watcher = RefreshingWatcher(
         queue_configs={
             "pg-dynamic.a": {"handler": lambda *_args: None},
             "pg-dynamic.b": {"handler": lambda *_args: b_handled.set()},
@@ -2257,18 +2280,35 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
         db=db_path,
         inactive_probe_interval=60.0,
     )
+    writer_a = make_queue("pg-dynamic.a")
     writer_b = make_queue("pg-dynamic.b")
     writer_c = make_queue("pg-dynamic.c")
     drive = watcher.run_in_thread()
+
+    def mutate(action: Callable[[], None]) -> None:
+        if mutation_origin == "foreign":
+            action()
+            return
+        refresh_done.clear()
+        refresh_committed.clear()
+        refresh_actions.append(action)
+        # A real broker message wakes the owner to refresh before its next pass.
+        try:
+            writer_a.write("refresh membership")
+        finally:
+            refresh_committed.set()
+        assert refresh_done.wait(timeout=3.0)
+        assert refresh_errors == []
+
     try:
-        watcher.add_queue("pg-dynamic.c", handle_c)
+        mutate(lambda: watcher.add_queue("pg-dynamic.c", handle_c))
         added = proxies[("pg-dynamic.a", "pg-dynamic.b", "pg-dynamic.c")]
         assert added.wait_entered.wait(timeout=3.0)
         writer_c.write("first")
         assert c_first.wait(timeout=3.0)
         assert handler_errors == []
 
-        watcher.remove_queue("pg-dynamic.b")
+        mutate(lambda: watcher.remove_queue("pg-dynamic.b"))
         remaining = proxies[("pg-dynamic.a", "pg-dynamic.c")]
         assert remaining.wait_entered.wait(timeout=3.0)
         quiet_baseline = remaining.true_count
@@ -2284,6 +2324,7 @@ def test_postgres_background_dynamic_membership_rebinds_native_waiter(
     finally:
         watcher.stop()
         drive.join(timeout=3.0)
+        writer_a.close()
         writer_b.close()
         writer_c.close()
 
@@ -2325,6 +2366,216 @@ def test_background_mutation_from_handler_is_rejected_before_effects(
         assert watcher._queue_generation == generation
         assert watcher._multi_activity_waiter_signature == signature
         assert watcher.get_queue("dynamic.forbidden") is None
+    finally:
+        watcher.stop()
+        drive.join(timeout=2.0)
+
+
+class _OwnerMutatingWatcher(MultiQueueWatcher):
+    """Watcher whose owner adds, removes, or mis-adds a queue before its pass.
+
+    This is the standalone membership-refresh shape: durable state read on the
+    drive owner decides the queue set at the top of the drain, outside any
+    dispatch pass.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.pre_drain_actions: list[tuple[str, str]] = []
+        self.owner_errors: list[BaseException] = []
+        self.owner_threads: list[int | None] = []
+
+    def _drain_queue(self) -> None:
+        while self.pre_drain_actions:
+            action, queue_name = self.pre_drain_actions.pop(0)
+            self.owner_threads.append(threading.get_ident())
+            try:
+                if action == "add":
+                    self.add_queue(queue_name, self._dynamic_handler)
+                else:
+                    self.remove_queue(queue_name)
+            except (RuntimeError, ValueError) as exc:
+                self.owner_errors.append(exc)
+        super()._drain_queue()
+
+    def _dynamic_handler(self, *_args: object) -> None:
+        self.dynamic_handled.set()
+
+    dynamic_handled = threading.Event()
+
+
+@pytest.mark.parametrize("nested_mutation", ["add", "remove"])
+def test_owner_reentrant_mutation_is_rejected_before_effects(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    nested_mutation: str,
+) -> None:
+    """Nested owner calls fail locally while the outer add remains usable."""
+    del thread_exception_guard
+    db_path, make_queue = broker_env
+    watcher = _OwnerMutatingWatcher(
+        queue_configs={"owner.a": {"handler": lambda *_args: None}},
+        db=db_path,
+    )
+    watcher.dynamic_handled = threading.Event()
+    original_open = watcher._open_runtime_config
+    nested_errors: list[str] = []
+    unchanged: list[bool] = []
+
+    def open_with_nested_mutation(request: _TopologyMutation) -> QueueRuntimeConfig:
+        if request.queue_name == "owner.b":
+            mapping = watcher.list_queues()
+            generation = watcher._queue_generation
+            inflight = watcher._topology_inflight
+            try:
+                if nested_mutation == "add":
+                    watcher.add_queue("owner.forbidden", lambda *_args: None)
+                else:
+                    watcher.remove_queue("owner.a")
+            except RuntimeError as exc:
+                nested_errors.append(str(exc))
+            unchanged.append(
+                watcher.list_queues() == mapping
+                and watcher._queue_generation == generation
+                and watcher._topology_inflight is inflight
+            )
+        return original_open(request)
+
+    monkeypatch.setattr(watcher, "_open_runtime_config", open_with_nested_mutation)
+    generation = watcher._queue_generation
+    watcher.pre_drain_actions.append(("add", "owner.b"))
+    drive = watcher.run_in_thread()
+    try:
+        make_queue("owner.b").write("outer add still dispatches")
+        assert watcher.dynamic_handled.wait(timeout=2.0)
+        assert nested_errors == ["topology mutation is reentrant"]
+        assert unchanged == [True]
+        assert watcher.owner_errors == []
+        assert watcher.list_queues() == ["owner.a", "owner.b"]
+        assert watcher._queue_generation == generation + 1
+        assert watcher._topology_inflight is None
+    finally:
+        watcher.stop()
+        drive.join(timeout=2.0)
+
+
+def test_owner_thread_add_between_passes_applies_in_same_turn(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+) -> None:
+    """The drive owner may add a queue synchronously outside a dispatch pass.
+
+    Verifies:
+    - the add is applied on the owner thread with no deque wait
+    - the waiter is re-signatured to the exact new membership
+    - a message on the new queue dispatches
+    """
+    del thread_exception_guard
+    db_path, make_queue = broker_env
+    created: list[tuple[tuple[str, ...], int]] = []
+
+    def create_waiter(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
+        del stop_event
+        created.append((tuple(queue.name for queue in queues), threading.get_ident()))
+        return None
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
+        create_waiter,
+    )
+    watcher = _OwnerMutatingWatcher(
+        queue_configs={"owner.a": {"handler": lambda *_args: None}},
+        db=db_path,
+        inactive_probe_interval=0.01,
+    )
+    watcher.dynamic_handled = threading.Event()
+    watcher.pre_drain_actions.append(("add", "owner.b"))
+    drive = watcher.run_in_thread()
+    try:
+        make_queue("owner.b").write("work")
+        assert watcher.dynamic_handled.wait(timeout=2.0)
+        assert watcher.owner_errors == []
+        assert watcher.owner_threads == [drive.ident]
+        assert watcher.list_queues() == ["owner.a", "owner.b"]
+        assert created[-1] == (("owner.a", "owner.b"), drive.ident)
+    finally:
+        watcher.stop()
+        drive.join(timeout=2.0)
+
+
+def test_owner_thread_remove_between_passes_closes_queue(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+) -> None:
+    """The drive owner may remove a queue synchronously; the queue is closed."""
+    del thread_exception_guard
+    db_path, make_queue = broker_env
+    first_pass = threading.Event()
+    watcher = _OwnerMutatingWatcher(
+        queue_configs={
+            "owner.keep": {"handler": lambda *_args: first_pass.set()},
+            "owner.drop": {"handler": lambda *_args: None},
+        },
+        db=db_path,
+        inactive_probe_interval=0.01,
+    )
+    dropped = watcher.get_queue("owner.drop")
+    assert dropped is not None
+    close_calls: list[int] = []
+    original_close = dropped.close
+
+    def recording_close() -> None:
+        close_calls.append(threading.get_ident())
+        original_close()
+
+    monkeypatch.setattr(dropped, "close", recording_close)
+    drive = watcher.run_in_thread()
+    try:
+        make_queue("owner.keep").write("first")
+        assert first_pass.wait(timeout=2.0)
+        watcher.pre_drain_actions.append(("remove", "owner.drop"))
+        first_pass.clear()
+        make_queue("owner.keep").write("second")
+        assert first_pass.wait(timeout=2.0)
+        assert watcher.owner_errors == []
+        assert watcher.list_queues() == ["owner.keep"]
+        assert watcher.get_queue("owner.drop") is None
+        assert close_calls == [drive.ident]
+        assert id(dropped) not in watcher._owned_dynamic_queues
+    finally:
+        watcher.stop()
+        drive.join(timeout=2.0)
+
+
+def test_owner_thread_duplicate_add_raises_synchronously(
+    broker_env: BrokerEnv,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+) -> None:
+    """An owner-side membership error surfaces to the owner and changes nothing."""
+    del thread_exception_guard
+    db_path, make_queue = broker_env
+    handled = threading.Event()
+    watcher = _OwnerMutatingWatcher(
+        queue_configs={"owner.a": {"handler": lambda *_args: handled.set()}},
+        db=db_path,
+        inactive_probe_interval=0.01,
+    )
+    generation = watcher._queue_generation
+    watcher.pre_drain_actions.append(("add", "owner.a"))
+    drive = watcher.run_in_thread()
+    try:
+        make_queue("owner.a").write("work")
+        assert handled.wait(timeout=2.0)
+        assert len(watcher.owner_errors) == 1
+        assert isinstance(watcher.owner_errors[0], ValueError)
+        assert watcher.list_queues() == ["owner.a"]
+        assert watcher._queue_generation == generation
+        assert watcher._topology_inflight is None
     finally:
         watcher.stop()
         drive.join(timeout=2.0)

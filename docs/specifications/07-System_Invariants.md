@@ -190,8 +190,13 @@ acknowledgement and shared dispatch; direct codec coverage lives in
 - **QUEUE.8**: a running standalone `MultiQueueWatcher` has one drive owner for
   dynamic topology effects. Foreign `add_queue()` and `remove_queue()` calls
   are synchronous requests applied in a deterministic linear order between
-  wait and drain phases; owner-thread mutation during dispatch is rejected
-  before effects. Public stop and topology commit use the same serialization
+  wait and drain phases; foreign requests may queue while a topology
+  transaction is in flight. The drive owner may mutate topology synchronously
+  between dispatch passes through the same transaction, which is how a
+  standalone watcher refreshes membership from durable state it reads itself;
+  owner mutation during a dispatch pass, and reentrant owner mutation while a
+  topology transaction is in flight, is rejected before effects. Public stop
+  and topology commit use the same serialization
   boundary, so no stop-first mutation can bind a waiter. Each committed
   membership generation has one exact activity-wait signature. The owner
   replaces the strategy's optional native waiter before closing the displaced
@@ -210,6 +215,7 @@ acknowledgement and shared dispatch; direct codec coverage lives in
 
 _Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` owns [QUEUE.8]
 through `MultiQueueWatcher._submit_topology_mutation()`,
+`_claim_owner_topology_mutation_locked()`, `_run_owner_topology_transaction()`,
 `_apply_pending_topology_mutations()`,
 `_apply_topology_mutation_on_owner()`, `run_in_thread()`, `run_forever()`,
 `wait_for_activity()`, `stop()`, `_sigint_handler()`, and
@@ -1196,6 +1202,7 @@ doc:
 
 ## Related Plans
 
+- [Owner-thread topology mutation](../plans/2026-09-21-owner-thread-topology-mutation-plan.md) - enables synchronous membership refresh between dispatch passes under [QUEUE.8].
 - [Watcher SIGINT lock safety](../plans/2026-09-21-watcher-sigint-lock-safety-plan.md) - keeps deferred standalone SIGINT handling free of lock-taking operations.
 
 - [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores one task wake arbiter, classifies backend/local/timer inputs, and removes task-reactor polling caps.

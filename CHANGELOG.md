@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## [0.9.105] - 2026-09-21
+
+### Changed
+
+- A standalone `MultiQueueWatcher` drive owner can now call `add_queue()` and
+  `remove_queue()` itself between dispatch passes; the request is applied
+  synchronously through the existing topology transaction. Mutation from inside
+  a dispatch pass (for example from a handler) and reentrant mutation are still
+  rejected before effects. `BaseTask` topology remains construction-fixed.
+  See `docs/plans/2026-09-21-owner-thread-topology-mutation-plan.md`.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.40`, `weft-docker 0.9.80`,
+  `weft-macos-sandbox 0.6.9`, and `weft-microsandbox 0.5.10`.
+
 ## [0.9.104] - 2026-09-21
 
 ### Fixed

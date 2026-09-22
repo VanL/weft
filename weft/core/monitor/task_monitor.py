@@ -951,6 +951,7 @@ class TaskMonitor(ServiceTask):
         worker._topology_stopping = False
         worker._topology_sigint_critical = False
         worker._topology_deferred_sigint = False
+        worker._topology_dispatch_pass = False
         worker._stop_event = threading.Event()
         worker._running_event = threading.Event()
         worker._signal_stop_requested = None
