@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.9.106] - 2026-09-22
+
 ### Changed
 
 - TaskMonitor maintenance now uses a freshly constructed `MaintenanceWorker`
@@ -12,6 +14,9 @@
 - Internal task-state helper names now reflect the per-TID state queues.
   Queue names and stored payloads are unchanged. Removed obsolete namespace
   upgrade instructions from the documentation.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.41`, `weft-docker 0.9.81`,
+  `weft-macos-sandbox 0.6.10`, and `weft-microsandbox 0.5.11`.
 
 ### Fixed
 
