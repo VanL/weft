@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Never
 
 import pytest
 
 import weft.commands.submission as submission_mod
+from simplebroker import BrokerSession
+from simplebroker.ext import IntegrityError
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_SPAWN_REQUESTS_QUEUE
 from weft._exceptions import (
@@ -1101,6 +1105,319 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
     assert captured["reconciled_tid"] == str(committed_id)
     assert receipt.tid == str(committed_id)
     assert receipt.context_root == str(context.root)
+
+
+def test_submit_prepared_borrows_session_without_closing_owner(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = weft_harness.context
+    prepared = submission_mod.prepare(
+        context,
+        {
+            "name": "borrowed-session",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+        payload="borrowed",
+    )
+    close_calls: list[BrokerSession] = []
+    original_close = BrokerSession.close
+
+    def counted_close(session: BrokerSession) -> None:
+        close_calls.append(session)
+        original_close(session)
+
+    monkeypatch.setattr(BrokerSession, "close", counted_close)
+    monkeypatch.setattr(
+        submission_mod,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: core_manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="test-ready",
+        ),
+    )
+
+    with context.session() as session:
+        outcome = submission_mod._submit_prepared_outcome(
+            context,
+            prepared,
+            session=session,
+        )
+        assert close_calls == []
+        with session.connection() as broker:
+            assert (
+                broker.peek_one(
+                    WEFT_SPAWN_REQUESTS_QUEUE,
+                    exact_timestamp=int(outcome.receipt.tid),
+                )
+                is not None
+            )
+
+    assert close_calls == [session]
+
+
+def test_retained_session_exits_each_operation_before_fresh_readiness(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = weft_harness.context
+    prepared = submission_mod.prepare(
+        context,
+        {
+            "name": "operation-boundary",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+    )
+    original_connection = BrokerSession.connection
+    active_operations = 0
+    events: list[tuple[str, int]] = []
+    observations = iter(("first-view", "second-view"))
+    ensured_reasons: list[str] = []
+
+    @contextmanager
+    def counted_connection(session: BrokerSession) -> Iterator[Any]:
+        nonlocal active_operations
+        events.append(("enter", id(session)))
+        active_operations += 1
+        try:
+            with original_connection(session) as broker:
+                yield broker
+        finally:
+            active_operations -= 1
+            events.append(("exit", id(session)))
+
+    def observe(
+        _context: WeftContext, *, broker: Any | None = None
+    ) -> core_manager_runtime.ManagerAvailabilityObservation:
+        assert broker is not None
+        assert active_operations == 1
+        return core_manager_runtime.ManagerAvailabilityObservation(
+            outcome="ready",
+            manager_record=None,
+            first_uncertain_at=None,
+            backlog_pending=None,
+            reason=next(observations),
+        )
+
+    def ensure(
+        _context: WeftContext,
+        *,
+        submitted_tid: str | int,
+        observation: core_manager_runtime.ManagerAvailabilityObservation,
+        **_kwargs: Any,
+    ) -> core_manager_runtime.ManagerEnsureResult:
+        del submitted_tid
+        assert active_operations == 0
+        ensured_reasons.append(observation.reason)
+        return core_manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=observation.reason,
+        )
+
+    monkeypatch.setattr(BrokerSession, "connection", counted_connection)
+    monkeypatch.setattr(core_manager_runtime, "observe_manager_availability", observe)
+    monkeypatch.setattr(submission_mod, "ensure_manager_after_submission", ensure)
+
+    with context.session() as session:
+        for _ in range(2):
+            submission_mod._submit_prepared_outcome(
+                context,
+                prepared,
+                session=session,
+            )
+
+    assert events == [
+        ("enter", id(session)),
+        ("exit", id(session)),
+        ("enter", id(session)),
+        ("exit", id(session)),
+    ]
+    assert ensured_reasons == ["first-view", "second-view"]
+
+
+@pytest.mark.parametrize("failure_point", ["insert", "observe", "ensure"])
+def test_borrowed_submission_failure_leaves_owner_session_usable(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    context = weft_harness.context
+    prepared = submission_mod.prepare(
+        context,
+        {
+            "name": f"borrowed-{failure_point}",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+    )
+    failure = RuntimeError(f"{failure_point} failed")
+    if failure_point == "insert":
+        monkeypatch.setattr(
+            submission_mod,
+            "submit_spawn_request",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
+    elif failure_point == "observe":
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "observe_manager_availability",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
+    else:
+        monkeypatch.setattr(
+            submission_mod,
+            "ensure_manager_after_submission",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
+
+    with context.session() as session:
+        with pytest.raises(RuntimeError, match=f"{failure_point} failed") as error:
+            submission_mod._submit_prepared_outcome(
+                context,
+                prepared,
+                session=session,
+            )
+        if failure_point != "insert":
+            assert "accepted_tid=" in str(error.value)
+        with session.connection() as broker:
+            timestamp = broker.write("borrowed.owner.probe", failure_point)
+            assert broker.peek_one(
+                "borrowed.owner.probe",
+                exact_timestamp=timestamp,
+            ) == (failure_point, timestamp)
+
+
+def test_borrowed_connection_exit_failure_names_tid_and_leaves_owner_usable(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = weft_harness.context
+    prepared = submission_mod.prepare(
+        context,
+        {
+            "name": "borrowed-connection-exit",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+    )
+    original_connection = BrokerSession.connection
+
+    with context.session() as session:
+
+        @contextmanager
+        def fail_after_yield(owner: BrokerSession) -> Iterator[Any]:
+            with original_connection(owner) as broker:
+                yield broker
+            raise RuntimeError("connection exit failed")
+
+        with monkeypatch.context() as exit_patch:
+            exit_patch.setattr(BrokerSession, "connection", fail_after_yield)
+            with pytest.raises(
+                RuntimeError, match="connection exit failed.*accepted_tid="
+            ):
+                submission_mod._submit_prepared_outcome(
+                    context,
+                    prepared,
+                    session=session,
+                )
+
+        with session.connection() as broker:
+            timestamp = broker.write("borrowed.exit.probe", "usable")
+            assert broker.peek_one(
+                "borrowed.exit.probe", exact_timestamp=timestamp
+            ) == ("usable", timestamp)
+
+
+def test_retained_session_recovers_after_real_duplicate_tid_rollback(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = weft_harness.context
+    monkeypatch.setattr(
+        submission_mod,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: core_manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="test-ready",
+        ),
+    )
+    explicit_tid = "1777000000000000912"
+    first = submission_mod.prepare(
+        context,
+        {
+            "name": "first-explicit",
+            "tid": explicit_tid,
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+    )
+    duplicate = submission_mod.prepare(
+        context,
+        {
+            "name": "duplicate-explicit",
+            "tid": explicit_tid,
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+    )
+    third = submission_mod.prepare(
+        context,
+        {
+            "name": "third-fresh",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+    )
+
+    with context.session() as session:
+        first_outcome = submission_mod._submit_prepared_outcome(
+            context, first, session=session
+        )
+        with pytest.raises(IntegrityError):
+            submission_mod._submit_prepared_outcome(context, duplicate, session=session)
+        third_outcome = submission_mod._submit_prepared_outcome(
+            context, third, session=session
+        )
+        with session.connection() as broker:
+            assert (
+                broker.peek_one(
+                    WEFT_SPAWN_REQUESTS_QUEUE,
+                    exact_timestamp=int(first_outcome.receipt.tid),
+                )
+                is not None
+            )
+            assert (
+                broker.peek_one(
+                    WEFT_SPAWN_REQUESTS_QUEUE,
+                    exact_timestamp=int(third_outcome.receipt.tid),
+                )
+                is not None
+            )
 
 
 def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(

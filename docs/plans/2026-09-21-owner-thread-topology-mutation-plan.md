@@ -217,3 +217,7 @@ Landing: completed for the 0.9.105 release with user authorization.
 
 Taut's reactor restoration plan (F15) pins the Weft revision that carries this
 change so its owner-thread membership refresh works under the exact copy.
+Recorded 2026-09-22: Taut pins `9fc913c1` (0.9.105), whole-file SHA-256
+`3afa84fc7998644cc63d40374fad9326236b73ba3e408a86086a6dc33089da89`, and marks
+F15 resolved upstream. The file is unchanged in 0.9.106 (`cfa5bb21`). The
+[QUEUE.8] implementation mapping now carries this downstream note.

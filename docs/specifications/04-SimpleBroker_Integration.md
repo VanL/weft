@@ -168,6 +168,16 @@ and `tests/context/test_context.py`; native waiter acceptance coverage is
 `test_postgres_background_dynamic_membership_rebinds_native_waiter` in
 `tests/tasks/test_multiqueue_watcher.py`.
 
+An explicitly entered `WeftClient` may retain one SimpleBroker
+`BrokerSession` lease only for its exact resolved `WeftContext` target and
+immutable Config identity. Same-context submission may borrow that lease;
+alternate effective runtime roots use independent bounded sessions and are not
+cached by the base client. Every submission still owns and exits its connection
+operation before manager recovery or waits. SimpleBroker continues to own the
+process-shared backend core and PostgreSQL pool, per-operation checkout return,
+broken-connection replacement, fork-safe inherited-handle close, and final
+shutdown after the last lease closes.
+
 The bounded observation owners in `weft/commands/_result_wait.py`, `result.py`,
 `events.py`, `run.py`, and `tasks.py` retain persistent queue leases until their
 existing close/finally boundary. Regression coverage lives in
@@ -302,10 +312,12 @@ key as its single Postgres usage value. The operator-configured
 the Weft lane limits. Weft adds no prospective per-launch connection charge.
 
 Implementation note for [SB-0.4]:
-`weft/commands/submission.py::_submit_prepared_outcome` owns the effective-context
-session and connection across enqueue and initial availability. That connection
-operation ends before `ensure_manager_after_submission` receives the same-call
-observation and enters recovery. Standalone
+`weft/commands/submission.py::_submit_prepared_outcome` owns or borrows the
+exact effective-context session and owns one connection operation across
+enqueue and initial availability. That connection operation ends before
+`ensure_manager_after_submission` receives the same-call observation and enters
+recovery. `weft/client/_client.py::WeftClient` owns any retained lease and
+never retains a checkout or alternate-root session. Standalone
 `weft/core/manager_runtime.py::observe_manager_availability` owns its own bounded
 session/connection. Coverage lives in `tests/core/test_manager_runtime_connections.py`.
 See the [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
@@ -807,6 +819,8 @@ connection-pooling designs are tracked in the companion doc:
 - [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
 
 ## Related Plans
+
+- [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md) - reuses SimpleBroker's process-shared session machinery without retaining operation checkouts.
 
 - [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - makes the retained `PollingStrategy` the one backend-neutral wake arbiter and defines notifications as hints validated against live watched-queue state.
 

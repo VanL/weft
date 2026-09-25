@@ -113,6 +113,11 @@ def test_public_construction_type_checks_and_rejects_bad_client_inputs(
         "import time\n"
         "context: WeftContext = build_context(create_dirs=False, create_database=False)\n"
         "client = WeftClient(context)\n"
+        "with client as entered:\n"
+        "    same_client: WeftClient = entered\n"
+        "client.close()\n"
+        "with client:\n"
+        "    pass\n"
         "spec = TaskSpec(name='typed', tid=str(time.time_ns()), spec=SpecSection(type='command', process_target='echo', limits=LimitsSection(memory_mb=128)))\n"
         "client.prepare(spec)\n"
         "client.prepare({'name': 'mapping', 'spec': {'type': 'command', 'process_target': 'echo'}})\n",

@@ -104,8 +104,12 @@ _Implementation mapping_: `weft/commands/run.py::_enqueue_taskspec`;
 `Manager._build_child_spec`, `Manager._launch_child_task`.
 
 Implementation resource-ownership note: the initial availability check borrows
-from the prepared submission's session, ending that connection operation before
-per-TID reconciliation or startup. See the
+from the prepared submission's session. An explicitly retained client may lend
+that session; otherwise submission owns one bounded session. Both paths own one
+short connection operation across the committed spawn write and initial
+availability observation, capture the accepted TID before operation exit, and
+end the operation before per-TID reconciliation, manager startup, or any wait.
+Submission never closes or recycles a borrowed session. See the
 [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
 
 ### 2. Message Processing Flow with Reservation [MF-2]
@@ -1652,6 +1656,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md) - retains only the session lease across client submissions while preserving queue-first acceptance and bounded operations.
 
 - [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 

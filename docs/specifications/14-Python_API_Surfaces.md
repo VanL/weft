@@ -46,9 +46,13 @@ Submission remains responsible for committing the task and its TID.
 it resolves configuration and creates the metadata directories and broker;
 `create_dirs=False` and `create_database=False` disable those respective
 creation steps; resolution can still create the project root. A supplied
-context is preserved by `WeftClient`. The context
-does not own a permanently open broker; callers close queues they obtain and
-use the broker context manager to release its resources. The context's `config`
+context is preserved by `WeftClient`. The context does not own a permanently
+open broker; callers close queues they obtain and use the broker context
+manager to release its resources. An explicitly entered `WeftClient` may own
+one lazy `BrokerSession` lease for its exact resolved context and Config
+identity. Submission operations borrow that lease but keep each connection
+checkout and transaction bounded. An unentered or closed client retains
+bounded per-call session ownership. The context's `config`
 and `broker_config` are immutable SimpleBroker `Config` snapshots with uppercase
 unprefixed keys, as specified in [SB-0.4]. Create a new context to apply changed
 configuration; copying its values does not reconfigure live handles. Broker
@@ -56,13 +60,33 @@ types remain SimpleBroker's public contracts.
 
 `WeftContext.session()` returns a new SimpleBroker `BrokerSession` bound to the
 context's resolved target and `Config`. It is intended for a `with` block
-entered and exited by the executing thread. `WeftContext` and `WeftClient` do
-not cache a live session. Existing `queue()` and `broker()` ownership and
-defaults are unchanged.
+entered and exited by the executing thread. `WeftContext` does not cache a live
+session. `WeftClient.__enter__()` establishes same-process, same-thread
+ownership but creates the retained session lazily on first same-context
+submission. `close()` releases that lease on the owning thread. Failed close
+retains cleanup ownership and blocks submission or re-entry until the same
+owner retries successfully. Sequential re-entry is allowed; active nesting and
+active-scope submission, re-entry, and close from a foreign thread are rejected.
+Preparation and observation retain their existing ownership contracts. A
+forked child first abandons the inherited handle through SimpleBroker's public
+child-safe `BrokerSession.close()` path, then uses child-owned bounded state
+unless explicitly re-entered in the child. Successful close is idempotent and
+returns the client to bounded behavior. Already returned `Task` and
+`PreparedSubmission` handles remain usable after close.
+
+`WeftClient.__exit__()` preserves an active body exception over ordinary close
+failure by attaching cleanup diagnostics; with no body exception the close
+failure propagates. Non-ordinary cleanup exceptions retain SimpleBroker's
+priority. Retention spans only the session lease. It never spans a queue
+operation, backend checkout, SQL transaction, manager recovery, or readiness
+wait. Existing `queue()` and `broker()` ownership and defaults are unchanged.
 
 _Implementation mapping_: `weft/context.py::WeftContext.session` owns the
-factory. Exact target/config behavior is covered by
-`tests/context/test_context.py`; real-backend task/session cleanup is covered by
+factory. `weft/client/_client.py::WeftClient` owns the retained client
+lifecycle. Exact target/config behavior is covered by
+`tests/context/test_context.py`; client ownership is covered by
+`tests/core/test_client.py` and `tests/core/test_public_client_contracts.py`;
+real-backend task/session cleanup is covered by
 `tests/core/test_task_runtime_connections.py`.
 
 Related plan: [SimpleBroker configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
@@ -402,13 +426,24 @@ and `weft/commands/submission.py::prepare_pipeline`. Related preparation input a
 error contracts are covered by `weft/ext.py`, `tests/core/test_client.py`, and
 `tests/commands/test_submission.py`.
 
-Implementation note for [PY-3]:
-`weft/commands/submission.py::_submit_prepared_outcome` shares one bounded broker
-session and connection across the committed spawn write and initial manager
-observation. The
-accepted TID is captured before connection exit, so subsequent operation or
-session cleanup failures retain the accepted-TID annotation. This also serves
-`PreparedSubmission.submit()` and its Django on-commit adapter.
+Resource ownership rule for [PY-3]:
+`weft/commands/submission.py::_submit_prepared_outcome(..., session=None)` owns
+one bounded session when no session is supplied and borrows the supplied
+session otherwise. Both paths open one bounded connection operation for the
+committed spawn write and immediate manager observation, capture the accepted
+TID before operation exit, and release the operation before manager recovery.
+Submission never closes or recycles a borrowed session. Operation, session, or
+later recovery failures retain the accepted-TID annotation.
+
+`PreparedSubmission.submit()` asks its owning client to select the retained or
+bounded path. Within an active same-context scope it borrows that client's
+session. After scope exit or in a forked child it uses bounded ownership with
+its captured context and never borrows a fork-inherited session. Every client
+submission method, including `submit_command()`, uses this seam. A TaskSpec
+whose effective runtime root differs from the base client context uses bounded
+ownership; clients do not retain a map of alternate-root sessions.
+
+This also serves the Django on-commit adapter.
 See the [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
 
 ## Layering [PY-4]
@@ -426,6 +461,8 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
+- [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md)
 
 - [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md)
 

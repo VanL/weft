@@ -5,14 +5,18 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 import weft._exceptions as exception_types
+from simplebroker import BrokerSession
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import (
     DEFAULT_TASK_COMPLETION_TIMEOUT,
@@ -53,6 +57,7 @@ from weft.client._namespaces import (
     TasksNamespace,
 )
 from weft.context import WeftContext, build_context
+from weft.core import manager_runtime
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import open_monitor_store
 from weft.core.task_state import task_state_queue_name
@@ -155,6 +160,7 @@ CLIENT_API_PARITY_EXPECTATIONS = {
     "client": (
         WeftClient,
         {
+            "close",
             "from_context",
             "from_weft_context",
             "prepare",
@@ -548,6 +554,35 @@ def test_prepare_snapshots_payload_before_submission() -> None:
         assert result.value == "{'value': 'before'}"
 
 
+def test_entered_client_lazily_reuses_one_submission_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+        opened_sessions: list[object] = []
+        original_session = WeftContext.session
+
+        def counted_session(context: WeftContext) -> object:
+            session = original_session(context)
+            opened_sessions.append(session)
+            return session
+
+        monkeypatch.setattr(WeftContext, "session", counted_session)
+
+        with client:
+            client.prepare(_function_taskspec(harness.root), payload="prepared")
+            assert opened_sessions == []
+            first = client.submit(_function_taskspec(harness.root), payload="first")
+            second = client.submit(_function_taskspec(harness.root), payload="second")
+            assert len(opened_sessions) == 1
+
+        third = client.submit(_function_taskspec(harness.root), payload="third")
+        assert len(opened_sessions) == 2
+        for task in (first, second, third):
+            harness.register_tid(task.tid)
+
+
 def test_submit_command_returns_task_with_completed_result() -> None:
     with WeftTestHarness() as harness:
         harness.ensure_foreground_manager()
@@ -557,6 +592,339 @@ def test_submit_command_returns_task_with_completed_result() -> None:
 
         assert result.status == "completed"
         assert "hello" in (result.stdout or str(result.value))
+
+
+def test_entered_client_submit_command_uses_retained_submission_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+        opened_sessions: list[object] = []
+        original_session = WeftContext.session
+
+        def counted_session(context: WeftContext) -> object:
+            session = original_session(context)
+            opened_sessions.append(session)
+            return session
+
+        monkeypatch.setattr(WeftContext, "session", counted_session)
+
+        with client:
+            first = client.submit_command(["echo", "first"])
+            second = client.submit_command(["echo", "second"])
+
+        assert len(opened_sessions) == 1
+        assert first.result(timeout=30.0).status == "completed"
+        assert second.result(timeout=30.0).status == "completed"
+
+
+def test_failed_client_close_blocks_work_until_owner_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+        client.__enter__()
+        accepted = client.submit(_function_taskspec(harness.root), payload="first")
+        harness.register_tid(accepted.tid)
+        original_close = BrokerSession.close
+        close_attempts = 0
+
+        def fail_once(session: BrokerSession) -> None:
+            nonlocal close_attempts
+            close_attempts += 1
+            if close_attempts == 1:
+                raise RuntimeError("close refused")
+            original_close(session)
+
+        monkeypatch.setattr(BrokerSession, "close", fail_once)
+
+        with pytest.raises(RuntimeError, match="close refused"):
+            client.close()
+        with pytest.raises(RuntimeError, match="cleanup is pending"):
+            client.submit(_function_taskspec(harness.root), payload="blocked")
+        with pytest.raises(RuntimeError, match="cleanup is pending"):
+            client.__enter__()
+
+        client.close()
+        assert close_attempts == 2
+        recovered = client.submit(_function_taskspec(harness.root), payload="recovered")
+        harness.register_tid(recovered.tid)
+        assert close_attempts == 3
+
+
+def test_client_close_refusal_retains_real_same_key_operation() -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+        client.__enter__()
+        accepted = client.submit(_function_taskspec(harness.root), payload="first")
+        harness.register_tid(accepted.tid)
+        session = client._submission_session
+        assert session is not None
+
+        with session.connection():
+            with pytest.raises(RuntimeError, match="open Queue or connection"):
+                client.close()
+            with pytest.raises(RuntimeError, match="cleanup is pending"):
+                client.submit(_function_taskspec(harness.root), payload="blocked")
+            with pytest.raises(RuntimeError, match="cleanup is pending"):
+                client.__enter__()
+            assert client._submission_session is session
+
+        client.close()
+        assert client._submission_session is None
+        recovered = client.submit(_function_taskspec(harness.root), payload="recovered")
+        harness.register_tid(recovered.tid)
+
+
+def test_active_client_rejects_foreign_thread_without_losing_owner_session() -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+        owner_thread = threading.current_thread()
+
+        with client:
+            accepted = client.submit(
+                _function_taskspec(harness.root), payload="owner-first"
+            )
+            harness.register_tid(accepted.tid)
+
+            def submit_from_foreign_thread() -> None:
+                assert threading.current_thread() is not owner_thread
+                client.submit(_function_taskspec(harness.root), payload="foreign")
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(submit_from_foreign_thread)
+                with pytest.raises(RuntimeError, match="owner thread"):
+                    future.result()
+
+                close_future = executor.submit(client.close)
+                with pytest.raises(RuntimeError, match="owner thread"):
+                    close_future.result()
+
+            owner_second = client.submit(
+                _function_taskspec(harness.root), payload="owner-second"
+            )
+            harness.register_tid(owner_second.tid)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+def test_client_fork_reset_uses_child_bounded_state(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path / "fork-root")
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "tests.helpers.client_fork_probe", str(root)],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads(completed.stdout)
+    assert report == {
+        "child_bounded_after_submit": True,
+        "child_closed_inherited": True,
+        "child_retained_fresh_session": True,
+        "parent_session_still_open": True,
+        "parent_session_still_reused": True,
+    }
+
+
+def test_client_close_is_idempotent_and_active_scope_can_reenter_sequentially(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+        opened_sessions: list[object] = []
+        original_session = WeftContext.session
+
+        def counted_session(context: WeftContext) -> object:
+            session = original_session(context)
+            opened_sessions.append(session)
+            return session
+
+        monkeypatch.setattr(WeftContext, "session", counted_session)
+
+        client.close()
+        client.close()
+        with client:
+            first = client.submit(_function_taskspec(harness.root), payload="first")
+            harness.register_tid(first.tid)
+            with pytest.raises(RuntimeError, match="already active"):
+                client.__enter__()
+        client.close()
+        with client:
+            second = client.submit(_function_taskspec(harness.root), payload="second")
+            harness.register_tid(second.tid)
+
+        assert len(opened_sessions) == 2
+
+
+def test_client_exit_preserves_body_failure_and_allows_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+
+        with monkeypatch.context() as close_patch:
+            close_patch.setattr(
+                BrokerSession,
+                "close",
+                lambda _session: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+            )
+            with (
+                pytest.raises(ValueError, match="body failed") as error,
+                client,
+            ):
+                accepted = client.submit(
+                    _function_taskspec(harness.root), payload="accepted"
+                )
+                harness.register_tid(accepted.tid)
+                raise ValueError("body failed")
+
+        assert any("cleanup failed" in note for note in error.value.__notes__)
+        client.close()
+
+
+def test_client_exit_never_formats_cleanup_failure_over_body_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnformattableCleanupError(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("formatting cleanup failed")
+
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+        cleanup_failure = UnformattableCleanupError("literal cleanup detail")
+        cleanup_failure.add_note("cleanup note")
+
+        with monkeypatch.context() as close_patch:
+            close_patch.setattr(
+                BrokerSession,
+                "close",
+                lambda _session: (_ for _ in ()).throw(cleanup_failure),
+            )
+            with (
+                pytest.raises(ValueError, match="body failed") as error,
+                client,
+            ):
+                accepted = client.submit(
+                    _function_taskspec(harness.root), payload="accepted"
+                )
+                harness.register_tid(accepted.tid)
+                raise ValueError("body failed")
+
+        assert len(error.value.__notes__) == 2
+        assert error.value.__notes__[0].endswith(
+            "UnformattableCleanupError: literal cleanup detail"
+        )
+        assert error.value.__notes__[1] == (
+            "Additional WeftClient cleanup diagnostic: cleanup note"
+        )
+        client.close()
+
+
+def test_client_exit_preserves_nonordinary_cleanup_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+
+        with monkeypatch.context() as close_patch:
+            close_patch.setattr(
+                BrokerSession,
+                "close",
+                lambda _session: (_ for _ in ()).throw(KeyboardInterrupt()),
+            )
+            with pytest.raises(KeyboardInterrupt), client:
+                accepted = client.submit(
+                    _function_taskspec(harness.root), payload="accepted"
+                )
+                harness.register_tid(accepted.tid)
+                raise ValueError("body failure")
+
+        client.close()
+
+
+def test_entered_client_keeps_alternate_runtime_roots_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as base, WeftTestHarness() as alternate:
+        base.ensure_foreground_manager()
+        client = WeftClient(path=base.root)
+        opened_roots: list[Path] = []
+        original_session = WeftContext.session
+
+        def counted_session(context: WeftContext) -> object:
+            opened_roots.append(context.root)
+            return original_session(context)
+
+        monkeypatch.setattr(WeftContext, "session", counted_session)
+        monkeypatch.setattr(
+            "weft.commands.submission.ensure_manager_after_submission",
+            lambda *_args, **_kwargs: manager_runtime.ManagerEnsureResult(
+                outcome="ready",
+                manager_record=None,
+                started_here=False,
+                process_handle=None,
+                reason="test-ready",
+            ),
+        )
+
+        with client:
+            first = client.submit(
+                _function_taskspec(alternate.root), payload="alternate-one"
+            )
+            second = client.submit(
+                _function_taskspec(alternate.root), payload="alternate-two"
+            )
+            retained = client.submit(_function_taskspec(base.root), payload="base")
+            for task in (first, second, retained):
+                base.register_tid(task.tid)
+
+        assert opened_roots == [
+            alternate.root.resolve(),
+            alternate.root.resolve(),
+            base.root.resolve(),
+        ]
+
+
+def test_prepared_submission_uses_live_scope_then_bounded_captured_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        client = WeftClient(path=harness.root)
+        opened_sessions: list[object] = []
+        original_session = WeftContext.session
+
+        def counted_session(context: WeftContext) -> object:
+            session = original_session(context)
+            opened_sessions.append(session)
+            return session
+
+        monkeypatch.setattr(WeftContext, "session", counted_session)
+
+        with client:
+            live = client.prepare(_function_taskspec(harness.root), payload="live")
+            late = client.prepare(_function_taskspec(harness.root), payload="late")
+            live_task = live.submit()
+            assert len(opened_sessions) == 1
+
+        late_task = late.submit()
+        assert len(opened_sessions) == 2
+        assert live_task.context is client.context
+        assert late_task.context is client.context
+        harness.register_tid(live_task.tid)
+        harness.register_tid(late_task.tid)
 
 
 def test_submit_spec_and_pipeline_references_return_tasks() -> None:
@@ -598,6 +966,67 @@ def test_submit_spec_and_pipeline_references_return_tasks() -> None:
 
         _assert_task_result_value(spec_task, harness, "stored")
         _assert_task_result_value(pipeline_task, harness, "pipeline")
+
+
+def test_all_client_submission_surfaces_share_retained_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        _write_json(
+            harness.root / ".weft" / "tasks" / "stored-echo.json",
+            {
+                "name": "stored-echo",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+                "metadata": {},
+            },
+        )
+        _write_json(
+            harness.root / ".weft" / "tasks" / "pipeline-stage.json",
+            {
+                "name": "pipeline-stage",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+                "metadata": {},
+            },
+        )
+        _write_json(
+            harness.root / ".weft" / "pipelines" / "stored-pipeline.json",
+            {
+                "name": "stored-pipeline",
+                "stages": [{"name": "only", "task": "pipeline-stage"}],
+            },
+        )
+        client = WeftClient(path=harness.root)
+        opened_sessions: list[object] = []
+        original_session = WeftContext.session
+
+        def counted_session(context: WeftContext) -> object:
+            session = original_session(context)
+            opened_sessions.append(session)
+            return session
+
+        monkeypatch.setattr(WeftContext, "session", counted_session)
+
+        with client:
+            tasks = (
+                client.submit(_function_taskspec(harness.root), payload="taskspec"),
+                client.submit_spec("stored-echo", payload="spec"),
+                client.submit_pipeline("stored-pipeline", payload="pipeline"),
+                client.submit_command(["echo", "command"]),
+                client.prepare(
+                    _function_taskspec(harness.root), payload="prepared"
+                ).submit(),
+            )
+            assert len(opened_sessions) == 1
+
+        for task in tasks:
+            harness.register_tid(task.tid)
 
 
 def test_client_prepare_spec_translates_unknown_override() -> None:

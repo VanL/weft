@@ -9,10 +9,14 @@ Spec references:
 
 from __future__ import annotations
 
+import os
+import threading
 from collections.abc import Mapping, Sequence
+from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
+from simplebroker import BrokerSession
 from weft.commands import submission
 from weft.context import WeftContext, build_context
 
@@ -28,6 +32,22 @@ from ._task import Task
 
 if TYPE_CHECKING:
     from weft.client import TaskSpec
+    from weft.commands.types import PreparedSubmissionRequest
+
+
+class _ClientLifecycleState(Enum):
+    """Retained submission ownership states [PY-1]."""
+
+    BOUNDED = auto()
+    RETAINED_ACTIVE = auto()
+    CLEANUP_PENDING = auto()
+
+
+def _stable_exception_message(failure: BaseException) -> str:
+    """Render literal string arguments without invoking custom formatting."""
+
+    string_args = [argument for argument in failure.args if type(argument) is str]
+    return ": ".join(string_args) if string_args else "<message unavailable>"
 
 
 class WeftClient:
@@ -52,6 +72,114 @@ class WeftClient:
         self.managers = ManagersNamespace(self)
         self.specs = SpecsNamespace(self)
         self.system = SystemNamespace(self)
+        self._lifecycle_state = _ClientLifecycleState.BOUNDED
+        self._owner_pid: int | None = None
+        self._owner_thread: threading.Thread | None = None
+        self._submission_session: BrokerSession | None = None
+
+    def __enter__(self) -> Self:
+        """Activate lazy same-thread retained submission reuse [PY-1]."""
+
+        self._reset_after_fork()
+        if self._lifecycle_state is _ClientLifecycleState.CLEANUP_PENDING:
+            raise RuntimeError(
+                "WeftClient cleanup is pending. Retry close() on the owner thread."
+            )
+        if self._lifecycle_state is _ClientLifecycleState.RETAINED_ACTIVE:
+            raise RuntimeError("WeftClient is already active")
+        self._lifecycle_state = _ClientLifecycleState.RETAINED_ACTIVE
+        self._owner_pid = os.getpid()
+        self._owner_thread = threading.current_thread()
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except Exception as close_failure:
+            if exc is None:
+                raise
+            failure_notes = tuple(getattr(close_failure, "__notes__", ()))
+            exc.add_note(
+                "Additional WeftClient cleanup failure: "
+                f"{type(close_failure).__qualname__}: "
+                f"{_stable_exception_message(close_failure)}"
+            )
+            for note in failure_notes:
+                exc.add_note(f"Additional WeftClient cleanup diagnostic: {note}")
+
+    def close(self) -> None:
+        """Release a retained submission session on its owner thread [PY-1]."""
+
+        self._reset_after_fork()
+        if self._lifecycle_state is _ClientLifecycleState.BOUNDED:
+            return
+        self._require_owner("close")
+        session = self._submission_session
+        if session is not None:
+            try:
+                session.close()
+            except BaseException:
+                self._lifecycle_state = _ClientLifecycleState.CLEANUP_PENDING
+                raise
+        self._submission_session = None
+        self._owner_pid = None
+        self._owner_thread = None
+        self._lifecycle_state = _ClientLifecycleState.BOUNDED
+
+    def _reset_after_fork(self) -> None:
+        owner_pid = self._owner_pid
+        if owner_pid is None or owner_pid == os.getpid():
+            return
+        session = self._submission_session
+        if session is not None:
+            session.close()
+        self._submission_session = None
+        self._owner_pid = None
+        self._owner_thread = None
+        self._lifecycle_state = _ClientLifecycleState.BOUNDED
+
+    def _require_owner(self, operation: str) -> None:
+        if (
+            self._owner_pid != os.getpid()
+            or self._owner_thread is not threading.current_thread()
+        ):
+            raise RuntimeError(
+                f"Active WeftClient {operation} must run on its owner thread"
+            )
+
+    def _submit_prepared(self, prepared: PreparedSubmissionRequest) -> Task:
+        self._reset_after_fork()
+        session: BrokerSession | None = None
+        if self._lifecycle_state is _ClientLifecycleState.CLEANUP_PENDING:
+            self._require_owner("submission")
+            raise RuntimeError(
+                "WeftClient cleanup is pending. Retry close() before submission."
+            )
+        if self._lifecycle_state is _ClientLifecycleState.RETAINED_ACTIVE:
+            self._require_owner("submission")
+            runtime_root = submission._resolve_submission_runtime_root(
+                prepared.taskspec,
+                self.context,
+            )
+            if runtime_root == self.context.root.resolve():
+                if self._submission_session is None:
+                    self._submission_session = self.context.session()
+                session = self._submission_session
+        outcome = submission._submit_prepared_outcome(
+            self.context,
+            prepared,
+            session=session,
+        )
+        return Task(
+            self,
+            outcome.receipt.tid,
+            context=outcome.runtime_context,
+        )
 
     @classmethod
     def from_context(
@@ -171,14 +299,14 @@ class WeftClient:
         shell: bool = False,
         **overrides: Any,
     ) -> Task:
-        receipt = submission.submit_command(
+        prepared = submission._prepare_command(
             self.context,
             command,
             payload=payload,
             shell=shell,
             **overrides,
         )
-        return Task(self, receipt.tid)
+        return self._submit_prepared(prepared)
 
     def task(self, tid: str) -> Task:
         return Task(self, submission.normalize_tid(tid))

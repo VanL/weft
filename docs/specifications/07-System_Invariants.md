@@ -223,6 +223,17 @@ through `MultiQueueWatcher._submit_topology_mutation()`,
 fires its SQLite, concurrency, cleanup, SIGINT, fallback, and real PostgreSQL
 paths.
 
+_Downstream exact copy_: Taut vendors `weft/core/tasks/multiqueue_watcher.py`
+whole and unmodified as its scheduler block (Taut reactor restoration plan,
+S1), pinned to Weft `9fc913c1` (0.9.105), whole-file SHA-256
+`3afa84fc7998644cc63d40374fad9326236b73ba3e408a86086a6dc33089da89`. That file
+is unchanged through `cfa5bb21` (0.9.106), so the pin is still exact. The
+[QUEUE.8] contract above, including the standalone `_sigint_handler` signal-frame
+rule and owner-thread mutation between dispatch passes, is therefore a contract
+for that copy as well. A change to this file must be recorded in the CHANGELOG
+so Taut can re-pin and re-record its digest; Taut does not import Weft at
+runtime.
+
 ### Resource Invariants
 
 _Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/resource_monitor.py`,

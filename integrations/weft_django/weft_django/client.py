@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Self
 
 from django.db import transaction
 
@@ -29,6 +29,7 @@ from weft_django.conf import (
     get_explicit_context,
     merge_metadata,
 )
+from weft_django.lifecycle import get_current_client
 from weft_django.registry import get_task
 
 
@@ -118,6 +119,236 @@ class DjangoWeftClient:
     def __init__(self, core_client: WeftClient) -> None:
         self.core_client = core_client
 
+    def __enter__(self) -> Self:
+        self.core_client.__enter__()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        self.core_client.__exit__(exc_type, exc, traceback)
+
+    def close(self) -> None:
+        self.core_client.close()
+
+    def submit_registered_task(
+        self,
+        task: Any,
+        *,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        overrides: Mapping[str, Any] | None = None,
+        envelope: Mapping[str, Any] | None = None,
+    ) -> WeftSubmission:
+        _validate_decorated_task_overrides(overrides)
+        built_envelope = dict(envelope or task.build_envelope(*args, **kwargs))
+        taskspec_payload = build_registered_task_taskspec(
+            task,
+            envelope=built_envelope,
+            embed_envelope=False,
+        )
+        submission_name = _effective_submission_name(
+            task,
+            overrides,
+            default=task.name,
+        )
+        task_handle = self.core_client.submit(
+            taskspec_payload,
+            payload={"payload": built_envelope},
+            **_submit_kwargs(overrides),
+        )
+        return _maybe_wait(_wrap_task(task_handle, name=submission_name), overrides)
+
+    def submit_registered_task_on_commit(
+        self,
+        task: Any,
+        *,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        overrides: Mapping[str, Any] | None = None,
+    ) -> WeftDeferredSubmission:
+        if overrides and overrides.get("wait"):
+            raise ValueError("enqueue_on_commit(..., wait=True) is not supported")
+        _validate_decorated_task_overrides(overrides)
+        envelope = task.build_envelope(*args, **kwargs)
+        prepared = self.core_client.prepare(
+            build_registered_task_taskspec(
+                task,
+                envelope=envelope,
+                embed_envelope=False,
+            ),
+            payload={"payload": envelope},
+            **_submit_kwargs(overrides),
+        )
+        deferred_name = _effective_submission_name(task, overrides, default=task.name)
+        deferred = WeftDeferredSubmission(name=deferred_name)
+
+        def _submit() -> None:
+            deferred.bind(_submit_prepared(prepared, name=deferred_name))
+
+        transaction.on_commit(_submit)
+        return deferred
+
+    def submit_taskspec(
+        self,
+        taskspec: Any,
+        *,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> WeftSubmission:
+        _reject_legacy_payload_names(overrides)
+        task = self.core_client.submit(
+            taskspec,
+            payload=payload,
+            **_submit_kwargs(overrides),
+        )
+        return _maybe_wait(
+            _wrap_task(
+                task,
+                name=_effective_submission_name(taskspec, overrides, default="task"),
+            ),
+            overrides or None,
+        )
+
+    def submit_taskspec_on_commit(
+        self,
+        taskspec: Any,
+        *,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> WeftDeferredSubmission:
+        _reject_legacy_payload_names(overrides)
+        if overrides.get("wait"):
+            raise ValueError(
+                "submit_taskspec_on_commit(..., wait=True) is not supported"
+            )
+        deferred_name = _effective_submission_name(taskspec, overrides, default="task")
+        prepared = self.core_client.prepare(
+            taskspec,
+            payload=payload,
+            **_submit_kwargs(overrides),
+        )
+        deferred = WeftDeferredSubmission(name=deferred_name)
+
+        def _submit() -> None:
+            deferred.bind(_submit_prepared(prepared, name=deferred_name))
+
+        transaction.on_commit(_submit)
+        return deferred
+
+    def submit_spec_reference(
+        self,
+        reference: str | Any,
+        *,
+        spec_args: Sequence[str] = (),
+        stdin_text: str | None = None,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> WeftSubmission:
+        _reject_legacy_payload_names(overrides)
+        task = self.core_client.submit_spec(
+            reference,
+            spec_args=spec_args,
+            stdin_text=stdin_text,
+            payload=payload,
+            **_submit_kwargs(overrides),
+        )
+        return _maybe_wait(
+            _wrap_task(
+                task,
+                name=_effective_submission_name(
+                    reference, overrides, default=str(reference)
+                ),
+            ),
+            overrides or None,
+        )
+
+    def submit_spec_reference_on_commit(
+        self,
+        reference: str | Any,
+        *,
+        spec_args: Sequence[str] = (),
+        stdin_text: str | None = None,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> WeftDeferredSubmission:
+        _reject_legacy_payload_names(overrides)
+        if overrides.get("wait"):
+            raise ValueError(
+                "submit_spec_reference_on_commit(..., wait=True) is not supported"
+            )
+        deferred_name = _effective_submission_name(
+            reference, overrides, default=str(reference)
+        )
+        prepared = self.core_client.prepare_spec(
+            reference,
+            spec_args=spec_args,
+            stdin_text=stdin_text,
+            payload=payload,
+            **_submit_kwargs(overrides),
+        )
+        deferred = WeftDeferredSubmission(name=deferred_name)
+
+        def _submit() -> None:
+            deferred.bind(_submit_prepared(prepared, name=deferred_name))
+
+        transaction.on_commit(_submit)
+        return deferred
+
+    def submit_pipeline_reference(
+        self,
+        reference: str | Any,
+        *,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> WeftSubmission:
+        _reject_legacy_payload_names(overrides)
+        task = self.core_client.submit_pipeline(
+            reference,
+            payload=payload,
+            **_submit_kwargs(overrides),
+        )
+        return _maybe_wait(
+            _wrap_task(
+                task,
+                name=_effective_submission_name(
+                    reference, overrides, default=str(reference)
+                ),
+            ),
+            overrides or None,
+        )
+
+    def submit_pipeline_reference_on_commit(
+        self,
+        reference: str | Any,
+        *,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> WeftDeferredSubmission:
+        _reject_legacy_payload_names(overrides)
+        if overrides.get("wait"):
+            raise ValueError(
+                "submit_pipeline_reference_on_commit(..., wait=True) is not supported"
+            )
+        deferred_name = _effective_submission_name(
+            reference, overrides, default=str(reference)
+        )
+        prepared = self.core_client.prepare_pipeline(
+            reference,
+            payload=payload,
+            **_submit_kwargs(overrides),
+        )
+        deferred = WeftDeferredSubmission(name=deferred_name)
+
+        def _submit() -> None:
+            deferred.bind(_submit_prepared(prepared, name=deferred_name))
+
+        transaction.on_commit(_submit)
+        return deferred
+
     def task(self, tid: str, *, name: str | None = None) -> WeftSubmission:
         return WeftSubmission(self.core_client.task(tid), name=name or tid)
 
@@ -138,7 +369,10 @@ class DjangoWeftClient:
             return None
 
     def snapshot(self, tid: str) -> TaskSnapshot | None:
-        return self.core_client.task(tid).snapshot()
+        try:
+            return self.core_client.task(tid).snapshot()
+        except ValueError:
+            return None
 
     def result(self, tid: str, timeout: float | None = None) -> TaskResult:
         return self.core_client.task(tid).result(timeout=timeout)
@@ -163,6 +397,12 @@ def get_core_client() -> WeftClient:
 
 def get_client() -> DjangoWeftClient:
     return DjangoWeftClient(get_core_client())
+
+
+def _current_client() -> DjangoWeftClient:
+    """Select the request-owned client or a bounded one-shot client."""
+
+    return get_current_client(get_client)
 
 
 def _submit_kwargs(overrides: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -330,24 +570,13 @@ def submit_registered_task(
     overrides: Mapping[str, Any] | None = None,
     envelope: Mapping[str, Any] | None = None,
 ) -> WeftSubmission:
-    _validate_decorated_task_overrides(overrides)
-    built_envelope = dict(envelope or task.build_envelope(*args, **kwargs))
-    taskspec_payload = build_registered_task_taskspec(
+    return _current_client().submit_registered_task(
         task,
-        envelope=built_envelope,
-        embed_envelope=False,
+        args=args,
+        kwargs=kwargs,
+        overrides=overrides,
+        envelope=envelope,
     )
-    submission_name = _effective_submission_name(
-        task,
-        overrides,
-        default=task.name,
-    )
-    task_handle = get_core_client().submit(
-        taskspec_payload,
-        payload={"payload": built_envelope},
-        **_submit_kwargs(overrides),
-    )
-    return _maybe_wait(_wrap_task(task_handle, name=submission_name), overrides)
 
 
 def submit_registered_task_on_commit(
@@ -362,29 +591,12 @@ def submit_registered_task_on_commit(
     Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.4]
     """
 
-    if overrides and overrides.get("wait"):
-        raise ValueError("enqueue_on_commit(..., wait=True) is not supported")
-    _validate_decorated_task_overrides(overrides)
-    submit_overrides = _submit_kwargs(overrides)
-    envelope = task.build_envelope(*args, **kwargs)
-    taskspec_payload = build_registered_task_taskspec(
+    return _current_client().submit_registered_task_on_commit(
         task,
-        envelope=envelope,
-        embed_envelope=False,
+        args=args,
+        kwargs=kwargs,
+        overrides=overrides,
     )
-    deferred_name = _effective_submission_name(task, overrides, default=task.name)
-    prepared = get_core_client().prepare(
-        taskspec_payload,
-        payload={"payload": envelope},
-        **submit_overrides,
-    )
-    deferred = WeftDeferredSubmission(name=deferred_name)
-
-    def _submit() -> None:
-        deferred.bind(_submit_prepared(prepared, name=deferred_name))
-
-    transaction.on_commit(_submit)
-    return deferred
 
 
 def export_registered_task_taskspec(
@@ -421,19 +633,7 @@ def submit_taskspec(
     payload: Any = None,
     **overrides: Any,
 ) -> WeftSubmission:
-    _reject_legacy_payload_names(overrides)
-    task = get_core_client().submit(
-        taskspec,
-        payload=payload,
-        **_submit_kwargs(overrides),
-    )
-    return _maybe_wait(
-        _wrap_task(
-            task,
-            name=_effective_submission_name(taskspec, overrides, default="task"),
-        ),
-        overrides or None,
-    )
+    return _current_client().submit_taskspec(taskspec, payload=payload, **overrides)
 
 
 def submit_taskspec_on_commit(
@@ -447,23 +647,9 @@ def submit_taskspec_on_commit(
     Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.4]
     """
 
-    _reject_legacy_payload_names(overrides)
-    if overrides.get("wait"):
-        raise ValueError("submit_taskspec_on_commit(..., wait=True) is not supported")
-    submit_overrides = _submit_kwargs(overrides)
-    deferred_name = _effective_submission_name(taskspec, overrides, default="task")
-    prepared = get_core_client().prepare(
-        taskspec,
-        payload=payload,
-        **submit_overrides,
+    return _current_client().submit_taskspec_on_commit(
+        taskspec, payload=payload, **overrides
     )
-    deferred = WeftDeferredSubmission(name=deferred_name)
-
-    def _submit() -> None:
-        deferred.bind(_submit_prepared(prepared, name=deferred_name))
-
-    transaction.on_commit(_submit)
-    return deferred
 
 
 def submit_spec_reference(
@@ -474,22 +660,12 @@ def submit_spec_reference(
     payload: Any = None,
     **overrides: Any,
 ) -> WeftSubmission:
-    _reject_legacy_payload_names(overrides)
-    task = get_core_client().submit_spec(
+    return _current_client().submit_spec_reference(
         reference,
         spec_args=spec_args,
         stdin_text=stdin_text,
         payload=payload,
-        **_submit_kwargs(overrides),
-    )
-    return _maybe_wait(
-        _wrap_task(
-            task,
-            name=_effective_submission_name(
-                reference, overrides, default=str(reference)
-            ),
-        ),
-        overrides or None,
+        **overrides,
     )
 
 
@@ -506,29 +682,13 @@ def submit_spec_reference_on_commit(
     Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.4]
     """
 
-    _reject_legacy_payload_names(overrides)
-    if overrides.get("wait"):
-        raise ValueError(
-            "submit_spec_reference_on_commit(..., wait=True) is not supported"
-        )
-    submit_overrides = _submit_kwargs(overrides)
-    deferred_name = _effective_submission_name(
-        reference, overrides, default=str(reference)
-    )
-    prepared = get_core_client().prepare_spec(
+    return _current_client().submit_spec_reference_on_commit(
         reference,
         spec_args=spec_args,
         stdin_text=stdin_text,
         payload=payload,
-        **submit_overrides,
+        **overrides,
     )
-    deferred = WeftDeferredSubmission(name=deferred_name)
-
-    def _submit() -> None:
-        deferred.bind(_submit_prepared(prepared, name=deferred_name))
-
-    transaction.on_commit(_submit)
-    return deferred
 
 
 def submit_pipeline_reference(
@@ -537,20 +697,8 @@ def submit_pipeline_reference(
     payload: Any = None,
     **overrides: Any,
 ) -> WeftSubmission:
-    _reject_legacy_payload_names(overrides)
-    task = get_core_client().submit_pipeline(
-        reference,
-        payload=payload,
-        **_submit_kwargs(overrides),
-    )
-    return _maybe_wait(
-        _wrap_task(
-            task,
-            name=_effective_submission_name(
-                reference, overrides, default=str(reference)
-            ),
-        ),
-        overrides or None,
+    return _current_client().submit_pipeline_reference(
+        reference, payload=payload, **overrides
     )
 
 
@@ -565,27 +713,9 @@ def submit_pipeline_reference_on_commit(
     Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-8.4]
     """
 
-    _reject_legacy_payload_names(overrides)
-    if overrides.get("wait"):
-        raise ValueError(
-            "submit_pipeline_reference_on_commit(..., wait=True) is not supported"
-        )
-    submit_overrides = _submit_kwargs(overrides)
-    deferred_name = _effective_submission_name(
-        reference, overrides, default=str(reference)
+    return _current_client().submit_pipeline_reference_on_commit(
+        reference, payload=payload, **overrides
     )
-    prepared = get_core_client().prepare_pipeline(
-        reference,
-        payload=payload,
-        **submit_overrides,
-    )
-    deferred = WeftDeferredSubmission(name=deferred_name)
-
-    def _submit() -> None:
-        deferred.bind(_submit_prepared(prepared, name=deferred_name))
-
-    transaction.on_commit(_submit)
-    return deferred
 
 
 def _resolve_task(task: str | Any) -> Any:
@@ -623,36 +753,27 @@ def enqueue_on_commit(
 
 
 def status(tid: str) -> TaskTerminalSnapshot | None:
-    try:
-        return get_core_client().task(tid).terminal_snapshot()
-    except ValueError:
-        return None
+    return _current_client().status(tid)
 
 
 def terminal_snapshot(
     tid: str,
     timeout: float = 0.0,
 ) -> TaskTerminalSnapshot | None:
-    try:
-        return get_core_client().task(tid).terminal_snapshot(timeout=timeout)
-    except ValueError:
-        return None
+    return _current_client().terminal_snapshot(tid, timeout=timeout)
 
 
 def snapshot(tid: str) -> TaskSnapshot | None:
-    try:
-        return get_core_client().task(tid).snapshot()
-    except ValueError:
-        return None
+    return _current_client().snapshot(tid)
 
 
 def result(tid: str, timeout: float | None = None) -> TaskResult:
-    return get_core_client().task(tid).result(timeout=timeout)
+    return _current_client().result(tid, timeout=timeout)
 
 
 def stop(tid: str) -> bool:
     try:
-        get_core_client().task(tid).stop()
+        _current_client().stop(tid)
     except (ControlRejected, TaskNotFound, ValueError):
         return False
     return True
@@ -660,7 +781,7 @@ def stop(tid: str) -> bool:
 
 def kill(tid: str) -> bool:
     try:
-        get_core_client().task(tid).kill()
+        _current_client().kill(tid)
     except (ControlRejected, TaskNotFound, ValueError):
         return False
     return True

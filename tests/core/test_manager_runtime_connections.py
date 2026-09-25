@@ -16,13 +16,14 @@ from uuid import UUID
 import pytest
 
 from simplebroker import BrokerSession
-from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.test_backend import active_test_backend, prepare_project_root
 from weft._constants import (
     MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft.client import WeftClient
 from weft.commands import submission
 from weft.context import WeftContext, build_context
 from weft.core import control_probe, heartbeat, manager_runtime
@@ -407,6 +408,162 @@ def test_prepared_submission_reuses_one_connection_and_releases_with_sibling(
             if ping_ready:
                 assert broker.peek_one(f"T{_TID}.ctrl_out") is None
                 assert broker.peek_one(f"T{_TID}.ctrl_in") is None
+
+
+def test_retained_client_reuses_sqlite_core_across_bounded_submissions(
+    counted_manager_connections: tuple[WeftContext, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, connections = counted_manager_connections
+    if ctx.backend_name != "sqlite":
+        pytest.skip("physical core count is only a valid SQLite reuse oracle")
+    monkeypatch.setattr(
+        submission,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="test-ready",
+        ),
+    )
+    client = WeftClient.from_weft_context(ctx)
+
+    with client:
+        first = client.submit(
+            {
+                "name": "retained-first",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            }
+        )
+        after_first = len(connections)
+        second = client.submit(
+            {
+                "name": "retained-second",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            }
+        )
+        assert len(connections) == after_first
+
+    with ctx.session() as session, session.connection() as broker:
+        assert len(connections) > after_first
+        assert (
+            broker.peek_one(
+                WEFT_SPAWN_REQUESTS_QUEUE,
+                exact_timestamp=int(first.tid),
+            )
+            is not None
+        )
+        assert (
+            broker.peek_one(
+                WEFT_SPAWN_REQUESTS_QUEUE,
+                exact_timestamp=int(second.tid),
+            )
+            is not None
+        )
+
+
+def test_retained_postgres_session_returns_each_pool_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if active_test_backend() != "postgres":
+        pytest.skip("PostgreSQL checkout proof")
+    psycopg_pool = pytest.importorskip("psycopg_pool")
+    original_getconn = psycopg_pool.ConnectionPool.getconn
+    original_putconn = psycopg_pool.ConnectionPool.putconn
+    active = 0
+    maximum_active = 0
+    get_count = 0
+    put_count = 0
+    pool_ids: set[int] = set()
+
+    def getconn(pool: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal active, get_count, maximum_active
+        connection = original_getconn(pool, *args, **kwargs)
+        pool_ids.add(id(pool))
+        active += 1
+        get_count += 1
+        maximum_active = max(maximum_active, active)
+        return connection
+
+    def putconn(pool: Any, connection: Any) -> None:
+        nonlocal active, put_count
+        try:
+            original_putconn(pool, connection)
+        finally:
+            active -= 1
+            put_count += 1
+
+    monkeypatch.setattr(psycopg_pool.ConnectionPool, "getconn", getconn)
+    monkeypatch.setattr(psycopg_pool.ConnectionPool, "putconn", putconn)
+    ctx = build_context(prepare_project_root(tmp_path))
+    pool_ids.clear()
+    active = maximum_active = get_count = put_count = 0
+
+    ensure_active_counts: list[int] = []
+
+    def ensure(*_args: Any, **_kwargs: Any) -> manager_runtime.ManagerEnsureResult:
+        ensure_active_counts.append(active)
+        return manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="test-ready",
+        )
+
+    monkeypatch.setattr(submission, "ensure_manager_after_submission", ensure)
+    client = WeftClient.from_weft_context(ctx)
+    with client:
+        first = client.submit(
+            {
+                "name": "retained-pg-first",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            }
+        )
+        assert active == 0
+        second = client.submit(
+            {
+                "name": "retained-pg-second",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            }
+        )
+        assert active == 0
+
+    assert ensure_active_counts == [0, 0]
+    assert active == 0
+    assert get_count == put_count
+    assert maximum_active == 1
+    assert len(pool_ids) == 1
+    with ctx.session() as session, session.connection() as broker:
+        assert (
+            broker.peek_one(
+                WEFT_SPAWN_REQUESTS_QUEUE,
+                exact_timestamp=int(first.tid),
+            )
+            is not None
+        )
+        assert (
+            broker.peek_one(
+                WEFT_SPAWN_REQUESTS_QUEUE,
+                exact_timestamp=int(second.tid),
+            )
+            is not None
+        )
 
 
 def test_availability_observes_new_stopped_record(

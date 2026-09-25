@@ -5,6 +5,8 @@
 The package is typed (`py.typed`) and depends on Weft through the public
 `weft.client` API.
 
+Supported Django versions are 5.2 and 6.x (`django>=5.2,<7`).
+
 It provides:
 
 - `@weft_task` for Django-owned synchronous background functions
@@ -81,6 +83,35 @@ Settings import and task discovery do not initialize Weft. Runtime operations
 acquire a client with a resolved context and Config snapshot; a retained client
 keeps that snapshot, while a later acquisition can observe new settings.
 
+During a synchronous Django request, module-level submission and task helpers
+lazily share one request-owned `DjangoWeftClient`. The client retains a
+SimpleBroker session lease, not a checked-out database connection. Each broker
+operation still checks out, commits or rolls back, and returns its connection
+before manager readiness or application code continues. Request start and
+finish do no broker work when no helper is used.
+
+This automatic lifetime covers WSGI requests and synchronous views running in
+Django's thread-sensitive ASGI executor. A helper called directly from an
+async view uses a bounded one-shot client. A synchronous streaming response
+retains the lease until response close, but each broker checkout remains
+bounded to one operation. Do not carry a request-owned client into async tasks
+or another thread.
+
+For batches outside a request, own the lifetime explicitly and close it on the
+same thread:
+
+```python
+from weft_django import get_client
+
+with get_client() as client:
+    first = client.submit_taskspec(first_spec, payload=first_payload)
+    second = client.submit_taskspec(second_spec, payload=second_payload)
+```
+
+`get_client()` always returns a fresh explicitly owned client. It does not
+expose or borrow the private request client. Forked workers and settings changes
+discard inherited or stale request entries before admitting new work.
+
 After upgrading, stray `BROKER_*` or default-valued broker settings no longer
 redirect Django's artifacts to CWD. If an installation used that former
 destination, pin `CONTEXT` to its existing root before upgrading. The integration
@@ -134,6 +165,21 @@ redirect prepared work. Core preparation binds an explicit relative or
 home-relative TaskSpec context to its absolute path. An explicitly different
 TaskSpec root still has its broker selected at submission using captured Config;
 broker project files are not snapshotted.
+
+For explicit transaction batches, place the client scope outside the atomic
+block so commit callbacks run while the retained lease is active:
+
+```python
+with get_client() as client:
+    with transaction.atomic():
+        client.submit_taskspec_on_commit(first_spec)
+        client.submit_taskspec_on_commit(second_spec)
+```
+
+Reversing those scopes is valid, but callbacks that run after client close use
+the captured client in bounded one-shot mode. Each helper still registers one
+independent callback, so Django's callback order and savepoint rollback rules
+remain unchanged.
 
 ## Composition Export
 

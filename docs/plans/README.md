@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 229 plan files in this directory.
+There are currently 231 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,8 @@ There are currently 229 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-09-25-client-owned-submission-session-plan.md`](./2026-09-25-client-owned-submission-session-plan.md) | Client-Owned Submission Session Reuse | `draft` | none |
+| [`2026-09-23-task-state-current-view-plan.md`](./2026-09-23-task-state-current-view-plan.md) | Task-State Current View and Status/List Projection Plan | `draft` | none |
 | [`2026-09-22-task-monitor-maintenance-worker-plan.md`](./2026-09-22-task-monitor-maintenance-worker-plan.md) | TaskMonitor MaintenanceWorker | `completed` | none |
 | [`2026-09-21-owner-thread-topology-mutation-plan.md`](./2026-09-21-owner-thread-topology-mutation-plan.md) | Owner-Thread Topology Mutation Plan | `completed` | none |
 | [`2026-09-21-watcher-sigint-lock-safety-plan.md`](./2026-09-21-watcher-sigint-lock-safety-plan.md) | Watcher SIGINT Lock Safety | `completed` | none |

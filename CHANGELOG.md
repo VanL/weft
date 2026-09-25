@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## [0.9.107] - 2026-09-25
+
+### Changed
+
+- `WeftClient` can now own a same-thread retained SimpleBroker session lease
+  through its context-manager lifecycle. All submission surfaces share that
+  lease while keeping each transaction and pool checkout bounded; prepared
+  submissions, alternate roots, cleanup failures, and forked children retain
+  explicit ownership rules.
+- `weft-django` now lazily reuses one client during synchronous WSGI requests
+  and synchronous views in Django's thread-sensitive ASGI executor. Direct
+  async calls and work outside a request remain bounded one-shot operations;
+  `get_client()` remains a fresh explicitly owned client for worker batches.
+- Core is versioned 0.9.107 and `weft-django` 0.9.42 requires
+  `weft>=0.9.107`. The Django package now supports `django>=5.2,<7`, dropping
+  the retired 4.2 line and adding the supported 6.x line.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.42`, `weft-docker 0.9.82`,
+  `weft-macos-sandbox 0.6.11`, and `weft-microsandbox 0.5.12`.
+
+### Fixed
+
+- Repeated Django submissions no longer rebuild and immediately discard a
+  Weft client and broker-session lease for every child task. PostgreSQL pool
+  checkouts still return after each individual broker operation.
+
 ## [0.9.106] - 2026-09-22
 
 ### Changed

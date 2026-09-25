@@ -240,6 +240,13 @@ The client should internally reuse the same context resolution, spawn
 submission, and result-wait paths that the CLI uses today. It should not invent
 second-path semantics.
 
+`WeftClient` is a context manager for an explicit retained submission scope.
+Entry records same-process, same-thread ownership and leaves session creation
+lazy. Same-context submissions borrow one retained SimpleBroker session while
+each submission still owns a bounded connection checkout and transaction.
+`close()` releases the lease; unentered and closed clients retain bounded
+one-shot behavior.
+
 Caller-supplied timeouts on follow-style client iterators are local wait
 budgets. They may stop the client-side iterator with a timeout error, but they
 must not publish task timeout state or change the underlying task lifecycle.
@@ -310,6 +317,10 @@ The integration should ship a standard Django app:
 - submit tasks
 - perform blocking broker health checks
 - open long-lived queue watchers
+
+`ready()` connects stable-UID synchronous receivers for Django's public
+`request_started`, `request_finished`, and `setting_changed` signals. Signal
+registration and requests with no Weft operation perform no broker I/O.
 
 The integration must preserve Weft's rule that ordinary execution should fail
 on the normal path rather than hide speculative preflight behind framework
@@ -725,6 +736,23 @@ The integration should also expose:
 - a decorated task object
 - a registered task name string
 
+`get_client()` returns a fresh explicitly owned `DjangoWeftClient`; entering it
+delegates to the core client lifecycle and is the retained surface for
+management commands, background workers, and caller-defined batches. Module
+helpers automatically share one lazy request-local client for WSGI requests
+and synchronous work in Django's ASGI thread-sensitive executor. Outside an
+active supported request scope they remain bounded one-shot operations. Direct
+async-view immediate helpers are one-shot; transaction/deferred helpers must
+run through Django's synchronous thread-sensitive bridge.
+
+`DjangoWeftClient` is a context manager with deterministic same-thread
+`close()`. It exposes the decorated-task, native TaskSpec, spec-reference, and
+pipeline immediate and deferred submission methods represented by the module
+helpers. Those helpers are compatibility facades over the object; there is no
+special `client=` keyword on only one deferred helper. The request-local or
+explicitly entered wrapper owns the active core-client scope, but its broker
+session remains lazy until a same-context submission.
+
 Known-TID status rule:
 
 - `weft_django.status(tid)` is a direct known-TID reconciliation helper. It
@@ -820,6 +848,14 @@ commit. An explicitly different TaskSpec runtime root continues to have its brok
 resolved by core with the captured Config; this rule does not snapshot broker project
 files.
 
+Within a supported active request, all immediate and deferred helper families
+select the same request-local `DjangoWeftClient`. A callback that runs after
+request close submits through its captured core client using bounded ownership;
+it does not reacquire settings or redirect prepared work. Settings changes
+advance a process generation and rotate only the current owner-local client;
+other owner contexts rotate on their next access. Existing retained and
+prepared clients keep their resolved context and Config snapshots.
+
 When the core broker write succeeds, deferred submission binds the accepted TID
 even if subsequent manager readiness cannot be established. Readiness-only
 degradation must not raise from that commit callback or prevent later callbacks
@@ -844,9 +880,23 @@ Behavior:
   so bad Weft submissions do not commit app rows and then fail after commit
 - a successful core broker write binds its accepted TID even when later manager
   readiness degrades; that degradation does not abort later commit callbacks
+- callbacks remain separate and follow Django's registration order and nested
+  savepoint rollback rules; they are not combined into an implicit batch
+- callbacks executed during an active request or explicit client scope may
+  borrow that scope's retained session, while each submission keeps its broker
+  operation and transaction bounded
+- normal request callbacks execute before `request_finished`; test callbacks
+  or reversed explicit-client nesting may execute after scope close and then
+  use bounded ownership with their captured client context
+- callbacks discarded by rollback create no retained submission session and no
+  spawn row; earlier client construction may still have performed [PY-1]'s
+  bounded broker ensure
 
 Implementation plan backlink:
 [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md).
+
+Request lifecycle ownership is specified by the
+[client-owned submission session reuse plan](../plans/2026-09-25-client-owned-submission-session-plan.md).
 
 This is the default-safe ORM integration point and should be the strongly
 recommended surface for tasks that depend on freshly written database state.
@@ -1169,9 +1219,36 @@ a TaskSpec must not resolve a context. A retained client uses its resolved conte
 Config snapshot; acquiring another client can observe changed settings. The integration
 does not cache contexts globally.
 
+The integration may retain a resolved client only inside an explicit client
+scope or the current Django request's owner-local registry. That registry uses
+`asgiref.local.Local(thread_critical=True)`, keeps request-active state separate
+from the replaceable settings-generation client entry, and never closes a
+foreign thread's client. Request finish closes the current owner-local client
+before its request executor can end. The first ordinary close failure is logged
+and retried once immediately on that owner thread. Successful retry deletes the
+entry. Repeated failure is logged as an owner-lifecycle invariant violation,
+retains cleanup-pending state, and blocks replacement in any later access by
+that same surviving owner context. Django may destroy an ASGI request's
+`ThreadSensitiveContext` before another access is possible; safe recovery then
+requires process recycling, not foreign-thread cleanup.
+
+Only `setting_changed` for `WEFT_DJANGO` or `BASE_DIR` advances the process
+generation. Rotation closes and deletes only the current-local client after
+successful cleanup while preserving the separate request-active marker; failed
+cleanup forbids a replacement. Other owner contexts rotate on next access.
+Already prepared callbacks retain the old immutable client/context generation,
+while later helpers in the same request resolve the new generation. Every
+request, settings, and lookup entry point compares the module PID and replaces
+the inherited generation lock, counter, and `Local` before acquiring or
+touching inherited state. The child then closes only the fork-surviving current
+context's inherited session through the public SimpleBroker path and creates
+child-owned state; it never traverses vanished parent threads.
+
 _Implementation mapping_: `integrations/weft_django/weft_django/conf.py::get_explicit_context`,
 `integrations/weft_django/weft_django/conf.py::get_context_fallback_root`,
 `integrations/weft_django/weft_django/client.py::get_core_client`,
+`integrations/weft_django/weft_django/lifecycle.py` request-client registry,
+`integrations/weft_django/weft_django/apps.py::WeftDjangoConfig.ready`,
 `integrations/weft_django/weft_django/client.py::build_registered_task_taskspec`,
 and `integrations/weft_django/tests/test_weft_django.py`.
 
@@ -1346,6 +1423,25 @@ Use test modes by lane:
   fail before app rows commit
 - deferred payload capture: assert mutation after callback registration does
   not change submitted work
+- explicit-client lifecycle: prove lazy retained-session creation, bounded
+  per-submission operations, same-thread close, sequential re-entry, fork
+  replacement, cleanup failure, and bounded fallback after scope close
+- request lifecycle: prove WSGI and production `ASGIHandler` synchronous views
+  reuse and close one owner-local client; drive the real ASGI handler because
+  Django's `AsyncClientHandler` does not reproduce production
+  `ThreadSensitiveContext` or response-close ownership
+- direct async-view immediate helpers: use `AsyncClient` only to prove the
+  bounded one-shot contract, not request-local owner-thread identity
+- streaming and exception responses: prove retention lasts until response
+  close and cleanup runs on the request owner
+- settings generation: prove old prepared callbacks keep their captured root,
+  later helpers observe the new root, request-active state survives rotation,
+  and cleanup failure admits no same-owner replacement
+- real backends: prove SQLite owner-thread core reuse and PostgreSQL
+  process-pool identity, balanced per-operation checkouts, broken-connection
+  replacement, sibling-lease survival, and final cleanup
+- process inheritance: prove a child replaces inherited registry locks and
+  owner-local state before use without changing the parent's resources
 
 ## Rejected Alternatives [DJ-18]
 
@@ -1407,8 +1503,14 @@ Why:
 Versioning rules:
 
 - `weft-django` major version must track the supported Weft core major version
+- `weft-django` 0.9.42 supports Django `>=5.2,<7` and requires
+  Weft `>=0.9.107`, the first core release with retained client-owned
+  submission sessions
 - while the stable core client is young, minor releases may carry paired
   compatibility requirements
+- release core client/session borrowing first, then release Django request
+  lifecycle reuse against the first declared core version that supplies that
+  contract; do not ship a reflection-based compatibility fallback
 
 Suggested install surfaces:
 
@@ -1429,6 +1531,8 @@ Once the package is split into a sibling repo:
   provide the required public client API
 
 ## Backlinks
+
+- [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md)
 
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from asgiref.testing import ApplicationCommunicator
 
 if TYPE_CHECKING:
     from weft.context import WeftContext
@@ -63,12 +64,14 @@ import django
 django.setup()
 
 from django.core.exceptions import ImproperlyConfigured
+from django.core.handlers.asgi import ASGIHandler
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.core.signals import request_finished, request_started
 from django.db import connections, transaction
-from django.test import AsyncClient, Client, override_settings
+from django.test import AsyncClient, Client, TestCase, override_settings
 from fixture_project import authz as fixture_authz
-from fixture_project import request_id_provider
+from fixture_project import lifecycle_views, request_id_provider
 from testapp.models import EventRecord
 from testapp.weft_tasks import declared_task, echo_current_request_id, echo_task
 
@@ -86,6 +89,7 @@ from weft.core.manager_runtime import ManagerEnsureResult
 from weft.core.taskspec import TaskSpec
 from weft.core.taskspec.transport import validate_taskspec_payload
 from weft_django import (
+    DjangoWeftClient,
     WeftSubmission,
     enqueue_on_commit,
     submit_pipeline_reference,
@@ -261,6 +265,467 @@ def _native_taskspec() -> TaskSpec:
     )
 
 
+def _ready_manager_result() -> ManagerEnsureResult:
+    return ManagerEnsureResult(
+        outcome="ready",
+        manager_record=None,
+        started_here=False,
+        process_handle=None,
+        reason="lifecycle-test-ready",
+    )
+
+
+@pytest.mark.parametrize(
+    "path", ["/lifecycle/sync-burst/", "/lifecycle/sync-on-commit/"]
+)
+def test_sync_wsgi_burst_reuses_one_request_client(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    created: list[DjangoWeftClient] = []
+    entered_threads: list[threading.Thread] = []
+    closed_threads: list[threading.Thread] = []
+    original_get_client = weft_django_client.get_client
+    original_enter = DjangoWeftClient.__enter__
+    original_close = DjangoWeftClient.close
+
+    def tracked_get_client() -> DjangoWeftClient:
+        client = original_get_client()
+        created.append(client)
+        return client
+
+    def tracked_enter(client: DjangoWeftClient) -> DjangoWeftClient:
+        entered_threads.append(threading.current_thread())
+        return original_enter(client)
+
+    def tracked_close(client: DjangoWeftClient) -> None:
+        closed_threads.append(threading.current_thread())
+        original_close(client)
+
+    monkeypatch.setattr(weft_django_client, "get_client", tracked_get_client)
+    monkeypatch.setattr(DjangoWeftClient, "__enter__", tracked_enter)
+    monkeypatch.setattr(DjangoWeftClient, "close", tracked_close)
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: _ready_manager_result(),
+    )
+    lifecycle_views.REQUEST_THREADS.clear()
+
+    response = Client().get(path)
+
+    assert response.status_code == 200
+    tids = response.json()["tids"]
+    for tid in tids:
+        _HARNESS.register_tid(tid)
+    assert len(created) == 1
+    assert entered_threads == lifecycle_views.REQUEST_THREADS
+    assert closed_threads == lifecycle_views.REQUEST_THREADS
+
+
+def test_direct_async_view_submissions_remain_one_shot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[DjangoWeftClient] = []
+    entered: list[DjangoWeftClient] = []
+    original_get_client = weft_django_client.get_client
+    original_enter = DjangoWeftClient.__enter__
+
+    def tracked_get_client() -> DjangoWeftClient:
+        client = original_get_client()
+        created.append(client)
+        return client
+
+    def tracked_enter(client: DjangoWeftClient) -> DjangoWeftClient:
+        entered.append(client)
+        return original_enter(client)
+
+    monkeypatch.setattr(weft_django_client, "get_client", tracked_get_client)
+    monkeypatch.setattr(DjangoWeftClient, "__enter__", tracked_enter)
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: _ready_manager_result(),
+    )
+
+    response = asyncio.run(AsyncClient().get("/lifecycle/async-burst/"))
+
+    assert response.status_code == 200
+    tids = response.json()["tids"]
+    for tid in tids:
+        _HARNESS.register_tid(tid)
+    assert len(created) == 2
+    assert created[0] is not created[1]
+    assert entered == []
+
+
+def test_streaming_response_retains_client_until_response_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[DjangoWeftClient] = []
+    closed_threads: list[threading.Thread] = []
+    original_get_client = weft_django_client.get_client
+    original_close = DjangoWeftClient.close
+
+    def tracked_get_client() -> DjangoWeftClient:
+        client = original_get_client()
+        created.append(client)
+        return client
+
+    def tracked_close(client: DjangoWeftClient) -> None:
+        closed_threads.append(threading.current_thread())
+        original_close(client)
+
+    monkeypatch.setattr(weft_django_client, "get_client", tracked_get_client)
+    monkeypatch.setattr(DjangoWeftClient, "close", tracked_close)
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: _ready_manager_result(),
+    )
+    lifecycle_views.REQUEST_THREADS.clear()
+
+    response = Client().get("/lifecycle/streaming-burst/")
+    assert response.streaming
+    assert len(created) == 1
+    assert closed_threads == []
+
+    body = b"".join(response.streaming_content)
+    assert len(created) == 1
+
+    for tid in json.loads(body)["tids"]:
+        _HARNESS.register_tid(tid)
+    assert len(lifecycle_views.REQUEST_THREADS) == 2
+    assert lifecycle_views.REQUEST_THREADS[0] is lifecycle_views.REQUEST_THREADS[1]
+    assert closed_threads == [lifecycle_views.REQUEST_THREADS[0]]
+
+
+def test_exception_response_closes_request_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered_threads: list[threading.Thread] = []
+    closed_threads: list[threading.Thread] = []
+    original_enter = DjangoWeftClient.__enter__
+    original_close = DjangoWeftClient.close
+
+    def tracked_enter(client: DjangoWeftClient) -> DjangoWeftClient:
+        entered_threads.append(threading.current_thread())
+        return original_enter(client)
+
+    def tracked_close(client: DjangoWeftClient) -> None:
+        closed_threads.append(threading.current_thread())
+        original_close(client)
+
+    monkeypatch.setattr(DjangoWeftClient, "__enter__", tracked_enter)
+    monkeypatch.setattr(DjangoWeftClient, "close", tracked_close)
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: _ready_manager_result(),
+    )
+    lifecycle_views.REQUEST_THREADS.clear()
+
+    response = Client(raise_request_exception=False).get("/lifecycle/exception-burst/")
+
+    assert response.status_code == 500
+    assert entered_threads == lifecycle_views.REQUEST_THREADS
+    assert closed_threads == lifecycle_views.REQUEST_THREADS
+
+
+def test_production_asgi_sync_view_uses_one_owner_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_threads: dict[str, list[threading.Thread]] = {
+        "started": [],
+        "finished": [],
+    }
+    entered_threads: list[threading.Thread] = []
+    closed_threads: list[threading.Thread] = []
+    original_enter = DjangoWeftClient.__enter__
+    original_close = DjangoWeftClient.close
+
+    def record_started(sender: object, **kwargs: Any) -> None:
+        del sender, kwargs
+        signal_threads["started"].append(threading.current_thread())
+
+    def record_finished(sender: object, **kwargs: Any) -> None:
+        del sender, kwargs
+        signal_threads["finished"].append(threading.current_thread())
+
+    def tracked_enter(client: DjangoWeftClient) -> DjangoWeftClient:
+        entered_threads.append(threading.current_thread())
+        return original_enter(client)
+
+    def tracked_close(client: DjangoWeftClient) -> None:
+        closed_threads.append(threading.current_thread())
+        original_close(client)
+
+    monkeypatch.setattr(DjangoWeftClient, "__enter__", tracked_enter)
+    monkeypatch.setattr(DjangoWeftClient, "close", tracked_close)
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: _ready_manager_result(),
+    )
+    lifecycle_views.REQUEST_THREADS.clear()
+    request_started.connect(
+        record_started, dispatch_uid="weft-test-asgi-started", weak=False
+    )
+    request_finished.connect(
+        record_finished, dispatch_uid="weft-test-asgi-finished", weak=False
+    )
+
+    async def exercise() -> list[dict[str, Any]]:
+        communicator = ApplicationCommunicator(
+            ASGIHandler(),
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/lifecycle/sync-burst/",
+                "raw_path": b"/lifecycle/sync-burst/",
+                "query_string": b"",
+                "headers": [(b"host", b"testserver")],
+                "client": ("127.0.0.1", 12345),
+                "server": ("testserver", 80),
+            },
+        )
+        await communicator.send_input(
+            {"type": "http.request", "body": b"", "more_body": False}
+        )
+        messages: list[dict[str, Any]] = []
+        while True:
+            message = await communicator.receive_output(timeout=10)
+            messages.append(message)
+            if message["type"] == "http.response.body" and not message.get(
+                "more_body", False
+            ):
+                break
+        await communicator.wait(timeout=10)
+        return messages
+
+    try:
+        messages = asyncio.run(exercise())
+    finally:
+        request_started.disconnect(dispatch_uid="weft-test-asgi-started")
+        request_finished.disconnect(dispatch_uid="weft-test-asgi-finished")
+
+    body = b"".join(
+        message.get("body", b"")
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+    for tid in json.loads(body)["tids"]:
+        _HARNESS.register_tid(tid)
+    assert len(signal_threads["started"]) == 1
+    assert len(signal_threads["finished"]) == 1
+    owner = lifecycle_views.REQUEST_THREADS[0]
+    assert signal_threads["started"] == [owner]
+    assert signal_threads["finished"] == [owner]
+    assert entered_threads == [owner]
+    assert closed_threads == [owner]
+
+
+def test_concurrent_production_asgi_requests_isolate_clients_and_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[DjangoWeftClient] = []
+    entered: list[tuple[DjangoWeftClient, threading.Thread]] = []
+    closed: list[tuple[DjangoWeftClient, threading.Thread]] = []
+    original_get_client = weft_django_client.get_client
+    original_enter = DjangoWeftClient.__enter__
+    original_close = DjangoWeftClient.close
+
+    def tracked_get_client() -> DjangoWeftClient:
+        client = original_get_client()
+        created.append(client)
+        return client
+
+    def tracked_enter(client: DjangoWeftClient) -> DjangoWeftClient:
+        entered.append((client, threading.current_thread()))
+        return original_enter(client)
+
+    def tracked_close(client: DjangoWeftClient) -> None:
+        closed.append((client, threading.current_thread()))
+        original_close(client)
+
+    monkeypatch.setattr(weft_django_client, "get_client", tracked_get_client)
+    monkeypatch.setattr(DjangoWeftClient, "__enter__", tracked_enter)
+    monkeypatch.setattr(DjangoWeftClient, "close", tracked_close)
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: _ready_manager_result(),
+    )
+    lifecycle_views.REQUEST_THREADS.clear()
+    lifecycle_views.CONCURRENT_BARRIER = threading.Barrier(2)
+
+    async def request_once(port: int) -> str:
+        communicator = ApplicationCommunicator(
+            ASGIHandler(),
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/lifecycle/concurrent-on-commit/",
+                "raw_path": b"/lifecycle/concurrent-on-commit/",
+                "query_string": b"",
+                "headers": [(b"host", b"testserver")],
+                "client": ("127.0.0.1", port),
+                "server": ("testserver", 80),
+            },
+        )
+        await communicator.send_input(
+            {"type": "http.request", "body": b"", "more_body": False}
+        )
+        body = b""
+        while True:
+            message = await communicator.receive_output(timeout=10)
+            if message["type"] == "http.response.body":
+                body += message.get("body", b"")
+                if not message.get("more_body", False):
+                    break
+        await communicator.wait(timeout=10)
+        return str(json.loads(body)["tids"][0])
+
+    async def exercise() -> tuple[str, str]:
+        first, second = await asyncio.gather(request_once(12001), request_once(12002))
+        return first, second
+
+    try:
+        tids = asyncio.run(exercise())
+    finally:
+        lifecycle_views.CONCURRENT_BARRIER = None
+
+    for tid in tids:
+        _HARNESS.register_tid(tid)
+    assert len(created) == 2
+    assert created[0] is not created[1]
+    assert len(lifecycle_views.REQUEST_THREADS) == 2
+    assert lifecycle_views.REQUEST_THREADS[0] is not lifecycle_views.REQUEST_THREADS[1]
+    assert {client for client, _thread in entered} == set(created)
+    assert {client for client, _thread in closed} == set(created)
+    assert {thread for _client, thread in entered} == set(
+        lifecycle_views.REQUEST_THREADS
+    )
+    assert {thread for _client, thread in closed} == set(
+        lifecycle_views.REQUEST_THREADS
+    )
+
+
+def test_callbacks_captured_after_response_close_use_bounded_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submission_states: list[str] = []
+    original_submit_prepared = WeftClient._submit_prepared
+
+    def tracked_submit_prepared(client: WeftClient, prepared: Any) -> Any:
+        submission_states.append(client._lifecycle_state.name)
+        return original_submit_prepared(client, prepared)
+
+    monkeypatch.setattr(WeftClient, "_submit_prepared", tracked_submit_prepared)
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: _ready_manager_result(),
+    )
+
+    with transaction.atomic():
+        with TestCase.captureOnCommitCallbacks(execute=True) as callbacks:
+            response = Client().get("/lifecycle/sync-on-commit/")
+            assert response.status_code == 200
+        deferred_handles = [
+            inspect.getclosurevars(callback).nonlocals["deferred"]
+            for callback in callbacks
+        ]
+        transaction.set_rollback(True)
+
+    assert len(callbacks) == 2
+    assert submission_states == ["BOUNDED", "BOUNDED"]
+    for deferred in deferred_handles:
+        assert deferred.task is not None
+        _HARNESS.register_tid(deferred.task.tid)
+
+
+def test_settings_rotation_keeps_prepared_callbacks_on_captured_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        submission_commands,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: _ready_manager_result(),
+    )
+    template = {
+        "name": "settings-rotation",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    with (
+        WeftTestHarness() as first_root,
+        WeftTestHarness() as second_root,
+        override_settings(WEFT_DJANGO=_fixture_weft_settings(CONTEXT=first_root.root)),
+    ):
+        request_started.send(sender=object())
+        try:
+            with transaction.atomic():
+                first = submit_taskspec_on_commit(template, payload="first")
+                with override_settings(
+                    WEFT_DJANGO=_fixture_weft_settings(CONTEXT=second_root.root)
+                ):
+                    second = submit_taskspec_on_commit(template, payload="second")
+            assert first.task is not None
+            assert second.task is not None
+            first_root.register_tid(first.task.tid)
+            second_root.register_tid(second.task.tid)
+            assert first.task.task.context is not None
+            assert second.task.task.context is not None
+            assert first.task.task.context.root == first_root.root.resolve()
+            assert second.task.task.context.root == second_root.root.resolve()
+            assert (
+                WeftClient(path=second_root.root).task(first.task.tid).snapshot()
+                is None
+            )
+            assert (
+                WeftClient(path=first_root.root).task(second.task.tid).snapshot()
+                is None
+            )
+        finally:
+            request_finished.send(sender=object())
+
+
+def test_public_facades_route_through_request_client_selector() -> None:
+    direct_facades = {
+        "submit_registered_task",
+        "submit_registered_task_on_commit",
+        "submit_taskspec",
+        "submit_taskspec_on_commit",
+        "submit_spec_reference",
+        "submit_spec_reference_on_commit",
+        "submit_pipeline_reference",
+        "submit_pipeline_reference_on_commit",
+        "status",
+        "terminal_snapshot",
+        "snapshot",
+        "result",
+        "stop",
+        "kill",
+    }
+    for name in direct_facades:
+        source = inspect.getsource(getattr(weft_django_client, name))
+        assert "_current_client()" in source, name
+
+    assert "submit_registered_task(" in inspect.getsource(weft_django_client.enqueue)
+    assert "submit_registered_task_on_commit(" in inspect.getsource(
+        weft_django_client.enqueue_on_commit
+    )
+
+
 def test_status_uses_terminal_snapshot_not_diagnostic_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -292,6 +757,15 @@ def test_status_uses_terminal_snapshot_not_diagnostic_snapshot(
     assert snapshot is not None
     assert snapshot.status == "completed"
     assert observed == {"terminal_snapshot": True}
+
+
+def test_django_client_snapshot_preserves_invalid_tid_none_contract() -> None:
+    class InvalidTidCore:
+        def task(self, _tid: str) -> Any:
+            raise ValueError("invalid tid")
+
+    core: Any = InvalidTidCore()
+    assert DjangoWeftClient(core).snapshot("bad") is None
 
 
 def test_status_returns_monitor_store_terminal_snapshot(

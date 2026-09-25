@@ -123,10 +123,14 @@ def test_client_submit_uses_shared_submission_module(
         )
 
     def _fake_submit_prepared(
-        context: WeftContext, prepared: submission_mod.PreparedSubmissionRequest
+        context: WeftContext,
+        prepared: submission_mod.PreparedSubmissionRequest,
+        *,
+        session: object | None = None,
     ) -> submission_mod._SubmittedPreparedOutcome:
         captured["submit_context"] = context
         captured["prepared"] = prepared
+        captured["session"] = session
         return submission_mod._SubmittedPreparedOutcome(
             receipt=submission_mod.SubmittedTaskReceipt(
                 tid="1776000000000000001",
@@ -152,6 +156,7 @@ def test_client_submit_uses_shared_submission_module(
 
     assert task.tid == "1776000000000000001"
     assert captured["submit_context"] is captured["prepare_context"]
+    assert captured["session"] is None
     assert captured["payload"] is None
     assert captured["prepared"] == submission_mod.PreparedSubmissionRequest(
         name="demo",

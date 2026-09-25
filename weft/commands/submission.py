@@ -21,6 +21,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from simplebroker import BrokerSession
 from simplebroker.ext import BrokerError
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
@@ -497,6 +498,8 @@ def _resolve_submission_runtime_root(
 def _submit_prepared_outcome(
     context: WeftContext,
     prepared: PreparedSubmissionRequest,
+    *,
+    session: BrokerSession | None = None,
 ) -> _SubmittedPreparedOutcome:
     """Submit and retain the exact live runtime context for client handles.
 
@@ -517,31 +520,24 @@ def _submit_prepared_outcome(
             autostart=context.autostart_enabled,
         )
     )
+    borrowed_session = session if runtime_context is context else None
     task_tid: str | None = None
     try:
-        with runtime_context.session() as session:
-            with session.connection() as broker:
-                submitted_tid = submit_spawn_request(
-                    runtime_context.broker_target,
-                    taskspec=normalized,
-                    work_payload=prepared.payload,
-                    config=runtime_context.broker_config,
-                    tid=normalized.tid,
-                    inherited_weft_context=normalized.spec.weft_context,
-                    seed_start_envelope=prepared.seed_start_envelope,
-                    allow_internal_runtime=prepared.allow_internal_runtime,
-                    broker=broker,
-                )
-                # Capture acceptance before either resource scope can fail exit.
-                task_tid = str(submitted_tid)
-                observation = manager_runtime.observe_manager_availability(
-                    runtime_context, broker=broker
-                )
-            availability = ensure_manager_after_submission(
+        if borrowed_session is not None:
+            task_tid, availability = _submit_with_session(
                 runtime_context,
-                submitted_tid=task_tid,
-                observation=observation,
+                prepared,
+                normalized,
+                borrowed_session,
             )
+        else:
+            with runtime_context.session() as owned_session:
+                task_tid, availability = _submit_with_session(
+                    runtime_context,
+                    prepared,
+                    normalized,
+                    owned_session,
+                )
     except SubmissionManagerError:
         raise
     except Exception as exc:
@@ -557,6 +553,46 @@ def _submit_prepared_outcome(
         receipt=_receipt(prepared.name, task_tid, context_root=runtime_context.root),
         runtime_context=runtime_context,
     )
+
+
+def _submit_with_session(
+    runtime_context: WeftContext,
+    prepared: PreparedSubmissionRequest,
+    normalized: TaskSpec,
+    session: BrokerSession,
+) -> tuple[str, manager_runtime.ManagerEnsureResult]:
+    """Commit one spawn request through a caller-owned session operation."""
+
+    task_tid: str | None = None
+    try:
+        with session.connection() as broker:
+            submitted_tid = submit_spawn_request(
+                runtime_context.broker_target,
+                taskspec=normalized,
+                work_payload=prepared.payload,
+                config=runtime_context.broker_config,
+                tid=normalized.tid,
+                inherited_weft_context=normalized.spec.weft_context,
+                seed_start_envelope=prepared.seed_start_envelope,
+                allow_internal_runtime=prepared.allow_internal_runtime,
+                broker=broker,
+            )
+            task_tid = str(submitted_tid)
+            observation = manager_runtime.observe_manager_availability(
+                runtime_context, broker=broker
+            )
+        availability = ensure_manager_after_submission(
+            runtime_context,
+            submitted_tid=task_tid,
+            observation=observation,
+        )
+    except SubmissionManagerError:
+        raise
+    except Exception as exc:
+        if task_tid is not None:
+            _annotate_accepted_submission_error(exc, task_tid)
+        raise
+    return task_tid, availability
 
 
 def submit_taskspec(
@@ -893,15 +929,15 @@ def _command_payload(payload: Any) -> Any:
     return {"stdin": payload}
 
 
-def submit_command(
+def _prepare_command(
     context: WeftContext,
     command: Sequence[str] | str,
     *,
     payload: Any = None,
     shell: bool = False,
     **overrides: Any,
-) -> SubmittedTaskReceipt:
-    """Submit a command target using the same durable manager path."""
+) -> PreparedSubmissionRequest:
+    """Validate and snapshot a command target for durable submission."""
 
     _validate_submit_overrides(overrides)
     if shell:
@@ -932,4 +968,26 @@ def submit_command(
         template=True,
     )
     updated = apply_submit_overrides(taskspec, **overrides)
-    return submit_taskspec(context, updated, payload=_command_payload(payload))
+    return prepare_taskspec(updated, payload=_command_payload(payload))
+
+
+def submit_command(
+    context: WeftContext,
+    command: Sequence[str] | str,
+    *,
+    payload: Any = None,
+    shell: bool = False,
+    **overrides: Any,
+) -> SubmittedTaskReceipt:
+    """Submit a command target using the same durable manager path."""
+
+    return submit_prepared(
+        context,
+        _prepare_command(
+            context,
+            command,
+            payload=payload,
+            shell=shell,
+            **overrides,
+        ),
+    )
