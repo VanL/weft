@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,11 @@ _PRIORITY_TEST_NODEIDS = (
         "test_cli_long_session_produces_identical_transcript_across_backends"
     ),
 )
+_PROGRESS_HEARTBEAT_ENV = "WEFT_TEST_PROGRESS_HEARTBEAT_SECONDS"
+_progress_active_items: dict[str, float] = {}
+_progress_lock = threading.Lock()
+_progress_stop = threading.Event()
+_progress_thread: threading.Thread | None = None
 _SHARED_MODULES = frozenset(
     {
         "tests/system/test_constants.py",
@@ -567,6 +573,91 @@ def _register_from_json(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-230] exceptio
                 item,
                 manager_command=manager_command,
             )
+
+
+def _progress_heartbeat_interval() -> float | None:
+    raw_value = os.environ.get(_PROGRESS_HEARTBEAT_ENV)
+    if raw_value is None or not raw_value.strip():
+        return None
+    try:
+        interval = float(raw_value)
+    except ValueError:
+        return None
+    if interval <= 0:
+        return None
+    return interval
+
+
+def _write_progress_heartbeats(interval: float) -> None:
+    """Emit active test nodeids during long CI runs."""
+
+    while not _progress_stop.wait(interval):
+        now = time.monotonic()
+        with _progress_lock:
+            active_items = tuple(sorted(_progress_active_items.items()))
+        if not active_items:
+            continue
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "controller")
+        for nodeid, started_at in active_items:
+            print(
+                "WEFT_TEST_PROGRESS "
+                f"pid={os.getpid()} worker={worker} "
+                f"active_for={now - started_at:.1f}s nodeid={nodeid}",
+                file=sys.__stderr__,
+                flush=True,
+            )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Start opt-in progress diagnostics for CI timeout investigation."""
+
+    del config
+    global _progress_thread
+    interval = _progress_heartbeat_interval()
+    if interval is None or _progress_thread is not None:
+        return
+    _progress_stop.clear()
+    _progress_thread = threading.Thread(
+        target=_write_progress_heartbeats,
+        args=(interval,),
+        name="weft-test-progress-heartbeat",
+        daemon=True,
+    )
+    _progress_thread.start()
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Stop opt-in progress diagnostics."""
+
+    del config
+    global _progress_thread
+    if _progress_thread is None:
+        return
+    _progress_stop.set()
+    _progress_thread.join(timeout=1.0)
+    _progress_thread = None
+
+
+def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
+    """Track active test items for heartbeat diagnostics."""
+
+    del location
+    if _progress_heartbeat_interval() is None:
+        return
+    with _progress_lock:
+        _progress_active_items[nodeid] = time.monotonic()
+
+
+def pytest_runtest_logfinish(
+    nodeid: str, location: tuple[str, int | None, str]
+) -> None:
+    """Clear active test items for heartbeat diagnostics."""
+
+    del location
+    if _progress_heartbeat_interval() is None:
+        return
+    with _progress_lock:
+        _progress_active_items.pop(nodeid, None)
 
 
 @pytest.hookimpl(tryfirst=True)

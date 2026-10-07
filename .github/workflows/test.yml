@@ -58,6 +58,8 @@ jobs:
 
     - name: Run tests with pytest
       if: ${{ matrix.os != 'ubuntu-latest' || matrix.python-version != '3.13' }}
+      env:
+        WEFT_TEST_PROGRESS_HEARTBEAT_SECONDS: ${{ matrix.os == 'windows-latest' && '120' || '' }}
       run: |
         pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" ${{ matrix.pytest_diagnostic_args }}
 
