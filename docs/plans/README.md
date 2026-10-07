@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 232 plan files in this directory.
+There are currently 233 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 232 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-10-07-test-audit-repairs-plan.md`](./2026-10-07-test-audit-repairs-plan.md) | Test Audit Repairs | `draft` | none |
 | [`2026-10-06-admission-controller-plan.md`](./2026-10-06-admission-controller-plan.md) | AdmissionController: Progress-Aware Admission Waiting | `draft` | none |
 | [`2026-09-25-client-owned-submission-session-plan.md`](./2026-09-25-client-owned-submission-session-plan.md) | Client-Owned Submission Session Reuse | `draft` | none |
 | [`2026-09-23-task-state-current-view-plan.md`](./2026-09-23-task-state-current-view-plan.md) | Task-State Current View and Status/List Projection Plan | `draft` | none |

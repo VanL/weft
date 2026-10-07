@@ -5,6 +5,8 @@ Spec: docs/specifications/08-Testing_Strategy.md [TS-0].
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from tests.helpers import reactor_driver
@@ -48,9 +50,9 @@ def test_drive_until_allows_only_the_turn_paired_with_a_boundary_wait(
 
     monotonic_values = iter((0.0, 0.5, 2.0))
     monkeypatch.setattr(
-        reactor_driver.time,
-        "monotonic",
-        lambda: next(monotonic_values),
+        reactor_driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
     )
     calls: list[object] = []
 
@@ -86,9 +88,9 @@ def test_drive_until_clips_wait_and_pairs_it_with_the_next_turn(
 
     monotonic_values = iter((10.0, 10.75))
     monkeypatch.setattr(
-        reactor_driver.time,
-        "monotonic",
-        lambda: next(monotonic_values),
+        reactor_driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
     )
     calls: list[object] = []
     turns = 0
@@ -125,9 +127,9 @@ def test_drive_until_applies_one_ready_result_after_the_deadline(
 
     monotonic_values = iter((0.0, 2.0))
     monkeypatch.setattr(
-        reactor_driver.time,
-        "monotonic",
-        lambda: next(monotonic_values),
+        reactor_driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
     )
     calls: list[str] = []
     completed = False
@@ -173,9 +175,9 @@ def test_drive_until_reports_boundary_evidence_after_failed_settlement(
 
     monotonic_values = iter((0.0, 2.0))
     monkeypatch.setattr(
-        reactor_driver.time,
-        "monotonic",
-        lambda: next(monotonic_values),
+        reactor_driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
     )
     turns = 0
     diagnostic_calls = 0
@@ -247,9 +249,9 @@ def test_drive_until_keeps_timeout_primary_when_diagnostics_raise(
 
     monotonic_values = iter((0.0, 2.0))
     monkeypatch.setattr(
-        reactor_driver.time,
-        "monotonic",
-        lambda: next(monotonic_values),
+        reactor_driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
     )
 
     def diagnostics() -> object:
@@ -280,9 +282,9 @@ def test_drive_until_propagates_fatal_diagnostic_failure(
 
     monotonic_values = iter((0.0, 2.0))
     monkeypatch.setattr(
-        reactor_driver.time,
-        "monotonic",
-        lambda: next(monotonic_values),
+        reactor_driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
     )
     failure = FatalDiagnostic("stop")
 
@@ -311,9 +313,9 @@ def test_drive_until_propagates_callback_failures(
 
     monotonic_values = iter((0.0, 2.0) if stage == "pending" else (0.0, 0.5))
     monkeypatch.setattr(
-        reactor_driver.time,
-        "monotonic",
-        lambda: next(monotonic_values),
+        reactor_driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
     )
     failure = RuntimeError(stage)
 

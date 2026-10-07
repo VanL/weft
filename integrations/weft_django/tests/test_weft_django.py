@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock
 
 import pytest
 from asgiref.testing import ApplicationCommunicator
@@ -699,31 +700,90 @@ def test_settings_rotation_keeps_prepared_callbacks_on_captured_roots(
             request_finished.send(sender=object())
 
 
-def test_public_facades_route_through_request_client_selector() -> None:
-    direct_facades = {
-        "submit_registered_task",
-        "submit_registered_task_on_commit",
-        "submit_taskspec",
-        "submit_taskspec_on_commit",
-        "submit_spec_reference",
-        "submit_spec_reference_on_commit",
-        "submit_pipeline_reference",
-        "submit_pipeline_reference_on_commit",
-        "status",
-        "terminal_snapshot",
-        "snapshot",
-        "result",
-        "stop",
-        "kill",
-    }
-    for name in direct_facades:
-        source = inspect.getsource(getattr(weft_django_client, name))
-        assert "_current_client()" in source, name
+@pytest.mark.parametrize(
+    ("facade_name", "client_method"),
+    [
+        ("submit_registered_task", "submit_registered_task"),
+        ("submit_registered_task_on_commit", "submit_registered_task_on_commit"),
+        ("submit_taskspec", "submit_taskspec"),
+        ("submit_taskspec_on_commit", "submit_taskspec_on_commit"),
+        ("submit_spec_reference", "submit_spec_reference"),
+        ("submit_spec_reference_on_commit", "submit_spec_reference_on_commit"),
+        ("submit_pipeline_reference", "submit_pipeline_reference"),
+        ("submit_pipeline_reference_on_commit", "submit_pipeline_reference_on_commit"),
+        ("status", "status"),
+        ("terminal_snapshot", "terminal_snapshot"),
+        ("snapshot", "snapshot"),
+        ("result", "result"),
+        ("stop", "stop"),
+        ("kill", "kill"),
+        ("enqueue", "submit_registered_task"),
+        ("enqueue_on_commit", "submit_registered_task_on_commit"),
+    ],
+)
+def test_public_facades_use_selected_request_client(
+    facade_name: str,
+    client_method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_client = Mock(spec=DjangoWeftClient)
+    fallback_client = Mock(spec=DjangoWeftClient)
+    expected_result = object()
+    selected_operation = getattr(selected_client, client_method)
+    selected_operation.return_value = expected_result
 
-    assert "submit_registered_task(" in inspect.getsource(weft_django_client.enqueue)
-    assert "submit_registered_task_on_commit(" in inspect.getsource(
-        weft_django_client.enqueue_on_commit
+    # Execute each facade, including aliases, while controlling only its client
+    # dependency. A fresh-client bypass cannot produce the selected client's call.
+    monkeypatch.setattr(
+        weft_django_client, "get_current_client", lambda _factory: selected_client
     )
+    monkeypatch.setattr(weft_django_client, "get_client", lambda: fallback_client)
+
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+    expected_args: tuple[Any, ...]
+    expected_kwargs: dict[str, Any]
+    if client_method.startswith("submit_registered_task"):
+        expected_args = (echo_task,)
+        expected_kwargs = {
+            "args": (7,),
+            "kwargs": {"flag": True},
+            "overrides": {"name": "request-test"},
+        }
+        if client_method == "submit_registered_task":
+            expected_kwargs["envelope"] = None
+        if facade_name in {"enqueue", "enqueue_on_commit"}:
+            args = (echo_task, 7)
+            kwargs = {"flag": True, "_overrides": {"name": "request-test"}}
+        else:
+            args = expected_args
+            kwargs = dict(expected_kwargs)
+    elif client_method.startswith("submit_"):
+        args = (
+            {"name": "request-test", "spec": {"type": "function"}}
+            if client_method.startswith("submit_taskspec")
+            else "request-reference",
+        )
+        kwargs = {"payload": {"request": "payload"}, "name": "request-test"}
+        if client_method.startswith("submit_spec_reference"):
+            kwargs.update(spec_args=("argument",), stdin_text="input")
+        expected_args = args
+        expected_kwargs = dict(kwargs)
+    else:
+        args = ("1770000000000000000",)
+        kwargs = (
+            {"timeout": 3.0} if client_method in {"terminal_snapshot", "result"} else {}
+        )
+        expected_args = args
+        expected_kwargs = dict(kwargs)
+
+    result = getattr(weft_django_client, facade_name)(*args, **kwargs)
+
+    selected_operation.assert_called_once_with(*expected_args, **expected_kwargs)
+    if client_method in {"stop", "kill"}:
+        assert result is True
+    else:
+        assert result is expected_result
 
 
 def test_status_uses_terminal_snapshot_not_diagnostic_snapshot(

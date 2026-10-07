@@ -919,8 +919,7 @@ class TestLoadConfig:
         ):
             config = load_config()
 
-        assert "WEFT_VACUUM_LOCK_TIMEOUT" not in config
-        assert "BROKER_VACUUM_LOCK_TIMEOUT" not in config
+        assert "VACUUM_LOCK_TIMEOUT" not in config
 
     def test_removed_simplebroker_vacuum_lock_timeout_overrides_are_ignored(
         self,
@@ -933,8 +932,7 @@ class TestLoadConfig:
                 }
             )
 
-        assert "WEFT_VACUUM_LOCK_TIMEOUT" not in config
-        assert "BROKER_VACUUM_LOCK_TIMEOUT" not in config
+        assert "VACUUM_LOCK_TIMEOUT" not in config
 
     def test_load_config_rejects_ambiguous_postgres_override_shapes(self) -> None:
         with (

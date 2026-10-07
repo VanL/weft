@@ -231,6 +231,9 @@ def _is_python_shebang(path: Path) -> bool:
 def _tracked_python_files() -> set[Path]:
     paths: set[Path] = set()
     for path in _tracked_files():
+        # Git still lists unstaged deletions; Ruff can only discover live files.
+        if not path.is_file():
+            continue
         if path.suffix in {".py", ".pyi"} or _is_python_shebang(path):
             paths.add(path.resolve())
     return paths

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,7 @@ from weft._constants import (
 )
 from weft.core.control_messages import encode_control_message
 from weft.core.tasks import Monitor, Observer, SamplingObserver, SelectiveConsumer
+from weft.core.tasks import observer as observer_module
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 
@@ -52,10 +54,13 @@ def test_observer_peek_without_ack(broker_env: BrokerEnv) -> None:
     seen: list[tuple[str, int]] = []
 
     task = Observer(db_path, spec, observer=lambda msg, ts: seen.append((msg, ts)))
-    task._drain_queue()
+    try:
+        task._drain_queue()
 
-    assert seen and seen[0][0] == "sample"
-    assert inbox.peek_one() == "sample"
+        assert seen and seen[0][0] == "sample"
+        assert inbox.peek_one() == "sample"
+    finally:
+        task.cleanup()
 
 
 def test_selective_consumer_consumes_when_selector_true(broker_env: BrokerEnv) -> None:
@@ -69,9 +74,12 @@ def test_selective_consumer_consumes_when_selector_true(broker_env: BrokerEnv) -
         spec,
         selector=lambda msg, ts: True,
     )
-    task._drain_queue()
+    try:
+        task._drain_queue()
 
-    assert inbox.peek_one() is None
+        assert inbox.peek_one() is None
+    finally:
+        task.cleanup()
 
 
 def test_selective_consumer_leaves_when_selector_false(broker_env: BrokerEnv) -> None:
@@ -85,9 +93,12 @@ def test_selective_consumer_leaves_when_selector_false(broker_env: BrokerEnv) ->
         spec,
         selector=lambda msg, ts: False,
     )
-    task._drain_queue()
+    try:
+        task._drain_queue()
 
-    assert inbox.peek_one() == "sample"
+        assert inbox.peek_one() == "sample"
+    finally:
+        task.cleanup()
 
 
 def test_monitor_forwards_message(broker_env: BrokerEnv) -> None:
@@ -99,11 +110,14 @@ def test_monitor_forwards_message(broker_env: BrokerEnv) -> None:
 
     seen: list[str] = []
     monitor = Monitor(db_path, spec, observer=lambda msg, ts: seen.append(msg))
-    monitor._drain_queue()
+    try:
+        monitor._drain_queue()
 
-    assert outbox.read_one() == "sample"
-    assert inbox.peek_one() is None
-    assert seen == ["sample"]
+        assert outbox.read_one() == "sample"
+        assert inbox.peek_one() is None
+        assert seen == ["sample"]
+    finally:
+        monitor.cleanup()
 
 
 def test_monitor_custom_target_queue(broker_env: BrokerEnv) -> None:
@@ -119,10 +133,13 @@ def test_monitor_custom_target_queue(broker_env: BrokerEnv) -> None:
         observer=lambda msg, ts: None,
         downstream_queue=target_queue,
     )
-    monitor._drain_queue()
+    try:
+        monitor._drain_queue()
 
-    downstream = make_queue(target_queue)
-    assert downstream.read_one() == "sample"
+        downstream = make_queue(target_queue)
+        assert downstream.read_one() == "sample"
+    finally:
+        monitor.cleanup()
 
 
 def test_monitor_allows_explicit_downstream_outbox_alias(tmp_path: Path) -> None:
@@ -174,19 +191,26 @@ def test_monitor_stop_command(broker_env: BrokerEnv) -> None:
     ctrl_in.write(encode_control_message(CONTROL_STOP, request_id="monitor-stop"))
 
     monitor = Monitor(db_path, spec, observer=lambda msg, ts: None)
-    monitor._drain_queue()
+    try:
+        monitor._drain_queue()
 
-    assert monitor.should_stop is True
-    responses = [json.loads(message) for message in ctrl_out.read_generator()]
-    control_responses = [item for item in responses if item.get("type") != "terminal"]
-    terminal_responses = [item for item in responses if item.get("type") == "terminal"]
-    response = next(item for item in control_responses if item["command"] == "STOP")
-    assert response["command"] == "STOP"
-    assert response["status"] == "ack"
-    assert response["request_id"] == "monitor-stop"
-    terminal = next(item for item in terminal_responses if item["tid"] == spec.tid)
-    assert terminal["source"] == "task"
-    assert terminal["status"] == "cancelled"
+        assert monitor.should_stop is True
+        responses = [json.loads(message) for message in ctrl_out.read_generator()]
+        control_responses = [
+            item for item in responses if item.get("type") != "terminal"
+        ]
+        terminal_responses = [
+            item for item in responses if item.get("type") == "terminal"
+        ]
+        response = next(item for item in control_responses if item["command"] == "STOP")
+        assert response["command"] == "STOP"
+        assert response["status"] == "ack"
+        assert response["request_id"] == "monitor-stop"
+        terminal = next(item for item in terminal_responses if item["tid"] == spec.tid)
+        assert terminal["source"] == "task"
+        assert terminal["status"] == "cancelled"
+    finally:
+        monitor.cleanup()
 
 
 def test_sampling_observer_interval(
@@ -201,30 +225,34 @@ def test_sampling_observer_interval(
     def fake_monotonic() -> float:
         return current_time
 
-    monkeypatch.setattr("weft.core.tasks.observer.time.monotonic", fake_monotonic)
-
     observer = SamplingObserver(
         db_path,
         spec,
         observer=lambda msg, ts: calls.append(msg),
         interval_seconds=0.05,
     )
+    try:
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(
+                observer_module, "time", SimpleNamespace(monotonic=fake_monotonic)
+            )
+            inbox.write("sample-1")
+            observer._drain_queue()
+            inbox.read_one()
 
-    inbox.write("sample-1")
-    observer._drain_queue()
-    inbox.read_one()
+            current_time += 0.06
+            inbox.write("sample-2")
+            observer._drain_queue()
+            inbox.read_one()
 
-    current_time += 0.06
-    inbox.write("sample-2")
-    observer._drain_queue()
-    inbox.read_one()
+            current_time += 0.01
+            inbox.write("sample-3")
+            observer._drain_queue()
+            inbox.read_one()
 
-    current_time += 0.01
-    inbox.write("sample-3")
-    observer._drain_queue()
-    inbox.read_one()
-
-    assert calls == ["sample-1", "sample-2"]
+            assert calls == ["sample-1", "sample-2"]
+    finally:
+        observer.cleanup()
 
 
 def test_observer_handles_stop(broker_env: BrokerEnv) -> None:
@@ -234,6 +262,9 @@ def test_observer_handles_stop(broker_env: BrokerEnv) -> None:
     ctrl_in.write(encode_control_message(CONTROL_STOP))
 
     task = Observer(db_path, spec, observer=lambda msg, ts: None)
-    task._drain_queue()
+    try:
+        task._drain_queue()
 
-    assert task.should_stop is True
+        assert task.should_stop is True
+    finally:
+        task.cleanup()

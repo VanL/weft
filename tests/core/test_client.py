@@ -255,8 +255,9 @@ def test_client_control_sweeps_delegate_to_structured_owner(
     monkeypatch: pytest.MonkeyPatch,
     method_name: str,
     command: str,
+    tmp_path: Path,
 ) -> None:
-    client = WeftClient(path=Path.cwd())
+    client = WeftClient(path=prepare_project_root(tmp_path))
     expected = object()
     observed: dict[str, object] = {}
 
@@ -285,8 +286,9 @@ def test_client_control_sweeps_delegate_to_structured_owner(
 def test_client_control_sweep_without_scope_is_an_empty_noop(
     method_name: str,
     command: str,
+    tmp_path: Path,
 ) -> None:
-    client = WeftClient(path=Path.cwd())
+    client = WeftClient(path=prepare_project_root(tmp_path))
 
     result = getattr(client.tasks, method_name)()
 
@@ -308,8 +310,9 @@ def test_client_control_sweep_preserves_non_tid_selector(
     monkeypatch: pytest.MonkeyPatch,
     method_name: str,
     selector: dict[str, object],
+    tmp_path: Path,
 ) -> None:
-    client = WeftClient(path=Path.cwd())
+    client = WeftClient(path=prepare_project_root(tmp_path))
     observed: dict[str, object] = {}
 
     def fake_control(command_arg: str, tid: str | None, **kwargs: object) -> object:
@@ -1147,8 +1150,9 @@ def test_spec_submission_uses_declared_runtime_broker_across_surfaces(
 
 def test_task_result_propagates_wait_expiry_and_preserves_terminal_timeout(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    client = WeftClient(path=Path.cwd())
+    client = WeftClient(path=prepare_project_root(tmp_path))
     task = Task(client, "1777000000000000001")
     terminal = TaskResult(
         tid=task.tid,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -141,7 +142,20 @@ def test_validate_agent_runtime_preflight_does_not_launch_provider_subprocess(
     )
     payload = taskspec.model_dump(mode="python")
 
+    launches: list[object] = []
+    original_popen = subprocess.Popen
+
+    def recording_popen(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        launches.append(kwargs.get("args", args[0] if args else None))
+        return original_popen(*args, **kwargs)
+
+    # Observe process creation, including probes whose failure is ignored.
+    # The real validator and executable resolution must still run.
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+
     validate_taskspec_agent_runtime(payload, load_runtime=True, preflight=True)
+
+    assert not launches, f"Validation launched provider processes: {launches!r}"
 
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)

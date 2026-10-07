@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Awaitable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from weft_microsandbox import _runtime
-from weft_microsandbox._options import MicrosandboxMount
+from weft_microsandbox._options import MicrosandboxMount, MicrosandboxNetwork
 from weft_microsandbox._runtime import (
     FileCopyBack,
     FileCopyIntoGuest,
@@ -69,28 +70,129 @@ def test_timeout_classifier_propagates_unexpected_sdk_lookup_defect(
         _runtime._is_timeout_error(TimeoutError())
 
 
-def test_installed_sdk_exposes_adapter_api_surface() -> None:
+@pytest.mark.parametrize("network", ["none", "allow"])
+def test_adapter_calls_bind_to_installed_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    network: MicrosandboxNetwork,
+) -> None:
+    """Check consumed calls [AR-5] without launching the external runtime."""
     sdk = _sdk()
+    checked: set[str] = set()
 
-    sandbox_create = inspect.signature(sdk.Sandbox.create)
-    sandbox_get = inspect.signature(sdk.Sandbox.get)
-    sandbox_remove = inspect.signature(sdk.Sandbox.remove)
-    volume_bind = inspect.signature(sdk.Volume.bind)
-    rlimit_nofile = inspect.signature(sdk.Rlimit.nofile)
+    def binding_call(
+        name: str,
+        function: Callable[..., Any],
+        result: Any = None,
+        *,
+        instance: bool = False,
+    ) -> Callable[..., Awaitable[Any]]:
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            positional = (object(), *args) if instance else args
+            inspect.signature(function).bind(*positional, **kwargs)
+            checked.add(name)
+            return result
 
-    assert "name" in sandbox_create.parameters
-    assert any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in sandbox_create.parameters.values()
+        return call
+
+    fs = SimpleNamespace(
+        mkdir=binding_call("mkdir", sdk.SandboxFsOps.mkdir, instance=True),
+        copy_from_host=binding_call(
+            "copy_from_host", sdk.SandboxFsOps.copy_from_host, instance=True
+        ),
+        copy_to_host=binding_call(
+            "copy_to_host", sdk.SandboxFsOps.copy_to_host, instance=True
+        ),
     )
-    sandbox_get.bind("probe")
-    sandbox_remove.bind("probe")
-    assert "path" in volume_bind.parameters
-    assert "readonly" in volume_bind.parameters
-    assert "limit" in rlimit_nofile.parameters
-    assert callable(sdk.Network.none)
-    assert callable(sdk.Network.allow_all)
-    assert callable(getattr(sdk, "is_installed", None))
+    sandbox = SimpleNamespace(
+        name="sdk-contract",
+        fs=fs,
+        exec=binding_call(
+            "exec",
+            sdk.Sandbox.exec,
+            SimpleNamespace(exit_code=0, stdout_text="sdk-contract", stderr_text=""),
+            instance=True,
+        ),
+        stop=binding_call("sandbox_stop", sdk.Sandbox.stop, instance=True),
+    )
+    handle = SimpleNamespace(
+        stop=binding_call("handle_stop", sdk.SandboxHandle.stop, instance=True),
+        kill=binding_call("kill", sdk.SandboxHandle.kill, instance=True),
+        refresh=binding_call(
+            "refresh",
+            sdk.SandboxHandle.refresh,
+            SimpleNamespace(name="sdk-contract", status="running"),
+            instance=True,
+        ),
+    )
+
+    def installed() -> bool:
+        inspect.signature(sdk.is_installed).bind()
+        checked.add("is_installed")
+        return True
+
+    proxy = SimpleNamespace(
+        Sandbox=SimpleNamespace(
+            create=binding_call("create", sdk.Sandbox.create, sandbox),
+            get=binding_call("get", sdk.Sandbox.get, handle),
+            remove=binding_call("remove", sdk.Sandbox.remove),
+        ),
+        Network=sdk.Network,
+        Volume=sdk.Volume,
+        Rlimit=sdk.Rlimit,
+        ExecTimeoutError=sdk.ExecTimeoutError,
+        MicrosandboxError=sdk.MicrosandboxError,
+        is_installed=installed,
+    )
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: proxy)
+    monkeypatch.setattr(_runtime, "_validate_platform", lambda: None)
+    source = tmp_path / "input.txt"
+    source.write_text("input", encoding="utf-8")
+    runtime = MicrosandboxRuntime()
+    result = runtime.run(
+        MicrosandboxRunSpec(
+            name="sdk-contract",
+            image="python:3.12",
+            command=("python", "-c", "print('sdk-contract')"),
+            env={"INPUT": "value"},
+            cwd="/work",
+            network=network,
+            workspace=WorkspaceSpec("mount-read-only", str(tmp_path), "/work"),
+            mounts=(MicrosandboxMount(str(tmp_path), "/input", True),),
+            timeout_seconds=1.0,
+            stdin_text="input",
+            memory_mb=128,
+            cpus=0.5,
+            max_fds=64,
+            guest_dirs=("/scratch",),
+            copy_into_guest=(FileCopyIntoGuest(str(source), "/scratch/input.txt"),),
+            copy_back=(FileCopyBack("/scratch/output.txt", str(tmp_path / "output")),),
+            labels={"test": "sdk-contract"},
+        )
+    )
+    assert result.exit_code == 0
+    assert result.stdout == "sdk-contract"
+    assert runtime.stop("sdk-contract", timeout=1.0)
+    assert runtime.kill("sdk-contract")
+    description = runtime.describe("sdk-contract")
+    assert description is not None
+    assert description.state == "running"
+    runtime.check_preflight()
+    # Cleanup and control calls can swallow SDK errors. Require successful binding.
+    assert checked == {
+        "create",
+        "get",
+        "remove",
+        "exec",
+        "sandbox_stop",
+        "handle_stop",
+        "kill",
+        "refresh",
+        "mkdir",
+        "copy_from_host",
+        "copy_to_host",
+        "is_installed",
+    }
 
 
 def test_sandbox_name_handles_current_sdk_attribute_shape() -> None:

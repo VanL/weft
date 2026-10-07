@@ -116,27 +116,6 @@ def test_lifecycle_machine_pair_matrix_matches_transition_table() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("current", "target"),
-    (
-        ("created", "completed"),
-        ("created", "running"),
-        ("running", "spawning"),
-        ("completed", "running"),
-        ("failed", "running"),
-        ("timeout", "running"),
-        ("cancelled", "running"),
-        ("killed", "running"),
-    ),
-)
-def test_lifecycle_machine_rejects_representative_forbidden_transitions(
-    current: TaskLifecycleStatus,
-    target: TaskLifecycleStatus,
-) -> None:
-    with pytest.raises(ValueError, match="No transition matched"):
-        task_lifecycle_machine.decide(current, TaskStatusTarget(target))
-
-
 def test_direct_created_to_running_still_fails() -> None:
     taskspec = fixtures.create_minimal_taskspec()
 

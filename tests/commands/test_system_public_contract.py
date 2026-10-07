@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,13 +29,28 @@ from weft.context import build_context
 pytestmark = [pytest.mark.shared]
 
 
-def test_cmd_system_tidy_returns_structured_target(tmp_path: Path) -> None:
+def test_cmd_system_tidy_compacts_backend_and_returns_structured_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = prepare_project_root(tmp_path / "proj")
+    context = build_context(root)
+    with context.broker() as broker:
+        broker_type = type(broker)
+        original_vacuum = broker_type.vacuum
+    compaction_requests: list[bool] = []
+
+    def recording_vacuum(broker: Any, compact: bool = False) -> None:
+        compaction_requests.append(compact)
+        original_vacuum(broker, compact=compact)
+
+    # Keep the command owner and backend maintenance real; observe their boundary.
+    monkeypatch.setattr(broker_type, "vacuum", recording_vacuum)
 
     result = cmd_system_tidy(context=root)
 
+    assert compaction_requests and all(compaction_requests)
     assert isinstance(result, SystemTidyResult)
-    assert result.target == build_context(root).broker_display_target
+    assert result.target == context.broker_display_target
 
 
 def test_cmd_system_dump_returns_exact_export_counts(tmp_path: Path) -> None:

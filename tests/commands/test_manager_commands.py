@@ -1821,32 +1821,6 @@ def test_stop_command_stop_if_absent_still_sends_stop(tmp_path: Path) -> None:
     assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
-def test_stop_command_waits_for_pid_exit_after_stopped_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    context_root = prepare_project_root(tmp_path / "ctx")
-    context = build_context(context_root)
-
-    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
-    monkeypatch.setattr(
-        core_manager_runtime,
-        "stop_manager",
-        lambda *args, **kwargs: (True, None),
-    )
-
-    stopped, message = core_manager_runtime.stop_manager(
-        context,
-        None,
-        tid="1761000000000000005",
-        force=False,
-        timeout=1.0,
-        stop_if_absent=True,
-    )
-
-    assert stopped is True
-    assert message is None
-
-
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
 def test_list_command_omits_stale_active_manager(tmp_path: Path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")

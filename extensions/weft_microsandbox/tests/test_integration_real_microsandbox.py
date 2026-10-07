@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -57,29 +58,41 @@ def test_real_microsandbox_prints_hello() -> None:
 
 def test_real_microsandbox_network_none_blocks_outbound_socket() -> None:
     runtime = _runtime_or_skip()
-
-    result = runtime.run(
-        MicrosandboxRunSpec(
-            name="weft-smoke-network-none",
-            image=_image(),
-            command=(
-                "python",
-                "-c",
-                (
-                    "import socket; "
-                    "s=socket.socket(); s.settimeout(2); "
-                    "s.connect(('1.1.1.1', 443))"
-                ),
+    spec = MicrosandboxRunSpec(
+        name="weft-smoke-network-allow",
+        image=_image(),
+        command=(
+            "python",
+            "-c",
+            (
+                "import socket\n"
+                "try:\n"
+                "    with socket.create_connection(('1.1.1.1', 443), timeout=2):\n"
+                "        print('socket-connected')\n"
+                "except OSError:\n"
+                "    print('socket-denied')\n"
+                "    raise SystemExit(23)\n"
             ),
-            env={},
-            cwd="/",
-            network="none",
-            workspace=WorkspaceSpec(),
-            timeout_seconds=5.0,
-        )
+        ),
+        env={},
+        cwd="/",
+        network="allow",
+        workspace=WorkspaceSpec(),
+        timeout_seconds=5.0,
     )
+    # Guest reachability is required: host connectivity cannot prove this path.
+    allowed = runtime.run(spec)
+    if allowed.exit_code != 0 or allowed.stdout.strip() != "socket-connected":
+        pytest.skip(
+            "network denial is inconclusive: allowed-network guest could not "
+            f"connect to 1.1.1.1:443 (exit={allowed.exit_code}, "
+            f"timed_out={allowed.timed_out}, stderr={allowed.stderr!r})"
+        )
 
-    assert result.exit_code != 0 or result.timed_out
+    denied = runtime.run(replace(spec, name="weft-smoke-network-none", network="none"))
+    assert denied.timed_out is False
+    assert denied.exit_code == 23
+    assert denied.stdout.strip() == "socket-denied"
 
 
 def test_real_task_runner_lifecycle_uses_microsandbox_plugin() -> None:
