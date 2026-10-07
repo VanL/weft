@@ -1433,3 +1433,21 @@ and `tests/system/test_config_transport.py`.
   seam. Restore real time before finalization; tests that pass deadlines to
   BaseTask must use compatible owner clocks. See the
   [AdmissionController plan](plans/2026-10-06-admission-controller-plan.md).
+
+## 2026-10-07 Partial Test Cleanup and Retained Task History
+
+- Two Manager launch/cleanup tests skipped `_cleanup_base_task_resources` on a
+  background thread, then marked the Manager closed. Fixture cleanup could not
+  retry that phase, and closing Queue facades did not release the retained
+  BrokerSession. The test owner now completes the skipped phase on the
+  constructing thread after the background thread exits. Closed-session
+  assertions and real DB/WAL/SHM handle probes exposed the leak that Unix file
+  deletion had hidden; the Windows harness's successive 30-second release and
+  deletion waits match the approximately 61-second teardown signature. Exact
+  Windows phase timing still needs a CI rerun.
+- The autostart pipeline result helper drained global task history while
+  observing progress. Without terminal evidence, harness cleanup sent KILL to
+  eight exited tasks and exhausted two control waits per TID, taking 32 seconds
+  locally. A non-destructive timestamp cursor now preserves original log rows
+  and carries observation progress between restart waits. The fix retains the
+  existing cleanup and control budgets. See `tests/core/test_manager.py`.

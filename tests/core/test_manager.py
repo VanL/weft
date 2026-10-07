@@ -4,6 +4,7 @@ Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2.1]
 - docs/specifications/05-Message_Flow_and_State.md [MF-6]
 - docs/specifications/07-System_Invariants.md [QUEUE.7], [IMPL.10]
+- docs/specifications/08-Testing_Strategy.md [TS-0]
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import time
 import traceback
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import closing
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +74,7 @@ from weft._constants import (
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_SUPERSEDED,
     SERVICE_TYPE_MANAGED,
+    TASK_CLEANUP_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_ADMISSION_MAX_CONNECTIONS,
     WEFT_ADMISSION_RESERVE_FRACTION,
@@ -840,9 +843,10 @@ def _wait_for_autostart_pipeline_result(
     make_queue: Callable[[str], Queue],
     *,
     source: str,
+    after_timestamp: int = 0,
     progress_timeout: float = AUTOSTART_PIPELINE_PROGRESS_TIMEOUT,
     timeout: float = AUTOSTART_PIPELINE_RESULT_TIMEOUT,
-) -> tuple[dict[str, Any], object]:
+) -> tuple[dict[str, Any], object, int]:
     start = time.monotonic()
     deadline = start + timeout
     progress_deadline = start + progress_timeout
@@ -851,34 +855,44 @@ def _wait_for_autostart_pipeline_result(
     status_queue = None
     event_tail: list[dict[str, object]] = []
     status_tail: list[object] = []
+    log_timestamp = after_timestamp
 
     while time.monotonic() < deadline:
         progress = False
         manager.process_once()
-        for item in drain(log_queue):
-            progress = True
-            event: dict[str, Any] = json.loads(item)
-            event_tail.append(event)
-            event_tail = event_tail[-12:]
-            if (
-                event.get("event") == "task_spawned"
-                and event.get("autostart_source") == source
-            ):
-                spawn_event = event
-                child_taskspec = event["child_taskspec"]
-                assert isinstance(child_taskspec, dict)
-                outbox_name = child_taskspec["io"]["outputs"]["outbox"]
-                outbox_queue = make_queue(outbox_name)
-                status_name = _pipeline_status_queue_name(child_taskspec)
-                if status_name is not None:
-                    status_queue = make_queue(status_name)
+        # Keep terminal evidence available to harness cleanup. Carry the cursor
+        # between waits so retained spawn rows cannot replay an earlier result.
+        with closing(
+            log_queue.peek_generator(
+                with_timestamps=True,
+                after_timestamp=log_timestamp,
+            )
+        ) as entries:
+            for item, timestamp in entries:
+                log_timestamp = timestamp
+                progress = True
+                event: dict[str, Any] = json.loads(item)
+                event_tail.append(event)
+                event_tail = event_tail[-12:]
+                if (
+                    event.get("event") == "task_spawned"
+                    and event.get("autostart_source") == source
+                ):
+                    spawn_event = event
+                    child_taskspec = event["child_taskspec"]
+                    assert isinstance(child_taskspec, dict)
+                    outbox_name = child_taskspec["io"]["outputs"]["outbox"]
+                    outbox_queue = make_queue(outbox_name)
+                    status_name = _pipeline_status_queue_name(child_taskspec)
+                    if status_name is not None:
+                        status_queue = make_queue(status_name)
 
         progress = _drain_pipeline_status_tail(status_queue, status_tail) or progress
 
         if outbox_queue is not None:
             raw = outbox_queue.read_one()
             if raw is not None:
-                return spawn_event or {}, _decode_queue_payload(raw)
+                return spawn_event or {}, _decode_queue_payload(raw), log_timestamp
 
         if progress:
             progress_deadline = time.monotonic() + progress_timeout
@@ -6748,6 +6762,8 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
+    broker_session = manager._broker_session
+    assert broker_session is not None
     child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
     assert child_spec is not None
 
@@ -6756,6 +6772,7 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
     cleanup_returned = threading.Event()
     cleanup_errors: list[BaseException] = []
     original_stop_worker_lanes = manager._stop_worker_lanes
+    original_base_cleanup = manager._cleanup_base_task_resources
 
     def blocked_launch(*args: object, **kwargs: object) -> FakeLaunchProcess:
         del args, kwargs
@@ -6804,29 +6821,34 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
         skip_full_queue_resource_cleanup,
     )
 
-    assert manager._launch_child_task(child_spec, None) is True
-    assert launch_entered.wait(timeout=3.0)
-
     cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
-    cleanup_thread.start()
     try:
+        assert manager._launch_child_task(child_spec, None) is True
+        assert launch_entered.wait(timeout=3.0)
+        cleanup_thread.start()
         assert not cleanup_returned.wait(timeout=0.25), (
             "Manager.cleanup() returned while a child launch worker was still active"
         )
     finally:
         release_launch.set()
-        cleanup_thread.join(timeout=5.0)
-
-    if cleanup_thread.is_alive():
-        assert cleanup_thread.ident is not None
-        frame = sys._current_frames().get(cleanup_thread.ident)
-        stack = (
-            "".join(traceback.format_stack(frame, limit=24))
-            if frame is not None
-            else "<no frame>"
-        )
-        pytest.fail(f"cleanup thread did not exit:\n{stack}")
+        if cleanup_thread.ident is not None:
+            cleanup_thread.join(timeout=5.0)
+        if cleanup_thread.is_alive():
+            assert cleanup_thread.ident is not None
+            frame = sys._current_frames().get(cleanup_thread.ident)
+            stack = (
+                "".join(traceback.format_stack(frame, limit=24))
+                if frame is not None
+                else "<no frame>"
+            )
+            pytest.fail(f"cleanup thread did not exit:\n{stack}")
+        # The background finalizer deliberately skipped this phase. CLOSED
+        # prevents fixture cleanup from retrying it, so release on its owner.
+        manager.cleanup()
+        original_base_cleanup(time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS)
     assert not cleanup_errors
+    with pytest.raises(RuntimeError, match="closed"), broker_session.connection():
+        pass
 
 
 def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
@@ -6836,6 +6858,9 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
 ) -> None:
     psutil = pytest.importorskip("psutil")
     manager, _make_queue = manager_setup
+    broker_session = manager._broker_session
+    assert broker_session is not None
+    original_base_cleanup = manager._cleanup_base_task_resources
     child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
     assert child_spec is not None
 
@@ -6936,11 +6961,11 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
         skip_full_queue_resource_cleanup,
     )
 
-    assert manager._launch_child_task(child_spec, None) is True
     process: RealLaunchProcess | None = None
     worker_pid: int | None = None
     stop_thread: threading.Thread | None = None
     try:
+        assert manager._launch_child_task(child_spec, None) is True
         assert launch_entered.wait(timeout=process_start_timeout)
         process = launched["process"]
         worker_pid = _wait_for_pidfile(
@@ -6970,29 +6995,38 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
         allow_termination.set()
         if stop_thread is not None:
             stop_thread.join(timeout=process_start_timeout)
-        process = process or launched.get("process")
-        if process is not None and process.is_alive():
-            real_kill_process_tree(process.pid, timeout=2.0)
-        if worker_pid is not None and _process_running(worker_pid):
-            try:
-                psutil.Process(worker_pid).kill()
-            except psutil.Error:
-                pass
-            _wait_for_pid_exit(worker_pid, timeout=2.0)
-        shutil.rmtree(locked_dir)
+        try:
+            process = process or launched.get("process")
+            if process is not None and process.is_alive():
+                real_kill_process_tree(process.pid, timeout=2.0)
+            if worker_pid is not None and _process_running(worker_pid):
+                try:
+                    psutil.Process(worker_pid).kill()
+                except psutil.Error:
+                    pass
+                _wait_for_pid_exit(worker_pid, timeout=2.0)
+            shutil.rmtree(locked_dir)
+            if stop_thread is not None and stop_thread.is_alive():
+                assert stop_thread.ident is not None
+                frame = sys._current_frames().get(stop_thread.ident)
+                stack = (
+                    "".join(traceback.format_stack(frame, limit=24))
+                    if frame is not None
+                    else "<no frame>"
+                )
+                pytest.fail(f"stop thread did not exit:\n{stack}")
+        finally:
+            if stop_thread is None or not stop_thread.is_alive():
+                # Complete the shared phase skipped by the stop thread even
+                # when process or directory cleanup fails. CLOSED cannot retry.
+                manager.cleanup()
+                original_base_cleanup(time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS)
 
     assert stop_thread is not None
-    if stop_thread.is_alive():
-        assert stop_thread.ident is not None
-        frame = sys._current_frames().get(stop_thread.ident)
-        stack = (
-            "".join(traceback.format_stack(frame, limit=24))
-            if frame is not None
-            else "<no frame>"
-        )
-        pytest.fail(f"stop thread did not exit:\n{stack}")
     assert not stop_errors
     assert not locked_dir.exists()
+    with pytest.raises(RuntimeError, match="closed"), broker_session.connection():
+        pass
 
 
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
@@ -10943,7 +10977,7 @@ def test_manager_autostart_pipeline_target_launches_pipeline_run(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     source = str(manifest_path.resolve())
     try:
-        spawn_event, result_payload = _wait_for_autostart_pipeline_result(
+        spawn_event, result_payload, _ = _wait_for_autostart_pipeline_result(
             manager,
             log_queue,
             make_queue,
@@ -11021,23 +11055,29 @@ def test_manager_autostart_pipeline_ensure_restarts(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     source = str(manifest_path.resolve())
     try:
-        first_spawn, first_result = _wait_for_autostart_pipeline_result(
+        original_log_rows = set(log_queue.peek_generator(with_timestamps=True))
+        assert original_log_rows
+        first_spawn, first_result, log_timestamp = _wait_for_autostart_pipeline_result(
             manager,
             log_queue,
             make_queue,
             source=source,
         )
-        second_spawn, second_result = _wait_for_autostart_pipeline_result(
+        first_log_rows = set(log_queue.peek_generator(with_timestamps=True))
+        assert original_log_rows <= first_log_rows
+        second_spawn, second_result, _ = _wait_for_autostart_pipeline_result(
             manager,
             log_queue,
             make_queue,
             source=source,
+            after_timestamp=log_timestamp,
         )
 
         assert first_spawn["child_tid"] != second_spawn["child_tid"]
         assert first_result == "restart-me"
         assert second_result == "restart-me"
         assert manager._service_state(source).restarts == 1
+        assert first_log_rows <= set(log_queue.peek_generator(with_timestamps=True))
     finally:
         manager.cleanup()
 
