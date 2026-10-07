@@ -11,9 +11,16 @@
   30 seconds without progress or 180 seconds total. Stalled waits retain queued
   requests and continue existing capacity checks; lane limits, SQLite policy,
   and admission configuration are unchanged.
+- Windows CI shards now emit opt-in active-test heartbeats during long pytest
+  runs so job timeouts preserve the current node IDs under xdist.
 - First-party extension packages were bumped for this release:
   `weft-django 0.9.43`, `weft-docker 0.9.83`,
   `weft-macos-sandbox 0.6.12`, and `weft-microsandbox 0.5.13`.
+
+### Fixed
+
+- The Ruff suppression index tool now retries transient Windows sharing
+  violations while atomically replacing the generated registry file.
 
 ## [0.9.107] - 2026-09-25
 

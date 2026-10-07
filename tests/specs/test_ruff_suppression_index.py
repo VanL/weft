@@ -278,9 +278,17 @@ def test_marker_like_string_literal_is_inert(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = _run_tool(tmp_path, "--write")
+    exit_code = ruff_suppression_index.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--registry",
+            "policy.md",
+            "--write",
+        ]
+    )
 
-    assert result.returncode == 0, result.stderr
+    assert exit_code == 0
     assert "RUFF-SUP-999" not in spec.read_text(encoding="utf-8")
 
 
@@ -345,9 +353,17 @@ Global raw-`noqa` inventory: `PYI036=3`
         encoding="utf-8",
     )
 
-    result = _run_tool(tmp_path, "--write")
+    exit_code = ruff_suppression_index.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--registry",
+            "policy.md",
+            "--write",
+        ]
+    )
 
-    assert result.returncode == 0, result.stderr
+    assert exit_code == 0
     generated = spec.read_text(encoding="utf-8")
     # Class-qualified: a bare "__exit__" would collide across classes.
     assert "`probe.py::Context.__exit__`" in generated
@@ -390,9 +406,17 @@ def test_write_preserves_crlf_and_non_ascii_bytes_outside_markers(
     begin = b"<!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->"
     end = b"<!-- END GENERATED RUFF SUPPRESSION INDEX -->"
 
-    result = _run_tool(tmp_path, "--write")
+    exit_code = ruff_suppression_index.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--registry",
+            "policy.md",
+            "--write",
+        ]
+    )
 
-    assert result.returncode == 0, result.stderr
+    assert exit_code == 0
     updated = spec.read_bytes()
     assert updated.split(begin, 1)[0] == original.split(begin, 1)[0]
     assert updated.split(end, 1)[1] == original.split(end, 1)[1]
@@ -554,6 +578,40 @@ def test_replacement_failure_leaves_the_spec_and_no_temp_file(
     assert "refused replacement" in captured.err
     assert "Traceback" not in captured.err
     assert spec.read_bytes() == original
+    assert not list(tmp_path.glob(".policy.md.*.tmp"))
+
+
+def test_transient_replacement_permission_error_is_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _write_fixture(tmp_path)
+    original_replace = ruff_suppression_index.os.replace
+    calls = 0
+
+    def replace_once_blocked(source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError("sharing violation")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(ruff_suppression_index.os, "replace", replace_once_blocked)
+    monkeypatch.setattr(ruff_suppression_index.time, "sleep", lambda _seconds: None)
+
+    exit_code = ruff_suppression_index.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--registry",
+            "policy.md",
+            "--write",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == 2
+    assert "`probe.py::contain_failure`" in spec.read_text(encoding="utf-8")
     assert not list(tmp_path.glob(".policy.md.*.tmp"))
 
 
