@@ -8,10 +8,10 @@ resolution-markers = [
 
 [manifest]
 constraints = [
-    { name = "charset-normalizer", specifier = ">=3.5.1" },
-    { name = "httpcore2", specifier = ">=2.12.0" },
-    { name = "httpx2", specifier = ">=2.12.0" },
-    { name = "idna", specifier = ">=3.19" },
+    { name = "charset-normalizer", specifier = ">=3.5.2" },
+    { name = "httpcore2", specifier = ">=2.13.1" },
+    { name = "httpx2", specifier = ">=2.13.1" },
+    { name = "idna", specifier = ">=3.20" },
     { name = "pygments", specifier = ">=2.21.0" },
     { name = "sqlite-utils", specifier = ">=4.2.1" },
     { name = "sqlparse", specifier = ">=0.6.0" },
@@ -1868,9 +1868,9 @@ pg = [
 
 [package.metadata]
 requires-dist = [
-    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.168.0" },
-    { name = "llm", specifier = ">=0.35" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3.1" },
+    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.168.5" },
+    { name = "llm", specifier = ">=0.36" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.4.0" },
     { name = "processtitle", specifier = ">=1.2" },
     { name = "prompt-toolkit", specifier = ">=3.0.53" },
     { name = "psutil", specifier = ">=7.2.2" },
@@ -1880,14 +1880,14 @@ requires-dist = [
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.4.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.8.0" },
     { name = "rich", specifier = ">=15.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.6" },
-    { name = "setproctitle", specifier = ">=1.3.7" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.10" },
+    { name = "setproctitle", specifier = ">=1.3.8" },
     { name = "simplebroker", specifier = ">=8.5.1" },
     { name = "simplebroker-pg", marker = "extra == 'all'", specifier = ">=4.5.1" },
     { name = "simplebroker-pg", marker = "extra == 'dev'", specifier = ">=4.5.1" },
     { name = "simplebroker-pg", marker = "extra == 'pg'", specifier = ">=4.5.1" },
-    { name = "typer", specifier = ">=0.27.2" },
-    { name = "types-docker", marker = "extra == 'dev'", specifier = ">=7.2.0.20260827" },
+    { name = "typer", specifier = ">=0.27.3" },
+    { name = "types-docker", marker = "extra == 'dev'", specifier = ">=7.2.0.20261006" },
     { name = "types-psutil", marker = "extra == 'dev'", specifier = ">=7.2.2.20260906" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20260906" },
     { name = "typing-extensions", specifier = ">=4.16.0" },
@@ -1922,10 +1922,10 @@ channels = [
 
 [package.metadata]
 requires-dist = [
-    { name = "channels", marker = "extra == 'channels'", specifier = ">=4.1,<5" },
-    { name = "channels", marker = "extra == 'realtime'", specifier = ">=4.1,<5" },
-    { name = "django", specifier = ">=5.2,<7" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "channels", marker = "extra == 'channels'", specifier = ">=4.3.2,<5" },
+    { name = "channels", marker = "extra == 'realtime'", specifier = ">=4.3.2,<5" },
+    { name = "django", specifier = ">=6.1.2,<7" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "weft", specifier = ">=0.9.108" },
 ]
 provides-extras = ["channels", "realtime", "dev"]
@@ -1941,8 +1941,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "docker", specifier = ">=7.1.0,<8" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "docker", specifier = ">=7.2.0,<8" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "weft", specifier = ">=0.9.108" },
 ]
 provides-extras = ["dev"]
@@ -1957,7 +1957,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "weft", specifier = ">=0.9.108,<1" },
 ]
 provides-extras = ["dev"]
@@ -1973,8 +1973,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "microsandbox", specifier = ">=0.5.7,<0.6" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "microsandbox", specifier = ">=0.5.10,<0.6" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "weft", specifier = ">=0.9.108" },
 ]
 provides-extras = ["dev"]

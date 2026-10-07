@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.32.4"]
 build-backend = "hatchling.build"
 
 [project]
@@ -13,13 +13,13 @@ authors = [
     {name = "Van Lindberg", email = "van@modelmonster.ai"},
 ]
 dependencies = [
-    "microsandbox>=0.5.7,<0.6",
+    "microsandbox>=0.5.10,<0.6",
     "weft>=0.9.108",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
+    "pytest>=9.1.1",
 ]
 
 [project.entry-points."weft.runners"]

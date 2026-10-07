@@ -5,7 +5,7 @@
 The package is typed (`py.typed`) and depends on Weft through the public
 `weft.client` API.
 
-Supported Django versions are 5.2 and 6.x (`django>=5.2,<7`).
+Supported Django versions are 6.1.2 and later 6.x releases (`django>=6.1.2,<7`).
 
 It provides:
 

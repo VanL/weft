@@ -28,6 +28,8 @@ See also:
   [`docs/plans/2026-09-14-simplebroker-8-2-configuration-plan.md`](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md)
 - SimpleBroker 8.0 upgrade plan:
   [`docs/plans/2026-08-28-simplebroker-8-upgrade-plan.md`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
+- validated dependency floor alignment:
+  [`docs/plans/2026-10-07-dependency-floor-alignment-plan.md`](../plans/2026-10-07-dependency-floor-alignment-plan.md)
 - explicit broker session lifetime plan:
   [`docs/plans/2026-09-15-explicit-broker-session-lifetimes-plan.md`](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 - cleanup policy convergence plan:
@@ -45,8 +47,8 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 8.3.0 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 4.3.0 or newer. These coordinated
+Weft requires SimpleBroker 8.5.1 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 4.5.1 or newer. These coordinated
 floors provide backend API v9, ascending public-message-ID default selection,
 surrogate-free SQL schema v6, bounded dump watermarks, immutable
 invocation/handle configuration snapshots, typed queue result overloads,

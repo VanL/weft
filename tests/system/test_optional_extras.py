@@ -57,7 +57,7 @@ def test_django_channels_extras_are_explicit_opt_ins() -> None:
     root_extras = root_pyproject["project"]["optional-dependencies"]
     django_extras = django_pyproject["project"]["optional-dependencies"]
 
-    assert django_extras["channels"] == ["channels>=4.1,<5"]
+    assert django_extras["channels"] == ["channels>=4.3.2,<5"]
     assert django_extras["realtime"] == django_extras["channels"]
     assert any(
         dependency.startswith("weft-django[channels]")
@@ -82,7 +82,7 @@ def test_typed_package_markers_are_included_in_builds() -> None:
 
 @pytest.mark.parametrize("package_name", ["httpx", "httpx2"])
 def test_llm_transport_dependencies_are_transitive(package_name: str) -> None:
-    """LLM 0.33 must own its HTTP transport dependencies."""
+    """LLM must own its HTTP transport dependencies."""
 
     root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
 
@@ -185,4 +185,4 @@ def test_microsandbox_sdk_dependency_is_minor_bounded() -> None:
         "microsandbox",
     )
 
-    assert dependency == "microsandbox>=0.5.7,<0.6"
+    assert dependency == "microsandbox>=0.5.10,<0.6"
