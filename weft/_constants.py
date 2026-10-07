@@ -793,6 +793,12 @@ ADMISSION_SERVICE_RESERVE_SLOTS: Final[int] = 3
 MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
 """Delay before rechecking a blocked Manager admission source."""
 
+MANAGER_ADMISSION_PROGRESS_TIMEOUT_SECONDS: Final[float] = 30.0
+"""PG drain-idle assessment budget, not a task timeout ([MA-1.8])."""
+
+MANAGER_ADMISSION_WAIT_MAX_SECONDS: Final[float] = 180.0
+"""Absolute PG drain assessment cap; queued work keeps retrying ([MA-1.8])."""
+
 MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS: Final[float] = 5.0
 """Minimum interval between public dispatch stalled operational warnings."""
 

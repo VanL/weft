@@ -1422,3 +1422,14 @@ and `tests/system/test_config_transport.py`.
   and test quiet exit and inherited-descriptor cases through the production
   driver. The rule is recorded in
   [CC-2.2.1](specifications/01-Core_Components.md).
+
+
+## 2026-10-06 Test Clocks Have Their Own Boundary
+
+- Patching `manager_mod.time.monotonic` patched the shared stdlib module,
+  freezing broker/driver clocks too and causing cleanup deadline failures.
+  Replacing only Manager's `time` binding with a test namespace controlled
+  the policy clock without changing those dependencies or adding a production
+  seam. Restore real time before finalization; tests that pass deadlines to
+  BaseTask must use compatible owner clocks. See the
+  [AdmissionController plan](plans/2026-10-06-admission-controller-plan.md).

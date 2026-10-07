@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- Manager admission policy now lives in a small internal `AdmissionController`.
+  PostgreSQL capacity waits report drain progress and become stalled after
+  30 seconds without progress or 180 seconds total. Stalled waits retain queued
+  requests and continue existing capacity checks; lane limits, SQLite policy,
+  and admission configuration are unchanged.
+
 ## [0.9.107] - 2026-09-25
 
 ### Changed

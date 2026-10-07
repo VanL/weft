@@ -2,7 +2,8 @@
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3], [CC-2.5]
-- docs/specifications/03-Manager_Architecture.md [MA-0], [MA-1], [MA-2], [MA-3]
+- docs/specifications/03-Manager_Architecture.md [MA-0], [MA-1], [MA-1.8], [MA-2], [MA-3]
+- docs/specifications/07-System_Invariants.md [MANAGER.18]
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-3.1]
 """
@@ -13,7 +14,6 @@ import atexit
 import copy
 import json
 import logging
-import math
 import multiprocessing
 import os
 import queue as thread_queue
@@ -34,7 +34,6 @@ from pydantic import ValidationError
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, DatabaseError
 from weft._constants import (
-    ADMISSION_SERVICE_RESERVE_SLOTS,
     CONTROL_KILL,
     CONTROL_PING,
     CONTROL_STOP,
@@ -139,6 +138,7 @@ from weft.helpers import (
 )
 from weft.liveness.policy import mapping_row_is_live
 
+from .admission import AdmissionController, AdmissionDecision, AdmissionLane
 from .control_messages import (
     ControlRequest,
     encode_control_message,
@@ -211,35 +211,6 @@ logger = logging.getLogger(__name__)
 
 DispatchOwnershipState = Literal["self", "other", "none", "unknown"]
 ManagerLivenessState = Literal["live", "stale", "unknown"]
-AdmissionLane = Literal["public", "internal"]
-
-
-def _admission_capacity(
-    *,
-    used: int,
-    max_connections: int,
-    reserve_fraction: float,
-    liveness_monitor_enabled: bool,
-) -> dict[str, Any]:
-    """Return backend usage limits and lane decisions.
-
-    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
-    """
-
-    reserve = max(
-        math.ceil(max_connections * reserve_fraction),
-        ADMISSION_SERVICE_RESERVE_SLOTS + int(liveness_monitor_enabled),
-    )
-    public_limit = max(0, max_connections - reserve)
-    internal_limit = max_connections
-    return {
-        "used": used,
-        "reserve": reserve,
-        "public_limit": public_limit,
-        "internal_limit": internal_limit,
-        "public_allowed": used < public_limit,
-        "internal_allowed": used < internal_limit,
-    }
 
 
 @dataclass
@@ -552,7 +523,7 @@ class Manager(ServiceTask):
         )
         self._admission_blocked_lanes: set[AdmissionLane] = set()
         self._admission_retry_after_ns = 0
-        self._admission_last_decision_state = "open"
+        self._admission_last_decision_state: tuple[str, str | None] = ("open", None)
         self._admission_probe_memo: dict[str, tuple[str, bool, float]] = {}
         self._child_launch_started_ns: dict[str, int] = {}
         self._child_launch_stale_retries: dict[str, int] = {}
@@ -609,6 +580,11 @@ class Manager(ServiceTask):
         )
         self._liveness_monitor_enabled = bool(
             self._weft_config.get("LIVENESS_MONITOR_ENABLED", True)
+        )
+        self._admission_controller = AdmissionController(
+            self._admission_max_connections,
+            self._admission_reserve_fraction,
+            self._liveness_monitor_enabled,
         )
         self._task_monitor_restart_backoff_ns = int(
             float(
@@ -1886,19 +1862,6 @@ class Manager(ServiceTask):
         return None
 
     @staticmethod
-    def _admission_blocked_lanes_for_capacity(
-        capacity: Mapping[str, Any],
-    ) -> set[AdmissionLane]:
-        """Return the monotonic lane blocks encoded by one capacity source."""
-
-        blocked: set[AdmissionLane] = set()
-        if not capacity["public_allowed"]:
-            blocked.add("public")
-        if not capacity["internal_allowed"]:
-            blocked.update(("public", "internal"))
-        return blocked
-
-    @staticmethod
     def _admission_state(
         blocked_lanes: set[AdmissionLane],
         *,
@@ -1998,36 +1961,44 @@ class Manager(ServiceTask):
         self,
         *,
         lane: AdmissionLane,
-        blocked_lanes: set[AdmissionLane],
         backend: str,
-        capacity: Mapping[str, Any] | None,
-        unavailable: bool = False,
+        decision: AdmissionDecision,
     ) -> None:
-        """Install one admission decision and emit bounded operational evidence."""
+        """Install eligibility and bounded evidence ([MA-1.8], [MANAGER.18])."""
 
         previous_state = self._admission_last_decision_state
+        blocked_lanes = set(decision.blocked_lanes)
         self._admission_blocked_lanes = blocked_lanes
         self._admission_retry_after_ns = (
             time.time_ns() + int(MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000)
             if blocked_lanes
             else 0
         )
+        unavailable = decision.capacity is None
         state = self._admission_state(blocked_lanes, unavailable=unavailable)
-        self._admission_last_decision_state = state
-        if state == previous_state and not unavailable:
+        self._admission_last_decision_state = (state, decision.wait_phase)
+        if self._admission_last_decision_state == previous_state and not unavailable:
             return
 
-        fields: dict[str, Any] = {
+        identity: dict[str, Any] = {
             "backend": backend,
             "state": state,
             "lane": lane,
         }
-        if capacity is not None:
+        fields = dict(identity)
+        if decision.wait_phase is not None:
+            identity["wait_phase"] = decision.wait_phase
             fields.update(
-                used=capacity["used"],
-                reserve=capacity["reserve"],
-                public_limit=capacity["public_limit"],
-                internal_limit=capacity["internal_limit"],
+                wait_phase=decision.wait_phase,
+                elapsed_seconds=decision.elapsed_seconds,
+                idle_seconds=decision.idle_seconds,
+            )
+        if decision.capacity is not None:
+            fields.update(
+                used=decision.capacity["used"],
+                reserve=decision.capacity["reserve"],
+                public_limit=decision.capacity["public_limit"],
+                internal_limit=decision.capacity["internal_limit"],
             )
         if unavailable:
             fields["error"] = "admission_usage_unavailable"
@@ -2037,7 +2008,7 @@ class Manager(ServiceTask):
             required_level="info",
             severity="warning" if blocked_lanes else "info",
             key="admission_state",
-            state=fields,
+            state=identity,
             log_fields=fields,
         )
 
@@ -2097,30 +2068,11 @@ class Manager(ServiceTask):
 
         backend = self._admission_backend_name()
         used = self._observe_admission_usage()
-        if used is None:
-            self._record_admission_decision(
-                lane=lane,
-                blocked_lanes={"public", "internal"},
-                backend=backend,
-                capacity=None,
-                unavailable=True,
-            )
-            return False
-
-        capacity = _admission_capacity(
-            used=used,
-            max_connections=self._admission_max_connections,
-            reserve_fraction=self._admission_reserve_fraction,
-            liveness_monitor_enabled=self._liveness_monitor_enabled,
+        decision = self._admission_controller.evaluate(
+            used=used, backend=backend, now=time.monotonic()
         )
-        blocked_lanes = self._admission_blocked_lanes_for_capacity(capacity)
-        self._record_admission_decision(
-            lane=lane,
-            blocked_lanes=blocked_lanes,
-            backend=backend,
-            capacity=capacity,
-        )
-        return lane not in blocked_lanes
+        self._record_admission_decision(lane=lane, backend=backend, decision=decision)
+        return lane not in decision.blocked_lanes
 
     def _register_manager(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         """Publish active manager service ownership (Spec: [MA-1.4], [MF-7])."""
@@ -3786,6 +3738,7 @@ class Manager(ServiceTask):
             # autostart child exits instead of waiting for the next scan interval.
             self._autostart_last_scan_ns = 0
         if child_exited:
+            self._admission_controller.note_child_reap(now=time.monotonic())
             self._publish_child_sentinel_membership()
             # Child completion is activity. The manager should only begin its idle
             # countdown after in-flight work has actually finished.
@@ -4203,6 +4156,7 @@ class Manager(ServiceTask):
         """
 
         ctrl_name = self._queue_names.get("ctrl_in")
+        empty_spawn_lanes: set[AdmissionLane] = set()
         for name, config in self._queues.items():
             if name == ctrl_name:
                 continue
@@ -4212,6 +4166,12 @@ class Manager(ServiceTask):
             if self._queue_has_pending(config.queue):
                 self._mark_pending_messages_prechecked()
                 return True
+            if lane is not None:
+                empty_spawn_lanes.add(lane)
+                if len(empty_spawn_lanes) == 2 and not self._stop_event.is_set():
+                    # Reuse only this scan's successful probes. A retry wake
+                    # alone cannot prove an idle gap ([MANAGER.18]).
+                    self._admission_controller.reset_wait()
         return self._manager_control_pending_is_actionable()
 
     def _note_control_request_activity(self, body: str) -> None:

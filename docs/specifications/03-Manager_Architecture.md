@@ -35,6 +35,8 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [AdmissionController: Progress-Aware Admission Waiting](../plans/2026-10-06-admission-controller-plan.md) - isolates admission policy and tracks bounded PG resource-drain diagnostics.
+
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes Manager and service probe replies through the Manager's existing control watcher and removes probe-specific polling deadlines.
 
 - [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores the Manager to the shared watcher reactor, publishes the remaining service clocks as deadlines, and routes child exit through one local sentinel adapter.
@@ -425,9 +427,26 @@ Postgres reads raw server-wide `numbackends` from the public
 persistent Queue. The configured maximum, not the returned server maximum or
 reserved-connection settings, controls both lane limits. Neither observation
 and its following launch are atomic, so admission is a soft guard, not a
-permit. Denial or observation failure leaves the row unreserved until a
-universal one-second retry deadline or an earlier child/launch-worker progress
-wake. PostgreSQL observation catches only `DatabaseError` and `ValueError`;
+permit. Denial or observation failure leaves the row unreserved until the
+existing one-second retry deadline or an earlier child/launch-worker wake.
+Enabled
+PostgreSQL admission also tracks one Manager-local drain-wait episode while
+either lane is blocked. Its progress clock advances only for a strict new
+episode-low usage observation or an actual child reap; probe success, launch
+completion and retry expiry are not drain progress. An unavailable initial
+observation retains its start clock when a first valid baseline arrives.
+Thirty seconds without drain progress or 180 seconds since episode start
+marks the wait stalled. Fresh capacity that opens both lanes ends the
+episode, as does an existing hint-driven scan proving both spawn sources
+empty without extra reads; skipped, failed or stopped probes cannot establish
+emptiness. Unobserved idle gaps conservatively retain episode age. Internal
+admission alone does not end it. Progress may clear an idle stall
+before 180 seconds, but never renews the absolute assessment cap. Stalling
+changes bounded operational diagnostics only: queued work and the same
+periodic/early recovery checks remain. It never grants capacity, fails work,
+or blocks control and cleanup. These deadlines are monotonic assessment
+budgets, not broker-call or task execution timeouts. SQLite policy is unchanged.
+PostgreSQL observation catches only `DatabaseError` and `ValueError`;
 SQLite catches only `BrokerError`, `OSError`, and `RuntimeError`. Shutdown or
 control `BaseException` subclasses propagate.
 Configuration is fixed for one Manager lifetime and takes effect after restart.
@@ -448,7 +467,7 @@ _Implementation mapping_:
 - [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. `weft/core/manager_services.py::ManagedServiceState` is the sole launch/restart/backoff state owner for autostarts and built-ins; `weft/core/manager.py` retains autostart source identity only, while `reduce_managed_service_state` owns transition selection.
 - [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._build_liveness_monitor_spawn_payload`, `Manager._liveness_monitor_service_spec`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager._drain_child_sentinel_events`, `Manager._publish_child_sentinel_membership`, `Manager._retire_expired_unvisited_probes`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; `_ManagerChildSentinelAdapter` is the broker-free local child-exit source; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, LivenessMonitor runtime behavior lives in `weft/core/tasks/liveness_monitor.py` with pure evidence and policy in `weft/liveness/`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
-- [MA-1.8] Admission control — `Manager` configuration loading, backend-specific pre-reservation usage observation, lane decisions, universal retry scheduling, child/launch-worker progress wakes, fallback pending-work suppression, duplicate-manager owned-work checks, and rate-limited operational transition/failure logs in `weft/core/manager.py`; constants and environment keys in `weft/_constants.py`; SQLite current-state collection propagates read failures from `weft/core/task_state.py::latest_task_state_rows` filtered through the shared `weft/liveness/policy.py::mapping_row_is_live` probe (memoized in `Manager._admission_mapping_is_live`) and unioned with `Manager._active_child_launches` plus `Manager._child_processes`. `BaseTask` owns the additive terminal mapping publication. Admission adds no Manager PING/STATUS field and no liveness policy beyond the shared probe.
+- [MA-1.8] Admission control — `weft/core/admission.py::AdmissionController` owns pure lane decisions and PG drain-wait budgets; `Manager` configuration loading, backend-specific pre-reservation usage observation, actual-reap notifications, best-effort empty-source reset, universal retry scheduling, child/launch-worker wakes, fallback pending-work suppression, duplicate-manager owned-work checks, and rate-limited operational transition/failure logs in `weft/core/manager.py`; constants and environment keys in `weft/_constants.py`; SQLite current-state collection propagates read failures from `weft/core/task_state.py::latest_task_state_rows` filtered through the shared `weft/liveness/policy.py::mapping_row_is_live` probe (memoized in `Manager._admission_mapping_is_live`) and unioned with `Manager._active_child_launches` plus `Manager._child_processes`. `BaseTask` owns the additive terminal mapping publication. Admission adds no Manager PING/STATUS field and no liveness policy beyond the shared probe.
 
 Implementation plan backlink for [MA-1.4]:
 [Registry Selection And Pruning Authority Refactor Plan](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)

@@ -2118,116 +2118,6 @@ def test_manager_processes_internal_spawn_before_public_spawn(
     assert launched == ["internal-first", "public-second"]
 
 
-@pytest.mark.parametrize(
-    ("used", "expected"),
-    [
-        (
-            6,
-            {
-                "used": 6,
-                "reserve": 3,
-                "public_limit": 7,
-                "internal_limit": 10,
-                "public_allowed": True,
-                "internal_allowed": True,
-            },
-        ),
-        (
-            7,
-            {
-                "used": 7,
-                "reserve": 3,
-                "public_limit": 7,
-                "internal_limit": 10,
-                "public_allowed": False,
-                "internal_allowed": True,
-            },
-        ),
-        (
-            9,
-            {
-                "used": 9,
-                "reserve": 3,
-                "public_limit": 7,
-                "internal_limit": 10,
-                "public_allowed": False,
-                "internal_allowed": True,
-            },
-        ),
-        (
-            10,
-            {
-                "used": 10,
-                "reserve": 3,
-                "public_limit": 7,
-                "internal_limit": 10,
-                "public_allowed": False,
-                "internal_allowed": False,
-            },
-        ),
-    ],
-)
-def test_admission_capacity_uses_strict_lane_limits(
-    used: int,
-    expected: dict[str, Any],
-) -> None:
-    assert (
-        manager_mod._admission_capacity(
-            used=used,
-            max_connections=10,
-            reserve_fraction=0.1,
-            liveness_monitor_enabled=False,
-        )
-        == expected
-    )
-
-
-def test_admission_capacity_applies_service_floor_and_fractional_ceiling() -> None:
-    assert manager_mod._admission_capacity(
-        used=0,
-        max_connections=2,
-        reserve_fraction=0.0,
-        liveness_monitor_enabled=False,
-    ) == {
-        "used": 0,
-        "reserve": 3,
-        "public_limit": 0,
-        "internal_limit": 2,
-        "public_allowed": False,
-        "internal_allowed": True,
-    }
-    assert (
-        manager_mod._admission_capacity(
-            used=15,
-            max_connections=20,
-            reserve_fraction=0.21,
-            liveness_monitor_enabled=True,
-        )["reserve"]
-        == 5
-    )
-
-
-def test_admission_capacity_reserves_four_slots_for_liveness_monitor() -> None:
-    assert (
-        manager_mod._admission_capacity(
-            used=0,
-            max_connections=10,
-            reserve_fraction=0.0,
-            liveness_monitor_enabled=True,
-        )["reserve"]
-        == 4
-    )
-    assert (
-        manager_mod._admission_capacity(
-            used=0,
-            max_connections=10,
-            reserve_fraction=0.0,
-            liveness_monitor_enabled=False,
-        )["reserve"]
-        == 3
-    )
-
-
 def _write_admission_snapshot(make_queue: Callable[[str], Any], body: str) -> int:
     """Publish test state to its actual owner's runtime namespace."""
     tid = json.loads(body)["full"]
@@ -2915,6 +2805,310 @@ def test_disabled_admission_dispatches_without_observing_backend(
     finally:
         manager.stop(join=False)
         manager.cleanup()
+
+
+@pytest.fixture
+def pg_admission_setup(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[Manager, Callable[[str], Any], dict[str, Any]]]:
+    """Keep real queues and Manager policy; control only external PG/time evidence."""
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
+                "WEFT_MANAGER_SERVE_LOG_ACTIVE": True,
+                "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
+                "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 60.0,
+                WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+                WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
+            }
+        ),
+    )
+    evidence: dict[str, Any] = {"now": 100.0, "used": 5}
+
+    def connection_stats() -> dict[str, int]:
+        if evidence["used"] is None:
+            raise ValueError("statistics unavailable")
+        return {"numbackends": int(evidence["used"])}
+
+    manager_clock = SimpleNamespace(
+        monotonic=lambda: evidence["now"], time_ns=time.time_ns, sleep=time.sleep
+    )
+    monkeypatch.setattr(manager, "_admission_backend_name", lambda: "postgres")
+    monkeypatch.setattr(manager, "_read_postgres_connection_stats", connection_stats)
+    # Replace only Manager's module binding; broker/driver deadlines stay real.
+    monkeypatch.setattr(manager_mod, "time", manager_clock)
+    for name in manager._queues:
+        drain(make_queue(name))
+    try:
+        yield manager, make_queue, evidence
+    finally:
+        # Cleanup owns real process/thread deadlines, outside the policy clock.
+        monkeypatch.setattr(manager_mod, "time", time)
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_pg_admission_stall_retains_source_answers_control_and_recovers(
+    pg_admission_setup: tuple[Manager, Callable[[str], Any], dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manager, make_queue, evidence = pg_admission_setup
+    source = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved = make_queue(manager._queue_names["reserved"])
+    source.write(json.dumps(make_child_spec()))
+    capsys.readouterr()
+    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    first = serve_log_events(capsys)
+    assert first[-1]["wait_phase"] == "waiting"
+
+    evidence["now"] = 130.0
+    manager._admission_retry_after_ns = time.time_ns() - 1
+    manager._expire_admission_retry_if_due()
+    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    stalled = serve_log_events(capsys)
+    assert stalled[-1]["wait_phase"] == "stalled"
+    assert stalled[-1]["elapsed_seconds"] == 30.0
+    assert source.peek_one() is not None
+    assert reserved.peek_one() is None
+
+    reply_name = f"T{int(manager.tid) + 1}.ctrl_in"
+    make_queue(manager._queue_names["ctrl_in"]).write(
+        encode_control_message(
+            CONTROL_PING, request_id="capacity-stall", reply_to=reply_name
+        )
+    )
+    manager._drain_control_queue_first()
+    response = json.loads(str(make_queue(reply_name).read_one()))
+    assert response["request_id"] == "capacity-stall"
+    assert response["message"] == "PONG"
+
+    launched: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_launch_child_task",
+        lambda child_spec, *_args, **_kwargs: record_and_return(
+            launched, child_spec.name, True
+        ),
+    )
+    evidence.update(now=220.0, used=0)
+    manager._admission_retry_after_ns = time.time_ns() - 1
+    manager._expire_admission_retry_if_due()
+    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is True
+    assert launched == ["child"]
+    assert source.peek_one() is None
+    assert reserved.peek_one() is None
+    assert any(event.get("state") == "open" for event in serve_log_events(capsys))
+
+
+def test_pg_admission_retry_restoration_and_allowed_internal_do_not_renew_wait(
+    pg_admission_setup: tuple[Manager, Callable[[str], Any], dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manager, make_queue, evidence = pg_admission_setup
+    public = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    public.write(json.dumps(make_child_spec()))
+    evidence["used"] = 2
+    capsys.readouterr()
+    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    assert serve_log_events(capsys)[-1]["wait_phase"] == "waiting"
+
+    evidence["now"] = 120.0
+    manager._clear_admission_retry()
+    make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE).write(json.dumps(make_child_spec()))
+    monkeypatch.setattr(manager, "_launch_child_task", lambda *_args, **_kwargs: True)
+    assert (
+        manager._process_queue_message(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, set())
+        is True
+    )
+    # The same helpers run when a failed launch restores its source. They own
+    # eligibility, not drain history; this does not substitute capacity policy.
+    manager._clear_admission_retry()
+    manager._schedule_admission_retry_for_source(WEFT_SPAWN_REQUESTS_QUEUE)
+    evidence["now"] = 130.0
+    manager._admission_retry_after_ns = time.time_ns() - 1
+    manager._expire_admission_retry_if_due()
+    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    events = [
+        event
+        for event in serve_log_events(capsys)
+        if event["event"] == "admission_state"
+    ]
+    assert events[-1]["wait_phase"] == "stalled"
+    assert events[-1]["elapsed_seconds"] == 30.0
+    assert public.peek_one() is not None
+    assert make_queue(manager._queue_names["reserved"]).peek_one() is None
+
+
+def test_pg_admission_unknown_samples_do_not_log_each_changing_elapsed_second(
+    pg_admission_setup: tuple[Manager, Callable[[str], Any], dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manager, make_queue, evidence = pg_admission_setup
+    source = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    source.write(json.dumps(make_child_spec()))
+    evidence["used"] = None
+    capsys.readouterr()
+    for now in (100.0, 101.0, 102.0):
+        evidence["now"] = now
+        manager._admission_retry_after_ns = time.time_ns() - 1
+        manager._expire_admission_retry_if_due()
+        assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    events = serve_log_events(capsys)
+    assert len(events) == 1
+    assert events[0]["state"] == "unavailable"
+    assert events[0]["wait_phase"] == "waiting"
+    evidence["now"] = 130.0
+    manager._clear_admission_retry()
+    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    assert serve_log_events(capsys)[-1]["wait_phase"] == "stalled"
+    assert source.peek_one() is not None
+    assert make_queue(manager._queue_names["reserved"]).peek_one() is None
+
+
+def test_pg_admission_real_child_reap_refreshes_progress_once(
+    pg_admission_setup: tuple[Manager, Callable[[str], Any], dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manager, make_queue, evidence = pg_admission_setup
+    make_queue(WEFT_SPAWN_REQUESTS_QUEUE).write(json.dumps(make_child_spec()))
+    capsys.readouterr()
+    manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+    serve_log_events(capsys)
+    evidence["now"] = 130.0
+    manager._clear_admission_retry()
+    manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+    assert serve_log_events(capsys)[-1]["wait_phase"] == "stalled"
+
+    process = multiprocessing.get_context("spawn").Process(target=os._exit, args=(1,))
+    process.start()
+    process.join(timeout=10.0)
+    try:
+        assert process.exitcode == 1
+        manager._child_processes["1777000000000000099"] = ManagedChild(
+            process=process, ctrl_queue=None, persistent=False
+        )
+        assert manager._cleanup_children() is True
+        manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+        events = [
+            event
+            for event in serve_log_events(capsys)
+            if event["event"] == "admission_state"
+        ]
+        assert events[-1]["wait_phase"] == "waiting"
+        assert events[-1]["idle_seconds"] == 0.0
+        evidence["now"] = 160.0
+        assert manager._cleanup_children() is False
+        manager._clear_admission_retry()
+        manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+        assert serve_log_events(capsys)[-1]["wait_phase"] == "stalled"
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10.0)
+        process.close()
+
+
+def _record_admission_source_probes(
+    manager: Manager,
+    sources: list[str],
+    scan: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    """Wrap real source reads, injecting only an external failure or stop."""
+    probed: list[str] = []
+    for name in sources:
+        queue = manager._queues[name].queue
+        original = queue.has_pending
+
+        def probe(
+            *, source_name: str = name, original_probe: Callable[[], bool] = original
+        ) -> bool:
+            probed.append(source_name)
+            if source_name == sources[-1]:
+                if scan == "stopped":
+                    manager._stop_event.set()
+                elif scan == "error":
+                    raise BrokerError("source probe unavailable")
+            return original_probe()
+
+        monkeypatch.setattr(queue, "has_pending", probe)
+    return probed
+
+
+@pytest.mark.parametrize(
+    "scan", ["empty", "later_reserved", "stopped", "error", "skipped", "partial"]
+)
+def test_pg_admission_idle_reset_requires_two_successful_unstopped_source_probes(
+    pg_admission_setup: tuple[Manager, Callable[[str], Any], dict[str, Any]],
+    scan: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manager, make_queue, evidence = pg_admission_setup
+    public = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    public.write(json.dumps(make_child_spec()))
+    capsys.readouterr()
+    manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+    assert serve_log_events(capsys)[-1]["wait_phase"] == "waiting"
+    drain(public)
+    manager._clear_admission_retry()
+    evidence["now"] = 140.0
+    sources = [
+        name for name in manager._queues if name in manager._spawn_inbox_queue_names()
+    ]
+    probed = _record_admission_source_probes(manager, sources, scan, monkeypatch)
+    if scan == "skipped":
+        manager._schedule_admission_retry_for_source(WEFT_SPAWN_REQUESTS_QUEUE)
+    elif scan == "partial":
+        make_queue(sources[0]).write(json.dumps(make_child_spec()))
+    elif scan == "later_reserved":
+        # Both spawn sources precede reserved recovery in the real scan. Its
+        # early return must not discard empty evidence already established.
+        make_queue(manager._queue_names["reserved"]).write(
+            json.dumps(make_child_spec())
+        )
+    if scan == "error":
+        with pytest.raises(BrokerError, match="source probe unavailable"):
+            manager._has_pending_messages()
+    else:
+        assert manager._has_pending_messages() is (
+            scan in {"partial", "later_reserved"}
+        )
+    assert len(probed) == (1 if scan in {"skipped", "partial"} else 2)
+    if scan == "stopped":
+        # Stopping is one-way. Inspect the real policy's next decision rather
+        # than restarting a stopped Manager merely to expose its history.
+        decision = manager._admission_controller.evaluate(
+            used=None, backend="postgres", now=evidence["now"]
+        )
+        assert decision.wait_phase == "stalled"
+        assert decision.elapsed_seconds == 40.0
+        return
+    for name in sources:
+        drain(make_queue(name))
+    public.write(json.dumps(make_child_spec()))
+    # An unavailable observation changes log identity even after a silent idle
+    # reset, exposing the next episode without requiring a synthetic open log.
+    evidence["used"] = None
+    manager._clear_admission_retry()
+    manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+    events = [
+        event
+        for event in serve_log_events(capsys)
+        if event["event"] == "admission_state"
+    ]
+    reset_expected = scan in {"empty", "later_reserved"}
+    assert events[-1]["wait_phase"] == ("waiting" if reset_expected else "stalled")
+    assert events[-1]["elapsed_seconds"] == (0.0 if reset_expected else 40.0)
 
 
 def test_postgres_admission_uses_real_connection_stats_and_retains_tight_row(

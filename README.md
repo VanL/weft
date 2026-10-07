@@ -682,7 +682,7 @@ limit. Both observations are non-atomic soft guards rather than connection
 leases, so races can still overshoot and conservative evidence can pause early.
 
 Denied messages remain in their source queue and are retried after one second;
-child or launch-worker progress may wake the Manager earlier. Both native and
+child or launch-worker events may wake the Manager earlier. Both native and
 fallback waits suppress only a blocked spawn source, not reserved recovery.
 Once another live lower-TID primary is proven, a non-primary Manager reserves
 no new shared public or internal work. The settings are read when the Manager
@@ -691,6 +691,26 @@ does not preempt persistent work. Pipelines need no separate setting or runtime
 branch; their runnable tasks use the same lanes as all other work. Admission
 adds no PING/STATUS fields; rate-limited transition and observation-failure
 logs are non-normative operational evidence.
+
+For PostgreSQL, the Manager also assesses whether a capacity wait is draining.
+A new episode-low connection count or confirmed child reap counts as resource
+progress. After 30 seconds without progress or 180 seconds in one episode,
+`wait_phase` becomes `stalled`; queued requests stay intact and the same checks
+continue. Actual capacity recovery permits dispatch. Run
+`weft manager serve --level info` to see waiting/stalled/recovery evidence
+through existing foreground serve logging. `WEFT_MANAGER_SERVE_LOG_LEVEL=info`
+also sets the level in serve mode; detached Managers do not emit this stream.
+These are assessment budgets, not task or broker-call timeouts. Child startup
+can precede its connections being counted, so this remains a soft guard.
+
+Child reaps can refresh the idle budget even when short internal tasks or
+crashing children leave aggregate usage high; the absolute cap still applies.
+Episode age tracks blocked lane capacity, even if no request in that lane was
+queued; it is not a request wait time. Fresh capacity opening both lanes ends
+an episode, as does a best-effort existing activity scan proving both spawn
+sources empty. Unobserved idle gaps retain history, so a later burst can inherit
+that age. Empty-source reset is silent; an `open` log requires observed capacity.
+SQLite admission and disabled admission retain their existing behavior.
 
 ### Task IDs (TIDs)
 

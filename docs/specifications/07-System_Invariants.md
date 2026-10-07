@@ -877,7 +877,8 @@ chain advances it. Real store/worker-result cadence regressions are in
 
 ### Manager Invariants
 
-_Implementation mapping_: `weft/core/manager.py`,
+_Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
+([MANAGER.18] pure lane and PG drain-wait policy),
 `weft/core/manager_runtime.py`, `weft/core/service_convergence.py`,
 `weft/core/control_probe.py`, `weft/core/monitor/task_monitor.py`,
 `weft/commands/system.py`,
@@ -1058,10 +1059,28 @@ _Implementation mapping_: `weft/core/manager.py`,
   service reconciliation, or shutdown. Native and fallback waits suppress
   only blocked spawn sources; reserved recovery remains actionable. One
   universal retry deadline must reconsider denied/failed observations and
-  failed-launch restoration without unrelated queue activity. A proven
-  non-primary Manager does not reserve shared public or internal backlog;
+  failed-launch restoration without unrelated queue activity.
+  PostgreSQL drain-wait history survives lane retry-cache clearing. Only a
+  strict new episode-low usage value or confirmed child reap refreshes drain
+  progress. Retry expiry, failed or successful process launch and observation
+  success alone cannot do so. An episode starts at first observed lane denial,
+  also on an unavailable observation, never on launch-failure restoration alone.
+  It ends when a fresh observation opens both lanes or an existing pending-work
+  scan successfully proves both spawn sources empty and the post-probe stop
+  flag is unset. This best-effort reset retains history across unobserved idle
+  gaps. No extra probes or cached emptiness state are introduced. Unknown
+  samples preserve its clocks and prior
+  known low. Idle 30-second or total 180-second assessment expiry marks the
+  wait stalled but
+  neither consumes nor fails queued requests nor stops rechecking. Real
+  progress can resume an idle-stalled assessment below the absolute cap;
+  fresh open capacity always ends it. Wall-clock changes cannot renew budgets.
+  This is resource-drain evidence, not task-success proof or a launch permit.
+  A proven non-primary Manager does not reserve shared public or internal backlog;
   shared unreserved internal rows are not owned work. Admission adds no
   PING/STATUS schema.
+
+_Plan backlinks_: [AdmissionController: Progress-Aware Admission Waiting](../plans/2026-10-06-admission-controller-plan.md) ([MANAGER.18]).
 
 ### Context Invariants
 
