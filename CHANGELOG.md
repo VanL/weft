@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.9.108] - 2026-10-07
+
 ### Changed
 
 - Manager admission policy now lives in a small internal `AdmissionController`.
@@ -9,6 +11,9 @@
   30 seconds without progress or 180 seconds total. Stalled waits retain queued
   requests and continue existing capacity checks; lane limits, SQLite policy,
   and admission configuration are unchanged.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.43`, `weft-docker 0.9.83`,
+  `weft-macos-sandbox 0.6.12`, and `weft-microsandbox 0.5.13`.
 
 ## [0.9.107] - 2026-09-25
 

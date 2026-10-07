@@ -29,6 +29,8 @@ if str(PACKAGE_ROOT) not in sys.path:
 
 from weft_django import lifecycle
 
+pytestmark = [pytest.mark.shared]
+
 
 class _FakeClient:
     def __init__(self, *, close_failures: list[BaseException] | None = None) -> None:
