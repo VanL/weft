@@ -818,16 +818,18 @@ def test_control_observer_retains_shared_completion_facts_with_bounded_drain(
             )
             with control.get_connection() as broker:
                 broker_type = type(broker)
-            original_peek = broker_type.peek_generator
+            original_latest = broker_type.latest_pending_timestamp
             late: list[tuple[str, int]] = []
 
-            def peek(db: Any, queue_name: str, **kwargs: Any) -> Any:
+            def latest(db: Any, queue_name: str, *args: Any, **kwargs: Any) -> Any:
+                horizon = original_latest(db, queue_name, *args, **kwargs)
                 if queue_name == route and not late:
                     raw = json.dumps({"command": "STOP", "status": "ack"})
-                    late.append((raw, control.write(raw)))
-                return original_peek(db, queue_name, **kwargs)
+                    with ctx.queue(route) as writer:
+                        late.append((raw, writer.write(raw)))
+                return horizon
 
-            monkeypatch.setattr(broker_type, "peek_generator", peek)
+            monkeypatch.setattr(broker_type, "latest_pending_timestamp", latest)
             capsys.readouterr()
             observation = task_cmd._observe_control_envelopes(
                 control,
