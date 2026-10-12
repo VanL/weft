@@ -16,7 +16,7 @@ This does not promise literal O(1) process creation or arbitrary historical disc
 
 ## Source documents and baseline
 
-Plan type: implementation with spec revision. The user authorized implementation on 2026-10-12. The source/code/spec delta is being verified in the working tree; this plan remains non-normative and uncommitted. The promoted specs define behavior.
+Plan type: implementation with spec revision. The user authorized implementation on 2026-10-12. The source/code/spec delta is being verified for release; this plan remains non-normative. The promoted specs define behavior.
 
 - [Message flow](../specifications/05-Message_Flow_and_State.md): [MF-1] spawn acceptance, [MF-3] control/terminal wire protocol, [MF-3.1] endpoint evidence, [MF-5] result observation and cleanup.
 - [Manager architecture](../specifications/03-Manager_Architecture.md): [MA-1.6]/[MA-1.6a] singleton supervision and sentinel ownership, [MA-2]/[MA-3] assigned identity and startup.
@@ -157,9 +157,9 @@ Each slice begins with the listed real-path regression, ends with focused checks
 
 ### 1. Address completion facts to their observers
 
-**Read first:** `BaseTask._report_state_change`, `_write_state_queue_message`, `_send_terminal_envelope`, `_cleanup_standard_control_queues_on_exit`; Consumer finalization/failure, pipeline/edge completion, interactive startup/finalization, Manager child-terminal proof, `LogFold`, result materialization and `_CollectedResult`, realtime event iteration, TaskMonitor runtime-control and dead-task cleanup policies. Understand why a persistent output is not terminal and why deleting control evidence at exit invalidates local-only waiting.
+**Read first:** `BaseTask._report_state_change`, `_write_state_queue_message`, the baseline `_send_terminal_envelope` (removed by this implementation), `_cleanup_standard_control_queues_on_exit`; Consumer finalization/failure, pipeline/edge completion, interactive startup/finalization, Manager child-terminal proof, `LogFold`, result materialization and `_CollectedResult`, realtime event iteration, TaskMonitor runtime-control and dead-task cleanup policies. Understand why a persistent output is not terminal and why deleting control evidence at exit invalidates local-only waiting.
 
-**Files to modify:** `weft/core/tasks/base.py`, `consumer.py`, `pipeline.py`, `interactive.py` (as applicable to actual writers); `weft/core/manager.py`; `weft/core/task_evidence.py`; `weft/commands/_result_wait.py`, `events.py`; `weft/core/monitor/policies/runtime_control.py`, `dead_task.py`; `weft/core/pruning/retention.py` and task-monitor cleanup ownership only where classification requires it; the three governing specs. Update direct callers of the removed separate terminal writer, not wrappers that emulate it.
+**Files to modify:** `weft/core/tasks/base.py`, `consumer.py`, `pipeline.py`, `interactive.py` (as applicable to actual writers); `weft/core/manager.py`; `weft/core/task_evidence.py`; `weft/commands/_result_wait.py`, `result.py`, `events.py`, `tasks.py`; `weft/core/monitor/policies/runtime_control.py`, `dead_task.py`; `weft/core/pruning/retention.py` and task-monitor cleanup ownership only where classification requires it; the three governing specs. Update direct callers of the removed separate terminal writer, not wrappers that emulate it.
 
 1. Extend the existing completion publication owner, not a new publisher service. Build and redact one lifecycle payload. On terminal status add existing terminal-envelope keys from canonical TaskSpec state; on `work_item_completed` retain the existing boundary payload. Publish with `broker.broadcast(serialized, queue_names=(WEFT_GLOBAL_LOG_QUEUE, configured_ctrl_out), create_missing=True)`. Exact destinations plus creation are essential: without `create_missing=True`, installed SimpleBroker enumerates existing queues. Reuse the existing bounded retry loop for both completion categories; ordinary nonterminal reporting retains its current best-effort behavior. Remove separate task terminal-envelope emission and update its callers/mappings. In `InteractiveTaskMixin._interactive_finalize_session` and `_interactive_handle_control`, move/defer the terminal report to after session unwind and final stdout/stderr frames. Retain the intended event name/details locally until that owner-thread finalization point, rather than publishing early and adding a second completion. The no-session startup/control branch reports immediately. Verify all terminal paths, including pipeline/edge, report through this owner after their boundary output is finalized.
 2. Retain standard `ctrl_out` on BaseTask exit and through every TaskMonitor/dead-name/stale-service cleanup path until result retention. Adjust deferred-retention scheduling so a young retained control queue does not cause an immediate cleanup loop. Reuse the current terminal-age policy; do not create a per-reader lease/ack registry or selective row-retention scanner. Custom queue ownership remains unchanged.
@@ -250,11 +250,12 @@ Use the repository's PostgreSQL test harness/environment for public broadcast, n
 
 ## Implementation evidence, 2026-10-12
 
-All five slices are implemented in the uncommitted working tree. The promotion
-baseline is `c573926ad0442f79f4712879e7693d416b3fd52f` plus the current exact
-`git diff` for the four governing spec files and their owning code/tests. No
-promotion commit or landing is claimed. Plan metadata remains `draft` until the
-repository's completion/commit gate is satisfied.
+All five slices are implemented in release-candidate commit
+`185a7c7ba42d23f37dc96eb7a20bd543984466c5`, with final test adaptations and
+evidence updates staged separately for the release retry. That commit contains
+the runtime and spec promotion from baseline
+`c573926ad0442f79f4712879e7693d416b3fd52f`. Plan metadata remains `draft` until
+the release pass satisfies the repository's completion gate.
 
 The completion owner now atomically addresses one serialized lifecycle fact to
 history and configured control output. Result and control observers retain that
@@ -284,13 +285,31 @@ show zero global completion searches/subscriptions at those sizes; abnormal
 bare/discovery observation deliberately retains its global watcher and measures
 its owner's incremental history reads separately.
 
-Preliminary end-to-end evidence: all 100 tasks completed with three built-in
-services and bounded public concurrency. An enqueue-only public-path run left
+End-to-end evidence: all 600 tasks completed across 100/200/300-task runs with
+three built-in services and eight ordinary configured waiter workers. Existing
+SQLite admission cap 12 bounded tracked/in-flight children at seven (three
+services plus four public children); admission capacity deliberately limited
+throughput. An enqueue-only public-path run left
 exactly 300 requests pending; successive 100-position windows had request-insert
 p50 0.174/0.153/0.155 ms and p95 0.362/0.276/0.235 ms. Whole `client.submit`
 p50 was 1.879/1.790/1.825 ms and p95 3.854/2.227/2.304 ms. Admission deliberately
 held public execution, separating queue growth from process startup. Remaining
-backend/burst and final verification results are recorded after their runs.
+backend contention and final verification results are recorded after their runs.
+
+| Burst size | Public submit wall | Insert p50 / p95 | Whole submit p50 / p95 | All results collected |
+| --- | --- | --- | --- | --- |
+| 100 | 1.800 s | 0.438 / 12.286 ms | 8.551 / 72.390 ms | 100/100 in 65.400 s |
+| 200 | 2.665 s | 0.420 / 6.317 ms | 7.088 / 40.573 ms | 200/200 in 147.824 s |
+| 300 | 1.259 s | 0.180 / 0.542 ms | 2.109 / 5.011 ms | 300/300 in 245.193 s |
+
+These end-to-end wall times overlap host tests and include bounded admission and
+process startup; they are not clean throughput comparisons. The N=300 audit
+captured all lifecycle stages: request-to-spawn p50/p95 119.382/231.175 s,
+spawn-to-running 0.188/1.025 s, and median launch gaps by successive 100-launch
+windows 1.004/0.978/0.979 s. The configured one-second admission recheck explains
+the spacing; it is excluded from the enqueue-complexity claim. Two probe teardown
+warnings named service PIDs as survival-uncertain; both PIDs were checked absent
+immediately afterward. All owned child processes were cleaned up.
 
 Residual costs are intentional: standard process/wait and child audits scale with
 live children; cold service recovery walks a backlog when identity is unknown;
@@ -336,3 +355,28 @@ Plan-authoring validation: `tests/specs/test_plan_metadata.py` and `tests/specs/
 ```bash
 ../backstitch/.venv/bin/backstitch check --repo-root . --spec-root docs/specifications --plan-root docs/plans --code-root weft --code-root tests --test-root tests --format json
 ```
+
+
+### Implementation review, 2026-10-12
+
+Independent owner reviews covered Manager failure custody, reader source horizons,
+shared-route retention, autostart recovery, and producer ordering. Review found
+and fixed the signal and cancellation issues described in the implementation
+record; no failure detector was removed or weakened. The final control predicate
+is reused by result and control observation, rather than adding another envelope
+schema or publisher. Tests exercise real producers, broker failures, administrative
+queue moves/deletes, retained rows, and the actual stop command. Synthetic old
+read-one-only clock fixtures were replaced by real queues with an owner-local
+clock facade, avoiding global broker/driver clock changes.
+
+Different-model implementation review used Gemini CLI with tools restricted to
+read-only plan approval and external extensions/MCP disabled. Reported model:
+`gemini-3.1-pro-preview-customtools` (the integrated session also listed
+`gemini-3.6-flash`). Integrated review session
+`5dc75db6-9fe8-476c-ab45-4d8516837c51` returned PASS. Independent firing tests then
+exposed the signal and cancellation interactions that this review missed. The
+corrected producer ordering was reviewed again in session
+`1151985a-d4a4-4bb9-942b-32b95b2fc466`, PASS; final control proof custody and all
+other control-output consumers were reviewed in session
+`e6ade684-c9e9-4c66-bc02-35e2e00e6b4e`, PASS. These reviews support the design;
+they do not substitute for backend or process verification.

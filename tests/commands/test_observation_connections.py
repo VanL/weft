@@ -134,7 +134,7 @@ def test_result_wait_reuses_physical_connections(
     monkeypatch: pytest.MonkeyPatch,
     persistent: bool,
 ) -> None:
-    """Real unrelated wakes reuse leases before a real Consumer finishes work."""
+    """Real local control wakes reuse leases before a real Consumer finishes work."""
     ctx = weft_harness.context
     if ctx.backend_name != "postgres":
         pytest.skip("Counts physical PostgreSQL connections")
@@ -178,9 +178,13 @@ def test_result_wait_reuses_physical_connections(
                 if wakes == 0:
                     initial_connections = len(connections)
                 if wakes < 3:
-                    log_writer.write(
-                        json.dumps({"tid": str(int(tid) + 1), "wake": wakes})
-                    )
+                    with log_writer.get_connection() as broker:
+                        broker.write(
+                            spec.io.control["ctrl_out"],
+                            json.dumps(
+                                {"tid": tid, "command": "STATUS", "status": "ok"}
+                            ),
+                        )
                 elif wakes == 3:
                     repeated_connections = len(connections) - initial_connections
                     assert consumer.run_work_item({"kwargs": {"ok": True}}) == {

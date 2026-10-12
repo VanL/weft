@@ -9,6 +9,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
 
 import psutil
@@ -1822,11 +1823,10 @@ def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(
         remaining = remaining_queue.peek_many(limit=10)
     finally:
         remaining_queue.close()
-    assert len(remaining) == 1
-    assert json.loads(str(remaining[0])) == {
-        "command": "STATUS",
-        "status": "late",
-    }
+    assert [json.loads(str(raw)) for raw in remaining] == [
+        terminal_payload,
+        {"command": "STATUS", "status": "late"},
+    ]
 
 
 def test_await_control_surface_public_grace_outlives_expired_kill_ack(
@@ -2018,35 +2018,35 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
 
 
 def test_observe_control_envelopes_keeps_same_drain_observation_times(
+    weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Public and KILL clocks retain their last per-envelope sample."""
 
     tid = str(time.time_ns())
-    messages = iter(
-        [
-            json.dumps({"command": "STATUS", "status": "ok", "tid": tid}),
-            json.dumps({"command": CONTROL_KILL, "status": "ack", "tid": tid}),
-            json.dumps({"type": "stream", "stream": "stderr", "data": "x"}),
-            None,
-        ]
-    )
-
-    class _ScriptedQueue:
-        def read_one(self) -> str | None:
-            return next(messages)
-
-    ctrl_out: Any = _ScriptedQueue()
+    messages = [
+        json.dumps({"command": "STATUS", "status": "ok", "tid": tid}),
+        json.dumps({"command": CONTROL_KILL, "status": "ack", "tid": tid}),
+        json.dumps({"type": "stream", "stream": "stderr", "data": "x"}),
+    ]
     monotonic_samples = iter([10.0, 20.0, 30.0])
-    monkeypatch.setattr(task_cmd.time, "monotonic", lambda: next(monotonic_samples))
+    with weft_harness.context.queue(f"T{tid}.ctrl_out") as ctrl_out:
+        for raw in messages:
+            ctrl_out.write(raw)
+        with monkeypatch.context() as clock:
+            clock.setattr(
+                task_cmd,
+                "time",
+                SimpleNamespace(monotonic=lambda: next(monotonic_samples)),
+            )
+            observation = task_cmd._observe_control_envelopes(
+                ctrl_out,
+                tid=tid,
+                taskspec_payload={},
+            )
+        assert ctrl_out.peek_one() is None
 
-    observation = task_cmd._observe_control_envelopes(
-        ctrl_out,
-        tid=tid,
-        taskspec_payload={},
-    )
-
-    assert next(messages, "exhausted") == "exhausted"
+    assert next(monotonic_samples, "exhausted") == "exhausted"
     assert observation.terminal_snapshot is None
     assert observation.public_signal_observed_at == 20.0
     assert observation.kill_ack_observed_at == 30.0
