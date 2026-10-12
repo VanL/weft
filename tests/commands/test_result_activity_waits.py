@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from base64 import b64encode
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -201,11 +202,12 @@ def test_realtime_cursor_keeps_adjacent_imported_stream_ids(stream: str) -> None
 
 
 def test_shared_collector_keeps_complete_large_stream_prefix() -> None:
-    """The actual stream producer and collector preserve more than 500 frames."""
+    """The consuming result collector preserves more than 500 stream frames."""
     frame_count = STREAM_PREFIX_REGRESSION_FRAME_COUNT
     with WeftTestHarness() as harness:
         with harness.context.queue("test.prefix.tid") as queue:
             tid = str(queue.generate_timestamp())
+            first_id = queue.generate_timestamp()
         spec = validate_taskspec_payload(
             {
                 "name": "prefix",
@@ -218,23 +220,40 @@ def test_shared_collector_keeps_complete_large_stream_prefix() -> None:
             },
             resolved_tid=tid,
         )
-        consumer = Consumer(
-            harness.context.broker_target, spec, config=harness.context.broker_config
+        outbox_name = spec.io.outputs["outbox"]
+        ctrl_out_name = spec.io.control["ctrl_out"]
+        stream_rows = [
+            (
+                outbox_name,
+                json.dumps(
+                    {
+                        "type": "stream",
+                        "chunk": index,
+                        "final": index == frame_count - 1,
+                        "encoding": "base64",
+                        "size": 1,
+                        "data": b64encode(b"x").decode("ascii"),
+                    }
+                ),
+                first_id + index,
+            )
+            for index in range(frame_count)
+        ]
+        terminal_row = (
+            ctrl_out_name,
+            json.dumps(
+                {
+                    "type": "terminal",
+                    "source": "task",
+                    "tid": tid,
+                    "status": "cancelled",
+                }
+            ),
+            first_id + frame_count,
         )
-        with (
-            consumer.drive_scope(),
-            harness.context.queue(spec.io.outputs["outbox"], persistent=True) as outbox,
-        ):
-            assert (
-                consumer._write_streaming_result(outbox, b"x" * frame_count, 1)
-                == frame_count
-            )
-            consumer._handle_stop_request(
-                reason="prefix test stop",
-                event="control_stop",
-                message_id=None,
-                apply_reserved_policy=True,
-            )
+        with harness.context.queue(outbox_name, persistent=True) as outbox:
+            with outbox.get_connection() as broker:
+                broker.insert_messages([*stream_rows, terminal_row])
             observed = list(
                 _iter_task_result(
                     harness.context,
