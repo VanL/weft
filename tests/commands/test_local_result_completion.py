@@ -53,15 +53,16 @@ def _spec(
     )
 
 
-@pytest.mark.parametrize("waiters", [100, 200, 300])
+@pytest.mark.parametrize("unrelated_rows", [100, 200, 300])
 def test_accepted_result_has_no_global_history_interest_or_search(
     monkeypatch: pytest.MonkeyPatch,
-    waiters: int,
+    unrelated_rows: int,
 ) -> None:
     """A real failed task needs local proof; output fallback cannot mask a scan.
 
     Instrument both broker searches and the queues given to the actual monitor,
-    so excluding watcher-thread work cannot hide a global subscription.
+    so excluding watcher-thread work cannot hide a global subscription. The
+    unrelated-row count stresses historical log size, not observation count.
     """
     with WeftTestHarness() as harness:
         spec = _spec(harness, fail=True)
@@ -72,7 +73,7 @@ def test_accepted_result_has_no_global_history_interest_or_search(
             with pytest.raises(RuntimeError, match="intentional failure"):
                 task.run_work_item("fail")
             with harness.context.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
-                for index in range(waiters):
+                for index in range(unrelated_rows):
                     log.write(json.dumps({"tid": "unrelated", "index": index}))
             interests: list[str] = []
             searches: list[str] = []
@@ -97,12 +98,11 @@ def test_accepted_result_has_no_global_history_interest_or_search(
             with monkeypatch.context() as patch:
                 patch.setattr(QueueChangeMonitor, "__init__", monitor_init)
                 patch.setattr(broker_type, "find_message_ids", find)
-                for _ in range(waiters):
-                    result = await_task_result(
-                        harness.context, task.tid, timeout=0, _accepted_taskspec=spec
-                    )
-                    assert result.status == "failed"
-                    assert "intentional failure" in (result.error or "")
+                result = await_task_result(
+                    harness.context, task.tid, timeout=0, _accepted_taskspec=spec
+                )
+                assert result.status == "failed"
+                assert "intentional failure" in (result.error or "")
             assert interests
             assert WEFT_GLOBAL_LOG_QUEUE not in interests
             assert WEFT_GLOBAL_LOG_QUEUE not in searches
@@ -196,11 +196,14 @@ def test_concurrent_accepted_waits_wake_on_local_completion_only(
                 futures = [pool.submit(observe, spec) for spec in specs]
                 registered.wait()
                 with harness.context.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
-                    for index in range(300):
+                    for index in range(10):
                         log.write(json.dumps({"tid": "unrelated", "index": index}))
                 for task in tasks:
                     with pytest.raises(RuntimeError, match="intentional failure"):
                         task.run_work_item("fail")
+                with harness.context.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
+                    for index in range(10, 300):
+                        log.write(json.dumps({"tid": "unrelated", "index": index}))
                 assert [future.result(timeout=20).status for future in futures] == [
                     "failed",
                     "failed",
