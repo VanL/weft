@@ -27,6 +27,8 @@ from weft.cli import app as cli_app
 from weft.context import WeftContext, build_context
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_state import task_state_queue_name
+from weft.core.tasks.consumer import Consumer
+from weft.core.taskspec.transport import validate_taskspec_payload
 from weft.helpers import process_create_time, tid_short_form
 
 pytestmark = [pytest.mark.shared]
@@ -63,77 +65,64 @@ def _host_runtime_handle(pid: int) -> dict[str, Any]:
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT semantics")
 def test_task_status_watch_sigint_exits_cleanly(workdir: Path) -> None:
+    """Ctrl-C ends a live watch cleanly, before the observed task terminates."""
     tid = "1777000000000000888"
     context = build_context(spec_context=workdir)
-    started = time.time_ns()
-    _write_log_event(
-        context,
+    spec = validate_taskspec_payload(
         {
-            "tid": tid,
-            "tid_short": tid_short_form(tid),
-            "timestamp": started,
-            "status": "running",
-            "event": "task_started",
-            "taskspec": {
-                "name": "sigint-task",
-                "state": {"status": "running", "started_at": started},
-                "io": {
-                    "inputs": {"inbox": f"T{tid}.inbox"},
-                    "outputs": {"outbox": f"T{tid}.outbox"},
-                    "control": {
-                        "ctrl_in": f"T{tid}.ctrl_in",
-                        "ctrl_out": f"T{tid}.ctrl_out",
-                    },
-                },
+            "name": "sigint-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "persistent": True,
+                "enable_process_title": False,
             },
         },
+        resolved_tid=tid,
+        inherited_weft_context=str(context.root),
     )
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "weft",
-            "task",
-            "status",
-            tid,
-            "--watch",
-        ],
-        cwd=workdir,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=1,
-    )
-    try:
-        assert process.stdout is not None
-        deadline = time.monotonic() + 10
-        watch_line = ""
-        while time.monotonic() < deadline and "heartbeat" not in watch_line:
-            _write_log_event(
-                context,
-                {
-                    "tid": tid,
-                    "name": "sigint-task",
-                    "status": "running",
-                    "event": "heartbeat",
-                    "timestamp": time.time_ns(),
-                },
-            )
-            ready, _, _ = select.select([process.stdout], [], [], 0.2)
-            if ready:
-                watch_line += process.stdout.readline()
-        assert "heartbeat" in watch_line, watch_line
-        process.send_signal(signal.SIGINT)
-        stdout, stderr = process.communicate(timeout=10)
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+    task = Consumer(context.broker_target, spec, config=context.config)
+    # A partial log fixture can settle as "missing" immediately after heartbeat.
+    # Keep a real persistent task alive so only SIGINT can end this watch.
+    with task.drive_scope():
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "weft",
+                "task",
+                "status",
+                tid,
+                "--watch",
+            ],
+            cwd=workdir,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+        )
+        try:
+            assert process.stdout is not None
+            deadline = time.monotonic() + 10
+            watch_line = ""
+            while time.monotonic() < deadline and "heartbeat" not in watch_line:
+                task._report_state_change(event="heartbeat")
+                ready, _, _ = select.select([process.stdout], [], [], 0.2)
+                if ready:
+                    watch_line += process.stdout.readline()
+            assert "heartbeat" in watch_line, watch_line
+            assert process.poll() is None, watch_line
+            process.send_signal(signal.SIGINT)
+            stdout, stderr = process.communicate(timeout=10)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
 
     assert process.returncode == 0, (stdout, stderr)
     assert "Traceback" not in stderr
     assert tid in watch_line
-    assert "running" in watch_line
+    assert "created" in watch_line
 
 
 def test_task_status_watch_sigint_during_stream_close_exits_cleanly(
