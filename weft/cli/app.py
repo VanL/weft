@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -1583,6 +1586,29 @@ def _render_task_watch(
         stream.close()
 
 
+@contextmanager
+def _task_watch_interrupt_scope() -> Iterator[None]:
+    """Make task watch Ctrl-C a clean user interrupt through command cleanup."""
+
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def raise_keyboard_interrupt(
+        _signum: int,
+        _frame: object,
+    ) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, raise_keyboard_interrupt)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
+
+
 @task_app.command("status")
 def task_status(
     tid: Annotated[str, typer.Argument(help="Task ID or short ID")],
@@ -1610,26 +1636,27 @@ def task_status(
         typer.Option("--context", help="Project root (defaults to auto-discovery)"),
     ] = None,
 ) -> None:
+    interrupt_scope = _task_watch_interrupt_scope() if watch else nullcontext()
     try:
-        snapshot = commands.cmd_task_status(
-            tid,
-            process=process,
-            watch=watch,
-            ping=ping,
-            context=context_dir,
-        )
+        with interrupt_scope:
+            snapshot = commands.cmd_task_status(
+                tid,
+                process=process,
+                watch=watch,
+                ping=ping,
+                context=context_dir,
+            )
+            if watch:
+                stream = cast(commands.CommandStream[commands.TaskEvent], snapshot)
+                _render_task_watch(stream, tid=tid, json_output=json_output)
+                return
+    except KeyboardInterrupt:
+        return
     except commands.WeftError as exc:
         if isinstance(exc, commands.InvalidTID):
             typer.echo(f"Task {tid} not found", err=True)
             raise typer.Exit(code=2) from exc
         _command_exit(exc)
-    if watch:
-        stream = cast(commands.CommandStream[commands.TaskEvent], snapshot)
-        try:
-            _render_task_watch(stream, tid=tid, json_output=json_output)
-        except KeyboardInterrupt:
-            return
-        return
     task_snapshot = cast(commands.TaskSnapshot, snapshot)
     status_payload = _task_snapshot_payload(task_snapshot)
     if process:

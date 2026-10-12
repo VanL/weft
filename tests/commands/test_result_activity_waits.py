@@ -28,6 +28,9 @@ from weft.helpers import closing_queue_iterator
 
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(30)]
 
+STREAM_PREFIX_REGRESSION_FRAME_COUNT = 501
+"""Minimum frame count proving the historical 500-frame prefix cap is gone."""
+
 
 @pytest.mark.parametrize("surface", ["realtime", "raw"])
 def test_idle_event_wait_uses_actual_caller_deadline(
@@ -199,6 +202,7 @@ def test_realtime_cursor_keeps_adjacent_imported_stream_ids(stream: str) -> None
 
 def test_shared_collector_keeps_complete_large_stream_prefix() -> None:
     """The actual stream producer and collector preserve more than 500 frames."""
+    frame_count = STREAM_PREFIX_REGRESSION_FRAME_COUNT
     with WeftTestHarness() as harness:
         with harness.context.queue("test.prefix.tid") as queue:
             tid = str(queue.generate_timestamp())
@@ -221,7 +225,10 @@ def test_shared_collector_keeps_complete_large_stream_prefix() -> None:
             consumer.drive_scope(),
             harness.context.queue(spec.io.outputs["outbox"], persistent=True) as outbox,
         ):
-            assert consumer._write_streaming_result(outbox, b"x" * 600, 1) == 600
+            assert (
+                consumer._write_streaming_result(outbox, b"x" * frame_count, 1)
+                == frame_count
+            )
             consumer._handle_stop_request(
                 reason="prefix test stop",
                 event="control_stop",
@@ -242,11 +249,13 @@ def test_shared_collector_keeps_complete_large_stream_prefix() -> None:
                 for item in observed
                 if isinstance(item, TaskEvent) and item.event_type == "stdout"
             ]
-            assert len(frames) == 600
-            assert [frame.payload["chunk"] for frame in frames] == list(range(600))
+            assert len(frames) == frame_count
+            assert [frame.payload["chunk"] for frame in frames] == list(
+                range(frame_count)
+            )
             final = observed[-1]
             assert isinstance(final, TaskResult)
-            assert final.status == "cancelled" and final.value == "x" * 600
+            assert final.status == "cancelled" and final.value == "x" * frame_count
             assert outbox.peek_one() is None
 
 
