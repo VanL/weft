@@ -429,34 +429,41 @@ def _drain_result_rows(
 ) -> Iterator[TaskEvent]:
     """Claim one selected row at a time and release operations before delivery."""
     decode = decode_outbox_message if include_stream_events else process_outbox_message
-    for _peeked, message_id in rows:
-        with connection_owner.get_connection() as broker:
+    pending_events: list[TaskEvent] = []
+    with connection_owner.get_connection() as broker:
+        for _peeked, message_id in rows:
             raw = broker.claim_one(
                 queue_name, exact_timestamp=message_id, with_timestamps=False
             )
-        if raw is None:
-            continue
-        collected.claimed_output = True
-        if collected.first_claimed_id is None:
-            collected.first_claimed_id = message_id
-        final, decoded = decode(
-            str(raw), collected.stream_buffer, emit_stream=emit_stream
-        )
-        stop = False
-        if final and decoded is not None:
-            stop = collected.record_output(
-                decoded, now=time.monotonic(), show_stderr=show_stderr
+            if raw is None:
+                continue
+            collected.claimed_output = True
+            if collected.first_claimed_id is None:
+                collected.first_claimed_id = message_id
+            final, decoded = decode(
+                str(raw), collected.stream_buffer, emit_stream=emit_stream
             )
-        if include_stream_events:
-            payload = decode_result_payload(str(raw))
-            if isinstance(payload, dict) and payload.get("type") == "stream":
-                stream = str(payload.get("stream") or "stdout")
-                if stream in {"stdout", "stderr"}:
-                    yield TaskEvent(
-                        tid, stream, message_id, _result_stream_payload(payload)
-                    )
-        if stop:
-            return
+            stop = False
+            if final and decoded is not None:
+                stop = collected.record_output(
+                    decoded, now=time.monotonic(), show_stderr=show_stderr
+                )
+            if include_stream_events:
+                payload = decode_result_payload(str(raw))
+                if isinstance(payload, dict) and payload.get("type") == "stream":
+                    stream = str(payload.get("stream") or "stdout")
+                    if stream in {"stdout", "stderr"}:
+                        pending_events.append(
+                            TaskEvent(
+                                tid,
+                                stream,
+                                message_id,
+                                _result_stream_payload(payload),
+                            )
+                        )
+            if stop:
+                break
+    yield from pending_events
 
 
 @dataclass(slots=True)

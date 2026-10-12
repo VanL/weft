@@ -2976,16 +2976,17 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         write_failed = True
         try:
-            for index, chunk in enumerate(chunks):
-                envelope = {
-                    "type": "stream",
-                    "chunk": index,
-                    "final": index == len(chunks) - 1,
-                    "encoding": "base64",
-                    "size": len(chunk),
-                    "data": base64.b64encode(chunk).decode("ascii"),
-                }
-                outbox_queue.write(json.dumps(envelope))
+            with outbox_queue.get_connection() as broker:
+                for index, chunk in enumerate(chunks):
+                    envelope = {
+                        "type": "stream",
+                        "chunk": index,
+                        "final": index == len(chunks) - 1,
+                        "encoding": "base64",
+                        "size": len(chunk),
+                        "data": base64.b64encode(chunk).decode("ascii"),
+                    }
+                    broker.write(outbox_queue.name, json.dumps(envelope))
             write_failed = False
         finally:
             if write_failed:
