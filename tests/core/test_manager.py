@@ -24,6 +24,7 @@ import traceback
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import closing
+from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from types import SimpleNamespace
@@ -4186,6 +4187,31 @@ def test_manager_child_sentinel_adapter_coalesces_level_triggered_exit() -> None
             process.kill()
         process.join(timeout=2.0)
         adapter.close(timeout=1.0)
+
+
+def test_manager_child_sentinel_adapter_chunks_large_windows_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large child sets must not exceed Windows' per-wait handle limit."""
+
+    wake = object()
+    membership = [(str(index), index) for index in range(130)]
+    calls: list[list[Any]] = []
+
+    def wait(waitables: list[Any], timeout: float | None = None) -> list[Any]:
+        calls.append(waitables)
+        assert timeout == manager_mod.MANAGER_CHILD_SENTINEL_WINDOWS_WAIT_SLICE_SECONDS
+        assert len(waitables) <= 63
+        assert waitables[0] is wake
+        return [125] if 125 in waitables else []
+
+    monkeypatch.setattr(manager_mod.os, "name", "nt")
+    monkeypatch.setattr(manager_mod, "wait_for_connections", wait)
+
+    assert manager_mod._ManagerChildSentinelAdapter._wait_for_ready(
+        cast(Connection, wake), membership
+    ) == {125}
+    assert len(calls) == 3
 
 
 def test_manager_child_sentinel_adapter_reports_fatal_observer_failure(

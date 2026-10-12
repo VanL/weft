@@ -66,6 +66,7 @@ from weft._constants import (
     MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT,
     MANAGER_CHILD_LAUNCH_WORKER_LANE,
     MANAGER_CHILD_SENTINEL_OBSERVER_CLOSE_TIMEOUT_SECONDS,
+    MANAGER_CHILD_SENTINEL_WINDOWS_WAIT_SLICE_SECONDS,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
     MANAGER_CHILD_STOP_ESCALATION_SECONDS,
     MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS,
@@ -355,6 +356,38 @@ class _ManagerChildSentinelAdapter:
         )
         self._thread.start()
 
+    @staticmethod
+    def _wait_for_ready(
+        wake_connection: Connection,
+        membership: Sequence[tuple[str, int]],
+    ) -> set[Any]:
+        """Wait for the adapter wake pipe or child sentinels.
+
+        Windows limits each ``WaitForMultipleObjects`` call to 63 handles. The
+        wake pipe is included in every chunk so membership changes and close
+        requests can still interrupt a large child set.
+        """
+
+        sentinels = [sentinel for _tid, sentinel in membership]
+        waitables: list[Any] = [wake_connection]
+        waitables.extend(sentinels)
+        if os.name != "nt" or len(waitables) <= 63:
+            return set(wait_for_connections(waitables))
+
+        chunk_size = 62
+        while True:
+            for index in range(0, len(sentinels), chunk_size):
+                chunk: list[Any] = [wake_connection]
+                chunk.extend(sentinels[index : index + chunk_size])
+                ready = set(
+                    wait_for_connections(
+                        chunk,
+                        MANAGER_CHILD_SENTINEL_WINDOWS_WAIT_SLICE_SECONDS,
+                    )
+                )
+                if ready:
+                    return ready
+
     def add(self, tid: str, sentinel: int) -> None:
         """Register one child identity, preserving identical exit suppression."""
         with self._lock:
@@ -450,9 +483,7 @@ class _ManagerChildSentinelAdapter:
                         for item in self._membership.items()
                         if item not in self._suppressed
                     )
-                waitables: list[Any] = [self._recv_conn]
-                waitables.extend(sentinel for _tid, sentinel in membership)
-                ready = set(wait_for_connections(waitables))
+                ready = self._wait_for_ready(self._recv_conn, membership)
                 if self._recv_conn in ready:
                     while self._recv_conn.poll():
                         self._recv_conn.recv_bytes()

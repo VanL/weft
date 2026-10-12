@@ -591,6 +591,14 @@ TASK_CLEANUP_TIMEOUT_SECONDS: Final[float] = 2.0
 MANAGER_CHILD_SENTINEL_OBSERVER_CLOSE_TIMEOUT_SECONDS: Final[float] = 0.5
 """Minimum close wait for the manager's local child-sentinel observer thread."""
 
+MANAGER_CHILD_SENTINEL_WINDOWS_WAIT_SLICE_SECONDS: Final[float] = 0.05
+"""Per-chunk Windows child-sentinel wait budget.
+
+Windows wait APIs accept at most 63 handles. The manager repeats short chunked
+waits so large child populations remain observable without blocking forever on
+the first chunk.
+"""
+
 TASK_POLL_INTERVAL_NONE_TOKEN: Final[str] = "none"
 """Detached-process transport token for an unbounded reactor wait."""
 
