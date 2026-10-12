@@ -1267,6 +1267,8 @@ doc:
 
 ## Related Plans
 
+- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - proposed queue-based local completion and matching retention changes; does not change the current contract before promotion.
+
 - [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 
 - [Owner-thread topology mutation](../plans/2026-09-21-owner-thread-topology-mutation-plan.md) - enables synchronous membership refresh between dispatch passes under [QUEUE.8].

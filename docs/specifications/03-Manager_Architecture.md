@@ -33,6 +33,8 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - proposed local completion proof, incremental sentinel membership, and exact pending service-request references; does not change the current contract before promotion.
+
 - [AdmissionController: Progress-Aware Admission Waiting](../plans/2026-10-06-admission-controller-plan.md) - isolates admission policy and tracks bounded PG resource-drain diagnostics.
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes Manager and service probe replies through the Manager's existing control watcher and removes probe-specific polling deadlines.

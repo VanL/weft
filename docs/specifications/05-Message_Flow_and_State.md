@@ -1789,6 +1789,8 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - proposed completion routing and retention changes; does not change the current contract before promotion.
+
 - [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md)
 
 - [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
