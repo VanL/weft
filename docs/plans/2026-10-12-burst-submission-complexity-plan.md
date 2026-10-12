@@ -1,6 +1,6 @@
 # Burst Submission: Local Completion and Incremental Manager Bookkeeping
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-2.1], [MF-3], [MF-3.1], [MF-5]; docs/specifications/03-Manager_Architecture.md [MA-1.6], [MA-1.6a], [MA-2], [MA-3]; docs/specifications/07-System_Invariants.md [OBS.1], [OBS.6], [OBS.13.9], [IMPL.10]; docs/specifications/01-Core_Components.md [CC-2.3]
 Superseded by: none
 
@@ -16,7 +16,7 @@ This does not promise literal O(1) process creation or arbitrary historical disc
 
 ## Source documents and baseline
 
-Plan type: implementation with spec revision. The user authorized implementation on 2026-10-12. The source/code/spec delta is being verified for release; this plan remains non-normative. The promoted specs define behavior.
+Plan type: implementation with spec revision. The user authorized implementation on 2026-10-12. The implementation and promoted specs have passed the verification recorded below; this plan remains non-normative. The promoted specs define behavior.
 
 - [Message flow](../specifications/05-Message_Flow_and_State.md): [MF-1] spawn acceptance, [MF-3] control/terminal wire protocol, [MF-3.1] endpoint evidence, [MF-5] result observation and cleanup.
 - [Manager architecture](../specifications/03-Manager_Architecture.md): [MA-1.6]/[MA-1.6a] singleton supervision and sentinel ownership, [MA-2]/[MA-3] assigned identity and startup.
@@ -61,7 +61,7 @@ Counterarguments: local completion retention uses more queue space after exit; a
 
 ## Proposed Spec Delta
 
-Promotion strategy: **B, atomic per slice**. Apply each slice's exact requirement edits with its code, tests, reciprocal code references, and implementation mapping changes in one reviewable change. Do not promote the entire new protocol ahead of its producer and cleanup changes. The implementation promotes the requirement edits with their owning code and tests in one uncommitted review delta. The specs are the sole contract; the proposal below is historical context.
+Promotion strategy: **B, atomic per slice**. Apply each slice's exact requirement edits with its code, tests, reciprocal code references, and implementation mapping changes in one reviewable change. Do not promote the entire new protocol ahead of its producer and cleanup changes. The implementation promoted the requirement edits with their owning code and tests in commit `185a7c7ba42d23f37dc96eb7a20bd543984466c5`. The specs are the sole contract; the proposal below is historical context.
 
 | Spec file | Sections | Owning slice |
 | --- | --- | --- |
@@ -250,12 +250,14 @@ Use the repository's PostgreSQL test harness/environment for public broadcast, n
 
 ## Implementation evidence, 2026-10-12
 
-All five slices are implemented in release-candidate commit
-`185a7c7ba42d23f37dc96eb7a20bd543984466c5`, with final test adaptations and
-evidence updates staged separately for the release retry. That commit contains
-the runtime and spec promotion from baseline
-`c573926ad0442f79f4712879e7693d416b3fd52f`. Plan metadata remains `draft` until
-the release pass satisfies the repository's completion gate.
+All five slices are implemented in commit
+`185a7c7ba42d23f37dc96eb7a20bd543984466c5`, with final observation-test
+adaptations in `c22064d0` (both commits verified in Git). The first commit
+contains the runtime and spec promotion from baseline
+`c573926ad0442f79f4712879e7693d416b3fd52f`. Final verification covers both
+commits. The user authorized the final evidence commit and closeout on
+2026-10-12. Implementation, independent review, and verification are complete;
+the existing traceability debt is recorded below.
 
 The completion owner now atomically addresses one serialized lifecycle fact to
 history and configured control output. Result and control observers retain that
@@ -293,12 +295,12 @@ throughput. An enqueue-only public-path run left
 exactly 300 requests pending; successive 100-position windows had request-insert
 p50 0.174/0.153/0.155 ms and p95 0.362/0.276/0.235 ms. Whole `client.submit`
 p50 was 1.879/1.790/1.825 ms and p95 3.854/2.227/2.304 ms. Admission deliberately
-held public execution, separating queue growth from process startup. Remaining
-backend contention and final verification results are recorded after their runs.
+held public execution, separating queue growth from process startup. Backend
+contention and final verification results follow below.
 
 | Burst size | Public submit wall | Insert p50 / p95 | Whole submit p50 / p95 | All results collected |
 | --- | --- | --- | --- | --- |
-| 100 | 1.800 s | 0.438 / 12.286 ms | 8.551 / 72.390 ms | 100/100 in 65.400 s |
+| 100 | 1.802 s | 0.438 / 12.286 ms | 8.551 / 72.390 ms | 100/100 in 65.384 s |
 | 200 | 2.665 s | 0.420 / 6.317 ms | 7.088 / 40.573 ms | 200/200 in 147.824 s |
 | 300 | 1.259 s | 0.180 / 0.542 ms | 2.109 / 5.011 ms | 300/300 in 245.193 s |
 
@@ -319,6 +321,63 @@ and persistent local history can contain many facts. No blanket O(1) claim is
 made for those paths. Two-address publication adds fixed broker contention and
 retained local evidence adds storage. Coordinated producer/consumer restart is
 required for the new protocol; no mixed-version compatibility shim was added.
+
+### PostgreSQL publication measurements
+
+Quiet-host probes used SimpleBroker 8.5.1 and simplebroker-pg 4.5.1, a 1,277-byte
+completion body, fresh schemas, and connections established outside the clock.
+Each case ran eight writers with 64 operations each (512 operations), in two
+counterbalanced passes. The comparison is the actual public two-address atomic
+broadcast versus two separate public queue writes. These are paired operation
+latencies, not per-row timings.
+
+| Pending submissions | Atomic broadcast p50 / p95, pass 1 | Atomic broadcast p50 / p95, pass 2 | Two writes p50 / p95, pass 1 | Two writes p50 / p95, pass 2 |
+| --- | --- | --- | --- | --- |
+| 100 | 10.635 / 13.908 ms | 10.555 / 15.679 ms | 24.307 / 37.491 ms | 22.407 / 34.693 ms |
+| 200 | 11.202 / 17.112 ms | 9.848 / 15.908 ms | 22.558 / 36.760 ms | 23.705 / 39.593 ms |
+| 300 | 9.372 / 11.606 ms | 9.945 / 13.615 ms | 27.277 / 36.459 ms | 25.592 / 37.171 ms |
+
+The eight-writer runs show no monotonic backlog-dependent growth over this range;
+atomic publication achieved 669–836 paired operations/s versus 247–331 for two
+writes. A single-writer, 128-operation control at 200 pending submissions
+measured atomic p50/p95 1.193/1.504 ms versus 1.710/2.431 ms for two writes.
+Earlier probes overlapped other host work and produced tails up to 170 ms; the
+quiet counterbalanced runs supersede those absolute-latency measurements.
+This resolves the measured lock-scope tradeoff for the tested workload, not a
+literal backend O(1) claim or a production throughput guarantee. The real
+600-process burst exercise above used SQLite; no PostgreSQL process-burst result
+is claimed.
+
+### Final verification
+
+The checkout was frozen for the final full runs. The repo-managed toolchain,
+loaded through `.envrc`, reported:
+
+- Fast suite: **5,531 passed, 33 skipped**, 285.10 s.
+- Full suite including slow tests (`pytest -m ""`): **5,532 passed, 44 skipped**,
+  259.76 s. Skips cover backend-specific cases and opt-in live-provider tests.
+- Real PostgreSQL focused runtime suite: **938 passed**, covering completion,
+  retry, interactive finalization, result observation, Monitor retention,
+  Manager bookkeeping, endpoint evidence, and abnormal spawn observation.
+- Final PostgreSQL control/connection suite: **153 passed**; both CLI
+  cancellation variants then **passed** with the correct active environment
+  (23.55 s). The initial CLI attempts exited before task startup because the
+  sanitized test environment omitted `VIRTUAL_ENV` and
+  `UV_PROJECT_ENVIRONMENT`, causing `uv run --active` to select Python without
+  SimpleBroker. Restoring those two runtime variables required no code change.
+  These targeted suites overlap; their counts are not a count of unique tests.
+- Required full mypy roots: **453 source files, no issues**. Ruff check and
+  format check passed (418 files already formatted). Final plan/spec hygiene
+  checks passed (six tests); `git diff --check` passed.
+
+Backstitch remains an existing non-clean gate: baseline **34 errors, 1,151
+warnings, 654 informational findings**; final **34 errors, 1,142 warnings, 651
+informational findings**. Comparing finding signatures without line numbers
+shows **zero new errors or warnings**. This change does not waive the existing
+34 errors or claim a clean repository-wide traceability gate. The same command
+recorded in the review section was used on a complete baseline checkout and the
+final checkout. Disposable PostgreSQL resources and the private test environment
+file were removed after verification.
 
 ## Review record
 

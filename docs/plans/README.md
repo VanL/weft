@@ -23,7 +23,7 @@ There are currently 240 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-10-12-burst-submission-complexity-plan.md`](./2026-10-12-burst-submission-complexity-plan.md) | Burst Submission: Local Completion and Incremental Manager Bookkeeping | `draft` | none |
+| [`2026-10-12-burst-submission-complexity-plan.md`](./2026-10-12-burst-submission-complexity-plan.md) | Burst Submission: Local Completion and Incremental Manager Bookkeeping | `completed` | none |
 | [`2026-10-10-result-observation-simplification-plan.md`](./2026-10-10-result-observation-simplification-plan.md) | Result Observation: Canonical History and Unified Settlement | `draft` | none |
 | [`2026-10-09-direct-result-observation-implementation-plan.md`](./2026-10-09-direct-result-observation-implementation-plan.md) | Direct Result Observation: Implementation Repair | `draft` | [Result observation simplification](./2026-10-10-result-observation-simplification-plan.md) |
 | [`2026-10-09-direct-result-observation-spec-plan.md`](./2026-10-09-direct-result-observation-spec-plan.md) | Direct Result Observation: Spec Changes Only | `draft` | [Result observation simplification](./2026-10-10-result-observation-simplification-plan.md) |
