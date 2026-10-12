@@ -731,6 +731,7 @@ class TestFixtureCleanupDiagnostics:
     ) -> None:
         harness = Mock()
         harness.dump_debug_state.side_effect = RuntimeError("contains secret")
+        harness.dump_broker_queue_state.side_effect = RuntimeError("contains queue")
         timeout_error = subprocess.TimeoutExpired(
             ["weft", "status"],
             1.0,
@@ -761,7 +762,36 @@ class TestFixtureCleanupDiagnostics:
         else:
             assert not any(note.startswith("partial stderr:") for note in notes)
         assert any("WeftTestHarness dump failed." in note for note in notes)
+        assert any(
+            "WeftTestHarness broker queue dump failed." in note for note in notes
+        )
         assert all("contains secret" not in note for note in notes)
+        assert all("contains queue" not in note for note in notes)
+
+    def test_run_cli_timeout_includes_broker_queue_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        harness = Mock()
+        harness.dump_debug_state.return_value = "debug snapshot"
+        harness.dump_broker_queue_state.return_value = "broker queue snapshot"
+        timeout_error = subprocess.TimeoutExpired(["weft", "status"], 1.0)
+
+        with (
+            patch("tests.conftest.subprocess.run", side_effect=timeout_error),
+            pytest.raises(subprocess.TimeoutExpired) as exc_info,
+        ):
+            run_cli(
+                "status",
+                cwd=tmp_path,
+                timeout=1.0,
+                harness=harness,
+                prepare_root=False,
+            )
+
+        assert exc_info.value is timeout_error
+        notes = getattr(exc_info.value, "__notes__", [])
+        assert any("debug snapshot" in note for note in notes)
+        assert any("broker queue snapshot" in note for note in notes)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")

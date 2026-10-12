@@ -530,6 +530,44 @@ class WeftTestHarness:
 
         return "\n".join(lines)
 
+    def dump_broker_queue_state(self, *, limit: int = 10) -> str:
+        """Return queue tails even when a timed-out CLI never printed a TID."""
+
+        context = self._context
+        if context is None:
+            return "Broker queue snapshot:\n  context=uninitialized"
+
+        queue_names: list[str] = []
+        try:
+            with context.broker() as broker:
+                queue_names = sorted(broker.list_queues())
+        except Exception:  # noqa: BLE001 approved [TS-3.1] diagnostic best-effort
+            queue_names = []
+
+        interesting = [
+            WEFT_SERVICES_REGISTRY_QUEUE,
+            WEFT_SPAWN_REQUESTS_QUEUE,
+            WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+            WEFT_GLOBAL_LOG_QUEUE,
+        ]
+        interesting.extend(
+            name
+            for name in queue_names
+            if name.startswith(("T", "once_override.", "continuous_override."))
+        )
+
+        lines = [
+            "Broker queue snapshot:",
+            f"  queue_count={len(queue_names) if queue_names else '<unavailable>'}",
+        ]
+        for name in dict.fromkeys(interesting):
+            lines.append(f"  {name}_tail:")
+            lines.extend(
+                self._peek_queue_lines(name, persistent=False, limit=limit)
+                or ["    <empty>"]
+            )
+        return "\n".join(lines)
+
     def wait_for_completion(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-217] exception
         self,
         tid: str,

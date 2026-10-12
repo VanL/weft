@@ -473,6 +473,10 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
                 debug_lines.append(harness.dump_debug_state())
             except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-310] exception
                 debug_lines.append("WeftTestHarness dump failed.")
+            try:
+                debug_lines.append(harness.dump_broker_queue_state())
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-310] exception
+                debug_lines.append("WeftTestHarness broker queue dump failed.")
         else:
             debug_lines.append("No WeftTestHarness provided.")
         debug_text = "\n".join(debug_lines)
