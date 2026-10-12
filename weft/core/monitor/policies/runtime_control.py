@@ -118,7 +118,7 @@ class TerminalTaskRuntimeQueueCleanupPlan:
     """Policy-selected task-local runtime queues for terminal cleanup."""
 
     queue_names: tuple[str, ...]
-    control_queue_names: tuple[str, str]
+    control_queue_names: tuple[str, ...]
     inbox_queue_names: tuple[str, ...]
     outbox_queue_names: tuple[str, ...]
     retention_eligible: bool
@@ -220,32 +220,36 @@ def terminal_task_runtime_queue_cleanup_plan(
 ) -> TerminalTaskRuntimeQueueCleanupPlan | None:
     """Return standard task-local queues eligible for terminal cleanup.
 
-    Outbox retention eligibility is age-gated on
+    Outbox and completion-control retention eligibility is age-gated on
     ``record.terminal_message_id`` (terminal evidence, hybrid-timestamp
     domain) when present, falling back to TID age -- also a hybrid
     timestamp -- when no terminal message id was recorded. This mirrors
     ``select_reserved_cleanup_pending_tasks`` (`sql.py`) so a long-running
-    task's outbox is retained for the full window measured from
+    task's outbox and completion evidence are retained for the full window from
     completion, not creation (Spec: [MF-5]).
     """
 
-    control_queue_names = standard_task_control_queue_names(record)
-    if control_queue_names is None:
+    standard_control_names = standard_task_control_queue_names(record)
+    if standard_control_names is None:
         return None
-    if preserve_data_without_terminal_proof and not record.terminal_seen:
-        return TerminalTaskRuntimeQueueCleanupPlan(
-            queue_names=control_queue_names,
-            control_queue_names=control_queue_names,
-            inbox_queue_names=(),
-            outbox_queue_names=(),
-            retention_eligible=False,
-        )
     retention_message_id = (
         record.terminal_message_id
         if record.terminal_message_id is not None
         else int(record.tid)
     )
     retention_eligible = is_old_enough(retention_message_id, now_ns, retention_seconds)
+    # Completion evidence shares the outbox lifetime, including claimed rows.
+    control_queue_names = (
+        standard_control_names if retention_eligible else standard_control_names[:1]
+    )
+    if preserve_data_without_terminal_proof and not record.terminal_seen:
+        return TerminalTaskRuntimeQueueCleanupPlan(
+            queue_names=control_queue_names,
+            control_queue_names=control_queue_names,
+            inbox_queue_names=(),
+            outbox_queue_names=(),
+            retention_eligible=retention_eligible,
+        )
     inbox_queue_names = (f"T{record.tid}.{QUEUE_INBOX_SUFFIX}",)
     outbox_queue_names = (
         (f"T{record.tid}.{QUEUE_OUTBOX_SUFFIX}",) if retention_eligible else ()
@@ -261,8 +265,11 @@ def terminal_task_runtime_queue_cleanup_plan(
 
 def stale_service_owner_runtime_queue_cleanup_plan(
     record: MonitorTaskCollationRecord,
+    *,
+    now_ns: int,
+    retention_seconds: float,
 ) -> TerminalTaskRuntimeQueueCleanupPlan | None:
-    """Return standard control queues for a disposed stale service owner."""
+    """Retain disposed service-owner completion evidence through [MF-5] age."""
 
     if record.disposition_reason not in STALE_SERVICE_OWNER_DISPOSITION_REASONS:
         return None
@@ -282,12 +289,23 @@ def stale_service_owner_runtime_queue_cleanup_plan(
         or control.get("ctrl_out") != expected_ctrl_out
     ):
         return None
+    retention_message_id = (
+        record.terminal_message_id
+        if record.terminal_message_id is not None
+        else int(record.tid)
+    )
+    retention_eligible = is_old_enough(retention_message_id, now_ns, retention_seconds)
+    control_queue_names = (
+        (expected_ctrl_in, expected_ctrl_out)
+        if retention_eligible
+        else (expected_ctrl_in,)
+    )
     return TerminalTaskRuntimeQueueCleanupPlan(
-        queue_names=(expected_ctrl_in, expected_ctrl_out),
-        control_queue_names=(expected_ctrl_in, expected_ctrl_out),
+        queue_names=control_queue_names,
+        control_queue_names=control_queue_names,
         inbox_queue_names=(),
         outbox_queue_names=(),
-        retention_eligible=False,
+        retention_eligible=retention_eligible,
     )
 
 
@@ -454,9 +472,10 @@ def _has_retention_deferred_only_work(
     retention_suffixes = {
         QUEUE_INBOX_SUFFIX,
         QUEUE_OUTBOX_SUFFIX,
+        QUEUE_CTRL_OUT_SUFFIX,
         QUEUE_RESERVED_SUFFIX,
     }
-    stale_suffixes = {QUEUE_CTRL_IN_SUFFIX, QUEUE_CTRL_OUT_SUFFIX}
+    stale_suffixes = {QUEUE_CTRL_IN_SUFFIX}
     return bool(suffixes & retention_suffixes) and not bool(suffixes & stale_suffixes)
 
 

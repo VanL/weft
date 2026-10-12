@@ -26,6 +26,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.deferred import get_task_evidence
 from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 from weft.core.task_state import latest_task_state_rows
 from weft.ext import RunnerHandle
@@ -213,35 +214,46 @@ def endpoint_record_from_payload(
 
 
 def _latest_task_statuses(
-    ctx: WeftContext, *, broker: Any | None = None
+    ctx: WeftContext,
+    *,
+    tids: Iterable[str] | None = None,
+    broker: Any | None = None,
 ) -> dict[str, str]:
-    with (
-        queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db,
-        closing_queue_iterator(
-            iter_broker_queue_json_entries(db, WEFT_GLOBAL_LOG_QUEUE)
-        ) as rows,
-    ):
+    """Read candidate history; bulk listing retains one shared pass [MF-3.1]."""
+    task_evidence = get_task_evidence()
+    candidates = None if tids is None else set(tids)
+    if candidates == set():
+        return {}
+    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
         latest: dict[str, tuple[int, str]] = {}
-        for payload, message_id in rows:
-            tid = payload.get("tid")
-            if not isinstance(tid, str) or not tid:
-                continue
 
-            status = payload.get("status")
-            if not isinstance(status, str) or not status:
-                taskspec = payload.get("taskspec")
-                if isinstance(taskspec, Mapping):
-                    state = taskspec.get("state")
-                    if isinstance(state, Mapping):
-                        state_status = state.get("status")
-                        if isinstance(state_status, str) and state_status:
-                            status = state_status
-            if not isinstance(status, str) or not status:
-                continue
+        def fold(rows: Iterable[tuple[dict[str, Any], int]]) -> None:
+            for payload, message_id in rows:
+                tid = payload.get("tid")
+                if not isinstance(tid, str) or not tid:
+                    continue
+                status = task_evidence.status_from_log_payload(payload)
+                if status is None:
+                    continue
+                previous = latest.get(tid)
+                if (
+                    previous is not None
+                    and previous[1] in TERMINAL_TASK_STATUSES
+                    and status not in TERMINAL_TASK_STATUSES
+                ):
+                    continue
+                if previous is None or previous[0] <= message_id:
+                    latest[tid] = (int(message_id), status)
 
-            previous = latest.get(tid)
-            if previous is None or previous[0] <= message_id:
-                latest[tid] = (int(message_id), status)
+        if candidates is None:
+            with closing_queue_iterator(
+                iter_broker_queue_json_entries(db, WEFT_GLOBAL_LOG_QUEUE)
+            ) as rows:
+                fold(rows)
+        else:
+            for tid in candidates:
+                rows, _horizon = task_evidence.read_task_history(ctx, tid, broker=db)
+                fold(rows)
         return {tid: status for tid, (_message_id, status) in latest.items()}
 
 
@@ -359,9 +371,17 @@ def list_resolved_endpoints(
                 if previous is None or (previous.message_id or -1) <= int(message_id):
                     latest_by_owner[(record.name, record.tid)] = record
 
-        task_statuses = _latest_task_statuses(ctx, broker=db)
+        if not latest_by_owner:
+            return []
+        candidate_tids = {record.tid for record in latest_by_owner.values()}
+        # Explicit bulk listing avoids one backend substring scan per owner.
+        # Exact-name lookups decode only matched owners' history.
+        bulk = pattern is None or any(token in pattern for token in ("*", "?", "["))
+        task_statuses = _latest_task_statuses(
+            ctx, tids=None if bulk else candidate_tids, broker=db
+        )
         tid_states = latest_tid_state_entries_for_endpoint_resolution(
-            ctx, tids={record.tid for record in latest_by_owner.values()}, broker=db
+            ctx, tids=candidate_tids, broker=db
         )
         grouped = _classify_latest_endpoint_records(
             latest_by_owner.values(),

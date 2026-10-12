@@ -31,6 +31,7 @@ from weft._constants import (
     CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
+    TASK_HISTORY_MAX_MESSAGE_ID,
     TASK_PID_EXIT_POLL_INTERVAL,
     TASK_PING_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
@@ -68,6 +69,7 @@ from weft.core.task_state import (
     task_state_queue_name,
 )
 from weft.helpers import (
+    closing_queue_iterator,
     pid_is_live,
     terminate_verified_process_tree,
     tid_short_form,
@@ -75,7 +77,7 @@ from weft.helpers import (
 from weft.helpers.message_ids import is_task_tid
 
 from ._boundary import typed_command_errors
-from ._result_wait import result_observation
+from ._result_wait import _is_completion_record, result_observation
 from ._task_history import (
     load_latest_taskspec_payload,
     monitor_terminal_evidence,
@@ -1653,40 +1655,63 @@ def _observe_control_envelopes(
     tid: str,
     taskspec_payload: dict[str, Any],
 ) -> _ControlSurfaceObservation:
-    """Drain current control facts, stopping at the first typed terminal."""
+    """Observe a bounded control range while retaining every completion fact.
+
+    Ordinary control rows are exact-deleted after observation. Completion facts
+    remain readable by result collection and supervision, including facts for
+    other owners sharing this route. Select the first matching typed terminal.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5].
+    """
 
     public_signal_observed_at: float | None = None
     kill_ack_observed_at: float | None = None
-    while True:
-        ctrl_raw = ctrl_queue.read_one()
-        if ctrl_raw is None:
-            break
-        ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
-        try:
-            payload = json.loads(str(ctrl_payload))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        terminal_snapshot = _snapshot_from_terminal_ctrl_out(
-            tid=tid,
-            payload=payload,
-            taskspec_payload=taskspec_payload,
-        )
-        if terminal_snapshot is not None:
-            return _ControlSurfaceObservation(
-                terminal_snapshot,
-                public_signal_observed_at,
-                kill_ack_observed_at,
+    with ctrl_queue.get_connection() as broker:
+        horizon = broker.latest_pending_timestamp(ctrl_queue.name)
+        if horizon is None:
+            return _ControlSurfaceObservation(None, None, None)
+        before = None if horizon == TASK_HISTORY_MAX_MESSAGE_ID else horizon + 1
+        with closing_queue_iterator(
+            cast(
+                Iterable[tuple[str, int]],
+                broker.peek_generator(
+                    ctrl_queue.name, with_timestamps=True, before_timestamp=before
+                ),
             )
-        if ("command" in payload and "status" in payload) or (
-            payload.get("type") == "terminal" and isinstance(payload.get("status"), str)
-        ):
-            public_signal_observed_at = time.monotonic()
-        command = str(payload.get("command", "")).strip().upper()
-        status = str(payload.get("status", "")).strip().lower()
-        if command == CONTROL_KILL and status == "ack":
-            kill_ack_observed_at = time.monotonic()
+        ) as rows:
+            for ctrl_payload, message_id in rows:
+                raw = str(ctrl_payload)
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    payload = None
+                retained = _is_completion_record(payload, raw)
+                if not retained:
+                    broker.delete_message_ids(ctrl_queue.name, [message_id])
+                if not isinstance(payload, dict):
+                    continue
+                terminal_snapshot = _snapshot_from_terminal_ctrl_out(
+                    tid=tid,
+                    payload=payload,
+                    taskspec_payload=taskspec_payload,
+                )
+                if terminal_snapshot is not None:
+                    return _ControlSurfaceObservation(
+                        terminal_snapshot,
+                        public_signal_observed_at,
+                        kill_ack_observed_at,
+                    )
+                if retained:
+                    continue
+                if ("command" in payload and "status" in payload) or (
+                    payload.get("type") == "terminal"
+                    and isinstance(payload.get("status"), str)
+                ):
+                    public_signal_observed_at = time.monotonic()
+                command = str(payload.get("command", "")).strip().upper()
+                status = str(payload.get("status", "")).strip().lower()
+                if command == CONTROL_KILL and status == "ack":
+                    kill_ack_observed_at = time.monotonic()
     return _ControlSurfaceObservation(
         None,
         public_signal_observed_at,

@@ -61,7 +61,6 @@ def test_terminal_runtime_cleanup_plan_deletes_stale_queues_before_retention() -
     assert plan is not None
     assert plan.queue_names == (
         f"T{tid}.ctrl_in",
-        f"T{tid}.ctrl_out",
         f"T{tid}.inbox",
     )
     assert plan.outbox_queue_names == ()
@@ -116,7 +115,7 @@ def test_runtime_cleanup_plan_preserves_data_without_terminal_proof() -> None:
     assert plan.queue_names == (f"T{tid}.ctrl_in", f"T{tid}.ctrl_out")
     assert plan.inbox_queue_names == ()
     assert plan.outbox_queue_names == ()
-    assert not plan.retention_eligible
+    assert plan.retention_eligible
 
 
 def test_terminal_runtime_cleanup_plan_retention_uses_terminal_evidence_not_creation() -> (
@@ -219,7 +218,9 @@ def test_stale_service_owner_cleanup_plan_allows_standard_manager_controls() -> 
         disposition_at_ns=int(tid) + 3,
     )
 
-    plan = stale_service_owner_runtime_queue_cleanup_plan(record)
+    plan = stale_service_owner_runtime_queue_cleanup_plan(
+        record, now_ns=int(tid) + 10_000_000_000, retention_seconds=1.0
+    )
 
     assert plan is not None
     assert plan.queue_names == (f"T{tid}.ctrl_in", f"T{tid}.ctrl_out")
@@ -232,7 +233,12 @@ def test_stale_service_owner_cleanup_plan_rejects_user_tasks() -> None:
     tid = "1778084345905438801"
     record = _record(tid)
 
-    assert stale_service_owner_runtime_queue_cleanup_plan(record) is None
+    assert (
+        stale_service_owner_runtime_queue_cleanup_plan(
+            record, now_ns=int(tid) + 10_000_000_000, retention_seconds=1.0
+        )
+        is None
+    )
 
 
 def test_stale_service_owner_cleanup_plan_rejects_nonstandard_controls() -> None:
@@ -240,7 +246,12 @@ def test_stale_service_owner_cleanup_plan_rejects_nonstandard_controls() -> None
     record = _record(tid, role="manager")
     record.taskspec_summary["io"]["control"]["ctrl_in"] = "weft.manager.ctrl_in"
 
-    assert stale_service_owner_runtime_queue_cleanup_plan(record) is None
+    assert (
+        stale_service_owner_runtime_queue_cleanup_plan(
+            record, now_ns=int(tid) + 10_000_000_000, retention_seconds=1.0
+        )
+        is None
+    )
 
 
 def test_dead_task_selection_treats_deferred_outbox_only_as_base_for_now() -> None:

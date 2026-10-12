@@ -2096,11 +2096,15 @@ class MaintenanceWorker:
         existing_queue_names: set[str] | None = None,
         now_ns: int,
     ) -> _TaskControlCleanupResult:
-        """Delete whole standard stale task-local queues for a terminal task."""
+        """Delete stale standard queues, retaining completion with results [MF-5]."""
 
         if record.task_control_deleted_at_ns is not None:
             return _TaskControlCleanupResult(families_processed=1)
-        cleanup_plan = _stale_service_owner_runtime_queue_cleanup_plan(record)
+        cleanup_plan = _stale_service_owner_runtime_queue_cleanup_plan(
+            record,
+            now_ns=now_ns,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+        )
         if cleanup_plan is None:
             cleanup_plan = _terminal_task_runtime_queue_cleanup_plan(
                 record,

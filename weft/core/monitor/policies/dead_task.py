@@ -40,7 +40,7 @@ class DeadTaskQueueCleanupPlan:
     """Policy-selected queue names for one dead-TID cleanup attempt."""
 
     queue_names: tuple[str, ...]
-    control_queue_names: tuple[str, str]
+    control_queue_names: tuple[str, ...]
     inbox_queue_names: tuple[str, ...]
     outbox_queue_names: tuple[str, ...]
     reserved_queue_names: tuple[str, ...]
@@ -79,20 +79,20 @@ def standard_task_queue_identity(queue_name: str) -> tuple[str, str] | None:
     return tid, suffix
 
 
-def standard_dead_task_stale_queue_names(tid: str) -> tuple[str, str, str]:
+def standard_dead_task_stale_queue_names(tid: str) -> tuple[str, str]:
     """Return standard task-local queues stale once a TID is dead."""
 
     return (
         f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
-        f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
         f"T{tid}.{QUEUE_INBOX_SUFFIX}",
     )
 
 
-def standard_dead_task_retention_queue_names(tid: str) -> tuple[str, str]:
+def standard_dead_task_retention_queue_names(tid: str) -> tuple[str, str, str]:
     """Return dead-task queues eligible only after retention expiry."""
 
     return (
+        f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
         f"T{tid}.{QUEUE_OUTBOX_SUFFIX}",
         f"T{tid}.{QUEUE_RESERVED_SUFFIX}",
     )
@@ -114,25 +114,25 @@ def dead_task_queue_cleanup_plan(
     evidence to prefer (Spec: [MF-5]).
     """
 
-    stale_queue_names = standard_dead_task_stale_queue_names(tid)
+    ctrl_in, inbox = standard_dead_task_stale_queue_names(tid)
     retention_eligible = is_old_enough(int(tid), now_ns, retention_seconds)
-    retention_queue_names = (
-        standard_dead_task_retention_queue_names(tid) if retention_eligible else ()
-    )
-    outbox_queue_names = tuple(
-        queue_name
-        for queue_name in retention_queue_names
-        if queue_name.endswith(f".{QUEUE_OUTBOX_SUFFIX}")
-    )
-    reserved_queue_names = tuple(
-        queue_name
-        for queue_name in retention_queue_names
-        if queue_name.endswith(f".{QUEUE_RESERVED_SUFFIX}")
-    )
+    control_queue_names: tuple[str, ...] = (ctrl_in,)
+    outbox_queue_names: tuple[str, ...] = ()
+    reserved_queue_names: tuple[str, ...] = ()
+    if retention_eligible:
+        ctrl_out, outbox, reserved = standard_dead_task_retention_queue_names(tid)
+        control_queue_names += (ctrl_out,)
+        outbox_queue_names = (outbox,)
+        reserved_queue_names = (reserved,)
     return DeadTaskQueueCleanupPlan(
-        queue_names=(*stale_queue_names, *retention_queue_names),
-        control_queue_names=stale_queue_names[:2],
-        inbox_queue_names=stale_queue_names[2:],
+        queue_names=(
+            *control_queue_names,
+            inbox,
+            *outbox_queue_names,
+            *reserved_queue_names,
+        ),
+        control_queue_names=control_queue_names,
+        inbox_queue_names=(inbox,),
         outbox_queue_names=outbox_queue_names,
         reserved_queue_names=reserved_queue_names,
         retention_eligible=retention_eligible,

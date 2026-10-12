@@ -247,6 +247,7 @@ def follow_task_events(
         normalized_tid,
         timeout=timeout,
         _accepted_taskspec=_accepted_taskspec,
+        _follow_lifecycle=True,
     ):
         if isinstance(item, TaskEvent):
             yield item

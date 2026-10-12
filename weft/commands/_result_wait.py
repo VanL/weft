@@ -8,6 +8,7 @@ Spec references:
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -157,13 +158,28 @@ def drain_ctrl_out_stream_messages(
                 continue
             ctrl_payload, message_id = entry[0], entry[1]
             raw = str(ctrl_payload)
-            terminal_envelope = coerce_terminal_envelope(raw, tid=tid)
-            if terminal_envelope is not None:
-                terminal_candidates.append((terminal_envelope, int(message_id)))
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            if _is_completion_record(payload, raw):
+                terminal_envelope = coerce_terminal_envelope(raw, tid=tid)
+                if terminal_envelope is not None:
+                    terminal_candidates.append((terminal_envelope, int(message_id)))
                 continue
             handle_ctrl_stream(raw)
             broker.delete_message_ids(queue_name, [message_id])
     return terminal_candidates
+
+
+def _is_completion_record(payload: Any, raw: str) -> bool:
+    """Recognize retained completion facts for every owner of a shared route [MF-5]."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("tid"), str):
+        return False
+    return coerce_terminal_envelope(raw, tid=payload["tid"]) is not None or (
+        payload.get("event") == "work_item_completed"
+        and payload.get("status") == "running"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +201,14 @@ class ResultMaterialization:
     outbox_name: str
     ctrl_out_name: str
     log_last_timestamp: int | None = None
-    batch_boundaries: tuple[tuple[int, float], ...] = ()
+    log_initial_timestamp: int | None = None
+    ctrl_last_timestamp: int | None = None
+    ctrl_initial_timestamp: int | None = None
+    # Each selected fact carries its own source's initial observation horizon.
+    # These containers belong to the single observation owner. Dict membership
+    # deduplicates retries and replaces a discovery copy by its local copy.
+    batch_boundaries: list[tuple[int, float, int]] = field(default_factory=list)
+    boundary_indexes: dict[str, tuple[int, bool]] = field(default_factory=dict)
     result_surface_had_activity: bool = False
     log_evidence: task_evidence.LogFold = field(default_factory=task_evidence.LogFold)
     monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None = None
@@ -222,14 +245,18 @@ def _accepted_result_materialization(taskspec: TaskSpec) -> ResultMaterializatio
 
 
 def _result_observation_names(
-    tid: str, materialized: ResultMaterialization
+    tid: str,
+    materialized: ResultMaterialization,
+    *,
+    include_history: bool = True,
 ) -> list[str]:
     """Name exact result, lifecycle and runtime interests before reading [MF-5]."""
     names = [
         materialized.outbox_name,
         materialized.ctrl_out_name,
-        WEFT_GLOBAL_LOG_QUEUE,
     ]
+    if include_history:
+        names.append(WEFT_GLOBAL_LOG_QUEUE)
     if is_task_tid(tid):
         names.append(task_state_queue_name(tid))
     if materialized.taskspec_payload is None:
@@ -262,6 +289,74 @@ def _with_terminal_evidence(
     )
 
 
+def _local_completion_rows(
+    broker: Any,
+    queue_name: str,
+    *,
+    tid: str,
+    cursor: int | None,
+    initial: int | None,
+) -> tuple[list[tuple[dict[str, Any], int]], int | None, int]:
+    """Inspect only the registered local suffix, retaining negative progress [MF-5]."""
+    horizon = broker.latest_pending_timestamp(queue_name)
+    if initial is None:
+        initial = horizon or 0
+    if horizon is None or (cursor is not None and horizon <= cursor):
+        return [], cursor, initial
+    before = None if horizon == TASK_HISTORY_MAX_MESSAGE_ID else horizon + 1
+    local: list[tuple[dict[str, Any], int]] = []
+    with closing_queue_iterator(
+        broker.peek_generator(
+            queue_name,
+            with_timestamps=True,
+            after_timestamp=cursor,
+            before_timestamp=before,
+        )
+    ) as entries:
+        for body, message_id in entries:
+            try:
+                event = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            if (
+                _is_completion_record(event, body)
+                and event["tid"] == tid
+                and event.get("source") != "manager"
+                and isinstance(event.get("event"), str)
+            ):
+                local.append((event, int(message_id)))
+    return local, horizon, initial
+
+
+def _retain_batch_boundaries(
+    materialized: ResultMaterialization,
+    rows: Sequence[tuple[dict[str, Any], int]],
+    *,
+    initial: int,
+    is_local: bool,
+    now: float,
+) -> None:
+    """Select each fact once, preferring its local ID without a list scan [MF-5]."""
+    for event, message_id in rows:
+        if event.get("event") not in {"work_item_completed", "work_completed"}:
+            continue
+        fact = json.dumps(event, sort_keys=True)
+        indexed = materialized.boundary_indexes.get(fact)
+        boundary = (message_id, now, initial)
+        if indexed is None:
+            materialized.boundary_indexes[fact] = (
+                len(materialized.batch_boundaries),
+                is_local,
+            )
+            materialized.batch_boundaries.append(boundary)
+        elif is_local and not indexed[1]:
+            index = indexed[0]
+            # Keep the original grace clock when replacing a discovery copy.
+            boundary = (message_id, materialized.batch_boundaries[index][1], initial)
+            materialized.batch_boundaries[index] = boundary
+            materialized.boundary_indexes[fact] = (index, True)
+
+
 def _acquire_result_observation(
     context: WeftContext,
     tid: str,
@@ -270,15 +365,23 @@ def _acquire_result_observation(
     broker: Any,
     *,
     now: float,
+    include_history: bool = True,
 ) -> tuple[ResultMaterialization, tuple[tuple[dict[str, Any], int], ...]]:
-    """Fold bounded history and immutable routes before their registration [MF-5]."""
-    fresh, cursor = task_evidence.read_task_history(
-        context, tid, broker=broker, after_timestamp=materialized.log_last_timestamp
+    """Acquire discovery/progress history and the registered local suffix [MF-5]."""
+    fresh, cursor = (
+        task_evidence.read_task_history(
+            context, tid, broker=broker, after_timestamp=materialized.log_last_timestamp
+        )
+        if include_history
+        else ([], materialized.log_last_timestamp)
     )
-    log_evidence = materialized.log_evidence.fold(fresh, tid=tid)
+    log_initial = materialized.log_initial_timestamp
+    if include_history and log_initial is None:
+        log_initial = cursor or 0
     payload = materialized.taskspec_payload
     if payload is None:
         payload = load_latest_taskspec_payload(context, tid, task_events=fresh)
+    log_evidence = materialized.log_evidence.fold(fresh, tid=tid)
     log_terminal = log_evidence.terminal
     lookup = materialized.monitor_lookup
     if lookup is None:
@@ -295,14 +398,29 @@ def _acquire_result_observation(
         if payload is not None
         else (materialized.outbox_name, materialized.ctrl_out_name)
     )
-    new_boundaries = tuple(
-        message_id
-        for event, message_id in fresh
-        if event.get("event") in {"work_item_completed", "work_completed"}
-    )
-    boundaries = materialized.batch_boundaries + tuple(
-        (message_id, now) for message_id in new_boundaries
-    )
+    ctrl_cursor = materialized.ctrl_last_timestamp
+    ctrl_initial = materialized.ctrl_initial_timestamp
+    local: list[tuple[dict[str, Any], int]] = []
+    if control == materialized.ctrl_out_name:
+        local, ctrl_cursor, ctrl_initial = _local_completion_rows(
+            broker,
+            control,
+            tid=tid,
+            cursor=ctrl_cursor,
+            initial=ctrl_initial,
+        )
+    else:
+        # The newly discovered route is acquired only after registration.
+        ctrl_cursor = ctrl_initial = None
+    log_evidence = log_evidence.fold(local, tid=tid)
+    log_terminal = log_evidence.terminal
+    for rows, initial, is_local in (
+        (fresh, log_initial or 0, False),
+        (local, ctrl_initial or 0, True),
+    ):
+        _retain_batch_boundaries(
+            materialized, rows, initial=initial, is_local=is_local, now=now
+        )
     acquired = replace(
         materialized,
         taskspec_payload=payload,
@@ -310,7 +428,9 @@ def _acquire_result_observation(
         ctrl_out_name=control,
         log_evidence=log_evidence,
         log_last_timestamp=cursor,
-        batch_boundaries=boundaries,
+        log_initial_timestamp=log_initial,
+        ctrl_last_timestamp=ctrl_cursor,
+        ctrl_initial_timestamp=ctrl_initial,
         monitor_lookup=lookup,
     )
     if log_terminal is not None:
@@ -519,16 +639,10 @@ class _CollectedResult:
     pending_changed_at: float | None = None
     pending_ordinary_count: int = 0
     boundary: tuple[int, float] | None = None
-    initial_history_horizon: int | None = None
     stream_output: bool = False
     claimed_output: bool = False
     first_claimed_id: int | None = None
     mode: Literal["one_shot", "persistent", "pipeline"] | None = None
-
-    def observe_history(self, materialized: ResultMaterialization) -> None:
-        """Remember which empty batch boundaries predate this observation."""
-        if self.initial_history_horizon is None:
-            self.initial_history_horizon = materialized.log_last_timestamp or 0
 
     def _observe_configuration(self, materialized: ResultMaterialization) -> None:
         self.mode = _result_mode(materialized.taskspec_payload)
@@ -601,13 +715,10 @@ class _CollectedResult:
         first_id = self.first_claimed_id or (rows[0][1] if rows else None)
         self.boundary = next(
             (
-                boundary
-                for boundary in materialized.batch_boundaries
-                if (first_id is not None and boundary[0] >= first_id)
-                or (
-                    first_id is None
-                    and boundary[0] > (self.initial_history_horizon or 0)
-                )
+                (message_id, observed_at)
+                for message_id, observed_at, initial in materialized.batch_boundaries
+                if (first_id is not None and message_id >= first_id)
+                or (first_id is None and message_id > initial)
             ),
             None,
         )
@@ -818,33 +929,42 @@ def _iter_consuming_result(
     show_stderr: bool,
     emit_stream: bool,
     include_stream_events: bool,
+    discover_history: bool = True,
+    follow_lifecycle: bool = False,
 ) -> Iterator[TaskEvent | TaskResult]:
     """One consuming observation from unresolved routes to final verdict [MF-5]."""
     collected = _CollectedResult(
         deadline=deadline, live_delivery=emit_stream or include_stream_events
     )
     pending_events: list[tuple[dict[str, Any], int]] = []
+    include_history = discover_history or follow_lifecycle
     with command_resource_scope() as resources:
         resources.enter_context(context.session())
         lease = resources.enter_context(command_resource_scope())
-        names = _result_observation_names(tid, materialized)
+        names = _result_observation_names(
+            tid, materialized, include_history=include_history
+        )
         observation = lease.enter_context(result_observation(context, names))
         while True:
             queues, monitor = observation
             old_activity = materialized.result_surface_had_activity
-            with queues[WEFT_GLOBAL_LOG_QUEUE].get_connection() as broker:
+            connection_owner = queues[names[0]]
+            with connection_owner.get_connection() as broker:
                 materialized, fresh = _acquire_result_observation(
                     context,
                     tid,
                     materialized,
-                    queues[WEFT_GLOBAL_LOG_QUEUE],
+                    connection_owner,
                     broker,
                     now=time.monotonic(),
+                    include_history=include_history,
                 )
-            collected.observe_history(materialized)
             pending_events.extend(fresh)
-            wanted = _result_observation_names(tid, materialized)
-            if not set(wanted).issubset(names):
+            include_history = follow_lifecycle or materialized.taskspec_payload is None
+            wanted = _result_observation_names(
+                tid, materialized, include_history=include_history
+            )
+            if wanted != names:
                 replacement = resources.enter_context(command_resource_scope())
                 observation = replacement.enter_context(
                     result_observation(context, wanted)
@@ -852,12 +972,14 @@ def _iter_consuming_result(
                 lease.close()
                 lease, names = replacement, wanted
                 queues, monitor = observation
-            with queues[WEFT_GLOBAL_LOG_QUEUE].get_connection() as broker:
+                # Read the newly registered local route before classification.
+                continue
+            with connection_owner.get_connection() as broker:
                 materialized = _classify_result_observation(
                     context,
                     tid,
                     materialized,
-                    queues[WEFT_GLOBAL_LOG_QUEUE],
+                    connection_owner,
                     broker,
                     now=time.monotonic(),
                 )
@@ -887,7 +1009,7 @@ def _iter_consuming_result(
                 # The caller may publish while we yield. Reacquire the bounded
                 # suffix and local evidence on resume before deciding a verdict.
                 continue
-            with queues[WEFT_GLOBAL_LOG_QUEUE].get_connection() as broker:
+            with connection_owner.get_connection() as broker:
                 outbox = queues[materialized.outbox_name]
                 rows: list[tuple[str, int]] = []
                 if collected.should_read_output(materialized):
@@ -905,7 +1027,7 @@ def _iter_consuming_result(
                 )
             yielded = False
             for event in _drain_result_rows(
-                queues[WEFT_GLOBAL_LOG_QUEUE],
+                connection_owner,
                 materialized.outbox_name,
                 selected,
                 collected=collected,

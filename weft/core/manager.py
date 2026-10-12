@@ -23,6 +23,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from heapq import nsmallest
 from multiprocessing.connection import Connection
 from multiprocessing.connection import wait as wait_for_connections
 from multiprocessing.process import BaseProcess
@@ -101,6 +102,8 @@ from weft._constants import (
     SPEC_TYPE_TASK,
     TASK_CLEANUP_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
+    TERMINAL_EVENT_WRITE_RETRIES,
+    TERMINAL_EVENT_WRITE_RETRY_INTERVAL,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
@@ -230,6 +233,7 @@ class ManagedChild:
     launched_ns: int = 0
     last_liveness_probe_ns: int = 0
     terminal_proof_missing_since_ns: int = 0
+    terminal_retry_after_ns: int = 0
     sentinel_observed_ns: int = 0
 
 
@@ -325,6 +329,8 @@ class _ManagerChildSentinelAdapter:
     The observer owns only immutable ``(tid, sentinel)`` identities. The
     Manager reactor remains the sole owner of Process objects, registry
     mutation, liveness checks, and reaping.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
     """
 
     def __init__(self, notify_activity: Callable[[], None]) -> None:
@@ -333,7 +339,7 @@ class _ManagerChildSentinelAdapter:
         self._send_conn: Connection = send_conn
         self._notify_activity = notify_activity
         self._lock = threading.Lock()
-        self._membership: tuple[tuple[str, int], ...] = ()
+        self._membership: dict[str, int] = {}
         self._suppressed: set[tuple[str, int]] = set()
         self._wake_token_pending = False
         self._stopping = False
@@ -349,15 +355,28 @@ class _ManagerChildSentinelAdapter:
         )
         self._thread.start()
 
-    def publish(self, membership: Sequence[tuple[str, int]]) -> None:
-        """Publish a complete immutable sentinel-membership snapshot."""
-
-        snapshot = tuple(dict.fromkeys(membership))
+    def add(self, tid: str, sentinel: int) -> None:
+        """Register one child identity, preserving identical exit suppression."""
         with self._lock:
             if self._stopping or self._closed:
                 return
-            self._membership = snapshot
-            self._suppressed.intersection_update(snapshot)
+            previous = self._membership.get(tid)
+            if previous == sentinel:
+                return
+            if previous is not None:
+                self._suppressed.discard((tid, previous))
+            self._membership[tid] = sentinel
+            self._wake_observer_locked()
+
+    def remove(self, tid: str) -> None:
+        """Forget one child and invalidate any queued observation of its identity."""
+        with self._lock:
+            previous = self._membership.pop(tid, None)
+            if previous is None:
+                return
+            self._suppressed.discard((tid, previous))
+            if self._stopping or self._closed:
+                return
             self._wake_observer_locked()
 
     def drain(
@@ -428,12 +447,12 @@ class _ManagerChildSentinelAdapter:
                         return
                     membership = tuple(
                         item
-                        for item in self._membership
+                        for item in self._membership.items()
                         if item not in self._suppressed
                     )
                 waitables: list[Any] = [self._recv_conn]
                 waitables.extend(sentinel for _tid, sentinel in membership)
-                ready = wait_for_connections(waitables)
+                ready = set(wait_for_connections(waitables))
                 if self._recv_conn in ready:
                     while self._recv_conn.poll():
                         self._recv_conn.recv_bytes()
@@ -445,8 +464,11 @@ class _ManagerChildSentinelAdapter:
                 if not fired:
                     continue
                 with self._lock:
-                    current = set(self._membership)
-                    fired = [item for item in fired if item in current]
+                    fired = [
+                        (tid, sentinel)
+                        for tid, sentinel in fired
+                        if self._membership.get(tid) == sentinel
+                    ]
                     self._suppressed.update(fired)
                 for tid, sentinel in fired:
                     self._results.put(_ManagerChildSentinelEvent(tid, sentinel))
@@ -761,9 +783,11 @@ class Manager(ServiceTask):
 
     def _child_summaries_for_log(self) -> list[dict[str, Any]]:
         summaries: list[dict[str, Any]] = []
-        for tid, child in sorted(self._child_processes.items())[
-            :MANAGER_SERVE_LOG_CHILD_LIMIT
-        ]:
+        for tid, child in nsmallest(
+            MANAGER_SERVE_LOG_CHILD_LIMIT,
+            self._child_processes.items(),
+            key=lambda item: item[0],
+        ):
             summaries.append(
                 {
                     "tid": tid,
@@ -1449,7 +1473,9 @@ class Manager(ServiceTask):
             message_timestamp=request.message_timestamp,
             launched_ns=result.launched_ns or time.time_ns(),
         )
-        self._publish_child_sentinel_membership()
+        self._register_child_sentinel(
+            child_spec.tid, self._child_processes[child_spec.tid]
+        )
         self._clear_admission_retry()
         self._invalidate_leadership_work_cache()
         if request.service_key is not None:
@@ -1462,6 +1488,8 @@ class Manager(ServiceTask):
             state = self._service_state(request.service_key)
             state.active_tid = child_spec.tid
             state.spawn_pending = False
+            if state.pending_request_id == request.message_timestamp:
+                state.pending_request_id = None
             state.locally_terminal_tids.discard(child_spec.tid)
             self._managed_service_duplicate_scan_pending.add(request.service_key)
         self._last_activity_ns = time.time_ns()
@@ -1543,6 +1571,20 @@ class Manager(ServiceTask):
             reserved_queue=request.reserved_queue,
             message_timestamp=request.message_timestamp,
         )
+        if policy is ReservedPolicy.CLEAR and request.service_key is not None:
+            state = self._service_state(request.service_key)
+            if state.pending_request_id == request.message_timestamp:
+                try:
+                    row = self._queue(request.reserved_queue).peek_one(
+                        exact_timestamp=request.message_timestamp
+                    )
+                except (BrokerError, OSError, RuntimeError):
+                    logger.debug(
+                        "Failed to confirm rejected spawn disposition", exc_info=True
+                    )
+                else:
+                    if row is None:
+                        state.pending_request_id = None
 
     def _handle_child_launch_result(
         self,
@@ -3474,18 +3516,17 @@ class Manager(ServiceTask):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _publish_child_sentinel_membership(self) -> None:
-        """Publish the complete tracked-child sentinel set to the adapter."""
+    def _register_child_sentinel(self, tid: str, child: ManagedChild) -> None:
+        """Register the newly committed child's identity.
 
-        membership: list[tuple[str, int]] = []
-        for tid, child in self._child_processes.items():
-            try:
-                sentinel = child.process.sentinel
-            except (AttributeError, ValueError):
-                continue
-            if isinstance(sentinel, int):
-                membership.append((tid, sentinel))
-        self._child_sentinel_adapter.publish(membership)
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
+        try:
+            sentinel = child.process.sentinel
+        except (AttributeError, ValueError):
+            return
+        if isinstance(sentinel, int):
+            self._child_sentinel_adapter.add(tid, sentinel)
 
     def _drain_child_sentinel_events(self) -> int:
         """Record current child-sentinel events on the Manager reactor."""
@@ -3566,7 +3607,13 @@ class Manager(ServiceTask):
         except (AssertionError, OSError, ValueError):  # pragma: no cover - defensive
             return True
 
-    def _child_terminal_proof_visible(self, tid: str, child: ManagedChild) -> bool:
+    def _child_terminal_proof_visible(
+        self, tid: str, child: ManagedChild
+    ) -> bool | None:
+        """Read task-owned local proof; a broker failure is unknown.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
         ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
         # Dynamic child queues borrow the connection, never a cached queue handle.
         try:
@@ -3585,6 +3632,8 @@ class Manager(ServiceTask):
                             payload.get("type") == TERMINAL_ENVELOPE_TYPE
                             and payload.get("tid") == tid
                             and payload.get("source") == "task"
+                            and isinstance(payload.get("status"), str)
+                            and payload.get("status") in TERMINAL_TASK_STATUSES
                         ):
                             return True
         except (BrokerError, OSError, RuntimeError):
@@ -3592,26 +3641,7 @@ class Manager(ServiceTask):
                 "Failed to inspect child ctrl_out for terminal proof",
                 exc_info=True,
             )
-            return True
-
-        log_queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
-        try:
-            since_timestamp = int(tid) - 1 if tid.isdigit() else None
-            for payload, _timestamp in iter_queue_json_entries(
-                log_queue,
-                since_timestamp=since_timestamp,
-            ):
-                if payload.get("tid") != tid:
-                    continue
-                status = payload.get("status")
-                if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
-                    return True
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to inspect task log for child terminal proof",
-                exc_info=True,
-            )
-            return True
+            return None
         return False
 
     def _child_terminal_proof_still_within_grace(
@@ -3626,7 +3656,7 @@ class Manager(ServiceTask):
             return False
         if exitcode not in (None, 0):
             return False
-        if self._child_terminal_proof_visible(tid, child):
+        if self._child_terminal_proof_visible(tid, child) is not False:
             return False
         now_ns = time.time_ns()
         if child.terminal_proof_missing_since_ns <= 0:
@@ -3639,9 +3669,15 @@ class Manager(ServiceTask):
         self,
         tid: str,
         child: ManagedChild,
-    ) -> None:
-        if self._child_terminal_proof_visible(tid, child):
-            return
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        """Commit the local failsafe before retiring exited-child custody.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
+        if self._child_terminal_proof_visible(tid, child) is True:
+            return True
         ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
         exitcode = child.process.exitcode
         payload: dict[str, Any] = {
@@ -3654,15 +3690,29 @@ class Manager(ServiceTask):
         }
         if exitcode is not None:
             payload["return_code"] = int(exitcode)
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                broker.write(ctrl_out_name, json.dumps(payload))
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to write manager terminal envelope for child %s",
-                tid,
-                exc_info=True,
-            )
+        serialized = json.dumps(payload)
+        attempts = max(1, TERMINAL_EVENT_WRITE_RETRIES)
+        for attempt in range(attempts):
+            if deadline is not None and self._remaining_deadline(deadline) <= 0:
+                return False
+            try:
+                with self._get_connected_queue().get_connection() as broker:
+                    broker.write(ctrl_out_name, serialized)
+                return True
+            except (BrokerError, OSError, RuntimeError):
+                if attempt + 1 >= attempts:
+                    logger.warning(
+                        "Failed to write manager terminal envelope for child %s",
+                        tid,
+                        exc_info=True,
+                    )
+                    return False
+                pause = TERMINAL_EVENT_WRITE_RETRY_INTERVAL
+                if deadline is not None:
+                    pause = min(pause, self._remaining_deadline(deadline))
+                if pause > 0:
+                    time.sleep(pause)
+        return False
 
     def _cleanup_children(self, *, deadline: float | None = None) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
         autostart_child_exited = False
@@ -3671,10 +3721,23 @@ class Manager(ServiceTask):
             if deadline is not None and self._remaining_deadline(deadline) <= 0:
                 break
             if self._child_has_exited(child):
+                if child.terminal_retry_after_ns > time.time_ns():
+                    continue
                 if self._child_terminal_proof_still_within_grace(tid, child):
                     continue
+                committed = (
+                    self._write_manager_terminal_envelope(tid, child)
+                    if deadline is None
+                    else self._write_manager_terminal_envelope(
+                        tid, child, deadline=deadline
+                    )
+                )
+                if not committed:
+                    child.terminal_retry_after_ns = time.time_ns() + int(
+                        MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS * 1_000_000_000
+                    )
+                    continue
                 child_exited = True
-                self._write_manager_terminal_envelope(tid, child)
                 try:
                     # Dead children must never stall the manager control loop.
                     # Treat dead-child cleanup as a local reap only; descendant
@@ -3696,6 +3759,7 @@ class Manager(ServiceTask):
                     pass
                 finally:
                     self._child_processes.pop(tid, None)
+                    self._child_sentinel_adapter.remove(tid)
                 if (
                     child.reserved_queue is not None
                     and child.message_timestamp is not None
@@ -3739,7 +3803,6 @@ class Manager(ServiceTask):
             self._autostart_last_scan_ns = 0
         if child_exited:
             self._admission_controller.note_child_reap(now=time.monotonic())
-            self._publish_child_sentinel_membership()
             # Child completion is activity. The manager should only begin its idle
             # countdown after in-flight work has actually finished.
             self._last_activity_ns = time.time_ns()
@@ -3868,8 +3931,7 @@ class Manager(ServiceTask):
                     )
             finally:
                 self._child_processes.pop(tid, None)
-
-        self._publish_child_sentinel_membership()
+                self._child_sentinel_adapter.remove(tid)
 
         self._last_child_cleanup_survivors = tuple(survivors)
         if survivors:
@@ -4984,7 +5046,7 @@ class Manager(ServiceTask):
 
         queue_name = self._managed_service_spawn_queue_name(service)
         try:
-            self._queue(queue_name).write(
+            request_id = self._queue(queue_name).write(
                 json.dumps(service.spawn_payload, ensure_ascii=False)
             )
             if queue_name == self._queue_names.get("internal_inbox"):
@@ -5006,6 +5068,7 @@ class Manager(ServiceTask):
             )
             return False
         state = self._service_state(service.key)
+        state.pending_request_id = request_id
         state.spawn_pending = True
         state.launched_once = True
         self._emit_serve_log(
@@ -5060,7 +5123,9 @@ class Manager(ServiceTask):
                 continue
             pid = child.process.pid
             force_kill_pids = [pid] if isinstance(pid, int) and pid > 0 else []
-            if scan_terminal_proof and self._child_terminal_proof_visible(tid, child):
+            if scan_terminal_proof and self._tracked_service_terminal_proof_visible(
+                tid, child
+            ):
                 candidates.append(
                     ServiceCandidate(
                         key=service_key,
@@ -5094,6 +5159,35 @@ class Manager(ServiceTask):
         if live is not None:
             return live
         return next(iter(candidates), None)
+
+    def _tracked_service_terminal_proof_visible(
+        self, tid: str, child: ManagedChild
+    ) -> bool:
+        """Preserve explicit singleton audits without scanning history on reaping.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
+        if self._child_terminal_proof_visible(tid, child) is True:
+            return True
+        try:
+            since_timestamp = int(tid) - 1 if tid.isdigit() else None
+            entries = iter_queue_json_entries(
+                self._queue(WEFT_GLOBAL_LOG_QUEUE),
+                since_timestamp=since_timestamp,
+                strict=True,
+            )
+            with closing_queue_iterator(entries) as rows:
+                for payload, _timestamp in rows:
+                    status = payload.get("status")
+                    if (
+                        payload.get("tid") == tid
+                        and isinstance(status, str)
+                        and status in TERMINAL_TASK_STATUSES
+                    ):
+                        return True
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to audit service terminal proof", exc_info=True)
+        return False
 
     @staticmethod
     def _child_matches_service(child: ManagedChild, service_key: str) -> bool:
@@ -5606,7 +5700,10 @@ class Manager(ServiceTask):
         *,
         queue_names: Sequence[str] | None = None,
     ) -> set[str]:
-        """Return desired service keys that already have unconsumed spawn work."""
+        """Confirm known requests before strict durable recovery.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
 
         if not desired_keys:
             return set()
@@ -5615,6 +5712,9 @@ class Manager(ServiceTask):
             for request in self._active_child_launches.values()
             if request.service_key in desired_keys
         }
+        unresolved = desired_keys - pending
+        if not unresolved:
+            return pending
         scan_queue_names = tuple(
             dict.fromkeys(
                 (
@@ -5630,16 +5730,73 @@ class Manager(ServiceTask):
                 else queue_names
             )
         )
+        for key in tuple(unresolved):
+            request_id = self._service_state(key).pending_request_id
+            if request_id is None:
+                continue
+            if self._pending_request_reference_is_valid(
+                key, request_id, scan_queue_names
+            ):
+                pending.add(key)
+                unresolved.remove(key)
+        if not unresolved:
+            return pending
+        return pending | self._recover_pending_service_requests(
+            unresolved, scan_queue_names
+        )
+
+    def _recover_pending_service_requests(
+        self, unresolved: set[str], scan_queue_names: Sequence[str]
+    ) -> set[str]:
+        """Recover unknown references; only a complete scan proves absence.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
+        pending: set[str] = set()
         for queue_name in scan_queue_names:
             queue = self._queue(queue_name)
-            for payload, _timestamp in iter_queue_json_entries(queue):
-                key = self._spawn_request_service_key(
-                    payload,
-                    desired_keys=desired_keys,
-                )
-                if key is not None:
-                    pending.add(key)
+            entries = iter_queue_json_entries(queue, strict=True)
+            with closing_queue_iterator(entries) as rows:
+                for payload, timestamp in rows:
+                    key = self._spawn_request_service_key(
+                        payload,
+                        desired_keys=unresolved,
+                    )
+                    if key is not None:
+                        self._service_state(key).pending_request_id = timestamp
+                        pending.add(key)
+                        unresolved.remove(key)
+                    if not unresolved:
+                        return pending
+        # Only complete successful recovery establishes absence. An exception
+        # above leaves unresolved references intact for the next observation.
+        for key in unresolved:
+            self._service_state(key).pending_request_id = None
         return pending
+
+    def _pending_request_reference_is_valid(
+        self, key: str, request_id: int, queue_names: Sequence[str]
+    ) -> bool:
+        """Confirm one trusted request within the existing queue scope.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
+        for name in queue_names:
+            row = self._queue(name).peek_one(
+                exact_timestamp=request_id, with_timestamps=True
+            )
+            if not isinstance(row, tuple):
+                continue
+            try:
+                payload = json.loads(row[0])
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(payload, dict)
+                and self._spawn_request_service_key(payload, desired_keys={key}) == key
+            ):
+                return True
+        return False
 
     @staticmethod
     def _service_candidate_taskspec_dump(
@@ -5847,6 +6004,7 @@ class Manager(ServiceTask):
 
         next_state = decision.state
         state.spawn_pending = next_state.spawn_pending
+        state.pending_request_id = next_state.pending_request_id
         state.active_tid = next_state.active_tid
         state.next_allowed_ns = next_state.next_allowed_ns
         state.launched_once = next_state.launched_once
@@ -6001,8 +6159,20 @@ class Manager(ServiceTask):
             return
 
         desired_keys = {service.key for service in services}
+        tracked_by_key = {
+            service.key: self._tracked_service_candidate(
+                service.key,
+                scan_terminal_proof=scan_terminal_proof,
+            )
+            for service in services
+        }
+        needs_pending = {
+            key
+            for key, candidate in tracked_by_key.items()
+            if candidate is None or candidate.state != "live"
+        }
         pending_keys: set[str] = set()
-        internal_keys = {service.key for service in internal_services}
+        internal_keys = {service.key for service in internal_services} & needs_pending
         if internal_keys:
             if self._internal_spawn_queue_attached():
                 pending_keys.update(
@@ -6016,16 +6186,9 @@ class Manager(ServiceTask):
                 )
             else:
                 pending_keys.update(self._pending_service_keys(internal_keys))
-        autostart_keys = {service.key for service in autostart_services}
+        autostart_keys = {service.key for service in autostart_services} & needs_pending
         if autostart_keys:
             pending_keys.update(self._pending_service_keys(autostart_keys))
-        tracked_by_key = {
-            service.key: self._tracked_service_candidate(
-                service.key,
-                scan_terminal_proof=scan_terminal_proof,
-            )
-            for service in services
-        }
         keys_needing_evidence: set[str] = set()
         for service in services:
             state = self._service_state(service.key)
@@ -7124,6 +7287,11 @@ class Manager(ServiceTask):
             MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS * 1_000_000_000
         )
         for child in self._child_processes.values():
+            if child.terminal_retry_after_ns > 0:
+                timeouts.append(
+                    self._timeout_until_ns(child.terminal_retry_after_ns, now_ns=now_ns)
+                )
+                continue
             if (
                 child.sentinel_observed_ns > 0
                 and child.terminal_proof_missing_since_ns <= 0

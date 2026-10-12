@@ -35,6 +35,8 @@ See also:
 
 ## Related Plans
 
+- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements task-local completion publication and matching retention.
+
 - [Watcher SIGINT lock safety](../plans/2026-09-21-watcher-sigint-lock-safety-plan.md) - keeps deferred standalone SIGINT handling free of lock-taking operations.
 
 - [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md) - routes interactive stream and process-exit events through the retained watcher and publishes resource checks as reactor deadlines.
@@ -602,12 +604,16 @@ Current task families:
   cleanup are separate maintenance slices: summary emission records
   `summary_emitted_at_ns`; retained runtime cleanup later uses Monitor-store
   readiness to delete whole standard stale task-local queues. Standard
-  `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
-  terminal cleanup time. Standard `T{tid}.outbox` is retained until task-log
-  retention age. For old nonterminal service-owner rows, same-service
-  registry proof may authorize only standard `T{tid}.ctrl_in` and
-  `T{tid}.ctrl_out` cleanup after a stale/superseded disposition; it does
-  not turn the row into terminal lifecycle truth. Eligible stale standard
+  `T{tid}.ctrl_in` and `T{tid}.inbox` are stale at terminal cleanup time.
+  Standard `T{tid}.ctrl_out` and `T{tid}.outbox` are retained until task-log
+  retention age, measured from terminal evidence when available and TID age
+  only under the existing fallback. Reserved queues retain their separate
+  cleanup policy. A stale/superseded service-owner disposition may authorize
+  standard `T{tid}.ctrl_in` cleanup immediately and standard `T{tid}.ctrl_out`
+  cleanup only at result-retention age. This does not turn the owner row into
+  terminal lifecycle truth or authorize deleting its inbox, outbox, reserved,
+  global, or custom queues.
+  Eligible stale standard
   `T{tid}.reserved` queues are deleted
   through the reserved cleanup policy after monitor-table proof or stale
   no-monitor evidence. Cleanup records `task_control_deleted_at_ns`,

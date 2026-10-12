@@ -2540,6 +2540,11 @@ def _instrument_streaming_queue(
             deletes.append(message_id)
             return self._delegate.delete(message_id=message_id)
 
+        def peek_generator(self, **_kwargs: Any) -> Any:
+            raise AssertionError(
+                "Owned streaming markers must use their write ID, not scan the registry"
+            )
+
         def __getattr__(self, attr: str) -> object:
             return getattr(self._delegate, attr)
 
@@ -5011,7 +5016,10 @@ def test_live_command_streaming_persists_stderr_after_control_cleanup(
         message.get("stream") == "stderr" and message.get("data") == "stderr-line\n"
         for message in messages
     )
-    assert ctrl_out.stats().total == 0
+    retained = [json.loads(raw) for raw in ctrl_out.peek_generator()]
+    assert len(retained) == 1
+    assert retained[0]["type"] == "terminal"
+    assert retained[0]["status"] == "completed"
 
 
 def test_streaming_session_records_and_clears(
@@ -5152,7 +5160,7 @@ def test_cleanup_on_exit_preserves_command_output(
     assert make_queue(spec.io.outputs["outbox"]).read_one() == "done" + "X" * 1024
 
 
-def test_task_cleanup_removes_standard_control_queues_after_success(
+def test_task_cleanup_retains_completion_and_clears_control_input_after_success(
     broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
@@ -5189,11 +5197,11 @@ def test_task_cleanup_removes_standard_control_queues_after_success(
     task.cleanup()
 
     assert ctrl_in.stats().total == 0
-    assert ctrl_out.stats().total == 0
+    assert ctrl_out.has_pending() is True
     assert outbox.has_pending() is True
 
 
-def test_task_cleanup_removes_standard_control_queues_after_stop(
+def test_task_cleanup_retains_completion_and_clears_control_input_after_stop(
     broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
@@ -5217,7 +5225,7 @@ def test_task_cleanup_removes_standard_control_queues_after_stop(
     task.cleanup()
 
     assert ctrl_in.stats().total == 0
-    assert ctrl_out.stats().total == 0
+    assert ctrl_out.has_pending() is True
 
 
 def test_reserved_policy_keep_on_stop(broker_env: BrokerEnv, unique_tid: str) -> None:

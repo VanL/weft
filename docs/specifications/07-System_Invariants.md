@@ -302,7 +302,12 @@ formats titles using shared bounds in `weft/_constants.py`;
 `weft/core/deferred.py`. See [CC-2.4] and the
 [implementation plan](../plans/2026-09-10-deferred-macos-process-title-plan.md).
 
-- **OBS.1**: lifecycle changes are written to `weft.log.tasks`
+- **OBS.1**: Lifecycle changes are written to `weft.log.tasks`. Task completion and
+  persistent work-item boundaries are additionally addressed to the task's configured
+  `ctrl_out` as the same serialized fact in one atomic broker publication, as specified
+  by [MF-3]. This is routing of queue evidence, not a second lifecycle authority.
+  _Implementation mapping_: `weft/core/tasks/base.py::BaseTask._report_state_change`,
+  `weft/core/tasks/base.py::BaseTask._write_state_queue_message`.
 - **OBS.2**: Weft does not use a separate state database for task lifecycle
 - **OBS.3**: task state remains observable through task-local queues and the
   global task log
@@ -375,7 +380,9 @@ _Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py
   sites) or when the write is itself a report (construction, restart
   republish). The terminal transition publishes its mapping exactly once per
   task, latched only on a successful write so a failed terminal append
-  retries on the next terminal report. Queue-wide read-before-write
+  retries on the next terminal report. Completion publication attempts precede
+  the terminal mapping; clearing terminal activity changes only owner-local
+  hints until that completion owner publishes. Queue-wide read-before-write
   deduplication and writer-side equivalence oracles are forbidden: a curated
   comparator field list silently suppresses newly added payload fields, and
   a report of identical values is still a new observation. A broker failure
@@ -546,19 +553,14 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     When external logging is enabled, the configured path is restart-scoped;
     the TaskMonitor must re-probe the resolved path once per monitor cycle and
     cache health transitions without emitting lifetime-log records.
-  - **OBS.13.9**: Normal task cleanup clears standard task-local
-    `T{tid}.ctrl_in` and `T{tid}.ctrl_out` runtime queues before process exit.
-    Terminal disposition may later remove residual standard `T{tid}.ctrl_in`,
-    `T{tid}.ctrl_out`, and `T{tid}.inbox` queues, including visible and claimed
-    rows, after required summary emission when those queues were left by forced
-    process death or cleanup failure. Standard
-    `T{tid}.outbox` is retained until task-log retention age, and standard
-    `T{tid}.reserved` remains owned by the reserved cleanup policy.
-    Monitor repair handles only states reachable from the current writer and
-    current cleanup transactions, including interrupted exact deletion,
-    pre-checkpoint gaps, pending deferred writes, and forced-process residue.
-    Data written by an older Monitor schema is handled by its schema migration,
-    not by a permanent normal-cycle compatibility lane.
+  - **OBS.13.9**: Normal task cleanup clears standard task-local `T{tid}.ctrl_in` before
+    process exit and retains standard `T{tid}.ctrl_out` until the result-retention age.
+    Terminal disposition may remove residual standard `ctrl_in` and inbox after required
+    summary emission; standard `ctrl_out` and outbox remain retention-gated under
+    [MF-5], including forced-death and stale-service-owner cleanup. Standard reserved
+    remains owned by its existing cleanup policy. Custom/shared queues remain externally
+    owned. Monitor repair covers only reachable current-writer/current-cleanup states;
+    older Monitor schemas use migration, not a permanent compatibility lane.
   - **OBS.13.10**: Built-in task-log cleanup and runtime cleanup are the only
     TaskMonitor worker lanes allowed to own broker/store cleanup effects. The
     reactor must continue servicing task-local control while either lane is in
@@ -1176,10 +1178,9 @@ SimpleBroker queue APIs and must remain bounded by the same runtime cleanup
 limit and per-slice deadline safeguards as task-local control queue cleanup.
 A separate runtime cleanup slice may identify dead tasks from standard
 `T{tid}.*` queue names minus live runtime TIDs. For those dead TIDs, the
-dead-task policy may delete stale standard `ctrl_in`, `ctrl_out`, and `inbox`
-queues immediately; it may delete standard `outbox` and `reserved` queues only
-after the task-log retention period. Dead-TID cleanup is actionable-work
-driven: retention-deferred `outbox` or `reserved` queues may be reported, but
+dead-task policy may delete stale standard `ctrl_in` and `inbox` immediately;
+standard `ctrl_out`, `outbox`, and `reserved` are retention-gated under [MF-5]. Dead-TID cleanup is actionable-work
+driven: retention-deferred `ctrl_out`, `outbox`, or `reserved` queues may be reported, but
 they must not keep the runtime cleanup worker pending or trigger raw task-log
 coalescing. Dead-TID cleanup must not mark Monitor collation families; if a
 Monitor row exists, terminal or reserved cleanup owns that family. That
@@ -1267,7 +1268,7 @@ doc:
 
 ## Related Plans
 
-- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - proposed queue-based local completion and matching retention changes; does not change the current contract before promotion.
+- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements queue-based local completion and matching retention.
 
 - [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 

@@ -28,6 +28,7 @@ from weft.context import WeftContext
 from weft.core import manager_runtime
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
+from weft.core.task_evidence import TASK_HISTORY_MAX_MESSAGE_ID
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.helpers import closing_queue_iterator
 from weft.helpers.message_ids import is_task_tid
@@ -78,47 +79,72 @@ def _mapping_exists_for_tid(
     return read_task_state_snapshot(context, tid, broker=broker) is not None
 
 
+@dataclass(slots=True)
+class _SpawnLogObservation:
+    """One fallback observer's completely inspected range and folded proof [MF-1]."""
+
+    inspected_through: int | None = None
+    task_seen: bool = False
+    latest_child_event: tuple[int, str, str | None] | None = None
+
+
 def _inspect_task_log_for_tid(
     context: WeftContext,
     tid: str,
     *,
     broker: Any | None = None,
+    observation: _SpawnLogObservation | None = None,
 ) -> SpawnSubmissionReconciliation | None:
-    with (
-        queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db,
-        closing_queue_iterator(
-            iter_broker_queue_json_entries(
-                db, WEFT_GLOBAL_LOG_QUEUE, since_timestamp=int(tid) - 1
-            )
-        ) as entries,
-    ):
-        latest_child_event: tuple[int, str, str | None] | None = None
-        for payload, timestamp in entries:
-            if payload.get("tid") == tid:
-                return SpawnSubmissionReconciliation(outcome="spawned", tid=tid)
-            if payload.get("child_tid") != tid:
-                continue
-            event = payload.get("event")
-            if event not in {"task_spawned", "task_spawn_rejected"}:
-                continue
-            error = payload.get("error")
-            if latest_child_event is None or timestamp >= latest_child_event[0]:
-                latest_child_event = (
-                    timestamp,
-                    str(event),
-                    str(error) if isinstance(error, str) else None,
+    observation = observation if observation is not None else _SpawnLogObservation()
+    since = (
+        observation.inspected_through
+        if observation.inspected_through is not None
+        else int(tid) - 1
+    )
+    with queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
+        horizon = db.latest_pending_timestamp(WEFT_GLOBAL_LOG_QUEUE)
+        if horizon is not None and horizon > since:
+            # Commit progress only after the complete strict range succeeds.
+            task_seen = observation.task_seen
+            latest_child_event = observation.latest_child_event
+            with closing_queue_iterator(
+                iter_broker_queue_json_entries(
+                    db,
+                    WEFT_GLOBAL_LOG_QUEUE,
+                    since_timestamp=since,
+                    before_timestamp=(
+                        None if horizon == TASK_HISTORY_MAX_MESSAGE_ID else horizon + 1
+                    ),
+                    strict=True,
                 )
+            ) as entries:
+                for payload, timestamp in entries:
+                    if payload.get("tid") == tid:
+                        task_seen = True
+                    if payload.get("child_tid") != tid:
+                        continue
+                    event = payload.get("event")
+                    if event not in {"task_spawned", "task_spawn_rejected"}:
+                        continue
+                    error = payload.get("error")
+                    if latest_child_event is None or timestamp >= latest_child_event[0]:
+                        latest_child_event = (
+                            timestamp,
+                            str(event),
+                            error if isinstance(error, str) else None,
+                        )
+            observation.inspected_through = horizon
+            observation.task_seen = task_seen
+            observation.latest_child_event = latest_child_event
 
-        if latest_child_event is None:
-            return None
-        _timestamp, event, error = latest_child_event
-        if event == "task_spawned":
-            return SpawnSubmissionReconciliation(outcome="spawned", tid=tid)
-        return SpawnSubmissionReconciliation(
-            outcome="rejected",
-            tid=tid,
-            error=error,
-        )
+    if observation.task_seen:
+        return SpawnSubmissionReconciliation(outcome="spawned", tid=tid)
+    if observation.latest_child_event is None:
+        return None
+    _timestamp, event, error = observation.latest_child_event
+    if event == "task_spawned":
+        return SpawnSubmissionReconciliation(outcome="spawned", tid=tid)
+    return SpawnSubmissionReconciliation(outcome="rejected", tid=tid, error=error)
 
 
 def _find_reserved_spawn_request_queue(
@@ -205,13 +231,16 @@ def _reconcile_submitted_spawn_once(
     tid: str,
     *,
     broker: Any | None = None,
+    observation: _SpawnLogObservation | None = None,
 ) -> SpawnSubmissionReconciliation:
     message_timestamp = int(tid)
 
     if _mapping_exists_for_tid(context, tid, broker=broker):
         return SpawnSubmissionReconciliation(outcome="spawned", tid=tid)
 
-    log_result = _inspect_task_log_for_tid(context, tid, broker=broker)
+    log_result = _inspect_task_log_for_tid(
+        context, tid, broker=broker, observation=observation
+    )
     if log_result is not None:
         return log_result
 
@@ -254,6 +283,7 @@ def reconcile_submitted_spawn(
 
     deadline = time.monotonic() + max(timeout, 0.0)
     last_reserved: SpawnSubmissionReconciliation | None = None
+    observation = _SpawnLogObservation()
     with (
         context.session(),
         context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log_queue,
@@ -266,7 +296,9 @@ def reconcile_submitted_spawn(
         )
         while True:
             with log_queue.get_connection() as broker:
-                result = _reconcile_submitted_spawn_once(context, tid, broker=broker)
+                result = _reconcile_submitted_spawn_once(
+                    context, tid, broker=broker, observation=observation
+                )
             if result.outcome != "unknown":
                 if result.outcome == "reserved" and not reserved_is_terminal:
                     last_reserved = result

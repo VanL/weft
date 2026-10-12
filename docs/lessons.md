@@ -1473,3 +1473,20 @@ and `tests/system/test_config_transport.py`.
   Prove both plain and mixed surfaces through real producer publications and
   later retrieval of the exact retained value. See [MF-5](specifications/05-Message_Flow_and_State.md)
   and the [implementation repair](plans/2026-10-09-direct-result-observation-implementation-plan.md).
+
+
+## 2026-10-12 Completion Routing Requires Every Observer to Preserve Proof
+
+- Moving ordinary result observation to task-local completion makes control
+  readers part of the proof lifetime. Task-stop previously consumed typed
+  terminal envelopes, so a later Manager exit check could manufacture
+  `wrapper_lost` after a successful cancellation. Audit every reader of the
+  destination, retain valid completion facts for every owner of a shared
+  route, and delete only ordinary replies or noise. A real blocked broker
+  publication plus the actual stop command exposed the loss.
+- Terminal activity and runtime mapping can trigger control actions too.
+  Keep terminal activity cleanup local, publish completion after final output,
+  then publish the terminal mapping. Interactive queued control, signals, and
+  parent loss must share the existing finalizer. Testing only queued STOP/KILL
+  missed early signal publication. See [MF-3](specifications/05-Message_Flow_and_State.md)
+  and the [burst plan](plans/2026-10-12-burst-submission-complexity-plan.md).

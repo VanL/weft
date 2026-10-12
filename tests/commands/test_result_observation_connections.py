@@ -98,6 +98,20 @@ def counted_connections(
                 connection.execute("SELECT 1")
 
 
+def _completion_payload(surface: str, taskspec: dict[str, Any]) -> dict[str, Any]:
+    """Match the addressed producer lifecycle protocol for connection probes."""
+    persistent = surface == "persistent"
+    completion: dict[str, Any] = {
+        "tid": _TID,
+        "event": "work_item_completed" if persistent else "work_completed",
+        "status": "running" if persistent else "completed",
+        "taskspec": taskspec,
+    }
+    if not persistent:
+        completion.update(type="terminal", source="task")
+    return completion
+
+
 @pytest.mark.parametrize(
     "surface", ["taskspec", "outbox", "ctrl", "pipeline", "one-shot", "persistent"]
 )
@@ -114,7 +128,7 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
         if custom
         else f"{'P' if surface == 'pipeline' else 'T'}{_TID}.outbox"
     )
-    payload = {
+    payload: dict[str, Any] = {
         "tid": _TID,
         "name": "late-connection-result",
         "spec": {
@@ -145,7 +159,9 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
                 if finish.is_set():
                     return
                 publish.clear()
-                broker.write(WEFT_GLOBAL_LOG_QUEUE, json.dumps({"tid": "unrelated"}))
+                # Local control traffic is observed by both configured and
+                # unresolved readers; accepted waits have no global interest.
+                broker.write(payload["io"]["control"]["ctrl_out"], "observer-wakeup")
                 published.set()
             assert publish.wait(10)
             if finish.is_set():
@@ -159,18 +175,39 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
                 WEFT_GLOBAL_LOG_QUEUE, json.dumps({"tid": _TID, "taskspec": payload})
             )
             broker.write(outbox_name, "late-result")
-            broker.write(
-                WEFT_GLOBAL_LOG_QUEUE, json.dumps({"tid": _TID, "status": "completed"})
+            broker.broadcast(
+                json.dumps(_completion_payload(surface, payload)),
+                queue_names=[
+                    WEFT_GLOBAL_LOG_QUEUE,
+                    payload["io"]["control"]["ctrl_out"],
+                ],
+                create_missing=True,
             )
             published.set()
             assert finish.wait(10)
 
     original_wait = QueueChangeMonitor.wait
+    original_init = QueueChangeMonitor.__init__
+    registrations: list[list[str]] = []
+    registration_connections: list[int] = []
     counts: list[int] = []
+
+    def monitor_init(
+        monitor: QueueChangeMonitor, queues: Sequence[Queue], **kwargs: Any
+    ) -> None:
+        before = len(connections)
+        original_init(monitor, queues, **kwargs)
+        registration_connections.append(len(connections) - before)
+        registrations.append([queue.name for queue in queues])
 
     def wait(monitor: QueueChangeMonitor, timeout: float | None) -> bool:
         counts.append(len(connections))
-        assert counts[-1] == counts[0], "observer reconnected after warm-up"
+        minimum = counts[0] + sum(registration_connections[1:])
+        # Each replacement can acquire its first owner-thread connection after
+        # monitor construction, in addition to connections counted at setup.
+        assert minimum <= counts[-1] <= minimum + len(registrations) - 1, (
+            "observer reconnected outside its one discovery route change"
+        )
         if len(counts) <= 3:
             published.clear()
             publish.set()
@@ -180,6 +217,7 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
         return original_wait(monitor, timeout)
 
     monkeypatch.setattr(QueueChangeMonitor, "wait", wait)
+    monkeypatch.setattr(QueueChangeMonitor, "__init__", monitor_init)
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(writer)
         try:
@@ -193,7 +231,10 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
                 None,
             )
             assert len(counts) >= 3
-            assert len(connections) == counts[0]
+            minimum = counts[0] + sum(registration_connections[1:])
+            assert minimum <= len(connections) <= minimum + len(registrations) - 1
+            assert len(registrations) == (1 if accepted is not None else 2)
+            assert WEFT_GLOBAL_LOG_QUEUE not in registrations[-1]
         finally:
             finish.set()
             publish.set()

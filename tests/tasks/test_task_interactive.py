@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import threading
 import time
@@ -16,7 +17,6 @@ import pytest
 from simplebroker import Queue
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.typing import BrokerEnv
-from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -586,37 +586,119 @@ def test_interactive_parent_exit_finishes_while_descendant_holds_pipes(
         task.cleanup()
 
 
-class _TerminalWriteQueue:
-    """Keep queue behavior real while failing one terminal write before commit."""
+class _TerminalBroadcast:
+    """Fail one atomic completion publication at the real broker boundary."""
 
-    def __init__(self, delegate: Queue, *, fail_once: bool) -> None:
-        self.delegate = delegate
-        self.fail_once = fail_once
+    def __init__(
+        self, queue: Queue, monkeypatch: pytest.MonkeyPatch, *, fail_once: bool
+    ) -> None:
         self.terminal_attempts = 0
+        with queue.get_connection() as broker:
+            broker_type = type(broker)
+            real_broadcast = broker_type.broadcast
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.delegate, name)
+        def broadcast(broker: Any, message: str, **kwargs: Any) -> int:
+            if json.loads(message).get("type") == "terminal":
+                self.terminal_attempts += 1
+                if fail_once and self.terminal_attempts == 1:
+                    raise RuntimeError("injected terminal publication failure")
+            return real_broadcast(broker, message, **kwargs)
 
-    def write(self, message: str) -> int:
-        if json.loads(message).get("type") == "terminal":
-            self.terminal_attempts += 1
-            if self.fail_once and self.terminal_attempts == 1:
-                raise RuntimeError("injected terminal write failure")
-        return self.delegate.write(message)
+        monkeypatch.setattr(broker_type, "broadcast", broadcast)
+
+
+@pytest.mark.parametrize("termination", ["signal-stop", "signal-kill", "parent-loss"])
+def test_interactive_external_termination_publishes_after_final_frames(
+    broker_env: BrokerEnv, unique_tid: str, termination: str
+) -> None:
+    """Owner-delivered termination uses the same finalizer as queued control."""
+
+    if termination == "signal-kill" and not hasattr(signal, "SIGUSR1"):
+        pytest.skip("Hard-kill signal is unavailable")
+    db_path, make_queue = broker_env
+    payload = make_interactive_spec(unique_tid).model_dump(mode="json")
+    payload["spec"]["cleanup_on_exit"] = False
+    spec = TaskSpec.model_validate(payload)
+    task = Consumer(db_path, spec)
+    try:
+        make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": "hello\n"}))
+        _drive_interactive(task, lambda: task._interactive_session is not None)
+        if termination == "parent-loss":
+            task.note_parent_loss()
+        else:
+            task.note_termination_signal(
+                signal.SIGUSR1 if termination == "signal-kill" else signal.SIGTERM
+            )
+        task.process_once()
+        task.cleanup()
+
+        local_rows = [
+            (json.loads(raw), timestamp)
+            for raw, timestamp in make_queue(
+                spec.io.control["ctrl_out"]
+            ).peek_generator(with_timestamps=True)
+        ]
+        terminal, terminal_id = next(
+            (row, timestamp)
+            for row, timestamp in local_rows
+            if row.get("type") == "terminal"
+        )
+        assert terminal["status"] == (
+            "killed" if termination == "signal-kill" else "cancelled"
+        )
+        stdout_final = next(
+            timestamp
+            for raw, timestamp in make_queue(spec.io.outputs["outbox"]).peek_generator(
+                with_timestamps=True
+            )
+            if _is_final_marker(raw)
+        )
+        stderr_final = next(
+            timestamp
+            for row, timestamp in local_rows
+            if row.get("stream") == "stderr" and row.get("final")
+        )
+        history = [
+            (json.loads(raw), timestamp)
+            for raw, timestamp in make_queue(WEFT_GLOBAL_LOG_QUEUE).peek_generator(
+                with_timestamps=True
+            )
+            if json.loads(raw).get("type") == "terminal"
+        ]
+        assert len(history) == 1
+        assert history[0][0] == terminal
+        assert max(stdout_final, stderr_final) < min(terminal_id, history[0][1])
+    finally:
+        task.cleanup()
 
 
 @pytest.mark.parametrize("command", ["STOP", "KILL"])
 @pytest.mark.parametrize("started", [False, True], ids=["before-input", "active"])
 @pytest.mark.parametrize("fail_once", [False, True], ids=["write-ok", "write-retry"])
 def test_interactive_command_control_unwinds_before_terminal_and_ack(
-    broker_env: BrokerEnv, unique_tid: str, command: str, started: bool, fail_once: bool
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    command: str,
+    started: bool,
+    fail_once: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    spec = make_interactive_spec(unique_tid)
+    script_path = None
+    if started:
+        script = tmp_path / "output_on_stdin_close.py"
+        script.write_text(
+            "import sys\nsys.stdin.read()\n"
+            "print('final stdout', flush=True)\n"
+            "print('final stderr', file=sys.stderr, flush=True)\n",
+            encoding="utf-8",
+        )
+        script_path = str(script)
+    spec = make_interactive_spec(unique_tid, script_path=script_path)
     task = Consumer(db_path, spec)
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    writer = _TerminalWriteQueue(task._ctrl_out_queue, fail_once=fail_once)
-    task._ctrl_out_queue = cast(Queue, writer)
+    writer = _TerminalBroadcast(task._ctrl_out_queue, monkeypatch, fail_once=fail_once)
     session = None
     try:
         if started:
@@ -657,7 +739,7 @@ def test_interactive_command_control_unwinds_before_terminal_and_ack(
         assert terminal["status"] == expected_status
         assert terminal["source"] == "task"
         assert terminal["tid"] == unique_tid
-        assert set(terminal) == {
+        assert set(terminal) >= {
             "type",
             "source",
             "tid",
@@ -673,6 +755,15 @@ def test_interactive_command_control_unwinds_before_terminal_and_ack(
         assert len(acknowledgements) == 1
         assert acknowledgements[0][0]["request_id"] == request_id
         assert terminal_timestamp < acknowledgements[0][1]
+        lifecycle = [
+            (json.loads(raw), timestamp)
+            for raw, timestamp in make_queue(WEFT_GLOBAL_LOG_QUEUE).peek_generator(
+                with_timestamps=True
+            )
+            if json.loads(raw).get("type") == "terminal"
+        ]
+        assert len(lifecycle) == 1
+        assert lifecycle[0][0] == terminal
         assert writer.terminal_attempts == (2 if fail_once else 1)
         if session is not None:
             assert not session.is_alive()
@@ -692,6 +783,12 @@ def test_interactive_command_control_unwinds_before_terminal_and_ack(
             assert len(stderr_finals) == len(stdout_finals) == 1
             assert stderr_finals[0] < terminal_timestamp
             assert stdout_finals[0] < terminal_timestamp
+            assert max(stderr_finals + stdout_finals) < lifecycle[0][1]
+            assert any(row.get("data") == "final stderr\n" for row, _ in rows)
+            assert any(
+                json.loads(raw).get("data") == "final stdout\n"
+                for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()
+            )
         # The status, not a new emission ledger, prevents a repeated command
         # from re-emitting terminal proof after the session has been released.
         task._interactive_handle_control(
@@ -710,34 +807,23 @@ def test_interactive_command_control_unwinds_before_terminal_and_ack(
 
 @pytest.mark.parametrize("fail_once", [False, True])
 def test_interactive_session_start_failure_uses_canonical_terminal_writer(
-    broker_env: BrokerEnv, tmp_path: Path, unique_tid: str, fail_once: bool
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+    unique_tid: str,
+    fail_once: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
     payload = make_interactive_spec(unique_tid).model_dump(mode="json")
     payload["spec"]["working_dir"] = str(tmp_path / "missing-directory")
     task = Consumer(db_path, TaskSpec.model_validate(payload))
     ctrl_out = make_queue(task.taskspec.io.control["ctrl_out"])
-    writer = _TerminalWriteQueue(task._ctrl_out_queue, fail_once=fail_once)
-    task._ctrl_out_queue = cast(Queue, writer)
-    ordinary = Consumer(
-        db_path,
-        make_function_taskspec(
-            str(time.time_ns()), "tests.tasks.sample_targets:echo_payload"
-        ),
-    )
+    writer = _TerminalBroadcast(task._ctrl_out_queue, monkeypatch, fail_once=fail_once)
     try:
         with pytest.raises(OSError):
             task._interactive_ensure_session(1, on_activity=lambda: None)
         assert task.taskspec.state.status == "failed"
-        ordinary.taskspec.mark_failed(error=task.taskspec.state.error)
-        ordinary._send_terminal_envelope()
-        expected = next(
-            json.loads(raw)
-            for raw in make_queue(
-                ordinary.taskspec.io.control["ctrl_out"]
-            ).peek_generator()
-            if json.loads(raw).get("type") == "terminal"
-        )
+        assert writer.terminal_attempts == (2 if fail_once else 1)
         task._interactive_shutdown()
         task._interactive_handle_control(
             ControlRequest(command="STOP", request_id="after-start-failure")
@@ -748,13 +834,13 @@ def test_interactive_session_start_failure_uses_canonical_terminal_writer(
             if json.loads(raw).get("type") == "terminal"
         ]
         assert len(terminals) == 1
-        assert set(terminals[0]) == set(expected)
+        assert terminals[0]["event"] == "work_failed"
+        assert terminals[0]["source"] == "task"
+        assert terminals[0]["runner_diagnostics"]["phase"] == "process_spawn"
         assert terminals[0]["status"] == "failed"
         assert terminals[0]["tid"] == unique_tid
-        assert writer.terminal_attempts == (2 if fail_once else 1)
     finally:
         task.cleanup()
-        ordinary.cleanup()
 
 
 def test_interactive_command_routes_stderr_and_reports_failure(

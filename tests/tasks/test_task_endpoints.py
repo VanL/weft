@@ -26,6 +26,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
+    WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext, build_context
 from weft.core.endpoints import (
@@ -37,7 +38,7 @@ from weft.core.task_state import (
 )
 from weft.core.tasks import Consumer, HeartbeatTask
 from weft.core.taskspec import TaskSpec
-from weft.helpers import iter_queue_json_entries, tid_short_form
+from weft.helpers import closing_queue_iterator, iter_queue_json_entries, tid_short_form
 
 
 def _entries(queue: Queue) -> list[dict[str, object]]:
@@ -726,3 +727,105 @@ def test_endpoint_owner_snapshot_read_errors_propagate(
         endpoints_module.latest_tid_state_entries_for_endpoint_resolution(
             context, tids=[tid]
         )
+
+
+@pytest.mark.parametrize("candidate_exists", [False, True])
+def test_named_endpoint_reads_only_candidate_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_exists: bool,
+) -> None:
+    """Single-name resolution never transfers unrelated lifecycle bodies."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "1770000000000000300"
+    with (
+        ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False) as registry,
+        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log,
+    ):
+        if candidate_exists:
+            _endpoint_record(registry, name="wanted", tid=tid)
+            _mark_endpoint_owner_live(ctx, tid)
+        for index in range(300):
+            log.write(
+                json.dumps({"tid": str(int(tid) + index + 1), "status": "running"})
+            )
+        # The shared reader must select top-level TID, ignore malformed data,
+        # and keep terminal authority despite a later stale live event.
+        log.write(
+            json.dumps(
+                {
+                    "tid": str(int(tid) + 500),
+                    "status": "running",
+                    "taskspec": {"tid": tid},
+                }
+            )
+        )
+        log.write("not-json")
+        log.write(json.dumps({"tid": tid, "taskspec": {"state": {"status": "failed"}}}))
+        log.write(json.dumps({"tid": tid, "status": "running"}))
+        with log.get_connection() as db:
+            broker_type = type(db)
+            original = broker_type.peek_generator
+        transferred: list[str] = []
+
+        def peek(broker: Any, name: str, **kwargs: Any) -> Any:
+            entries = original(broker, name, **kwargs)
+            if name != WEFT_GLOBAL_LOG_QUEUE:
+                return entries
+
+            def counted() -> Any:
+                with closing_queue_iterator(entries) as rows:
+                    for entry in rows:
+                        transferred.append(
+                            str(entry[0] if isinstance(entry, tuple) else entry)
+                        )
+                        yield entry
+
+            return counted()
+
+        monkeypatch.setattr(broker_type, "peek_generator", peek)
+        assert list_resolved_endpoints(ctx, pattern="wanted") == []
+        assert transferred == []
+
+
+@pytest.mark.parametrize("pattern", [None, "*"])
+def test_bulk_endpoint_listing_keeps_one_history_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pattern: str | None,
+) -> None:
+    """Bulk listing must not replace one shared scan with one per owner."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    with (
+        ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False) as registry,
+        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log,
+    ):
+        for index in range(100):
+            tid = str(1770000000000000400 + index)
+            _endpoint_record(registry, name=f"owner.{index}", tid=tid)
+            _mark_endpoint_owner_live(ctx, tid)
+            log.write(json.dumps({"tid": tid, "status": "running"}))
+        with log.get_connection() as db:
+            broker_type = type(db)
+            original = broker_type.peek_generator
+            original_find = broker_type.find_message_ids
+        history_scans = 0
+        point_scans = 0
+
+        def peek(broker: Any, name: str, **kwargs: Any) -> Any:
+            nonlocal history_scans
+            if name == WEFT_GLOBAL_LOG_QUEUE:
+                history_scans += 1
+            return original(broker, name, **kwargs)
+
+        def find(broker: Any, name: str, **kwargs: Any) -> Any:
+            nonlocal point_scans
+            if name == WEFT_GLOBAL_LOG_QUEUE:
+                point_scans += 1
+            return original_find(broker, name, **kwargs)
+
+        monkeypatch.setattr(broker_type, "peek_generator", peek)
+        monkeypatch.setattr(broker_type, "find_message_ids", find)
+        assert len(list_resolved_endpoints(ctx, pattern=pattern)) == 100
+        assert history_scans == 1
+        assert point_scans == 0

@@ -7,7 +7,7 @@ published endpoints but must not bypass Manager dispatch.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3]
-- docs/specifications/03-Manager_Architecture.md [MA-1.5], [MA-1.6]
+- docs/specifications/03-Manager_Architecture.md [MA-1.5], [MA-1.6], [MA-1.6a]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3.2], [MF-6], [MF-7]
 """
 
@@ -58,9 +58,16 @@ class ManagedServiceSpec:
 
 @dataclass(slots=True)
 class ManagedServiceState:
-    """Mutable Manager-local state for one desired service key."""
+    """Mutable Manager-local state for one desired service key.
+
+    ``pending_request_id`` is a reference to confirm against durable queues,
+    never proof that a request is still pending.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+    """
 
     spawn_pending: bool = False
+    pending_request_id: int | None = None
     active_tid: str | None = None
     next_allowed_ns: int = 0
     launched_once: bool = False
@@ -363,6 +370,7 @@ def _copy_service_state(state: ManagedServiceState) -> ManagedServiceState:
 
     return ManagedServiceState(
         spawn_pending=state.spawn_pending,
+        pending_request_id=state.pending_request_id,
         active_tid=state.active_tid,
         next_allowed_ns=state.next_allowed_ns,
         launched_once=state.launched_once,

@@ -512,7 +512,6 @@ def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
     task.taskspec.mark_completed(return_code=0)
 
     task._report_state_change(event="work_completed")
-    task._send_terminal_envelope()
 
     state_events = [json.loads(message) for message in drain_queue(task_log)]
     assert state_events[-1]["event"] == "work_completed"
@@ -615,8 +614,7 @@ def test_state_logging_records_events(
     assert statuses[-1] == "completed"
 
 
-def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
+def test_success_terminal_ctrl_out_survives_global_log_retirement(
     broker_env: BrokerEnv,
     task_factory: TaskFactory,
     unique_tid: str,
@@ -628,14 +626,6 @@ def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
     spec = build_function_spec(unique_tid)
     task = task_factory(spec)
     drain_queue(log_queue)
-    original_report_state_change = task._report_state_change
-
-    def drop_completed_log(event: str, **extra: object) -> None:
-        if event == "work_completed":
-            return
-        original_report_state_change(event, **extra)
-
-    monkeypatch.setattr(task, "_report_state_change", drop_completed_log)
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
@@ -646,8 +636,10 @@ def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
 
     outbox = make_queue(spec.io.outputs["outbox"])
     assert outbox.read_one() == "payload"
-    records = [json.loads(msg) for msg in drain_queue(log_queue)]
-    assert not any(record["event"] == "work_completed" for record in records)
+    # Raw history may retire independently of result retention.
+    for raw, message_id in log_queue.peek_generator(with_timestamps=True):
+        if json.loads(raw).get("event") == "work_completed":
+            log_queue.delete(message_id=message_id)
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
     envelopes = terminal_envelopes(ctrl_out, tid=unique_tid, source="task")
     assert len(envelopes) == 1

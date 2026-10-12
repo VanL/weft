@@ -83,7 +83,6 @@ def test_dead_task_queue_cleanup_plan_keeps_retention_queues_until_old() -> None
 
     assert plan.queue_names == (
         f"T{tid}.ctrl_in",
-        f"T{tid}.ctrl_out",
         f"T{tid}.inbox",
     )
     assert plan.outbox_queue_names == ()

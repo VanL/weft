@@ -70,13 +70,16 @@ def test_event_follow_reuses_physical_connections(
     assert all(connection.closed for connection in connections)
 
 
-@pytest.mark.parametrize("fail_at", [2, 3, 4, None])
+@pytest.mark.parametrize(
+    "accepted,fail_at", [(True, 2), (True, 3), (True, None), (False, 4)]
+)
 def test_result_acquisition_failure_releases_previous_queues(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
+    accepted: bool,
     fail_at: int | None,
 ) -> None:
-    """Real queue leases close even before the wait loop is constructed."""
+    """Partial local and unresolved-discovery queue leases close on acquisition failure."""
     ctx = weft_harness.context
     original_queue = WeftContext.queue
     queues: list[Any] = []
@@ -117,7 +120,9 @@ def test_result_acquisition_failure_releases_previous_queues(
     with pytest.raises(
         CommandExecutionError, match="injected acquisition failure"
     ) as caught:
-        result_cmd.await_task_result(ctx, spec.tid, _accepted_taskspec=spec)
+        result_cmd.await_task_result(
+            ctx, spec.tid, _accepted_taskspec=spec if accepted else None
+        )
     assert isinstance(caught.value.__cause__, RuntimeError)
     assert queues
     assert sorted(map(id, closed)) == sorted(map(id, queues))

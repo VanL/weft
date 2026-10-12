@@ -1,4 +1,4 @@
-"""Deferred native title dependencies (Spec: 01-Core_Components.md [CC-2.4])."""
+"""Deferred core dependencies (Spec: 01-Core_Components.md [CC-2.4])."""
 
 from __future__ import annotations
 
@@ -18,3 +18,8 @@ def get_processtitle() -> ModuleType:
     """Load the macOS Unix-only title backend without preparing it."""
     # Native dependency loaded lazily so process-title setup stays explicit.
     return import_module("processtitle")
+
+
+def get_task_evidence() -> ModuleType:
+    """Break endpoints -> evidence -> spawn_requests -> endpoints imports."""
+    return import_module("weft.core.task_evidence")

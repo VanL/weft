@@ -557,7 +557,17 @@ def _track_watch_resources(
     opened: list[str] = []
     closed: list[str] = []
     original_queue = WeftContext.queue
-    original_monitor = task_cmd.QueueChangeMonitor
+
+    class TrackedMonitor:
+        def wait(self, timeout: float | None) -> bool:
+            if failure == "wait":
+                raise RuntimeError("injected wait failure")
+            return False
+
+        def close(self) -> None:
+            closed.append("monitor")
+            if failure == "monitor-close":
+                raise RuntimeError("injected monitor close")
 
     def queue(self: WeftContext, name: str, *, persistent: bool = False) -> Queue:
         if failure == "state-construction" and opened:
@@ -573,24 +583,10 @@ def _track_watch_resources(
         opened.append(name)
         return result
 
-    def monitor(*args: Any, **kwargs: Any) -> QueueChangeMonitor:
+    def monitor(*args: Any, **kwargs: Any) -> TrackedMonitor:
         if failure == "monitor-construction":
             raise RuntimeError("injected monitor construction")
-        result = original_monitor(*args, **kwargs)
-        original_close = result.close
-
-        def close() -> None:
-            original_close()
-            closed.append("monitor")
-            if failure == "monitor-close":
-                raise RuntimeError("injected monitor close")
-
-        def wait(timeout: float | None) -> bool:
-            raise RuntimeError("injected wait failure")
-
-        monkeypatch.setattr(result, "close", close)
-        monkeypatch.setattr(result, "wait", wait)
-        return result
+        return TrackedMonitor()
 
     monkeypatch.setattr(WeftContext, "queue", queue)
     monkeypatch.setattr(task_cmd, "QueueChangeMonitor", monitor)
@@ -771,3 +767,78 @@ def test_interactive_stop_observer_borrows_log_queue(
     assert borrowed == [0]
     assert sources == (["log_fallback"] if log_wins else ["monitor_store"])
     assert connections and all(connection.closed for connection in connections)
+
+
+def test_control_observer_retains_shared_completion_facts_with_bounded_drain(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Control observation preserves every owner's completion and later arrivals."""
+    ctx = weft_harness.context
+    route = "test.shared.control-custody"
+    specs: list[TaskSpec] = []
+    with ctx.queue("test.control-custody.ids") as allocator:
+        for persistent in (True, False):
+            specs.append(
+                TaskSpec.model_validate(
+                    {
+                        "tid": str(allocator.generate_timestamp()),
+                        "name": "control-custody",
+                        "spec": {
+                            "type": "function",
+                            "function_target": (
+                                "tests.tasks.sample_targets:echo_payload"
+                                if persistent
+                                else "tests.tasks.sample_targets:fail_payload"
+                            ),
+                            "persistent": persistent,
+                            "cleanup_on_exit": False,
+                            "enable_process_title": False,
+                        },
+                        "io": {"control": {"ctrl_out": route}},
+                    }
+                )
+            )
+    tasks = [Consumer(ctx.broker_target, spec, config=ctx.config) for spec in specs]
+    try:
+        assert tasks[0].run_work_item("batch") == "batch"
+        with pytest.raises(RuntimeError, match="intentional failure"):
+            tasks[1].run_work_item("fail")
+        with ctx.queue(route) as control:
+            facts = list(control.peek_generator(with_timestamps=True))
+            assert len(facts) == 2
+            assert {json.loads(raw)["event"] for raw, _ in facts} == {
+                "work_item_completed",
+                "work_failed",
+            }
+            control.write(json.dumps({"command": "KILL", "status": "ack"}))
+            control.write(
+                json.dumps({"type": "stream", "stream": "stderr", "data": "quiet"})
+            )
+            with control.get_connection() as broker:
+                broker_type = type(broker)
+            original_peek = broker_type.peek_generator
+            late: list[tuple[str, int]] = []
+
+            def peek(db: Any, queue_name: str, **kwargs: Any) -> Any:
+                if queue_name == route and not late:
+                    raw = json.dumps({"command": "STOP", "status": "ack"})
+                    late.append((raw, control.write(raw)))
+                return original_peek(db, queue_name, **kwargs)
+
+            monkeypatch.setattr(broker_type, "peek_generator", peek)
+            capsys.readouterr()
+            observation = task_cmd._observe_control_envelopes(
+                control,
+                tid=tasks[0].tid,
+                taskspec_payload=specs[0].model_dump(mode="json"),
+            )
+            assert capsys.readouterr() == ("", "")
+            assert observation.terminal_snapshot is None
+            assert observation.kill_ack_observed_at is not None
+            assert list(control.peek_generator(with_timestamps=True)) == facts + late
+            assert len(late) == 1
+    finally:
+        for task in tasks:
+            task.cleanup()

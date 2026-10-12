@@ -4389,9 +4389,11 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
     assert make_queue(f"T{tid}.ctrl_out").stats().total == 0
 
 
-def test_task_monitor_terminal_control_cleanup_does_not_wait_for_retention(
+@pytest.mark.parametrize("service_owner", [False, True])
+def test_task_monitor_terminal_control_cleanup_retains_completion_evidence(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
+    service_owner: bool,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -4419,10 +4421,13 @@ def test_task_monitor_terminal_control_cleanup_does_not_wait_for_retention(
             },
         },
         "state": {"status": "completed"},
-        "metadata": {},
+        "metadata": {"role": "manager"} if service_owner else {},
     }
     make_queue(f"T{tid}.ctrl_in").write("stop")
-    make_queue(f"T{tid}.ctrl_out").write("pong")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_out.write("completion")
+    ctrl_out.write("claimed-completion")
+    assert ctrl_out.read_one() == "completion"
     make_queue(f"T{tid}.inbox").write("input")
     outbox = make_queue(f"T{tid}.outbox")
     outbox.write("result")
@@ -4451,6 +4456,10 @@ def test_task_monitor_terminal_control_cleanup_does_not_wait_for_retention(
                 checkpoint_message_id=None,
             )
             store.mark_summary_emitted(tid, int(tid) + 1)
+            if service_owner:
+                store.mark_families_disposed(
+                    ((tid, "stale_service_owner", None, None),), int(tid) + 1
+                )
 
             cleanup = worker._run_terminal_control_cleanup_slice(
                 store,
@@ -4461,9 +4470,27 @@ def test_task_monitor_terminal_control_cleanup_does_not_wait_for_retention(
             assert record.task_control_deleted_at_ns is not None
             assert cleanup.families_processed == 1
             assert make_queue(f"T{tid}.ctrl_in").stats().total == 0
-            assert make_queue(f"T{tid}.ctrl_out").stats().total == 0
-            assert make_queue(f"T{tid}.inbox").stats().total == 0
+            assert ctrl_out.stats().total == 2
+            # Stale-owner authority covers controls only, not task input/data.
+            assert make_queue(f"T{tid}.inbox").stats().total == int(service_owner)
             assert list(outbox.peek_generator()) == ["result"]
+
+            # The existing collation lifetime protects retained result queues.
+            store.delete_task_messages_after_raw_delete(
+                (update.message_id,), deleted_at_ns=int(tid) + 3
+            )
+            store.mark_reserved_cleanup_checked(tid, int(tid) + 3)
+            early = store.retire_completed_collation_families(
+                limit=10, retired_at_ns=int(tid) + 4, retention_seconds=172800
+            )
+            assert early.families_retired == 0
+            expired_at = int(tid) + 172801_000_000_000
+            expired = store.retire_completed_collation_families(
+                limit=10, retired_at_ns=expired_at, retention_seconds=172800
+            )
+            assert expired.families_retired == 1
+            worker._run_dead_task_cleanup_slice(store, now_ns=expired_at)
+            assert ctrl_out.stats().total == 0
     finally:
         task.stop()
 
@@ -5422,9 +5449,11 @@ def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_reten
     assert cleanup.dead_tid_reserved_queues_deleted == 0
 
 
-def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
+@pytest.mark.parametrize("retained_role", ["outbox", "ctrl_out"])
+def test_task_monitor_dead_task_cleanup_defers_result_evidence_until_retention(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
+    retained_role: str,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -5443,7 +5472,7 @@ def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
     tid = str(
         now_ns - int((TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
     )
-    outbox = make_queue(f"T{tid}.outbox")
+    outbox = make_queue(f"T{tid}.{retained_role}")
     reserved = make_queue(f"T{tid}.reserved")
     outbox.write("result")
     reserved.write("reserved")
@@ -5683,7 +5712,7 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
         task.stop()
 
     assert ctrl_in.stats().total == 0
-    assert ctrl_out.stats().total == 0
+    assert ctrl_out.stats().total == 1
     retained_task_rows = [
         json.loads(body)
         for body, _message_id in iter_queue_entries(log_queue)

@@ -1,28 +1,8 @@
-"""Regression coverage for terminal-event write retry behavior (Task A4).
+"""Bounded atomic completion publication at the real broker boundary.
 
-Background
-----------
-``BaseTask._report_state_change`` (the ``weft.log.tasks`` state-change
-write) and ``BaseTask._send_terminal_envelope`` (the ``ctrl_out`` terminal
-observation write) previously made a single best-effort attempt and logged
-at DEBUG on failure, same as every other observability write. Because these
-two writes are the only durable evidence of a task's one-shot terminal
-transition ([OBS.1]), Task A4 promotes *terminal* writes only to a bounded
-retry (``TERMINAL_EVENT_WRITE_RETRIES``) with a short pause between
-attempts (``TERMINAL_EVENT_WRITE_RETRY_INTERVAL``) and a WARNING-level log
-(with ``exc_info``) once retries are exhausted. Non-terminal writes are
-unchanged: single attempt, DEBUG level.
-
-The failure is a broker I/O error, which is external and nondeterministic
-to produce for real. Per the testing plan, this is the one sanctioned
-narrow stub: a proxy around the *queue write call only* that raises
-``BrokerError`` a controlled number of times. Task construction, state
-transitions, and the eventual successful queue write all go through real
-``Consumer``/``TaskSpec``/``Queue`` objects.
-
-Spec references:
-- docs/specifications/07-System_Invariants.md [OBS.1]
-- docs/specifications/05-Message_Flow_and_State.md [MF-5], [MF-3]
+Only broker I/O failure is injected. Consumer, serialization, lifecycle state,
+retry ownership, and successful broker transactions remain real.
+Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3].
 """
 
 from __future__ import annotations
@@ -31,209 +11,108 @@ import json
 import logging
 import sys
 import time
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
-from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import make_command_taskspec
-from weft._constants import (
-    TERMINAL_EVENT_WRITE_RETRIES,
-    WEFT_GLOBAL_LOG_QUEUE,
-)
+from weft._constants import TERMINAL_EVENT_WRITE_RETRIES, WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks import Consumer
 
 pytestmark = [pytest.mark.shared]
 
 
-class _FailNTimesQueueProxy:
-    """Narrow stub wrapping a real ``Queue``: fails ``write`` N times.
-
-    Only the ``write`` call is intercepted; every other attribute
-    (including subsequent successful writes) delegates to the real,
-    broker-backed queue object. This is the one sanctioned stub per the
-    testing plan: the failure mode (broker I/O error) is external and not
-    practical to trigger deterministically against a real backend.
-    """
-
-    def __init__(self, real_queue: Queue, *, fail_times: int) -> None:
-        self._real_queue = real_queue
-        self._fail_times = fail_times
-        self.write_attempts = 0
-
-    def write(self, message: str) -> int:
-        self.write_attempts += 1
-        if self.write_attempts <= self._fail_times:
-            raise BrokerError("simulated transient broker write failure")
-        return self._real_queue.write(message)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._real_queue, name)
-
-
-@pytest.fixture
-def unique_tid_terminal_retry() -> str:
-    return str(time.time_ns())
-
-
-def _make_completed_consumer(
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("failure", ["transient", "exhausted", "ambiguous"])
+def test_completion_retry_preserves_one_serialized_fact_and_atomic_addresses(
     broker_env: BrokerEnv,
-    tid: str,
-) -> Consumer:
-    db_path, _make_queue = broker_env
-    spec = make_command_taskspec(tid, sys.executable, args=["-c", "pass"])
-    task = Consumer(db_path, spec)
-    task.taskspec.mark_started(pid=1234)
-    task.taskspec.mark_running(pid=1234)
-    task.taskspec.mark_completed(return_code=0)
-    return task
-
-
-def test_terminal_state_write_retries_and_warns_then_completes_shutdown(
-    broker_env: BrokerEnv,
-    unique_tid_terminal_retry: str,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    persistent: bool,
+    failure: str,
 ) -> None:
-    """Terminal state-change write: bounded retries, WARNING on exhaustion.
-
-    Verifies (Spec: [OBS.1]):
-    - the write is retried exactly ``TERMINAL_EVENT_WRITE_RETRIES`` times
-      when every attempt fails,
-    - a WARNING (with ``exc_info``) is logged once retries are exhausted,
-    - the caller (``_report_state_change``) returns normally afterward --
-      the process's shutdown path is not blocked by the exhausted retries.
-    """
-    task = _make_completed_consumer(broker_env, unique_tid_terminal_retry)
-    try:
-        real_log_queue = task._queue(WEFT_GLOBAL_LOG_QUEUE)
-        proxy = _FailNTimesQueueProxy(
-            real_log_queue, fail_times=TERMINAL_EVENT_WRITE_RETRIES + 5
-        )
-        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = cast(
-            Queue, proxy
-        )  # Delegates every Queue operation except injected write failures.
-
-        with caplog.at_level(logging.WARNING, logger="weft.core.tasks.base"):
-            # Should not raise -- non-fatal after retries exhaust.
-            task._report_state_change("work_completed")
-
-        assert proxy.write_attempts == TERMINAL_EVENT_WRITE_RETRIES
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings, "expected a WARNING-level log on retry exhaustion"
-        assert any(r.exc_info is not None for r in warnings)
-    finally:
-        task._queue_cache.pop(WEFT_GLOBAL_LOG_QUEUE, None)
-        task.stop(join=False)
-
-
-def test_terminal_envelope_write_retries_and_warns_then_completes_shutdown(
-    broker_env: BrokerEnv,
-    unique_tid_terminal_retry: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Terminal ctrl_out envelope write: bounded retries, WARNING on exhaustion."""
-    task = _make_completed_consumer(broker_env, unique_tid_terminal_retry)
-    try:
-        real_ctrl_out = task._ctrl_out_queue
-        proxy = _FailNTimesQueueProxy(
-            real_ctrl_out, fail_times=TERMINAL_EVENT_WRITE_RETRIES + 5
-        )
-        task._ctrl_out_queue = proxy  # type: ignore[assignment]
-
-        with caplog.at_level(logging.WARNING, logger="weft.core.tasks.base"):
-            task._send_terminal_envelope()
-
-        assert proxy.write_attempts == TERMINAL_EVENT_WRITE_RETRIES
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings, "expected a WARNING-level log on retry exhaustion"
-        assert any(r.exc_info is not None for r in warnings)
-    finally:
-        task.stop(join=False)
-
-
-def test_terminal_state_write_transient_failure_then_success_emits_exactly_one(
-    broker_env: BrokerEnv,
-    unique_tid_terminal_retry: str,
-) -> None:
-    """One transient failure followed by success lands exactly one event.
-
-    Verifies (Spec: [OBS.1]): the retry loop stops as soon as the write
-    succeeds, and exactly one terminal event reaches the real,
-    broker-backed ``weft.log.tasks`` queue -- no duplicate emission.
-    """
-    task = _make_completed_consumer(broker_env, unique_tid_terminal_retry)
-    try:
-        real_log_queue = task._queue(WEFT_GLOBAL_LOG_QUEUE)
-        # Fail once, then delegate to the real queue -- well within budget.
-        assert TERMINAL_EVENT_WRITE_RETRIES > 1
-        proxy = _FailNTimesQueueProxy(real_log_queue, fail_times=1)
-        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = cast(
-            Queue, proxy
-        )  # Delegates every Queue operation except injected write failures.
-
-        task._report_state_change("work_completed")
-
-        assert proxy.write_attempts == 2
-
-        payloads: list[dict[str, Any]] = []
-        for raw in real_log_queue.peek_many(limit=50) or []:
-            try:
-                payload = json.loads(raw)
-            except (TypeError, ValueError):
-                continue
-            if payload.get("tid") == task.tid:
-                payloads.append(payload)
-
-        terminal_payloads = [p for p in payloads if p.get("event") == "work_completed"]
-        assert len(terminal_payloads) == 1
-    finally:
-        task._queue_cache.pop(WEFT_GLOBAL_LOG_QUEUE, None)
-        task.stop(join=False)
-
-
-def test_non_terminal_state_write_failure_is_single_attempt_debug_only(
-    broker_env: BrokerEnv,
-    unique_tid_terminal_retry: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Non-terminal state-change writes keep today's single-attempt/DEBUG behavior.
-
-    Verifies no behavior change on the non-terminal path: a task still in a
-    non-terminal status (e.g. ``running``) that fails to write its
-    state-change event must not retry, and must log at DEBUG (not WARNING).
-    """
-    db_path, _make_queue = broker_env
+    db_path, make_queue = broker_env
     spec = make_command_taskspec(
-        unique_tid_terminal_retry, sys.executable, args=["-c", "pass"]
+        str(time.time_ns()), sys.executable, args=["-c", "pass"], persistent=persistent
     )
     task = Consumer(db_path, spec)
+    task.taskspec.mark_running()
+    if not persistent:
+        task.taskspec.mark_completed(return_code=0)
+    global_log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    local = make_queue(spec.io.control["ctrl_out"])
+    with global_log.get_connection() as broker:
+        broker_type = type(broker)
+        real_broadcast = broker_type.broadcast
+    attempts: list[str] = []
+
+    def broadcast(self: Any, message: str, **kwargs: Any) -> int:
+        attempts.append(message)
+        assert kwargs == {
+            "queue_names": (WEFT_GLOBAL_LOG_QUEUE, spec.io.control["ctrl_out"]),
+            "create_missing": True,
+        }
+        if failure == "exhausted" or len(attempts) == 1:
+            if failure == "ambiguous":
+                real_broadcast(self, message, **kwargs)
+            raise BrokerError("injected completion publication failure")
+        return real_broadcast(self, message, **kwargs)
+
+    monkeypatch.setattr(broker_type, "broadcast", broadcast)
     try:
-        task.taskspec.mark_running(pid=1234)
-        assert task.taskspec.state.status == "running"
+        event = "work_item_completed" if persistent else "work_completed"
+        with caplog.at_level(logging.WARNING, logger="weft.core.tasks.base"):
+            task._report_state_change(event)
+        expected_attempts = (
+            TERMINAL_EVENT_WRITE_RETRIES if failure == "exhausted" else 2
+        )
+        assert len(attempts) == expected_attempts
+        assert len(set(attempts)) == 1
+        global_facts = [
+            raw
+            for raw in global_log.peek_generator()
+            if json.loads(raw).get("event") == event
+        ]
+        local_facts = list(local.peek_generator())
+        assert local_facts == global_facts
+        assert (
+            len(local_facts)
+            == {"exhausted": 0, "transient": 1, "ambiguous": 2}[failure]
+        )
+        warnings = [row for row in caplog.records if row.levelno == logging.WARNING]
+        assert bool(warnings) is (failure == "exhausted")
+        if warnings:
+            assert warnings[0].exc_info is not None
+    finally:
+        task.cleanup()
 
-        real_log_queue = task._queue(WEFT_GLOBAL_LOG_QUEUE)
-        proxy = _FailNTimesQueueProxy(real_log_queue, fail_times=100)
-        task._queue_cache[WEFT_GLOBAL_LOG_QUEUE] = cast(
-            Queue, proxy
-        )  # Delegates every Queue operation except injected write failures.
 
+def test_progress_failure_is_single_attempt_and_debug_only(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    db_path, make_queue = broker_env
+    task = Consumer(db_path, make_command_taskspec(str(time.time_ns()), sys.executable))
+    queue = task._queue(WEFT_GLOBAL_LOG_QUEUE)
+    real_write = type(queue).write
+    attempts = 0
+
+    def write(self: Any, message: str) -> int:
+        nonlocal attempts
+        if self.name == WEFT_GLOBAL_LOG_QUEUE:
+            attempts += 1
+            raise BrokerError("injected progress write failure")
+        return real_write(self, message)
+
+    monkeypatch.setattr(type(queue), "write", write)
+    try:
         with caplog.at_level(logging.DEBUG, logger="weft.core.tasks.base"):
             task._report_state_change("task_progress")
-
-        assert proxy.write_attempts == 1
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert not warnings
-        debugs = [
-            r
-            for r in caplog.records
-            if r.levelno == logging.DEBUG and "state change event" in r.getMessage()
-        ]
-        assert debugs
+        assert attempts == 1
+        assert not [row for row in caplog.records if row.levelno >= logging.WARNING]
+        assert not make_queue(task.taskspec.io.control["ctrl_out"]).has_pending()
     finally:
-        task._queue_cache.pop(WEFT_GLOBAL_LOG_QUEUE, None)
-        task.stop(join=False)
+        task.cleanup()

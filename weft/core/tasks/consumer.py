@@ -889,7 +889,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             metrics=metrics_payload,
             agent_execution=agent_execution,
         )
-        self._send_terminal_envelope()
         self._emit_pipeline_terminal_event(status="completed")
         self._update_process_title("completed")
         self._cleanup_spilled_outputs_if_needed()
@@ -1013,7 +1012,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if runner_diagnostics is not None:
             state_extra[RUNNER_DIAGNOSTICS_FIELD] = runner_diagnostics
         self._report_state_change(event=event, **state_extra)
-        self._send_terminal_envelope()
         self._emit_pipeline_terminal_event(
             status=pipeline_status,
             error=self.taskspec.state.error,

@@ -69,6 +69,7 @@ def _iter_task_result(
     emit_stream: bool = False,
     include_stream_events: bool = False,
     _accepted_taskspec: TaskSpec | None = None,
+    _follow_lifecycle: bool = False,
 ) -> Iterator[TaskEvent | TaskResult]:
     """Yield raw activity and one final result within the original budget.
 
@@ -91,6 +92,8 @@ def _iter_task_result(
         show_stderr=show_stderr,
         emit_stream=emit_stream,
         include_stream_events=include_stream_events,
+        discover_history=_accepted_taskspec is None,
+        follow_lifecycle=_follow_lifecycle,
     )
 
 

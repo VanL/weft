@@ -190,7 +190,7 @@ def test_follow_projects_one_collector_with_original_budget(
             "spec": {"type": "function", "function_target": "builtins:dict"},
         }
     )
-    calls: list[tuple[WeftContext, str, float | None, TaskSpec | None]] = []
+    calls: list[tuple[WeftContext, str, float | None, TaskSpec | None, bool]] = []
     raw = TaskEvent(tid=tid, event_type=status, timestamp=1, payload={"status": status})
     result = TaskResult(
         tid=tid,
@@ -207,8 +207,11 @@ def test_follow_projects_one_collector_with_original_budget(
         *,
         timeout: float | None = None,
         _accepted_taskspec: TaskSpec | None = None,
+        _follow_lifecycle: bool = False,
     ) -> Iterator[TaskEvent | TaskResult]:
-        calls.append((context, child_tid, timeout, _accepted_taskspec))
+        calls.append(
+            (context, child_tid, timeout, _accepted_taskspec, _follow_lifecycle)
+        )
         yield raw
         yield result
 
@@ -218,7 +221,7 @@ def test_follow_projects_one_collector_with_original_budget(
             ctx, tid, timeout=timeout, _accepted_taskspec=spec
         )
     )
-    assert calls == [(ctx, tid, timeout, spec)]
+    assert calls == [(ctx, tid, timeout, spec, True)]
     assert observed[0] is raw
     assert observed[-1].event_type == "result"
     assert observed[-1].payload == {
@@ -241,7 +244,9 @@ def test_follow_preserves_original_collector_timeout_after_terminal_event(
         *,
         timeout: float | None = None,
         _accepted_taskspec: TaskSpec | None = None,
+        _follow_lifecycle: bool = False,
     ) -> Iterator[TaskEvent | TaskResult]:
+        assert _follow_lifecycle
         yield TaskEvent(
             tid=child_tid,
             event_type="completed",

@@ -29,6 +29,7 @@ from weft.commands.types import TaskEvent, TaskResult
 from weft.context import WeftContext, build_context
 from weft.core.monitor.store import MonitorStore
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.tasks.base import BaseTask
 from weft.core.tasks.consumer import Consumer
 from weft.core.taskspec import TaskSpec
 from weft.helpers import closing_queue_iterator
@@ -403,6 +404,7 @@ def test_persistent_competing_reader_does_not_rewait_expired_quiet_grace(
     original_claim_many = broker_type.claim_many
     with (
         context.queue(WEFT_GLOBAL_LOG_QUEUE) as log,
+        context.queue(spec.io.control["ctrl_out"]) as ctrl_out,
         context.queue(spec.io.inputs["inbox"]) as inbox,
         context.queue(spec.io.outputs["outbox"]) as competitor,
     ):
@@ -417,18 +419,19 @@ def test_persistent_competing_reader_does_not_rewait_expired_quiet_grace(
                 timeout=15.0,
                 diagnostics=lambda: task.taskspec.state.status,
             )
-            with closing_queue_iterator(
-                log.peek_generator(with_timestamps=True)
-            ) as rows:
-                boundaries = [
-                    message_id
-                    for body, message_id in rows
-                    if (payload := json.loads(body)).get("tid") == spec.tid
-                    and payload.get("event") == "work_item_completed"
-                ]
-            assert boundaries
-            for message_id in boundaries:
-                log.delete(message_id=message_id)
+            for completion_queue in (log, ctrl_out):
+                with closing_queue_iterator(
+                    completion_queue.peek_generator(with_timestamps=True)
+                ) as rows:
+                    boundaries = [
+                        message_id
+                        for body, message_id in rows
+                        if (payload := json.loads(body)).get("tid") == spec.tid
+                        and payload.get("event") == "work_item_completed"
+                    ]
+                assert boundaries
+                for message_id in boundaries:
+                    completion_queue.delete(message_id=message_id)
 
             def monotonic() -> float:
                 return clock[0] if get_ident() == caller else real_monotonic()
@@ -574,7 +577,7 @@ def test_live_persistent_prefix_keeps_next_batch_after_early_final(
 ) -> None:
     """A real final frame can be followed before its boundary without batch theft.
 
-    Advance the consumer at the producer's public log-write boundary. Its first
+    Advance the consumer at the producer's public atomic completion boundary. Its first
     output is already committed, but work_item_completed is not. Then let two
     real batches finish before resuming the suspended result reader.
     """
@@ -583,7 +586,7 @@ def test_live_persistent_prefix_keeps_next_batch_after_early_final(
     tid = spec.tid
     assert tid is not None
     first_frames: list[TaskEvent] = []
-    original_write = Queue.write
+    original_publish = BaseTask._write_state_queue_message
     with (
         context.queue(WEFT_GLOBAL_LOG_QUEUE) as log,
         context.queue(spec.io.inputs["inbox"]) as inbox,
@@ -599,7 +602,15 @@ def test_live_persistent_prefix_keeps_next_batch_after_early_final(
         ) as results,
     ):
 
-        def write(queue: Queue, message: str, *, keep_newest: int | None = None) -> int:
+        def publish(
+            producer: BaseTask,
+            queue: Queue,
+            message: str,
+            *,
+            completion: bool,
+            log_context: str,
+            payload_for_log: Any,
+        ) -> None:
             if queue.name == log.name:
                 payload = json.loads(message)
                 if (
@@ -608,12 +619,19 @@ def test_live_persistent_prefix_keeps_next_batch_after_early_final(
                     and not first_frames
                 ):
                     first_frames.append(_next_stdout(iter(results)))
-            return original_write(queue, message, keep_newest=keep_newest)
+            original_publish(
+                producer,
+                queue,
+                message,
+                completion=completion,
+                log_context=log_context,
+                payload_for_log=payload_for_log,
+            )
 
         def no_wait(_monitor: QueueChangeMonitor, _duration: float | None) -> bool:
             pytest.fail("committed live output must be followed before work completes")
 
-        monkeypatch.setattr(Queue, "write", write)
+        monkeypatch.setattr(BaseTask, "_write_state_queue_message", publish)
         monkeypatch.setattr(QueueChangeMonitor, "wait", no_wait)
         task = Consumer(context.broker_target, spec, config=context.config)
         with task.drive_scope():
@@ -681,8 +699,8 @@ def test_nonrendering_timeout_preserves_output_until_actual_completion(
 ) -> None:
     """Observer timeout must leave unqualified buffered output readable.
 
-    The producer's real output is committed before its completion log write.
-    Intercept only that public write: the first result call must time out while
+    The producer's real output is committed before its atomic completion publication.
+    Intercept that existing publication owner: the first result call must time out while
     its buffered value stays pending; a call after publication gets that value.
     Live presentation flags do not deliver ordinary values. In the mixed case,
     another real Consumer shares the pipeline outbox: its frame must be delivered
@@ -697,12 +715,20 @@ def test_nonrendering_timeout_preserves_output_until_actual_completion(
     )
     tid = spec.tid
     assert tid is not None
-    original_write = Queue.write
+    original_publish = BaseTask._write_state_queue_message
     interceptions: list[str] = []
     delivered: list[TaskEvent] = []
     with context.queue(spec.io.outputs["outbox"]) as outbox:
 
-        def write(queue: Queue, message: str, *, keep_newest: int | None = None) -> int:
+        def publish(
+            producer: BaseTask,
+            queue: Queue,
+            message: str,
+            *,
+            completion: bool,
+            log_context: str,
+            payload_for_log: Any,
+        ) -> None:
             if queue.name == WEFT_GLOBAL_LOG_QUEUE:
                 payload = json.loads(message)
                 if (
@@ -717,11 +743,14 @@ def test_nonrendering_timeout_preserves_output_until_actual_completion(
                         stream_spec = _accepted_spec(
                             context, stream_output=True, outbox_name=outbox.name
                         )
-                        producer = Consumer(
+                        stream_producer = Consumer(
                             context.broker_target, stream_spec, config=context.config
                         )
-                        with producer.drive_scope():
-                            assert producer.run_work_item({"args": ["live"]}) == "live"
+                        with stream_producer.drive_scope():
+                            assert (
+                                stream_producer.run_work_item({"args": ["live"]})
+                                == "live"
+                            )
                     with pytest.raises(CommandTimeoutError):
                         if surface in {"result", "emit-text"}:
                             await_task_result(
@@ -761,9 +790,16 @@ def test_nonrendering_timeout_preserves_output_until_actual_completion(
                         assert len(delivered) == 1
                         assert base64.b64decode(delivered[0].payload["data"]) == b"live"
                     interceptions.append(payload["event"])
-            return original_write(queue, message, keep_newest=keep_newest)
+            original_publish(
+                producer,
+                queue,
+                message,
+                completion=completion,
+                log_context=log_context,
+                payload_for_log=payload_for_log,
+            )
 
-        monkeypatch.setattr(Queue, "write", write)
+        monkeypatch.setattr(BaseTask, "_write_state_queue_message", publish)
         task = Consumer(context.broker_target, spec, config=context.config)
         with task.drive_scope():
             assert task.run_work_item({"args": ["briefing"]}) == "briefing"
@@ -788,7 +824,7 @@ def test_one_shot_buffered_value_survives_observer_failure_before_quiet_grace(
     spec = _accepted_spec(context, stream_output=False)
     tid = spec.tid
     assert tid is not None
-    original_write = Queue.write
+    original_publish = BaseTask._write_state_queue_message
     inspected: list[int] = []
     waits: list[float | None] = []
     with context.queue(spec.io.outputs["outbox"]) as outbox:
@@ -797,8 +833,16 @@ def test_one_shot_buffered_value_survives_observer_failure_before_quiet_grace(
             waits.append(timeout)
             raise OSError("observer unavailable before delivery")
 
-        def write(queue: Queue, message: str, *, keep_newest: int | None = None) -> int:
-            payload = json.loads(message) if queue.name == WEFT_GLOBAL_LOG_QUEUE else {}
+        def publish(
+            producer: BaseTask,
+            queue: Queue,
+            message: str,
+            *,
+            completion: bool,
+            log_context: str,
+            payload_for_log: Any,
+        ) -> None:
+            payload = json.loads(message)
             if (
                 payload.get("tid") == tid
                 and payload.get("event") == "work_completed"
@@ -822,9 +866,16 @@ def test_one_shot_buffered_value_survives_observer_failure_before_quiet_grace(
                         )
                 assert waits, "the real pending value must reach its quiet-grace wait"
                 assert outbox.peek_one(with_timestamps=True) == pending
-            return original_write(queue, message, keep_newest=keep_newest)
+            original_publish(
+                producer,
+                queue,
+                message,
+                completion=completion,
+                log_context=log_context,
+                payload_for_log=payload_for_log,
+            )
 
-        monkeypatch.setattr(Queue, "write", write)
+        monkeypatch.setattr(BaseTask, "_write_state_queue_message", publish)
         task = Consumer(context.broker_target, spec, config=context.config)
         with task.drive_scope():
             assert task.run_work_item({"args": ["briefing"]}) == "briefing"
@@ -844,7 +895,7 @@ def test_abandoned_consuming_stream_keeps_buffered_ordinary_value(
     spec = _accepted_spec(context)
     tid = spec.tid
     assert tid is not None
-    original_write = Queue.write
+    original_publish = BaseTask._write_state_queue_message
     abandoned: list[int] = []
     with context.queue(spec.io.outputs["outbox"]) as outbox:
         task = Consumer(context.broker_target, spec, config=context.config)
@@ -857,8 +908,16 @@ def test_abandoned_consuming_stream_keeps_buffered_ordinary_value(
             )
             return True
 
-        def write(queue: Queue, message: str, *, keep_newest: int | None = None) -> int:
-            payload = json.loads(message) if queue.name == WEFT_GLOBAL_LOG_QUEUE else {}
+        def publish(
+            producer: BaseTask,
+            queue: Queue,
+            message: str,
+            *,
+            completion: bool,
+            log_context: str,
+            payload_for_log: Any,
+        ) -> None:
+            payload = json.loads(message)
             if payload.get("tid") == tid and payload.get("event") == "work_completed":
                 pending = outbox.peek_one(with_timestamps=True)
                 assert pending is not None
@@ -868,6 +927,7 @@ def test_abandoned_consuming_stream_keeps_buffered_ordinary_value(
                     timeout=2.0,
                     include_stream_events=True,
                     _accepted_taskspec=spec,
+                    _follow_lifecycle=True,
                 )
                 with (
                     monkeypatch.context() as wake,
@@ -886,9 +946,16 @@ def test_abandoned_consuming_stream_keeps_buffered_ordinary_value(
                             "the real activity publication must suspend the result stream"
                         )
                 assert outbox.peek_one(with_timestamps=True) == pending
-            return original_write(queue, message, keep_newest=keep_newest)
+            original_publish(
+                producer,
+                queue,
+                message,
+                completion=completion,
+                log_context=log_context,
+                payload_for_log=payload_for_log,
+            )
 
-        monkeypatch.setattr(Queue, "write", write)
+        monkeypatch.setattr(BaseTask, "_write_state_queue_message", publish)
         with task.drive_scope():
             assert task.run_work_item({"args": ["briefing"]}) == "briefing"
             result = await_task_result(
@@ -907,12 +974,20 @@ def test_live_runtime_outranks_claimed_result_without_terminal_proof(
     spec = _accepted_spec(context)
     tid = spec.tid
     assert tid is not None
-    original_write = Queue.write
+    original_publish = BaseTask._write_state_queue_message
     observed: list[str] = []
     with context.queue(spec.io.outputs["outbox"]) as competitor:
 
-        def write(queue: Queue, message: str, *, keep_newest: int | None = None) -> int:
-            payload = json.loads(message) if queue.name == WEFT_GLOBAL_LOG_QUEUE else {}
+        def publish(
+            producer: BaseTask,
+            queue: Queue,
+            message: str,
+            *,
+            completion: bool,
+            log_context: str,
+            payload_for_log: Any,
+        ) -> None:
+            payload = json.loads(message)
             if payload.get("tid") == tid and payload.get("event") == "work_completed":
                 assert competitor.read_one() is not None
                 assert competitor.stats().pending == 0 and competitor.stats().total == 1
@@ -933,9 +1008,16 @@ def test_live_runtime_outranks_claimed_result_without_terminal_proof(
                             context, tid, timeout=0.0, _accepted_taskspec=spec
                         )
                 observed.append(live.classification)
-            return original_write(queue, message, keep_newest=keep_newest)
+            original_publish(
+                producer,
+                queue,
+                message,
+                completion=completion,
+                log_context=log_context,
+                payload_for_log=payload_for_log,
+            )
 
-        monkeypatch.setattr(Queue, "write", write)
+        monkeypatch.setattr(BaseTask, "_write_state_queue_message", publish)
         task = Consumer(context.broker_target, spec, config=context.config)
         with task.drive_scope():
             assert (
@@ -957,7 +1039,7 @@ def test_new_ordinary_row_cancels_quiet_wake_and_preserves_ambiguous_window(
     tid = spec.tid
     assert tid is not None
     second_spec = _accepted_spec(context, outbox_name=spec.io.outputs["outbox"])
-    original_write = Queue.write
+    original_publish = BaseTask._write_state_queue_message
     original_monotonic = time.monotonic
     caller = get_ident()
     clock = [0.0]
@@ -989,8 +1071,16 @@ def test_new_ordinary_row_cancels_quiet_wake_and_preserves_ambiguous_window(
             clock[0] += duration
             return False
 
-        def write(queue: Queue, message: str, *, keep_newest: int | None = None) -> int:
-            payload = json.loads(message) if queue.name == WEFT_GLOBAL_LOG_QUEUE else {}
+        def publish(
+            producer: BaseTask,
+            queue: Queue,
+            message: str,
+            *,
+            completion: bool,
+            log_context: str,
+            payload_for_log: Any,
+        ) -> None:
+            payload = json.loads(message)
             if (
                 payload.get("tid") == tid
                 and payload.get("event") == "work_completed"
@@ -1012,9 +1102,16 @@ def test_new_ordinary_row_cancels_quiet_wake_and_preserves_ambiguous_window(
                     outbox.peek_generator(with_timestamps=True)
                 ) as rows:
                     assert list(rows) == observed
-            return original_write(queue, message, keep_newest=keep_newest)
+            original_publish(
+                producer,
+                queue,
+                message,
+                completion=completion,
+                log_context=log_context,
+                payload_for_log=payload_for_log,
+            )
 
-        monkeypatch.setattr(Queue, "write", write)
+        monkeypatch.setattr(BaseTask, "_write_state_queue_message", publish)
         task = Consumer(context.broker_target, spec, config=context.config)
         with task.drive_scope():
             assert task.run_work_item({"args": ["first"]}) == "first"

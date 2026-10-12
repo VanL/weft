@@ -138,12 +138,6 @@ class InteractiveTaskMixin(ABC):
     ) -> None:  # pragma: no cover - interface definition
         """Publish a control response on the task control channel."""
 
-    @abstractmethod
-    def _send_terminal_envelope(
-        self, *, source: str = "task"
-    ) -> None:  # pragma: no cover - interface definition
-        """Publish terminal proof through the canonical bounded writer."""
-
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -154,6 +148,7 @@ class InteractiveTaskMixin(ABC):
         self._interactive_session: CommandSessionProtocol | None = None
         self._interactive_started = False
         self._interactive_completion_reported = False
+        self._interactive_pending_completion: tuple[str, dict[str, Any]] | None = None
         self._interactive_stdout_index = 0
         self._interactive_stderr_index = 0
         self._interactive_stdout_final_sent = False
@@ -264,7 +259,6 @@ class InteractiveTaskMixin(ABC):
                 error=str(exc),
                 runner_diagnostics=diagnostics,
             )
-            self._send_terminal_envelope()
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy, message_timestamp=message_id)
             self.should_stop = True
@@ -307,16 +301,16 @@ class InteractiveTaskMixin(ABC):
             )
             if not ok and violation:
                 self.taskspec.mark_killed(reason=violation)
-                self._report_state_change(
-                    event="work_limit_violation",
-                    message_id=time.time_ns(),
-                    error=violation,
+                self._interactive_pending_completion = (
+                    "work_limit_violation",
+                    {"message_id": time.time_ns(), "error": violation},
                 )
                 policy = self.taskspec.spec.reserved_policy_on_error
                 self._apply_reserved_policy(policy)
                 self._update_process_title("killed", "limit")
                 session.terminate()
                 session.stop_monitor()
+                self._interactive_drain_remaining(session, outbox_queue)
                 self._interactive_finalize_session(failure_reason=violation)
                 return
 
@@ -389,6 +383,10 @@ class InteractiveTaskMixin(ABC):
         if session is None:
             return
         returncode = session.returncode()
+        completion_event, completion_details = self._interactive_pending_completion or (
+            None,
+            {},
+        )
 
         current_status = self.taskspec.state.status
         terminal_override_allowed = current_status not in {
@@ -410,11 +408,11 @@ class InteractiveTaskMixin(ABC):
                     f"Interactive session exited with {returncode}"
                 )
                 self.taskspec.mark_failed(error=message, return_code=returncode)
-                self._report_state_change(
-                    event="work_failed",
-                    message_id=time.time_ns(),
-                    error=message,
-                    runner_diagnostics=runner_diagnostics(
+                completion_event = "work_failed"
+                completion_details = {
+                    "message_id": time.time_ns(),
+                    "error": message,
+                    "runner_diagnostics": runner_diagnostics(
                         phase="execute",
                         runner=self.taskspec.spec.runner.name,
                         target_type=self.taskspec.spec.type,
@@ -423,7 +421,7 @@ class InteractiveTaskMixin(ABC):
                         alive=session.is_alive(),
                         message=message,
                     ),
-                )
+                }
                 policy = self.taskspec.spec.reserved_policy_on_error
                 self._apply_reserved_policy(policy)
                 self._update_process_title("failed")
@@ -431,11 +429,11 @@ class InteractiveTaskMixin(ABC):
             if terminal_override_allowed:
                 rc = 0 if returncode is None else returncode
                 self.taskspec.mark_completed(return_code=rc)
-                self._report_state_change(
-                    event="work_completed",
-                    message_id=time.time_ns(),
-                    result_bytes=self._interactive_total_stdout_bytes,
-                )
+                completion_event = "work_completed"
+                completion_details = {
+                    "message_id": time.time_ns(),
+                    "result_bytes": self._interactive_total_stdout_bytes,
+                }
                 self._update_process_title("completed")
 
         outbox_queue = self._queue(self._queue_names["outbox"])
@@ -465,8 +463,6 @@ class InteractiveTaskMixin(ABC):
             self._interactive_stderr_index += 1
             self._interactive_stderr_final_sent = True
 
-        self._send_terminal_envelope()
-
         self.should_stop = True
         self._interactive_completion_reported = True
         self._interactive_next_limit_check_at = None
@@ -477,6 +473,11 @@ class InteractiveTaskMixin(ABC):
             session.close()
         except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive session resources", exc_info=True)
+        # STOP/KILL record state before unwind; their single completion fact
+        # follows final frames and session close, then the caller acknowledges.
+        if completion_event is not None:
+            self._report_state_change(event=completion_event, **completion_details)
+        self._interactive_pending_completion = None
 
     def _interactive_session_is_monitored(self) -> bool:
         """Return whether resource sampling is clock work for this session.
@@ -561,30 +562,40 @@ class InteractiveTaskMixin(ABC):
         if command == CONTROL_STOP:
             self.should_stop = True
             self.taskspec.mark_cancelled(reason="STOP command received")
-            self._report_state_change(event="control_stop", message_id=time.time_ns())
             self._update_process_title("cancelled")
             policy = self.taskspec.spec.reserved_policy_on_stop
             self._apply_reserved_policy(policy)
             if self._stop_event:
                 self._stop_event.set()
             if self._interactive_session is None:
-                self._send_terminal_envelope()
+                self._report_state_change(
+                    event="control_stop", message_id=time.time_ns()
+                )
             else:
+                self._interactive_pending_completion = (
+                    "control_stop",
+                    {"message_id": time.time_ns()},
+                )
                 self._interactive_shutdown(reason="cancelled")
             self._send_control_response("STOP", "ack", **response_extra)
             return True
         if command == CONTROL_KILL:
             self.should_stop = True
             self.taskspec.mark_killed(reason="KILL command received")
-            self._report_state_change(event="control_kill", message_id=time.time_ns())
             self._update_process_title("killed")
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy)
             if self._stop_event:
                 self._stop_event.set()
             if self._interactive_session is None:
-                self._send_terminal_envelope()
+                self._report_state_change(
+                    event="control_kill", message_id=time.time_ns()
+                )
             else:
+                self._interactive_pending_completion = (
+                    "control_kill",
+                    {"message_id": time.time_ns()},
+                )
                 self._interactive_shutdown(reason="killed")
             self._send_control_response("KILL", "ack", **response_extra)
             return True

@@ -3404,7 +3404,7 @@ def test_terminal_service_child_retries_reserved_spawn_ack(
         manager, "_child_terminal_proof_still_within_grace", lambda *_args: False
     )
     monkeypatch.setattr(
-        manager, "_write_manager_terminal_envelope", lambda *_args: None
+        manager, "_write_manager_terminal_envelope", lambda *_args: True
     )
 
     try:
@@ -4162,7 +4162,7 @@ def test_manager_child_sentinel_adapter_coalesces_level_triggered_exit() -> None
     process.start()
     sentinel = process.sentinel
     try:
-        adapter.publish((("child", sentinel),))
+        adapter.add("child", sentinel)
         assert notified.wait(timeout=2.0)
         results = adapter.drain()
         assert len(results) == 1
@@ -4172,9 +4172,9 @@ def test_manager_child_sentinel_adapter_coalesces_level_triggered_exit() -> None
         process.join(timeout=2.0)
         assert process.is_alive() is False
 
-        adapter.publish((("child", sentinel),))
+        adapter.add("child", sentinel)
         assert adapter.wait(0.05) is False
-        adapter.publish(())
+        adapter.remove("child")
         adapter.close(timeout=1.0)
         adapter.close(timeout=1.0)
 
@@ -4205,7 +4205,7 @@ def test_manager_child_sentinel_adapter_reports_fatal_observer_failure(
     )
     adapter = manager_mod._ManagerChildSentinelAdapter(lambda: None)
     try:
-        adapter.publish((("child", 123),))
+        adapter.add("child", 123)
         assert adapter.wait(1.0) is True
         results = adapter.drain()
         assert len(results) == 1

@@ -95,6 +95,13 @@ metadata from caller-provided TaskSpecs before queueing. Manager-owned internal
 spawn paths may still use those keys inside explicit internal runtime
 envelopes.
 
+During one abnormal submission-reconciliation observation, retained task/child spawn
+evidence and an inspected task-log horizon prevent replay of already inspected history.
+Both exact top-level `tid` and manager `child_tid` records remain supported. Queue
+presence, reservation, spawned proof, and rejection keep their existing precedence.
+Administrative backfill behind a completed horizon requires a fresh observation,
+consistent with [MF-5].
+
 _Implementation mapping_: `weft/commands/run.py::_enqueue_taskspec`;
 `weft/commands/submission.py::ensure_manager_after_submission`;
 `weft/commands/_spawn_submission.py::reconcile_submitted_spawn`;
@@ -241,9 +248,37 @@ The control plane is explicit:
 - terminal task-local notifications must be typed JSON envelopes with
   `type="terminal"`, `source="task"` or `source="manager"`, `tid`, `status`,
   and `timestamp`; optional fields include `error` and `return_code`
-- one-shot non-persistent task success publishes a task-owned typed terminal
-  `ctrl_out` envelope after the task reaches `completed`, so task-local
-  terminal proof exists alongside the `work_completed` task-log event
+
+A task publishes completion through its existing lifecycle-reporting path. A task-owned
+terminal record is both a lifecycle event and a typed terminal envelope: it retains the
+lifecycle fields, including the redacted TaskSpec, and includes `type="terminal"`,
+`source="task"`, `tid`, `status`, `timestamp`, and applicable `error` and `return_code`.
+The same serialized record is atomically published to `weft.log.tasks` and the
+configured task `ctrl_out`, using SimpleBroker's public exact-destination broadcast with
+missing destinations created. Duplicate destination names receive one copy. Nonterminal
+persistent `work_item_completed` boundaries are published to the same two destinations,
+without the terminal discriminator. Other nonterminal lifecycle events remain global-log
+events.
+
+This completion publication applies to every BaseTask terminal path, including
+pipeline/edge tasks, interactive startup/finalization, cancellation, timeout, and
+failure. It replaces separate task-owned global-terminal and local-terminal writes. A
+work-item boundary remains nonterminal. Completion records use the existing bounded
+completion-write retry policy; retry exhaustion remains reported and nonfatal to process
+shutdown. Retrying the same serialized fact may leave duplicate records after an
+ambiguous commit; readers do not turn duplicate observations into duplicate output
+settlement.
+
+Completion is published after the task has finalized the output belonging to that
+boundary. Interactive STOP/KILL, external termination signals, and parent loss record
+the terminal state on the owner thread, unwind the session, and publish completion after
+its final stdout/stderr frames. Queued control is acknowledged after this unwind. It does not publish local completion while the session can
+still produce final output. The payload for one publication attempt series is serialized
+once and reused on retry. Terminal runtime mapping publication follows completion
+publication attempts, so a control observer cannot act on a terminal mapping before
+the task has attempted to commit its completion proof. The mapping remains best-effort
+liveness evidence, including after bounded completion-publication failure.
+
 - readers must ignore ordinary control replies, malformed JSON, and unrelated
   `ctrl_out` payloads when looking for terminal state
 - after strict request parsing, a non-request `ctrl_in` row is passed to the
@@ -312,10 +347,12 @@ interpretation and CLI convergence live in `weft/core/task_evidence.py` and
 `tests/core/test_control_messages.py`, `tests/core/test_control_probe.py`,
 `tests/tasks/test_control_channel.py`, and `tests/tasks/test_task_execution.py`.
 Interactive startup failure and session finalization use
-`BaseTask._send_terminal_envelope`;
-`InteractiveSessionMixin._interactive_handle_control` acknowledges after
+`weft/core/tasks/base.py::BaseTask._report_state_change`;
+`weft/core/tasks/interactive.py::InteractiveTaskMixin._interactive_handle_control` acknowledges after
 shutdown. Ordering and retry coverage is in
 `tests/tasks/test_task_interactive.py`; see [Monitor and task correctness fixes](../plans/2026-08-31-monitor-and-task-correctness-fixes-plan.md).
+`weft/commands/tasks.py::_observe_control_envelopes` consumes ordinary replies while
+retaining valid completion facts for every owner of a shared control route.
 The wire module owns shape only, not task or manager policy.
 
 Implementation plan backlinks:
@@ -352,10 +389,15 @@ Current rules:
 - after matching endpoint claims, read valid snapshots only for candidate owner
   TIDs. Empty candidate sets require no state reads; pure liveness predicates
   receive evidence values, not broker callbacks
-- current liveness checks use `weft.log.tasks` plus `weft.state.tasks.<tid>`;
-  task processes publish host-PID liveness through `runtime_handle` when no
-  runner-specific handle exists, and there is no separate endpoint lease or
-  heartbeat contract
+- Exact-name endpoint resolution reads lifecycle and runtime evidence only for matched
+  candidate owner TIDs, using shared task-evidence classification. Explicitly bulk
+  unfiltered or glob listings may retain one global history pass to avoid repeated
+  backend substring scans. Terminal proof retains precedence over live runtime handles.
+  An empty candidate set performs no history or task-state reads. Candidate filtering
+  bounds transferred/decoded history; it does not claim that public broker substring
+  search is an indexed TID lookup. Task processes publish host-PID liveness through
+  `runtime_handle` when no runner-specific handle exists; there is no separate endpoint
+  lease or heartbeat contract.
 - if multiple live tasks claim the same name, the canonical live owner is the
   lowest eligible TID; duplicate live claims remain observable conflicts
 - names under `_weft.` are reserved for Weft-owned internal runtime services;
@@ -748,13 +790,11 @@ Current rules:
   TaskMonitor maintenance worker after the summary/disposition high-water is
   reached; that worker owns only the queue-delete plus Monitor-store mark
   transaction for standard stale task-local queues. Standard
-  `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
-  terminal cleanup time. Standard `T{tid}.outbox` is retention-gated: eligible
-  only when the terminal evidence (or, absent terminal evidence, the TID) is
-  older than the configured task-log retention period, so a task's outbox is
-  retained for the full window measured from completion rather than from
-  creation. Standard `T{tid}.reserved` is handled by the reserved cleanup
-  policy, which age-gates the same way (see below). For
+  `T{tid}.ctrl_in` and `T{tid}.inbox` are stale at terminal cleanup time.
+  Standard `T{tid}.ctrl_out` and `T{tid}.outbox` are retained until task-log
+  retention age, measured from terminal evidence when available and TID age
+  only under the existing fallback. Reserved queues retain their separate
+  cleanup policy. For
   old nonterminal manager or manager-supervised service owner rows, the
   Monitor may record a `stale_service_owner` or `superseded_service_owner`
   disposition without rewriting task lifecycle truth only after same-service
@@ -762,11 +802,11 @@ Current rules:
   non-live owner row, or a different live owner exists for the same service
   key, and no active runtime evidence protects the old TID. Ambiguous rows,
   missing service-key proof, active owner rows, and rows with live runtime
-  handles stay open for the normal stale-open path. Disposed stale
-  service-owner rows are eligible only for standard task-local
-  `T{tid}.ctrl_in` and `T{tid}.ctrl_out` cleanup through
-  `task_local.terminal_runtime`; their inbox, outbox, reserved queue, global
-  manager queues, spawn queues, and custom queues remain out of this authority.
+  handles stay open for the normal stale-open path. A stale/superseded service-owner disposition may authorize standard
+  `T{tid}.ctrl_in` cleanup immediately and standard `T{tid}.ctrl_out` cleanup
+  only at result-retention age. This does not turn the owner row into terminal
+  lifecycle truth or authorize deleting its inbox, outbox, reserved, global,
+  or custom queues.
   For terminal non-completed families, the reserved policy is Monitor-table
   driven: it selects rows with `reserved_probe_needed`, records
   `reserved_cleanup_checked_at_ns` after successfully deleting the reserved
@@ -829,9 +869,9 @@ a permanent normal-cycle compatibility lane.
   require reserved-queue probes. After any required summary is emitted,
   terminal disposition may delete whole standard task-local runtime queues
   through public SimpleBroker queue APIs from the dedicated TaskMonitor
-  runtime-cleanup worker. For a proven-dead TID, `T{tid}.ctrl_in`,
-  `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale immediately. `T{tid}.outbox`
-  and `T{tid}.reserved` remain retention-gated and are selected by the same
+  runtime-cleanup worker. For a proven-dead TID, `T{tid}.ctrl_in` and `T{tid}.inbox` are stale
+  immediately. `T{tid}.ctrl_out`, `T{tid}.outbox`, and `T{tid}.reserved` remain
+  retention-gated and are selected by the same
   dead-TID policy (the name-derived path, which has no monitor record and so
   no terminal evidence to prefer) only when the TID is older than the
   task-log retention period. Dead-TID cleanup excludes manager, global, service, and custom
@@ -892,9 +932,8 @@ a permanent normal-cycle compatibility lane.
   latest envelope wins. This keeps the manager terminal-proof grace window a
   liveness mechanism rather than a correctness arbiter: a real task verdict that
   becomes durable after the grace window is not overwritten by the failsafe
-- for new one-shot non-persistent success paths, terminal proof should normally
-  include both `work_completed` in `weft.log.tasks` and a task-owned typed
-  terminal `ctrl_out` envelope
+- task completion uses the same lifecycle fact in `weft.log.tasks` and
+  configured `ctrl_out`, under [MF-3]
 - for one-shot non-persistent tasks, a final unambiguous outbox result may be
   classified as `result_without_terminal`; persistent, interactive, streaming,
   partial, or ambiguous outbox traffic does not prove task completion, and
@@ -973,19 +1012,38 @@ source or fail explicitly. It must not silently wait until a caller deadline
 or indefinitely when no deadline exists.
 Notifications are hints; durable messages determine the result.
 
-The watched completion surfaces follow the existing task protocol: task-local
-typed control evidence where sufficient, and TID-matched lifecycle evidence
-for persistent work boundaries and pipeline completion. A live wait may omit
-lifecycle-log interest only when every terminal path for that task kind has
-reliable task-local terminal publication and crash coverage under the existing
-terminal-retry and manager `wrapper_lost` contracts. Other task kinds retain
-TID-matched lifecycle observation. Best-effort pipeline status snapshots do
-not replace lifecycle completion proof. After raw history retirement, known
-full TIDs retain the existing read-only terminal Monitor-store fallback and
-its unavailable/degraded diagnostics, at its existing evidence priority.
-Unrelated shared-log activity must not cause whole-log payload
-decoding or restart completed configuration discovery. Shared history is not
-a prerequisite for ordinary collection when local evidence is sufficient.
+Ordinary result waits with known immutable task configuration observe the configured
+outbox and `ctrl_out`, plus the existing task-local runtime wake/evidence surfaces. They
+do not subscribe to or scan `weft.log.tasks` for live completion. Task-local completion
+records carry the same lifecycle fact as global history; existing terminal precedence,
+persistent work boundaries, output grace, and claim settlement apply.
+
+Bare-TID configuration discovery retains the existing bounded global-history search and
+terminal Monitor fallback. While configuration is unresolved, its global-log interest
+remains a valid discovery wake source; it is detached as soon as routes and mode are
+established. Negative discovery retains its inspected horizon. Explicit lifecycle-event
+following retains global-log observation to preserve the public event stream, including
+nonterminal progress events. It is distinct from ordinary result collection and is not
+claimed to have constant cost with respect to unrelated history.
+
+Global history remains available for status/history reconstruction and historical tasks
+written before local completion publication. Existing accepted-submission entry points
+use local completion from their first read, including before child initialization.
+Public reopened handles and `result(tid)` enter through bare-TID acquisition, which
+retains discovered historical terminal/batch evidence and configuration, including the
+terminal Monitor fallback. The decision uses the existing accepted-submission entry
+path, not inferred age/status, queue emptiness, or a new version flag. Configuration
+acquired from history is not a newly accepted submission. Once routes are resolved,
+local completion supplies new boundaries; discovery and local copies of the same
+completion are not appended twice. A retained old completion absent from local queues
+remains usable historical evidence. No live historical producer is supported across the
+coordinated cutover.
+
+Result/control drains preserve every valid completion record in a configured `ctrl_out`,
+including records for another TID sharing that queue. They fold only the requested TID
+and never consume those records as stream noise. An identical serialized persistent
+boundary observed again after a publication retry is the same boundary, even when its
+broker message ID differs.
 
 Existing evidence classification and precedence apply to acquired evidence.
 Persistent result waits retain `work_item_completed` and `work_completed`
@@ -1472,13 +1530,11 @@ shared helpers in `weft/helpers/__init__.py`.
 Cleanup has three owners: task-owned exit purge, monitor-owned lifecycle and
 self-maintenance, and explicit operator commands for force and compaction:
 
-- task-owned cleanup clears standard task-local `T{tid}.ctrl_in` and
-  `T{tid}.ctrl_out` runtime queues whenever the task unwinds through
-  `cleanup()`, including success, failure, timeout, STOP, and KILL paths. Those
-  queues are runtime control channels, not retained result surfaces. `T{tid}.outbox`
-  remains outside this cleanup and is retained until result policy consumes it.
-  Residual standard control queues after a terminal task imply forced process
-  death before cleanup, cleanup failure, or pre-existing stale state.
+- Task-owned cleanup clears standard task-local `T{tid}.ctrl_in` whenever the
+  task unwinds through `cleanup()`, including success, failure, timeout, STOP,
+  and KILL. It retains standard `T{tid}.ctrl_out` as completion evidence until
+  the [MF-5] retention policy permits deletion. Outbox remains outside task-owned
+  cleanup. A retained standard `ctrl_out` after terminal completion is expected.
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - the supervised task monitor additionally owns a default-on self-maintenance
   pass on a monotonic deadline (hourly by default): backend vacuum of claimed
@@ -1540,12 +1596,12 @@ self-maintenance, and explicit operator commands for force and compaction:
   pass. Rows with non-terminal events such as
   `task_activity` do not close lifecycle groups solely because they carry a
   terminal-looking status. Terminal disposition may clear standard task-local
-  residual `ctrl_in`, `ctrl_out`, and `inbox` queues left by forced process
-  death or cleanup failure. For proven-dead TIDs, the same
-  policy may clear standard `outbox` and `reserved` queues only when the TID is
-  older than the configured task-log retention period. Retained non-interactive
+  residual `ctrl_in` and `inbox` queues left by forced process death or cleanup
+  failure. Standard `ctrl_out`, `outbox`, and `reserved` remain retention-gated
+  on terminal-evidence age where available and TID age only under the existing
+  name-derived no-record fallback. Retained non-interactive
   command stream frames, including stderr diagnostics, live in outbox rather
-  than cleanup-owned `ctrl_out` while the retention gate protects them.
+  than `ctrl_out`; completion evidence in `ctrl_out` has the same retention gate.
   `WEFT_TASK_MONITOR_BATCH_SIZE` caps retained task-log rows or cleanup
   candidates per cycle; it is not the task-log scan depth. Reserved rows remain
   protected recovery-sensitive evidence by default: the store-backed reserved
@@ -1568,8 +1624,9 @@ self-maintenance, and explicit operator commands for force and compaction:
   schedules a dead-TID cleanup
   job only when at least one currently existing standard task-local queue is
   eligible now. Without terminal lifecycle proof it selects only standard
-  stale `T{tid}.ctrl_in` and `T{tid}.ctrl_out`; inbox, reserved, and unread
-  outbox rows remain preserved for explicit archived forced pruning. With
+  stale `T{tid}.ctrl_in` immediately and `T{tid}.ctrl_out` only at retention
+  age; inbox, reserved, and unread outbox rows remain preserved for explicit
+  archived forced pruning. With
   terminal proof, existing retention and cleanup gates continue to govern the
   standard task-local family.
   Manager-owned `T{manager_tid}.internal_reserved` queues are not standard
@@ -1655,8 +1712,9 @@ Current rules:
 - queue creation is implicit on first write; opening a task-state queue
   handle and subscribing before that first write is valid and must wake on
   publication, even while names-only listing has no entry
-- task cleanup closes task-owned handles and clears standard task-local
-  `T{tid}.ctrl_in` / `T{tid}.ctrl_out` rows before closing those handles
+- Task cleanup closes task-owned handles, clears standard task-local
+  `T{tid}.ctrl_in` rows, and retains standard `T{tid}.ctrl_out` completion
+  evidence under [MF-5]. Custom queue ownership remains unchanged.
 - `weft.state.services`, `weft.state.tasks.<tid>`, `weft.state.streaming`,
   `weft.state.endpoints`, and `weft.state.pipelines` are runtime-only
   bookkeeping queues; they may be read for live reconciliation but are not
@@ -1789,7 +1847,7 @@ management live in the companion doc:
 
 ## Related Plans
 
-- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - proposed completion routing and retention changes; does not change the current contract before promotion.
+- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements completion routing, retention, incremental spawn observation, and candidate-scoped endpoint evidence.
 
 - [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md)
 

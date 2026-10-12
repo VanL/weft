@@ -91,7 +91,6 @@ from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
     ensure_owner_only_dir,
-    iter_queue_json_entries,
     process_create_time,
     redact_taskspec_dump,
     terminate_verified_process_tree,
@@ -185,6 +184,7 @@ class BaseTask(MultiQueueWatcher, ABC):
     _allowed_reserved_policies: ClassVar[frozenset[ReservedPolicy]] = frozenset(
         {ReservedPolicy.KEEP, ReservedPolicy.CLEAR}
     )
+    _interactive_pending_completion: tuple[str, dict[str, Any]] | None = None
 
     control_policy: ClassVar[TaskControlPolicy] = TaskControlPolicy(
         stop="immediate",
@@ -1111,23 +1111,23 @@ class BaseTask(MultiQueueWatcher, ABC):
         return expected_ctrl_in, expected_ctrl_out
 
     def _cleanup_standard_control_queues_on_exit(self) -> None:
-        """Clear standard task-local control queues when the task exits.
+        """Clear standard control input; retain result-completion evidence.
 
-        Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
+        Spec: docs/specifications/05-Message_Flow_and_State.md [MF-2.1], [MF-5]
         """
 
         queue_names = self._standard_control_queue_names()
         if queue_names is None:
             return
-        for queue_name in queue_names:
-            try:
-                self._queue(queue_name).delete()
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to clean control queue %s during task exit",
-                    queue_name,
-                    exc_info=True,
-                )
+        ctrl_in, _ctrl_out = queue_names
+        try:
+            self._queue(ctrl_in).delete()
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to clean control queue %s during task exit",
+                ctrl_in,
+                exc_info=True,
+            )
 
     @final
     def stop(
@@ -1927,24 +1927,24 @@ class BaseTask(MultiQueueWatcher, ABC):
         queue: Queue,
         serialized_payload: str,
         *,
-        terminal: bool,
+        completion: bool,
         log_context: str,
         payload_for_log: Any,
     ) -> None:
-        """Write a state/observability payload with terminal-aware retry.
+        """Publish one lifecycle fact, with bounded retries for completion.
 
         Non-terminal writes keep the existing single-attempt, debug-level
-        best-effort behavior. Terminal writes (the one-shot state event and
-        ctrl_out envelope covered by [OBS.1]) get a bounded retry with a
+        best-effort behavior. Completion facts are atomically addressed to
+        history and configured control output by the broker, with a
         short pause and a WARNING-level log (with ``exc_info``) once retries
         are exhausted, because losing the terminal signal silently is more
         costly than losing an in-flight progress update. The write is still
         non-fatal after retries exhaust — the caller must continue its
         shutdown path regardless.
 
-        Spec: [OBS.1]
+        Spec: [OBS.1], [MF-3]
         """
-        if not terminal:
+        if not completion:
             try:
                 queue.write(serialized_payload)
             except (BrokerError, OSError, RuntimeError):
@@ -1957,7 +1957,15 @@ class BaseTask(MultiQueueWatcher, ABC):
         last_exc: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                queue.write(serialized_payload)
+                with queue.get_connection() as broker:
+                    broker.broadcast(
+                        serialized_payload,
+                        queue_names=(
+                            WEFT_GLOBAL_LOG_QUEUE,
+                            self._queue_names["ctrl_out"],
+                        ),
+                        create_missing=True,
+                    )
                 return
             except (BrokerError, OSError, RuntimeError) as exc:
                 last_exc = exc
@@ -1982,19 +1990,20 @@ class BaseTask(MultiQueueWatcher, ABC):
         logger.debug("Unwritten %s payload: %s", log_context, payload_for_log)
 
     def _report_state_change(self, event: str, **extra: Any) -> None:
-        """Publish a state-change payload to the project log queue.
+        """Publish lifecycle history and address completion to local observers.
 
-        Spec: [CC-2.4], [MF-5]
+        Spec: [CC-2.4], [MF-3], [MF-5]
         """
         if (
-            not self._terminal_tid_state_published
-            and self.taskspec.state.status in TERMINAL_TASK_STATUSES
+            self.taskspec.state.status in TERMINAL_TASK_STATUSES
+            and getattr(self, "_interactive_session", None) is not None
         ):
-            # The terminal transition publishes exactly once on success; a
-            # failed append retries on the next terminal report because this
-            # row is the task's final liveness evidence ([OBS.6a]).
-            self._terminal_tid_state_published = self._register_tid_state()
-
+            # Signals and parent loss share the interactive finalizer with
+            # queued control: final output must precede completion. Preserve
+            # the first cause while the session unwinds.
+            if self._interactive_pending_completion is None:
+                self._interactive_pending_completion = (event, extra)
+            return
         taskspec_dump = self.taskspec.model_dump(mode="json")
         payload = {
             "event": event,
@@ -2014,6 +2023,13 @@ class BaseTask(MultiQueueWatcher, ABC):
             if self._waiting_on is not None:
                 payload["waiting_on"] = self._waiting_on
         payload.update(extra)
+        terminal = self.taskspec.state.status in TERMINAL_TASK_STATUSES
+        if terminal:
+            payload.update(type=TERMINAL_ENVELOPE_TYPE, source="task")
+            if self.taskspec.state.error:
+                payload["error"] = self.taskspec.state.error
+            if self.taskspec.state.return_code is not None:
+                payload["return_code"] = self.taskspec.state.return_code
         payload.setdefault("runner", self._current_runner_name())
         payload.setdefault(
             "runtime_handle",
@@ -2026,10 +2042,19 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._write_state_queue_message(
             self._queue(WEFT_GLOBAL_LOG_QUEUE),
             serialized_payload,
-            terminal=self.taskspec.state.status in TERMINAL_TASK_STATUSES,
+            completion=terminal or event == "work_item_completed",
             log_context="state change event",
             payload_for_log=payload,
         )
+        if (
+            not self._terminal_tid_state_published
+            and self.taskspec.state.status in TERMINAL_TASK_STATUSES
+        ):
+            # Publish completion first: control clients may terminate the
+            # wrapper once its mapping is terminal. A failed mapping append
+            # retries on the next report ([OBS.6a]).
+            self._terminal_tid_state_published = self._register_tid_state()
+
         self._last_poll_report_at = time.monotonic()
         self._last_reported_status = self.taskspec.state.status
 
@@ -2096,33 +2121,6 @@ class BaseTask(MultiQueueWatcher, ABC):
                 reply_to,
                 exc_info=True,
             )
-
-    def _send_terminal_envelope(self, *, source: str = "task") -> None:
-        """Publish task-local terminal observation on ctrl_out.
-
-        Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
-        """
-
-        if self.taskspec.state.status not in TERMINAL_TASK_STATUSES:
-            return
-        payload = {
-            "type": TERMINAL_ENVELOPE_TYPE,
-            "source": source,
-            "tid": self.tid,
-            "status": self.taskspec.state.status,
-            "timestamp": time.time_ns(),
-        }
-        if self.taskspec.state.error:
-            payload["error"] = self.taskspec.state.error
-        if self.taskspec.state.return_code is not None:
-            payload["return_code"] = self.taskspec.state.return_code
-        self._write_state_queue_message(
-            self._ctrl_out_queue,
-            json.dumps(payload),
-            terminal=True,
-            log_context="terminal ctrl_out envelope",
-            payload_for_log=payload,
-        )
 
     def note_termination_signal(self, signum: int) -> None:
         """Record an external signal for processing on the task run loop.
@@ -2257,7 +2255,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             self.taskspec.mark_cancelled(reason=reason)
             self._clear_activity()
             self._report_state_change(event=event, message_id=message_id)
-            self._send_terminal_envelope()
             self._emit_pipeline_terminal_event(
                 status="cancelled",
                 error=self.taskspec.state.error,
@@ -2288,7 +2285,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             self.taskspec.mark_killed(reason=reason)
             self._clear_activity()
             self._report_state_change(event=event, message_id=message_id)
-            self._send_terminal_envelope()
             self._emit_pipeline_terminal_event(
                 status="killed",
                 error=self.taskspec.state.error,
@@ -2550,6 +2546,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             return
         self._activity = normalized_activity
         self._waiting_on = normalized_waiting_on
+        if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
+            # The completion owner publishes terminal evidence after output.
+            # Clearing a live activity hint must not expose an earlier verdict.
+            return
         self._emit_activity_event()
         self._register_tid_state()
         self._update_process_title(self.taskspec.state.status)
@@ -2657,13 +2657,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             if error:
                 payload["error"] = error
             self._emit_pipeline_owner_event("edge_terminal", **payload)
-
-    def _locate_streaming_session(self, queue: Queue, session_id: str) -> int | None:
-        """Look up the message id for an active streaming record (Spec: [CC-2.4])."""
-        for payload, ts in iter_queue_json_entries(queue):
-            if payload.get("session_id") == session_id:
-                return int(ts)
-        return None
 
     def _claim_configured_runtime_endpoint(self) -> None:
         """Claim the runtime endpoint requested by submission-time shaping.
@@ -2802,12 +2795,11 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         serialized_payload = json.dumps(payload, ensure_ascii=False)
         try:
-            queue.write(serialized_payload)
+            message_id = queue.write(serialized_payload)
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to register streaming session", exc_info=True)
             return
 
-        message_id = self._locate_streaming_session(queue, session_id)
         self._streaming_session_info = payload
         self._streaming_session_message_id = message_id
 
@@ -2817,10 +2809,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             return
 
         queue = self._queue(WEFT_STREAMING_SESSIONS_QUEUE)
-        session_id = self._streaming_session_info.get("session_id")
         message_id = self._streaming_session_message_id
-        if message_id is None and session_id:
-            message_id = self._locate_streaming_session(queue, session_id)
 
         if message_id is not None:
             try:
