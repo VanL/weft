@@ -57,6 +57,7 @@ def _authorize_scope(scope: dict[str, Any], tid: str, action: str) -> bool:
 class TaskEventsConsumer(AsyncJsonWebsocketConsumer):  # pragma: no cover - optional
     _stream_task: asyncio.Task[None] | None = None
     _stream_cancel: threading.Event | None = None
+    _stream_owner: AsyncIteratorOwner[dict[str, Any]] | None = None
 
     async def connect(self) -> None:
         if get_realtime_transport() != "channels":
@@ -87,6 +88,9 @@ class TaskEventsConsumer(AsyncJsonWebsocketConsumer):  # pragma: no cover - opti
         cancel_event = self._stream_cancel
         if cancel_event is not None:
             cancel_event.set()
+        owner = self._stream_owner
+        if owner is not None:
+            owner.request_close()
         stream_task = self._stream_task
         if stream_task is None:
             return
@@ -121,10 +125,11 @@ class TaskEventsConsumer(AsyncJsonWebsocketConsumer):  # pragma: no cover - opti
             lambda: iter_task_event_payloads(
                 task,
                 follow=True,
-                cancel_event=cancel_event,
+                cancel_event=owner,
             ),
             cancel_event=cancel_event,
         )
+        self._stream_owner = owner
         normal_end = False
         body_error: BaseException | None = None
         try:
@@ -139,7 +144,6 @@ class TaskEventsConsumer(AsyncJsonWebsocketConsumer):  # pragma: no cover - opti
             body_error = exc
             raise
         finally:
-            cancel_event.set()
             try:
                 await owner.aclose()
             except BaseException as cleanup_error:

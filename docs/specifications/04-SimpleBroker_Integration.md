@@ -180,6 +180,18 @@ process-shared backend core and PostgreSQL pool, per-operation checkout return,
 broken-connection replacement, fork-safe inherited-handle close, and final
 shutdown after the last lease closes.
 
+An entered client may retain one lazy, session-owned spawn-queue facade for
+its exact target/`Config`. Submissions borrow bounded `Queue.get_connection()`
+operations, ending before manager recovery or readiness waits. Session cleanup
+owns the facade; close failure and fork reset preserve existing custody rules.
+Warm reuse avoids repeating facade plugin discovery and schema setup, without
+extending transaction lifetime or bypassing SimpleBroker's first-use
+facade/schema validation.
+
+Implementation: `weft/client/_client.py::WeftClient` and
+`weft/commands/submission.py::_submit_with_session`.
+Related plan: [Burst result observation](../plans/2026-10-09-burst-result-observation-plan.md).
+
 The bounded observation owners in `weft/commands/_result_wait.py`, `result.py`,
 `events.py`, `run.py`, and `tasks.py` retain persistent queue leases until their
 existing close/finally boundary. Regression coverage lives in
@@ -188,14 +200,17 @@ in [the dependency suite repair plan](../plans/2026-09-09-updated-dependency-sui
 
 Task control observation in `weft/commands/tasks.py` also lends its owned log
 queue connection through `_task_history.py`, `system.py`, and manager/evidence
-helpers. Each turn rereads metadata, routing, and completion evidence; connection
-reuse does not cache those observations. Watchers close before their queues,
+helpers. Observation owners retain known immutable task configuration and routing for
+the operation, and read fresh durable completion and runtime evidence when
+evaluating its outcome. Connection reuse does not cache lifecycle truth and
+does not require reconstructing immutable configuration on each turn. Result
+discovery and waiting follow [MF-5]. Watchers close before their queues,
 including failed construction and cleanup paths. Coverage lives in
 `tests/commands/test_control_observation_connections.py` and
 `tests/core/test_manager_runtime_connections.py`; the task and helper audit is
 recorded in [the connection reuse repair plan](../plans/2026-09-14-bounded-registry-connection-reuse-plan.md).
 The same loans cover status-watch and terminal-snapshot loops, submission
-reconciliation in `_spawn_submission.py`, result materialization in `result.py`,
+reconciliation in `_spawn_submission.py`, result acquisition/collection in `_result_wait.py`,
 realtime following in `events.py`, and the interactive Monitor-store fallback
 in `run.py`. Transactions end before waits and generator yields; a bounded
 observer may retain an operation lease without retaining a transaction. Regression
@@ -203,13 +218,21 @@ coverage also lives in `test_spawn_observation_connections.py`,
 `test_result_observation_connections.py`, and `test_event_observation_connections.py`
 under `tests/commands/`.
 
+Related plan: [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md).
+Implementation repair plan: [Direct result observation](../plans/2026-10-09-direct-result-observation-implementation-plan.md).
+Related plan: [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md).
+
 Current behavior:
 
 _Implementation mapping_: shared task inventory and driver ownership live in
 `weft/core/tasks/base.py` and `weft/core/tasks/multiqueue_watcher.py`; Monitor
 worker/store ownership lives in `weft/core/monitor/task_monitor.py` and
 `weft/core/monitor/store.py`; bounded command observers live in the command
-modules listed above.
+modules listed above. `weft/core/task_evidence.py::read_task_history`
+owns bounded filtered point-task reads; `weft/core/task_evidence.py` also owns
+fresh task evidence over a borrowed observation broker.
+`weft/commands/_result_wait.py::result_observation` owns result subscriptions.
+`tests/core/test_task_history_reader.py` verifies filtered history ownership.
 Standalone fallback scopes are owned by `weft/core/control_probe.py`,
 `manager_runtime.py`, `pruning/apply.py`, `queue_window.py`, and
 `spawn_requests.py`.
@@ -553,7 +576,9 @@ pre-checkpoint gaps, pending deferred writes, and forced-process residue. Data
 written by an older Monitor schema is handled by its schema migration, not by
 a permanent normal-cycle compatibility lane.
 
-_Implementation mapping_: `weft/core/monitor/store.py` uses the resolved
+_Implementation mapping_: `weft/commands/_task_history.py::read_monitor_task_record`
+owns read-only retained task lookup on the observation broker.
+`weft/core/monitor/store.py` uses the resolved
 `WeftContext` and owns table access; `weft/core/monitor/sql.py` owns SQL
 templates/builders and validates code-owned identifiers; `weft/core/tasks/base.py`
 builds task contexts with `create_database=False`; `weft/core/monitor/task_monitor.py`
@@ -821,6 +846,12 @@ connection-pooling designs are tracked in the companion doc:
 - [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
 
 ## Related Plans
+
+- [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md)
+
+- [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
+
+- [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md)
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md) - reuses SimpleBroker's process-shared session machinery without retaining operation checkouts.
 

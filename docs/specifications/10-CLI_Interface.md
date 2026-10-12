@@ -312,7 +312,13 @@ acknowledgement or existing terminal evidence for the named
 Terminal evidence ends the wait promptly; acknowledgement remains after
 task-side runtime unwind.
 
-Implementation: `weft/commands/run.py::_InteractiveRunLifecycle.request_exit`.
+_Implementation mapping_: `weft/commands/run.py::_stop_interactive_run_session`, called
+by `weft/cli/run.py::drive_interactive_session`. The CLI output worker advances
+and closes its own realtime iterator; the session wakes it through the shared
+observation callback when teardown cancels output.
+`weft/cli/run.py::consume_run_session` owns driving, waiting, and session cleanup.
+`tests/commands/test_active_interactive_lifecycle.py` covers the active CLI
+owner, cancellation, EOF, and keyed STOP settlement.
 Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
 
 ### `manager serve` - Run the manager in the foreground [CLI-1.1.2]
@@ -489,14 +495,20 @@ Implementation plan backlinks:
 ### `result` - Read task output [CLI-1.2.2]
 
 _Implementation mapping_: `weft/commands/result.py::cmd_result`,
-`weft/commands/result.py::_await_single_result`, and
-`weft/commands/result.py::_collect_all_task_results` and `await_task_result`.
+`weft/commands/result.py::await_task_result` and `weft/commands/result.py::_collect_all_task_results`.
+Single-task result and stream projections use `weft/commands/result.py::_iter_task_result`, backed by
+`weft/commands/_result_wait.py::_iter_consuming_result` and its shared settlement
+policy.
+`weft/core/outbox.py::decode_stream_text` shares transport decoding;
+`weft/cli/app.py::_render_task_result` owns final presentation and exit policy.
+`tests/cli/test_cli_result.py::test_result_invalid_invocation_exits_cleanly`
+proves shipped-entrypoint invocation errors remain exit 2 without a traceback.
 
 Current behavior:
 
 - `weft result TID` waits for or reads the next completed result for a task
 - `weft result TID --stream` follows unread outbox stream chunks for that one
-  task while still using the same task-log completion and grace rules
+  task while still using the same lifecycle completion and grace rules in [MF-5]
 - `weft result --all` aggregates completed outbox results from non-streaming
   tasks. Consume mode removes only the observed prefix through the last
   complete result; a trailing partial stream batch remains unread for later
@@ -510,6 +522,8 @@ Current behavior:
   metadata instead of waiting until timeout
 - `--stream` is single-task only and cannot be combined with `--all` or
   `--json`
+
+Related plan: [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md).
 
 ### `task list`, `task status`, and `task tid` [CLI-1.2.3]
 
@@ -1071,6 +1085,10 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 
 ## Related Plans
+
+- [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
+
+- [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md)
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 

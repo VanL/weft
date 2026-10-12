@@ -32,6 +32,8 @@ from weft._constants import (
     __version__,
     get_weft_directory_name,
 )
+from weft.commands._resources import command_resource_scope
+from weft.commands._streaming import decode_stream_text
 from weft.commands.queue import _InvalidMessageIDUsageError
 from weft.commands.types import SpecValidationResult
 from weft.context import build_context
@@ -43,7 +45,6 @@ from weft.helpers import (
 
 from .run import (
     consume_run_session,
-    drive_interactive_session,
     read_run_stdin,
     render_run_description,
     render_run_result,
@@ -275,8 +276,9 @@ def _render_task_result(
     *,
     json_output: bool,
     error_stream: bool,
+    nl: bool = True,
 ) -> int:
-    """Render one canonical result using the CLI's exit policy."""
+    """Render one canonical result using the CLI's exit policy and framing."""
 
     value = (
         result.stderr if error_stream and result.stderr is not None else result.value
@@ -287,12 +289,13 @@ def _render_task_result(
                 json.dumps(
                     {"tid": result.tid, "status": result.status, "result": value},
                     ensure_ascii=False,
-                )
+                ),
+                nl=nl,
             )
         elif isinstance(value, (dict, list)):
-            typer.echo(json.dumps(value, ensure_ascii=False))
+            typer.echo(json.dumps(value, ensure_ascii=False), nl=nl)
         elif value is not None:
-            typer.echo(str(value))
+            typer.echo(str(value), nl=nl)
         return 0
     if json_output and result.reconciliation is not None:
         typer.echo(
@@ -2137,7 +2140,7 @@ def status_command(
 
 
 @app.command("result")
-def result_command(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-368] exception
+def result_command(
     tid: Annotated[
         str | None,
         typer.Argument(help="Task ID to fetch the result for"),
@@ -2199,31 +2202,34 @@ def result_command(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-368] exception
         )
         if stream:
             event_stream = cast(commands.CommandStream[commands.TaskEvent], outcome)
-            try:
+            exit_code = 0
+            with command_resource_scope() as resources:
+                resources.callback(event_stream.close)
                 for event in event_stream:
                     payload = event.payload
                     if event.event_type in {"stdout", "stderr"}:
-                        chunk = payload.get("data")
-                    elif event.event_type == "result":
-                        chunk = (
-                            payload.get("stderr")
-                            if error_stream and payload.get("stderr") is not None
-                            else payload.get("value")
-                        )
-                        if error_stream and isinstance(chunk, dict):
-                            chunk = chunk.get("stderr", chunk)
-                    else:
-                        chunk = None
-                    if chunk is not None:
                         typer.echo(
-                            json.dumps(chunk, ensure_ascii=False)
-                            if isinstance(chunk, (dict, list))
-                            else str(chunk),
+                            decode_stream_text(payload),
+                            err=event.event_type == "stderr",
                             nl=False,
                         )
-            finally:
-                event_stream.close()
-            return
+                    elif event.event_type == "result":
+                        result = commands.TaskResult(
+                            tid=event.tid,
+                            status=payload["status"],
+                            value=payload.get("value"),
+                            stdout=payload.get("stdout"),
+                            stderr=payload.get("stderr"),
+                            error=payload.get("error"),
+                            reconciliation=payload.get("reconciliation"),
+                        )
+                        exit_code = _render_task_result(
+                            result,
+                            json_output=False,
+                            error_stream=error_stream,
+                            nl=False,
+                        )
+            raise typer.Exit(code=exit_code)
         if all_results:
             results = cast(tuple[commands.TaskResult, ...], outcome)
             if json_output:
@@ -2449,10 +2455,12 @@ def run_command(
         render_run_description(ctx, cast(commands.RunSpecDescription, outcome))
         raise typer.Exit(code=0)
     try:
-        if interactive and wait:
-            drive_interactive_session(cast(commands.RunSession, outcome), stdin_text)
         execution = (
-            consume_run_session(cast(commands.RunSession, outcome))
+            consume_run_session(
+                cast(commands.RunSession, outcome),
+                interactive=interactive,
+                stdin_text=stdin_text,
+            )
             if wait
             else cast(commands.RunExecutionResult, outcome)
         )

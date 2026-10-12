@@ -1054,7 +1054,8 @@ def test_watch_queue_body_failure_remains_primary_over_session_cleanup(
             )
         )
 
-    assert exc_info.value is body_failure
+    assert isinstance(exc_info.value, CommandUsageError)
+    assert exc_info.value.__cause__ is body_failure
     assert body_failure.__notes__ == [
         "Command resource cleanup failed: RuntimeError('session cleanup failed')"
     ]

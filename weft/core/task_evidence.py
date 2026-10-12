@@ -1,6 +1,7 @@
 """Shared read-only task evidence classification helpers.
 
 Spec references:
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]
 - docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17]
 """
@@ -9,7 +10,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -21,6 +22,7 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     RUNNER_DIAGNOSTICS_FIELD,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
+    TASK_HISTORY_MAX_MESSAGE_ID,
     TASK_TERMINAL_ENVELOPE_SOURCES,
     TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_EVENTS,
@@ -35,7 +37,7 @@ from weft.core.outbox import (
     aggregate_public_outputs,
     process_outbox_message,
 )
-from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
+from weft.core.queue_window import queue_broker
 from weft.core.runner_diagnostics import diagnostic_summary
 from weft.ext import RunnerHandle
 from weft.helpers import (
@@ -632,6 +634,9 @@ def peek_final_outbox_evidence(
                     continue
                 if decoded is None:
                     continue
+                if decoded.streamed:
+                    saw_partial = True
+                    continue
                 values.append(decoded.value)
                 timestamp_int = int(timestamp)
                 ack_targets.append(
@@ -867,34 +872,123 @@ def runtime_evidence(
     )
 
 
+def _task_history_candidate_ids(
+    broker: Any,
+    tid: str,
+    *,
+    after_timestamp: int | None,
+    before_timestamp: int | None,
+) -> list[int]:
+    """Page canonical literal identity candidates through the range [MF-5]."""
+    candidates: list[int] = []
+    cursor = after_timestamp
+    while True:
+        page = broker.find_message_ids(
+            WEFT_GLOBAL_LOG_QUEUE,
+            body_contains=tid,
+            after_timestamp=cursor,
+            before_timestamp=before_timestamp,
+            include_claimed=False,
+        )
+        if not page:
+            return candidates
+        candidates.extend(page)
+        cursor = page[-1]
+
+
+def read_task_history(
+    context: WeftContext,
+    tid: str,
+    *,
+    broker: Any | None = None,
+    after_timestamp: int | None = None,
+) -> tuple[list[tuple[dict[str, Any], int]], int | None]:
+    """Read exact-TID pending history through a completely inspected horizon.
+
+    The observation owner registers interest before calling this reader.
+    Initial reads have no TID-derived lower bound. Later reads borrow the
+    prior inspected horizon, including negative progress. The public broker
+    search selects substring candidate IDs. Weft fetches only those candidate
+    bodies, then selects records by their decoded top-level TID. Backend search
+    work and transfer within SimpleBroker remain backend concerns.
+    Supported task-log identities contain literal ASCII digits. Failed reads
+    return no progress; empty or older queues retain the supplied horizon.
+
+    Spec: [MF-5], [SB-0.4].
+    """
+    with queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
+        horizon = db.latest_pending_timestamp(WEFT_GLOBAL_LOG_QUEUE)
+        if horizon is None or (
+            after_timestamp is not None and horizon <= after_timestamp
+        ):
+            return [], after_timestamp
+        before_timestamp = (
+            None if horizon == TASK_HISTORY_MAX_MESSAGE_ID else horizon + 1
+        )
+        candidates = _task_history_candidate_ids(
+            db,
+            tid,
+            after_timestamp=after_timestamp,
+            before_timestamp=before_timestamp,
+        )
+        matched: list[tuple[dict[str, Any], int]] = []
+        for message_id in candidates:
+            row = db.peek_one(
+                WEFT_GLOBAL_LOG_QUEUE,
+                exact_timestamp=message_id,
+                with_timestamps=True,
+                include_claimed=False,
+            )
+            if row is None:
+                continue
+            body, _timestamp = row
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("tid") == tid:
+                matched.append((payload, message_id))
+        return matched, horizon
+
+
+@dataclass(frozen=True, slots=True)
+class LogFold:
+    """Incremental lifecycle proof from acquired exact-TID rows (Spec: [MF-5])."""
+
+    terminal: TaskEvidenceSnapshot | None = None
+    latest_live_at: int | None = None
+
+    def fold(
+        self,
+        rows: Sequence[tuple[dict[str, Any], int]],
+        *,
+        tid: str,
+    ) -> LogFold:
+        """Retain newest terminal and prior-live facts after a fresh suffix."""
+        latest_terminal = self.terminal
+        latest_live_at = self.latest_live_at
+        for payload, timestamp in rows:
+            status = payload.get("status")
+            if isinstance(status, str) and status in {"spawning", "running"}:
+                latest_live_at = max(latest_live_at or 0, timestamp)
+            terminal = log_terminal_evidence(payload, tid=tid, timestamp=timestamp)
+            if terminal is not None and (
+                latest_terminal is None
+                or timestamp >= (latest_terminal.observed_at or 0)
+            ):
+                latest_terminal = terminal
+        return LogFold(latest_terminal, latest_live_at)
+
+
 def bounded_log_terminal_evidence(
     ctx: WeftContext,
     *,
     tid: str,
     broker: Any | None = None,
-) -> tuple[TaskEvidenceSnapshot | None, bool, int | None]:
-    """Return latest bounded log terminal evidence and prior-live hints."""
-
-    latest_terminal: TaskEvidenceSnapshot | None = None
-    prior_live = False
-    latest_prior_live_at: int | None = None
-    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
-        since_timestamp = int(tid) - 1 if tid.isdigit() else None
-        for payload, timestamp in iter_broker_queue_json_entries(
-            db,
-            WEFT_GLOBAL_LOG_QUEUE,
-            since_timestamp=since_timestamp,
-        ):
-            if payload.get("tid") != tid:
-                continue
-            status = payload.get("status")
-            if isinstance(status, str) and status in {"spawning", "running"}:
-                prior_live = True
-                latest_prior_live_at = int(timestamp)
-            terminal = log_terminal_evidence(payload, tid=tid, timestamp=timestamp)
-            if terminal is not None:
-                latest_terminal = terminal
-        return latest_terminal, prior_live, latest_prior_live_at
+) -> LogFold:
+    """Acquire and fold one bounded exact-TID history range (Spec: [MF-5])."""
+    rows, _horizon = read_task_history(ctx, tid, broker=broker)
+    return LogFold().fold(rows, tid=tid)
 
 
 def stale_observer_evidence(
@@ -945,15 +1039,16 @@ def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
     ping: bool = False,
     probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     broker: Any | None = None,
+    log_evidence: LogFold | None = None,
 ) -> TaskEvidenceSnapshot | None:
-    """Return the best non-consuming evidence for a known full TID."""
+    """Select evidence using an authoritative log fold, when supplied [MF-5]."""
 
-    log_snapshot, log_prior_live, log_prior_live_at = bounded_log_terminal_evidence(
-        ctx,
-        tid=tid,
-        broker=broker,
+    log = (
+        bounded_log_terminal_evidence(ctx, tid=tid, broker=broker)
+        if log_evidence is None
+        else log_evidence
     )
-    read_only_snapshot: TaskEvidenceSnapshot | None = log_snapshot
+    read_only_snapshot: TaskEvidenceSnapshot | None = log.terminal
 
     if read_only_snapshot is None:
         local_snapshot = task_local_terminal_evidence(
@@ -971,11 +1066,11 @@ def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
             read_only_snapshot = runtime_snapshot
 
     if read_only_snapshot is None:
-        prior_live = log_prior_live or isinstance(
+        prior_live = log.latest_live_at is not None or isinstance(
             (mapping_entry or {}).get("runtime_handle"),
             dict,
         )
-        prior_live_at = log_prior_live_at
+        prior_live_at = log.latest_live_at
         mapping_timestamp = (
             mapping_entry.get("timestamp") if isinstance(mapping_entry, dict) else None
         )

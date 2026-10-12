@@ -9,17 +9,18 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
 class DecodedOutboxValue:
-    """One caller-facing outbox value plus whether it was emitted live already."""
+    """One decoded value, its stream origin, and whether it was emitted live."""
 
     value: Any
     emitted: bool = False
+    streamed: bool = False
 
 
 OutboxTextEmitter = Callable[[str, bool, bool], None]
@@ -32,6 +33,17 @@ def decode_result_payload(raw: str) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError:
         return raw
+
+
+def decode_stream_text(envelope: Mapping[str, Any]) -> str:
+    """Decode shared text/base64 stream transport, retaining malformed policy [MF-2]."""
+    data = envelope.get("data", "")
+    if envelope.get("encoding", "text") == "base64":
+        try:
+            return base64.b64decode(data).decode("utf-8", errors="replace")
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            return ""
+    return str(data)
 
 
 def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] exception
@@ -54,20 +66,7 @@ def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] excep
 
     if isinstance(envelope, dict) and envelope.get("type") == "stream":
         stream_name = str(envelope.get("stream") or "stdout")
-        encoding = envelope.get("encoding", "text")
-        data = envelope.get("data", "")
-        if encoding == "base64":
-            try:
-                chunk = base64.b64decode(data)
-                text = chunk.decode("utf-8", errors="replace")
-            except (
-                binascii.Error,
-                ValueError,
-                UnicodeDecodeError,
-            ):  # pragma: no cover - malformed base64 envelope
-                text = ""
-        else:
-            text = str(data)
+        text = decode_stream_text(envelope)
         is_stderr = stream_name == "stderr"
         if text and is_stderr:
             if emit_stream and emit_text is not None:
@@ -85,7 +84,7 @@ def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] excep
             if envelope.get("result_transform") == "strip":
                 value = value.strip()
             stream_buffer.clear()
-            return True, DecodedOutboxValue(value, emitted=emit_stream)
+            return True, DecodedOutboxValue(value, emitted=emit_stream, streamed=True)
         return False, None
 
     return True, DecodedOutboxValue(envelope)
@@ -106,5 +105,6 @@ __all__ = [
     "OutboxTextEmitter",
     "aggregate_public_outputs",
     "decode_result_payload",
+    "decode_stream_text",
     "process_outbox_message",
 ]

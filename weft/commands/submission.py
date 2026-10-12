@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
-- docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-6]
+- docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-5], [MF-6]
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-1], [PL-4.1]
 - docs/specifications/14-Python_API_Surfaces.md [PY-3]
@@ -21,7 +21,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from simplebroker import BrokerSession
+from simplebroker import BrokerSession, Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
@@ -46,7 +46,7 @@ from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
-from weft.core.spawn_requests import submit_spawn_request
+from weft.core.spawn_requests import _submit_spawn_request_with_payload
 from weft.core.taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
@@ -265,10 +265,24 @@ def _initial_work_payload(
 
 @dataclass(frozen=True, slots=True)
 class _SubmittedPreparedOutcome:
-    """Internal receipt plus the live runtime context used for submission."""
+    """Accepted receipt, immutable configuration, and effective context [MF-5]."""
 
     receipt: SubmittedTaskReceipt
     runtime_context: WeftContext
+    taskspec: TaskSpec
+
+
+def _bind_accepted_taskspec(
+    shaped_payload: Mapping[str, Any], tid: str | int
+) -> TaskSpec:
+    """Resolve accepted routes after recording the successful write's TID.
+
+    Decode the final transport to preserve bundle provenance and submission
+    shaping. Caller ownership must annotate any failure with the accepted TID.
+
+    Spec: [MF-5], [PY-2], [TS-1]
+    """
+    return decode_taskspec_transport_payload(shaped_payload, resolved_tid=str(tid))
 
 
 def _receipt(name: str, tid: str, *, context_root: Path) -> SubmittedTaskReceipt:
@@ -500,13 +514,14 @@ def _submit_prepared_outcome(
     prepared: PreparedSubmissionRequest,
     *,
     session: BrokerSession | None = None,
+    connection_queue: Queue | None = None,
 ) -> _SubmittedPreparedOutcome:
     """Submit and retain the exact live runtime context for client handles.
 
     Enqueue and initial availability share one bounded session. Individual
     operations commit independently and end before recovery or session cleanup.
 
-    Spec: [PY-3], [MF-1], [SB-0.4]
+    Spec: [PY-2], [PY-3], [MF-1], [MF-5], [SB-0.4]
     """
 
     normalized = normalize_taskspec(prepared.taskspec)
@@ -524,20 +539,22 @@ def _submit_prepared_outcome(
     task_tid: str | None = None
     try:
         if borrowed_session is not None:
-            task_tid, availability = _submit_with_session(
+            task_tid, availability, shaped_payload = _submit_with_session(
                 runtime_context,
                 prepared,
                 normalized,
                 borrowed_session,
+                connection_queue=connection_queue,
             )
         else:
             with runtime_context.session() as owned_session:
-                task_tid, availability = _submit_with_session(
+                task_tid, availability, shaped_payload = _submit_with_session(
                     runtime_context,
                     prepared,
                     normalized,
                     owned_session,
                 )
+        accepted_taskspec = _bind_accepted_taskspec(shaped_payload, task_tid)
     except SubmissionManagerError:
         raise
     except Exception as exc:
@@ -552,6 +569,7 @@ def _submit_prepared_outcome(
     return _SubmittedPreparedOutcome(
         receipt=_receipt(prepared.name, task_tid, context_root=runtime_context.root),
         runtime_context=runtime_context,
+        taskspec=accepted_taskspec,
     )
 
 
@@ -560,13 +578,27 @@ def _submit_with_session(
     prepared: PreparedSubmissionRequest,
     normalized: TaskSpec,
     session: BrokerSession,
-) -> tuple[str, manager_runtime.ManagerEnsureResult]:
-    """Commit one spawn request through a caller-owned session operation."""
+    *,
+    connection_queue: Queue | None = None,
+) -> tuple[str, manager_runtime.ManagerEnsureResult, dict[str, Any]]:
+    """Commit one spawn request through a bounded caller-owned operation.
+
+    A retained client lends its session-owned facade to avoid repeated backend
+    discovery and project validation. The connection operation always ends
+    before manager recovery; this helper never closes the lent queue or session.
+
+    Spec: [PY-1], [PY-2], [PY-3], [MF-5], [SB-0.4]
+    """
 
     task_tid: str | None = None
     try:
-        with session.connection() as broker:
-            submitted_tid = submit_spawn_request(
+        connection = (
+            connection_queue.get_connection()
+            if connection_queue is not None
+            else session.connection()
+        )
+        with connection as broker:
+            submitted_tid, shaped_payload = _submit_spawn_request_with_payload(
                 runtime_context.broker_target,
                 taskspec=normalized,
                 work_payload=prepared.payload,
@@ -592,7 +624,7 @@ def _submit_with_session(
         if task_tid is not None:
             _annotate_accepted_submission_error(exc, task_tid)
         raise
-    return task_tid, availability
+    return task_tid, availability, shaped_payload
 
 
 def submit_taskspec(

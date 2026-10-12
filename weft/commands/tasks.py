@@ -5,7 +5,7 @@ Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
 - docs/specifications/10-CLI_Interface.md [CLI-1.3]
 - docs/specifications/01-Core_Components.md [CC-3.2]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-5.2], [PL-5.3]
 - docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
@@ -31,7 +31,6 @@ from weft._constants import (
     CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
-    TASK_EVIDENCE_POLL_INTERVAL,
     TASK_PID_EXIT_POLL_INTERVAL,
     TASK_PING_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
@@ -58,9 +57,7 @@ from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.monitor.store import (
-    MonitorStoreNotInitialized,
     MonitorTaskCollationRecord,
-    open_monitor_store,
 )
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
@@ -78,7 +75,14 @@ from weft.helpers import (
 from weft.helpers.message_ids import is_task_tid
 
 from ._boundary import typed_command_errors
-from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
+from ._result_wait import result_observation
+from ._task_history import (
+    load_latest_taskspec_payload,
+    monitor_terminal_evidence,
+    pipeline_status_queue_name,
+    read_monitor_task_record,
+)
+from ._task_snapshot_reducer import CollectedTaskSnapshot
 from .control_convergence import (
     ControlConvergenceEvidence,
     reduce_control_convergence,
@@ -132,26 +136,14 @@ def _load_taskspec_payload_bounded(
     *,
     broker: Any | None = None,
 ) -> dict[str, Any] | None:
-    """Return the latest TaskSpec for a full TID without old global replay.
+    """Use the shared filtered TaskSpec reader for one full TID.
 
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
     """
 
     if not tid.isdigit():
         return None
-    latest: dict[str, Any] | None = None
-    with queue_broker(ctx, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
-        for payload, _timestamp in system_cmd._iter_log_events(
-            None,
-            since_timestamp=int(tid) - 1,
-            broker=db,
-        ):
-            if payload.get("tid") != tid:
-                continue
-            taskspec = payload.get("taskspec")
-            if isinstance(taskspec, dict):
-                latest = taskspec
-        return latest
+    return load_latest_taskspec_payload(ctx, tid, broker=broker)
 
 
 def resolve_full_tid(
@@ -359,6 +351,7 @@ def _raise_watch_timeout(
     raise TimeoutError(f"Timed out after {timeout} seconds watching task {tid}")
 
 
+@typed_command_errors
 def task_terminal_snapshot(
     tid: str,
     *,
@@ -388,65 +381,147 @@ def task_terminal_snapshot(
             source="normalization",
             terminal=True,
         )
+    return _task_terminal_snapshot(full_tid, timeout=timeout, context=ctx)
 
+
+def _terminal_observation_queue_names(
+    tid: str, taskspec_payload: dict[str, Any] | None
+) -> list[str]:
+    """Register the actual terminal evidence surfaces before reading [MF-5]."""
+    outbox, control = task_evidence.queue_names_for_tid(tid, taskspec_payload)
+    names = [WEFT_GLOBAL_LOG_QUEUE, task_state_queue_name(tid), outbox, control]
+    pipeline = pipeline_status_queue_name(tid, taskspec_payload)
+    if pipeline is not None:
+        names.append(pipeline)
+    return names
+
+
+def _terminal_observation_snapshot(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    routing_payload: dict[str, Any] | None,
+    task_events: Sequence[tuple[dict[str, Any], int]],
+    log_evidence: task_evidence.LogFold,
+    broker: Any,
+    log_queue: Queue,
+    monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None],
+) -> TaskTerminalSnapshot:
+    """Select one terminal turn using acquired history and shared priority [MF-5]."""
+    evidence = task_evidence.known_tid_evidence(
+        ctx,
+        tid=tid,
+        taskspec_payload=routing_payload,
+        mapping_entry=mapping_for_tid(ctx, tid, broker=broker),
+        broker=broker,
+        log_evidence=log_evidence,
+    )
+    retained = monitor_terminal_evidence(monitor_lookup[0], acquired_evidence=evidence)
+    if retained is not None:
+        return task_evidence.terminal_snapshot_from_evidence(retained)
+    if evidence is not None:
+        return task_evidence.terminal_snapshot_from_evidence(evidence)
+    record = _task_status_record(
+        tid,
+        include_terminal=True,
+        context=ctx,
+        broker=broker,
+        observation_queue=log_queue,
+        accepted_taskspec_payload=routing_payload,
+        task_events=task_events,
+        log_evidence=log_evidence,
+        monitor_lookup=monitor_lookup,
+    )
+    snapshot = _terminal_snapshot_from_status_snapshot(
+        record.snapshot if record is not None else None
+    )
+    return snapshot or TaskTerminalSnapshot(
+        tid=tid, status="unknown", source="observer"
+    )
+
+
+@typed_command_errors
+def _task_terminal_snapshot(
+    tid: str,
+    *,
+    timeout: float = 0.0,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+    accepted_taskspec_payload: dict[str, Any] | None = None,
+) -> TaskTerminalSnapshot:
+    """Observe terminal state with one advancing history acquisition [MF-5].
+
+    Accepted configuration governs routing; observed history governs fresh state.
+    Positive timeouts wait on registered queue activity and the actual deadline.
+    """
+    ctx = _coerce_context(context=context, context_path=context_path)
+    full_tid = tid
     deadline = time.monotonic() + timeout if timeout > 0 else None
-    with (
-        ctx.session(),
-        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log_queue,
-    ):
+    names = _terminal_observation_queue_names(full_tid, accepted_taskspec_payload)
+    with ExitStack() as resources:
+        queues, monitor = resources.enter_context(result_observation(ctx, names))
+        log_queue = queues[WEFT_GLOBAL_LOG_QUEUE]
+        task_events: list[tuple[dict[str, Any], int]] = []
+        log_evidence = task_evidence.LogFold()
+        cursor: int | None = None
+        monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None = (
+            None
+        )
         while True:
             with log_queue.get_connection() as broker:
-                taskspec_payload = _load_taskspec_payload_bounded(
-                    ctx, full_tid, broker=broker
+                rows, cursor = task_evidence.read_task_history(
+                    ctx, full_tid, broker=broker, after_timestamp=cursor
                 )
-                mapping_entry = mapping_for_tid(ctx, full_tid, broker=broker)
-                evidence = task_evidence.known_tid_evidence(
-                    ctx,
-                    tid=full_tid,
-                    taskspec_payload=taskspec_payload,
-                    mapping_entry=mapping_entry,
-                    broker=broker,
+                task_events.extend(rows)
+                log_evidence = log_evidence.fold(rows, tid=full_tid)
+                fresh_payload = load_latest_taskspec_payload(
+                    ctx, full_tid, broker=broker, task_events=task_events
                 )
-                status_snapshot = (
-                    _task_status(
-                        full_tid,
-                        include_terminal=True,
-                        context=ctx,
-                        broker=broker,
-                        observation_queue=log_queue,
+                if monitor_lookup is None:
+                    monitor_lookup = read_monitor_task_record(
+                        ctx, full_tid, queue=log_queue
                     )
-                    if evidence is None
-                    else None
+                retained_record = monitor_lookup[0]
+                if (
+                    fresh_payload is None
+                    and monitor_terminal_evidence(retained_record) is not None
+                    and retained_record is not None
+                ):
+                    fresh_payload = dict(retained_record.taskspec_summary)
+                routing_payload = (
+                    accepted_taskspec_payload
+                    if accepted_taskspec_payload is not None
+                    else fresh_payload
                 )
-            if evidence is not None:
-                snapshot = task_evidence.terminal_snapshot_from_evidence(evidence)
-                if snapshot.status in {"running", "pending"} and deadline is not None:
-                    if time.monotonic() >= deadline:
-                        return snapshot
-                    time.sleep(
-                        min(
-                            TASK_EVIDENCE_POLL_INTERVAL,
-                            max(0.0, deadline - time.monotonic()),
+                new_names = _terminal_observation_queue_names(full_tid, routing_payload)
+                if not set(new_names).issubset(queues):
+                    new_observation = resources.enter_context(
+                        result_observation(
+                            ctx, new_names, borrowed_queues=list(queues.values())
                         )
                     )
-                    continue
-                return snapshot
-
-            terminal_status_snapshot = _terminal_snapshot_from_status_snapshot(
-                status_snapshot
-            )
-            if terminal_status_snapshot is not None:
-                return terminal_status_snapshot
-
-            if deadline is None or time.monotonic() >= deadline:
-                return TaskTerminalSnapshot(
-                    tid=full_tid,
-                    status="unknown",
-                    source="observer",
+                    monitor.close()
+                    queues, monitor = new_observation
+                    # Register newly discovered routes before their first read.
+                snapshot = _terminal_observation_snapshot(
+                    ctx,
+                    full_tid,
+                    routing_payload=routing_payload,
+                    task_events=task_events,
+                    log_evidence=log_evidence,
+                    broker=broker,
+                    log_queue=log_queue,
+                    monitor_lookup=monitor_lookup,
                 )
-            time.sleep(
-                min(TASK_EVIDENCE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
-            )
+            if snapshot.terminal or snapshot.status not in {
+                "running",
+                "pending",
+                "unknown",
+            }:
+                return snapshot
+            if deadline is None or time.monotonic() >= deadline:
+                return snapshot
+            monitor.wait(max(0.0, deadline - time.monotonic()))
 
 
 def ack_terminal_snapshot(
@@ -502,59 +577,207 @@ def _task_status(
     broker: Any | None = None,
     observation_queue: Queue | None = None,
 ) -> system_cmd.TaskSnapshot | None:
-    """Shared status projection with explicit bounded resource loans [MF-5]."""
-    ctx = _coerce_context(context=context, context_path=context_path)
-    full_tid = resolve_full_tid(ctx, tid, broker=broker) or tid.strip().lstrip("T")
-    pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid, broker=broker)
-    if ping and is_task_tid(full_tid):
-        taskspec_payload = load_latest_taskspec_payload(ctx, full_tid)
-        mapping_entry = mapping_for_tid(ctx, full_tid)
-        evidence = task_evidence.known_tid_evidence(
-            ctx,
-            tid=full_tid,
-            taskspec_payload=taskspec_payload,
-            mapping_entry=mapping_entry,
-            ping=True,
-            probe_timeout=probe_timeout,
-        )
-        if evidence is not None and evidence.classification == "live_pong":
-            return _task_snapshot_from_live_pong(
-                full_tid,
-                evidence,
-                base_snapshot=None,
-                taskspec_payload=taskspec_payload,
-            )
+    """Project the shared fresh status record [MF-5]."""
+    record = _task_status_record(
+        tid,
+        include_terminal=include_terminal,
+        ping=ping,
+        probe_timeout=probe_timeout,
+        context=context,
+        context_path=context_path,
+        broker=broker,
+        observation_queue=observation_queue,
+    )
+    return record.snapshot if record is not None else None
+
+
+def _collect_status_record(
+    ctx: WeftContext,
+    full_tid: str,
+    *,
+    include_terminal: bool,
+    ping: bool,
+    probe_timeout: float,
+    broker: Any | None,
+    accepted_taskspec_payload: dict[str, Any] | None,
+    task_events: Sequence[tuple[dict[str, Any], int]] | None,
+    log_evidence: task_evidence.LogFold | None,
+) -> tuple[CollectedTaskSnapshot | None, dict[str, Any] | None]:
+    """Project status from acquired rows and their shared lifecycle fold [MF-5]."""
     if is_task_tid(full_tid):
-        base_snapshot = system_cmd.collect_known_tid_snapshot(
+        assert task_events is not None
+        fresh_payload = load_latest_taskspec_payload(
+            ctx, full_tid, broker=broker, task_events=task_events
+        )
+        routing_payload = (
+            accepted_taskspec_payload
+            if accepted_taskspec_payload is not None
+            else fresh_payload
+        )
+        if ping:
+            mapping_entry = mapping_for_tid(ctx, full_tid, broker=broker)
+            evidence = task_evidence.known_tid_evidence(
+                ctx,
+                tid=full_tid,
+                taskspec_payload=routing_payload,
+                mapping_entry=mapping_entry,
+                ping=True,
+                probe_timeout=probe_timeout,
+                broker=broker,
+                log_evidence=log_evidence,
+            )
+            if evidence is not None and evidence.classification == "live_pong":
+                snapshot = _task_snapshot_from_live_pong(
+                    full_tid,
+                    evidence,
+                    base_snapshot=None,
+                    taskspec_payload=fresh_payload,
+                )
+                return CollectedTaskSnapshot(snapshot, fresh_payload), fresh_payload
+        base_record = system_cmd.collect_known_tid_record(
             ctx,
             full_tid,
             include_terminal=include_terminal,
             broker=broker,
+            task_events=task_events,
+            accepted_taskspec_payload=accepted_taskspec_payload,
         )
+        if base_record is not None:
+            fresh_payload = base_record.taskspec_payload
     else:
-        snapshots = system_cmd._collect_task_snapshots(
+        records = system_cmd._collect_task_snapshot_records(
             ctx,
             include_terminal=include_terminal,
             tid_filters={full_tid},
             broker=broker,
         )
-        base_snapshot = snapshots[0] if snapshots else None
+        base_record = records[0] if records else None
+        fresh_payload = (
+            base_record.taskspec_payload if base_record is not None else None
+        )
+    return base_record, fresh_payload
+
+
+def _task_status_record(
+    tid: str,
+    *,
+    include_terminal: bool = True,
+    ping: bool = False,
+    probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+    broker: Any | None = None,
+    observation_queue: Queue | None = None,
+    accepted_taskspec_payload: dict[str, Any] | None = None,
+    task_events: Sequence[tuple[dict[str, Any], int]] | None = None,
+    log_evidence: task_evidence.LogFold | None = None,
+    monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None = None,
+) -> CollectedTaskSnapshot | None:
+    """Select status while retaining fresh payload and observation loans [MF-5].
+
+    Accepted configuration governs routing only. Raw rows serve snapshot
+    projection; the lifecycle fold serves classification. An explicit empty
+    fold and negative Monitor outcome are authoritative acquisition loans.
+    """
+    ctx = _coerce_context(context=context, context_path=context_path)
+    full_tid = resolve_full_tid(ctx, tid, broker=broker) or tid.strip().lstrip("T")
+    known_tid = is_task_tid(full_tid)
+    if known_tid and task_events is None:
+        task_events, _horizon = task_evidence.read_task_history(
+            ctx, full_tid, broker=broker
+        )
+    if known_tid and log_evidence is None:
+        log_evidence = task_evidence.LogFold().fold(task_events or (), tid=full_tid)
+    base_record, fresh_payload = _collect_status_record(
+        ctx,
+        full_tid,
+        include_terminal=include_terminal,
+        ping=ping,
+        probe_timeout=probe_timeout,
+        broker=broker,
+        accepted_taskspec_payload=accepted_taskspec_payload,
+        task_events=task_events,
+        log_evidence=log_evidence,
+    )
+    if ping and base_record is not None and base_record.snapshot.event == "live_pong":
+        return base_record
+    routing_payload = (
+        accepted_taskspec_payload
+        if accepted_taskspec_payload is not None
+        else fresh_payload
+    )
+    pipeline_snapshot = _latest_pipeline_status_snapshot(
+        ctx, full_tid, taskspec_payload=routing_payload, broker=broker
+    )
+    base_snapshot = base_record.snapshot if base_record is not None else None
     if pipeline_snapshot is not None and _prefer_pipeline_snapshot(
         pipeline_snapshot, base_snapshot
     ):
-        return _pipeline_task_snapshot(
-            ctx, full_tid, pipeline_snapshot, base_snapshot, broker=broker
-        )
-    if base_snapshot is None and is_task_tid(full_tid):
-        base_snapshot = _monitor_store_task_snapshot(
+        snapshot = _pipeline_task_snapshot(
             ctx,
             full_tid,
-            include_terminal=include_terminal,
-            queue=observation_queue,
+            pipeline_snapshot,
+            base_snapshot,
+            taskspec_payload=fresh_payload,
+            broker=broker,
         )
-    if pipeline_snapshot is not None and base_snapshot is not None:
-        base_snapshot = replace(base_snapshot, pipeline_status=pipeline_snapshot)
-    return base_snapshot
+        return CollectedTaskSnapshot(snapshot, fresh_payload)
+    if known_tid:
+        base_record = _select_monitor_status_record(
+            ctx,
+            full_tid,
+            base_record,
+            include_terminal=include_terminal,
+            broker=broker,
+            queue=observation_queue,
+            monitor_lookup=monitor_lookup,
+            routing_payload=routing_payload,
+            log_evidence=log_evidence,
+        )
+    if pipeline_snapshot is not None and base_record is not None:
+        base_record = replace(
+            base_record,
+            snapshot=replace(base_record.snapshot, pipeline_status=pipeline_snapshot),
+        )
+    return base_record
+
+
+def _select_monitor_status_record(
+    ctx: WeftContext,
+    tid: str,
+    base_record: CollectedTaskSnapshot | None,
+    *,
+    include_terminal: bool,
+    broker: Any | None,
+    queue: Queue | None,
+    monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None,
+    routing_payload: dict[str, Any] | None,
+    log_evidence: task_evidence.LogFold | None,
+) -> CollectedTaskSnapshot | None:
+    """Let qualified retention replace stale history, with core proof priority [MF-5]."""
+    lookup = (
+        monitor_lookup
+        if monitor_lookup is not None
+        else read_monitor_task_record(ctx, tid, queue=queue)
+    )
+    if monitor_terminal_evidence(lookup[0]) is not None:
+        if routing_payload is None and lookup[0] is not None:
+            routing_payload = dict(lookup[0].taskspec_summary)
+        evidence = task_evidence.known_tid_evidence(
+            ctx,
+            tid=tid,
+            taskspec_payload=routing_payload,
+            mapping_entry=mapping_for_tid(ctx, tid, broker=broker),
+            broker=broker,
+            log_evidence=log_evidence,
+        )
+        if monitor_terminal_evidence(lookup[0], acquired_evidence=evidence) is None:
+            return base_record
+    elif base_record is not None:
+        return base_record
+    return _monitor_store_task_record(
+        ctx, tid, include_terminal=include_terminal, monitor_lookup=lookup
+    )
 
 
 def _task_snapshot_from_monitor_store_record(
@@ -564,11 +787,20 @@ def _task_snapshot_from_monitor_store_record(
 
     Terminal rows carry the `terminal_monitor_store` classification; nonterminal
     rows stay diagnostic history and never establish liveness.
+    A terminal-looking diagnostic status needs both the collation terminal flag
+    and a qualified terminal status before it can yield a terminal answer.
 
     Spec: [MF-5]
     """
 
-    status = record.terminal_status or record.status or "unknown"
+    status_is_terminal = monitor_terminal_evidence(record) is not None
+    status = (
+        record.terminal_status
+        if status_is_terminal
+        else record.status
+        if record.status not in system_cmd.TERMINAL_TASK_STATUSES
+        else "unknown"
+    ) or "unknown"
     taskspec_summary = record.taskspec_summary
     metadata = taskspec_summary.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -579,7 +811,6 @@ def _task_snapshot_from_monitor_store_record(
     else:
         duration = None
     error = record.state.get("error")
-    status_is_terminal = status in system_cmd.TERMINAL_TASK_STATUSES
     return system_cmd.TaskSnapshot(
         tid=record.tid,
         tid_short=tid_short_form(record.tid),
@@ -615,6 +846,7 @@ def _monitor_store_task_snapshot(
     *,
     include_terminal: bool,
     queue: Queue | None = None,
+    monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None = None,
 ) -> system_cmd.TaskSnapshot | None:
     """Return a snapshot from Monitor state after raw task-log retirement.
 
@@ -625,12 +857,12 @@ def _monitor_store_task_snapshot(
     Spec: [MF-5]
     """
 
-    try:
-        store = open_monitor_store(ctx, config=ctx.config, queue=queue)
-        record = store.get_task(tid)
-    except MonitorStoreNotInitialized:
-        return None
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-355] exception
+    record, error = (
+        monitor_lookup
+        if monitor_lookup is not None
+        else read_monitor_task_record(ctx, tid, queue=queue)
+    )
+    if error is not None:
         return system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid_short_form(tid),
@@ -651,7 +883,7 @@ def _monitor_store_task_snapshot(
                 "classification": "monitor_store_unavailable",
                 "reason": "store_read_failed",
             },
-            error=f"monitor store unavailable: {exc}",
+            error=f"monitor store unavailable: {error}",
         )
     if record is None:
         return None
@@ -659,6 +891,34 @@ def _monitor_store_task_snapshot(
     if not include_terminal and snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
         return None
     return snapshot
+
+
+def _monitor_store_task_record(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    include_terminal: bool,
+    queue: Queue | None = None,
+    monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None = None,
+) -> CollectedTaskSnapshot | None:
+    """Keep the Monitor snapshot's fresh summary without a second lookup [MF-5]."""
+    lookup = (
+        monitor_lookup
+        if monitor_lookup is not None
+        else read_monitor_task_record(ctx, tid, queue=queue)
+    )
+    snapshot = _monitor_store_task_snapshot(
+        ctx,
+        tid,
+        include_terminal=include_terminal,
+        queue=queue,
+        monitor_lookup=lookup,
+    )
+    if snapshot is None:
+        return None
+    record, _error = lookup
+    payload = dict(record.taskspec_summary) if record is not None else None
+    return CollectedTaskSnapshot(snapshot, payload)
 
 
 def _terminal_snapshot_from_status_snapshot(
@@ -944,29 +1204,32 @@ def _task_snapshot(
     context_path: str | os.PathLike[str] | None = None,
     broker: Any | None = None,
     observation_queue: Queue | None = None,
+    accepted_taskspec_payload: dict[str, Any] | None = None,
+    task_events: Sequence[tuple[dict[str, Any], int]] | None = None,
+    monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None = None,
 ) -> TaskSnapshot | None:
     """Project fresh public fields using an observation owner's loans [MF-5]."""
 
     ctx = _coerce_context(context=context, context_path=context_path)
-    snapshot = _task_status(
+    record = _task_status_record(
         tid,
         include_terminal=include_terminal,
         context=ctx,
         broker=broker,
         observation_queue=observation_queue,
+        accepted_taskspec_payload=accepted_taskspec_payload,
+        task_events=task_events,
+        monitor_lookup=monitor_lookup,
     )
-    if snapshot is None:
+    if record is None:
         return None
     return _public_snapshot(
-        snapshot,
-        taskspec_payload=(
-            _load_taskspec_payload_bounded(ctx, snapshot.tid, broker=broker)
-            if is_task_tid(snapshot.tid)
-            else load_latest_taskspec_payload(ctx, snapshot.tid, broker=broker)
-        ),
+        record.snapshot,
+        taskspec_payload=record.taskspec_payload,
     )
 
 
+@typed_command_errors
 def watch_task_status(
     tid: str,
     *,
@@ -975,7 +1238,10 @@ def watch_task_status(
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> Iterable[TaskSnapshot]:
-    """Yield snapshots as the task changes until terminal state."""
+    """Yield snapshots until terminal state or typed observation failure.
+
+    Spec: [MF-5], [PY-2].
+    """
 
     ctx = _coerce_context(context=context, context_path=context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
@@ -1062,9 +1328,9 @@ def _latest_pipeline_status_snapshot(
     ctx: WeftContext,
     tid: str,
     *,
+    taskspec_payload: dict[str, Any] | None,
     broker: Any | None = None,
 ) -> dict[str, Any] | None:
-    taskspec_payload = load_latest_taskspec_payload(ctx, tid, broker=broker)
     if not isinstance(taskspec_payload, dict):
         return None
     status_queue = pipeline_status_queue_name(tid, taskspec_payload)
@@ -1089,9 +1355,10 @@ def _pipeline_task_snapshot(
     pipeline_status: dict[str, Any],
     base_snapshot: system_cmd.TaskSnapshot | None,
     *,
+    taskspec_payload: dict[str, Any] | None,
     broker: Any | None = None,
 ) -> system_cmd.TaskSnapshot:
-    taskspec_payload = load_latest_taskspec_payload(ctx, tid, broker=broker) or {}
+    taskspec_payload = taskspec_payload if taskspec_payload is not None else {}
     state = taskspec_payload.get("state") if isinstance(taskspec_payload, dict) else {}
     state = state if isinstance(state, dict) else {}
     started_at = (
@@ -1454,6 +1721,7 @@ def _control_surface_wait_timeout(
     return min(wait_timeout, kill_ack_remaining)
 
 
+@typed_command_errors
 def _await_control_surface(
     ctx: WeftContext,
     tid: str,
@@ -1462,7 +1730,8 @@ def _await_control_surface(
 ) -> tuple[dict[str, Any] | None, system_cmd.TaskSnapshot | None]:
     """Observe dynamic task-control endpoints within the bounded wait budget.
 
-    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5];
+    docs/specifications/14-Python_API_Surfaces.md [PY-2].
     """
 
     state_queue_name = task_state_queue_name(tid) if is_task_tid(tid) else None

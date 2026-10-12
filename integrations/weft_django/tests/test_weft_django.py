@@ -19,14 +19,13 @@ import time
 from collections.abc import Iterator
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from asgiref.testing import ApplicationCommunicator
 
-if TYPE_CHECKING:
-    from weft.context import WeftContext
+from simplebroker import BrokerSession, Queue
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_ROOT = PROJECT_ROOT / "integrations" / "weft_django"
@@ -85,8 +84,11 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.client import SpecNotFound, SubmissionValidationError, WeftClient
+from weft.client._task import _task_with_configuration
 from weft.commands.types import TaskTerminalSnapshot
+from weft.context import WeftContext
 from weft.core.manager_runtime import ManagerEnsureResult
+from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.taskspec import TaskSpec
 from weft.core.taskspec.transport import validate_taskspec_payload
 from weft_django import (
@@ -2162,6 +2164,329 @@ def test_async_iterator_owner_close_edges_and_stream_isolation(
         asyncio.run(_run())
 
     assert not any(record.name == "weft_django.realtime" for record in caplog.records)
+
+
+def test_async_iterator_owner_close_wakes_each_live_registration_outside_lock() -> None:
+    owner = weft_django_sse.AsyncIteratorOwner(
+        lambda: iter(()), cancel_event=threading.Event()
+    )
+    calls: list[str] = []
+    deregistered = threading.Event()
+    callback_threads: list[threading.Thread] = []
+
+    def first() -> None:
+        calls.append("first")
+
+        # Deregistration acquires the owner lock. Calling it from the callback
+        # proves request_close does not invoke callbacks while holding it.
+        def deregister() -> None:
+            unregister_first()
+            deregistered.set()
+
+        thread = threading.Thread(target=deregister, daemon=True)
+        callback_threads.append(thread)
+        thread.start()
+        assert deregistered.wait(1.0)
+
+    unregister_first = owner._register_wakeup(first)
+    unregister_second = owner._register_wakeup(lambda: calls.append("second"))
+    unregister_removed = owner._register_wakeup(lambda: calls.append("removed"))
+    unregister_removed()
+    unregister_removed()
+
+    try:
+        owner.request_close()
+    finally:
+        for thread in callback_threads:
+            thread.join(1.0)
+    assert owner.is_set()
+    assert sorted(calls) == ["first", "second"]
+    unregister_first()
+    unregister_second()
+    unregister_second()
+
+    unregister_late = owner._register_wakeup(lambda: calls.append("late"))
+    assert sorted(calls) == ["first", "late", "second"]
+    unregister_late()
+    unregister_late()
+    owner.request_close()
+    assert sorted(calls) == ["first", "late", "second"]
+
+
+def test_async_iterator_owner_registration_observes_existing_cancellation() -> None:
+    cancellation = threading.Event()
+    cancellation.set()
+    owner = weft_django_sse.AsyncIteratorOwner(
+        lambda: iter(()), cancel_event=cancellation
+    )
+    calls: list[str] = []
+    unregister = owner._register_wakeup(lambda: calls.append("wake"))
+    assert owner.is_set()
+    assert calls == ["wake"]
+    unregister()
+    unregister()
+    assert owner.request_close() is None
+    assert calls == ["wake"]
+
+
+class _IdleFollowProbe:
+    """Observe one real idle transport's wake, broker reads, and lease custody."""
+
+    def __init__(
+        self,
+        context: WeftContext,
+        client: WeftClient,
+        tid: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self.context = context
+        self.client = client
+        self.tid = tid
+        self.monkeypatch = monkeypatch
+        self.waiting = threading.Event()
+        self.closed = threading.Event()
+        self.cancellation_wake = threading.Event()
+        self.waits: list[bool] = []
+        self.wait_timeouts: list[float | None] = []
+        self.owner_threads: list[int] = []
+        self.monitors: list[QueueChangeMonitor] = []
+        self.reads: list[tuple[int, str, bool]] = []
+        self.created_queues: list[tuple[Any, int]] = []
+        self.closed_queues: list[tuple[Any, int]] = []
+        self.created_sessions: list[tuple[Any, int]] = []
+        self.closed_sessions: list[tuple[Any, int]] = []
+        self.response: Any = None
+        self.consumer: Any = None
+        self.advance: asyncio.Task[Any] | None = None
+        self._original_wait = QueueChangeMonitor.wait
+        self._original_close = QueueChangeMonitor.close
+        self._original_queue = WeftContext.queue
+        self._original_session = WeftContext.session
+        monkeypatch.setattr(
+            QueueChangeMonitor,
+            "wait",
+            lambda monitor, timeout: self._wait(monitor, timeout),
+        )
+        monkeypatch.setattr(
+            QueueChangeMonitor, "close", lambda monitor: self._close(monitor)
+        )
+        monkeypatch.setattr(
+            WeftContext, "queue", lambda ctx, *a, **kw: self._queue(ctx, *a, **kw)
+        )
+        monkeypatch.setattr(WeftContext, "session", lambda ctx: self._session(ctx))
+        for name in (
+            "peek_one",
+            "peek_many",
+            "peek_generator",
+            "find_message_ids",
+            "latest_pending_timestamp",
+            "list_queues",
+            "get_queue_stat",
+            "list_queue_stats",
+        ):
+            self._observe_read(name)
+
+    def _wait(self, monitor: QueueChangeMonitor, timeout: float | None) -> bool:
+        self.monitors.append(monitor)
+        self.owner_threads.append(threading.get_ident())
+        self.wait_timeouts.append(timeout)
+        self.waiting.set()
+        result = self._original_wait(monitor, timeout)
+        self.waits.append(result)
+        if result:
+            self.cancellation_wake.set()
+        return result
+
+    def _close(self, monitor: QueueChangeMonitor) -> None:
+        self.owner_threads.append(threading.get_ident())
+        try:
+            self._original_close(monitor)
+        finally:
+            self.closed.set()
+
+    def _observe_read(self, name: str) -> None:
+        with self.context.broker() as broker:
+            broker_type = type(broker)
+        original = getattr(broker_type, name)
+
+        def read(broker: Any, *args: Any, **kwargs: Any) -> Any:
+            self.reads.append(
+                (threading.get_ident(), name, self.cancellation_wake.is_set())
+            )
+            return original(broker, *args, **kwargs)
+
+        self.monkeypatch.setattr(broker_type, name, read)
+
+    def _track_resource(
+        self,
+        resource: Any,
+        created: list[tuple[Any, int]],
+        closed: list[tuple[Any, int]],
+    ) -> None:
+        created.append((resource, threading.get_ident()))
+        original = resource.close
+
+        def close() -> None:
+            original()
+            closed.append((resource, threading.get_ident()))
+
+        self.monkeypatch.setattr(resource, "close", close)
+
+    def _queue(self, context: WeftContext, *args: Any, **kwargs: Any) -> Queue:
+        queue = self._original_queue(context, *args, **kwargs)
+        if context is self.context:
+            self._track_resource(queue, self.created_queues, self.closed_queues)
+        return queue
+
+    def _session(self, context: WeftContext) -> BrokerSession:
+        session = self._original_session(context)
+        if context is self.context:
+            self._track_resource(session, self.created_sessions, self.closed_sessions)
+        return session
+
+    async def start(self, transport: str) -> None:
+        if transport == "sse":
+            self.monkeypatch.setattr(
+                weft_django_sse, "get_core_client", lambda: self.client
+            )
+            self.response = weft_django_sse.sse_response(self.tid, asynchronous=True)
+            self.advance = asyncio.create_task(anext(self.response.streaming_content))
+        else:
+            await self._start_channels()
+
+    async def _start_channels(self) -> None:
+        module = importlib.import_module("weft_django.channels")
+        self.monkeypatch.setattr(module, "get_core_client", lambda: self.client)
+        self.monkeypatch.setattr(module, "get_realtime_transport", lambda: "channels")
+        self.monkeypatch.setattr(module, "_authorize_scope", lambda *a: True)
+        self.monkeypatch.setattr(module.TaskEventsConsumer, "accept", self._accept)
+        self.monkeypatch.setattr(
+            module.TaskEventsConsumer, "send_json", self._reject_event
+        )
+        self.monkeypatch.setattr(module.TaskEventsConsumer, "close", self._socket_close)
+        self.consumer = module.TaskEventsConsumer()
+        self.consumer.scope = {"url_route": {"kwargs": {"tid": self.tid}}}
+        # Admission is separate: this queued handle has no initialization row.
+        task = self.client.task(self.tid)
+        self.monkeypatch.setattr(type(task), "snapshot", lambda _self: object())
+        await self.consumer.connect()
+
+    @staticmethod
+    async def _accept(_consumer: Any) -> None:
+        return
+
+    @staticmethod
+    async def _reject_event(_consumer: Any, _payload: Any) -> None:
+        raise AssertionError("idle cancellation must not publish an event")
+
+    @staticmethod
+    async def _socket_close(_consumer: Any, code: int | None = None) -> None:
+        del code
+
+    async def disconnect(self) -> None:
+        if self.response is not None:
+            self.response.close()
+        else:
+            await self.consumer.disconnect(1000)
+
+    async def finish(self) -> None:
+        if self.advance is not None:
+            with pytest.raises(StopAsyncIteration):
+                await self.advance
+        if self.consumer is not None:
+            await self.consumer._stream_task
+
+    @staticmethod
+    def _assert_resources_closed(
+        created: list[tuple[Any, int]], closed: list[tuple[Any, int]], worker: int
+    ) -> None:
+        owned = {id(resource) for resource, thread in created if thread == worker}
+        assert owned
+        assert owned == {
+            id(resource) for resource, thread in closed if thread == worker
+        }
+        assert all(
+            thread == worker for resource, thread in closed if id(resource) in owned
+        )
+
+    def assert_finished(self) -> None:
+        # Monitor close comes before queue/session teardown. Only call this
+        # after the iterator owner has completed its serialized closure.
+        assert self.waits == [True]
+        assert self.wait_timeouts == [None]
+        assert len(set(self.owner_threads)) == 1
+        worker = self.owner_threads[0]
+        self._assert_resources_closed(self.created_queues, self.closed_queues, worker)
+        self._assert_resources_closed(
+            self.created_sessions, self.closed_sessions, worker
+        )
+        assert any(thread == worker for thread, _name, _after in self.reads)
+        assert not [
+            name for thread, name, after in self.reads if thread == worker and after
+        ]
+
+    def _release_red_waits(self) -> None:
+        if self.response is not None:
+            self.response.close()
+        if self.consumer is not None and self.consumer._stream_cancel is not None:
+            self.consumer._stream_cancel.set()
+        for monitor in self.monitors:
+            monitor._activity_event.set()
+
+    @staticmethod
+    async def _await_cleanup(task: asyncio.Task[Any] | None) -> None:
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(task, 2.0)
+        except (StopAsyncIteration, asyncio.CancelledError):
+            pass
+
+    async def cleanup(self) -> None:
+        # The RED candidate cannot release an indefinite idle wait itself.
+        self._release_red_waits()
+        await self._await_cleanup(self.advance)
+        if self.consumer is not None:
+            await self._await_cleanup(self.consumer._stream_task)
+
+    async def run(self, transport: str) -> None:
+        try:
+            await self.start(transport)
+            assert await asyncio.to_thread(self.waiting.wait, 2.0)
+            assert self.waits == []
+            await self.disconnect()
+            assert await asyncio.to_thread(self.closed.wait, 2.0)
+            await self.finish()
+            self.assert_finished()
+        finally:
+            await self.cleanup()
+
+
+@pytest.mark.parametrize("transport", ["sse", "channels"])
+def test_django_disconnect_directly_wakes_idle_weft_follow(
+    monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    # The real queued-task iterator has no output or caller timeout. Its wake
+    # verdict distinguishes direct notification from the old timed cap tick.
+    with WeftTestHarness() as harness:
+        context = harness.context
+        with context.queue("test.idle.stream.tid", persistent=False) as queue:
+            tid = str(queue.generate_timestamp())
+        spec = validate_taskspec_payload(
+            {
+                "name": "idle-disconnect",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            },
+            resolved_tid=tid,
+        )
+        with WeftClient(context) as client:
+            task = _task_with_configuration(client, tid, context, spec)
+            monkeypatch.setattr(client, "task", lambda _tid: task)
+            probe = _IdleFollowProbe(context, client, tid, monkeypatch)
+            asyncio.run(probe.run(transport))
 
 
 @pytest.mark.shared

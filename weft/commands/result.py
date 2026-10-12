@@ -1,7 +1,8 @@
-"""Fetch task results from Weft queues.
+"""Fetch task results through the canonical consuming observation.
 
 Spec references:
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
+- docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/10-CLI_Interface.md [CLI-1.2.2] (result)
 - docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
@@ -10,23 +11,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
-from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import Queue
-from simplebroker.ext import BrokerError
-from weft._constants import (
-    QUEUE_OUTBOX_SUFFIX,
-    WEFT_COMPLETED_RESULT_GRACE_SECONDS,
-    WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_STREAMING_SESSIONS_QUEUE,
-)
+from weft._constants import QUEUE_OUTBOX_SUFFIX, WEFT_STREAMING_SESSIONS_QUEUE
 from weft._exceptions import (
     CommandError,
     CommandExecutionError,
-    CommandTimeoutError,
     CommandUsageError,
     InvalidTID,
     TaskNotFound,
@@ -34,71 +25,17 @@ from weft._exceptions import (
 from weft.commands.types import CommandStream, TaskEvent, TaskResult
 from weft.context import WeftContext, build_context
 from weft.core import task_evidence
-from weft.core.pipelines import pipeline_public_queues
-from weft.core.queue_wait import QueueChangeMonitor
-from weft.core.queue_window import queue_broker
+from weft.core.taskspec import TaskSpec
 from weft.helpers import closing_queue_iterator, iter_queue_json_entries
 
 from ._boundary import typed_command_errors
 from ._result_wait import (
+    ResultMaterialization,
+    _accepted_result_materialization,
+    _iter_consuming_result,
     append_public_value,
-    await_one_shot_result,
-    drain_ctrl_out_stream_messages,
-    effective_result_surface_wait_interval,
-    select_terminal_envelope,
-    terminal_error_message,
-    terminal_status_from_event,
 )
-from ._streaming import (
-    DecodedOutboxValue,
-    aggregate_public_outputs,
-    drain_available_outbox_values,
-    poll_log_events,
-    process_outbox_message,
-)
-from ._task_history import (
-    is_pipeline_taskspec_payload,
-    load_latest_taskspec_payload,
-)
-
-
-@dataclass(frozen=True, slots=True)
-class ResultMaterialization:
-    """Resolved result queues plus any terminal log state already observed."""
-
-    taskspec_payload: dict[str, Any] | None
-    outbox_name: str
-    ctrl_out_name: str
-    log_last_timestamp: int | None = None
-    terminal_status: str | None = None
-    terminal_error_message: str | None = None
-    terminal_event_payload: dict[str, Any] | None = None
-    terminal_event_timestamp: int | None = None
-    batch_boundary_timestamps: tuple[int, ...] = ()
-    result_surface_had_activity: bool = False
-
-
-def _claimed_result_blockage(
-    context: WeftContext,
-    tid: str,
-    materialized: ResultMaterialization,
-) -> task_evidence.TaskEvidenceSnapshot | None:
-    """Return claimed-result recovery evidence for an explicit result read."""
-
-    counts = task_evidence.queue_message_counts(context, materialized.outbox_name)
-    if counts is None or counts.total <= 0 or counts.unclaimed > 0:
-        return None
-    evidence = task_evidence.known_tid_evidence(
-        context,
-        tid=tid,
-        taskspec_payload=materialized.taskspec_payload,
-    )
-    if (
-        evidence is not None
-        and evidence.classification == "claimed_result_without_terminal"
-    ):
-        return evidence
-    return None
+from ._streaming import aggregate_public_outputs, process_outbox_message
 
 
 def _normalize_tid(raw_tid: str) -> str:
@@ -109,243 +46,6 @@ def _normalize_tid(raw_tid: str) -> str:
     if not candidate.isdigit():
         raise ValueError(f"invalid task id '{raw_tid}'")
     return candidate
-
-
-def _pipeline_queue_names_for_tid(tid: str) -> tuple[str, str, str]:
-    """Return the canonical pipeline result, control, and status queues."""
-
-    queues = pipeline_public_queues(tid)
-    return queues.outbox, queues.ctrl_out, queues.status
-
-
-def _load_taskspec_payload(
-    context: WeftContext, tid: str, *, broker: Any | None = None
-) -> dict[str, Any] | None:
-    return load_latest_taskspec_payload(context, tid, broker=broker)
-
-
-def _queue_exists(context: WeftContext, queue_name: str) -> bool:
-    with context.broker() as db:
-        try:
-            return bool(db.queue_exists(queue_name))
-        except (
-            BrokerError,
-            OSError,
-            RuntimeError,
-        ):  # pragma: no cover - queue probe best effort
-            return False
-
-
-def _queue_names_exist(
-    context: WeftContext, *queue_names: str, broker: Any | None = None
-) -> bool:
-    """Return ``True`` when any named queue currently exists."""
-
-    wanted = {name for name in queue_names if name}
-    if not wanted:
-        return False
-
-    with queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
-        try:
-            return any(bool(db.queue_exists(name)) for name in wanted)
-        except (
-            BrokerError,
-            OSError,
-            RuntimeError,
-        ):  # pragma: no cover - queue probe best effort
-            return False
-
-
-def _result_surface_has_activity(
-    context: WeftContext,
-    *,
-    outbox_name: str,
-    ctrl_out_name: str,
-    broker: Any | None = None,
-) -> bool:
-    """Return ``True`` when the default result surface already has messages.
-
-    Queue metadata can lag behind direct queue reads on some backends. For
-    the default ``T{tid}`` surface, visible outbox or control-stream traffic is
-    enough to start result collection even when metadata and task-log
-    discovery have not caught up yet.
-    """
-
-    with queue_broker(context, outbox_name, broker=broker) as db:
-        return (
-            db.peek_one(outbox_name) is not None
-            or db.peek_one(ctrl_out_name) is not None
-        )
-
-
-def _await_result_materialization(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-108] exception
-    context: WeftContext,
-    tid: str,
-    *,
-    timeout: float | None,
-    wait_without_timeout: bool = False,
-) -> ResultMaterialization | None:
-    """Wait for taskspec metadata or live result activity to become visible.
-
-    For stored specs with custom outbox/control queue names, ``weft result`` can
-    race the manager on backends where task initialization becomes visible after
-    the caller already has a TID. When a timeout is supplied, treat that window
-    as part of the overall result wait instead of failing immediately.
-    """
-
-    deadline = None
-    if timeout is not None:
-        deadline = time.monotonic() + max(0.0, timeout)
-    poll_interval = effective_result_surface_wait_interval(timeout)
-    resources = ExitStack()
-    try:
-        resources.enter_context(context.session())
-        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
-        resources.callback(log_queue.close)
-        # Retain the lease, not a transaction; each poll reads fresh committed data.
-        broker = resources.enter_context(log_queue.get_connection())
-        monitor = QueueChangeMonitor([log_queue], config=context.config)
-        resources.callback(monitor.close)
-        log_last_timestamp: int | None = None
-
-        while True:
-            taskspec_payload = _load_taskspec_payload(context, tid, broker=broker)
-            outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
-                tid,
-                taskspec_payload,
-            )
-            if taskspec_payload is not None:
-                return ResultMaterialization(
-                    taskspec_payload=taskspec_payload,
-                    outbox_name=outbox_name,
-                    ctrl_out_name=ctrl_out_name,
-                    log_last_timestamp=log_last_timestamp,
-                )
-            if taskspec_payload is None and _result_surface_has_activity(
-                context,
-                outbox_name=outbox_name,
-                ctrl_out_name=ctrl_out_name,
-                broker=broker,
-            ):
-                return ResultMaterialization(
-                    taskspec_payload=None,
-                    outbox_name=outbox_name,
-                    ctrl_out_name=ctrl_out_name,
-                    log_last_timestamp=log_last_timestamp,
-                    result_surface_had_activity=True,
-                )
-
-            if taskspec_payload is None:
-                (
-                    pipeline_outbox_name,
-                    pipeline_ctrl_out_name,
-                    pipeline_status_name,
-                ) = _pipeline_queue_names_for_tid(tid)
-                if _queue_names_exist(
-                    context,
-                    pipeline_outbox_name,
-                    pipeline_ctrl_out_name,
-                    pipeline_status_name,
-                    broker=broker,
-                ) or _result_surface_has_activity(
-                    context,
-                    outbox_name=pipeline_outbox_name,
-                    ctrl_out_name=pipeline_ctrl_out_name,
-                    broker=broker,
-                ):
-                    return ResultMaterialization(
-                        taskspec_payload=None,
-                        outbox_name=pipeline_outbox_name,
-                        ctrl_out_name=pipeline_ctrl_out_name,
-                        log_last_timestamp=log_last_timestamp,
-                        result_surface_had_activity=True,
-                    )
-
-            events, log_last_timestamp = poll_log_events(
-                log_queue,
-                log_last_timestamp,
-                tid,
-            )
-            if events:
-                terminal_status: str | None = None
-                terminal_message: str | None = None
-                terminal_payload: dict[str, Any] | None = None
-                terminal_timestamp: int | None = None
-                batch_boundary_timestamps = tuple(
-                    timestamp
-                    for event_payload, timestamp in events
-                    if event_payload.get("event")
-                    in {"work_item_completed", "work_completed"}
-                )
-                for event_payload, event_timestamp in reversed(events):
-                    event_status = terminal_status_from_event(event_payload)
-                    if event_status is None:
-                        continue
-                    terminal_status = event_status
-                    terminal_message = terminal_error_message(
-                        event_payload,
-                        event_status,
-                    )
-                    terminal_payload = event_payload
-                    terminal_timestamp = event_timestamp
-                    break
-                for event_payload, _timestamp in reversed(events):
-                    event_taskspec = event_payload.get("taskspec")
-                    if isinstance(event_taskspec, dict):
-                        outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
-                            tid,
-                            event_taskspec,
-                        )
-                        result_surface_had_activity = _result_surface_has_activity(
-                            context,
-                            outbox_name=outbox_name,
-                            ctrl_out_name=ctrl_out_name,
-                            broker=broker,
-                        )
-                        return ResultMaterialization(
-                            taskspec_payload=event_taskspec,
-                            outbox_name=outbox_name,
-                            ctrl_out_name=ctrl_out_name,
-                            log_last_timestamp=log_last_timestamp,
-                            terminal_status=terminal_status,
-                            terminal_error_message=terminal_message,
-                            terminal_event_payload=terminal_payload,
-                            terminal_event_timestamp=terminal_timestamp,
-                            batch_boundary_timestamps=batch_boundary_timestamps,
-                            result_surface_had_activity=result_surface_had_activity,
-                        )
-                if terminal_status is not None:
-                    return ResultMaterialization(
-                        taskspec_payload=taskspec_payload,
-                        outbox_name=outbox_name,
-                        ctrl_out_name=ctrl_out_name,
-                        log_last_timestamp=log_last_timestamp,
-                        terminal_status=terminal_status,
-                        terminal_error_message=terminal_message,
-                        terminal_event_payload=terminal_payload,
-                        terminal_event_timestamp=terminal_timestamp,
-                        batch_boundary_timestamps=batch_boundary_timestamps,
-                        result_surface_had_activity=_result_surface_has_activity(
-                            context,
-                            outbox_name=outbox_name,
-                            ctrl_out_name=ctrl_out_name,
-                            broker=broker,
-                        ),
-                    )
-                continue
-
-            if deadline is None and not wait_without_timeout:
-                return None
-            if deadline is None:
-                monitor.wait(poll_interval)
-                continue
-            wait_timeout = max(0.0, deadline - time.monotonic())
-            if wait_timeout <= 0:
-                return None
-            wait_timeout = min(wait_timeout, poll_interval)
-            monitor.wait(wait_timeout)
-    finally:
-        resources.close()
 
 
 def _active_streaming_queues(context: WeftContext) -> set[str]:
@@ -359,387 +59,42 @@ def _active_streaming_queues(context: WeftContext) -> set[str]:
     return active
 
 
-def _is_persistent_task(taskspec_payload: dict[str, Any] | None) -> bool:
-    """Return ``True`` when the loaded TaskSpec payload is persistent."""
-    if not isinstance(taskspec_payload, dict):
-        return False
-    spec_section = taskspec_payload.get("spec")
-    if not isinstance(spec_section, dict):
-        return False
-    return bool(spec_section.get("persistent"))
-
-
-def _drain_outbox_until_timestamp(
-    queue: Queue,
-    *,
-    boundary_timestamp: int,
-    stream_buffer: list[str],
-    emit_stream: bool,
-) -> list[DecodedOutboxValue]:
-    """Consume final outbox payloads whose timestamps fall at or before a boundary."""
-    values: list[DecodedOutboxValue] = []
-    while True:
-        next_item = queue.peek_one(with_timestamps=True)
-        if next_item is None:
-            break
-        if not isinstance(next_item, tuple):
-            break
-        _payload, timestamp = next_item
-        if timestamp > boundary_timestamp:
-            break
-        consumed = queue.read_one(exact_timestamp=timestamp)
-        if consumed is None:
-            continue
-        final, value = process_outbox_message(
-            str(consumed),
-            stream_buffer,
-            emit_stream=emit_stream,
-        )
-        if final and value is not None:
-            values.append(value)
-    return values
-
-
-def _latest_visible_outbox_timestamp(queue: Queue) -> int | None:
-    """Return the largest timestamp currently visible in an outbox queue."""
-
-    latest_timestamp: int | None = None
-    iterator = queue.peek_generator(with_timestamps=True)
-    with closing_queue_iterator(iterator) as rows:
-        for entry in rows:
-            if not isinstance(entry, tuple) or len(entry) != 2:
-                continue
-            _payload, timestamp = entry
-            timestamp_int = int(timestamp)
-            if latest_timestamp is None or timestamp_int > latest_timestamp:
-                latest_timestamp = timestamp_int
-    return latest_timestamp
-
-
-def _resolve_persistent_result_boundary(
-    outbox_queue: Queue,
-    *,
-    first_pending_timestamp: int,
-    completion_timestamps: list[int],
-) -> int | None:
-    """Return the outbox drain boundary for a persistent-task result batch."""
-
-    for completion_timestamp in completion_timestamps:
-        if completion_timestamp >= first_pending_timestamp:
-            return completion_timestamp
-    if not completion_timestamps:
-        return None
-    return _latest_visible_outbox_timestamp(outbox_queue) or first_pending_timestamp
-
-
-def _await_single_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-109] exception
+@typed_command_errors
+def _iter_task_result(
     context: WeftContext,
     tid: str,
     *,
-    timeout: float | None,
-    show_stderr: bool,
+    timeout: float | None = None,
+    show_stderr: bool = False,
     emit_stream: bool = False,
-    taskspec_payload: dict[str, Any] | None = None,
-    outbox_name: str | None = None,
-    ctrl_out_name: str | None = None,
-    initial_log_last_timestamp: int | None = None,
-    initial_terminal_status: str | None = None,
-    initial_terminal_error_message: str | None = None,
-    initial_batch_boundary_timestamps: tuple[int, ...] = (),
-    initial_result_surface_had_activity: bool = False,
-) -> tuple[str, Any | None, str | None]:
-    if taskspec_payload is None:
-        taskspec_payload = _load_taskspec_payload(context, tid)
-    is_persistent = _is_persistent_task(taskspec_payload)
-    if outbox_name is None or ctrl_out_name is None:
-        outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
-            tid,
-            taskspec_payload,
-        )
-    ctrl_out_for_wait = (
-        None if is_pipeline_taskspec_payload(taskspec_payload) else ctrl_out_name
+    include_stream_events: bool = False,
+    _accepted_taskspec: TaskSpec | None = None,
+) -> Iterator[TaskEvent | TaskResult]:
+    """Yield raw activity and one final result within the original budget.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5];
+    docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+    normalized = _normalize_tid(tid)
+    deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+    if _accepted_taskspec is not None:
+        materialized = _accepted_result_materialization(_accepted_taskspec)
+    else:
+        outbox, control = task_evidence.queue_names_for_tid(normalized, None)
+        materialized = ResultMaterialization(None, outbox, control)
+    yield from _iter_consuming_result(
+        context,
+        normalized,
+        materialized=materialized,
+        deadline=deadline,
+        timeout=timeout,
+        show_stderr=show_stderr,
+        emit_stream=emit_stream,
+        include_stream_events=include_stream_events,
     )
 
-    if not is_persistent:
-        return await_one_shot_result(
-            context,
-            tid,
-            outbox_name=outbox_name,
-            ctrl_out_name=ctrl_out_for_wait,
-            timeout=timeout,
-            show_stderr=show_stderr,
-            emit_stream=emit_stream,
-            initial_log_last_timestamp=initial_log_last_timestamp,
-            initial_terminal_status=initial_terminal_status,
-            initial_error_message=initial_terminal_error_message,
-        )
 
-    resources = ExitStack()
-    try:
-        resources.enter_context(context.session())
-        outbox_queue = context.queue(outbox_name, persistent=True)
-        resources.callback(outbox_queue.close)
-        ctrl_queue = context.queue(ctrl_out_name, persistent=True)
-        resources.callback(ctrl_queue.close)
-        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
-        resources.callback(log_queue.close)
-        monitor = QueueChangeMonitor(
-            [outbox_queue, ctrl_queue, log_queue],
-            config=context.config,
-        )
-        resources.callback(monitor.close)
-
-        log_last_timestamp: int | None = initial_log_last_timestamp
-        stream_buffer: list[str] = []
-        status = "running"
-        result_values: list[Any] = []
-        result_value: Any | None = None
-        error_message: str | None = initial_terminal_error_message
-        completed_at: float | None = (
-            time.monotonic() if initial_terminal_status == "completed" else None
-        )
-        first_pending_timestamp: int | None = None
-        latest_pending_timestamp: int | None = None
-        pending_quiet_since: float | None = None
-        boundary_timestamp: int | None = None
-        boundary_seen_at: float | None = None
-        pending_completion_timestamps: list[int] = list(
-            initial_batch_boundary_timestamps
-        )
-        materialized_completed = initial_terminal_status == "completed"
-        if (
-            initial_terminal_status is not None
-            and initial_terminal_status != "completed"
-        ):
-            status = initial_terminal_status
-
-        deadline = None
-        if timeout is not None:
-            deadline = time.monotonic() + max(0.0, timeout)
-        poll_interval = effective_result_surface_wait_interval(timeout)
-
-        while True:
-            while True:
-                terminal_candidates = drain_ctrl_out_stream_messages(
-                    ctrl_queue,
-                    tid=tid,
-                )
-                selected = select_terminal_envelope(terminal_candidates)
-                if selected is not None:
-                    terminal_envelope = selected[0]
-                    event_status = terminal_status_from_event(terminal_envelope)
-                    if event_status == "completed":
-                        if completed_at is None:
-                            completed_at = time.monotonic()
-                    elif event_status is not None:
-                        status = event_status
-                        error_message = terminal_error_message(
-                            terminal_envelope,
-                            event_status,
-                        )
-                break
-
-            peeked = outbox_queue.peek_one(with_timestamps=True)
-            if (
-                peeked is not None
-                and isinstance(peeked, tuple)
-                and first_pending_timestamp is None
-            ):
-                _payload, first_pending_timestamp = peeked
-                boundary_timestamp = _resolve_persistent_result_boundary(
-                    outbox_queue,
-                    first_pending_timestamp=first_pending_timestamp,
-                    completion_timestamps=pending_completion_timestamps,
-                )
-                if boundary_timestamp is not None:
-                    boundary_seen_at = time.monotonic()
-            if first_pending_timestamp is not None and boundary_timestamp is None:
-                latest_visible_timestamp = _latest_visible_outbox_timestamp(
-                    outbox_queue
-                )
-                if latest_visible_timestamp is not None:
-                    if latest_visible_timestamp != latest_pending_timestamp:
-                        latest_pending_timestamp = latest_visible_timestamp
-                        pending_quiet_since = time.monotonic()
-                    elif (
-                        not emit_stream
-                        and pending_quiet_since is not None
-                        and time.monotonic() - pending_quiet_since
-                        >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
-                    ):
-                        boundary_timestamp = latest_visible_timestamp
-                        boundary_seen_at = pending_quiet_since
-
-            events: list[tuple[dict[str, Any], int]]
-            events, log_last_timestamp = poll_log_events(
-                log_queue,
-                log_last_timestamp,
-                tid,
-            )
-            for event_payload, _ts in events:
-                if event_payload.get("event") in {
-                    "work_item_completed",
-                    "work_completed",
-                }:
-                    pending_completion_timestamps.append(_ts)
-                    if (
-                        first_pending_timestamp is not None
-                        and boundary_timestamp is None
-                    ):
-                        boundary_timestamp = _resolve_persistent_result_boundary(
-                            outbox_queue,
-                            first_pending_timestamp=first_pending_timestamp,
-                            completion_timestamps=pending_completion_timestamps,
-                        )
-                        if boundary_timestamp is not None:
-                            boundary_seen_at = time.monotonic()
-                    if event_payload.get("event") == "work_item_completed":
-                        continue
-                event_status = terminal_status_from_event(event_payload)
-                if event_status is None:
-                    continue
-                if (
-                    first_pending_timestamp is not None
-                    and _ts >= first_pending_timestamp
-                    and boundary_timestamp is None
-                ):
-                    boundary_timestamp = _ts
-                    boundary_seen_at = time.monotonic()
-                if event_status == "completed":
-                    if completed_at is None:
-                        completed_at = time.monotonic()
-                    continue
-                status = event_status
-                error_message = terminal_error_message(event_payload, event_status)
-            if status != "running":
-                break
-
-            if boundary_timestamp is not None:
-                drained_outputs = _drain_outbox_until_timestamp(
-                    outbox_queue,
-                    boundary_timestamp=boundary_timestamp,
-                    stream_buffer=stream_buffer,
-                    emit_stream=emit_stream,
-                )
-                for output in drained_outputs:
-                    append_public_value(
-                        result_values,
-                        output,
-                        show_stderr=show_stderr,
-                    )
-                if materialized_completed and result_values:
-                    result_value = aggregate_public_outputs(result_values)
-                    status = "completed"
-                    break
-                if (
-                    drained_outputs
-                    or result_values
-                    or (
-                        boundary_seen_at is not None
-                        and time.monotonic() - boundary_seen_at
-                        >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
-                    )
-                ):
-                    result_value = aggregate_public_outputs(result_values)
-                    status = "completed"
-                    break
-
-            if completed_at is not None and (
-                time.monotonic() - completed_at >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
-            ):
-                late_values, _ = drain_available_outbox_values(
-                    outbox_queue,
-                    stream_buffer,
-                    emit_stream=emit_stream,
-                )
-                for output in late_values:
-                    append_public_value(
-                        result_values,
-                        output,
-                        show_stderr=show_stderr,
-                    )
-                result_value = aggregate_public_outputs(result_values)
-                status = "completed"
-                break
-
-            if deadline is not None and time.monotonic() >= deadline:
-                if (
-                    not emit_stream
-                    and boundary_timestamp is None
-                    and latest_pending_timestamp is not None
-                ):
-                    drained_outputs = _drain_outbox_until_timestamp(
-                        outbox_queue,
-                        boundary_timestamp=latest_pending_timestamp,
-                        stream_buffer=stream_buffer,
-                        emit_stream=emit_stream,
-                    )
-                    for output in drained_outputs:
-                        append_public_value(
-                            result_values,
-                            output,
-                            show_stderr=show_stderr,
-                        )
-                    if result_values:
-                        result_value = aggregate_public_outputs(result_values)
-                        status = "completed"
-                        break
-                raise CommandTimeoutError(
-                    f"Timed out after {timeout} seconds waiting for task {tid}"
-                )
-
-            wait_timeout: float | None = None
-            if deadline is not None:
-                wait_timeout = max(0.0, deadline - time.monotonic())
-            if boundary_timestamp is not None and boundary_seen_at is not None:
-                grace_remaining = max(
-                    0.0,
-                    WEFT_COMPLETED_RESULT_GRACE_SECONDS
-                    - (time.monotonic() - boundary_seen_at),
-                )
-                wait_timeout = (
-                    grace_remaining
-                    if wait_timeout is None
-                    else min(wait_timeout, grace_remaining)
-                )
-            if (
-                not emit_stream
-                and boundary_timestamp is None
-                and pending_quiet_since is not None
-            ):
-                output_grace_remaining = max(
-                    0.0,
-                    WEFT_COMPLETED_RESULT_GRACE_SECONDS
-                    - (time.monotonic() - pending_quiet_since),
-                )
-                wait_timeout = (
-                    output_grace_remaining
-                    if wait_timeout is None
-                    else min(wait_timeout, output_grace_remaining)
-                )
-            if completed_at is not None:
-                completion_remaining = max(
-                    0.0,
-                    WEFT_COMPLETED_RESULT_GRACE_SECONDS
-                    - (time.monotonic() - completed_at),
-                )
-                wait_timeout = (
-                    completion_remaining
-                    if wait_timeout is None
-                    else min(wait_timeout, completion_remaining)
-                )
-            wait_timeout = (
-                poll_interval
-                if wait_timeout is None
-                else min(wait_timeout, poll_interval)
-            )
-            monitor.wait(wait_timeout)
-    finally:
-        resources.close()
-
-    return status, result_value, error_message
-
-
+@typed_command_errors
 def await_task_result(
     context: WeftContext,
     tid: str,
@@ -747,77 +102,26 @@ def await_task_result(
     timeout: float | None = None,
     show_stderr: bool = False,
     emit_stream: bool = False,
-    wait_for_materialization: bool = False,
+    _accepted_taskspec: TaskSpec | None = None,
 ) -> TaskResult:
-    """Wait for and return the public result payload for one task."""
+    """Drain the shared consuming iterator and return its final result.
 
-    normalized_tid = _normalize_tid(tid)
-    start_monotonic = time.monotonic()
-    materialized = _await_result_materialization(
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5];
+    docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+    source = _iter_task_result(
         context,
-        normalized_tid,
+        tid,
         timeout=timeout,
-        wait_without_timeout=wait_for_materialization,
-    )
-    if materialized is None:
-        if timeout is not None:
-            raise CommandTimeoutError(
-                f"Timed out after {timeout} seconds waiting for task {normalized_tid}"
-            )
-        return TaskResult(
-            tid=normalized_tid,
-            status="missing",
-            value=None,
-            stdout=None,
-            stderr=None,
-            error=f"no outbox queue for task {normalized_tid}",
-        )
-
-    claimed_evidence = _claimed_result_blockage(
-        context,
-        normalized_tid,
-        materialized,
-    )
-    if claimed_evidence is not None:
-        return TaskResult(
-            tid=normalized_tid,
-            status=claimed_evidence.status,
-            value=None,
-            stdout=None,
-            stderr=None,
-            error=claimed_evidence.error,
-            reconciliation=claimed_evidence.reconciliation,
-        )
-
-    remaining_timeout = timeout
-    if timeout is not None and timeout > 0:
-        elapsed = time.monotonic() - start_monotonic
-        remaining_timeout = max(0.0, timeout - elapsed)
-
-    status, value, error_message = _await_single_result(
-        context,
-        normalized_tid,
-        timeout=remaining_timeout,
         show_stderr=show_stderr,
         emit_stream=emit_stream,
-        taskspec_payload=materialized.taskspec_payload,
-        outbox_name=materialized.outbox_name,
-        ctrl_out_name=materialized.ctrl_out_name,
-        initial_log_last_timestamp=materialized.log_last_timestamp,
-        initial_terminal_status=materialized.terminal_status,
-        initial_terminal_error_message=materialized.terminal_error_message,
-        initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
-        initial_result_surface_had_activity=materialized.result_surface_had_activity,
+        _accepted_taskspec=_accepted_taskspec,
     )
-    stdout, stderr = task_evidence.split_stdio(value)
-    return TaskResult(
-        tid=normalized_tid,
-        status=status,
-        value=value,
-        stdout=stdout,
-        stderr=stderr,
-        error=error_message,
-    )
+    with closing_queue_iterator(source) as rows:
+        for row in rows:
+            if isinstance(row, TaskResult):
+                return row
+    raise CommandExecutionError("Result collection ended without an outcome")
 
 
 def _read_outbox_task_result(
@@ -905,41 +209,41 @@ def _collect_all_task_results(
     return tuple(results)
 
 
+def _task_result_event(result: TaskResult) -> TaskEvent:
+    """Project a settled result without changing its outcome [MF-5], [PY-2]."""
+    return TaskEvent(
+        result.tid,
+        "result",
+        time.time_ns(),
+        {
+            "status": result.status,
+            "value": result.value,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "error": result.error,
+        },
+    )
+
+
 def _result_task_event_stream(
     context: WeftContext,
     tid: str,
     *,
     timeout: float | None,
 ) -> CommandStream[TaskEvent]:
-    """Return structured realtime events and consume the result on exhaustion."""
-
-    # Late import breaks the real result <-> events cycle: events uses
-    # await_task_result for its synthetic terminal event.
-    from .events import iter_task_realtime_events
-
-    source = iter_task_realtime_events(
-        context,
-        tid,
-        follow=True,
-        timeout=timeout,
+    """Project stream frames and the final outcome from one collector [MF-5]."""
+    source = _iter_task_result(
+        context, tid, timeout=timeout, emit_stream=True, include_stream_events=True
     )
 
     def _stream() -> Iterator[TaskEvent]:
-        try:
-            yield from source
-            result = await_task_result(context, tid, timeout=0.0)
-            if result.status == "missing":
-                raise TaskNotFound(result.error or f"task {tid} not found")
-        except (CommandError, TaskNotFound):
-            raise
-        except TimeoutError as exc:
-            raise CommandTimeoutError(str(exc)) from exc
-        except Exception as exc:
-            raise CommandExecutionError(f"result stream failed: {exc}") from exc
-        finally:
-            close = getattr(source, "close", None)
-            if callable(close):
-                close()
+        with closing_queue_iterator(source) as rows:
+            for row in rows:
+                if isinstance(row, TaskEvent):
+                    yield row
+                else:
+                    _require_available_result(row)
+                    yield _task_result_event(row)
 
     return cast(CommandStream[TaskEvent], _stream())
 
@@ -1056,4 +360,4 @@ def cmd_result(
     return _require_available_result(result)
 
 
-__all__ = ["ResultMaterialization", "await_task_result", "cmd_result"]
+__all__ = ["await_task_result", "cmd_result"]

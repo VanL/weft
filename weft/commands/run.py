@@ -1,31 +1,30 @@
 """Shared `weft run` execution helpers.
 
-Non-interactive run modes expose structured `execute_run()` results and leave
-stdout/stderr rendering to the Typer adapter. Interactive prompt mode remains
-presentation-adjacent here because it owns prompt-toolkit callbacks and live
-stream display. This module is still not a public `WeftClient.run()` surface.
+Submission returns structured execution receipts. Waiting and realtime output
+use the common result owners through RunSession; the CLI owns prompt callbacks
+and rendering. This module is not a public `WeftClient.run()` surface.
 
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
 - docs/specifications/10B-Builtin_TaskSpecs.md
 - docs/specifications/01-Core_Components.md [CC-2.5]
 - docs/specifications/02-TaskSpec.md [TS-1], [TS-1.3]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import weft.commands.specs as spec_cmd
 from simplebroker import Queue, format_message_id
@@ -34,7 +33,6 @@ from weft._constants import (
     CONTROL_STOP,
     DEFAULT_STREAM_OUTPUT,
     INTERACTIVE_STOP_COMPLETION_TIMEOUT,
-    INTERACTIVE_STOP_POLL_INTERVAL,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -44,19 +42,14 @@ from weft._constants import (
 )
 from weft._exceptions import CommandUsageError, SubmissionError
 from weft.commands._boundary import typed_command_errors
-from weft.commands._resources import close_command_resources
-from weft.commands._result_wait import await_one_shot_result
-from weft.commands._streaming import (
-    collect_interactive_queue_output as _collect_interactive_queue_output,
+from weft.commands._result_wait import result_observation
+from weft.commands._task_history import (
+    read_monitor_task_record,
 )
-from weft.commands._streaming import (
-    poll_log_events,
-)
-from weft.commands._task_history import is_pipeline_taskspec_payload
-from weft.commands.interactive import InteractiveStreamClient
 from weft.commands.result import await_task_result
 from weft.commands.submission import (
     _annotate_accepted_submission_error,
+    _bind_accepted_taskspec,
     _resolve_submission_runtime_root,
 )
 from weft.commands.submission import (
@@ -76,22 +69,25 @@ from weft.commands.types import (
 )
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
-from weft.core.control_messages import encode_control_message
+from weft.core.control_messages import decode_control_object, encode_control_message
 from weft.core.endpoints import validate_endpoint_claim_name
-from weft.core.monitor.store import open_monitor_store
 from weft.core.pipelines import (
     PipelineSpec,
     compile_linear_pipeline,
     load_pipeline_spec_payload,
 )
-from weft.core.spawn_requests import delete_spawn_request, submit_spawn_request
-from weft.core.task_evidence import terminal_error_message, terminal_status_from_event
+from weft.core.spawn_requests import (
+    _submit_spawn_request_with_payload,
+    delete_spawn_request,
+)
+from weft.core.task_evidence import LogFold, read_task_history
 from weft.core.taskspec import (
     TaskSpec,
     encode_taskspec_transport_payload,
     normalize_declared_option_name,
     validate_taskspec_payload,
 )
+from weft.helpers import _register_observation_wakeup, closing_queue_iterator
 
 # -----------------------------------------------------------------------------
 # Explicit spec helpers
@@ -149,24 +145,20 @@ def _manager_started_payload(record: dict[str, Any]) -> dict[str, Any]:
 def _run_with_managed_execution(
     *,
     context: WeftContext,
-    submit: Callable[[], int],
+    submit: Callable[[], tuple[int, dict[str, Any]]],
     verbose: bool,
-    wait: bool,
-    reuse_enabled: bool,
     emit_verbose: bool = True,
-    wait_for_completion: Callable[[str], tuple[str, Any, str | None]] | None = None,
-    on_submitted: Callable[[str, WeftContext], None] | None = None,
+    on_submitted: Callable[[str, WeftContext, TaskSpec], None] | None = None,
 ) -> RunExecutionResult:
-    """Share the manager-backed bootstrap -> submit -> wait -> optional stop flow."""
+    """Retain accepted config through the managed run lifecycle [MF-1], [MF-5]."""
     manager_record: dict[str, Any] | None = None
     started_here = False
     process_handle: subprocess.Popen[bytes] | None = None
-    failed = False
     manager_started_payload: dict[str, Any] | None = None
     accepted_tid: str | None = None
 
     try:
-        tid_int = submit()
+        tid_int, shaped_payload = submit()
         accepted_tid = str(tid_int)
         availability = _ensure_manager_after_submission(
             context,
@@ -186,44 +178,21 @@ def _run_with_managed_execution(
         if started_here and manager_record is not None:
             manager_started_payload = _manager_started_payload(manager_record)
         tid = str(tid_int)
+        accepted_taskspec = _bind_accepted_taskspec(shaped_payload, tid)
         if on_submitted is not None:
-            on_submitted(tid, context)
+            on_submitted(tid, context, accepted_taskspec)
 
-        if not wait:
-            return RunExecutionResult(
-                tid=tid,
-                manager_started_payload=manager_started_payload,
-                availability_warning=availability_warning,
-            )
-
-        if wait_for_completion is None:  # pragma: no cover - caller contract guard
-            raise RuntimeError("wait_for_completion is required when wait=True")
-
-        status, result_value, error_message = wait_for_completion(tid)
         return RunExecutionResult(
             tid=tid,
-            status=status,
-            result_value=result_value,
-            error_message=error_message,
             manager_started_payload=manager_started_payload,
             availability_warning=availability_warning,
         )
-    except Exception as exc:  # pragma: no cover - managed execution cleanup
+    except Exception as exc:
         if accepted_tid is not None:
             _annotate_accepted_submission_error(exc, accepted_tid)
-        failed = True
         if started_here and manager_record is not None:
             manager_runtime.stop_manager(context, manager_record, process_handle)
         raise
-    finally:
-        if (
-            not failed
-            and started_here
-            and wait
-            and not reuse_enabled
-            and manager_record is not None
-        ):
-            manager_runtime.stop_manager(context, manager_record, process_handle)
 
 
 def _load_taskspec_reference(
@@ -383,23 +352,34 @@ def _describe_taskspec(
 
 
 class _LiveRunSession:
-    """Queue-backed session returned immediately after durable submission."""
+    """Retain accepted config for direct result observation [MF-5], [PY-2]."""
 
     def __init__(
         self,
         execution: RunExecutionResult,
         context: WeftContext,
+        *,
+        _accepted_taskspec: TaskSpec | None = None,
     ) -> None:
         self.tid = execution.tid
         self._execution = execution
         self._context = context
-        self._streams: list[CommandStream[TaskEvent]] = []
+        self._accepted_taskspec = _accepted_taskspec
+        self._streams: dict[CommandStream[TaskEvent], int] = {}
+        self._stream_lock = threading.Lock()
+        self._cancel_event = threading.Event()
+        self._wakeups: dict[object, Callable[[], None]] = {}
         self._result: RunExecutionResult | None = None
         self._closed = False
         with ExitStack() as resources:
             resources.enter_context(context.session())
             self._input_queue = context.queue(
-                f"T{self.tid}.{QUEUE_INBOX_SUFFIX}", persistent=True
+                (
+                    _accepted_taskspec.io.inputs["inbox"]
+                    if _accepted_taskspec is not None
+                    else f"T{self.tid}.{QUEUE_INBOX_SUFFIX}"
+                ),
+                persistent=True,
             )
             resources.callback(self._input_queue.close)
             self._input_resources = resources.pop_all()
@@ -408,12 +388,47 @@ class _LiveRunSession:
         # Late import breaks the real result/events cycle.
         from .events import iter_task_realtime_events
 
-        stream = cast(
-            CommandStream[TaskEvent],
-            iter_task_realtime_events(self._context, self.tid, follow=True),
+        def events_on_owner() -> Iterator[TaskEvent]:
+            stream = cast(
+                CommandStream[TaskEvent],
+                iter_task_realtime_events(
+                    self._context,
+                    self.tid,
+                    follow=True,
+                    _accepted_taskspec=self._accepted_taskspec,
+                    cancel_event=self,
+                ),
+            )
+            with self._stream_lock:
+                self._streams[stream] = threading.get_ident()
+            try:
+                yield from stream
+            finally:
+                try:
+                    stream.close()
+                finally:
+                    with self._stream_lock:
+                        self._streams.pop(stream, None)
+
+        return cast(CommandStream[TaskEvent], events_on_owner())
+
+    def is_set(self) -> bool:
+        """Expose output cancellation through the shared paired wake contract."""
+        return self._cancel_event.is_set()
+
+    def _register_wakeup(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register non-blocking direct wake outside the stream-owner lock."""
+        return _register_observation_wakeup(
+            self._stream_lock, self._cancel_event, self._wakeups, callback
         )
-        self._streams.append(stream)
-        return stream
+
+    def _cancel_output(self) -> None:
+        """Wake this session's streams; consuming threads retain iterator closure."""
+        with self._stream_lock:
+            callbacks = tuple(self._wakeups.values()) if not self.is_set() else ()
+            self._cancel_event.set()
+        for callback in callbacks:
+            callback()
 
     def send_input(self, text: str) -> None:
         self._input_queue.write(json.dumps({"stdin": text}))
@@ -444,7 +459,7 @@ class _LiveRunSession:
             self._context,
             self.tid,
             timeout=timeout,
-            wait_for_materialization=True,
+            _accepted_taskspec=self._accepted_taskspec,
         )
         self._result = replace(
             self._execution,
@@ -455,15 +470,110 @@ class _LiveRunSession:
         return self._result
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        self._cancel_output()
+        with self._stream_lock:
+            if self._closed:
+                return
+            self._closed = True
+            streams = [
+                stream
+                for stream, owner in self._streams.items()
+                if owner == threading.get_ident()
+            ]
         resources = ExitStack()
         resources.callback(self._input_resources.close)
-        for stream in self._streams:
+        for stream in streams:
             resources.callback(stream.close)
-        self._streams.clear()
         resources.close()
+
+
+def _matching_stop_ack(queue: Queue, tid: str, request_id: str) -> bool:
+    """Acknowledge only this keyed STOP, retaining all other control proof [MF-3]."""
+    with closing_queue_iterator(queue.peek_generator(with_timestamps=True)) as rows:
+        for raw, message_id in rows:
+            payload = decode_control_object(raw)
+            if payload is not None and (
+                payload.get("tid") == tid
+                and payload.get("command") == CONTROL_STOP
+                and payload.get("status") == "ack"
+                and payload.get("request_id") == request_id
+            ):
+                queue.delete(message_id=message_id)
+                return True
+    return False
+
+
+@typed_command_errors
+def _stop_interactive_run_session(session: _LiveRunSession) -> None:
+    """Close stdin and observe keyed STOP through its actual deadline [CLI-1.1.1].
+
+    The stop observer is independent of the output stream's cancellation scope.
+    ACK is progress, not a synthetic terminal task state. KILL follows only
+    expiry of the named STOP completion budget.
+    """
+    # Late import avoids the tasks -> system -> run dependency closure.
+    from .tasks import _terminal_observation_queue_names, _terminal_observation_snapshot
+
+    ctx = session._context
+    tid = session.tid
+    payload = (
+        session._accepted_taskspec.model_dump(mode="json")
+        if session._accepted_taskspec is not None
+        else None
+    )
+    control_in = (
+        session._accepted_taskspec.io.control["ctrl_in"]
+        if session._accepted_taskspec is not None
+        else f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
+    )
+    control_out = (
+        session._accepted_taskspec.io.control["ctrl_out"]
+        if session._accepted_taskspec is not None
+        else f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+    )
+    names = [*_terminal_observation_queue_names(tid, payload), control_in]
+    with result_observation(ctx, names) as (queues, monitor):
+        log_queue = queues[WEFT_GLOBAL_LOG_QUEUE]
+        request_id = uuid4().hex
+        session.close_input()
+        queues[control_in].write(
+            encode_control_message(CONTROL_STOP, request_id=request_id)
+        )
+        deadline = time.monotonic() + INTERACTIVE_STOP_COMPLETION_TIMEOUT
+        task_events: list[tuple[dict[str, Any], int]] = []
+        log_evidence = LogFold()
+        cursor: int | None = None
+        lookup = None
+        while True:
+            with log_queue.get_connection() as broker:
+                if lookup is None:
+                    lookup = read_monitor_task_record(ctx, tid, queue=log_queue)
+                rows, cursor = read_task_history(
+                    ctx, tid, broker=broker, after_timestamp=cursor
+                )
+                task_events.extend(rows)
+                log_evidence = log_evidence.fold(rows, tid=tid)
+                snapshot = _terminal_observation_snapshot(
+                    ctx,
+                    tid,
+                    routing_payload=payload,
+                    task_events=task_events,
+                    log_evidence=log_evidence,
+                    broker=broker,
+                    log_queue=log_queue,
+                    monitor_lookup=lookup,
+                )
+            if snapshot.terminal or _matching_stop_ack(
+                queues[control_out], tid, request_id
+            ):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                queues[control_in].write(
+                    encode_control_message(CONTROL_KILL, request_id=uuid4().hex)
+                )
+                return
+            monitor.wait(remaining)
 
 
 # -----------------------------------------------------------------------------
@@ -515,42 +625,6 @@ def _derive_name(
     return "cli-task"
 
 
-def _drain_stream_queue(queue: Queue, *, to_stderr: bool = False) -> None:
-    target = sys.stderr if to_stderr else sys.stdout
-    while True:
-        raw_item = queue.read_one()
-        if raw_item is None:
-            break
-        if isinstance(raw_item, tuple):
-            message_obj = raw_item[0]
-        else:
-            message_obj = raw_item
-        message = str(message_obj)
-        try:
-            envelope = json.loads(message)
-        except json.JSONDecodeError:
-            target.write(message)
-            target.flush()
-            continue
-
-        data = envelope.get("data", "")
-        encoding = envelope.get("encoding")
-        if encoding == "text":
-            target.write(data)
-            target.flush()
-        elif encoding == "base64":
-            chunk = base64.b64decode(data)
-            buffer = getattr(target, "buffer", None)
-            if buffer is not None:
-                buffer.write(chunk)
-            else:  # pragma: no cover - fallback for text streams
-                target.write(chunk.decode("utf-8", errors="replace"))
-            target.flush()
-        else:
-            target.write(json.dumps(envelope))
-            target.flush()
-
-
 def _enqueue_taskspec(
     context: WeftContext,
     taskspec: TaskSpec,
@@ -558,10 +632,9 @@ def _enqueue_taskspec(
     *,
     seed_start_envelope: bool = True,
     allow_internal_runtime: bool = False,
-) -> int:
-    # Spec: docs/specifications/03-Manager_Architecture.md [MA-2];
-    # docs/specifications/05-Message_Flow_and_State.md [MF-1]
-    return submit_spawn_request(
+) -> tuple[int, dict[str, Any]]:
+    """Return committed TID and shaped transport [MA-2], [MF-1], [MF-5]."""
+    return _submit_spawn_request_with_payload(
         context.broker_target,
         taskspec=taskspec,
         work_payload=work_payload,
@@ -594,445 +667,6 @@ def _ensure_manager_after_submission(
         context,
         submitted_tid=submitted_tid,
     )
-
-
-def _wait_for_task_completion(
-    context: WeftContext,
-    taskspec: TaskSpec,
-) -> tuple[str, Any | None, str | None]:
-    assert taskspec.tid is not None
-    outbox_name = taskspec.io.outputs.get("outbox")
-    ctrl_out_name = taskspec.io.control.get("ctrl_out")
-
-    if outbox_name is None:
-        outbox_name = f"T{taskspec.tid}.{QUEUE_OUTBOX_SUFFIX}"
-    if ctrl_out_name is None:
-        ctrl_out_name = f"T{taskspec.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-    ctrl_out_for_wait = (
-        None
-        if is_pipeline_taskspec_payload(taskspec.model_dump(mode="json"))
-        else ctrl_out_name
-    )
-
-    return await_one_shot_result(
-        context,
-        taskspec.tid,
-        outbox_name=outbox_name,
-        ctrl_out_name=ctrl_out_for_wait,
-        timeout=None,
-        show_stderr=False,
-    )
-
-
-class _InteractiveRunLifecycle:
-    """Own one command-side interactive session and its live resources.
-
-    Spec: [CC-2.3], [SB-0.4], [MF-3], [MF-5], [CLI-1.1.1]
-    """
-
-    def __init__(
-        self,
-        context: WeftContext,
-        taskspec: TaskSpec,
-        *,
-        use_prompt: bool,
-    ) -> None:
-        assert taskspec.tid is not None
-        self._context = context
-        self._tid = taskspec.tid
-        self._use_prompt = use_prompt
-        self._outbox_name = taskspec.io.outputs.get("outbox") or (
-            f"T{self._tid}.{QUEUE_OUTBOX_SUFFIX}"
-        )
-        ctrl_out_name = taskspec.io.control.get("ctrl_out") or (
-            f"T{self._tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-        )
-        self._ctrl_in_name = taskspec.io.control.get("ctrl_in") or (
-            f"T{self._tid}.{QUEUE_CTRL_IN_SUFFIX}"
-        )
-        inbox_name = taskspec.io.inputs.get("inbox") or (
-            f"T{self._tid}.{QUEUE_INBOX_SUFFIX}"
-        )
-        self._status: str | None = None
-        self._error: str | None = None
-        self._stdout_chunks: list[str] = []
-        self._result: Any | None = None
-        self._log_last_timestamp: int | None = None
-        self._client = InteractiveStreamClient(
-            db_path=context.broker_target,
-            config=context.broker_config,
-            tid=self._tid,
-            inbox=inbox_name,
-            outbox=self._outbox_name,
-            ctrl_out=ctrl_out_name,
-            on_stdout=self._on_stdout,
-            on_stderr=self._on_stderr,
-            on_state=self._on_state,
-        )
-        self._resources = ExitStack()
-        try:
-            self._resources.enter_context(context.session())
-            self._log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
-            self._resources.callback(self._log_queue.close)
-        except BaseException as error:
-            cleanup = ExitStack()
-            cleanup.callback(self._client.stop)
-            cleanup.callback(self._resources.close)
-            close_command_resources(cleanup, body_error=error)
-            raise
-
-    def start(self) -> None:
-        """Start the queue client inside the caller-owned cleanup region."""
-
-        self._client.start()
-
-    def close(self) -> None:
-        """Close resources in the existing client-then-log order."""
-
-        cleanup = ExitStack()
-        cleanup.callback(self._resources.close)
-        cleanup.callback(self._client.stop)
-        cleanup.close()
-        if self._use_prompt:
-            return
-        if self._stdout_chunks:
-            self._result = "".join(self._stdout_chunks)
-            return
-        history = self._client.stdout_history
-        if history:
-            self._result = "".join(history)
-            self._stdout_chunks.extend(history)
-
-    def send_input(self, payload: str) -> None:
-        """Write one queue-mediated interactive input payload."""
-
-        self._client.send_input(payload)
-
-    def close_input(self) -> None:
-        """Close the task's interactive input stream."""
-
-        self._client.close_input()
-
-    def wait_for_completion(self, timeout: float | None = None) -> bool:
-        """Observe terminal evidence in the existing priority order.
-
-        Spec: [MF-3], [MF-5]
-        """
-
-        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
-        while True:
-            if self._client.wait(timeout=0):
-                return True
-            if self._poll_terminal_log() or self._poll_monitor_terminal():
-                return True
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            wait_timeout = 0.05
-            if deadline is not None:
-                wait_timeout = min(wait_timeout, max(0.0, deadline - time.monotonic()))
-            if self._client.wait(timeout=wait_timeout):
-                return True
-
-    def request_exit(self) -> bool:
-        """Close input, then allow the task's STOP unwind budget before KILL.
-
-        Existing terminal evidence or acknowledgement ends the STOP wait;
-        neither gains new process-death or signal authority here.
-
-        Spec: [CC-2.4], [MF-3], [CLI-1.1.1]
-        """
-
-        self.close_input()
-        if self.wait_for_completion(timeout=1.0):
-            return True
-        self._send_control(CONTROL_STOP)
-        stop_deadline = time.monotonic() + INTERACTIVE_STOP_COMPLETION_TIMEOUT
-        while True:
-            if self.wait_for_completion(timeout=0):
-                return True
-            remaining = stop_deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            if (
-                self._client.wait_for_control_response(
-                    "STOP",
-                    status="ack",
-                    timeout=min(INTERACTIVE_STOP_POLL_INTERVAL, remaining),
-                )
-                is not None
-            ):
-                return True
-        self._send_control(CONTROL_KILL)
-        if (
-            self._client.wait_for_control_response(
-                "KILL",
-                status="ack",
-                timeout=1.0,
-            )
-            is not None
-        ):
-            return True
-        return self.wait_for_completion(timeout=0.1)
-
-    def exit_prompt_if_completed(
-        self,
-        session: Any,
-        completion_event: threading.Event,
-    ) -> None:
-        """Exit a running prompt after terminal completion is visible."""
-
-        if (
-            completion_event.is_set()
-            and session.app.is_running
-            and not session.app.is_done
-        ):
-            session.app.exit()
-
-    def await_prompt_completion(
-        self,
-        session: Any,
-        completion_event: threading.Event,
-    ) -> None:
-        """Wait for completion and safely wake the prompt event loop."""
-
-        with self._context.session():
-            self.wait_for_completion()
-        completion_event.set()
-        loop = session.app.loop
-        if loop is None:
-            return
-        try:
-            loop.call_soon_threadsafe(
-                lambda: self.exit_prompt_if_completed(session, completion_event)
-            )
-        except RuntimeError:  # pragma: no cover - closed event-loop race
-            return
-
-    def outcome(self, *, quit_requested: bool) -> tuple[str, str | None]:
-        """Return the current terminal outcome with quit normalization."""
-
-        status = self._status or self._client.status or "completed"
-        error = self._error or self._client.error
-        if quit_requested and status in {"cancelled", "killed"}:
-            return "completed", None
-        return status, error
-
-    def collect_piped_result(self) -> Any | None:
-        """Fill an empty captured result from the final outbox snapshot."""
-
-        with self._context.session():
-            outbox_queue = self._context.queue(self._outbox_name, persistent=True)
-            try:
-                collected = _collect_interactive_queue_output(outbox_queue)
-            finally:
-                outbox_queue.close()
-        if collected and not self._result:
-            self._result = "".join(collected)
-        return self._result
-
-    def _on_stdout(self, chunk: str, final: bool) -> None:
-        if self._use_prompt:
-            if chunk:
-                _echo(chunk, nl=False)
-            if final and (not chunk or not chunk.endswith("\n")):
-                _echo()
-        elif chunk:
-            self._stdout_chunks.append(chunk)
-
-    @staticmethod
-    def _on_stderr(chunk: str, final: bool) -> None:
-        if chunk:
-            _echo(chunk, err=True, nl=False)
-        if final and (not chunk or not chunk.endswith("\n")):
-            _echo(err=True)
-
-    def _on_state(self, event: dict[str, Any]) -> None:
-        status = event.get("status")
-        if isinstance(status, str) and status in {
-            "completed",
-            "failed",
-            "timeout",
-            "cancelled",
-            "killed",
-        }:
-            self._status = status
-            error = event.get("error")
-            self._error = str(error) if isinstance(error, str) else None
-            return
-        event_name = event.get("event")
-        if event_name in {"work_failed", "work_timeout", "work_limit_violation"}:
-            self._status = "failed"
-            self._error = event.get("error") or str(event_name).replace("_", " ")
-        elif event_name == "work_completed":
-            self._status = "completed"
-        elif event_name in {"control_stop", "task_signal_stop"}:
-            self._status = "cancelled"
-            self._error = event.get("error") or "Task cancelled"
-        elif event_name in {"control_kill", "task_signal_kill"}:
-            self._status = "killed"
-            self._error = event.get("error") or "Task killed"
-
-    def _send_control(self, command: str) -> None:
-        ctrl_queue = self._context.queue(self._ctrl_in_name, persistent=True)
-        try:
-            ctrl_queue.write(encode_control_message(command))
-        finally:
-            ctrl_queue.close()
-
-    def _poll_terminal_log(self) -> bool:
-        events, self._log_last_timestamp = poll_log_events(
-            self._log_queue,
-            self._log_last_timestamp,
-            self._tid,
-        )
-        terminal_seen = False
-        for event_payload, _timestamp in events:
-            event_status = terminal_status_from_event(event_payload)
-            if event_status is None:
-                continue
-            self._status = event_status
-            self._error = terminal_error_message(event_payload, event_status)
-            terminal_seen = True
-        return terminal_seen
-
-    def _poll_monitor_terminal(self) -> bool:
-        """Return optional Monitor terminal evidence without changing priority."""
-
-        try:
-            record = open_monitor_store(
-                self._context,
-                config=self._context.config,
-                queue=self._log_queue,
-            ).get_task(self._tid)
-        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-332] exception
-            return False
-        if record is None or not record.terminal_seen:
-            return False
-        status = record.terminal_status or record.status
-        if not isinstance(status, str) or not status:
-            return False
-        self._status = status
-        error = record.state.get("error")
-        self._error = str(error) if isinstance(error, str) else None
-        return True
-
-
-def _run_interactive_prompt(lifecycle: _InteractiveRunLifecycle) -> bool:
-    """Run the PromptToolkit mode for one queue-mediated session.
-
-    Spec: [CC-2.3], [CLI-1.1.1]
-    """
-
-    try:
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.patch_stdout import patch_stdout
-    except ImportError as exc:  # pragma: no cover - optional dependency guard
-        raise RunUsageError(
-            "prompt_toolkit is required for interactive mode when stdin is a TTY"
-        ) from exc
-
-    session: PromptSession[str] = PromptSession("weft> ")
-    completion_event = threading.Event()
-
-    def exit_if_completed() -> None:
-        lifecycle.exit_prompt_if_completed(session, completion_event)
-
-    waiter = threading.Thread(
-        target=lambda: lifecycle.await_prompt_completion(session, completion_event),
-        daemon=True,
-    )
-    waiter.start()
-    lifecycle.send_input("\n")
-    quit_requested = False
-
-    with patch_stdout():
-        while not completion_event.is_set():
-            try:
-                line = session.prompt("weft> ", pre_run=exit_if_completed)
-            except EOFError:
-                lifecycle.close_input()
-                break
-            except KeyboardInterrupt:
-                _echo()
-                continue
-            if line is None:
-                break
-            stripped = line.strip()
-            if stripped in {":quit", ":exit"}:
-                quit_requested = True
-                if not lifecycle.request_exit():
-                    raise RuntimeError("Interactive session did not stop after :quit")
-                break
-            lifecycle.send_input(line if line.endswith("\n") else f"{line}\n")
-
-    waiter.join(timeout=0.5)
-    if not lifecycle.wait_for_completion(timeout=INTERACTIVE_STOP_COMPLETION_TIMEOUT):
-        raise RuntimeError("Interactive session did not stop after :quit")
-    return quit_requested
-
-
-def _run_interactive_piped(
-    lifecycle: _InteractiveRunLifecycle,
-    stdin_data: str | None,
-    *,
-    auto_close: bool,
-) -> None:
-    """Run the existing non-prompt input and auto-close branches.
-
-    Spec: [CLI-1.1.1]
-    """
-
-    if stdin_data:
-        lifecycle.send_input(stdin_data)
-        if auto_close and not lifecycle.wait_for_completion(timeout=0.2):
-            lifecycle.close_input()
-            lifecycle.wait_for_completion()
-        else:
-            lifecycle.wait_for_completion()
-        return
-    if auto_close:
-        lifecycle.close_input()
-    lifecycle.wait_for_completion()
-
-
-def _run_interactive_session(
-    context: WeftContext,
-    taskspec: TaskSpec,
-    *,
-    stdin_data: str | None,
-    auto_close: bool = True,
-    use_prompt: bool = False,
-) -> tuple[str, Any | None, str | None]:
-    """Run one command-side interactive session through its lifecycle owner.
-
-    Spec: [CC-2.3], [SB-0.4], [MF-3], [MF-5], [CLI-1.1.1]
-    """
-
-    lifecycle = _InteractiveRunLifecycle(context, taskspec, use_prompt=use_prompt)
-    quit_requested = False
-    body_error: BaseException | None = None
-    try:
-        lifecycle.start()
-        if use_prompt:
-            quit_requested = _run_interactive_prompt(lifecycle)
-        else:
-            _run_interactive_piped(lifecycle, stdin_data, auto_close=auto_close)
-        status, error = lifecycle.outcome(quit_requested=quit_requested)
-    except BaseException as exc:
-        body_error = exc
-        raise
-    finally:
-        try:
-            lifecycle.close()
-        except BaseException as cleanup_error:
-            if body_error is None:
-                raise
-            body_error.add_note(
-                f"Interactive lifecycle cleanup failed: {cleanup_error!r}"
-            )
-
-    result = None if use_prompt else lifecycle.collect_piped_result()
-    return status, result, error
 
 
 def _build_taskspec_dict(
@@ -1144,7 +778,7 @@ def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> T
     )
 
 
-def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
+def _execute_inline(
     *,
     command: Sequence[str],
     function_target: str | None,
@@ -1159,12 +793,11 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
     cpu: int | None,
     tags: Sequence[str],
     context_dir: Path | None,
-    wait: bool,
     json_output: bool,
     verbose: bool,
     autostart_enabled: bool,
     stdin_data: str | None = None,
-    on_submitted: Callable[[str, WeftContext], None] | None = None,
+    on_submitted: Callable[[str, WeftContext, TaskSpec], None] | None = None,
 ) -> RunExecutionResult:
     target_type = "command" if command else "function"
     if target_type == "command" and not command:
@@ -1191,7 +824,6 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
         metadata["tags"] = list(tags)
     metadata["source"] = "weft.cli"
 
-    stdin_is_terminal = False
     work_payload = _submission_initial_work_payload(
         target_type=target_type,
         stdin_text=stdin_data,
@@ -1222,41 +854,6 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
     )
 
     taskspec = validate_taskspec_payload(template_dict, template=True)
-    reuse_enabled = bool(context.config.get("MANAGER_REUSE_ENABLED", True))
-
-    def _wait_for_inline_completion(tid: str) -> tuple[str, Any, str | None]:
-        resolved_spec = validate_taskspec_payload(
-            taskspec.model_dump(mode="json"),
-            bundle_root=taskspec.get_bundle_root(),
-            resolved_tid=tid,
-            inherited_weft_context=taskspec.spec.weft_context,
-        )
-
-        if interactive:
-            use_prompt = stdin_data is None and stdin_is_terminal
-            session_stdin = stdin_data
-            session_auto_close = not use_prompt
-            if isinstance(work_payload, dict) and "stdin" in work_payload:
-                session_stdin = None
-                session_auto_close = False
-            status, result_value, error_message = _run_interactive_session(
-                context,
-                resolved_spec,
-                stdin_data=session_stdin,
-                auto_close=session_auto_close,
-                use_prompt=use_prompt,
-            )
-            if not use_prompt and result_value:
-                _echo(result_value, nl=False)
-                if not str(result_value).endswith("\n"):
-                    _echo()
-                result_value = ""
-            return status, result_value, error_message
-
-        return _wait_for_task_completion(
-            context,
-            resolved_spec,
-        )
 
     if interactive:
         if target_type != "command":
@@ -1273,10 +870,7 @@ def _execute_inline(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-113] exception
                 work_payload,
             ),
             verbose=verbose,
-            wait=wait,
-            reuse_enabled=reuse_enabled,
             emit_verbose=False,
-            wait_for_completion=_wait_for_inline_completion if wait else None,
             on_submitted=on_submitted,
         )
     except Exception as exc:
@@ -1299,12 +893,11 @@ def _execute_spec_via_manager(
     context_dir: Path | None = None,
     run_input_tokens: Sequence[str] = (),
     verbose: bool,
-    wait: bool,
     json_output: bool,
     autostart_enabled: bool,
     persistent_override: bool | None,
     stdin_data: str | None = None,
-    on_submitted: Callable[[str, WeftContext], None] | None = None,
+    on_submitted: Callable[[str, WeftContext, TaskSpec], None] | None = None,
     session_wait_requested: bool = False,
 ) -> RunExecutionResult:
     submission_context = build_context(
@@ -1321,7 +914,7 @@ def _execute_spec_via_manager(
         name=name,
     )
     spec = cast(TaskSpec, prepared.taskspec)
-    if spec.spec.persistent and (wait or session_wait_requested):
+    if spec.spec.persistent and session_wait_requested:
         raise RunUsageError(
             "--wait is not supported for persistent TaskSpecs; use --no-wait."
         )
@@ -1336,19 +929,6 @@ def _execute_spec_via_manager(
         )
     )
     work_payload = prepared.payload
-    reuse_enabled = bool(context.config.get("MANAGER_REUSE_ENABLED", True))
-
-    def _wait_for_spec_completion(tid: str) -> tuple[str, Any, str | None]:
-        resolved_spec = validate_taskspec_payload(
-            spec.model_dump(mode="json"),
-            bundle_root=spec.get_bundle_root(),
-            resolved_tid=tid,
-            inherited_weft_context=spec.spec.weft_context,
-        )
-        return _wait_for_task_completion(
-            context,
-            resolved_spec,
-        )
 
     try:
         execution = _run_with_managed_execution(
@@ -1359,10 +939,7 @@ def _execute_spec_via_manager(
                 work_payload,
             ),
             verbose=verbose,
-            wait=wait,
-            reuse_enabled=reuse_enabled,
             emit_verbose=False,
-            wait_for_completion=_wait_for_spec_completion if wait else None,
             on_submitted=on_submitted,
         )
     except Exception as exc:
@@ -1384,12 +961,11 @@ def _execute_pipeline(
     name: str | None,
     pipeline_input: str | None,
     context_dir: Path | None,
-    wait: bool,
     json_output: bool,
     verbose: bool,
     autostart_enabled: bool,
     stdin_data: str | None = None,
-    on_submitted: Callable[[str, WeftContext], None] | None = None,
+    on_submitted: Callable[[str, WeftContext, TaskSpec], None] | None = None,
 ) -> RunExecutionResult:
     context = build_context(spec_context=context_dir, autostart=autostart_enabled)
     pipeline_spec, source_ref = _load_pipeline_spec(pipeline, context_dir=context_dir)
@@ -1432,8 +1008,6 @@ def _execute_pipeline(
         else compiled.bootstrap_input_fallback
     )
 
-    reuse_enabled = bool(context.config.get("MANAGER_REUSE_ENABLED", True))
-
     execution = _run_with_managed_execution(
         context=context,
         submit=lambda: _enqueue_taskspec(
@@ -1444,19 +1018,7 @@ def _execute_pipeline(
             allow_internal_runtime=True,
         ),
         verbose=verbose,
-        wait=wait,
-        reuse_enabled=reuse_enabled,
         emit_verbose=False,
-        wait_for_completion=(
-            (
-                lambda _tid: _wait_for_task_completion(
-                    context,
-                    compiled.pipeline_taskspec,
-                )
-            )
-            if wait
-            else None
-        ),
         on_submitted=on_submitted,
     )
 
@@ -1495,13 +1057,12 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
     cpu: int | None,
     tags: Sequence[str],
     context_dir: Path | None,
-    wait: bool,
     json_output: bool,
     verbose: bool,
     persistent_override: bool | None,
     autostart_enabled: bool,
     stdin_text: str | None = None,
-    on_submitted: Callable[[str, WeftContext], None] | None = None,
+    on_submitted: Callable[[str, WeftContext, TaskSpec], None] | None = None,
     session_wait_requested: bool = False,
 ) -> RunExecutionResult:
     """Execute a command, function, task spec, or pipeline without rendering.
@@ -1523,8 +1084,8 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
       weft run --function mymod:fn --arg x      Function with args
       weft run --spec probe-agents              Builtin helper TaskSpec
 
-    By default, waits for the task to complete and prints output.
-    Use --no-wait to submit and return immediately (prints TID).
+    Submission itself does not wait or render. `cmd_run` supplies the public
+    waiting session and the CLI renders its structured outcome.
     """
     if pipeline is not None:
         if spec is not None or command or function:
@@ -1542,7 +1103,6 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             name=name,
             pipeline_input=pipeline_input,
             context_dir=context_dir,
-            wait=wait,
             json_output=json_output,
             verbose=verbose,
             autostart_enabled=autostart_enabled,
@@ -1564,7 +1124,6 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
             context_dir=context_dir,
             run_input_tokens=spec_run_args,
             verbose=verbose,
-            wait=wait,
             json_output=json_output,
             autostart_enabled=autostart_enabled,
             persistent_override=persistent_override,
@@ -1606,7 +1165,6 @@ def execute_run(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-114] exception
         cpu=cpu,
         tags=tags,
         context_dir=context_dir,
-        wait=wait,
         json_output=json_output,
         verbose=verbose,
         autostart_enabled=autostart_enabled,
@@ -1656,10 +1214,14 @@ def cmd_run(
         return _describe_taskspec(spec, context_dir=context_dir)
 
     submitted_context: WeftContext | None = None
+    submitted_taskspec: TaskSpec | None = None
 
-    def _capture_submission(_tid: str, resolved_context: WeftContext) -> None:
-        nonlocal submitted_context
+    def _capture_submission(
+        _tid: str, resolved_context: WeftContext, accepted_taskspec: TaskSpec
+    ) -> None:
+        nonlocal submitted_context, submitted_taskspec
         submitted_context = resolved_context
+        submitted_taskspec = accepted_taskspec
 
     execution = execute_run(
         tuple(command),
@@ -1679,7 +1241,6 @@ def cmd_run(
         cpu=cpu,
         tags=tuple(tag),
         context_dir=context_dir,
-        wait=False,
         json_output=False,
         verbose=False,
         persistent_override=continuous,
@@ -1691,7 +1252,9 @@ def cmd_run(
     if wait:
         if submitted_context is None:  # pragma: no cover - execution invariant
             raise SubmissionError("run submission completed without a context")
-        return _LiveRunSession(execution, submitted_context)
+        return _LiveRunSession(
+            execution, submitted_context, _accepted_taskspec=submitted_taskspec
+        )
     return execution
 
 

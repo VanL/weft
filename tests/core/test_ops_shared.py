@@ -16,6 +16,7 @@ import weft.commands.run as run_mod
 import weft.commands.specs as specs_mod
 import weft.commands.submission as submission_mod
 from tests.helpers.weft_harness import WeftTestHarness
+from weft._exceptions import CommandTimeoutError
 from weft.client import WeftClient
 from weft.commands.types import TaskEvent, TaskResult
 from weft.context import WeftContext
@@ -127,10 +128,12 @@ def test_client_submit_uses_shared_submission_module(
         prepared: submission_mod.PreparedSubmissionRequest,
         *,
         session: object | None = None,
+        connection_queue: object | None = None,
     ) -> submission_mod._SubmittedPreparedOutcome:
         captured["submit_context"] = context
         captured["prepared"] = prepared
         captured["session"] = session
+        captured["connection_queue"] = connection_queue
         return submission_mod._SubmittedPreparedOutcome(
             receipt=submission_mod.SubmittedTaskReceipt(
                 tid="1776000000000000001",
@@ -139,6 +142,12 @@ def test_client_submit_uses_shared_submission_module(
                 context_root=str(context.root),
             ),
             runtime_context=context,
+            taskspec=submission_mod._bind_accepted_taskspec(
+                submission_mod.encode_taskspec_transport_payload(
+                    submission_mod.normalize_taskspec(prepared.taskspec)
+                ),
+                "1776000000000000001",
+            ),
         )
 
     monkeypatch.setattr(submission_mod, "prepare", _fake_prepare)
@@ -157,6 +166,7 @@ def test_client_submit_uses_shared_submission_module(
     assert task.tid == "1776000000000000001"
     assert captured["submit_context"] is captured["prepare_context"]
     assert captured["session"] is None
+    assert captured["connection_queue"] is None
     assert captured["payload"] is None
     assert captured["prepared"] == submission_mod.PreparedSubmissionRequest(
         name="demo",
@@ -165,368 +175,120 @@ def test_client_submit_uses_shared_submission_module(
     )
 
 
-def test_follow_task_events_reuses_shared_result_wait_without_timeout(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("timeout", [None, 0.0, 5.0])
+@pytest.mark.parametrize("status", ["completed", "timeout"])
+def test_follow_projects_one_collector_with_original_budget(
+    monkeypatch: pytest.MonkeyPatch, timeout: float | None, status: str
 ) -> None:
-    captured: dict[str, object] = {}
-
-    def _fake_iter(
-        context: WeftContext,
-        tid: str,
-        *,
-        follow: bool = False,
-        timeout: float | None = None,
-    ) -> Iterator[TaskEvent]:
-        assert follow is True
-        captured["iter_timeout"] = timeout
-        yield TaskEvent(
-            tid=tid,
-            event_type="completed",
-            timestamp=1,
-            payload={"tid": tid, "status": "completed"},
-        )
-
-    def _fake_await(
-        context: WeftContext,
-        tid: str,
-        *,
-        timeout: float | None = None,
-        show_stderr: bool = False,
-        emit_stream: bool = False,
-    ) -> TaskResult:
-        captured["timeout"] = timeout
-        return TaskResult(
-            tid=tid,
-            status="completed",
-            value="done",
-            stdout="done\n",
-            stderr=None,
-            error=None,
-        )
-
-    monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
-    monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
-
-    events = list(
-        events_mod.follow_task_events(Mock(spec=WeftContext), "1776000000000000001")
+    """Projection lends one original budget and retains task-outcome meaning."""
+    ctx = Mock(spec=WeftContext)
+    tid = "1776000000000000001"
+    spec = TaskSpec.model_validate(
+        {
+            "tid": tid,
+            "name": "projection",
+            "spec": {"type": "function", "function_target": "builtins:dict"},
+        }
+    )
+    calls: list[tuple[WeftContext, str, float | None, TaskSpec | None]] = []
+    raw = TaskEvent(tid=tid, event_type=status, timestamp=1, payload={"status": status})
+    result = TaskResult(
+        tid=tid,
+        status=status,
+        value="done",
+        stdout="done\n",
+        stderr=None,
+        error="task limit" if status == "timeout" else None,
     )
 
-    assert captured["iter_timeout"] is None
-    assert captured["timeout"] is None
-    assert events[-1].event_type == "result"
-    assert events[-1].payload["status"] == "completed"
-
-
-def test_follow_task_events_passes_remaining_timeout_to_result_wait(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    def _fake_iter(
+    def collect(
         context: WeftContext,
-        tid: str,
-        *,
-        follow: bool = False,
-        timeout: float | None = None,
-    ) -> Iterator[TaskEvent]:
-        assert follow is True
-        captured["iter_timeout"] = timeout
-        yield TaskEvent(
-            tid=tid,
-            event_type="completed",
-            timestamp=1,
-            payload={"tid": tid, "status": "completed"},
-        )
-
-    def _fake_await(
-        context: WeftContext,
-        tid: str,
+        child_tid: str,
         *,
         timeout: float | None = None,
-        show_stderr: bool = False,
-        emit_stream: bool = False,
-    ) -> TaskResult:
-        captured["result_timeout"] = timeout
-        return TaskResult(
-            tid=tid,
-            status="completed",
-            value="done",
-            stdout="done\n",
-            stderr=None,
-            error=None,
-        )
+        _accepted_taskspec: TaskSpec | None = None,
+    ) -> Iterator[TaskEvent | TaskResult]:
+        calls.append((context, child_tid, timeout, _accepted_taskspec))
+        yield raw
+        yield result
 
-    monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
-    monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
-
-    events = list(
+    monkeypatch.setattr(events_mod, "_iter_task_result", collect)
+    observed = list(
         events_mod.follow_task_events(
-            Mock(spec=WeftContext),
-            "1776000000000000001",
-            timeout=5.0,
+            ctx, tid, timeout=timeout, _accepted_taskspec=spec
         )
     )
-
-    assert captured["iter_timeout"] == 5.0
-    assert isinstance(captured["result_timeout"], float)
-    assert 0.0 < captured["result_timeout"] <= 5.0
-    assert events[-1].event_type == "result"
-
-
-def test_follow_task_events_uses_visible_result_after_event_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    def _fake_iter(
-        context: WeftContext,
-        tid: str,
-        *,
-        follow: bool = False,
-        timeout: float | None = None,
-    ) -> Iterator[TaskEvent]:
-        assert follow is True
-        captured["iter_timeout"] = timeout
-        raise TimeoutError("event wait expired")
-        yield  # pragma: no cover - makes this a generator
-
-    def _fake_await(
-        context: WeftContext,
-        tid: str,
-        *,
-        timeout: float | None = None,
-        show_stderr: bool = False,
-        emit_stream: bool = False,
-    ) -> TaskResult:
-        captured["result_timeout"] = timeout
-        return TaskResult(
-            tid=tid,
-            status="completed",
-            value="done",
-            stdout="done\n",
-            stderr=None,
-            error=None,
-        )
-
-    monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
-    monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
-
-    events = list(
-        events_mod.follow_task_events(
-            Mock(spec=WeftContext),
-            "1776000000000000001",
-            timeout=0.0,
-        )
-    )
-
-    assert captured["iter_timeout"] == 0.0
-    assert captured["result_timeout"] == events_mod.WEFT_COMPLETED_RESULT_GRACE_SECONDS
-    assert events[-1].event_type == "result"
-    assert events[-1].payload["status"] == "completed"
+    assert calls == [(ctx, tid, timeout, spec)]
+    assert observed[0] is raw
+    assert observed[-1].event_type == "result"
+    assert observed[-1].payload == {
+        "status": status,
+        "value": "done",
+        "stdout": "done\n",
+        "stderr": None,
+        "error": result.error,
+    }
 
 
-def test_follow_task_events_preserves_terminal_timeout_result(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fake_iter(
-        context: WeftContext,
-        tid: str,
-        *,
-        follow: bool = False,
-        timeout: float | None = None,
-    ) -> Iterator[TaskEvent]:
-        raise TimeoutError("event wait expired")
-        yield  # pragma: no cover - makes this a generator
-
-    def _fake_await(
-        context: WeftContext,
-        tid: str,
-        *,
-        timeout: float | None = None,
-        show_stderr: bool = False,
-        emit_stream: bool = False,
-    ) -> TaskResult:
-        return TaskResult(
-            tid=tid,
-            status="timeout",
-            value=None,
-            stdout=None,
-            stderr=None,
-            error="not ready",
-        )
-
-    monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
-    monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
-
-    events = list(
-        events_mod.follow_task_events(
-            Mock(spec=WeftContext),
-            "1776000000000000001",
-            timeout=0.0,
-        )
-    )
-
-    assert events[-1].event_type == "result"
-    assert events[-1].payload["status"] == "timeout"
-
-
-def test_follow_task_events_reports_original_timeout_after_terminal_event(
+def test_follow_preserves_original_collector_timeout_after_terminal_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tid = "1776000000000000001"
 
-    def _fake_iter(
+    def collect(
         context: WeftContext,
-        tid: str,
+        child_tid: str,
         *,
-        follow: bool = False,
         timeout: float | None = None,
-    ) -> Iterator[TaskEvent]:
+        _accepted_taskspec: TaskSpec | None = None,
+    ) -> Iterator[TaskEvent | TaskResult]:
         yield TaskEvent(
-            tid=tid,
+            tid=child_tid,
             event_type="completed",
             timestamp=1,
-            payload={"tid": tid, "status": "completed"},
+            payload={"status": "completed"},
         )
+        raise CommandTimeoutError(f"Timed out after {timeout} seconds")
 
-    def _fake_await(
-        context: WeftContext,
-        tid: str,
-        *,
-        timeout: float | None = None,
-        show_stderr: bool = False,
-        emit_stream: bool = False,
-    ) -> TaskResult:
-        raise events_mod.CommandTimeoutError(
-            f"Timed out after {timeout} seconds waiting for task {tid}"
-        )
-
-    monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
-    monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
-
+    monkeypatch.setattr(events_mod, "_iter_task_result", collect)
     with pytest.raises(TimeoutError, match="Timed out after 5.0 seconds"):
         list(events_mod.follow_task_events(Mock(spec=WeftContext), tid, timeout=5.0))
 
 
-def test_realtime_events_uses_terminal_state_seen_during_materialization(
-    monkeypatch: pytest.MonkeyPatch,
-    weft_harness: WeftTestHarness,
+@pytest.mark.parametrize("retain_log", [True, False])
+def test_realtime_emits_terminal_state_from_acquired_real_task_proof(
+    weft_harness: WeftTestHarness, retain_log: bool
 ) -> None:
-    tid = "1776000000000000001"
-    first_context = weft_harness.context
-
-    materialized = result_mod.ResultMaterialization(
-        taskspec_payload=None,
-        outbox_name=f"T{tid}.outbox",
-        ctrl_out_name=f"T{tid}.ctrl_out",
-        log_last_timestamp=42,
-        terminal_status="completed",
-        terminal_event_payload={
-            "tid": tid,
+    """Snapshot and terminal rendering share actual Consumer lifecycle proof."""
+    ctx = weft_harness.context
+    weft_harness.ensure_foreground_manager()
+    with WeftClient(ctx) as client:
+        task = client.submit(
+            {
+                "name": "realtime-proof",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "cleanup_on_exit": False,
+                },
+            },
+            payload="done",
+        )
+        assert task.terminal_snapshot(timeout=15).status == "completed"
+        if not retain_log:
+            with ctx.queue("weft.log.tasks") as log:
+                for body, message_id in list(log.peek_generator(with_timestamps=True)):
+                    if json.loads(body).get("tid") == task.tid:
+                        assert log.delete(message_id=message_id)
+        observed = list(task.realtime_events(timeout=2))
+        states = [event for event in observed if event.event_type == "state"]
+        assert any(event.payload.get("status") == "completed" for event in states)
+        assert observed[-2].event_type == "result"
+        assert observed[-2].payload == {
             "status": "completed",
-            "event": "work_completed",
-        },
-        terminal_event_timestamp=42,
-    )
-
-    monkeypatch.setattr(
-        events_mod,
-        "_await_result_materialization",
-        lambda *args, **kwargs: materialized,
-    )
-    monkeypatch.setattr(
-        events_mod, "iter_queue_json_entries", lambda *args, **kwargs: iter(())
-    )
-    monkeypatch.setattr(
-        events_mod, "_peek_result_value", lambda *args, **kwargs: "done"
-    )
-    monkeypatch.setattr(
-        events_mod,
-        "_task_snapshot_event",
-        lambda context, normalized_tid, *, allow_outbox_completion, broker, observation_queue: (
-            TaskEvent(
-                tid=normalized_tid,
-                event_type="snapshot",
-                timestamp=1,
-                payload={"tid": normalized_tid, "status": "completed"},
-            )
-        ),
-    )
-
-    events = list(
-        events_mod.iter_task_realtime_events(
-            first_context,
-            tid,
-            timeout=1.0,
-        )
-    )
-
-    assert [event.event_type for event in events] == [
-        "snapshot",
-        "state",
-        "result",
-        "end",
-    ]
-    assert events[1].timestamp == 42
-    assert events[1].payload == {"status": "completed", "event": "work_completed"}
-    assert events[-2].payload == {"status": "completed", "value": "done", "error": None}
-
-
-def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-    weft_harness: WeftTestHarness,
-) -> None:
-    tid = "1776000000000000001"
-    first_context = weft_harness.context
-
-    materialized = result_mod.ResultMaterialization(
-        taskspec_payload=None,
-        outbox_name=f"T{tid}.outbox",
-        ctrl_out_name=f"T{tid}.ctrl_out",
-        log_last_timestamp=42,
-        terminal_status=None,
-        terminal_event_payload=None,
-        terminal_event_timestamp=None,
-    )
-
-    monkeypatch.setattr(
-        events_mod,
-        "_await_result_materialization",
-        lambda *args, **kwargs: materialized,
-    )
-    monkeypatch.setattr(
-        events_mod, "iter_queue_json_entries", lambda *args, **kwargs: iter(())
-    )
-    monkeypatch.setattr(
-        events_mod, "_peek_result_value", lambda *args, **kwargs: "done"
-    )
-    monkeypatch.setattr(
-        events_mod,
-        "_task_snapshot_event",
-        lambda context, normalized_tid, *, allow_outbox_completion, broker, observation_queue: (
-            TaskEvent(
-                tid=normalized_tid,
-                event_type="snapshot",
-                timestamp=100,
-                payload={"tid": normalized_tid, "status": "completed"},
-            )
-        ),
-    )
-
-    events = list(
-        events_mod.iter_task_realtime_events(
-            first_context,
-            tid,
-            timeout=1.0,
-        )
-    )
-
-    assert [event.event_type for event in events] == [
-        "snapshot",
-        "state",
-        "result",
-        "end",
-    ]
-    assert events[1].timestamp == 100
-    assert events[1].payload == {"status": "completed"}
-    assert events[-2].payload == {"status": "completed", "value": "done", "error": None}
+            "value": "done",
+            "error": None,
+        }
+        assert observed[-1].event_type == "end"
+        with ctx.queue(f"T{task.tid}.outbox") as outbox:
+            assert outbox.peek_one() is not None

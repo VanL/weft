@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event
 from typing import Any
 
 import pytest
@@ -16,9 +16,11 @@ from psycopg.pq import TransactionStatus
 from simplebroker import Queue, QueueWatcher
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._exceptions import CommandExecutionError, CommandTimeoutError
 from weft.commands import result
 from weft.context import WeftContext, build_context
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.taskspec import TaskSpec
 
 pytestmark = [pytest.mark.shared]
 _TID = "1780000000000000012"
@@ -42,22 +44,31 @@ def counted_connections(
     ctx = build_context(prepare_project_root(tmp_path))
     connections: list[Any] = []
     original_drain = QueueWatcher._drain_queue
-    original_start = QueueWatcher.run_in_thread
+    original_monitor_init = QueueChangeMonitor.__init__
     initialized: dict[QueueWatcher, Event] = {}
 
     def drain(watcher: QueueWatcher) -> None:
         original_drain(watcher)
-        initialized[watcher].set()
+        initialized.setdefault(watcher, Event()).set()
 
-    def start(watcher: QueueWatcher) -> Thread:
-        initialized[watcher] = Event()
-        thread = original_start(watcher)
-        # Fallback watcher cores initialize asynchronously, outside the poll loop.
-        assert initialized[watcher].wait(10)
-        return thread
+    def monitor_init(
+        monitor: QueueChangeMonitor,
+        queues: Sequence[Queue],
+        *,
+        config: Mapping[str, Any] | None = None,
+    ) -> None:
+        original_monitor_init(monitor, queues, config=config)
+        try:
+            # The monitor owns run_forever threads. Await each actual fallback
+            # initial drain before counting post-warmup connections.
+            for watcher in monitor._watchers:
+                assert initialized.setdefault(watcher, Event()).wait(10)
+        except BaseException:
+            monitor.close()
+            raise
 
     monkeypatch.setattr(QueueWatcher, "_drain_queue", drain)
-    monkeypatch.setattr(QueueWatcher, "run_in_thread", start)
+    monkeypatch.setattr(QueueChangeMonitor, "__init__", monitor_init)
     if ctx.backend_name == "postgres":
         psycopg = pytest.importorskip("psycopg")
         original_connect = psycopg.Connection.connect.__func__
@@ -97,11 +108,31 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
 ) -> None:
     ctx, connections = counted_connections
     ready, publish, published, finish = Event(), Event(), Event(), Event()
+    custom = surface in {"one-shot", "persistent"}
+    outbox_name = (
+        "custom.outbox"
+        if custom
+        else f"{'P' if surface == 'pipeline' else 'T'}{_TID}.outbox"
+    )
     payload = {
         "tid": _TID,
-        "spec": {"persistent": surface == "persistent"},
-        "io": {"outputs": {"outbox": "custom.outbox"}},
+        "name": "late-connection-result",
+        "spec": {
+            "type": "function",
+            "persistent": surface == "persistent",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+        "io": {
+            "outputs": {"outbox": outbox_name},
+            "control": {
+                "ctrl_out": f"{'P' if surface == 'pipeline' else 'T'}{_TID}.ctrl_out"
+            },
+        },
+        "metadata": {"role": "pipeline"} if surface == "pipeline" else {},
     }
+    accepted = (
+        TaskSpec.model_validate(payload) if custom or surface == "pipeline" else None
+    )
 
     def writer() -> None:
         with (
@@ -109,24 +140,28 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
             queue.get_connection() as broker,
         ):
             ready.set()
+            for _turn in range(2):
+                assert publish.wait(10)
+                if finish.is_set():
+                    return
+                publish.clear()
+                broker.write(WEFT_GLOBAL_LOG_QUEUE, json.dumps({"tid": "unrelated"}))
+                published.set()
             assert publish.wait(10)
-            if surface == "taskspec":
-                broker.write(
-                    WEFT_GLOBAL_LOG_QUEUE,
-                    json.dumps({"tid": _TID, "taskspec": payload}),
-                )
+            if finish.is_set():
+                return
+            publish.clear()
+            if surface == "ctrl":
+                broker.write(f"T{_TID}.ctrl_out", "ready")
             elif surface == "pipeline":
                 broker.write(f"P{_TID}.status", "ready")
-            elif surface == "ctrl":
-                broker.write(f"T{_TID}.ctrl_out", "ready")
-            else:
-                name = f"T{_TID}.outbox" if surface == "outbox" else "custom.outbox"
-                broker.write(name, "late-result")
-                if surface in {"one-shot", "persistent"}:
-                    broker.write(
-                        WEFT_GLOBAL_LOG_QUEUE,
-                        json.dumps({"tid": _TID, "status": "completed"}),
-                    )
+            broker.write(
+                WEFT_GLOBAL_LOG_QUEUE, json.dumps({"tid": _TID, "taskspec": payload})
+            )
+            broker.write(outbox_name, "late-result")
+            broker.write(
+                WEFT_GLOBAL_LOG_QUEUE, json.dumps({"tid": _TID, "status": "completed"})
+            )
             published.set()
             assert finish.wait(10)
 
@@ -136,7 +171,8 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
     def wait(monitor: QueueChangeMonitor, timeout: float | None) -> bool:
         counts.append(len(connections))
         assert counts[-1] == counts[0], "observer reconnected after warm-up"
-        if len(counts) == 3:
+        if len(counts) <= 3:
+            published.clear()
             publish.set()
             assert published.wait(10)
             assert len(connections) == counts[0]
@@ -148,35 +184,24 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
         future = executor.submit(writer)
         try:
             assert ready.wait(10)
-            if surface in {"one-shot", "persistent"}:
-                status, value, error = result._await_single_result(
-                    ctx,
-                    _TID,
-                    timeout=5,
-                    show_stderr=False,
-                    taskspec_payload=payload,
-                )
-                assert (status, value, error) == ("completed", "late-result", None)
-            else:
-                observed = result._await_result_materialization(ctx, _TID, timeout=5)
-                assert observed is not None
-                if surface == "taskspec":
-                    assert observed.taskspec_payload == payload
-                    assert observed.outbox_name == "custom.outbox"
-                else:
-                    prefix = "P" if surface == "pipeline" else "T"
-                    assert observed.outbox_name == f"{prefix}{_TID}.outbox"
-                    assert observed.result_surface_had_activity
+            observed = result.await_task_result(
+                ctx, _TID, timeout=5, _accepted_taskspec=accepted
+            )
+            assert (observed.status, observed.value, observed.error) == (
+                "completed",
+                "late-result",
+                None,
+            )
             assert len(counts) >= 3
             assert len(connections) == counts[0]
         finally:
-            publish.set()
             finish.set()
+            publish.set()
             future.result(timeout=10)
 
 
 @pytest.mark.parametrize("failure", ["timeout", "wait", "constructor", "close"])
-def test_result_materialization_releases_resources_on_timeout_or_failure(
+def test_result_collection_releases_resources_on_timeout_or_failure(
     counted_connections: tuple[WeftContext, list[Any]],
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
@@ -190,7 +215,11 @@ def test_result_materialization_releases_resources_on_timeout_or_failure(
         monkeypatch.setattr(QueueChangeMonitor, "wait", fail_wait)
     elif failure == "constructor":
 
-        def fail_start(_monitor: QueueChangeMonitor, _queues: list[Queue]) -> bool:
+        def fail_start(_monitor: QueueChangeMonitor, queues: list[Queue]) -> bool:
+            # Subscription now precedes durable reads. Exercise partial real
+            # connection acquisition before the injected constructor failure.
+            with queues[0].get_connection() as broker:
+                broker.latest_pending_timestamp(queues[0].name)
             raise RuntimeError("constructor boundary failed")
 
         monkeypatch.setattr(QueueChangeMonitor, "_start_multi_queue_waiter", fail_start)
@@ -203,11 +232,17 @@ def test_result_materialization_releases_resources_on_timeout_or_failure(
 
         monkeypatch.setattr(QueueChangeMonitor, "close", fail_close)
 
-    if failure == "timeout":
-        assert result._await_result_materialization(ctx, _TID, timeout=0) is None
-    else:
-        with pytest.raises(RuntimeError, match=f"{failure} boundary failed"):
-            result._await_result_materialization(
-                ctx, _TID, timeout=5 if failure == "wait" else 0
+    if failure in {"timeout", "close"}:
+        with pytest.raises(CommandTimeoutError) as timeout_info:
+            result.await_task_result(ctx, _TID, timeout=0)
+        if failure == "close":
+            assert any(
+                "close boundary failed" in note for note in timeout_info.value.__notes__
             )
+    else:
+        with pytest.raises(
+            CommandExecutionError, match=f"{failure} boundary failed"
+        ) as failure_info:
+            result.await_task_result(ctx, _TID, timeout=5 if failure == "wait" else 0)
+        assert isinstance(failure_info.value.__cause__, RuntimeError)
     assert connections

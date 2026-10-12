@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 234 plan files in this directory.
+There are currently 239 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,11 @@ There are currently 234 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-10-10-result-observation-simplification-plan.md`](./2026-10-10-result-observation-simplification-plan.md) | Result Observation: Canonical History and Unified Settlement | `draft` | none |
+| [`2026-10-09-direct-result-observation-implementation-plan.md`](./2026-10-09-direct-result-observation-implementation-plan.md) | Direct Result Observation: Implementation Repair | `draft` | [Result observation simplification](./2026-10-10-result-observation-simplification-plan.md) |
+| [`2026-10-09-direct-result-observation-spec-plan.md`](./2026-10-09-direct-result-observation-spec-plan.md) | Direct Result Observation: Spec Changes Only | `draft` | [Result observation simplification](./2026-10-10-result-observation-simplification-plan.md) |
+| [`2026-10-09-task-specific-result-discovery-placeholder.md`](./2026-10-09-task-specific-result-discovery-placeholder.md) | Task-Specific Result Discovery Placeholder | `draft` | [Result observation simplification](./2026-10-10-result-observation-simplification-plan.md) |
+| [`2026-10-09-burst-result-observation-plan.md`](./2026-10-09-burst-result-observation-plan.md) | Burst Result Observation and Session Setup | `draft` | [Result observation simplification](./2026-10-10-result-observation-simplification-plan.md) |
 | [`2026-10-07-dependency-floor-alignment-plan.md`](./2026-10-07-dependency-floor-alignment-plan.md) | Validated Dependency Floor Alignment | `completed` | none |
 | [`2026-10-07-test-audit-repairs-plan.md`](./2026-10-07-test-audit-repairs-plan.md) | Test Audit Repairs | `draft` | none |
 | [`2026-10-06-admission-controller-plan.md`](./2026-10-06-admission-controller-plan.md) | AdmissionController: Progress-Aware Admission Waiting | `draft` | none |

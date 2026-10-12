@@ -7,24 +7,21 @@ import json
 import os
 import subprocess
 import sys
-import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
-import prompt_toolkit
 import pytest
-from prompt_toolkit.input import create_pipe_input
-from prompt_toolkit.output import DummyOutput
 
-import weft.commands._result_wait as result_wait_cmd
 import weft.commands._spawn_submission as spawn_submission_cmd
 import weft.commands.run as run_cmd
+import weft.commands.submission as submission_cmd
 from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
     INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
@@ -56,18 +53,15 @@ from weft.commands._spawn_submission import (
 )
 from weft.commands.run import (
     RunUsageError,
-    _collect_interactive_queue_output,
     _delete_spawn_request,
     _enqueue_taskspec,
     _execute_inline,
     _execute_pipeline,
     _execute_spec_via_manager,
-    _wait_for_task_completion,
 )
 from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime as core_manager_runtime
-from weft.core.control_messages import parse_control_request
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import open_monitor_store
@@ -147,13 +141,103 @@ def test_unexpected_post_acceptance_failure_names_committed_tid(
     with pytest.raises(RuntimeError, match=f"accepted_tid={tid}") as exc_info:
         run_cmd._run_with_managed_execution(
             context=context,
-            submit=lambda: int(tid),
+            submit=lambda: (int(tid), _make_taskspec(tid).model_dump(mode="json")),
             verbose=False,
-            wait=False,
-            reuse_enabled=True,
         )
 
     assert exc_info.value is defect
+
+
+def test_run_binding_failure_keeps_committed_tid_after_connection_and_recovery(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run must record acceptance before resolving its submitted configuration."""
+    context = weft_harness.context
+    taskspec = TaskSpec.model_validate(
+        {
+            "name": "run-binding-fault",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+        context={"template": True, "auto_expand": False},
+    )
+    active_operations = 0
+    connection_released = False
+    recovered_tid: str | None = None
+    handed_off: list[str] = []
+    original_connection = Queue.get_connection
+    original_decode = submission_cmd.decode_taskspec_transport_payload
+    fault = RuntimeError("run accepted configuration binding failed")
+
+    @contextmanager
+    def tracked_connection(queue: Queue) -> Iterator[Any]:
+        nonlocal active_operations, connection_released
+        if queue.name != WEFT_SPAWN_REQUESTS_QUEUE:
+            with original_connection(queue) as broker:
+                yield broker
+            return
+        active_operations += 1
+        try:
+            with original_connection(queue) as broker:
+                yield broker
+        finally:
+            active_operations -= 1
+            connection_released = True
+
+    def ensure(
+        _context: WeftContext, *, submitted_tid: str | int
+    ) -> core_manager_runtime.ManagerEnsureResult:
+        nonlocal recovered_tid
+        assert connection_released and active_operations == 0
+        recovered_tid = str(submitted_tid)
+        return core_manager_runtime.ManagerEnsureResult(
+            outcome="not_needed",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="run_custody_test",
+        )
+
+    def fail_binding(payload: Mapping[str, Any], **kwargs: Any) -> TaskSpec:
+        if kwargs.get("resolved_tid") is not None:
+            assert recovered_tid == kwargs["resolved_tid"]
+            assert connection_released and active_operations == 0
+            raise fault
+        return original_decode(payload, **kwargs)
+
+    def on_submitted(tid: str, _context: WeftContext, _taskspec: TaskSpec) -> None:
+        handed_off.append(tid)
+
+    monkeypatch.setattr(Queue, "get_connection", tracked_connection)
+    monkeypatch.setattr(run_cmd, "_ensure_manager_after_submission", ensure)
+    # Only the post-write resolved-TID decode fails. Template shaping and the
+    # actual broker write still execute, so moving binding into enqueue loses
+    # recovery/acceptance and omitting binding cannot pass this test.
+    monkeypatch.setattr(
+        submission_cmd, "decode_taskspec_transport_payload", fail_binding
+    )
+    with pytest.raises(RuntimeError, match="accepted_tid=") as raised:
+        run_cmd._run_with_managed_execution(
+            context=context,
+            submit=lambda: _enqueue_taskspec(context, taskspec, None),
+            verbose=False,
+            on_submitted=on_submitted,
+        )
+    assert raised.value is fault
+    assert recovered_tid is not None
+    assert f"accepted_tid={recovered_tid}" in str(fault)
+    assert any(recovered_tid in note for note in fault.__notes__)
+    assert handed_off == []
+    assert active_operations == 0
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as queue:
+        pending = queue.peek_one(exact_timestamp=int(recovered_tid))
+    assert isinstance(pending, str)
+    committed_spec = json.loads(pending)["taskspec"]
+    assert committed_spec["name"] == "run-binding-fault"
+    assert committed_spec["tid"] is None
 
 
 @pytest.mark.parametrize(
@@ -449,550 +533,6 @@ def _make_taskspec(tid: str) -> TaskSpec:
     )
 
 
-class _PromptCompletionApp:
-    def __init__(
-        self,
-        app: Any,
-        *,
-        completion_timing: str,
-        loop_read_before_run: threading.Event,
-    ) -> None:
-        self._app = app
-        self._allow_loop = completion_timing != "before_run"
-        self._loop_read_before_run = loop_read_before_run
-
-    @property
-    def loop(self) -> Any:
-        if not self._allow_loop:
-            self._loop_read_before_run.set()
-            return None
-        return self._app.loop
-
-    @property
-    def is_running(self) -> bool:
-        return bool(self._app.is_running)
-
-    @property
-    def is_done(self) -> bool:
-        return bool(self._app.is_done)
-
-    def allow_loop(self) -> None:
-        self._allow_loop = True
-
-    def exit(self) -> None:
-        self._app.exit()
-
-
-class _PromptCompletionSession:
-    def __init__(
-        self,
-        session: Any,
-        *,
-        completion_timing: str,
-        completion_observed: threading.Event,
-        prompt_entered: threading.Event,
-        loop_read_before_run: threading.Event,
-    ) -> None:
-        self._session = session
-        self._completion_timing = completion_timing
-        self._completion_observed = completion_observed
-        self._prompt_entered = prompt_entered
-        self._loop_read_before_run = loop_read_before_run
-        self.app = _PromptCompletionApp(
-            session.app,
-            completion_timing=completion_timing,
-            loop_read_before_run=loop_read_before_run,
-        )
-
-    def prompt(self, message: str, **kwargs: Any) -> Any:
-        if self._completion_timing == "before_run":
-            self._prompt_entered.set()
-            assert self._completion_observed.wait(timeout=1.0)
-            assert self._loop_read_before_run.wait(timeout=1.0)
-            self.app.allow_loop()
-        return self._session.prompt(message, **kwargs)
-
-
-class _PromptCompletionClient:
-    def __init__(
-        self,
-        *,
-        completion_timing: str,
-        session_holder: dict[str, _PromptCompletionSession],
-        completion_observed: threading.Event,
-        prompt_entered: threading.Event,
-    ) -> None:
-        self._completion_timing = completion_timing
-        self._session_holder = session_holder
-        self._completion_observed = completion_observed
-        self._prompt_entered = prompt_entered
-        self.status = "completed"
-        self.error = None
-        self.stdout_history: list[str] = []
-        self.stop_count = 0
-        self.completed = False
-
-    def start(self) -> None:
-        return None
-
-    def wait(self, timeout: float | None = None) -> bool:
-        del timeout
-        if self.completed:
-            return True
-        if self._completion_timing == "before_run":
-            assert self._prompt_entered.wait(timeout=1.0)
-        if self._completion_timing == "while_running":
-            deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline:
-                session = self._session_holder.get("session")
-                if session is not None and session.app.is_running:
-                    break
-                time.sleep(0.001)
-            else:
-                raise AssertionError("prompt application did not start")
-        self.completed = True
-        self._completion_observed.set()
-        return True
-
-    def send_input(self, _payload: str) -> None:
-        return None
-
-    def close_input(self) -> None:
-        return None
-
-    def stop(self) -> None:
-        self.stop_count += 1
-
-
-class _PromptCompletionQueue:
-    def __init__(self) -> None:
-        self.close_count = 0
-
-    def close(self) -> None:
-        self.close_count += 1
-
-
-class _PromptCompletionContext:
-    def __init__(self, log_queue: _PromptCompletionQueue) -> None:
-        self.broker_target = "unused"
-        self.broker_config: dict[str, Any] = {}
-        self.config: dict[str, Any] = {}
-        self._log_queue = log_queue
-
-    def session(self) -> Any:
-        return nullcontext()
-
-    def queue(self, name: str, *, persistent: bool) -> _PromptCompletionQueue:
-        assert name == WEFT_GLOBAL_LOG_QUEUE
-        assert persistent is True
-        return self._log_queue
-
-
-class _InteractiveExitQueue:
-    def __init__(self, messages: list[str] | None = None) -> None:
-        self._messages = messages
-        self.close_count = 0
-
-    def write(self, message: str) -> None:
-        if self._messages is not None:
-            request = parse_control_request(message)
-            assert request is not None
-            self._messages.append(request.command)
-
-    def close(self) -> None:
-        self.close_count += 1
-
-
-class _InteractiveExitContext:
-    def __init__(self, tid: str, commands: list[str]) -> None:
-        self.broker_target = "unused"
-        self.broker_config: dict[str, Any] = {}
-        self.config: dict[str, Any] = {}
-        self._tid = tid
-        self.log_queue = _InteractiveExitQueue()
-        self.control_queues: list[_InteractiveExitQueue] = []
-        self._commands = commands
-
-    def session(self) -> Any:
-        return nullcontext()
-
-    def queue(self, name: str, *, persistent: bool) -> _InteractiveExitQueue:
-        if name == WEFT_GLOBAL_LOG_QUEUE:
-            assert persistent is True
-            return self.log_queue
-        assert name == f"T{self._tid}.ctrl_in"
-        assert persistent is True
-        queue = _InteractiveExitQueue(self._commands)
-        self.control_queues.append(queue)
-        return queue
-
-
-class _InteractiveEscalationClient:
-    def __init__(self, *, stop_acknowledged: bool, **_kwargs: Any) -> None:
-        self._stop_acknowledged = stop_acknowledged
-        self.status: str | None = None
-        self.error: str | None = None
-        self.stdout_history: list[str] = []
-        self.terminal = False
-        self.stop_count = 0
-
-    def start(self) -> None:
-        return None
-
-    def send_input(self, _payload: str) -> None:
-        return None
-
-    def close_input(self) -> None:
-        return None
-
-    def wait(self, timeout: float | None = None) -> bool:
-        del timeout
-        return self.terminal
-
-    def wait_for_control_response(
-        self,
-        command: str,
-        *,
-        status: str | None = None,
-        timeout: float | None = None,
-    ) -> dict[str, Any] | None:
-        del status, timeout
-        if command == "STOP" and self._stop_acknowledged:
-            self.status = "cancelled"
-            self.error = "Task cancelled"
-            self.terminal = True
-            return {"command": "STOP", "status": "ack"}
-        if command == "KILL":
-            self.status = "killed"
-            self.error = "Task killed"
-            self.terminal = True
-        return None
-
-    def stop(self) -> None:
-        self.stop_count += 1
-
-
-class _QuitPromptApp:
-    is_running = False
-    is_done = False
-    loop = None
-
-    def exit(self) -> None:
-        return None
-
-
-class _QuitPromptSession:
-    app = _QuitPromptApp()
-
-    def __init__(self, _message: str) -> None:
-        return None
-
-    def prompt(self, _message: str, **_kwargs: Any) -> str:
-        return ":quit"
-
-
-class _DormantInteractiveThread:
-    def __init__(self, *, target: Callable[[], None], daemon: bool) -> None:
-        del target, daemon
-
-    def start(self) -> None:
-        return None
-
-    def join(self, timeout: float | None = None) -> None:
-        del timeout
-
-
-class _InteractiveThreadingAdapter:
-    Event = threading.Event
-    Thread = _DormantInteractiveThread
-
-
-class _EmptyMonitorStore:
-    def get_task(self, _tid: str) -> None:
-        return None
-
-
-@pytest.mark.parametrize("completion_timing", ("before_run", "while_running"))
-@pytest.mark.timeout(3)
-def test_interactive_prompt_completion_exits_without_cross_thread_app_mutation(
-    completion_timing: str,
-    monkeypatch: pytest.MonkeyPatch,
-    thread_exception_guard: list[threading.ExceptHookArgs],
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    real_prompt_session = prompt_toolkit.PromptSession
-    session_holder: dict[str, _PromptCompletionSession] = {}
-    completion_observed = threading.Event()
-    prompt_entered = threading.Event()
-    loop_read_before_run = threading.Event()
-    client_holder: dict[str, _PromptCompletionClient] = {}
-    log_queue = _PromptCompletionQueue()
-
-    def make_client(**_kwargs: Any) -> _PromptCompletionClient:
-        client = _PromptCompletionClient(
-            completion_timing=completion_timing,
-            session_holder=session_holder,
-            completion_observed=completion_observed,
-            prompt_entered=prompt_entered,
-        )
-        client_holder["client"] = client
-        return client
-
-    with create_pipe_input() as pipe_input:
-
-        def make_prompt_session(
-            *_args: Any, **_kwargs: Any
-        ) -> _PromptCompletionSession:
-            session: prompt_toolkit.PromptSession[str] = real_prompt_session(
-                input=pipe_input, output=DummyOutput()
-            )
-            wrapper = _PromptCompletionSession(
-                session,
-                completion_timing=completion_timing,
-                completion_observed=completion_observed,
-                prompt_entered=prompt_entered,
-                loop_read_before_run=loop_read_before_run,
-            )
-            session_holder["session"] = wrapper
-            return wrapper
-
-        monkeypatch.setattr(run_cmd, "InteractiveStreamClient", make_client)
-        monkeypatch.setattr(prompt_toolkit, "PromptSession", make_prompt_session)
-        monkeypatch.setattr(
-            "prompt_toolkit.patch_stdout.patch_stdout",
-            lambda: nullcontext(),
-        )
-
-        result = run_cmd._run_interactive_session(
-            cast(
-                WeftContext, _PromptCompletionContext(log_queue)
-            ),  # Deliberate queue-only context double.
-            _make_taskspec(str(time.time_ns())),
-            stdin_data=None,
-            use_prompt=True,
-        )
-
-    assert result == ("completed", None, None)
-    assert client_holder["client"].stop_count == 1
-    assert log_queue.close_count == 1
-    assert thread_exception_guard == []
-    assert capsys.readouterr() == ("", "")
-
-
-def test_interactive_start_failure_closes_owned_resources(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A client start failure still closes both command-owned resources."""
-
-    class StartFailure(Exception):
-        pass
-
-    failure = StartFailure("interactive client start failed")
-    client_holder: dict[str, object] = {}
-    log_queue = _PromptCompletionQueue()
-
-    class FailingStartClient:
-        status = None
-        error = None
-
-        def __init__(self, **_kwargs: Any) -> None:
-            self.stop_count = 0
-            self.stdout_history: list[str] = []
-            client_holder["client"] = self
-
-        def start(self) -> None:
-            raise failure
-
-        def stop(self) -> None:
-            self.stop_count += 1
-
-    monkeypatch.setattr(run_cmd, "InteractiveStreamClient", FailingStartClient)
-
-    with pytest.raises(StartFailure) as exc_info:
-        run_cmd._run_interactive_session(
-            cast(
-                WeftContext, _PromptCompletionContext(log_queue)
-            ),  # Deliberate queue-only context double.
-            _make_taskspec(str(time.time_ns())),
-            stdin_data=None,
-            use_prompt=False,
-        )
-
-    client = client_holder["client"]
-    assert exc_info.value is failure
-    assert isinstance(client, FailingStartClient)
-    assert client.stop_count == 1
-    assert log_queue.close_count == 1
-    assert capsys.readouterr() == ("", "")
-
-
-@pytest.mark.parametrize(
-    ("stop_acknowledged", "expected_commands"),
-    ((True, ["STOP"]), (False, ["STOP", "KILL"])),
-)
-def test_interactive_quit_escalates_stop_before_kill(
-    stop_acknowledged: bool,
-    expected_commands: list[str],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Quit sends KILL only after STOP and its completion checks fail."""
-
-    tid = str(time.time_ns())
-    commands: list[str] = []
-    context = _InteractiveExitContext(tid, commands)
-    client = _InteractiveEscalationClient(stop_acknowledged=stop_acknowledged)
-    ticks = iter(range(100))
-    monkeypatch.setattr(run_cmd, "InteractiveStreamClient", lambda **_kwargs: client)
-    monkeypatch.setattr(run_cmd, "threading", _InteractiveThreadingAdapter)
-    monkeypatch.setattr(run_cmd.time, "monotonic", lambda: float(next(ticks)))
-    monkeypatch.setattr(run_cmd, "poll_log_events", lambda *_args: ([], None))
-    monkeypatch.setattr(
-        run_cmd,
-        "open_monitor_store",
-        lambda *_args, **_kwargs: _EmptyMonitorStore(),
-    )
-    monkeypatch.setattr(prompt_toolkit, "PromptSession", _QuitPromptSession)
-    monkeypatch.setattr(
-        "prompt_toolkit.patch_stdout.patch_stdout",
-        lambda: nullcontext(),
-    )
-
-    result = run_cmd._run_interactive_session(
-        context,  # type: ignore[arg-type]
-        _make_taskspec(tid),
-        stdin_data=None,
-        use_prompt=True,
-    )
-
-    assert commands == expected_commands
-    assert [queue.close_count for queue in context.control_queues] == [1] * len(
-        commands
-    )
-    assert result == ("completed", None, None)
-    assert client.stop_count == 1
-    assert context.log_queue.close_count == 1
-    assert capsys.readouterr() == ("", "")
-
-
-@pytest.mark.parametrize(
-    ("result_source", "expected"),
-    (("callback", "callback"), ("history", "history"), ("outbox", "outbox")),
-)
-def test_interactive_piped_result_precedence(
-    result_source: str,
-    expected: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Captured callback/history output wins; outbox fills only an empty result."""
-
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    taskspec = _make_taskspec(str(time.time_ns()))
-    outbox = context.queue(taskspec.io.outputs["outbox"], persistent=True)
-    try:
-        outbox.write(
-            json.dumps(
-                {
-                    "type": "stream",
-                    "stream": "stdout",
-                    "final": True,
-                    "encoding": "text",
-                    "data": "outbox",
-                }
-            )
-        )
-    finally:
-        outbox.close()
-
-    class CompletingClient:
-        def __init__(self, **kwargs: Any) -> None:
-            self.status = "completed"
-            self.error = None
-            self.stdout_history = ["history"] if result_source == "history" else []
-            self._on_stdout = kwargs["on_stdout"]
-
-        def start(self) -> None:
-            if result_source == "callback":
-                self._on_stdout("callback", False)
-
-        def close_input(self) -> None:
-            return None
-
-        def wait(self, timeout: float | None = None) -> bool:
-            del timeout
-            return True
-
-        def stop(self) -> None:
-            return None
-
-    monkeypatch.setattr(run_cmd, "InteractiveStreamClient", CompletingClient)
-
-    result = run_cmd._run_interactive_session(
-        context,
-        taskspec,
-        stdin_data=None,
-        use_prompt=False,
-    )
-
-    assert result == ("completed", expected, None)
-
-
-def test_interactive_completion_ignores_unexpected_monitor_store_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """An optional Monitor read cannot break the primary interactive channels."""
-
-    class UnexpectedMonitorFailure(Exception):
-        pass
-
-    class CompletingClient:
-        def __init__(self, **_kwargs: Any) -> None:
-            self.wait_count = 0
-            self.status = "completed"
-            self.error = None
-            self.stdout_history: list[str] = []
-
-        def start(self) -> None:
-            return None
-
-        def wait(self, timeout: float | None = None) -> bool:
-            del timeout
-            self.wait_count += 1
-            return self.wait_count > 1
-
-        def close_input(self) -> None:
-            return None
-
-        def stop(self) -> None:
-            return None
-
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    monkeypatch.setattr(run_cmd, "InteractiveStreamClient", CompletingClient)
-    monkeypatch.setattr(
-        run_cmd,
-        "open_monitor_store",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            UnexpectedMonitorFailure("private monitor detail")
-        ),
-    )
-
-    result = run_cmd._run_interactive_session(
-        context,
-        _make_taskspec(str(time.time_ns())),
-        stdin_data=None,
-        use_prompt=False,
-    )
-
-    assert result == ("completed", None, None)
-    assert capsys.readouterr() == ("", "")
-
-
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1092,9 +632,19 @@ def test_terminal_snapshot_falls_back_to_monitor_store_after_raw_log_retirement(
     context = build_context(spec_context=root)
     tid = "1779226615233821720"
     _seed_terminal_monitor_store_record(context, tid=tid)
+    store = open_monitor_store(context)
+    retained_before = store.get_task(tid)
+    assert retained_before is not None
+    assert retained_before.terminal_seen
+    assert retained_before.terminal_status == "failed"
+    with context.queue(WEFT_GLOBAL_LOG_QUEUE) as log_queue:
+        raw_before = list(log_queue.peek_generator(with_timestamps=True))
 
     snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
 
+    assert store.get_task(tid) == retained_before
+    with context.queue(WEFT_GLOBAL_LOG_QUEUE) as log_queue:
+        assert list(log_queue.peek_generator(with_timestamps=True)) == raw_before == []
     assert snapshot.tid == tid
     assert snapshot.status == "failed"
     assert snapshot.source == "monitor_store"
@@ -1103,9 +653,11 @@ def test_terminal_snapshot_falls_back_to_monitor_store_after_raw_log_retirement(
     assert snapshot.return_code == 1
     assert snapshot.observed_at == int(tid) + 279
     assert snapshot.metadata["classification"] == "terminal_monitor_store"
-    assert snapshot.metadata["event"] == "work_failed"
-    assert snapshot.metadata["name"] == "retired-terminal-task"
-    assert snapshot.metadata["task_metadata"] == {"kind": "terminal-fallback"}
+    assert retained_before.taskspec_summary == {
+        "tid": tid,
+        "name": "retired-terminal-task",
+        "metadata": {"kind": "terminal-fallback"},
+    }
     assert snapshot.ack_targets == ()
 
 
@@ -1179,7 +731,9 @@ def test_terminal_snapshot_reports_monitor_store_read_failure(
         del args, kwargs
         raise RuntimeError("store temporarily unavailable")
 
-    monkeypatch.setattr(task_cmd, "open_monitor_store", fail_open_monitor_store)
+    monkeypatch.setattr(
+        "weft.commands._task_history.open_monitor_store", fail_open_monitor_store
+    )
 
     snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
 
@@ -1299,7 +853,9 @@ def test_task_status_reports_unknown_when_monitor_store_read_fails(
         del args, kwargs
         raise RuntimeError("store temporarily unavailable")
 
-    monkeypatch.setattr(task_cmd, "open_monitor_store", fail_open_monitor_store)
+    monkeypatch.setattr(
+        "weft.commands._task_history.open_monitor_store", fail_open_monitor_store
+    )
 
     snapshot = task_cmd.task_status(tid, context_path=root)
 
@@ -1392,179 +948,6 @@ class _FakeQueueChangeMonitor:
 
     def close(self) -> None:
         return
-
-
-def test_wait_for_task_completion_reads_outbox_after_completion_event(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    taskspec = _make_taskspec(tid)
-
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-            }
-        )
-    )
-
-    writes_triggered = 0
-
-    class _LateOutboxMonitor:
-        def __init__(
-            self, _queues: Sequence[Queue], *, config: Config | None = None
-        ) -> None:
-            del config
-
-        def wait(self, timeout: float | None) -> bool:
-            del timeout
-            nonlocal writes_triggered
-            if writes_triggered == 0:
-                writes_triggered += 1
-                outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-                try:
-                    outbox_queue.write("hello")
-                finally:
-                    outbox_queue.close()
-            return False
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(result_wait_cmd, "QueueChangeMonitor", _LateOutboxMonitor)
-
-    status, result, error = _wait_for_task_completion(
-        ctx,
-        taskspec,
-    )
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
-
-
-def test_wait_for_task_completion_aggregates_multiple_outbox_messages(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    taskspec = _make_taskspec(tid)
-
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-            }
-        )
-    )
-
-    writes_triggered = 0
-
-    class _LateOutboxMonitor:
-        def __init__(
-            self, _queues: Sequence[Queue], *, config: Config | None = None
-        ) -> None:
-            del config
-
-        def wait(self, timeout: float | None) -> bool:
-            del timeout
-            nonlocal writes_triggered
-            if writes_triggered == 0:
-                writes_triggered += 1
-                outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-                try:
-                    outbox_queue.write("hello")
-                    outbox_queue.write("world")
-                finally:
-                    outbox_queue.close()
-            return False
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(result_wait_cmd, "QueueChangeMonitor", _LateOutboxMonitor)
-
-    status, result, error = _wait_for_task_completion(
-        ctx,
-        taskspec,
-    )
-
-    assert status == "completed"
-    assert result == ["hello", "world"]
-    assert error is None
-
-
-def test_wait_for_task_completion_classifies_timeout_event_as_timeout(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    taskspec = _make_taskspec(tid)
-
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "timeout",
-                "event": "work_timeout",
-                "error": "Target execution timed out",
-            }
-        )
-    )
-
-    status, result, error = _wait_for_task_completion(
-        ctx,
-        taskspec,
-    )
-
-    assert status == "timeout"
-    assert result is None
-    assert error == "Target execution timed out"
-
-
-class _FakePeekQueue:
-    def __init__(self, records: Sequence[object]) -> None:
-        self._records = records
-
-    def peek_generator(self) -> Iterator[object]:
-        yield from self._records
-
-
-def test_collect_interactive_queue_output_reads_beyond_fixed_window() -> None:
-    records = [
-        (
-            json.dumps(
-                {
-                    "type": "stream",
-                    "stream": "stdout",
-                    "chunk": index,
-                    "final": False,
-                    "encoding": "text",
-                    "data": f"chunk-{index}\n",
-                }
-            ),
-            index,
-        )
-        for index in range(600)
-    ]
-    queue = _FakePeekQueue(records)
-
-    collected = _collect_interactive_queue_output(queue)  # type: ignore[arg-type]
-
-    assert collected == [f"chunk-{index}\n" for index in range(600)]
 
 
 class _FakeManagerSpec:
@@ -2368,9 +1751,9 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
 
     def _fake_enqueue(
         context_arg: WeftContext, taskspec: TaskSpec, work_payload: str | None
-    ) -> int:
+    ) -> tuple[int, dict[str, Any]]:
         calls.append("enqueue")
-        return 1775679597297004544
+        return 1775679597297004544, taskspec.model_dump(mode="json")
 
     def _fake_ensure(
         context_arg: WeftContext, *, submitted_tid: str | int
@@ -2400,7 +1783,6 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
         cpu=None,
         tags=(),
         context_dir=root,
-        wait=False,
         json_output=False,
         verbose=False,
         autostart_enabled=True,
@@ -2437,7 +1819,6 @@ def test_execute_inline_rejects_invalid_function_target_before_context(
             cpu=None,
             tags=(),
             context_dir=None,
-            wait=False,
             json_output=False,
             verbose=False,
             autostart_enabled=True,
@@ -2463,7 +1844,10 @@ def test_execute_run_inline_returns_structured_result_without_rendering(
     )
     monkeypatch.setattr(
         "weft.commands.run._enqueue_taskspec",
-        lambda context_arg, taskspec, work_payload: 1775679597297004544,
+        lambda context_arg, taskspec, work_payload: (
+            1775679597297004544,
+            taskspec.model_dump(mode="json"),
+        ),
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime.ensure_manager",
@@ -2492,7 +1876,6 @@ def test_execute_run_inline_returns_structured_result_without_rendering(
         cpu=None,
         tags=(),
         context_dir=root,
-        wait=False,
         json_output=False,
         verbose=False,
         persistent_override=None,
@@ -2537,7 +1920,6 @@ def test_execute_inline_contains_unexpected_command_boundary_failure(
             cpu=None,
             tags=(),
             context_dir=root,
-            wait=False,
             json_output=False,
             verbose=False,
             autostart_enabled=True,
@@ -2553,10 +1935,10 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
     submitted_tid: dict[str, str] = {}
     original_enqueue = _enqueue_taskspec
 
-    def _recording_enqueue(*args: Any, **kwargs: Any) -> int:
-        tid = original_enqueue(*args, **kwargs)
+    def _recording_enqueue(*args: Any, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+        tid, payload = original_enqueue(*args, **kwargs)
         submitted_tid["value"] = str(tid)
-        return tid
+        return tid, payload
 
     monkeypatch.setattr(
         "weft.commands.run.build_context",
@@ -2584,7 +1966,6 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
             cpu=None,
             tags=(),
             context_dir=root,
-            wait=False,
             json_output=False,
             verbose=False,
             autostart_enabled=True,
@@ -2606,10 +1987,10 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
     submitted_tid: dict[str, str] = {}
     original_enqueue = _enqueue_taskspec
 
-    def _recording_enqueue(*args: Any, **kwargs: Any) -> int:
-        tid = original_enqueue(*args, **kwargs)
+    def _recording_enqueue(*args: Any, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+        tid, payload = original_enqueue(*args, **kwargs)
         submitted_tid["value"] = str(tid)
-        return tid
+        return tid, payload
 
     monkeypatch.setattr(
         "weft.commands.run.build_context",
@@ -2637,13 +2018,16 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
             cpu=None,
             tags=(),
             context_dir=root,
-            wait=True,
             json_output=False,
             verbose=False,
             autostart_enabled=True,
         )
 
-        assert execution.status == "completed"
+        session = run_cmd._LiveRunSession(execution, context)
+        try:
+            assert session.wait(timeout=10).status == "completed"
+        finally:
+            session.close()
         tid = submitted_tid["value"]
         snapshot = _wait_for_task_status(root, tid, expected_status="completed")
         assert snapshot.tid == tid
@@ -2657,7 +2041,7 @@ def test_delete_spawn_request_removes_queued_message(tmp_path: Path) -> None:
     tid = str(time.time_ns())
     taskspec = _make_taskspec(tid)
 
-    message_timestamp = _enqueue_taskspec(context, taskspec, None)
+    message_timestamp, _payload = _enqueue_taskspec(context, taskspec, None)
 
     deleted = _delete_spawn_request(context, message_timestamp)
 
@@ -2693,15 +2077,15 @@ def test_enqueue_template_uses_committed_submission_id(
     def fail_preallocation(_context: WeftContext) -> str:
         raise AssertionError("template enqueue must not preallocate a TID")
 
-    def fake_submit(*args: object, **kwargs: object) -> int:
+    def fake_submit(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
         captured["args"] = args
         captured["kwargs"] = kwargs
-        return committed_id
+        return committed_id, taskspec.model_dump(mode="json")
 
     monkeypatch.setattr(core_manager_runtime, "generate_tid", fail_preallocation)
-    monkeypatch.setattr(run_cmd, "submit_spawn_request", fake_submit)
+    monkeypatch.setattr(run_cmd, "_submit_spawn_request_with_payload", fake_submit)
 
-    submitted_id = _enqueue_taskspec(context, taskspec, None)
+    submitted_id, _payload = _enqueue_taskspec(context, taskspec, None)
 
     assert submitted_id == committed_id
     assert captured["kwargs"]["tid"] is None
@@ -2820,7 +2204,8 @@ def test_reconcile_submitted_spawn_reports_queued_for_unclaimed_request(
     context = build_context(spec_context=root)
     tid = str(time.time_ns())
     taskspec = _make_taskspec(tid)
-    submitted_tid = str(_enqueue_taskspec(context, taskspec, None))
+    submitted_id, _payload = _enqueue_taskspec(context, taskspec, None)
+    submitted_tid = str(submitted_id)
 
     result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.0)
 
@@ -2852,7 +2237,8 @@ def test_reconcile_submitted_spawn_reports_reserved_for_claimed_request(
 
     tid = str(time.time_ns())
     taskspec = _make_taskspec(tid)
-    submitted_tid = str(_enqueue_taskspec(context, taskspec, None))
+    submitted_id, _payload = _enqueue_taskspec(context, taskspec, None)
+    submitted_tid = str(submitted_id)
     spawn_queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
     try:
         moved = spawn_queue.move_one(
@@ -3202,7 +2588,6 @@ def test_run_inline_retains_spawn_request_when_manager_readiness_degrades(
         cpu=None,
         tags=(),
         context_dir=root,
-        wait=False,
         json_output=False,
         verbose=False,
         autostart_enabled=True,
@@ -3255,7 +2640,6 @@ def test_run_spec_via_manager_retains_request_when_readiness_degrades(
         spec_path,
         name=None,
         verbose=False,
-        wait=False,
         json_output=False,
         autostart_enabled=True,
         persistent_override=None,
@@ -3307,63 +2691,10 @@ def test_execute_spec_contains_unexpected_command_boundary_failure(
             spec_path,
             name=None,
             verbose=False,
-            wait=False,
             json_output=False,
             autostart_enabled=True,
             persistent_override=None,
         )
-
-
-def test_run_spec_via_manager_returns_timeout_exit_code(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    spec_path = root / "task.json"
-    _write_json(
-        spec_path,
-        {
-            "name": "demo-task",
-            "spec": {
-                "type": "function",
-                "function_target": "tests.tasks.sample_targets:echo_payload",
-            },
-            "metadata": {},
-        },
-    )
-
-    monkeypatch.setattr(
-        "weft.commands.run._ensure_manager_after_submission",
-        lambda context, *, submitted_tid: _ready_manager_result(),
-    )
-    monkeypatch.setattr(
-        "weft.commands.run._enqueue_taskspec",
-        lambda context, taskspec, work_payload, seed_start_envelope=True: (
-            1777000000000000000
-        ),
-    )
-    monkeypatch.setattr(
-        "weft.commands.run._wait_for_task_completion",
-        lambda context, resolved_spec: (
-            "timeout",
-            None,
-            "Timed out waiting for task",
-        ),
-    )
-    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
-
-    execution = _execute_spec_via_manager(
-        spec_path,
-        name=None,
-        verbose=False,
-        wait=True,
-        json_output=False,
-        autostart_enabled=True,
-        persistent_override=None,
-    )
-
-    assert execution.status == "timeout"
-    assert execution.error_message == "Timed out waiting for task"
 
 
 def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
@@ -3396,11 +2727,14 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
         *,
         seed_start_envelope: bool = True,
         allow_internal_runtime: bool = False,
-    ) -> int:
+    ) -> tuple[int, dict[str, Any]]:
         del context_arg, work_payload, seed_start_envelope, allow_internal_runtime
         captured["name"] = taskspec.name
         captured["metadata"] = dict(taskspec.metadata)
-        return 1777000000000000001
+        return (
+            int(taskspec.tid) if taskspec.tid is not None else 1777000000000000001,
+            taskspec.model_dump(mode="json"),
+        )
 
     monkeypatch.setattr(
         "weft.commands.run.build_context",
@@ -3417,7 +2751,6 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
         spec_path,
         name="mayor",
         verbose=False,
-        wait=False,
         json_output=False,
         autostart_enabled=True,
         persistent_override=None,
@@ -3456,11 +2789,14 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
         *,
         seed_start_envelope: bool = True,
         allow_internal_runtime: bool = False,
-    ) -> int:
+    ) -> tuple[int, dict[str, Any]]:
         del context_arg, work_payload, seed_start_envelope, allow_internal_runtime
         captured["name"] = taskspec.name
         captured["metadata"] = dict(taskspec.metadata)
-        return 1777000000000000002
+        return (
+            int(taskspec.tid) if taskspec.tid is not None else 1777000000000000002,
+            taskspec.model_dump(mode="json"),
+        )
 
     monkeypatch.setattr(
         "weft.commands.run.build_context",
@@ -3477,7 +2813,6 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
         spec_path,
         name="mayor",
         verbose=False,
-        wait=False,
         json_output=False,
         autostart_enabled=True,
         persistent_override=None,
@@ -3522,7 +2857,6 @@ def test_run_spec_via_manager_rejects_reserved_internal_name_prefix(
             spec_path,
             name="_weft.heartbeat",
             verbose=False,
-            wait=False,
             json_output=False,
             autostart_enabled=True,
             persistent_override=None,
@@ -3576,7 +2910,6 @@ def test_run_pipeline_retains_request_when_manager_readiness_degrades(
         name=None,
         pipeline_input=None,
         context_dir=root,
-        wait=False,
         json_output=False,
         verbose=False,
         autostart_enabled=True,
@@ -3625,11 +2958,14 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
         *,
         seed_start_envelope: bool = True,
         allow_internal_runtime: bool = False,
-    ) -> int:
+    ) -> tuple[int, dict[str, Any]]:
         del context_arg, work_payload, seed_start_envelope, allow_internal_runtime
         captured["name"] = taskspec.name
         captured["metadata"] = dict(taskspec.metadata)
-        return 1777000000000000003
+        return (
+            int(taskspec.tid) if taskspec.tid is not None else 1777000000000000003,
+            taskspec.model_dump(mode="json"),
+        )
 
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager_after_submission",
@@ -3643,7 +2979,6 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
         name="nightly",
         pipeline_input=None,
         context_dir=root,
-        wait=False,
         json_output=False,
         verbose=False,
         autostart_enabled=True,
@@ -3700,7 +3035,6 @@ def test_run_pipeline_without_input_does_not_inject_work_envelope_start(
         name=None,
         pipeline_input=None,
         context_dir=root,
-        wait=False,
         json_output=False,
         verbose=False,
         autostart_enabled=True,

@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Self, TypedDict, cast
+from typing import Any, Self, TypedDict
 
 import pytest
 from psycopg_pool import PoolTimeout
@@ -25,22 +25,21 @@ from weft.commands import _result_wait as result_wait
 from weft.commands import events as events_cmd
 from weft.commands import result as result_cmd
 from weft.commands._streaming import (
-    collect_interactive_queue_output,
     handle_ctrl_stream,
-    poll_log_events,
     process_outbox_message,
 )
+from weft.commands._task_history import load_latest_taskspec_payload
 from weft.commands.result import (
-    _await_single_result,
-    _load_taskspec_payload,
-    await_one_shot_result,
     await_task_result,
     cmd_result,
 )
 from weft.commands.types import TaskEvent, TaskResult
 from weft.context import WeftContext, build_context
 from weft.core import task_evidence
-from weft.helpers import iter_queue_json_entries
+from weft.core.task_state import task_state_queue_name
+from weft.core.tasks.consumer import Consumer
+from weft.core.taskspec import TaskSpec
+from weft.helpers import closing_queue_iterator, iter_queue_json_entries
 
 
 class _ResultOptions(TypedDict, total=False):
@@ -382,6 +381,61 @@ def _one_shot_taskspec_payload(tid: str) -> dict[str, object]:
     }
 
 
+@contextmanager
+def _result_consumer(
+    context: WeftContext,
+    tid: str,
+    *,
+    persistent: bool = False,
+    stream_output: bool = False,
+    function_target: str = "tests.tasks.sample_targets:echo_payload",
+) -> Iterator[Consumer]:
+    """Own real task publications and worker cleanup for result contracts."""
+    payload = _one_shot_taskspec_payload(tid)
+    payload["spec"] = {
+        "type": "function",
+        "function_target": function_target,
+        "persistent": persistent,
+        "stream_output": stream_output,
+        "cleanup_on_exit": False,
+        "enable_process_title": False,
+        "weft_context": str(context.root),
+    }
+    consumer = Consumer(
+        context.broker_target, TaskSpec.model_validate(payload), config=context.config
+    )
+    try:
+        yield consumer
+    finally:
+        consumer.cleanup()
+
+
+def _retire_result_proof(
+    context: WeftContext,
+    spec: TaskSpec,
+    *,
+    local_terminal: bool = False,
+) -> None:
+    """Retire a real producer's log; optionally retain only its result surface."""
+    assert spec.tid is not None
+    with context.queue(WEFT_GLOBAL_LOG_QUEUE) as log, log.get_connection() as broker:
+        rows, _horizon = task_evidence.read_task_history(
+            context, spec.tid, broker=broker
+        )
+        broker.delete_message_ids(
+            WEFT_GLOBAL_LOG_QUEUE, [message_id for _payload, message_id in rows]
+        )
+    if local_terminal:
+        for name in (spec.io.control["ctrl_out"], task_state_queue_name(spec.tid)):
+            with context.queue(name) as queue:
+                with closing_queue_iterator(
+                    queue.peek_generator(with_timestamps=True)
+                ) as entries:
+                    message_ids = [message_id for _raw, message_id in entries]
+                for message_id in message_ids:
+                    assert queue.delete(message_id=message_id)
+
+
 def _log_timestamps_by_tid(queue: Queue) -> dict[str, list[int]]:
     timestamps: dict[str, list[int]] = {}
     for payload, timestamp in iter_queue_json_entries(queue):
@@ -474,25 +528,39 @@ def test_process_outbox_message_handles_malformed_base64() -> None:
     assert value.value == ""
 
 
-def test_collect_interactive_queue_output_handles_malformed_base64() -> None:
-    class _Queue:
-        def peek_generator(self) -> Iterator[str]:
-            yield json.dumps(
+def test_consuming_stream_preserves_malformed_base64_transport(tmp_path: Path) -> None:
+    context = build_context(prepare_project_root(tmp_path))
+    tid = str(time.time_ns())
+    spec = TaskSpec.model_validate(_one_shot_taskspec_payload(tid))
+    with context.queue(spec.io.outputs["outbox"]) as outbox:
+        outbox.write(
+            json.dumps(
                 {
                     "type": "stream",
                     "stream": "stdout",
                     "encoding": "base64",
                     "data": "%%%not-base64%%%",
+                    "final": False,
                 }
             )
+        )
+    source = result_cmd._iter_task_result(
+        context,
+        tid,
+        timeout=0,
+        include_stream_events=True,
+        _accepted_taskspec=spec,
+    )
+    with closing_queue_iterator(source):
+        frame = next(source)
+        assert isinstance(frame, TaskEvent)
+        assert frame.event_type == "stdout"
+        assert frame.payload["data"] == "%%%not-base64%%%"
 
-    # The double supplies malformed transport data at the queue read boundary.
-    assert collect_interactive_queue_output(cast(Queue, _Queue())) == [
-        "%%%not-base64%%%"
-    ]
 
-
-def test_poll_log_events_advances_cursor_over_unrelated_events(tmp_path: Path) -> None:
+def test_task_history_reader_advances_cursor_over_unrelated_events(
+    tmp_path: Path,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
@@ -508,19 +576,23 @@ def test_poll_log_events_advances_cursor_over_unrelated_events(tmp_path: Path) -
         timestamp for values in timestamps.values() for timestamp in values
     )
 
-    events, cursor = poll_log_events(log_queue, None, target_tid)
+    events, cursor = task_evidence.read_task_history(ctx, target_tid)
 
     assert [payload["tid"] for payload, _timestamp in events] == [target_tid]
     assert events[0][1] == target_timestamp
     assert cursor == highest_timestamp
 
-    later_events, later_cursor = poll_log_events(log_queue, cursor, target_tid)
+    later_events, later_cursor = task_evidence.read_task_history(
+        ctx, target_tid, after_timestamp=cursor
+    )
 
     assert later_events == []
     assert later_cursor == cursor
 
 
-def test_poll_log_events_advances_cursor_when_no_target_events(tmp_path: Path) -> None:
+def test_task_history_reader_advances_cursor_when_no_target_events(
+    tmp_path: Path,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
@@ -534,7 +606,7 @@ def test_poll_log_events_advances_cursor_when_no_target_events(tmp_path: Path) -
         timestamp for values in timestamps.values() for timestamp in values
     )
 
-    events, cursor = poll_log_events(log_queue, None, target_tid)
+    events, cursor = task_evidence.read_task_history(ctx, target_tid)
 
     assert events == []
     assert cursor == highest_timestamp
@@ -572,25 +644,23 @@ def test_iter_task_events_follow_advances_cursor_over_unrelated_events(
         def close(self) -> None:
             return
 
-    real_iter = events_cmd.iter_queue_json_entries
+    real_read = events_cmd.read_task_history
     since_timestamps: list[int | None] = []
 
-    def _recording_iter(
-        queue: Queue, *, since_timestamp: int | None = None
-    ) -> Iterator[tuple[dict[str, Any], int]]:
-        since_timestamps.append(since_timestamp)
-        real_generator = real_iter(queue, since_timestamp=since_timestamp)
-        if len(since_timestamps) != 2:
-            return real_generator
-
-        def _sentinel_generator() -> Iterator[tuple[dict[str, Any], int]]:
+    def recording_read(
+        context: WeftContext,
+        tid: str,
+        *,
+        broker: Any,
+        after_timestamp: int | None = None,
+    ) -> tuple[list[tuple[dict[str, Any], int]], int | None]:
+        since_timestamps.append(after_timestamp)
+        if len(since_timestamps) == 2:
             raise _StopAfterSecondScan
-            yield  # pragma: no cover - keep this function a generator
+        return real_read(context, tid, broker=broker, after_timestamp=after_timestamp)
 
-        return _sentinel_generator()
-
-    monkeypatch.setattr(events_cmd, "QueueChangeMonitor", _NoSleepMonitor)
-    monkeypatch.setattr(events_cmd, "iter_queue_json_entries", _recording_iter)
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _NoSleepMonitor)
+    monkeypatch.setattr(events_cmd, "read_task_history", recording_read)
 
     event_iter = events_cmd.iter_task_events(
         ctx,
@@ -602,15 +672,15 @@ def test_iter_task_events_follow_advances_cursor_over_unrelated_events(
         first_event = next(event_iter)
         assert first_event.tid == target_tid
         assert first_event.event_type == "task_started"
-        with pytest.raises(_StopAfterSecondScan):
+        with pytest.raises(CommandExecutionError) as caught:
             next(event_iter)
+        assert isinstance(caught.value.__cause__, _StopAfterSecondScan)
     finally:
         close = getattr(event_iter, "close", None)
         assert callable(close)
         close()
 
-    assert since_timestamps[0] == int(target_tid)
-    assert since_timestamps[1] == highest_unrelated_timestamp + 1
+    assert since_timestamps == [None, highest_unrelated_timestamp]
 
 
 def test_iter_task_events_non_follow_yields_only_target_events(tmp_path: Path) -> None:
@@ -633,7 +703,7 @@ def test_iter_task_events_non_follow_yields_only_target_events(tmp_path: Path) -
     assert {event.tid for event in events} == {target_tid}
 
 
-def test_load_taskspec_payload_reads_full_log_history(tmp_path: Path) -> None:
+def test_load_latest_taskspec_payload_reads_full_log_history(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     queue = ctx.queue("weft.log.tasks", persistent=True)
@@ -658,15 +728,14 @@ def test_load_taskspec_payload_reads_full_log_history(tmp_path: Path) -> None:
             )
         )
 
-    taskspec = _load_taskspec_payload(ctx, target_tid)
+    taskspec = load_latest_taskspec_payload(ctx, target_tid)
 
     assert taskspec is not None
     assert taskspec["tid"] == target_tid
 
 
-def test_await_result_materialization_falls_back_on_malformed_io(
+def test_result_acquisition_falls_back_on_malformed_io(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -680,17 +749,19 @@ def test_await_result_materialization_falls_back_on_malformed_io(
         "metadata": {},
     }
 
-    monkeypatch.setattr(
-        result_cmd,
-        "_load_taskspec_payload",
-        lambda _context, requested_tid, **_kwargs: (
-            taskspec_payload if requested_tid == tid else None
-        ),
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE) as log_queue:
+        log_queue.write(json.dumps({"tid": tid, "taskspec": taskspec_payload}))
+
+    materialized = result_wait.ResultMaterialization(
+        None, f"T{tid}.outbox", f"T{tid}.ctrl_out"
     )
-
-    materialized = result_cmd._await_result_materialization(ctx, tid, timeout=0.0)
-
-    assert materialized is not None
+    with (
+        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log,
+        log.get_connection() as broker,
+    ):
+        materialized, _rows = result_wait._acquire_result_observation(
+            ctx, tid, materialized, log, broker, now=time.monotonic()
+        )
     assert materialized.outbox_name == f"T{tid}.outbox"
     assert materialized.ctrl_out_name == f"T{tid}.ctrl_out"
 
@@ -702,98 +773,51 @@ def test_iter_task_realtime_events_falls_back_on_malformed_io(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    materialized = result_cmd.ResultMaterialization(
-        taskspec_payload={
-            "tid": tid,
-            "name": "malformed-io",
-            "spec": {"type": "function"},
-            "io": "not-a-dict",
-            "state": {"status": "running"},
-            "metadata": {},
-        },
-        outbox_name=f"T{tid}.outbox",
-        ctrl_out_name=f"T{tid}.ctrl_out",
-    )
-    monkeypatch.setattr(
-        events_cmd,
-        "_await_result_materialization",
-        lambda *_args, **_kwargs: materialized,
-    )
-
-    assert list(events_cmd.iter_task_realtime_events(ctx, tid, follow=False)) == []
+    payload = {
+        "tid": tid,
+        "spec": {"type": "function"},
+        "io": "not-a-dict",
+        "state": {"status": "running"},
+        "metadata": {},
+    }
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
+        log.write(json.dumps({"tid": tid, "taskspec": payload}))
+    events = list(events_cmd.iter_task_realtime_events(ctx, tid, follow=False))
+    assert all(event.event_type != "result" for event in events)
 
 
-def test_load_taskspec_payload_closes_log_queue() -> None:
+def test_load_latest_taskspec_payload_closes_log_queue(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = build_context(spec_context=workdir)
     tid = "1844674407370955199"
-
-    class FakeQueue:
-        def __init__(self) -> None:
-            self.closed = False
-
-        def peek_generator(
-            self,
-            queue_name: str,
-            *,
-            with_timestamps: bool = False,
-            after_timestamp: int | None = None,
-            before_timestamp: int | None = None,
-        ) -> Iterator[tuple[str, int]]:
-            assert queue_name == WEFT_GLOBAL_LOG_QUEUE
-            assert with_timestamps is True
-            assert after_timestamp == int(tid) - 1
-            assert before_timestamp is None
-            payload = json.dumps(
-                {
-                    "tid": tid,
-                    "taskspec": {
-                        "tid": tid,
-                        "name": "closed-queue-task",
-                        "state": {"status": "running"},
-                    },
-                }
+    with context.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
+        log.write(
+            json.dumps(
+                {"tid": tid, "taskspec": {"tid": tid, "name": "closed-queue-task"}}
             )
-            return iter([(payload, int(tid))])
+        )
+    closed: list[str] = []
+    exited: list[bool] = []
+    original_close = Queue.close
+    original_session = WeftContext.session
 
-        def close(self) -> None:
-            self.closed = True
+    def close(queue: Queue) -> None:
+        closed.append(queue.name)
+        original_close(queue)
 
-        def __enter__(self) -> Self:
-            return self
+    @contextmanager
+    def session(ctx: WeftContext) -> Iterator[Any]:
+        with original_session(ctx) as owner:
+            yield owner
+        exited.append(True)
 
-        def __exit__(self, *_args: object) -> None:
-            self.close()
-
-        @contextmanager
-        def get_connection(self) -> Iterator[Self]:
-            yield self
-
-    queue = FakeQueue()
-
-    class FakeContext:
-        def __init__(self) -> None:
-            self.session_exited = False
-
-        @contextmanager
-        def session(self) -> Iterator[None]:
-            try:
-                yield
-            finally:
-                self.session_exited = True
-
-        def queue(self, name: str, *, persistent: bool = False) -> FakeQueue:
-            assert name == WEFT_GLOBAL_LOG_QUEUE
-            assert persistent is True
-            return queue
-
-    context = FakeContext()
-    taskspec = _load_taskspec_payload(
-        cast(WeftContext, context), tid
-    )  # Queue-lifetime double.
-
-    assert taskspec is not None
-    assert taskspec["tid"] == tid
-    assert queue.closed is True
-    assert context.session_exited is True
+    monkeypatch.setattr(Queue, "close", close)
+    monkeypatch.setattr(WeftContext, "session", session)
+    taskspec = load_latest_taskspec_payload(context, tid)
+    assert taskspec is not None and taskspec["tid"] == tid
+    assert closed == [WEFT_GLOBAL_LOG_QUEUE]
+    assert exited == [True]
 
 
 def test_cmd_result_reports_failed_task_without_outbox(tmp_path: Path) -> None:
@@ -875,7 +899,7 @@ def test_cmd_result_reports_claimed_outbox_without_waiting(
     def fail_result_wait(*args: object, **kwargs: object) -> tuple[str, None, str]:
         raise AssertionError("claimed result blockage should not enter result wait")
 
-    monkeypatch.setattr(result_cmd, "_await_single_result", fail_result_wait)
+    monkeypatch.setattr(result_wait.QueueChangeMonitor, "wait", fail_result_wait)
     try:
         log_queue.write(
             json.dumps(
@@ -909,114 +933,68 @@ def test_cmd_result_reports_claimed_outbox_without_waiting(
     )
 
 
-def test_await_single_result_reads_outbox_after_completion_event(
+def test_await_task_result_reads_outbox_after_completion_event(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    """A real terminal publication can precede visible output at the reader."""
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+    original_wait = result_wait.QueueChangeMonitor.wait
+    published = False
+    with _result_consumer(ctx, tid) as consumer, ctx.queue(f"T{tid}.outbox") as outbox:
+        assert consumer.run_work_item({"args": ["hello"]}) == "hello"
+        pending = outbox.read_one()
+        assert pending is not None
 
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-            }
-        )
-    )
+        def wait(monitor: Any, timeout: float | None) -> bool:
+            nonlocal published
+            if not published:
+                outbox.write(pending)
+                published = True
+            return original_wait(monitor, timeout)
 
-    class _WakeMonitor:
-        def __init__(
-            self, _queues: Sequence[Queue], *, config: Config | None = None
-        ) -> None:
-            del config
-            self._written = False
-
-        def wait(self, timeout: float | None) -> bool:
-            del timeout
-            if not self._written:
-                outbox_queue.write("hello")
-                self._written = True
-            return False
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
-    try:
-        status, result, error = _await_single_result(
-            ctx,
-            tid,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-        )
-    finally:
-        outbox_queue.close()
-        log_queue.close()
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
+        monkeypatch.setattr(result_wait.QueueChangeMonitor, "wait", wait)
+        observed = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
+    assert published
+    assert observed.status == "completed"
+    assert observed.value == "hello"
+    assert observed.error is None
 
 
-def test_await_single_result_returns_visible_one_shot_result_at_deadline(
+def test_await_task_result_returns_visible_one_shot_result_at_deadline(
     tmp_path: Path,
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
-
-    try:
-        outbox_queue.write("ready")
-
-        status, result, error = _await_single_result(
+    with _result_consumer(ctx, tid) as consumer:
+        assert consumer.run_work_item({"args": ["ready"]}) == "ready"
+        _retire_result_proof(ctx, consumer.taskspec, local_terminal=True)
+        observed = await_task_result(
             ctx,
             tid,
-            timeout=0.01,
-            show_stderr=False,
-            taskspec_payload=None,
-            outbox_name=outbox_name,
-            ctrl_out_name=f"T{tid}.ctrl_out",
+            timeout=0.0,
+            _accepted_taskspec=consumer.taskspec,
         )
-    finally:
-        outbox_queue.close()
-
-    assert status == "completed"
-    assert result == "ready"
-    assert error is None
+    assert observed.status == "completed"
+    assert observed.value == "ready"
+    assert observed.error is None
 
 
-def test_await_single_result_zero_timeout_does_not_wait_on_partial_stream(
+def test_await_task_result_zero_timeout_does_not_wait_on_partial_stream(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
+    spec = TaskSpec.model_validate(_one_shot_taskspec_payload(tid))
 
-    class _NoWaitMonitor:
-        def __init__(
-            self, _queues: Sequence[Queue], *, config: Config | None = None
-        ) -> None:
-            del config
+    def wait(_monitor: Any, timeout: float | None) -> bool:
+        raise AssertionError(f"unexpected wait with timeout={timeout!r}")
 
-        def wait(self, timeout: float | None) -> bool:
-            raise AssertionError(f"unexpected wait with timeout={timeout!r}")
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _NoWaitMonitor)
-    try:
-        outbox_queue.write(
+    monkeypatch.setattr(result_wait.QueueChangeMonitor, "wait", wait)
+    with ctx.queue(spec.io.outputs["outbox"]) as outbox:
+        outbox.write(
             json.dumps(
                 {
                     "type": "stream",
@@ -1026,391 +1004,175 @@ def test_await_single_result_zero_timeout_does_not_wait_on_partial_stream(
                 }
             )
         )
-
         with pytest.raises(CommandTimeoutError, match="Timed out after 0.0 seconds"):
-            _await_single_result(
+            await_task_result(ctx, tid, timeout=0.0, _accepted_taskspec=spec)
+
+
+def test_await_task_result_retains_terminal_ctrl_out_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = build_context(prepare_project_root(tmp_path))
+    tid = str(time.time_ns())
+    monkeypatch.setattr(result_wait, "WEFT_COMPLETED_RESULT_GRACE_SECONDS", 0.0)
+    with _result_consumer(ctx, tid) as consumer:
+        assert consumer.run_work_item({"args": ["hello"]}) == "hello"
+        _retire_result_proof(ctx, consumer.taskspec)
+        with ctx.queue(consumer.taskspec.io.control["ctrl_out"]) as control:
+            terminal = control.peek_one()
+            assert terminal is not None
+            observed = await_task_result(
                 ctx,
                 tid,
-                timeout=0.0,
-                show_stderr=False,
-                emit_stream=False,
-                taskspec_payload=None,
-                outbox_name=outbox_name,
-                ctrl_out_name=f"T{tid}.ctrl_out",
+                timeout=RESULT_WAIT_TIMEOUT,
+                _accepted_taskspec=consumer.taskspec,
             )
-    finally:
-        outbox_queue.close()
+            assert control.peek_one() == terminal
+    assert observed.status == "completed"
+    assert observed.value == "hello"
+    assert observed.error is None
 
 
-def test_await_one_shot_result_reads_outbox_after_completion_event(
+def test_await_task_result_prefers_task_completed_over_manager_wrapper_lost(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    """Later manager inference cannot override a real task-owned terminal."""
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-            }
-        )
-    )
-
-    class _WakeMonitor:
-        def __init__(
-            self, _queues: Sequence[Queue], *, config: Config | None = None
-        ) -> None:
-            del config
-            self._written = False
-
-        def wait(self, timeout: float | None) -> bool:
-            del timeout
-            if not self._written:
-                outbox_queue.write("hello")
-                self._written = True
-            return False
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
-    try:
-        status, result, error = await_one_shot_result(
-            ctx,
-            tid,
-            outbox_name=f"T{tid}.outbox",
-            ctrl_out_name=None,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-        )
-    finally:
-        outbox_queue.close()
-        log_queue.close()
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
-
-
-def test_await_one_shot_result_retains_terminal_ctrl_out_proof(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
-    ctrl_queue = ctx.queue(ctrl_out_name, persistent=False)
-    outbox_queue.write("hello")
-    ctrl_queue.write(
-        json.dumps(
-            {
-                "type": "terminal",
-                "source": "task",
-                "tid": tid,
-                "status": "completed",
-                "timestamp": time.time_ns(),
-            }
-        )
-    )
-    monkeypatch.setattr(
-        result_wait,
-        "poll_log_events",
-        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
-    )
     monkeypatch.setattr(result_wait, "WEFT_COMPLETED_RESULT_GRACE_SECONDS", 0.0)
-
-    try:
-        status, result, error = await_one_shot_result(
-            ctx,
-            tid,
-            outbox_name=outbox_name,
-            ctrl_out_name=ctrl_out_name,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
+    with _result_consumer(ctx, tid) as consumer:
+        assert consumer.run_work_item({"args": ["hello"]}) == "hello"
+        _retire_result_proof(ctx, consumer.taskspec)
+        with ctx.queue(consumer.taskspec.io.control["ctrl_out"]) as control:
+            control.write(
+                json.dumps(
+                    {
+                        "type": "terminal",
+                        "source": "manager",
+                        "tid": tid,
+                        "status": "failed",
+                        "error": task_evidence.WRAPPER_LOST_ERROR,
+                        "return_code": 1,
+                        "timestamp": time.time_ns(),
+                    }
+                )
+            )
+        observed = await_task_result(
+            ctx, tid, timeout=RESULT_WAIT_TIMEOUT, _accepted_taskspec=consumer.taskspec
         )
-        retained = ctrl_queue.peek_one()
-    finally:
-        outbox_queue.close()
-        ctrl_queue.close()
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
-    assert retained is not None
+    assert observed.status == "completed"
+    assert observed.value == "hello"
+    assert observed.error is None
 
 
-def test_await_one_shot_result_prefers_task_completed_over_manager_wrapper_lost(
+def test_await_task_result_preserves_output_with_manager_wrapper_lost_failure(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`weft result` honors a task ``completed`` over a later manager wrapper_lost.
-
-    Regression for the completed->failed inversion on the result-wait path: with
-    no terminal task-log event, the ctrl_out drain is the selected source, and a
-    manager ``wrapper_lost`` envelope written after the task ``completed`` envelope
-    must not flip the reported result to failed.
-
-    Spec: [MF-5]
-    """
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    """MF-5 typed terminal failure keeps acquired output for diagnostics."""
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
-    ctrl_queue = ctx.queue(ctrl_out_name, persistent=False)
-    outbox_queue.write("hello")
-    ctrl_queue.write(
-        json.dumps(
-            {
-                "type": "terminal",
-                "source": "task",
-                "tid": tid,
-                "status": "completed",
-                "timestamp": time.time_ns(),
-            }
+    with _result_consumer(ctx, tid) as consumer:
+        assert consumer.run_work_item({"args": ["hello"]}) == "hello"
+        _retire_result_proof(ctx, consumer.taskspec, local_terminal=True)
+        with ctx.queue(consumer.taskspec.io.control["ctrl_out"]) as control:
+            control.write(
+                json.dumps(
+                    {
+                        "type": "terminal",
+                        "source": "manager",
+                        "tid": tid,
+                        "status": "failed",
+                        "error": task_evidence.WRAPPER_LOST_ERROR,
+                        "return_code": 0,
+                        "timestamp": time.time_ns(),
+                    }
+                )
+            )
+        observed = await_task_result(
+            ctx, tid, timeout=RESULT_WAIT_TIMEOUT, _accepted_taskspec=consumer.taskspec
         )
-    )
-    ctrl_queue.write(
-        json.dumps(
-            {
-                "type": "terminal",
-                "source": "manager",
-                "tid": tid,
-                "status": "failed",
-                "error": task_evidence.WRAPPER_LOST_ERROR,
-                "return_code": 1,
-                "timestamp": time.time_ns(),
-            }
-        )
-    )
-    # No terminal task-log event: force the ctrl_out drain to be the selected source.
-    monkeypatch.setattr(
-        result_wait,
-        "poll_log_events",
-        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
-    )
-    monkeypatch.setattr(result_wait, "WEFT_COMPLETED_RESULT_GRACE_SECONDS", 0.0)
-
-    try:
-        status, result, error = await_one_shot_result(
-            ctx,
-            tid,
-            outbox_name=outbox_name,
-            ctrl_out_name=ctrl_out_name,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-        )
-    finally:
-        outbox_queue.close()
-        ctrl_queue.close()
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
+    assert observed.status == "failed"
+    assert observed.value == "hello"
+    assert observed.error == task_evidence.WRAPPER_LOST_ERROR
 
 
-def test_await_one_shot_result_prefers_outbox_over_manager_wrapper_lost(
+def test_await_task_result_accepts_prewritten_outbox_when_log_event_is_missed(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real one-shot result outranks manager wrapper_lost fallback evidence."""
-
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
-    ctrl_queue = ctx.queue(ctrl_out_name, persistent=False)
-    ctrl_queue.write(
-        json.dumps(
-            {
-                "type": "terminal",
-                "source": "manager",
-                "tid": tid,
-                "status": "failed",
-                "error": task_evidence.WRAPPER_LOST_ERROR,
-                "return_code": 0,
-                "timestamp": time.time_ns(),
-            }
-        )
-    )
-    outbox_queue.write("hello")
-    monkeypatch.setattr(
-        result_wait,
-        "poll_log_events",
-        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
-    )
-
-    try:
-        status, result, error = await_one_shot_result(
+    with _result_consumer(
+        ctx, tid, function_target="tests.tasks.sample_targets:provide_stdio"
+    ) as consumer:
+        assert consumer.run_work_item(
+            {"kwargs": {"stdout": "out", "stderr": "err"}}
+        ) == {"stdout": "out", "stderr": "err"}
+        _retire_result_proof(ctx, consumer.taskspec, local_terminal=True)
+        observed = await_task_result(
             ctx,
             tid,
-            outbox_name=outbox_name,
-            ctrl_out_name=ctrl_out_name,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-        )
-    finally:
-        outbox_queue.close()
-        ctrl_queue.close()
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
-
-
-def test_await_one_shot_result_accepts_prewritten_outbox_when_log_event_is_missed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
-    outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
-    monkeypatch.setattr(
-        result_wait,
-        "poll_log_events",
-        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
-    )
-
-    try:
-        status, result, error = await_one_shot_result(
-            ctx,
-            tid,
-            outbox_name=outbox_name,
-            ctrl_out_name=f"T{tid}.ctrl_out",
             timeout=RESULT_WAIT_TIMEOUT,
             show_stderr=True,
+            _accepted_taskspec=consumer.taskspec,
         )
-    finally:
-        outbox_queue.close()
-
-    assert status == "completed"
-    assert result == "err"
-    assert error is None
+    assert observed.status == "completed"
+    assert observed.value == "err"
+    assert observed.error is None
 
 
-def test_await_one_shot_result_accepts_single_primitive_outbox_when_log_event_is_missed(
+def test_await_task_result_accepts_single_primitive_outbox_when_log_event_is_missed(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
-    outbox_queue.write("hello")
-    monkeypatch.setattr(
-        result_wait,
-        "poll_log_events",
-        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
-    )
-
-    try:
-        status, result, error = await_one_shot_result(
-            ctx,
-            tid,
-            outbox_name=outbox_name,
-            ctrl_out_name=f"T{tid}.ctrl_out",
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
+    with _result_consumer(ctx, tid) as consumer:
+        assert consumer.run_work_item({"args": ["hello"]}) == "hello"
+        _retire_result_proof(ctx, consumer.taskspec, local_terminal=True)
+        observed = await_task_result(
+            ctx, tid, timeout=RESULT_WAIT_TIMEOUT, _accepted_taskspec=consumer.taskspec
         )
-    finally:
-        outbox_queue.close()
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
+    assert observed.status == "completed"
+    assert observed.value == "hello"
+    assert observed.error is None
 
 
-def test_await_one_shot_result_accepts_emitted_stream_when_log_event_is_missed(
+def test_await_task_result_counts_emitted_final_with_real_terminal_proof(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    """Emitted final presence survives an empty buffered value and retired log."""
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
-    outbox_queue.write(
-        json.dumps(
-            {
-                "type": "stream",
-                "stream": "stdout",
-                "data": "hello",
-                "final": True,
-            }
-        )
-    )
-    monkeypatch.setattr(
-        result_wait,
-        "poll_log_events",
-        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
-    )
-
-    try:
-        status, result, error = await_one_shot_result(
+    with _result_consumer(ctx, tid, stream_output=True) as consumer:
+        assert consumer.run_work_item({"args": ["hello"]}) == "hello"
+        _retire_result_proof(ctx, consumer.taskspec)
+        observed = await_task_result(
             ctx,
             tid,
-            outbox_name=outbox_name,
-            ctrl_out_name=f"T{tid}.ctrl_out",
             timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
             emit_stream=True,
+            _accepted_taskspec=consumer.taskspec,
         )
-    finally:
-        outbox_queue.close()
-
-    captured = capsys.readouterr()
-    assert status == "completed"
-    assert result is None
-    assert error is None
-    assert captured.out == "hello\n"
+    assert observed.status == "completed"
+    assert observed.value is None
+    assert observed.error is None
+    assert capsys.readouterr().out == "hello\n"
 
 
-def test_await_one_shot_result_does_not_infer_completion_from_ambiguous_outbox(
+def test_await_task_result_does_not_infer_completion_from_ambiguous_outbox(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    outbox_name = f"T{tid}.outbox"
-    outbox_queue = ctx.queue(outbox_name, persistent=True)
-    outbox_queue.write("hello")
-    outbox_queue.write("world")
-    monkeypatch.setattr(
-        result_wait,
-        "poll_log_events",
-        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
-    )
-
-    try:
+    with _result_consumer(ctx, tid) as consumer, ctx.queue(f"T{tid}.outbox") as outbox:
+        assert consumer.run_work_item({"args": ["hello"]}) == "hello"
+        outbox.write("world")
+        _retire_result_proof(ctx, consumer.taskspec, local_terminal=True)
         with pytest.raises(CommandTimeoutError, match="Timed out after 0.3 seconds"):
-            await_one_shot_result(
-                ctx,
-                tid,
-                outbox_name=outbox_name,
-                ctrl_out_name=f"T{tid}.ctrl_out",
-                timeout=0.3,
-                show_stderr=False,
+            await_task_result(
+                ctx, tid, timeout=0.3, _accepted_taskspec=consumer.taskspec
             )
-    finally:
-        outbox_queue.close()
 
 
 def test_await_task_result_returns_terminal_task_timeout_as_result(
@@ -1437,366 +1199,150 @@ def test_await_task_result_returns_terminal_task_timeout_as_result(
     assert result.error == "Target execution timed out"
 
 
-def test_await_single_result_aggregates_multiple_outbox_messages(
+def test_await_task_result_aggregates_multiple_outbox_messages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+    original_wait = result_wait.QueueChangeMonitor.wait
+    published = False
+    with _result_consumer(ctx, tid) as consumer, ctx.queue(f"T{tid}.outbox") as outbox:
+        assert consumer.run_work_item({"args": ["hello"]}) == "hello"
+        pending = outbox.read_one()
+        assert pending is not None
 
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-            }
-        )
-    )
+        def wait(monitor: Any, timeout: float | None) -> bool:
+            nonlocal published
+            if not published:
+                outbox.write(pending)
+                outbox.write("world")
+                published = True
+            return original_wait(monitor, timeout)
 
-    class _WakeMonitor:
-        def __init__(
-            self, _queues: Sequence[Queue], *, config: Config | None = None
-        ) -> None:
-            del config
-            self._written = False
+        monkeypatch.setattr(result_wait.QueueChangeMonitor, "wait", wait)
+        observed = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
+    assert published
+    assert observed.status == "completed"
+    assert observed.value == ["hello", "world"]
+    assert observed.error is None
 
-        def wait(self, timeout: float | None) -> bool:
-            del timeout
-            if not self._written:
-                outbox_queue.write("hello")
-                outbox_queue.write("world")
-                self._written = True
-            return False
 
-        def close(self) -> None:
-            return
+def test_await_task_result_persistent_returns_one_work_item_batch(
+    tmp_path: Path,
+) -> None:
+    ctx = build_context(prepare_project_root(tmp_path))
+    tid = str(time.time_ns())
+    with (
+        _result_consumer(ctx, tid, persistent=True) as consumer,
+        ctx.queue(f"T{tid}.outbox") as outbox,
+    ):
+        outbox.write("first")
+        assert consumer.run_work_item({"args": ["second"]}) == "second"
+        assert consumer.run_work_item({"args": ["third"]}) == "third"
+        first = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
+        assert outbox.peek_one() == "third"
+        second = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
+    assert first.status == second.status == "completed"
+    assert first.value == ["first", "second"]
+    assert second.value == "third"
+    assert first.error is second.error is None
 
-    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
-    try:
-        status, result, error = _await_single_result(
+
+@pytest.mark.parametrize("emit_stream", [False, True], ids=["buffered", "rendering"])
+def test_await_task_result_persistent_returns_quiet_visible_output_without_boundary(
+    tmp_path: Path,
+    emit_stream: bool,
+) -> None:
+    """Live rendering flags retain the same ordinary persistent quiet fallback."""
+    ctx = build_context(prepare_project_root(tmp_path))
+    tid = str(time.time_ns())
+    with _result_consumer(ctx, tid, persistent=True) as consumer:
+        assert consumer.run_work_item({"args": ["ready"]}) == "ready"
+        _retire_result_proof(ctx, consumer.taskspec)
+        observed = await_task_result(
             ctx,
             tid,
             timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
+            emit_stream=emit_stream,
+            _accepted_taskspec=consumer.taskspec,
         )
-    finally:
-        outbox_queue.close()
-        log_queue.close()
-
-    assert status == "completed"
-    assert result == ["hello", "world"]
-    assert error is None
+    assert observed.status == "completed"
+    assert observed.value == "ready"
+    assert observed.error is None
 
 
-def test_await_single_result_classifies_timeout_event_as_timeout(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "timeout",
-                "event": "work_timeout",
-                "error": "Target execution timed out",
-            }
-        )
-    )
-
-    status, result, error = _await_single_result(
-        ctx,
-        tid,
-        timeout=RESULT_WAIT_TIMEOUT,
-        show_stderr=False,
-    )
-
-    assert status == "timeout"
-    assert result is None
-    assert error == "Target execution timed out"
-
-
-def test_await_single_result_persistent_returns_one_work_item_batch(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-
-    taskspec_payload: dict[str, object] = {
-        "tid": tid,
-        "name": "persistent-agent",
-        "spec": {"type": "agent", "persistent": True},
-        "io": {
-            "outputs": {"outbox": f"T{tid}.outbox"},
-            "control": {"ctrl_out": f"T{tid}.ctrl_out"},
-        },
-        "state": {"status": "running"},
-        "metadata": {},
-    }
-
-    outbox_queue.write("first")
-    outbox_queue.write("second")
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "running",
-                "event": "work_item_completed",
-                "taskspec": taskspec_payload,
-            }
-        )
-    )
-    outbox_queue.write("third")
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "running",
-                "event": "work_item_completed",
-                "taskspec": taskspec_payload,
-            }
-        )
-    )
-
-    first_status, first_result, first_error = _await_single_result(
-        ctx,
-        tid,
-        timeout=RESULT_WAIT_TIMEOUT,
-        show_stderr=False,
-    )
-    second_status, second_result, second_error = _await_single_result(
-        ctx,
-        tid,
-        timeout=RESULT_WAIT_TIMEOUT,
-        show_stderr=False,
-    )
-
-    assert first_status == "completed"
-    assert first_result == ["first", "second"]
-    assert first_error is None
-    assert second_status == "completed"
-    assert second_result == "third"
-    assert second_error is None
-
-
-def test_await_single_result_persistent_returns_quiet_visible_output_without_boundary(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-
-    taskspec_payload: dict[str, object] = {
-        "tid": tid,
-        "name": "persistent-agent",
-        "spec": {"type": "agent", "persistent": True},
-        "io": {
-            "outputs": {"outbox": f"T{tid}.outbox"},
-            "control": {"ctrl_out": f"T{tid}.ctrl_out"},
-        },
-        "state": {"status": "running"},
-        "metadata": {},
-    }
-
-    try:
-        outbox_queue.write("ready")
-
-        status, result, error = _await_single_result(
-            ctx,
-            tid,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-            taskspec_payload=taskspec_payload,
-        )
-    finally:
-        outbox_queue.close()
-
-    assert status == "completed"
-    assert result == "ready"
-    assert error is None
-
-
-def test_await_single_result_stream_mode_emits_chunks_without_replay(
+def test_await_task_result_stream_mode_emits_chunks_without_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    """Late chunks are rendered once after a real completion publication."""
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-    rendered = _capture_stream_echo(monkeypatch)
+    original_wait = result_wait.QueueChangeMonitor.wait
+    publications = 0
+    with (
+        _result_consumer(ctx, tid, stream_output=True) as consumer,
+        ctx.queue(f"T{tid}.outbox") as outbox,
+    ):
+        assert consumer.run_work_item({"args": ["hello world"]}) == "hello world"
+        assert outbox.read_one() is not None
 
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-            }
+        def wait(monitor: Any, timeout: float | None) -> bool:
+            nonlocal publications
+            if publications == 0:
+                publications += 1
+                for chunk, text, final in [(0, "hello ", False), (1, "world", True)]:
+                    outbox.write(
+                        json.dumps(
+                            {
+                                "type": "stream",
+                                "stream": "stdout",
+                                "chunk": chunk,
+                                "final": final,
+                                "encoding": "text",
+                                "data": text,
+                            }
+                        )
+                    )
+            return original_wait(monitor, timeout)
+
+        monkeypatch.setattr(result_wait.QueueChangeMonitor, "wait", wait)
+        observed = await_task_result(
+            ctx, tid, timeout=RESULT_WAIT_TIMEOUT, emit_stream=True
         )
-    )
-
-    writes_triggered = 0
-
-    class _LateStreamMonitor:
-        def __init__(
-            self, _queues: Sequence[Queue], *, config: Config | None = None
-        ) -> None:
-            del config
-
-        def wait(self, timeout: float | None) -> bool:
-            del timeout
-            nonlocal writes_triggered
-            writes_triggered += 1
-            if writes_triggered == 1:
-                outbox_queue.write(
-                    json.dumps(
-                        {
-                            "type": "stream",
-                            "stream": "stdout",
-                            "chunk": 0,
-                            "final": False,
-                            "encoding": "text",
-                            "data": "hello ",
-                        }
-                    )
-                )
-                outbox_queue.write(
-                    json.dumps(
-                        {
-                            "type": "stream",
-                            "stream": "stdout",
-                            "chunk": 1,
-                            "final": True,
-                            "encoding": "text",
-                            "data": "world",
-                        }
-                    )
-                )
-            return False
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _LateStreamMonitor)
-
-    status, result, error = _await_single_result(
-        ctx,
-        tid,
-        timeout=RESULT_WAIT_TIMEOUT,
-        show_stderr=False,
-        emit_stream=True,
-    )
-
-    assert status == "completed"
-    assert result is None
-    assert error is None
-    assert "".join(rendered) == "hello world\n"
+    assert publications == 1
+    assert observed.status == "completed"
+    assert observed.value is None
+    assert observed.error is None
+    assert capsys.readouterr().out == "hello world\n"
 
 
-def test_await_single_result_persistent_stream_mode_keeps_next_batch(
+def test_await_task_result_persistent_stream_mode_keeps_next_batch(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
+    ctx = build_context(prepare_project_root(tmp_path))
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-    rendered = _capture_stream_echo(monkeypatch)
-
-    taskspec_payload: dict[str, object] = {
-        "tid": tid,
-        "name": "persistent-agent",
-        "spec": {"type": "agent", "persistent": True},
-        "io": {
-            "outputs": {"outbox": f"T{tid}.outbox"},
-            "control": {"ctrl_out": f"T{tid}.ctrl_out"},
-        },
-        "state": {"status": "running"},
-        "metadata": {},
-    }
-
-    outbox_queue.write(
-        json.dumps(
-            {
-                "type": "stream",
-                "stream": "stdout",
-                "chunk": 0,
-                "final": False,
-                "encoding": "text",
-                "data": "first ",
-            }
+    with (
+        _result_consumer(ctx, tid, persistent=True, stream_output=True) as consumer,
+        ctx.queue(f"T{tid}.outbox") as outbox,
+    ):
+        assert consumer.run_work_item({"args": ["first batch"]}) == "first batch"
+        assert consumer.run_work_item({"args": ["third"]}) == "third"
+        first = await_task_result(
+            ctx, tid, timeout=RESULT_WAIT_TIMEOUT, emit_stream=True
         )
-    )
-    outbox_queue.write(
-        json.dumps(
-            {
-                "type": "stream",
-                "stream": "stdout",
-                "chunk": 1,
-                "final": True,
-                "encoding": "text",
-                "data": "batch",
-            }
+        assert capsys.readouterr().out == "first batch\n"
+        assert outbox.peek_one() is not None
+        second = await_task_result(
+            ctx, tid, timeout=RESULT_WAIT_TIMEOUT, emit_stream=True
         )
-    )
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "running",
-                "event": "work_item_completed",
-                "taskspec": taskspec_payload,
-            }
-        )
-    )
-    outbox_queue.write("third")
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "running",
-                "event": "work_item_completed",
-                "taskspec": taskspec_payload,
-            }
-        )
-    )
-
-    first_status, first_result, first_error = _await_single_result(
-        ctx,
-        tid,
-        timeout=RESULT_WAIT_TIMEOUT,
-        show_stderr=False,
-        emit_stream=True,
-    )
-    second_status, second_result, second_error = _await_single_result(
-        ctx,
-        tid,
-        timeout=RESULT_WAIT_TIMEOUT,
-        show_stderr=False,
-        emit_stream=True,
-    )
-
-    assert first_status == "completed"
-    assert first_result is None
-    assert first_error is None
-    assert "".join(rendered) == "first batch\n"
-    assert second_status == "completed"
-    assert second_result == "third"
-    assert second_error is None
+        assert capsys.readouterr().out == "third\n"
+    assert first.status == second.status == "completed"
+    assert first.value is second.value is None
+    assert first.error is second.error is None
 
 
 def test_cmd_result_waits_for_custom_result_channels_to_materialize(
@@ -1859,7 +1405,7 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _WakeMonitor)
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
     try:
         result = cmd_result(
             tid=tid,
@@ -1876,145 +1422,7 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
     assert result.value == "hello"
 
 
-def test_await_single_result_reuses_materialized_batch_boundary_state(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    outbox_queue = ctx.queue("late.custom.outbox", persistent=True)
-
-    taskspec_payload: dict[str, object] = {
-        "tid": tid,
-        "name": "late-custom-result",
-        "spec": {"type": "function", "persistent": True},
-        "io": {
-            "outputs": {"outbox": "late.custom.outbox"},
-            "control": {"ctrl_out": "late.custom.ctrl_out"},
-        },
-        "state": {"status": "running"},
-        "metadata": {},
-    }
-
-    outbox_queue.write("hello")
-    outbox_item = outbox_queue.peek_one(with_timestamps=True)
-    assert isinstance(outbox_item, tuple)
-    _payload, outbox_timestamp = outbox_item
-
-    try:
-        status, result, error = _await_single_result(
-            ctx,
-            tid=tid,
-            timeout=0.1,
-            show_stderr=False,
-            taskspec_payload=taskspec_payload,
-            outbox_name="late.custom.outbox",
-            ctrl_out_name="late.custom.ctrl_out",
-            initial_log_last_timestamp=123,
-            initial_batch_boundary_timestamps=(outbox_timestamp,),
-        )
-    finally:
-        outbox_queue.close()
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
-
-
-def test_await_single_result_tolerates_materialized_boundary_timestamp_skew(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    outbox_queue = ctx.queue("skewed.custom.outbox", persistent=True)
-
-    taskspec_payload: dict[str, object] = {
-        "tid": tid,
-        "name": "skewed-custom-result",
-        "spec": {"type": "function", "persistent": True},
-        "io": {
-            "outputs": {"outbox": "skewed.custom.outbox"},
-            "control": {"ctrl_out": "skewed.custom.ctrl_out"},
-        },
-        "state": {"status": "running"},
-        "metadata": {},
-    }
-
-    outbox_queue.write("first")
-    outbox_queue.write("second")
-    outbox_item = outbox_queue.peek_one(with_timestamps=True)
-    assert isinstance(outbox_item, tuple)
-    _payload, outbox_timestamp = outbox_item
-
-    try:
-        status, result, error = _await_single_result(
-            ctx,
-            tid=tid,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-            taskspec_payload=taskspec_payload,
-            outbox_name="skewed.custom.outbox",
-            ctrl_out_name="skewed.custom.ctrl_out",
-            initial_log_last_timestamp=123,
-            initial_batch_boundary_timestamps=(int(outbox_timestamp) - 1,),
-            initial_result_surface_had_activity=True,
-        )
-    finally:
-        outbox_queue.close()
-
-    assert status == "completed"
-    assert result == ["first", "second"]
-    assert error is None
-
-
-def test_await_single_result_tolerates_late_visible_boundary_timestamp_skew(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    outbox_queue = ctx.queue("late-skewed.custom.outbox", persistent=True)
-
-    taskspec_payload: dict[str, object] = {
-        "tid": tid,
-        "name": "late-skewed-custom-result",
-        "spec": {"type": "function", "persistent": True},
-        "io": {
-            "outputs": {"outbox": "late-skewed.custom.outbox"},
-            "control": {"ctrl_out": "late-skewed.custom.ctrl_out"},
-        },
-        "state": {"status": "running"},
-        "metadata": {},
-    }
-
-    outbox_queue.write("hello")
-    outbox_item = outbox_queue.peek_one(with_timestamps=True)
-    assert isinstance(outbox_item, tuple)
-    _payload, outbox_timestamp = outbox_item
-
-    try:
-        status, result, error = _await_single_result(
-            ctx,
-            tid=tid,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-            taskspec_payload=taskspec_payload,
-            outbox_name="late-skewed.custom.outbox",
-            ctrl_out_name="late-skewed.custom.ctrl_out",
-            initial_log_last_timestamp=123,
-            initial_batch_boundary_timestamps=(int(outbox_timestamp) - 1,),
-            initial_result_surface_had_activity=False,
-        )
-    finally:
-        outbox_queue.close()
-
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
-
-
-def test_await_single_result_tolerates_late_polled_boundary_timestamp_skew(
+def test_await_task_result_tolerates_retained_boundary_before_output(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -2048,22 +1456,14 @@ def test_await_single_result_tolerates_late_polled_boundary_timestamp_skew(
     outbox_queue.write("hello")
 
     try:
-        status, result, error = _await_single_result(
-            ctx,
-            tid=tid,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-            taskspec_payload=taskspec_payload,
-            outbox_name="late-polled-skewed.custom.outbox",
-            ctrl_out_name="late-polled-skewed.custom.ctrl_out",
-        )
+        observed = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
     finally:
         outbox_queue.close()
         log_queue.close()
 
-    assert status == "completed"
-    assert result == "hello"
-    assert error is None
+    assert observed.status == "completed"
+    assert observed.value == "hello"
+    assert observed.error is None
 
 
 @pytest.mark.parametrize(
@@ -2102,57 +1502,20 @@ def test_await_task_result_stream_preserves_error_payload_selection(
     outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
 
     outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
-    monkeypatch.setattr(
-        result_cmd, "_queue_names_exist", lambda *_args, **_kwargs: False
-    )
-
-    def _no_log_events(
-        _queue: Queue, last_timestamp: int | None, _tid: str
-    ) -> tuple[list[tuple[dict[str, object], int]], int | None]:
-        return [], last_timestamp
-
-    monkeypatch.setattr(result_cmd, "poll_log_events", _no_log_events)
-
     result = await_task_result(
-        ctx, tid, timeout=0.0, show_stderr=True, emit_stream=True
+        ctx,
+        tid,
+        timeout=0.0,
+        show_stderr=True,
+        emit_stream=True,
+        _accepted_taskspec=TaskSpec.model_validate(_one_shot_taskspec_payload(tid)),
     )
 
     assert result.status == "completed"
     assert result.value == "err"
 
 
-def test_await_task_result_stream_reuses_materialized_completion_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-    outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
-    materialized = result_cmd.ResultMaterialization(
-        taskspec_payload=None,
-        outbox_name=f"T{tid}.outbox",
-        ctrl_out_name=f"T{tid}.ctrl_out",
-        log_last_timestamp=123,
-        terminal_status="completed",
-        terminal_error_message=None,
-    )
-    monkeypatch.setattr(
-        result_cmd,
-        "_await_result_materialization",
-        lambda *_args, **_kwargs: materialized,
-    )
-
-    result = await_task_result(
-        ctx, tid, timeout=RESULT_WAIT_TIMEOUT, show_stderr=True, emit_stream=True
-    )
-
-    assert result.status == "completed"
-    assert result.value == "err"
-
-
-def test_await_result_materialization_waits_for_taskspec_after_activity_event(
+def test_result_waits_for_taskspec_after_activity_event(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2170,153 +1533,51 @@ def test_await_result_materialization_waits_for_taskspec_after_activity_event(
         "state": {"status": "running"},
         "metadata": {},
     }
-    load_calls = 0
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+        log.write(
+            json.dumps({"tid": tid, "status": "running", "event": "task_activity"})
+        )
 
-    def _load(
-        _context: WeftContext, requested_tid: str, *, broker: Any | None = None
-    ) -> dict[str, object] | None:
-        nonlocal load_calls
-        assert requested_tid == tid
-        load_calls += 1
-        if load_calls == 1:
-            return None
-        return taskspec_payload
-
-    def _poll(
-        _queue: Queue, last_timestamp: int | None, requested_tid: str
-    ) -> tuple[list[tuple[dict[str, object], int]], int | None]:
-        assert requested_tid == tid
-        if last_timestamp is None:
-            return [
-                ({"tid": tid, "status": "running", "event": "task_activity"}, 123)
-            ], 123
-        return [], last_timestamp
-
-    class _NoWakeMonitor:
+    class _DrivenMonitor:
         def __init__(
             self, _queues: Sequence[Queue], *, config: Config | None = None
         ) -> None:
             del config
+            self.waits = 0
 
         def wait(self, timeout: float | None) -> bool:
             del timeout
-            raise AssertionError("materialization should retry before waiting again")
+            self.waits += 1
+            assert self.waits == 1
+            with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+                log.write(json.dumps({"tid": tid, "taskspec": taskspec_payload}))
+            with ctx.queue("late.custom.outbox") as outbox:
+                outbox.write("late-result")
+            with ctx.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
+                log.write(
+                    json.dumps(
+                        {
+                            "tid": tid,
+                            "event": "work_item_completed",
+                            "status": "running",
+                        }
+                    )
+                )
+            return True
 
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(result_cmd, "_load_taskspec_payload", _load)
-    monkeypatch.setattr(
-        result_cmd, "_queue_names_exist", lambda *_args, **_kwargs: False
-    )
-    monkeypatch.setattr(
-        result_cmd,
-        "_result_surface_has_activity",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(result_cmd, "poll_log_events", _poll)
-    monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _NoWakeMonitor)
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _DrivenMonitor)
 
-    materialized = result_cmd._await_result_materialization(
-        ctx,
-        tid,
-        timeout=RESULT_WAIT_TIMEOUT,
-    )
-
-    assert materialized is not None
-    assert materialized.taskspec_payload == taskspec_payload
-    assert materialized.outbox_name == "late.custom.outbox"
-    assert materialized.ctrl_out_name == "late.custom.ctrl_out"
-
-
-def test_await_single_result_reuses_materialized_completion_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rendered = _capture_stream_echo(monkeypatch)
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-    outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
-
-    status, value, error_message = _await_single_result(
-        ctx,
-        tid,
-        timeout=0.1,
-        show_stderr=True,
-        emit_stream=False,
-        taskspec_payload=None,
-        outbox_name=f"T{tid}.outbox",
-        ctrl_out_name=f"T{tid}.ctrl_out",
-        initial_log_last_timestamp=123,
-        initial_terminal_status="completed",
-        initial_terminal_error_message=None,
-    )
-
-    assert status == "completed"
-    assert value == "err"
-    assert error_message is None
-    assert rendered == []
-
-
-def test_cmd_result_passes_materialized_state_to_result_wait(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    tid = str(time.time_ns())
-    captured: dict[str, object] = {}
-
-    materialized = result_cmd.ResultMaterialization(
-        taskspec_payload=None,
-        outbox_name=f"T{tid}.outbox",
-        ctrl_out_name=f"T{tid}.ctrl_out",
-        log_last_timestamp=123,
-        terminal_status="completed",
-        terminal_error_message=None,
-        batch_boundary_timestamps=(456,),
-    )
-
-    monkeypatch.setattr(
-        result_cmd.time,
-        "monotonic",
-        lambda: 100.0,
-    )
-    monkeypatch.setattr(
-        result_cmd,
-        "_await_result_materialization",
-        lambda *args, **kwargs: materialized,
-    )
-    monkeypatch.setattr(
-        result_cmd,
-        "_await_single_result",
-        lambda *args, **kwargs: captured.update(kwargs) or ("completed", "err", None),
-    )
-
-    result = cmd_result(
-        tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
-    )
-    assert isinstance(result, TaskResult)
-
+    result = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
     assert result.status == "completed"
-    assert result.value == "err"
-    assert captured["taskspec_payload"] is None
-    assert captured["outbox_name"] == materialized.outbox_name
-    assert captured["ctrl_out_name"] == materialized.ctrl_out_name
-    assert captured["initial_log_last_timestamp"] == materialized.log_last_timestamp
-    assert captured["initial_terminal_status"] == materialized.terminal_status
-    assert (
-        captured["initial_terminal_error_message"]
-        == materialized.terminal_error_message
-    )
-    assert (
-        captured["initial_batch_boundary_timestamps"]
-        == materialized.batch_boundary_timestamps
-    )
+    assert result.value == "late-result"
 
 
-def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path: Path) -> None:
+def test_result_requires_pipeline_lifecycle_before_consuming_output(
+    tmp_path: Path,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -2334,13 +1595,9 @@ def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path: Path) -> None:
         )
     )
 
-    result = cmd_result(
-        tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
-    )
-    assert isinstance(result, TaskResult)
-
-    assert result.status == "completed"
-    assert result.value == "pipeline-result"
+    with pytest.raises(CommandTimeoutError):
+        cmd_result(tid=tid, peek=False, timeout=0, context=str(root))
+    assert outbox_queue.peek_one() == "pipeline-result"
     retained_status = status_queue.peek_one()
     assert retained_status is not None
     assert json.loads(retained_status)["type"] == "pipeline_status"

@@ -8,11 +8,25 @@ Spec references:
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from typing import Any
 
-from weft._constants import PIPELINE_RUNTIME_METADATA_KEY, WEFT_GLOBAL_LOG_QUEUE
+from simplebroker import Queue
+from weft._constants import PIPELINE_RUNTIME_METADATA_KEY
 from weft.context import WeftContext
-from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
+from weft.core.monitor.store import (
+    MonitorStoreNotInitialized,
+    MonitorTaskCollationRecord,
+    open_monitor_store,
+)
+from weft.core.task_evidence import (
+    TERMINAL_TASK_STATUSES,
+    TaskEvidenceSnapshot,
+    read_task_history,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def load_latest_taskspec_payload(
@@ -20,29 +34,89 @@ def load_latest_taskspec_payload(
     tid: str,
     *,
     broker: Any | None = None,
+    task_events: Sequence[tuple[dict[str, Any], int]] | None = None,
 ) -> dict[str, Any] | None:
-    """Read fresh TaskSpec history, borrowing a bounded owner's broker [MF-5]."""
+    """Fold one acquired task history or read it once with the core reader.
 
-    def _scan_history(*, since_timestamp: int | None) -> dict[str, Any] | None:
-        latest_taskspec: dict[str, Any] | None = None
-        for payload, _timestamp in iter_broker_queue_json_entries(
-            db,
-            WEFT_GLOBAL_LOG_QUEUE,
-            since_timestamp=since_timestamp,
-        ):
-            if payload.get("tid") != tid:
-                continue
-            taskspec = payload.get("taskspec")
-            if isinstance(taskspec, dict):
-                latest_taskspec = taskspec
-        return latest_taskspec
+    An empty loan is acquired absence; only ``None`` requests acquisition.
+    Rows come from the shared reader in ascending message-ID order.
 
-    with queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db:
-        since_timestamp = int(tid) - 1 if tid.isdigit() else None
-        latest_taskspec = _scan_history(since_timestamp=since_timestamp)
-        if latest_taskspec is not None or since_timestamp is None:
-            return latest_taskspec
-        return _scan_history(since_timestamp=None)
+    Spec: [MF-5]
+    """
+    if task_events is None:
+        task_events, _horizon = read_task_history(context, tid, broker=broker)
+    latest_taskspec: dict[str, Any] | None = None
+    for payload, _timestamp in task_events:
+        taskspec = payload.get("taskspec")
+        if isinstance(taskspec, dict):
+            latest_taskspec = taskspec
+    return latest_taskspec
+
+
+def read_monitor_task_record(
+    context: WeftContext,
+    tid: str,
+    *,
+    queue: Queue | None = None,
+) -> tuple[MonitorTaskCollationRecord | None, str | None]:
+    """Read retained Monitor evidence without schema maintenance.
+
+    Absence includes an uninitialized store. Other ordinary failures remain
+    diagnostic errors; callers own terminal qualification and presentation.
+
+    Spec: [MF-5], [SB-0.4a]
+    """
+    try:
+        store = open_monitor_store(context, config=context.config, queue=queue)
+        return store.get_task(tid), None
+    except MonitorStoreNotInitialized:
+        return None, None
+    except Exception as exc:  # pragma: no cover - corrupt store reads remain diagnostic
+        logger.debug("Monitor task record read failed for %s", tid, exc_info=True)
+        return None, str(exc)
+
+
+def monitor_terminal_evidence(
+    record: MonitorTaskCollationRecord | None,
+    *,
+    acquired_evidence: TaskEvidenceSnapshot | None = None,
+) -> TaskEvidenceSnapshot | None:
+    """Qualify retained terminal evidence; callers apply MF-5 source priority.
+
+    Nonterminal raw history alone does not prove a live runtime. The existing
+    runtime/control classifiers determine whether stronger evidence exists.
+    Claimed result residue ends an observation but is a recovery diagnostic,
+    not terminal task proof; qualified retained proof outranks that diagnostic.
+
+    Spec: [MF-5]
+    """
+    if acquired_evidence is not None and (
+        (
+            acquired_evidence.terminal
+            and acquired_evidence.classification != "claimed_result_without_terminal"
+        )
+        or acquired_evidence.classification in {"live", "live_pong"}
+    ):
+        return None
+    if record is None or not record.terminal_seen:
+        return None
+    status = record.terminal_status
+    if status is None or status not in TERMINAL_TASK_STATUSES:
+        return None
+    error = record.state.get("error")
+    return TaskEvidenceSnapshot(
+        tid=record.tid,
+        status=status,
+        classification="terminal_monitor_store",
+        source="monitor_store",
+        terminal=True,
+        taskspec_payload=record.taskspec_summary,
+        observed_at=record.terminal_message_id,
+        started_at=record.started_at_ns,
+        completed_at=record.completed_at_ns,
+        error=error if isinstance(error, str) else None,
+        return_code=record.return_code,
+    )
 
 
 def is_pipeline_taskspec_payload(taskspec_payload: dict[str, Any] | None) -> bool:

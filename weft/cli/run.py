@@ -8,13 +8,14 @@ Spec references:
 
 from __future__ import annotations
 
-import base64
 import json
+import logging
 import threading
+from typing import Any, cast
 
 import typer
 
-from weft._constants import load_config
+from weft._constants import INTERACTIVE_OUTPUT_DRAIN_TIMEOUT, load_config
 from weft.commands import (
     CommandStream,
     RunExecutionResult,
@@ -22,11 +23,16 @@ from weft.commands import (
     RunSpecDescription,
     TaskEvent,
 )
+from weft.commands._resources import command_resource_scope
+from weft.commands._streaming import decode_stream_text
+from weft.commands.run import _LiveRunSession, _stop_interactive_run_session
 from weft.helpers import (
     read_limited_stdin,
     resolve_broker_max_message_size,
     stdin_is_tty,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def read_run_stdin() -> str | None:
@@ -123,29 +129,85 @@ def render_run_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-367] exception
     return 124 if status == "timeout" else 1
 
 
-def consume_run_session(session: RunSession) -> RunExecutionResult:
-    """Wait for and close the session returned by the command API."""
+def consume_run_session(
+    session: RunSession,
+    *,
+    interactive: bool = False,
+    stdin_text: str | None = None,
+) -> RunExecutionResult:
+    """Own CLI input/output driving, waiting and session cleanup [CLI-1.1.1]."""
 
-    try:
+    with command_resource_scope() as resources:
+        resources.callback(session.close)
+        if interactive:
+            drive_interactive_session(session, stdin_text)
         return session.wait()
-    finally:
-        session.close()
 
 
 def _render_interactive_events(events: CommandStream[TaskEvent]) -> None:
     """Render structured stdout/stderr events without consuming result queues."""
 
-    try:
+    with command_resource_scope() as resources:
+        resources.callback(events.close)
         for event in events:
             if event.event_type not in {"stdout", "stderr"}:
                 continue
-            data = str(event.payload.get("data", ""))
-            if event.payload.get("encoding") == "base64":
-                data = base64.b64decode(data).decode("utf-8", errors="replace")
+            data = decode_stream_text(event.payload)
             if data:
                 typer.echo(data, err=event.event_type == "stderr", nl=False)
+
+
+def _wake_interactive_prompt(prompt: Any) -> None:
+    """Wake only the prompt UI when its existing output owner settles."""
+    loop = prompt.app.loop
+    if loop is not None and not loop.is_closed():
+        try:
+            loop.call_soon_threadsafe(_exit_settled_prompt, prompt)
+        except RuntimeError:
+            logger.debug("Interactive prompt loop already closed", exc_info=True)
+
+
+def _exit_settled_prompt(prompt: Any) -> None:
+    if prompt.app.is_running and not prompt.app.is_done:
+        prompt.app.exit(result=None)
+
+
+def _close_interactive_output(
+    session: _LiveRunSession,
+    output_thread: threading.Thread,
+    *,
+    drain: bool,
+) -> None:
+    """Allow one best-effort final-frame drain, then wake owner-thread closure."""
+    if drain:
+        # Frames published beyond this existing deadline can be missed.
+        output_thread.join(timeout=INTERACTIVE_OUTPUT_DRAIN_TIMEOUT)
+    session._cancel_output()
+    output_thread.join()
+
+
+def _stream_interactive_output(
+    session: RunSession,
+    prompt: Any,
+    done: threading.Event,
+    errors: list[BaseException],
+) -> None:
+    try:
+        _render_interactive_events(session.events())
+    except BaseException as exc:  # Transfer worker failure to its waiting caller.
+        logger.debug("Interactive output failed", exc_info=True)
+        errors.append(exc)
     finally:
-        events.close()
+        done.set()
+        _wake_interactive_prompt(prompt)
+
+
+def _prompt_interactive_input(prompt: Any, done: threading.Event) -> str | None:
+    def before_prompt() -> None:
+        if done.is_set():
+            _exit_settled_prompt(prompt)
+
+    return cast(str | None, prompt.prompt("weft> ", pre_run=before_prompt))
 
 
 def drive_interactive_session(session: RunSession, stdin_text: str | None) -> None:
@@ -160,27 +222,41 @@ def drive_interactive_session(session: RunSession, stdin_text: str | None) -> No
     except ImportError as exc:  # pragma: no cover - optional dependency guard
         raise RuntimeError("prompt_toolkit is required for interactive mode") from exc
 
-    def _stream_output() -> None:
-        _render_interactive_events(session.events())
-
-    output_thread = threading.Thread(target=_stream_output, daemon=True)
-    output_thread.start()
     prompt: PromptSession[str] = PromptSession()
-    try:
+    done = threading.Event()
+    errors: list[BaseException] = []
+    live_session = cast(_LiveRunSession, session)
+
+    output_thread = threading.Thread(
+        target=_stream_interactive_output,
+        args=(session, prompt, done, errors),
+        daemon=True,
+    )
+    drain = False
+    with command_resource_scope() as resources:
+        output_thread.start()
+        resources.callback(
+            lambda: _close_interactive_output(live_session, output_thread, drain=drain)
+        )
         while True:
             try:
-                line = prompt.prompt("weft> ")
+                line = _prompt_interactive_input(prompt, done)
             except EOFError:
                 session.close_input()
+                # EOF closes input and retains the legitimate result wait.
+                output_thread.join()
                 break
             except KeyboardInterrupt:
                 continue
+            if line is None:
+                break
             if line.strip() in {":quit", ":exit"}:
-                session.stop()
+                _stop_interactive_run_session(live_session)
+                drain = True
                 break
             session.send_input(line if line.endswith("\n") else f"{line}\n")
-    finally:
-        output_thread.join()
+    if errors:
+        raise errors[0]
 
 
 __all__ = [

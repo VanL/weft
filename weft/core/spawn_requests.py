@@ -1,7 +1,7 @@
 """Shared spawn-request helpers for manager-launched task processes.
 
 Spec references:
-- docs/specifications/05-Message_Flow_and_State.md [MF-6]
+- docs/specifications/05-Message_Flow_and_State.md [MF-5], [MF-6]
 - docs/specifications/07-System_Invariants.md [MANAGER.4]
 """
 
@@ -205,6 +205,42 @@ def submit_spawn_request(
     Spec: [MF-1], [MANAGER.4]
     """
 
+    submitted_tid, _payload = _submit_spawn_request_with_payload(
+        broker_target,
+        taskspec=taskspec,
+        work_payload=work_payload,
+        config=config,
+        tid=tid,
+        inherited_weft_context=inherited_weft_context,
+        seed_start_envelope=seed_start_envelope,
+        allow_internal_runtime=allow_internal_runtime,
+        spawn_queue_name=spawn_queue_name,
+        broker=broker,
+    )
+    return submitted_tid
+
+
+def _submit_spawn_request_with_payload(
+    broker_target: BrokerTarget | str | Path,
+    *,
+    taskspec: TaskSpec | Mapping[str, Any],
+    work_payload: Any,
+    config: Mapping[str, Any] | None = None,
+    tid: str | int | None = None,
+    inherited_weft_context: str | None = None,
+    seed_start_envelope: bool = True,
+    allow_internal_runtime: bool = False,
+    spawn_queue_name: str = WEFT_SPAWN_REQUESTS_QUEUE,
+    broker: Any | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Commit one request and retain the exact shaped TaskSpec transport.
+
+    The caller records acceptance before binding implicit TID-default routes.
+    This is the sole shaping/write path for both return forms.
+
+    Spec: [MF-1], [MF-5], [MANAGER.4]
+    """
+
     if spawn_queue_name not in {
         WEFT_SPAWN_REQUESTS_QUEUE,
         WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
@@ -253,7 +289,7 @@ def submit_spawn_request(
 
     with _spawn_broker(broker_target, spawn_queue_name, config, broker) as db:
         if message_timestamp is None:
-            return int(db.write(spawn_queue_name, message_json))
+            return int(db.write(spawn_queue_name, message_json)), taskspec_payload
         _write_spawn_request_with_timestamp(
             db,
             queue_name=spawn_queue_name,
@@ -261,7 +297,7 @@ def submit_spawn_request(
             timestamp=message_timestamp,
         )
 
-    return message_timestamp
+    return message_timestamp, taskspec_payload
 
 
 def delete_spawn_request(

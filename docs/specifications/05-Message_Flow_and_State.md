@@ -162,7 +162,8 @@ The SimpleBroker reference reactor's sidecar outbox is specific to its
 peek/checkpoint example and is not part of ordinary Weft task delivery.
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
-`weft/core/tasks/base.py`, `tests/tasks/test_task_execution.py`.
+`weft/core/tasks/base.py`, `weft/core/outbox.py::decode_stream_text`,
+`tests/tasks/test_task_execution.py`.
 
 ### 3. Control Flow [MF-3]
 
@@ -305,7 +306,7 @@ runtime stop writes live in `weft/core/control_probe.py::send_keyed_ping_probe`,
 `weft/core/control_probe.py::pong_proves_dispatch_eligible`, and
 `weft/core/manager_runtime.py::_send_stop`; command producers live in
 `weft/commands/tasks.py::_send_control` and
-`weft/commands/run.py::_InteractiveRunLifecycle._send_control`. Terminal
+`weft/commands/run.py::_stop_interactive_run_session`. Terminal
 interpretation and CLI convergence live in `weft/core/task_evidence.py` and
 `weft/commands/control_convergence.py`. Direct protocol coverage lives in
 `tests/core/test_control_messages.py`, `tests/core/test_control_probe.py`,
@@ -861,12 +862,15 @@ a permanent normal-cycle compatibility lane.
   interpretation instead of each inventing their own priority rules. Realtime
   iteration reuses it after its first snapshot as well, for late typed terminal
   `ctrl_out` envelopes and eligible readable final one-shot outbox evidence.
-  Realtime observation refreshes task metadata before classifying late output.
-  When discovered metadata identifies different outbox or control routes, it
-  switches observation to those routes without consuming their contents.
-  Until one-shot task metadata is known, ordinary outbox values alone cannot
-  end realtime observation; explicit terminal log or control evidence remains
-  sufficient. Persistent and interactive work-item output is not task completion.
+  Realtime observation uses known immutable task configuration when available.
+  When configuration is missing, it discovers and validates the task's metadata
+  before treating ordinary outbox values as one-shot completion evidence. Late
+  discovery may establish explicit routes and collection mode without consuming
+  those queues; once known,
+  immutable configuration is retained for that observation. Explicit terminal
+  evidence remains sufficient without TaskSpec discovery. Persistent and
+  interactive work-item output is not task completion. Fresh lifecycle
+  observations remain separate from immutable configuration.
 - shared task evidence priority is: terminal task-log lifecycle proof, typed
   terminal `ctrl_out`, readable final one-shot outbox, live runtime evidence,
   terminal Monitor-store fallback for known full TIDs after raw task-log
@@ -912,20 +916,147 @@ a permanent normal-cycle compatibility lane.
   published as `running` when a different active manager has been selected
 - shared waiters use the same terminal-state interpretation for `weft run` and
   `weft result`
-- `weft result` and `weft run` share the same wait helper path: they watch the
-  outbox, ctrl-out, and log queues, tolerate the short gap between a terminal
-  log event and final outbox visibility, and do one last non-blocking outbox
-  drain before returning `completed`
-- persistent result waits treat both `work_item_completed` and
-  `work_completed` as completion boundaries for the same task
-- `weft result --stream` follows unread outbox stream chunks without changing
-  the task-log boundary events that define completion
-- when a one-shot streamed result has already been emitted to the caller, shared
-  result waiters retain that emitted-result fact as completion evidence so a
-  delayed terminal log cannot turn visible output into a later timeout
-- `weft result` first waits for taskspec metadata or outbox/control queue names
-  to materialize when those surfaces are not yet visible, then falls back to the
-  shared completion wait
+
+`weft run`, `weft result`, and Python result retrieval use one shared result
+capability. Shared result behavior has one implementation owner and is
+reused by callers and collection modes; separate implementations of the same
+behavior are defects. Mode-specific completion rules remain explicit within
+that shared capability. The caller owns observation and retrieves output
+directly from the task's configured result surface. A parent task does not relay results
+solely to satisfy another caller's wait.
+
+An operation with the accepted canonical task specification, assigned TID,
+and effective resolved context derives its routes and collection mode from
+those values. It must not rediscover the same specification through task
+history or wait for child initialization, queue existence, or a task-owned
+TaskSpec event before observing those routes. Explicit `io` routes take
+precedence over canonical TID defaults. Submission-time shaping is complete
+before this configuration is retained.
+
+A bare-TID operation resolves canonical TID-default routes directly and
+discovers only missing configuration required for correct collection, such
+as explicit routes or persistent/pipeline mode. It uses SimpleBroker's public
+body filtering and advancing message-ID bounds. The supported task-log
+serialization is the production writer's JSON, whose top-level `tid` is a
+string of literal ASCII digits. Discovery searches for those literal digits;
+substring hits qualify only when decoded records match the exact top-level
+TID. Lookup paginates through its captured range without truncating history.
+Weft does not provide an alternate escaped-TID decoder or a whole-log replay
+fallback. Imported bodies with escaped TID digits are outside this discovery
+contract; this rule does not authorize rewriting imported bodies. Filtering
+limits candidate bodies fetched and decoded by Weft. Backend search work, body transfer inside
+the broker, and any indexing belong to SimpleBroker.
+
+After raw task-log retirement, a known full TID uses the existing read-only
+terminal Monitor-store fallback to recover retained configuration. Only
+terminal records qualify; absence and unavailable/degraded-store results
+retain their existing distinct diagnostic meanings.
+
+Configuration discovery is separate from result waiting. Once configuration
+is established, the observation retains it. A negative lookup retains the
+inspected range so later relevant activity does not replay the same history.
+Generated live writes at the supported SimpleBroker dependency floors may be
+followed by an advancing message-ID range;
+administrative exact-ID imports or ID-preserving moves that backfill that
+range require a fresh observation. This does not restrict ordinary pipeline
+result moves.
+
+The observation owner registers interest in its exact result and completion
+queues before checking current durable contents, including queues that have
+not received their first write. It then uses the existing watcher/reactor
+waiting foundation for backend activity, interruption, and actual timeout or
+completion-grace deadlines. There is no separate Weft sleep/probe cadence or
+arbitrary maximum wait slice for result discovery. Backend-native waiting
+and SimpleBroker's own polling remain broker concerns. If Weft's observation
+adapter loses its native waiter, it must transition to another live wake
+source or fail explicitly. It must not silently wait until a caller deadline
+or indefinitely when no deadline exists.
+Notifications are hints; durable messages determine the result.
+
+The watched completion surfaces follow the existing task protocol: task-local
+typed control evidence where sufficient, and TID-matched lifecycle evidence
+for persistent work boundaries and pipeline completion. A live wait may omit
+lifecycle-log interest only when every terminal path for that task kind has
+reliable task-local terminal publication and crash coverage under the existing
+terminal-retry and manager `wrapper_lost` contracts. Other task kinds retain
+TID-matched lifecycle observation. Best-effort pipeline status snapshots do
+not replace lifecycle completion proof. After raw history retirement, known
+full TIDs retain the existing read-only terminal Monitor-store fallback and
+its unavailable/degraded diagnostics, at its existing evidence priority.
+Unrelated shared-log activity must not cause whole-log payload
+decoding or restart completed configuration discovery. Shared history is not
+a prerequisite for ordinary collection when local evidence is sufficient.
+
+Existing evidence classification and precedence apply to acquired evidence.
+Persistent result waits retain `work_item_completed` and `work_completed`
+boundaries; a work-item result is not task termination. Streaming follows
+unread output using the existing completion semantics. Output already emitted
+as a completed one-shot result remains evidence against a later false timeout.
+Result waits tolerate the existing completion/output visibility gap, honor
+the completion grace, and perform the last non-blocking output drain before
+returning completed. Claimed-result recovery remains scoped to actual claimed
+rows rather than repeated on empty turns.
+
+_Implementation mapping_: `weft/core/spawn_requests.py::_submit_spawn_request_with_payload`
+and `weft/commands/submission.py::_bind_accepted_taskspec` own accepted transport
+capture/binding. `weft/client/_task.py::_task_with_configuration` and
+`weft/commands/run.py::_LiveRunSession` retain it;
+`weft/commands/_result_wait.py::_accepted_result_materialization` derives immutable
+routes without treating submission state as lifecycle evidence.
+`weft/commands/_result_wait.py::result_observation` owns shared queue
+acquisition, registration-before-read and cancellation wake registration.
+`weft/core/queue_wait.py::QueueChangeMonitor` owns native/fallback thread
+custody, latched operational failure, wake and close. Shared typed error
+translation remains in `weft/commands/_boundary.py`.
+`weft/core/task_evidence.py::read_task_history` owns bounded candidate discovery,
+exact identity validation, ordering and inspected progress. Command history and
+stream adapters delegate to it. `weft/commands/_task_history.py::read_monitor_task_record`
+owns read-only retained lookup;
+`weft/core/task_evidence.py::LogFold.fold` retains incremental terminal and
+prior-live evidence. `weft/core/task_evidence.py::known_tid_evidence` uses a
+provided fold, including an empty fold, as authoritative acquired log evidence.
+`weft/commands/_result_wait.py::_acquire_result_observation` advances discovery
+and retains configuration;
+`weft/commands/_result_wait.py::_classify_result_observation` lends the fold and
+lookup outcomes to current mapping-aware evidence classification.
+`weft/commands/_result_wait.py::_CollectedResult.select_claims` and
+`weft/commands/_result_wait.py::_CollectedResult.settle`
+own shared row eligibility, completion and deadline rules for consuming and
+realtime observations. `weft/commands/_result_wait.py::_drain_result_rows`
+claims selected IDs individually
+and decodes and records successful claims through the shared assembly path.
+`weft/commands/_result_wait.py::_iter_consuming_result` drives consuming
+collection; `weft/commands/result.py::_iter_task_result` is its typed adapter.
+`weft/commands/events.py::iter_task_realtime_events` projects a read-only output window
+through the same settlement owner and lends startup rows until the initial
+snapshot is emitted. Shared cancellation wake
+registration lives in `weft/helpers/__init__.py::_register_observation_wakeup`.
+The typed result adapter is used by result retrieval, streaming and
+`weft/commands/events.py::follow_task_events`.
+`weft/commands/tasks.py::_task_status_record` and
+`weft/commands/system.py::collect_known_tid_record` retain fresh snapshot fields
+while borrowing accepted routing. Coverage lives in
+`tests/core/test_task_history_reader.py`,
+`tests/commands/test_task_history_adapters.py`,
+`tests/commands/test_point_snapshot_loans.py`, and
+`tests/commands/test_retained_result_history.py`,
+`tests/commands/test_active_interactive_lifecycle.py`,
+`tests/commands/test_consuming_result_collection.py`,
+`tests/commands/test_event_observation_connections.py`,
+`tests/commands/test_observer_command_failures.py`,
+`tests/commands/test_result_activity_waits.py`,
+`tests/commands/test_result_settlement_policy.py`, and
+`tests/commands/test_terminal_snapshot_loans.py`.
+`weft/commands/result.py::_task_result_event` owns the common settled-result
+projection. `weft/commands/events.py::_terminal_evidence_identity` compares
+semantic proof without treating a fresh diagnostic timestamp as new evidence.
+`weft/commands/queue.py::watch_queue` shares activity-driven command observation;
+`weft/commands/queue.py` owns its queue adapter.
+
+Related plan: [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md).
+Implementation repair plan: [Direct result observation](../plans/2026-10-09-direct-result-observation-implementation-plan.md).
+Related plan: [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md).
+Earlier implementation work: [Burst result observation](../plans/2026-10-09-burst-result-observation-plan.md).
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
 `weft/core/monitor/task_monitor.py` foreground monitor scan primitive and
@@ -938,9 +1069,10 @@ runtime description, and structured stdout/stderr extraction;
 `weft/commands/system.py` queue/runtime evidence acquisition and ordered log
 replay; `weft/commands/_task_snapshot_reducer.py` pure event folding, evidence
 precedence, snapshot construction, filtering, and ordering;
-`weft/commands/result.py` materialization and completion waits;
+`weft/commands/_result_wait.py` shared acquisition, collection and settlement;
+`weft/commands/result.py` typed result and CLI projections;
 `weft/commands/events.py` `iter_task_realtime_events` non-consuming realtime
-observation, refreshing late metadata before shared terminal classification;
+observation, discovering late metadata before shared terminal classification;
 `weft/commands/events.py` `_open_realtime_routes` owns observation route leases
 and monitor replacement when late metadata identifies custom queues;
 `weft/core/task_evidence.py` shared lifecycle/result evidence;
@@ -1656,6 +1788,12 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md)
+
+- [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
+
+- [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md)
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md) - retains only the session lease across client submissions while preserving queue-first acceptance and bounded operations.
 

@@ -16,6 +16,8 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from weft._exceptions import CommandTimeoutError
+from weft.commands import _result_wait as result_wait
 from weft.commands import events as events_cmd
 from weft.commands.types import TaskEvent
 from weft.context import WeftContext, build_context
@@ -396,12 +398,13 @@ def test_staggered_task_terminal_replaces_wrapper_lost_verdict(
     )
 
     classifications: list[str] = []
-    real_evidence = events_cmd.task_local_terminal_evidence
+    real_evidence = events_cmd._classify_result_observation
 
     def _classify_then_publish_task_terminal(*args: Any, **kwargs: Any) -> Any:
-        snapshot = real_evidence(*args, **kwargs)
+        materialized = real_evidence(*args, **kwargs)
+        snapshot = materialized.terminal_evidence
         if snapshot is None:
-            return None
+            return materialized
         classifications.append(snapshot.classification)
         if len(classifications) == 1 and snapshot.classification == "wrapper_lost":
             _write_queue(
@@ -416,11 +419,11 @@ def test_staggered_task_terminal_replaces_wrapper_lost_verdict(
                 persistent=False,
             )
             _write_queue(ctx, f"T{tid}.outbox", {"ok": True}, persistent=True)
-        return snapshot
+        return materialized
 
     monkeypatch.setattr(
         events_cmd,
-        "task_local_terminal_evidence",
+        "_classify_result_observation",
         _classify_then_publish_task_terminal,
     )
 
@@ -490,14 +493,19 @@ def _publish_after_initial_materialization(
     publish: Callable[[], None],
 ) -> None:
     """Place real queue writes after the observer's initial metadata read."""
-    original = events_cmd._await_result_materialization
+    original = events_cmd._acquire_result_observation
 
-    def materialize(*args: Any, **kwargs: Any) -> Any:
+    published = False
+
+    def acquire(*args: Any, **kwargs: Any) -> Any:
+        nonlocal published
         result = original(*args, **kwargs)
-        publish()
+        if not published:
+            published = True
+            publish()
         return result
 
-    monkeypatch.setattr(events_cmd, "_await_result_materialization", materialize)
+    monkeypatch.setattr(events_cmd, "_acquire_result_observation", acquire)
 
 
 @pytest.mark.parametrize("persistent", [False, True])
@@ -530,7 +538,14 @@ def test_realtime_refreshes_late_metadata_before_final_output(
         _write_queue(ctx, outbox, {"item": "done"}, persistent=True)
 
     _publish_after_initial_materialization(monkeypatch, publish)
-    events = list(events_cmd.iter_task_realtime_events(ctx, tid, follow=False))
+    events: list[TaskEvent] = []
+    iterator = events_cmd.iter_task_realtime_events(ctx, tid, timeout=0.5)
+    if persistent:
+        with pytest.raises(CommandTimeoutError):
+            events.extend(iterator)
+        assert any(event.payload.get("status") == "running" for event in events)
+    else:
+        events.extend(iterator)
     terminals = [event for event in events if event.event_type in {"result", "end"}]
     if persistent:
         assert not terminals
@@ -588,7 +603,7 @@ def test_realtime_route_refresh_preserves_unchanged_queue_cursor(
         {"type": "stream", "stream": "stderr", "data": "old-err"},
         persistent=True,
     )
-    iterator = events_cmd.iter_task_realtime_events(ctx, tid, follow=False)
+    iterator = events_cmd.iter_task_realtime_events(ctx, tid, timeout=5)
     try:
         assert next(iterator).payload["data"] == "old-out"
         assert next(iterator).payload["data"] == "old-err"
@@ -669,7 +684,9 @@ def test_realtime_rebind_releases_subscriptions(
         nonlocal rebinding
         rebinding = args[1] == spec["io"]["outputs"]["outbox"]
         try:
-            return original_routes(*args, **kwargs)
+            with monkeypatch.context() as patches:
+                patches.setattr(result_wait, "QueueChangeMonitor", monitor)
+                return original_routes(*args, **kwargs)
         finally:
             rebinding = False
 
@@ -705,7 +722,13 @@ def test_realtime_rebind_releases_subscriptions(
         monkeypatch.setattr(owner, "close", close)
         return owner
 
-    def publish() -> None:
+    original_wait = events_cmd.QueueChangeMonitor.wait
+    published = False
+
+    def publish(owner: Any, timeout: float | None) -> bool:
+        nonlocal published
+        assert not published, "rebind must settle on its first real wake"
+        published = True
         _write_log(
             ctx,
             {
@@ -715,12 +738,18 @@ def test_realtime_rebind_releases_subscriptions(
                 "taskspec": spec,
             },
         )
+        _write_queue(
+            ctx,
+            spec["io"]["control"]["ctrl_out"],
+            {"tid": tid, "type": "terminal", "source": "task", "status": "cancelled"},
+            persistent=True,
+        )
+        return original_wait(owner, timeout)
 
-    _publish_after_initial_materialization(monkeypatch, publish)
+    monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", publish)
     monkeypatch.setattr(WeftContext, "queue", queue)
     monkeypatch.setattr(events_cmd, "_open_realtime_routes", routes)
-    monkeypatch.setattr(events_cmd, "QueueChangeMonitor", monitor)
-    iterator = events_cmd.iter_task_realtime_events(ctx, tid, follow=False)
+    iterator = events_cmd.iter_task_realtime_events(ctx, tid, timeout=5)
     try:
         if failure is None:
             list(iterator)

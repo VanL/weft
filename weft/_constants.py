@@ -49,7 +49,7 @@ from simplebroker import (
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.108"
+__version__: Final[str] = "0.9.109"
 """Current version of Weft."""
 
 # ==============================================================================
@@ -715,9 +715,6 @@ TASK_PING_TIMEOUT_SECONDS: Final[float] = 10.0
 CONTROL_SURFACE_WAIT_INTERVAL: Final[float] = 0.05
 """Polling interval while waiting for task terminal state in CLI control flows."""
 
-RESULT_SURFACE_WAIT_INTERVAL: Final[float] = 0.1
-"""Maximum interval between CLI result-surface rescans when watcher wakeups are missed."""
-
 QUEUE_CHANGE_MONITOR_WAITER_TIMEOUT_SECONDS: Final[float] = 1.0
 """Bounded wait chunk for multi-queue CLI activity monitors."""
 
@@ -981,6 +978,9 @@ WEFT_QUEUE_NAMESPACE_PREFIX: Final[str] = "weft."
 
 WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 """Global queue for task state changes and events."""
+
+TASK_HISTORY_MAX_MESSAGE_ID: Final[int] = (1 << 63) - 1
+"""Greatest signed broker ID; its history upper bound must stay absent [MF-5]."""
 
 TASK_MONITOR_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for task monitor operational records."""
@@ -1820,7 +1820,7 @@ WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV: Final[str] = "WEFT_MANAGER_RUNTIME_HANDLE_
 """Optional JSON RunnerHandle for externally supervised manager processes."""
 
 WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.5
-"""Time to keep polling an outbox after a completion event before assuming no result."""
+"""Original activity-driven visibility grace for terminal or eligible quiet output."""
 
 INTERACTIVE_OUTPUT_DRAIN_TIMEOUT: Final[float] = 0.25
 """Best-effort drain window for late stdout/stderr after an interactive session exits."""

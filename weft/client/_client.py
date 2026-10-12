@@ -16,7 +16,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
-from simplebroker import BrokerSession
+from simplebroker import BrokerSession, Queue
+from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE
 from weft.commands import submission
 from weft.context import WeftContext, build_context
 
@@ -28,7 +29,7 @@ from ._namespaces import (
     TasksNamespace,
 )
 from ._prepared import PreparedSubmission
-from ._task import Task
+from ._task import Task, _task_with_configuration
 
 if TYPE_CHECKING:
     from weft.client import TaskSpec
@@ -76,9 +77,10 @@ class WeftClient:
         self._owner_pid: int | None = None
         self._owner_thread: threading.Thread | None = None
         self._submission_session: BrokerSession | None = None
+        self._submission_queue: Queue | None = None
 
     def __enter__(self) -> Self:
-        """Activate lazy same-thread retained submission reuse [PY-1]."""
+        """Activate lazy same-thread session and submission-facade reuse [PY-1]."""
 
         self._reset_after_fork()
         if self._lifecycle_state is _ClientLifecycleState.CLEANUP_PENDING:
@@ -113,7 +115,7 @@ class WeftClient:
                 exc.add_note(f"Additional WeftClient cleanup diagnostic: {note}")
 
     def close(self) -> None:
-        """Release a retained submission session on its owner thread [PY-1]."""
+        """Release the session and its minted facade on the owner thread [PY-1]."""
 
         self._reset_after_fork()
         if self._lifecycle_state is _ClientLifecycleState.BOUNDED:
@@ -127,6 +129,7 @@ class WeftClient:
                 self._lifecycle_state = _ClientLifecycleState.CLEANUP_PENDING
                 raise
         self._submission_session = None
+        self._submission_queue = None
         self._owner_pid = None
         self._owner_thread = None
         self._lifecycle_state = _ClientLifecycleState.BOUNDED
@@ -139,6 +142,7 @@ class WeftClient:
         if session is not None:
             session.close()
         self._submission_session = None
+        self._submission_queue = None
         self._owner_pid = None
         self._owner_thread = None
         self._lifecycle_state = _ClientLifecycleState.BOUNDED
@@ -155,6 +159,7 @@ class WeftClient:
     def _submit_prepared(self, prepared: PreparedSubmissionRequest) -> Task:
         self._reset_after_fork()
         session: BrokerSession | None = None
+        connection_queue: Queue | None = None
         if self._lifecycle_state is _ClientLifecycleState.CLEANUP_PENDING:
             self._require_owner("submission")
             raise RuntimeError(
@@ -170,15 +175,22 @@ class WeftClient:
                 if self._submission_session is None:
                     self._submission_session = self.context.session()
                 session = self._submission_session
+                if self._submission_queue is None:
+                    # Mint once. Session ownership also bounds the facade's
+                    # inventory lifetime without retaining a connection operation.
+                    self._submission_queue = session.queue(WEFT_SPAWN_REQUESTS_QUEUE)
+                connection_queue = self._submission_queue
         outcome = submission._submit_prepared_outcome(
             self.context,
             prepared,
             session=session,
+            connection_queue=connection_queue,
         )
-        return Task(
+        return _task_with_configuration(
             self,
             outcome.receipt.tid,
-            context=outcome.runtime_context,
+            outcome.runtime_context,
+            outcome.taskspec,
         )
 
     @classmethod

@@ -880,6 +880,17 @@ index is not a dated section and does not count toward the coalescing trigger.
   replay of every non-target event after the last target event. Otherwise a
   test-side waiter can create enough Postgres read pressure to starve the
   in-process manager it is waiting on.
+- October 9 qualification of the preceding May 10 cursor lesson: supported
+  SimpleBroker 8.5.1 / simplebroker-pg 4.5.1 generated writes serialize timestamp
+  allocation, insertion, and commit (SQLite write transaction; PostgreSQL
+  singleton timestamp-row lock). An advancing raw-row cursor is valid for that
+  live runtime publication path. Exact-ID imports and ID-preserving moves can
+  still backfill behind a cursor. Start a fresh observation after such an
+  administrative change. The historical production dependency version was not
+  established; do not reinterpret the May incident as disproved. Source owners:
+  `simplebroker/db.py` generated-write transaction and
+  `simplebroker_pg/plugin.py` timestamp allocation. See [MF-5] and
+  [the result observation plan](plans/2026-10-09-burst-result-observation-plan.md).
 - Pipeline child bootstrap is accepted-task internal work. Sending generated
   stage and edge spawn requests back through the public spawn backlog can leave
   a pipeline partially bootstrapped under load; use the internal spawn lane and
@@ -1451,3 +1462,14 @@ and `tests/system/test_config_transport.py`.
   locally. A non-destructive timestamp cursor now preserves original log rows
   and carries observation progress between restart waits. The fix retains the
   existing cleanup and control budgets. See `tests/core/test_manager.py`.
+
+## 2026-10-09 Result Claims Must Match Actual Delivery
+
+- A live-rendering flag does not mean every result row is delivered live.
+  Ordinary pipeline values are buffered until completion; claiming them early
+  loses them if observation times out. The shared collector must check each
+  row's actual eligibility before claiming without task/batch proof. Keep
+  undelivered values pending while eligible stream frames can reach the caller.
+  Prove both plain and mixed surfaces through real producer publications and
+  later retrieval of the exact retained value. See [MF-5](specifications/05-Message_Flow_and_State.md)
+  and the [implementation repair](plans/2026-10-09-direct-result-observation-implementation-plan.md).

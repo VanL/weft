@@ -60,7 +60,24 @@ EXPECTED_GROUP_IDS = [
     *(
         f"RUFF-SUP-{number:03d}"
         for number in range(101, 127)
-        if number not in {101, 102, 103, 110, 111, 112, 119, 120, 121, 123, 125}
+        if number
+        not in {
+            101,
+            102,
+            103,
+            106,
+            108,
+            109,
+            110,
+            111,
+            112,
+            113,
+            119,
+            120,
+            121,
+            123,
+            125,
+        }
     ),
     *(
         f"RUFF-SUP-{number:03d}"
@@ -75,6 +92,7 @@ EXPECTED_GROUP_IDS = [
             243,
             353,
             354,
+            355,
             351,
             337,
             336,
@@ -97,12 +115,12 @@ EXPECTED_GROUP_IDS = [
             306,
             330,
             331,
+            332,
             333,
             352,
         }
     ),
     "RUFF-SUP-367",
-    "RUFF-SUP-368",
     "RUFF-SUP-369",
     "RUFF-SUP-370",
     "RUFF-SUP-372",
@@ -113,9 +131,9 @@ EXPECTED_GROUP_IDS = [
     "RUFF-SUP-377",
     "RUFF-SUP-378",
 ]
-EXPECTED_GROUP_COUNT = 206
-EXPECTED_DIRECTIVE_COUNT = 338
-EXPECTED_C901_DIRECTIVE_COUNT = 123
+EXPECTED_GROUP_COUNT = 199
+EXPECTED_DIRECTIVE_COUNT = 331
+EXPECTED_C901_DIRECTIVE_COUNT = 118
 TAGGED_C901 = re.compile(
     r"#\s*noqa:\s*[^#\n]*\bC901\b[^#\n]*"
     r"approved\s+\[TS-3\.1\]\s+\[RUFF-SUP-(\d{3})\]\s+exception\b"

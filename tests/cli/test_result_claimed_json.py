@@ -11,9 +11,9 @@ from typer.testing import CliRunner
 
 from tests.helpers.test_backend import prepare_project_root
 from weft.cli.app import app
-from weft.commands import result as result_cmd
 from weft.context import build_context
 from weft.core import task_evidence
+from weft.core.queue_wait import QueueChangeMonitor
 
 pytestmark = [pytest.mark.shared]
 
@@ -40,7 +40,7 @@ def test_result_claimed_outbox_json_keeps_reconciliation_without_waiting(
     def unexpected_wait(*args: object, **kwargs: object) -> None:
         raise AssertionError("claimed result must not wait for completion")
 
-    monkeypatch.setattr(result_cmd, "_await_single_result", unexpected_wait)
+    monkeypatch.setattr(QueueChangeMonitor, "wait", unexpected_wait)
     log = ctx.queue("weft.log.tasks", persistent=False)
     outbox = ctx.queue(f"T{tid}.outbox", persistent=True)
     try:

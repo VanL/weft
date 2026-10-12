@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft"
-version = "0.9.108"
+version = "0.9.109"
 description = "The durable task substrate for agent systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,32 +44,32 @@ pg = [
     "simplebroker-pg>=4.5.1",
 ]
 docker = [
-    "weft-docker>=0.9.83",
+    "weft-docker>=0.9.84",
 ]
 django = [
-    "weft-django>=0.9.43",
+    "weft-django>=0.9.44",
 ]
 django-channels = [
-    "weft-django[channels]>=0.9.43",
+    "weft-django[channels]>=0.9.44",
 ]
 macos-sandbox = [
-    "weft-macos-sandbox>=0.6.12",
+    "weft-macos-sandbox>=0.6.13",
 ]
 microsandbox = [
-    "weft-microsandbox>=0.5.13; platform_system != 'Windows'",
+    "weft-microsandbox>=0.5.14; platform_system != 'Windows'",
 ]
 all = [
     "simplebroker-pg>=4.5.1",
-    "weft-docker>=0.9.83",
-    "weft-django>=0.9.43",
-    "weft-macos-sandbox>=0.6.12",
-    "weft-microsandbox>=0.5.13; platform_system != 'Windows'",
+    "weft-docker>=0.9.84",
+    "weft-django>=0.9.44",
+    "weft-macos-sandbox>=0.6.13",
+    "weft-microsandbox>=0.5.14; platform_system != 'Windows'",
 ]
 dev = [
     "simplebroker-pg>=4.5.1",
-    "weft-docker>=0.9.83",
-    "weft-macos-sandbox>=0.6.12",
-    "weft-microsandbox>=0.5.13; platform_system != 'Windows'",
+    "weft-docker>=0.9.84",
+    "weft-macos-sandbox>=0.6.13",
+    "weft-microsandbox>=0.5.14; platform_system != 'Windows'",
     "hypothesis>=6.168.5",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",

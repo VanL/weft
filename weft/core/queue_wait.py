@@ -2,6 +2,7 @@
 
 Spec references:
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
+- docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-1.2]
 """
 
@@ -34,7 +35,11 @@ class QueueChangeMonitor:
     ) -> None:
         self._activity_event = threading.Event()
         self._stop_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._closed = False
+        self._failure: Exception | None = None
         self._watchers: list[QueueWatcher] = []
+        self._watcher_threads: list[threading.Thread] = []
         self._multi_waiter: Any | None = None
         self._monitor_thread: threading.Thread | None = None
         self._config = resolve_runtime_config(config)
@@ -53,7 +58,13 @@ class QueueChangeMonitor:
                     config=self._config,
                 )
                 self._watchers.append(watcher)
-                watcher.run_in_thread()
+                thread = threading.Thread(
+                    target=self._run_watcher,
+                    args=(watcher,),
+                    daemon=True,
+                )
+                self._watcher_threads.append(thread)
+                thread.start()
         except BaseException:
             self.close()
             raise
@@ -88,56 +99,113 @@ class QueueChangeMonitor:
         if waiter is None:
             return
 
-        while not self._stop_event.is_set():
-            try:
+        try:
+            while not self._stop_event.is_set():
                 if waiter.wait(QUEUE_CHANGE_MONITOR_WAITER_TIMEOUT_SECONDS):
-                    self._activity_event.set()
-            except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
-                logger.debug("Multi-queue activity monitor failed", exc_info=True)
-                self._activity_event.set()
-                try:
-                    waiter.close()
-                except (BrokerError, OSError, RuntimeError):
-                    logger.debug(
-                        "Failed to close failed multi-queue activity monitor",
-                        exc_info=True,
-                    )
-                if self._multi_waiter is waiter:
+                    self.wake()
+        except Exception as failure:  # Report ordinary thread failure to observer.
+            logger.debug("Multi-queue activity monitor failed", exc_info=True)
+            self._record_failure(failure)
+        finally:
+            # Fatal exceptions stay at the thread boundary. Its death must still
+            # wake the observer; close suppresses this expected-exit diagnostic.
+            self._record_failure(
+                RuntimeError("Multi-queue activity monitor stopped unexpectedly")
+            )
+            with self._state_lock:
+                owns_waiter = self._multi_waiter is waiter
+                if owns_waiter:
                     self._multi_waiter = None
-                break
+            if owns_waiter:
+                self._close_waiter(waiter)
 
-    def _handle_queue_activity(self, _message: str, _timestamp: int) -> None:
+    def _run_watcher(self, watcher: QueueWatcher) -> None:
+        """Keep failure and thread custody around the broker's public run owner."""
+        try:
+            watcher.run_forever()
+        except Exception as failure:  # Report ordinary thread failure to observer.
+            logger.debug("Queue watcher observation failed", exc_info=True)
+            self._record_failure(failure)
+        finally:
+            # Uncaught fatal exceptions retain thread-local semantics while the
+            # observer learns that its wake source has died.
+            self._record_failure(RuntimeError("Queue watcher stopped unexpectedly"))
+
+    def _record_failure(self, failure: Exception) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+            if self._failure is None:
+                self._failure = failure
+        self.wake()
+
+    def _raise_failure(self) -> None:
+        with self._state_lock:
+            failure = self._failure
+        if failure is not None:
+            raise BrokerError("Queue activity observation failed") from failure
+
+    def wake(self) -> None:
+        """Wake observation without broker effects; safe across threads and close.
+
+        Wake sources record durable contents, failure or cancellation first;
+        callers recheck that state after the coalesced Event wake [MF-5].
+        """
         self._activity_event.set()
 
+    def _handle_queue_activity(self, _message: str, _timestamp: int) -> None:
+        self.wake()
+
     def wait(self, timeout: float | None) -> bool:
-        """Block until any watched queue changes or the timeout expires."""
+        """Wait for activity or timeout; close wakes and returns True.
+
+        Raises BrokerError from a latched observer failure, on every wait.
+        """
+        self._raise_failure()
+        if self._stop_event.is_set():
+            return True
         triggered = self._activity_event.wait(timeout=timeout)
         if triggered:
             self._activity_event.clear()
+        self._raise_failure()
         return triggered
+
+    @staticmethod
+    def _close_waiter(waiter: Any) -> None:
+        try:
+            waiter.close()
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to close multi-queue activity monitor", exc_info=True)
 
     def close(self) -> None:
         """Stop watcher threads and release broker-side wait resources."""
-        self._stop_event.set()
-        waiter = self._multi_waiter
-        self._multi_waiter = None
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._stop_event.set()
+            waiter = self._multi_waiter
+            self._multi_waiter = None
+            monitor_thread = self._monitor_thread
+            self._monitor_thread = None
+            watchers = self._watchers
+            self._watchers = []
+            watcher_threads = self._watcher_threads
+            self._watcher_threads = []
+        self.wake()
         if waiter is not None:
-            try:
-                waiter.close()
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to close multi-queue activity monitor", exc_info=True
-                )
+            self._close_waiter(waiter)
         if (
-            self._monitor_thread is not None
-            and self._monitor_thread.is_alive()
-            and self._monitor_thread is not threading.current_thread()
+            monitor_thread is not None
+            and monitor_thread.is_alive()
+            and monitor_thread is not threading.current_thread()
         ):
-            self._monitor_thread.join(QUEUE_CHANGE_MONITOR_JOIN_TIMEOUT_SECONDS)
-        self._monitor_thread = None
-        for watcher in self._watchers:
+            monitor_thread.join(QUEUE_CHANGE_MONITOR_JOIN_TIMEOUT_SECONDS)
+        for watcher in watchers:
             try:
-                watcher.stop(join=True)
+                watcher.stop(join=False)
             except Exception:  # pragma: no cover - watcher teardown best effort
                 logger.debug("Failed to stop queue watcher cleanly", exc_info=True)
-        self._watchers.clear()
+        for thread in watcher_threads:
+            if thread.is_alive() and thread is not threading.current_thread():
+                thread.join(QUEUE_CHANGE_MONITOR_JOIN_TIMEOUT_SECONDS)

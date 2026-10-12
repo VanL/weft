@@ -77,9 +77,14 @@ returns the client to bounded behavior. Already returned `Task` and
 `WeftClient.__exit__()` preserves an active body exception over ordinary close
 failure by attaching cleanup diagnostics; with no body exception the close
 failure propagates. Non-ordinary cleanup exceptions retain SimpleBroker's
-priority. Retention spans only the session lease. It never spans a queue
+priority. Retention spans the session lease and its single lazy spawn-queue
+facade. It never spans a queue
 operation, backend checkout, SQL transaction, manager recovery, or readiness
 wait. Existing `queue()` and `broker()` ownership and defaults are unchanged.
+
+Implementation: `weft/client/_client.py::WeftClient` and
+`weft/commands/submission.py::_submit_with_session`.
+Related plan: [Burst result observation](../plans/2026-10-09-burst-result-observation-plan.md).
 
 _Implementation mapping_: `weft/context.py::WeftContext.session` owns the
 factory. `weft/client/_client.py::WeftClient` owns the retained client
@@ -174,6 +179,32 @@ submission errors. An authoritative manager rejection retains its typed error
 and includes the accepted TID and rejection reason in the message. Direct
 manager lifecycle commands continue to require readiness proof.
 
+A returned submission handle retains access to the accepted canonical task
+configuration, assigned TID, and effective resolved context needed by the
+shared result capability [MF-5]. These immutable values are usable before
+child initialization and after the submitting client closes. They are not a
+lifecycle snapshot. Python and CLI callers observe and retrieve task results
+directly through that capability; result meaning and errors remain shared.
+Bare-TID callers use the task-specific discovery boundary in [MF-5].
+
+_Implementation mapping_: `weft/core/spawn_requests.py::_submit_spawn_request_with_payload`
+retains the committed transport; `weft/commands/submission.py::_bind_accepted_taskspec`
+binds it after acceptance/recovery; `weft/client/_task.py::_task_with_configuration`
+and `weft/commands/run.py::_LiveRunSession` retain it. Queue-based custody
+coverage lives in `tests/commands/test_submission_custody.py`,
+`tests/core/test_client.py`, `tests/commands/test_run.py`, and
+`tests/commands/test_run_public.py`. Snapshot custody coverage lives in
+`tests/commands/test_point_snapshot_loans.py`; its owner is
+`weft/client/_task.py::Task.snapshot`, through the shared point-snapshot capability.
+`tests/commands/test_observer_command_failures.py` covers typed observer failure
+and cleanup priority at public boundaries.
+`weft/commands/result.py::_task_result_event` projects the shared settled-result
+shape for consuming follow and stream adapters.
+
+Related plan: [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md).
+Implementation repair plan: [Direct result observation](../plans/2026-10-09-direct-result-observation-implementation-plan.md).
+Related plan: [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md).
+
 The exact signature exceptions are: `cmd_run` has `spec_args=()`,
 `describe=False`, and `stdin_text=None`;
 `cmd_queue_write(queue_name, message=None, *, endpoint=None)` exposes its
@@ -218,7 +249,10 @@ _Implementation mapping_: `weft/commands/_resources.py` owns stream cleanup
 exception priority; `weft/commands/_result_wait.py`, `_spawn_submission.py`,
 `events.py`, `queue.py`, `result.py`, `system.py`, and `tasks.py` own the
 bounded and generator observation scopes; `weft/commands/run.py::_LiveRunSession`
-owns input and child-stream closure. Cross-thread Django adaptation is mapped
+owns input, direct cancellation wake, and child-stream closure on the thread
+that advances each iterator. It shares the plain callback registration helper
+`weft/helpers/__init__.py::_register_observation_wakeup` with Django.
+Cross-thread Django adaptation is mapped
 under [DJ-12.1] and [DJ-12.2]. Firing cleanup coverage lives in
 `tests/commands/test_resource_cleanup.py`, `test_queue.py`, `test_status.py`,
 and `integrations/weft_django/tests/test_weft_django.py`.
@@ -461,6 +495,12 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
+- [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md)
+
+- [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
+
+- [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md)
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md)
 

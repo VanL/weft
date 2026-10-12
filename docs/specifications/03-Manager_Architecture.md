@@ -12,9 +12,7 @@ the **Client**.
 - **Manager**: A long-lived task that spawns child tasks and manages autostart.
 - **Manager (CLI)**: The CLI namespace for managing Managers (not a distinct runtime).
 
-_Implementation status_: `Manager` (`weft/core/manager.py`), the spawn registry
-queue, and the CLI wrappers (`weft manager …`, `weft run`) are fully
-implemented. The Client (`weft/cli/run.py`) builds TaskSpec templates,
+The Client (`weft/cli/run.py`) builds TaskSpec templates,
 enqueues them on `weft.spawn.requests`, and optionally waits for completion by
 tailing task logs/outboxes. The spawn-request message ID becomes the task TID.
 Managers consume those requests, expand the TaskSpec, launch child Consumers
@@ -699,6 +697,8 @@ reactor applies them through its owner-thread transition path. There is no
 Manager-specific synchronous signal alias.
 
 _Implementation mapping_:
+- `tests/core/test_manager_start_observer_failure.py` verifies cleanup when
+  manager-start observation fails.
 - Registry liveness reduction —
   `weft/core/manager_runtime.py::manager_registry_record_liveness`; missing
   handles or an empty scoped host-process set yield unknown. Registry readers

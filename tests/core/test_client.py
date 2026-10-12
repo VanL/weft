@@ -56,6 +56,7 @@ from weft.client._namespaces import (
     SystemNamespace,
     TasksNamespace,
 )
+from weft.commands import submission
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 from weft.core.monitor.collation import MonitorTaskEventUpdate
@@ -1859,3 +1860,89 @@ def test_client_context_policy_reaches_parameterized_spec(
     )
     assert prepared._request.taskspec.spec.weft_context == str(declared.resolve())
     assert not declared.exists(), "preparation must not initialize an alternate context"
+
+
+@pytest.mark.parametrize("operation", ["result", "realtime"])
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+def test_accepted_handle_observes_custom_routes_before_initialization_after_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    outcome: str,
+) -> None:
+    """Broker acceptance carries routing before any child-owned event exists.
+
+    Gate only manager availability, outside result observation. Real submission
+    remains pending and real custom queues prove response/error retrieval; the
+    old handle loses its spec and watches empty TID-default queues instead.
+    """
+    context = build_context(prepare_project_root(tmp_path))
+    monkeypatch.setattr(
+        submission,
+        "ensure_manager_after_submission",
+        lambda *_args, **_kwargs: manager_runtime.ManagerEnsureResult(
+            outcome="ready",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="admission-gated",
+        ),
+    )
+    with WeftClient(context=context) as client:
+        task = client.submit(
+            {
+                "name": "accepted-queued-child",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "weft_context": str(context.root),
+                },
+                "io": {
+                    "outputs": {"outbox": "accepted.custom.outbox"},
+                    "control": {
+                        "ctrl_in": "accepted.custom.input_control",
+                        "ctrl_out": "accepted.custom.control",
+                    },
+                },
+            }
+        )
+    with context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+        assert log.peek_one() is None
+    with context.queue("accepted.custom.outbox", persistent=True) as outbox:
+        if outcome == "completed":
+            outbox.write(json.dumps({"structured_output": "briefing"}))
+    with context.queue("accepted.custom.control", persistent=True) as control:
+        control.write(
+            json.dumps(
+                {
+                    "type": "terminal",
+                    "tid": task.tid,
+                    "source": "task",
+                    "status": outcome,
+                    "error": "child failed" if outcome == "failed" else None,
+                }
+            )
+        )
+    bare = Task(client, task.tid, context)
+    assert task == bare
+    # Effective contexts have dict-backed config and remain unhashable.
+    for handle in (task, bare):
+        with pytest.raises(TypeError, match="unhashable"):
+            hash(handle)
+    assert repr(task) == repr(bare)
+    if operation == "result":
+        result = task.result(timeout=0.5)
+        assert result.status == outcome
+        if outcome == "completed":
+            assert result.value == {"structured_output": "briefing"}
+        else:
+            assert result.error == "child failed"
+    else:
+        observed = list(task.realtime_events(timeout=0.5))
+        assert observed[-1].event_type == "end"
+        assert observed[-1].payload["status"] == outcome
+        result_event = next(event for event in observed if event.event_type == "result")
+        if outcome == "completed":
+            assert result_event.payload["value"] == {"structured_output": "briefing"}
+        else:
+            assert result_event.payload["error"] == "child failed"

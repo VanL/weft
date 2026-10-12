@@ -2001,181 +2001,217 @@ def _registry_start_timeout_message(
 def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
     context: WeftContext,
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
-    """Launch a new Manager process and wait for its registry entry (Spec: [MA-3])."""
+    """Observe readiness while retaining custody until SUCCESS is sent.
+
+    Listener failure aborts an unconfirmed launch through its owned-tree
+    cleanup. Once SUCCESS is sent, an observation failure cannot revoke the
+    detached runtime. Spec: [MA-3], [SB-0.4].
+    """
     invocation = _build_manager_runtime_invocation(context)
     manager_tid = invocation.tid
     launch = _launch_detached_manager(context, invocation)
 
-    deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
-    competing_record: dict[str, Any] | None = None
-    last_view: ManagerRegistryView | None = None
-    last_child_pid_live: bool | None = None
-    last_selected_proof: bool | None = None
-    probe_cache: dict[str, int | None] = {}
-    with ExitStack() as resources:
-        resources.enter_context(context.session())
-        registry_queue = _registry_queue(context)
-        resources.callback(registry_queue.close)
-        monitor = QueueChangeMonitor([registry_queue], config=context.config)
-        resources.callback(monitor.close)
-        while time.monotonic() < deadline:
-            view = _registry_view(
-                context,
-                target_tid=manager_tid,
-                probe_stale=True,
-                probe_cache=probe_cache,
-                queue=registry_queue,
-            )
-            last_view = view
-            last_selected_proof = None
-            selected_record = view.active_manager
-            if selected_record is not None:
-                if selected_record.get("tid") != manager_tid:
-                    competing_record = selected_record
-                    if _view_contains_registered_launch(
-                        view,
-                        manager_tid=manager_tid,
-                        launch_pid=launch.pid,
-                    ):
-                        return _acknowledge_competing_and_return(
-                            launch,
+    launch_handed_off = False
+    try:
+        deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
+        competing_record: dict[str, Any] | None = None
+        last_view: ManagerRegistryView | None = None
+        last_child_pid_live: bool | None = None
+        last_selected_proof: bool | None = None
+        probe_cache: dict[str, int | None] = {}
+        with ExitStack() as resources:
+            resources.enter_context(context.session())
+            registry_queue = _registry_queue(context)
+            resources.callback(registry_queue.close)
+            monitor = QueueChangeMonitor([registry_queue], config=context.config)
+            resources.callback(monitor.close)
+            while time.monotonic() < deadline:
+                view = _registry_view(
+                    context,
+                    target_tid=manager_tid,
+                    probe_stale=True,
+                    probe_cache=probe_cache,
+                    queue=registry_queue,
+                )
+                last_view = view
+                last_selected_proof = None
+                selected_record = view.active_manager
+                if selected_record is not None:
+                    if selected_record.get("tid") != manager_tid:
+                        competing_record = selected_record
+                        if _view_contains_registered_launch(
+                            view,
                             manager_tid=manager_tid,
-                            record=selected_record,
-                        )
-                else:
-                    last_selected_proof = _manager_start_record_matches_launch(
-                        selected_record,
-                        launch_pid=launch.pid,
-                    )
-                    if last_selected_proof:
-                        try:
-                            _acknowledge_manager_launch_success(launch)
-                        except _ManagerLaunchAcknowledgementError as exc:
-                            if not exc.success_signal_sent:
-                                _fail_manager_start(
-                                    launch=launch,
-                                    message=str(exc),
-                                    abort_launcher=True,
-                                )
-                            settled_record = _await_manager_start_settlement(
-                                context,
+                            launch_pid=launch.pid,
+                        ):
+                            result = _acknowledge_competing_and_return(
+                                launch,
                                 manager_tid=manager_tid,
-                                deadline=deadline,
-                                session_owned=True,
+                                record=selected_record,
                             )
-                            if (
-                                settled_record is not None
-                                and settled_record.get("tid") != manager_tid
-                            ):
-                                _cleanup_startup_stderr(launch.stderr_path)
-                                return settled_record, False, None
-                            view_after_ack = _registry_view(
-                                context,
-                                target_tid=manager_tid,
-                                probe_stale=True,
-                                probe_cache=probe_cache,
-                                queue=registry_queue,
-                            )
-                            last_view = view_after_ack
-                            current_record = view_after_ack.target_record or (
-                                view_after_ack.active_manager
-                                if view_after_ack.active_manager is not None
-                                and view_after_ack.active_manager.get("tid")
-                                == manager_tid
-                                else None
-                            )
-                            last_selected_proof = isinstance(
-                                current_record, dict
-                            ) and _manager_start_record_matches_launch(
-                                current_record,
-                                launch_pid=launch.pid,
-                            )
-                            if not last_selected_proof:
-                                continue
-                            logger.debug(
-                                "Detached manager launch for %s succeeded before "
-                                "post-proof acknowledgement failed: %s",
-                                manager_tid,
-                                exc,
-                                exc_info=True,
-                            )
+                            launch_handed_off = True
+                            return result
+                    else:
+                        last_selected_proof = _manager_start_record_matches_launch(
+                            selected_record,
+                            launch_pid=launch.pid,
+                        )
+                        if last_selected_proof:
+                            try:
+                                _acknowledge_manager_launch_success(launch)
+                                launch_handed_off = True
+                            except _ManagerLaunchAcknowledgementError as exc:
+                                if not exc.success_signal_sent:
+                                    _fail_manager_start(
+                                        launch=launch,
+                                        message=str(exc),
+                                        abort_launcher=True,
+                                    )
+                                launch_handed_off = True
+                                settled_record = _await_manager_start_settlement(
+                                    context,
+                                    manager_tid=manager_tid,
+                                    deadline=deadline,
+                                    session_owned=True,
+                                )
+                                if (
+                                    settled_record is not None
+                                    and settled_record.get("tid") != manager_tid
+                                ):
+                                    _cleanup_startup_stderr(launch.stderr_path)
+                                    return settled_record, False, None
+                                view_after_ack = _registry_view(
+                                    context,
+                                    target_tid=manager_tid,
+                                    probe_stale=True,
+                                    probe_cache=probe_cache,
+                                    queue=registry_queue,
+                                )
+                                last_view = view_after_ack
+                                current_record = view_after_ack.target_record or (
+                                    view_after_ack.active_manager
+                                    if view_after_ack.active_manager is not None
+                                    and view_after_ack.active_manager.get("tid")
+                                    == manager_tid
+                                    else None
+                                )
+                                last_selected_proof = isinstance(
+                                    current_record, dict
+                                ) and _manager_start_record_matches_launch(
+                                    current_record,
+                                    launch_pid=launch.pid,
+                                )
+                                if not last_selected_proof:
+                                    continue
+                                logger.debug(
+                                    "Detached manager launch for %s succeeded before "
+                                    "post-proof acknowledgement failed: %s",
+                                    manager_tid,
+                                    exc,
+                                    exc_info=True,
+                                )
+                            _cleanup_startup_stderr(launch.stderr_path)
+                            return selected_record, True, None
+
+                if launch.launcher_process.poll() is not None:
+                    if competing_record is None:
+                        competing_record = _await_manager_start_settlement(
+                            context,
+                            manager_tid=manager_tid,
+                            deadline=deadline,
+                            session_owned=True,
+                        )
+                    if competing_record is not None:
                         _cleanup_startup_stderr(launch.stderr_path)
-                        return selected_record, True, None
+                        return competing_record, False, None
+                    _fail_manager_start(
+                        launch=launch,
+                        message="Failed to start Manager process; detached launcher exited before startup stabilized.",
+                        abort_launcher=False,
+                    )
+                last_child_pid_live = pid_is_live(launch.pid)
+                if not last_child_pid_live:
+                    if competing_record is None:
+                        competing_record = _await_manager_start_settlement(
+                            context,
+                            manager_tid=manager_tid,
+                            deadline=deadline,
+                            session_owned=True,
+                        )
+                    if competing_record is not None:
+                        _send_launcher_signal(
+                            launch.launcher_process,
+                            MANAGER_LAUNCHER_SIGNAL_ABORT,
+                        )
+                        _communicate_launcher(launch.launcher_process, timeout=1.0)
+                        _cleanup_startup_stderr(launch.stderr_path)
+                        return competing_record, False, None
+                    _fail_manager_start(
+                        launch=launch,
+                        message="Failed to start Manager process; detached manager PID exited before startup stabilized.",
+                        abort_launcher=True,
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
+        if competing_record is not None:
+            return _reconcile_competing_manager_start(
+                context,
+                launch=launch,
+                manager_tid=manager_tid,
+                record=competing_record,
+            )
 
-            if launch.launcher_process.poll() is not None:
-                if competing_record is None:
-                    competing_record = _await_manager_start_settlement(
-                        context,
-                        manager_tid=manager_tid,
-                        deadline=deadline,
-                        session_owned=True,
-                    )
-                if competing_record is not None:
-                    _cleanup_startup_stderr(launch.stderr_path)
-                    return competing_record, False, None
-                _fail_manager_start(
-                    launch=launch,
-                    message="Failed to start Manager process; detached launcher exited before startup stabilized.",
-                    abort_launcher=False,
-                )
-            last_child_pid_live = pid_is_live(launch.pid)
-            if not last_child_pid_live:
-                if competing_record is None:
-                    competing_record = _await_manager_start_settlement(
-                        context,
-                        manager_tid=manager_tid,
-                        deadline=deadline,
-                        session_owned=True,
-                    )
-                if competing_record is not None:
-                    _send_launcher_signal(
-                        launch.launcher_process,
-                        MANAGER_LAUNCHER_SIGNAL_ABORT,
-                    )
-                    _communicate_launcher(launch.launcher_process, timeout=1.0)
-                    _cleanup_startup_stderr(launch.stderr_path)
-                    return competing_record, False, None
-                _fail_manager_start(
-                    launch=launch,
-                    message="Failed to start Manager process; detached manager PID exited before startup stabilized.",
-                    abort_launcher=True,
-                )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
-    if competing_record is not None:
-        return _reconcile_competing_manager_start(
+        settled_record = _await_manager_start_settlement(
             context,
-            launch=launch,
             manager_tid=manager_tid,
-            record=competing_record,
+            deadline=time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
         )
+        if settled_record is not None:
+            return _reconcile_competing_manager_start(
+                context,
+                launch=launch,
+                manager_tid=manager_tid,
+                record=settled_record,
+            )
 
-    settled_record = _await_manager_start_settlement(
-        context,
-        manager_tid=manager_tid,
-        deadline=time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
-    )
-    if settled_record is not None:
-        return _reconcile_competing_manager_start(
-            context,
+        _fail_manager_start(
             launch=launch,
-            manager_tid=manager_tid,
-            record=settled_record,
+            message=_registry_start_timeout_message(
+                launch,
+                manager_tid=manager_tid,
+                view=last_view,
+                child_pid_live=last_child_pid_live,
+                selected_proof=last_selected_proof,
+            ),
+            abort_launcher=True,
         )
-
-    _fail_manager_start(
-        launch=launch,
-        message=_registry_start_timeout_message(
-            launch,
-            manager_tid=manager_tid,
-            view=last_view,
-            child_pid_live=last_child_pid_live,
-            selected_proof=last_selected_proof,
-        ),
-        abort_launcher=True,
-    )
+    except ManagerStartFailed:
+        raise
+    except (BrokerError, OSError, RuntimeError) as exc:
+        launcher_events: list[dict[str, Any]] = []
+        launcher_stderr = ""
+        if not launch_handed_off:
+            try:
+                stdout_text, launcher_stderr = _abort_unconfirmed_launcher(
+                    launch.launcher_process
+                )
+            except (OSError, subprocess.SubprocessError) as cleanup_error:
+                exc.add_note(f"Detached launcher cleanup failed: {cleanup_error}")
+            else:
+                launcher_events = _collect_launcher_events(stdout_text)
+        raise ManagerStartFailed(
+            _format_manager_start_failure(
+                message=(
+                    "Failed to start Manager process: "
+                    f"registry observation failed: {exc}"
+                ),
+                launch=launch,
+                launcher_events=launcher_events,
+                launcher_stderr=launcher_stderr,
+            )
+        ) from exc
 
 
 def _terminate_manager_process(

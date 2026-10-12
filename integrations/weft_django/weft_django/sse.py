@@ -26,7 +26,7 @@ def _serialize_event(event_type: str, payload: dict[str, Any]) -> bytes:
 def event_stream(
     tid: str,
     *,
-    cancel_event: threading.Event | None = None,
+    cancel_event: Any | None = None,
 ) -> Iterator[bytes]:
     client = get_core_client()
     task = client.task(tid)
@@ -51,7 +51,7 @@ class _AsyncSSEStream(AsyncIterator[bytes]):
         self._cancel_event = threading.Event()
         self._close_reporter_attached = False
         self._owner = AsyncIteratorOwner(
-            lambda: event_stream(tid, cancel_event=self._cancel_event),
+            lambda: event_stream(tid, cancel_event=self._owner),
             cancel_event=self._cancel_event,
         )
 

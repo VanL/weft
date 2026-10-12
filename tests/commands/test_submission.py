@@ -958,12 +958,12 @@ def test_concurrent_accepted_requests_converge_and_execute_once(
     context = weft_harness.context
     writes_committed = threading.Barrier(2)
     launch_lock = threading.Lock()
-    real_submit_spawn_request = submission_mod.submit_spawn_request
+    real_submit_spawn_request = submission_mod._submit_spawn_request_with_payload
 
-    def submit_then_converge(*args: Any, **kwargs: Any) -> int:
-        message_id = real_submit_spawn_request(*args, **kwargs)
+    def submit_then_converge(*args: Any, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+        outcome = real_submit_spawn_request(*args, **kwargs)
         writes_committed.wait(timeout=10.0)
-        return message_id
+        return outcome
 
     def start_one_inline_manager(
         _context: WeftContext,
@@ -974,7 +974,7 @@ def test_concurrent_accepted_requests_converge_and_execute_once(
 
     monkeypatch.setattr(
         submission_mod,
-        "submit_spawn_request",
+        "_submit_spawn_request_with_payload",
         submit_then_converge,
     )
     monkeypatch.setattr(
@@ -1078,10 +1078,12 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
     def fail_preallocation(_context: WeftContext) -> str:
         raise AssertionError("prepared submission must not preallocate a TID")
 
-    def fake_submit(*args: object, **kwargs: object) -> int:
+    def fake_submit(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
         captured["submit_args"] = args
         captured["submit_kwargs"] = kwargs
-        return committed_id
+        submitted_spec = kwargs["taskspec"]
+        assert isinstance(submitted_spec, TaskSpec)
+        return committed_id, submitted_spec.model_dump(mode="json")
 
     def fake_ensure(
         _context: WeftContext, *, submitted_tid: str | int, **_kwargs: Any
@@ -1096,7 +1098,9 @@ def test_submit_prepared_uses_committed_id_for_reconciliation_and_receipt(
         )
 
     monkeypatch.setattr(core_manager_runtime, "generate_tid", fail_preallocation)
-    monkeypatch.setattr(submission_mod, "submit_spawn_request", fake_submit)
+    monkeypatch.setattr(
+        submission_mod, "_submit_spawn_request_with_payload", fake_submit
+    )
     monkeypatch.setattr(submission_mod, "ensure_manager_after_submission", fake_ensure)
 
     receipt = submission_mod.submit_prepared(context, prepared)
@@ -1268,7 +1272,7 @@ def test_borrowed_submission_failure_leaves_owner_session_usable(
     if failure_point == "insert":
         monkeypatch.setattr(
             submission_mod,
-            "submit_spawn_request",
+            "_submit_spawn_request_with_payload",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
         )
     elif failure_point == "observe":
@@ -1344,9 +1348,11 @@ def test_borrowed_connection_exit_failure_names_tid_and_leaves_owner_usable(
             ) == ("usable", timestamp)
 
 
+@pytest.mark.parametrize("lend_facade", [False, True])
 def test_retained_session_recovers_after_real_duplicate_tid_rollback(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
+    lend_facade: bool,
 ) -> None:
     context = weft_harness.context
     monkeypatch.setattr(
@@ -1395,13 +1401,18 @@ def test_retained_session_recovers_after_real_duplicate_tid_rollback(
     )
 
     with context.session() as session:
+        connection_queue = (
+            session.queue(WEFT_SPAWN_REQUESTS_QUEUE) if lend_facade else None
+        )
         first_outcome = submission_mod._submit_prepared_outcome(
-            context, first, session=session
+            context, first, session=session, connection_queue=connection_queue
         )
         with pytest.raises(IntegrityError):
-            submission_mod._submit_prepared_outcome(context, duplicate, session=session)
+            submission_mod._submit_prepared_outcome(
+                context, duplicate, session=session, connection_queue=connection_queue
+            )
         third_outcome = submission_mod._submit_prepared_outcome(
-            context, third, session=session
+            context, third, session=session, connection_queue=connection_queue
         )
         with session.connection() as broker:
             assert (
@@ -1448,10 +1459,12 @@ def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(
     )
     captured: dict[str, Any] = {}
 
-    def fake_submit(*args: object, **kwargs: object) -> int:
+    def fake_submit(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
         captured["submit_args"] = args
         captured["submit_kwargs"] = kwargs
-        return int(explicit_tid)
+        submitted_spec = kwargs["taskspec"]
+        assert isinstance(submitted_spec, TaskSpec)
+        return int(explicit_tid), submitted_spec.model_dump(mode="json")
 
     def fake_ensure(
         _context: WeftContext, *, submitted_tid: str | int, **_kwargs: Any
@@ -1465,7 +1478,9 @@ def test_submit_prepared_keeps_explicit_id_on_exact_insert_path(
             reason="ready",
         )
 
-    monkeypatch.setattr(submission_mod, "submit_spawn_request", fake_submit)
+    monkeypatch.setattr(
+        submission_mod, "_submit_spawn_request_with_payload", fake_submit
+    )
     monkeypatch.setattr(submission_mod, "ensure_manager_after_submission", fake_ensure)
 
     receipt = submission_mod.submit_prepared(context, prepared)
@@ -1494,8 +1509,8 @@ def test_submit_prepared_programmer_error_names_committed_tid(
     defect = RuntimeError("programmer defect")
     monkeypatch.setattr(
         submission_mod,
-        "submit_spawn_request",
-        lambda *_args, **_kwargs: int(tid),
+        "_submit_spawn_request_with_payload",
+        lambda *_args, **_kwargs: (int(tid), {}),
     )
     monkeypatch.setattr(
         submission_mod,

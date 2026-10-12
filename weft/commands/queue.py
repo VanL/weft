@@ -8,6 +8,7 @@ CLI in sync with SimpleBroker (minus ``init``, which already exists as
 Spec references:
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.1], [SB-0.3], [SB-0.5]
 - docs/specifications/10-CLI_Interface.md [CLI-4], [CLI-4.1]
+- docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """
 
@@ -549,6 +550,7 @@ def queue_info(ctx: WeftContext, queue_name: str) -> QueueInfo:
     )
 
 
+@typed_queue_command_errors
 def watch_queue(
     ctx: WeftContext,
     queue_name: str,
@@ -562,13 +564,16 @@ def watch_queue(
     before: int | None = None,
     move_to: str | None = None,
 ) -> Iterator[QueueMessage]:
+    """Yield queue messages, releasing observations on operational failure.
+
+    Spec: [MF-5], [PY-2].
+    """
     with command_resource_scope() as resources:
         resources.enter_context(ctx.session())
         queue = ctx.queue(queue_name, persistent=True)
         resources.callback(queue.close)
         watch_queue = ctx.queue(queue_name, persistent=True)
         resources.callback(watch_queue.close)
-        monitor: QueueChangeMonitor | None = None
         monitor = QueueChangeMonitor([watch_queue], config=ctx.config)
         resources.callback(monitor.close)
         emitted = 0

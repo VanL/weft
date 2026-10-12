@@ -911,7 +911,21 @@ def test_manager_registry_wait_releases_queue_on_monitor_failure(
     queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=True)
     queue.write("warm the real connection")
     closed: list[str] = []
+    primary_error = RuntimeError(f"injected monitor {failure} failure")
     original_close = queue.close
+    launcher_process = cast(
+        subprocess.Popen[str], SimpleNamespace(pid=12345, returncode=None)
+    )
+    launch = core_manager_runtime.DetachedManagerLaunch(
+        pid=12346,
+        stderr_path=tmp_path / "startup-stderr.txt",
+        launcher_process=launcher_process,
+    )
+    cleanup_calls: list[subprocess.Popen[str]] = []
+
+    def abort_launcher(process: subprocess.Popen[str]) -> tuple[str, str]:
+        cleanup_calls.append(process)
+        return "", ""
 
     def close_queue() -> None:
         original_close()
@@ -920,11 +934,11 @@ def test_manager_registry_wait_releases_queue_on_monitor_failure(
     class FailingMonitor:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             if failure == "construction":
-                raise RuntimeError("injected monitor construction failure")
+                raise primary_error
 
         def close(self) -> None:
             closed.append("monitor")
-            raise RuntimeError("injected monitor close failure")
+            raise primary_error
 
     def fail_scan(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("injected scan failure")
@@ -939,10 +953,16 @@ def test_manager_registry_wait_releases_queue_on_monitor_failure(
         lambda _ctx: type("Invocation", (), {"tid": "1761000000000000112"})(),
     )
     monkeypatch.setattr(
-        core_manager_runtime, "_launch_detached_manager", lambda *_: None
+        core_manager_runtime, "_launch_detached_manager", lambda *_: launch
+    )
+    monkeypatch.setattr(
+        core_manager_runtime, "_abort_unconfirmed_launcher", abort_launcher
     )
     try:
-        with pytest.raises(RuntimeError, match=f"injected monitor {failure}"):
+        expected_error = ManagerStartFailed if owner == "startup" else RuntimeError
+        with pytest.raises(
+            expected_error, match=f"injected monitor {failure}"
+        ) as caught:
             if owner == "stop":
                 core_manager_runtime._await_manager_stop_confirmation(
                     context,
@@ -960,6 +980,10 @@ def test_manager_registry_wait_releases_queue_on_monitor_failure(
                 )
             else:
                 core_manager_runtime.start_manager(context)
+        if owner == "startup":
+            assert caught.value.__cause__ is primary_error
+            assert "registry observation failed" in str(caught.value)
+            assert cleanup_calls == [launcher_process]
         assert closed == (["monitor", "queue"] if failure == "close" else ["queue"])
     finally:
         original_close()

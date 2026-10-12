@@ -15,11 +15,13 @@ from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import PIPELINE_RUNTIME_METADATA_KEY, WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import run as run_cmd
 from weft.commands import tasks as task_cmd
+from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext
 from weft.core.monitor.collation import update_from_task_log_payload
 from weft.core.monitor.store import open_monitor_store
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.task_state import task_state_queue_name
+from weft.core.tasks import Consumer
 from weft.core.taskspec import TaskSpec
 from weft.helpers import tid_short_form
 
@@ -340,7 +342,7 @@ def test_terminal_snapshot_reuses_connections_and_observes_external_route(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repeated fallback polls stay fresh and release their real PG connection."""
+    """Queue wakes stay fresh and release their real PG connections."""
     ctx = weft_harness.context
     connections = _track_postgres_connections(ctx, monkeypatch)
     with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as writer:
@@ -389,7 +391,7 @@ def test_terminal_snapshot_reuses_connections_and_observes_external_route(
 
     with ThreadPoolExecutor(max_workers=1) as producer:
 
-        def sleep(timeout: float) -> None:
+        def wake(_monitor: QueueChangeMonitor, timeout: float | None) -> bool:
             nonlocal polls, warm_connections
             polls += 1
             assert polls <= 4
@@ -399,14 +401,9 @@ def test_terminal_snapshot_reuses_connections_and_observes_external_route(
                 repeated.append(len(connections) - warm_connections)
             if polls == 4:
                 producer.submit(publish).result(timeout=10)
+            return True
 
-        monkeypatch.setattr(
-            task_cmd,
-            "time",
-            SimpleNamespace(
-                monotonic=time.monotonic, time_ns=time.time_ns, sleep=sleep
-            ),
-        )
+        monkeypatch.setattr(QueueChangeMonitor, "wait", wake)
         snapshot = task_cmd.task_terminal_snapshot(
             tid, context=ctx, timeout=task_cmd.CONTROL_SURFACE_WAIT_TIMEOUT
         )
@@ -421,7 +418,7 @@ def test_terminal_snapshot_reuses_connections_and_observes_external_route(
         assert reader.peek_one() is not None
 
 
-@pytest.mark.parametrize("outcome", ["timeout", "read-error", "sleep-error"])
+@pytest.mark.parametrize("outcome", ["timeout", "read-error", "wait-error"])
 def test_terminal_snapshot_closes_owned_queue_on_all_exits(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
@@ -453,18 +450,20 @@ def test_terminal_snapshot_closes_owned_queue_on_all_exits(
             raise RuntimeError("injected read failure")
         return result
 
-    def sleep(timeout: float) -> None:
+    def wait(_monitor: QueueChangeMonitor, timeout: float | None) -> bool:
         nonlocal now
-        if outcome == "sleep-error":
-            raise RuntimeError("injected sleep failure")
+        if outcome == "wait-error":
+            raise RuntimeError("injected wait failure")
         now = task_cmd.CONTROL_SURFACE_WAIT_TIMEOUT + 1
+        return False
 
     monkeypatch.setattr(WeftContext, "queue", queue)
     monkeypatch.setattr(task_cmd.task_evidence, "known_tid_evidence", evidence)
+    monkeypatch.setattr(QueueChangeMonitor, "wait", wait)
     monkeypatch.setattr(
         task_cmd,
         "time",
-        SimpleNamespace(monotonic=lambda: now, sleep=sleep, time_ns=time.time_ns),
+        SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns),
     )
     if outcome == "timeout":
         result = task_cmd.task_terminal_snapshot(
@@ -480,8 +479,14 @@ def test_terminal_snapshot_closes_owned_queue_on_all_exits(
                 context=ctx,
                 timeout=task_cmd.CONTROL_SURFACE_WAIT_TIMEOUT,
             )
-    assert [q.name for q in opened] == [WEFT_GLOBAL_LOG_QUEUE]
-    assert closed == opened
+    assert {q.name for q in opened} == {
+        WEFT_GLOBAL_LOG_QUEUE,
+        task_state_queue_name("1789010695101849600"),
+        "T1789010695101849600.outbox",
+        "T1789010695101849600.ctrl_out",
+    }
+    assert len(closed) == len(opened)
+    assert all(queue in closed for queue in opened)
 
 
 def test_status_watch_reuses_connections_and_observes_external_updates(
@@ -685,17 +690,18 @@ def test_status_watch_closes_before_queues_on_each_exit(
 
 
 @pytest.mark.parametrize("log_wins", [False, True])
-def test_interactive_monitor_poll_borrows_log_queue(
+def test_interactive_stop_observer_borrows_log_queue(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
     log_wins: bool,
 ) -> None:
-    """Real interactive fallback reuses its owner and preserves log-first priority."""
+    """The active STOP owner borrows Monitor SQL and selects real terminal proof."""
     ctx = weft_harness.context
     connections = _track_postgres_connections(ctx, monkeypatch)
-    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as writer:
-        tid = str(writer.generate_timestamp())
-        open_monitor_store(ctx, queue=writer).ensure_schema()
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+        tid = str(log.generate_timestamp())
+        store = open_monitor_store(ctx, queue=log)
+        store.ensure_schema()
     spec = TaskSpec.model_validate(
         {
             "tid": tid,
@@ -703,47 +709,65 @@ def test_interactive_monitor_poll_borrows_log_queue(
             "spec": {
                 "type": "function",
                 "function_target": "tests.tasks.sample_targets:echo_payload",
-                "interactive": True,
+                "cleanup_on_exit": False,
+                "enable_process_title": False,
             },
-            "io": {},
-            "state": {},
         }
     )
-    lifecycle = run_cmd._InteractiveRunLifecycle(ctx, spec, use_prompt=False)
-    repeated: list[int] = []
-
-    def publish() -> None:
-        with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
-            update = update_from_task_log_payload(
-                {
-                    "tid": tid,
-                    "event": "work_failed",
-                    "status": "failed",
-                    "taskspec": spec.model_dump(mode="json"),
-                },
-                message_id=log.generate_timestamp(),
-            )
+    consumer = Consumer(ctx.broker_target, spec, config=ctx.broker_config)
+    with consumer.drive_scope():
+        consumer._handle_stop_request(
+            reason="STOP requested",
+            event="control_stop",
+            message_id=None,
+            apply_reserved_policy=True,
+        )
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+        store = open_monitor_store(ctx, queue=log)
+        for raw, message_id in list(log.peek_generator(with_timestamps=True)):
+            payload = json.loads(raw)
+            if payload.get("tid") != tid:
+                continue
+            update = update_from_task_log_payload(payload, message_id=message_id)
             assert update is not None
-            open_monitor_store(ctx, queue=log).upsert_task_event(update)
-            if log_wins:
-                log.write(
-                    json.dumps(
-                        {"tid": tid, "event": "work_completed", "status": "completed"}
-                    )
-                )
+            store.upsert_task_event(update)
+            if not log_wins and payload.get("status") == "cancelled":
+                assert log.delete(message_id=message_id)
+    # Retire the producer's ephemeral control surface in both source cases.
+    # This isolates retained history versus retained Monitor terminal proof.
+    names = [task_state_queue_name(tid), spec.io.control["ctrl_out"]]
+    for name in names:
+        with ctx.queue(name) as queue:
+            for _body, message_id in list(queue.peek_generator(with_timestamps=True)):
+                assert queue.delete(message_id=message_id)
+    borrowed: list[int] = []
+    sources: list[str] = []
+    original_lookup = run_cmd.read_monitor_task_record
+    original_snapshot = task_cmd._terminal_observation_snapshot
 
+    def lookup(*args: Any, **kwargs: Any) -> Any:
+        queue = kwargs.get("queue")
+        assert queue is not None and queue.name == WEFT_GLOBAL_LOG_QUEUE
+        before = len(connections)
+        record = original_lookup(*args, **kwargs)
+        borrowed.append(len(connections) - before)
+        return record
+
+    def snapshot(*args: Any, **kwargs: Any) -> Any:
+        value = original_snapshot(*args, **kwargs)
+        assert value.terminal and value.status == "cancelled"
+        sources.append(value.source)
+        return value
+
+    monkeypatch.setattr(run_cmd, "read_monitor_task_record", lookup)
+    monkeypatch.setattr(task_cmd, "_terminal_observation_snapshot", snapshot)
+    session = run_cmd._LiveRunSession(
+        RunExecutionResult(tid=tid), ctx, _accepted_taskspec=spec
+    )
     try:
-        assert not lifecycle.wait_for_completion(timeout=0)
-        for _ in range(3):
-            before = len(connections)
-            assert not lifecycle.wait_for_completion(timeout=0)
-            repeated.append(len(connections) - before)
-        with ThreadPoolExecutor(max_workers=1) as producer:
-            producer.submit(publish).result(timeout=10)
-        assert lifecycle.wait_for_completion(timeout=0)
-        status, _error = lifecycle.outcome(quit_requested=False)
-        assert status == ("completed" if log_wins else "failed")
+        run_cmd._stop_interactive_run_session(session)
     finally:
-        lifecycle.close()
-    assert repeated == [0, 0, 0]
+        session.close()
+    assert borrowed == [0]
+    assert sources == (["log_fallback"] if log_wins else ["monitor_store"])
     assert connections and all(connection.closed for connection in connections)

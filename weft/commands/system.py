@@ -636,12 +636,16 @@ def _collect_snapshot_evidence(
     service_owner_index: _InternalServiceOwnerEvidenceIndex,
     now_ns: int,
     broker: Any | None = None,
+    accepted_taskspec_payload: dict[str, Any] | None = None,
 ) -> tuple[SnapshotProbePlan, SnapshotEvidence]:
     """Acquire only the runtime and queue observations requested by policy."""
 
     taskspec = record.taskspec_payload
     if taskspec is None:
         raise ValueError("snapshot evidence requires a TaskSpec-bearing record")
+    routing_taskspec = (
+        accepted_taskspec_payload if accepted_taskspec_payload is not None else taskspec
+    )
     runtime_entry = _merge_runtime_entry(mapping_entry, record.event_payload)
     runtime_handle = _runtime_handle_from_mapping(runtime_entry or {})
     runner = runner_name_for_snapshot(
@@ -655,7 +659,7 @@ def _collect_snapshot_evidence(
         local_evidence = task_evidence.task_local_terminal_evidence(
             ctx,
             tid=record.tid,
-            taskspec_payload=taskspec,
+            taskspec_payload=routing_taskspec,
             broker=broker,
         )
     draft = prepare_snapshot(record, local_evidence=local_evidence)
@@ -708,13 +712,13 @@ def _collect_snapshot_evidence(
     if probe_plan.acquire_claimed_outbox:
         outbox_name, _ctrl_out_name = task_evidence.queue_names_for_tid(
             record.tid,
-            taskspec,
+            routing_taskspec,
         )
         claimed_outbox = task_evidence.claimed_outbox_result_evidence(
             ctx,
             tid=record.tid,
             outbox_name=outbox_name,
-            taskspec_payload=taskspec,
+            taskspec_payload=routing_taskspec,
             broker=broker,
         )
 
@@ -739,6 +743,8 @@ def _collect_task_snapshot_records(
     service_registry_evidence: Sequence[_ServiceEvidence] | None = None,
     tid_state_entries: Mapping[str, Mapping[str, Any]] | None = None,
     broker: Any | None = None,
+    task_events: Sequence[tuple[dict[str, Any], int]] | None = None,
+    accepted_taskspec_payload: dict[str, Any] | None = None,
 ) -> list[CollectedTaskSnapshot]:
     """Reconstruct current task state from event-sourced log replay.
 
@@ -769,13 +775,20 @@ def _collect_task_snapshot_records(
     except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-335] exception
         selected_active_manager_tid = None
     with (
-        _queue(ctx, WEFT_GLOBAL_LOG_QUEUE) if broker is None else nullcontext()
+        _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
+        if broker is None and task_events is None
+        else nullcontext()
     ) as log_queue:
-        for payload, timestamp in _iter_log_events(
-            log_queue,
-            since_timestamp=since_timestamp,
-            broker=broker,
-        ):
+        events = (
+            task_events
+            if task_events is not None
+            else _iter_log_events(
+                log_queue,
+                since_timestamp=since_timestamp,
+                broker=broker,
+            )
+        )
+        for payload, timestamp in events:
             tid = payload.get("tid")
             if not isinstance(tid, str):
                 continue
@@ -803,6 +816,7 @@ def _collect_task_snapshot_records(
             service_owner_index=service_owner_index,
             now_ns=now_ns,
             broker=broker,
+            accepted_taskspec_payload=accepted_taskspec_payload,
         )
         snapshot = reduce_task_snapshot(
             probe_plan,
@@ -1342,6 +1356,32 @@ def _collect_task_snapshots(
     ]
 
 
+def collect_known_tid_record(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    include_terminal: bool = True,
+    broker: Any | None = None,
+    task_events: Sequence[tuple[dict[str, Any], int]] | None = None,
+    accepted_taskspec_payload: dict[str, Any] | None = None,
+) -> CollectedTaskSnapshot | None:
+    """Keep a full-TID snapshot and its fresh payload in one acquisition [MF-5]."""
+
+    if not is_task_tid(tid):
+        return None
+    if task_events is None:
+        task_events, _horizon = task_evidence.read_task_history(ctx, tid, broker=broker)
+    records = _collect_task_snapshot_records(
+        ctx,
+        include_terminal=include_terminal,
+        tid_filters={tid},
+        broker=broker,
+        task_events=task_events,
+        accepted_taskspec_payload=accepted_taskspec_payload,
+    )
+    return records[0] if records else None
+
+
 def collect_known_tid_snapshot(
     ctx: WeftContext,
     tid: str,
@@ -1349,25 +1389,11 @@ def collect_known_tid_snapshot(
     include_terminal: bool = True,
     broker: Any | None = None,
 ) -> TaskSnapshot | None:
-    """Return one full-TID diagnostic snapshot using bounded task-log replay."""
-
-    if not is_task_tid(tid):
-        return None
-    records = _collect_task_snapshot_records(
-        ctx,
-        include_terminal=include_terminal,
-        tid_filters={tid},
-        since_timestamp=int(tid) - 1,
-        broker=broker,
+    """Project one fresh full-TID diagnostic snapshot [MF-5]."""
+    record = collect_known_tid_record(
+        ctx, tid, include_terminal=include_terminal, broker=broker
     )
-    if not records and int(tid) > time.time_ns():
-        records = _collect_task_snapshot_records(
-            ctx,
-            include_terminal=include_terminal,
-            tid_filters={tid},
-            broker=broker,
-        )
-    return records[0].snapshot if records else None
+    return record.snapshot if record is not None else None
 
 
 def _public_status_event(

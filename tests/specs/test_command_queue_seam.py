@@ -9,12 +9,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMANDS_DIR = REPO_ROOT / "weft" / "commands"
-DIRECT_QUEUE_ALLOWLIST_REASONS = {
-    "weft/commands/interactive.py": (
-        "InteractiveStreamClient owns its task-local inbox queue and does not "
-        "currently accept a WeftContext."
-    ),
-}
+DIRECT_QUEUE_ALLOWLIST_REASONS: dict[str, str] = {}
 
 pytestmark = [pytest.mark.shared]
 

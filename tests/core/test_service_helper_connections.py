@@ -320,11 +320,7 @@ def test_known_tid_evidence_borrows_all_reads_and_sees_new_commits(
         before = len(connections)
         assert task_evidence.bounded_log_terminal_evidence(
             ctx, tid=tid, broker=broker
-        ) == (
-            None,
-            True,
-            live_at,
-        )
+        ) == task_evidence.LogFold(latest_live_at=live_at)
         initial = task_evidence.known_tid_evidence(ctx, tid=tid, broker=broker)
         assert initial is not None and not initial.terminal
         assert len(connections) == before

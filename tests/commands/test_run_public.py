@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 from typing import Any
 
@@ -10,12 +11,117 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft import commands
+from weft.commands import _result_wait as result_wait
+from weft.commands import run as run_commands
 from weft.commands import tasks as task_commands
 from weft.commands.run import _LiveRunSession
 from weft.commands.types import RunExecutionResult, RunSpecDescription, TaskResult
 from weft.context import WeftContext, build_context
+from weft.core.manager_runtime import ManagerEnsureResult
+from weft.core.taskspec import TaskSpec
 
 pytestmark = pytest.mark.shared
+
+
+def _submission_spec(tid: str, context: WeftContext) -> TaskSpec:
+    """Build accepted configuration for execution-boundary fixtures."""
+    return TaskSpec.model_validate(
+        {
+            "tid": tid,
+            "name": "fixture-run",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "weft_context": str(context.root),
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize("collection", ["wait", "events"])
+def test_run_session_collects_custom_output_without_child_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    collection: str,
+) -> None:
+    """Accepted run config routes collection before a child TaskSpec exists [MF-5]."""
+    project = prepare_project_root(tmp_path / "project")
+    context = build_context(project)
+    spec_path = project / "custom-output.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "name": "custom-output",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "weft_context": str(project),
+                },
+                "io": {
+                    "outputs": {"outbox": "run.custom.result"},
+                    "control": {
+                        "ctrl_in": "run.custom.ctrl_in",
+                        "ctrl_out": "run.custom.ctrl_out",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Hold the external manager boundary. Submission, spec shaping, and
+    # observation remain real; no child has published its initialization event.
+    monkeypatch.setattr(
+        run_commands,
+        "_ensure_manager_after_submission",
+        lambda *_args, **_kwargs: ManagerEnsureResult(
+            outcome="not_needed",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason="test_manager_held",
+        ),
+    )
+    session = commands.cmd_run((), spec=spec_path, context=project, wait=True)
+    assert isinstance(session, _LiveRunSession)
+    try:
+        with context.queue("run.custom.result", persistent=True) as outbox:
+            outbox.write(json.dumps({"briefing": "ready"}))
+        with context.queue("run.custom.ctrl_out", persistent=True) as control:
+            control.write(
+                json.dumps(
+                    {
+                        "type": "terminal",
+                        "source": "task",
+                        "tid": session.tid,
+                        "status": "completed",
+                    }
+                )
+            )
+
+        def refuse_discovery(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("accepted run must not rediscover its specification")
+
+        # This forbidden operation is part of MF-5, rather than an incidental
+        # call count. It also prevents a missing route from hanging the events case.
+        monkeypatch.setattr(
+            result_wait, "load_latest_taskspec_payload", refuse_discovery
+        )
+        if collection == "wait":
+            result = session.wait(timeout=0.0)
+            assert result.tid == session.tid
+            assert result.status == "completed"
+            assert result.result_value == {"briefing": "ready"}
+        else:
+            events = list(session.events())
+            result_event = next(
+                event for event in events if event.event_type == "result"
+            )
+            assert result_event.tid == session.tid
+            assert result_event.payload["status"] == "completed"
+            assert result_event.payload["value"] == {"briefing": "ready"}
+            assert events[-1].event_type == "end"
+    finally:
+        session.close()
 
 
 def test_cmd_run_has_the_cli_derived_public_signature() -> None:
@@ -150,23 +256,28 @@ def test_cmd_run_wait_returns_a_session(
     """Wait mode returns before result collection and exposes a live session."""
 
     execution = RunExecutionResult(
-        tid="123",
+        tid="1780000000000000001",
         error_prefix="Custom failure",
-        submitted_payload={"tid": "123", "status": "submitted"},
+        submitted_payload={"tid": "1780000000000000001", "status": "submitted"},
         manager_started_payload={"tid": "manager", "status": "active"},
     )
     context = build_context(str(tmp_path))
 
     def fake_execute(*_args: Any, **kwargs: Any) -> RunExecutionResult:
-        assert kwargs["wait"] is False
-        kwargs["on_submitted"]("123", context)
+        assert "wait" not in kwargs
+        assert kwargs["session_wait_requested"] is True
+        kwargs["on_submitted"](
+            "1780000000000000001",
+            context,
+            _submission_spec("1780000000000000001", context),
+        )
         return execution
 
     monkeypatch.setattr("weft.commands.run.execute_run", fake_execute)
     monkeypatch.setattr(
         "weft.commands.run.await_task_result",
         lambda *_args, **_kwargs: TaskResult(
-            tid="123",
+            tid="1780000000000000001",
             status="completed",
             value="ok",
             stdout=None,
@@ -177,19 +288,21 @@ def test_cmd_run_wait_returns_a_session(
 
     session = commands.cmd_run(("worker",), wait=True)
 
-    assert session.tid == "123"
-    expected = RunExecutionResult(
-        tid="123",
-        status="completed",
-        result_value="ok",
-        error_prefix="Custom failure",
-        submitted_payload={"tid": "123", "status": "submitted"},
-        manager_started_payload={"tid": "manager", "status": "active"},
-    )
-    assert session.wait() == expected
-    assert session.wait() is session.wait()
-    session.close()
-    session.close()
+    try:
+        assert session.tid == "1780000000000000001"
+        expected = RunExecutionResult(
+            tid="1780000000000000001",
+            status="completed",
+            result_value="ok",
+            error_prefix="Custom failure",
+            submitted_payload={"tid": "1780000000000000001", "status": "submitted"},
+            manager_started_payload={"tid": "manager", "status": "active"},
+        )
+        assert session.wait() == expected
+        assert session.wait() is session.wait()
+    finally:
+        session.close()
+        session.close()
 
 
 def test_run_session_wait_propagates_deadline_timeout(
@@ -197,10 +310,14 @@ def test_run_session_wait_propagates_deadline_timeout(
     tmp_path: Path,
 ) -> None:
     context = build_context(str(tmp_path))
-    execution = RunExecutionResult(tid="123")
+    execution = RunExecutionResult(tid="1780000000000000001")
 
     def fake_execute(*_args: Any, **kwargs: Any) -> RunExecutionResult:
-        kwargs["on_submitted"]("123", context)
+        kwargs["on_submitted"](
+            "1780000000000000001",
+            context,
+            _submission_spec("1780000000000000001", context),
+        )
         return execution
 
     monkeypatch.setattr("weft.commands.run.execute_run", fake_execute)
@@ -212,8 +329,11 @@ def test_run_session_wait_propagates_deadline_timeout(
     )
 
     session = commands.cmd_run(("worker",), wait=True)
-    with pytest.raises(commands.CommandTimeoutError, match="wait expired"):
-        session.wait()
+    try:
+        with pytest.raises(commands.CommandTimeoutError, match="wait expired"):
+            session.wait()
+    finally:
+        session.close()
 
 
 def test_run_session_wait_preserves_terminal_task_timeout(
@@ -223,14 +343,20 @@ def test_run_session_wait_preserves_terminal_task_timeout(
     context = build_context(str(tmp_path))
 
     def fake_execute(*_args: Any, **kwargs: Any) -> RunExecutionResult:
-        kwargs["on_submitted"]("123", context)
-        return RunExecutionResult(tid="123", error_prefix="Target failed")
+        kwargs["on_submitted"](
+            "1780000000000000001",
+            context,
+            _submission_spec("1780000000000000001", context),
+        )
+        return RunExecutionResult(
+            tid="1780000000000000001", error_prefix="Target failed"
+        )
 
     monkeypatch.setattr("weft.commands.run.execute_run", fake_execute)
     monkeypatch.setattr(
         "weft.commands.run.await_task_result",
         lambda *_args, **_kwargs: TaskResult(
-            tid="123",
+            tid="1780000000000000001",
             status="timeout",
             value=None,
             stdout=None,
@@ -241,12 +367,15 @@ def test_run_session_wait_preserves_terminal_task_timeout(
 
     session = commands.cmd_run(("worker",), wait=True)
 
-    assert session.wait() == RunExecutionResult(
-        tid="123",
-        status="timeout",
-        error_message="target timed out",
-        error_prefix="Target failed",
-    )
+    try:
+        assert session.wait() == RunExecutionResult(
+            tid="1780000000000000001",
+            status="timeout",
+            error_message="target timed out",
+            error_prefix="Target failed",
+        )
+    finally:
+        session.close()
 
 
 def test_run_session_stop_controls_on_the_session_context(

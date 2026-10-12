@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## [0.9.109] - 2026-10-12
+
+### Changed
+
+- Result observation now uses task-specific result discovery and explicit
+  observer loan lifetimes. Point and terminal result snapshots, burst waits,
+  retained result history, and claimed-result JSON paths share the same task
+  history adapters instead of the removed interactive command surface.
+- The run/result/event command paths now coordinate around direct result
+  activity waits and settlement policy, including explicit observer command
+  failure handling and submission custody tests.
+- Django realtime, SSE, and channels integration paths were aligned with the
+  updated observation model.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.44`, `weft-docker 0.9.84`,
+  `weft-macos-sandbox 0.6.13`, and `weft-microsandbox 0.5.14`.
+
+### Fixed
+
+- Queue and task history readers now avoid fixed-size history assumptions on
+  result-facing paths, keeping retained output discovery stable as queue
+  histories grow.
+
 ## [0.9.108] - 2026-10-07
 
 ### Changed

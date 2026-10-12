@@ -11,10 +11,13 @@ from simplebroker import Queue
 from tests.helpers.typing import BrokerEnv
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
+    INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.core.spawn_requests import (
+    _submit_spawn_request_with_payload,
     _write_spawn_request_with_timestamp,
     submit_spawn_request,
 )
@@ -111,6 +114,41 @@ def test_explicit_spawn_keeps_supplied_exact_id(weft_harness: WeftTestHarness) -
     assert submitted_tid == explicit_tid
     assert message_id == explicit_tid
     assert json.loads(body)["taskspec"]["tid"] == str(explicit_tid)
+
+
+@pytest.mark.parametrize("allow_internal_runtime", [False, True])
+def test_retained_spawn_transport_matches_serialized_authority_shaping(
+    weft_harness: WeftTestHarness, allow_internal_runtime: bool
+) -> None:
+    """The run caller receives committed transport rather than earlier metadata.
+
+    Internal runtime authority lives only in the request envelope. Existing
+    integer-returning tests cannot guard what the richer run boundary retains.
+    """
+    context = weft_harness.context
+    taskspec = _template_taskspec(context.root)
+    taskspec.metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY] = "envelope-only-class"
+    submitted_tid, retained_payload = _submit_spawn_request_with_payload(
+        context.broker_target,
+        taskspec=taskspec,
+        work_payload=None,
+        config=context.broker_config,
+        inherited_weft_context=str(context.root),
+        allow_internal_runtime=allow_internal_runtime,
+    )
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as queue:
+        row = queue.peek_one(exact_timestamp=submitted_tid, with_timestamps=True)
+    assert row is not None and row[1] == submitted_tid
+    request = json.loads(row[0])
+    assert retained_payload == request["taskspec"]
+    assert INTERNAL_RUNTIME_TASK_CLASS_KEY not in retained_payload["metadata"]
+    if allow_internal_runtime:
+        assert (
+            request[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY] == "envelope-only-class"
+        )
+    else:
+        assert INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY not in request
+    assert taskspec.metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY] == "envelope-only-class"
 
 
 def test_pre_context_spawn_ignores_invalid_ambient_broker_config(

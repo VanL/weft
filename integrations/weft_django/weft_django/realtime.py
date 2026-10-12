@@ -14,6 +14,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from weft.client import Task, TaskEvent
+from weft.helpers import _register_observation_wakeup
 
 _STREAM_END = object()
 
@@ -65,6 +66,22 @@ class AsyncIteratorOwner[T]:
         self._advance_future: Future[T | object] | None = None
         self._close_future: Future[None] | None = None
         self._closed = False
+        self._wakeups: dict[object, Callable[[], None]] = {}
+
+    def is_set(self) -> bool:
+        """Expose this owner's existing cancellation intent to Weft observers."""
+        return self._cancel_event.is_set()
+
+    def _register_wakeup(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register direct observation wake; return idempotent deregistration.
+
+        Paired cancellation wake contract: callbacks are non-blocking and
+        thread-safe, perform no broker effects, and run outside the owner lock.
+        The shared Weft observation owner deregisters before monitor disposal.
+        """
+        return _register_observation_wakeup(
+            self._lock, self._cancel_event, self._wakeups, callback
+        )
 
     def __aiter__(self) -> AsyncIteratorOwner[T]:
         return self
@@ -109,11 +126,15 @@ class AsyncIteratorOwner[T]:
     def request_close(self) -> Future[None] | None:
         """Request serialized close and return its caller-owned future."""
 
-        self._cancel_event.set()
+        with self._lock:
+            self._cancel_event.set()
+            callbacks = tuple(self._wakeups.values()) if not self._closed else ()
+            self._closed = True
+        for callback in callbacks:
+            callback()
         with self._lock:
             if self._close_future is not None:
                 return self._close_future
-            self._closed = True
             executor = self._executor
             if executor is None:
                 return None

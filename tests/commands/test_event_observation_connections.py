@@ -149,7 +149,7 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
     def wait(_monitor: Any, timeout: float | None) -> bool:
         nonlocal now
         now += max(timeout or 0.0, 0.001)
-        if reads == 3:
+        if reads == 1:
             with ctx.broker() as writer:
                 writer.write(f"T{tid}.outbox", json.dumps({"late": True}))
         return True
@@ -160,8 +160,8 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
     monkeypatch.setattr(events_cmd, "_peek_result_value", peek)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(events_cmd.iter_task_realtime_events(ctx, tid))
-    assert reads == 4
-    assert deltas == [(0, 0)] * 3
+    assert reads == 2
+    assert deltas == [(0, 0)]
     assert emitted[-2].event_type == "result"
     assert emitted[-2].payload["value"] == {"late": True}
     assert emitted[-1].event_type == "end"
@@ -176,11 +176,33 @@ def test_realtime_observer_rebinds_to_independent_custom_route_commits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx, _connections, _queues = observed_connections
-    tid, payload = _seed_task(ctx, streams=True)
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+        tid = str(log.generate_timestamp())
+    payload = TaskSpec.model_validate(
+        {
+            "tid": tid,
+            "name": "first-discovery",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "persistent": True,
+                "stream_output": True,
+            },
+        }
+    ).model_dump(mode="json")
     custom_outbox = f"custom.{tid}.outbox"
     custom_control = f"custom.{tid}.ctrl_out"
     now = 100.0
     published = False
+    routes_open = False
+    original_open = events_cmd._open_realtime_routes
+
+    def open_routes(*args: Any, **kwargs: Any) -> Any:
+        nonlocal routes_open
+        opened = original_open(*args, **kwargs)
+        routes_open = True
+        return opened
+
     stream_body = json.dumps(
         {"type": "stream", "stream": "stdout", "data": "new route"}
     )
@@ -191,7 +213,7 @@ def test_realtime_observer_rebinds_to_independent_custom_route_commits(
     def wait(_monitor: Any, timeout: float | None) -> bool:
         nonlocal now, published
         now += max(timeout or 0.0, 0.001)
-        if not published:
+        if not published and routes_open:
             published = True
             payload["io"]["outputs"]["outbox"] = custom_outbox
             payload["io"]["control"]["ctrl_out"] = custom_control
@@ -209,6 +231,7 @@ def test_realtime_observer_rebinds_to_independent_custom_route_commits(
         "time",
         SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns),
     )
+    monkeypatch.setattr(events_cmd, "_open_realtime_routes", open_routes)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(events_cmd.iter_task_realtime_events(ctx, tid))
     assert [
@@ -258,9 +281,7 @@ def test_realtime_early_exit_closes_owned_connections(
             with pytest.raises(RuntimeError, match="injected observer wait failure"):
                 list(iterator)
         elif exit_kind == "read-error":
-            monkeypatch.setattr(
-                events_cmd, "peek_terminal_ctrl_out_evidence", fail_read
-            )
+            monkeypatch.setattr(events_cmd, "_classify_result_observation", fail_read)
             with pytest.raises(RuntimeError, match="injected observer read failure"):
                 list(iterator)
         else:
@@ -271,3 +292,133 @@ def test_realtime_early_exit_closes_owned_connections(
         close = getattr(iterator, "close", None)
         assert callable(close)
         close()
+
+
+def test_realtime_replays_startup_lifecycle_with_original_timestamps(
+    observed_connections: tuple[WeftContext, list[Any], list[Queue]],
+) -> None:
+    """Result discovery must not consume the realtime observer's lifecycle cursor."""
+    ctx, _connections, _queues = observed_connections
+    tid, _payload = _seed_task(ctx)
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+        initial_rows = list(log.peek_generator(with_timestamps=True))
+        timestamps = [initial_rows[0][1]]
+        for status in ("running", "completed"):
+            timestamps.append(log.write(json.dumps({"tid": tid, "status": status})))
+    emitted = list(events_cmd.iter_task_realtime_events(ctx, tid, follow=False))
+    states = [event for event in emitted if event.event_type == "state"]
+    assert [event.timestamp for event in states] == timestamps
+    assert sum(event.payload.get("status") == "completed" for event in states) == 1
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+        assert len(list(log.peek_generator())) == 3
+
+
+def test_queued_realtime_observer_does_not_expand_to_pre_tid_history(
+    observed_connections: tuple[WeftContext, list[Any], list[Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing initialization must not widen the existing queued-task replay bound."""
+    ctx, _connections, _queues = observed_connections
+    body = json.dumps({"tid": "other", "event": "before-child-submission"})
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
+        log.write(body)
+        tid = str(log.generate_timestamp())
+    cancelled = threading.Event()
+    observing = False
+    reads = 0
+    waits = 0
+    owner = threading.current_thread()
+    original_open = events_cmd._open_realtime_routes
+    original_peek = Queue.peek_generator
+    original_wait = events_cmd.QueueChangeMonitor.wait
+
+    def open_routes(*args: Any, **kwargs: Any) -> Any:
+        nonlocal observing
+        opened = original_open(*args, **kwargs)
+        observing = True
+        return opened
+
+    def peek(queue: Queue, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        nonlocal reads
+        iterator = original_peek(queue, *args, **kwargs)
+        try:
+            for row in iterator:
+                if observing and threading.current_thread() is owner and row[0] == body:
+                    reads += 1
+                yield row
+        finally:
+            iterator.close()
+
+    def wait(monitor: Any, timeout: float | None) -> bool:
+        nonlocal waits
+        if not observing:
+            return original_wait(monitor, timeout)
+        waits += 1
+        if waits == 2:
+            cancelled.set()
+        assert waits <= 2
+        return False
+
+    monkeypatch.setattr(events_cmd, "_open_realtime_routes", open_routes)
+    monkeypatch.setattr(Queue, "peek_generator", peek)
+    monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
+    assert (
+        list(events_cmd.iter_task_realtime_events(ctx, tid, cancel_event=cancelled))
+        == []
+    )
+    assert waits == 2
+    assert reads == 0
+
+
+@pytest.mark.parametrize("cancel_at", ["grace_entry", "deadline_wake"])
+def test_realtime_cancellation_precedes_coincident_caller_timeout(
+    observed_connections: tuple[WeftContext, list[Any], list[Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_at: str,
+) -> None:
+    """Cancellation wins at grace entry and at a real deadline wake [MF-5]."""
+    ctx, _connections, _queues = observed_connections
+    tid, _payload = _seed_task(ctx, status="completed", streams=True)
+    cancelled = threading.Event()
+    now = 100.0
+    timeout = 1.0
+    deadline = now + timeout
+    peeks = 0
+    original_peek = events_cmd._peek_result_value
+
+    def peek(*args: Any, **kwargs: Any) -> Any:
+        nonlocal now, peeks
+        assert not cancelled.is_set(), "durable result read after cancellation"
+        value = original_peek(*args, **kwargs)
+        peeks += 1
+        if cancel_at == "grace_entry":
+            # Model cancellation racing the fresh read at its caller deadline.
+            # The next grace condition sees cancellation before any new wait.
+            now = deadline
+            cancelled.set()
+        return value
+
+    def wait(_monitor: Any, wait_timeout: float | None) -> bool:
+        nonlocal now
+        assert not cancelled.is_set()
+        if peeks:
+            assert cancel_at == "deadline_wake"
+            now = deadline
+            cancelled.set()
+            return False  # The supplied deadline, not a broker publication.
+        now += max(wait_timeout or 0.0, 0.001)
+        return False
+
+    clock = SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns)
+    monkeypatch.setattr(events_cmd, "time", clock)
+    monkeypatch.setattr(events_cmd.task_ops, "time", clock)
+    monkeypatch.setattr(events_cmd, "_peek_result_value", peek)
+    monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
+    emitted = list(
+        events_cmd.iter_task_realtime_events(
+            ctx, tid, timeout=timeout, cancel_event=cancelled
+        )
+    )
+    assert peeks == 1
+    assert cancelled.is_set()
+    assert all(event.event_type not in {"result", "end"} for event in emitted)

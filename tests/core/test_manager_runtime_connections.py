@@ -16,6 +16,7 @@ from uuid import UUID
 import pytest
 
 from simplebroker import BrokerSession
+from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import active_test_backend, prepare_project_root
 from weft._constants import (
     MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS,
@@ -24,7 +25,7 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.client import WeftClient
-from weft.commands import submission
+from weft.commands import _spawn_submission, submission
 from weft.context import WeftContext, build_context
 from weft.core import control_probe, heartbeat, manager_runtime
 from weft.core.service_convergence import build_manager_service_payload
@@ -367,14 +368,14 @@ def test_prepared_submission_reuses_one_connection_and_releases_with_sibling(
     )
     brokers: list[Any] = []
     connection_counts: list[int] = []
-    original_submit = submission.submit_spawn_request
+    original_submit = submission._submit_spawn_request_with_payload
     original_observe = manager_runtime.observe_manager_availability
 
-    def submit(*args: Any, **kwargs: Any) -> int:
-        tid = original_submit(*args, **kwargs)
+    def submit(*args: Any, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+        accepted = original_submit(*args, **kwargs)
         brokers.append(kwargs["broker"])
         connection_counts.append(len(connections))
-        return tid
+        return accepted
 
     def observe(
         context: WeftContext, *, broker: Any | None = None
@@ -384,7 +385,7 @@ def test_prepared_submission_reuses_one_connection_and_releases_with_sibling(
         connection_counts.append(len(connections))
         return result
 
-    monkeypatch.setattr(submission, "submit_spawn_request", submit)
+    monkeypatch.setattr(submission, "_submit_spawn_request_with_payload", submit)
     monkeypatch.setattr(manager_runtime, "observe_manager_availability", observe)
     with ctx.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as sibling:
         receipt = submission.submit_prepared(ctx, prepared)
@@ -656,3 +657,65 @@ def test_observation_io_error_preserves_accepted_request(
         assert len(rows) == 1
         assert isinstance(rows[0], tuple)
         assert str(rows[0][1]) == receipt.tid
+
+
+def test_reconciliation_listener_failure_keeps_uncertain_accepted_receipt(
+    counted_manager_connections: tuple[WeftContext, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real reconciliation failure preserves the exact committed spawn request."""
+    ctx, _connections = counted_manager_connections
+    failure = BrokerError("accepted request observer failed")
+    results: list[manager_runtime.ManagerEnsureResult] = []
+    original_ensure = submission.ensure_manager_after_submission
+
+    def observe(
+        *args: Any, **kwargs: Any
+    ) -> manager_runtime.ManagerAvailabilityObservation:
+        return manager_runtime.ManagerAvailabilityObservation(
+            outcome="uncertain",
+            manager_record=None,
+            first_uncertain_at=time.monotonic(),
+            backlog_pending=True,
+            reason="ambiguous_incumbent",
+        )
+
+    def ensure(*args: Any, **kwargs: Any) -> manager_runtime.ManagerEnsureResult:
+        result = original_ensure(*args, **kwargs)
+        results.append(result)
+        return result
+
+    class FailedObservation:
+        def __init__(self, queues: Any, *, config: Any) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> bool:
+            raise failure
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(manager_runtime, "observe_manager_availability", observe)
+    monkeypatch.setattr(submission, "ensure_manager_after_submission", ensure)
+    monkeypatch.setattr(_spawn_submission, "QueueChangeMonitor", FailedObservation)
+    prepared = submission.prepare_taskspec(
+        {
+            "name": "accepted-listener-failure",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        },
+        payload={"accepted": True},
+    )
+    receipt = submission.submit_prepared(ctx, prepared)
+    assert len(results) == 1
+    assert results[0].outcome == "uncertain"
+    assert results[0].reason == f"submission_reconciliation_error:{failure}"
+    with ctx.queue(WEFT_SPAWN_REQUESTS_QUEUE) as queue:
+        rows = list(queue.peek_generator(with_timestamps=True))
+    assert len(rows) == 1
+    assert isinstance(rows[0], tuple)
+    assert str(rows[0][1]) == receipt.tid
+    request = json.loads(str(rows[0][0]))
+    assert request["taskspec"]["name"] == prepared.name

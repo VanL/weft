@@ -18,7 +18,12 @@ from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import CONTROL_KILL
-from weft._exceptions import CommandUsageError, ControlRejected, TaskNotFound
+from weft._exceptions import (
+    CommandExecutionError,
+    CommandUsageError,
+    ControlRejected,
+    TaskNotFound,
+)
 from weft.commands import events as event_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.control_convergence import (
@@ -452,7 +457,7 @@ def test_terminal_snapshot_status_fallback_preserves_live_context(
     def fake_status(*_args: object, **kwargs: object) -> None:
         observed.update(kwargs)
 
-    monkeypatch.setattr(task_cmd, "_task_status", fake_status)
+    monkeypatch.setattr(task_cmd, "_task_status_record", fake_status)
 
     task_cmd.task_terminal_snapshot(tid, context=weft_harness.context)
 
@@ -633,7 +638,7 @@ def test_monitor_store_snapshot_reports_ordinary_dynamic_store_failure(
         del args, kwargs
         raise MonitorStoreReadFailure("store detail")
 
-    monkeypatch.setattr(task_cmd, "open_monitor_store", fail_open)
+    monkeypatch.setattr("weft.commands._task_history.open_monitor_store", fail_open)
 
     snapshot = task_cmd._monitor_store_task_snapshot(
         context,
@@ -759,7 +764,7 @@ def test_monitor_store_snapshot_propagates_fatal_dynamic_store_signal(
         del args, kwargs
         raise signal
 
-    monkeypatch.setattr(task_cmd, "open_monitor_store", fail_open)
+    monkeypatch.setattr("weft.commands._task_history.open_monitor_store", fail_open)
 
     with pytest.raises(MonitorStoreReadSignal) as exc_info:
         task_cmd._monitor_store_task_snapshot(
@@ -1956,10 +1961,10 @@ def test_await_control_surface_closes_partial_replacement_on_open_failure(
         lambda *_args, **_kwargs: next(taskspecs),
     )
 
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(CommandExecutionError) as exc_info:
         task_cmd._await_control_surface(ctx, tid)
 
-    assert exc_info.value is construction_error
+    assert exc_info.value.__cause__ is construction_error
     assert open_calls == 5
     assert len(created_monitors) == 1
     assert created_monitors[0].close_calls == 1

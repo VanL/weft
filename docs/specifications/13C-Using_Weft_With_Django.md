@@ -1135,7 +1135,11 @@ and records secondary cleanup diagnostics.
 _Implementation mapping_: request-mode selection lives in
 `integrations/weft_django/weft_django/views.py`; synchronous and asynchronous
 SSE wrappers live in `sse.py`; shared owner-thread iterator serialization lives
-in `realtime.py::AsyncIteratorOwner`; Channels lifetime and detached-cleanup
+in `realtime.py::AsyncIteratorOwner`. Its existing owner registers the direct
+Weft monitor wake callback and requests cancellation before worker-thread
+closure; shared Weft acquisition deregisters that callback before monitor
+disposal. Registration is shared through
+`weft/helpers/__init__.py::_register_observation_wakeup`. Channels lifetime and detached-cleanup
 diagnostics live in `channels.py::TaskEventsConsumer`. Firing transport coverage
 is in `integrations/weft_django/tests/test_weft_django.py`.
 
@@ -1531,6 +1535,8 @@ Once the package is split into a sibling repo:
   provide the required public client API
 
 ## Backlinks
+
+- [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md)
 

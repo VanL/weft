@@ -7,7 +7,7 @@ runtime ownership reducers that multiple spec-owned surfaces reuse.
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-3.2]
 - docs/specifications/03-Manager_Architecture.md [MA-3]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-6]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-5], [MF-6]
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-1.2.3]
 - docs/specifications/07-System_Invariants.md [OBS.5]
 """
@@ -20,7 +20,9 @@ import math
 import os
 import sys
 import tempfile
+import threading
 import time
+from _thread import LockType
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -54,6 +56,32 @@ _config: Config | None = None
 
 # Set up module logger
 logger = logging.getLogger(__name__)
+
+
+def _register_observation_wakeup(
+    lock: LockType,
+    cancel_event: threading.Event,
+    wakeups: dict[object, Callable[[], None]],
+    callback: Callable[[], None],
+) -> Callable[[], None]:
+    """Share paired registration while each owner retains closure custody [MF-5].
+
+    Callbacks are non-blocking and thread-safe, perform no broker effects, and
+    run outside the owner lock. Observation teardown deregisters before disposal.
+    """
+    key = object()
+    with lock:
+        wake_now = cancel_event.is_set()
+        if not wake_now:
+            wakeups[key] = callback
+    if wake_now:
+        callback()
+
+    def unregister() -> None:
+        with lock:
+            wakeups.pop(key, None)
+
+    return unregister
 
 
 def stdin_is_tty(stream: Any | None = None) -> bool:
