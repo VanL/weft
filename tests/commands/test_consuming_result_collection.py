@@ -400,6 +400,7 @@ def test_persistent_competing_reader_does_not_rewait_expired_quiet_grace(
     with context.broker() as broker:
         broker_type = type(broker)
     original_claim = broker_type.claim_one
+    original_claim_many = broker_type.claim_many
     with (
         context.queue(WEFT_GLOBAL_LOG_QUEUE) as log,
         context.queue(spec.io.inputs["inbox"]) as inbox,
@@ -468,11 +469,48 @@ def test_persistent_competing_reader_does_not_rewait_expired_quiet_grace(
                     ),
                 )
 
+            def claim_many(
+                broker: Any,
+                queue: str,
+                limit: int,
+                *,
+                with_timestamps: bool = True,
+                delivery_guarantee: Literal["exactly_once", "at_least_once"] = (
+                    "exactly_once"
+                ),
+                after_timestamp: int | None = None,
+                before_timestamp: int | None = None,
+                order: str = "oldest",
+            ) -> list[tuple[str, int]] | list[str]:
+                if (
+                    get_ident() == caller
+                    and queue == competitor.name
+                    and before_timestamp is not None
+                    and not competing_values
+                ):
+                    # The competing public reader wins after the collector's
+                    # horizon and peek, before its committed prefix claim.
+                    competing_values.append(competitor.read_one())
+                return cast(
+                    list[tuple[str, int]] | list[str],
+                    original_claim_many(
+                        broker,
+                        queue,
+                        limit,
+                        with_timestamps=with_timestamps,
+                        delivery_guarantee=delivery_guarantee,
+                        after_timestamp=after_timestamp,
+                        before_timestamp=before_timestamp,
+                        order=order,
+                    ),
+                )
+
             clock_facade = SimpleNamespace(monotonic=monotonic)
             monkeypatch.setattr(result_cmd, "time", clock_facade)
             monkeypatch.setattr(result_wait, "time", clock_facade)
             monkeypatch.setattr(QueueChangeMonitor, "wait", wait)
             monkeypatch.setattr(broker_type, "claim_one", claim)
+            monkeypatch.setattr(broker_type, "claim_many", claim_many)
             with pytest.raises(CommandTimeoutError):
                 await_task_result(
                     context, spec.tid, timeout=2.0, _accepted_taskspec=spec

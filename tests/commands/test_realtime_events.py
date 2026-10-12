@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -488,26 +488,6 @@ def test_final_stream_frame_alone_is_not_realtime_completion(tmp_path: Path) -> 
         close()
 
 
-def _publish_after_initial_materialization(
-    monkeypatch: pytest.MonkeyPatch,
-    publish: Callable[[], None],
-) -> None:
-    """Place real queue writes after the observer's initial metadata read."""
-    original = events_cmd._acquire_result_observation
-
-    published = False
-
-    def acquire(*args: Any, **kwargs: Any) -> Any:
-        nonlocal published
-        result = original(*args, **kwargs)
-        if not published:
-            published = True
-            publish()
-        return result
-
-    monkeypatch.setattr(events_cmd, "_acquire_result_observation", acquire)
-
-
 @pytest.mark.parametrize("persistent", [False, True])
 @pytest.mark.parametrize("custom_routes", [False, True])
 def test_realtime_refreshes_late_metadata_before_final_output(
@@ -537,7 +517,17 @@ def test_realtime_refreshes_late_metadata_before_final_output(
         )
         _write_queue(ctx, outbox, {"item": "done"}, persistent=True)
 
-    _publish_after_initial_materialization(monkeypatch, publish)
+    original_wait = events_cmd.QueueChangeMonitor.wait
+    published = False
+
+    def wait(owner: Any, timeout: float | None) -> bool:
+        nonlocal published
+        if not published:
+            published = True
+            publish()
+        return original_wait(owner, timeout)
+
+    monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     events: list[TaskEvent] = []
     iterator = events_cmd.iter_task_realtime_events(ctx, tid, timeout=0.5)
     if persistent:

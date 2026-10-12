@@ -416,6 +416,40 @@ def _result_stream_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _claim_result_rows(
+    broker: Any,
+    queue_name: str,
+    rows: Sequence[tuple[str, int]],
+    *,
+    window_rows: Sequence[tuple[str, int]],
+) -> Sequence[tuple[str, int]]:
+    """Claim selected rows, batching when the selection is the visible prefix."""
+    selected_ids = [row[1] for row in rows]
+    window_prefix_ids = [row[1] for row in window_rows[: len(rows)]]
+    if rows and selected_ids == window_prefix_ids:
+        last_selected_id = rows[-1][1]
+        claimed = broker.claim_many(
+            queue_name,
+            len(rows),
+            before_timestamp=(
+                None
+                if last_selected_id == TASK_HISTORY_MAX_MESSAGE_ID
+                else last_selected_id + 1
+            ),
+            with_timestamps=True,
+        )
+        return [row for row in claimed if isinstance(row, tuple)]
+
+    claimed_rows: list[tuple[str, int]] = []
+    for _peeked, message_id in rows:
+        raw = broker.claim_one(
+            queue_name, exact_timestamp=message_id, with_timestamps=False
+        )
+        if raw is not None:
+            claimed_rows.append((str(raw), message_id))
+    return claimed_rows
+
+
 def _drain_result_rows(
     connection_owner: Queue,
     queue_name: str,
@@ -426,17 +460,16 @@ def _drain_result_rows(
     include_stream_events: bool,
     tid: str,
     show_stderr: bool,
+    window_rows: Sequence[tuple[str, int]] = (),
 ) -> Iterator[TaskEvent]:
     """Claim one selected row at a time and release operations before delivery."""
     decode = decode_outbox_message if include_stream_events else process_outbox_message
     pending_events: list[TaskEvent] = []
     with connection_owner.get_connection() as broker:
-        for _peeked, message_id in rows:
-            raw = broker.claim_one(
-                queue_name, exact_timestamp=message_id, with_timestamps=False
-            )
-            if raw is None:
-                continue
+        claimed_rows = _claim_result_rows(
+            broker, queue_name, rows, window_rows=window_rows
+        )
+        for raw, message_id in claimed_rows:
             collected.claimed_output = True
             if collected.first_claimed_id is None:
                 collected.first_claimed_id = message_id
@@ -880,6 +913,7 @@ def _iter_consuming_result(
                 include_stream_events=include_stream_events,
                 tid=tid,
                 show_stderr=show_stderr,
+                window_rows=rows,
             ):
                 yielded = True
                 yield event
