@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+from typer.testing import CliRunner
 
 from tests.conftest import run_cli
 from weft._constants import (
@@ -22,12 +23,26 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft.cli import app as cli_app
 from weft.context import WeftContext, build_context
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_state import task_state_queue_name
 from weft.helpers import process_create_time, tid_short_form
 
 pytestmark = [pytest.mark.shared]
+
+
+class _ClosingInterruptTaskStream:
+    """Task event stream interrupted during close after watch rendering exits."""
+
+    def __iter__(self) -> _ClosingInterruptTaskStream:
+        return self
+
+    def __next__(self) -> Any:
+        raise StopIteration
+
+    def close(self) -> None:
+        raise KeyboardInterrupt
 
 
 def _write_log_event(context: WeftContext, payload: dict[str, Any]) -> None:
@@ -119,6 +134,24 @@ def test_task_status_watch_sigint_exits_cleanly(workdir: Path) -> None:
     assert "Traceback" not in stderr
     assert tid in watch_line
     assert "running" in watch_line
+
+
+def test_task_status_watch_sigint_during_stream_close_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIGINT while releasing a watch stream is still a clean user interrupt."""
+
+    def _fake_cmd_task_status(
+        *_args: Any, **_kwargs: Any
+    ) -> _ClosingInterruptTaskStream:
+        return _ClosingInterruptTaskStream()
+
+    monkeypatch.setattr(cli_app.commands, "cmd_task_status", _fake_cmd_task_status)
+
+    result = CliRunner().invoke(cli_app.app, ["task", "status", "1777", "--watch"])
+
+    assert result.exit_code == 0
+    assert result.exception is None
 
 
 def _manager_service_payload(

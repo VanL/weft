@@ -1625,7 +1625,10 @@ def task_status(
         _command_exit(exc)
     if watch:
         stream = cast(commands.CommandStream[commands.TaskEvent], snapshot)
-        _render_task_watch(stream, tid=tid, json_output=json_output)
+        try:
+            _render_task_watch(stream, tid=tid, json_output=json_output)
+        except KeyboardInterrupt:
+            return
         return
     task_snapshot = cast(commands.TaskSnapshot, snapshot)
     status_payload = _task_snapshot_payload(task_snapshot)

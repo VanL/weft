@@ -20,7 +20,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = ROOT / "pyproject.toml"
-RULE_FIXTURE = ROOT / "tests" / "fixtures" / "ruff-enabled-rules.txt"
 TESTING_STRATEGY_SPEC = ROOT / "docs" / "specifications" / "08-Testing_Strategy.md"
 SUPPRESSION_REGISTRY = ROOT / "docs" / "ruff-suppression-registry.md"
 SUPPRESSION_TOOL = ROOT / "bin" / "ruff_suppression_index.py"
@@ -28,6 +27,16 @@ WORKFLOW = ROOT / ".github" / "workflows" / "test.yml"
 
 REVIEWED_FAMILIES = ["E", "W", "F", "I", "B", "C901", "C4", "UP"]
 GLOBAL_IGNORES = ["E501", "B008"]
+REQUIRED_ENABLED_RULES = {
+    "B006",
+    "C400",
+    "C901",
+    "E722",
+    "F401",
+    "I001",
+    "UP006",
+    "W291",
+}
 EXTENSIONLESS_PYTHON = [
     "bin/check-doc-paths",
     "bin/check-dom15-fixtures",
@@ -291,10 +300,14 @@ def _assert_ruff_policy(ruff: dict[str, Any], lint: dict[str, Any]) -> None:
     assert lint.get("per-file-ignores", {}) == {}
 
 
-def _assert_enabled_rules(actual: set[str], expected: set[str]) -> None:
-    assert actual == expected, {
-        "missing": sorted(expected - actual),
-        "unexpected": sorted(actual - expected),
+def _assert_required_enabled_rules(actual: set[str]) -> None:
+    """Assert repository-owned Ruff selections without freezing Ruff defaults."""
+
+    assert REQUIRED_ENABLED_RULES <= actual, {
+        "missing": sorted(REQUIRED_ENABLED_RULES - actual),
+    }
+    assert not set(GLOBAL_IGNORES) & actual, {
+        "ignored-but-enabled": sorted(set(GLOBAL_IGNORES) & actual),
     }
 
 
@@ -467,24 +480,29 @@ def test_ruff_policy_guard_rejects_extensionless_bash_inclusion() -> None:
         _assert_ruff_policy(ruff, lint)
 
 
-def test_enabled_rule_inventory_guard_rejects_changed_code() -> None:
-    expected = set(RULE_FIXTURE.read_text(encoding="utf-8").splitlines())
-    changed = expected - {min(expected)}
-    _assert_enabled_rules(expected, expected)
+def test_enabled_rule_policy_guard_rejects_missing_required_code() -> None:
+    changed = REQUIRED_ENABLED_RULES - {min(REQUIRED_ENABLED_RULES)}
+    _assert_required_enabled_rules(REQUIRED_ENABLED_RULES)
 
     with pytest.raises(AssertionError, match="missing"):
-        _assert_enabled_rules(changed, expected)
+        _assert_required_enabled_rules(changed)
+
+
+def test_enabled_rule_policy_guard_rejects_enabled_global_ignore() -> None:
+    changed = REQUIRED_ENABLED_RULES | {GLOBAL_IGNORES[0]}
+    _assert_required_enabled_rules(REQUIRED_ENABLED_RULES)
+
+    with pytest.raises(AssertionError, match="ignored-but-enabled"):
+        _assert_required_enabled_rules(changed)
 
 
 def test_real_ruff_settings_match_repository_policy() -> None:
-    expected = set(RULE_FIXTURE.read_text(encoding="utf-8").splitlines())
-    assert expected
     settings = _ruff_settings()
 
     assert settings["target"] == "3.12"
     assert settings["max-complexity"] == MCCABE_MAX_COMPLEXITY
     assert settings["preview"] == "disabled"
-    _assert_enabled_rules(settings["enabled"], expected)
+    _assert_required_enabled_rules(settings["enabled"])
 
 
 def test_extensionless_python_inventory_is_exact() -> None:
