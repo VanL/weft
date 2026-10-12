@@ -541,7 +541,7 @@ class WeftTestHarness:
         try:
             with context.broker() as broker:
                 queue_names = sorted(broker.list_queues())
-        except Exception:  # noqa: BLE001 approved [TS-3.1] diagnostic best-effort
+        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-315] exception
             queue_names = []
 
         interesting = [
