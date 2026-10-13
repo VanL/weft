@@ -47,8 +47,8 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 8.5.1 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 4.5.1 or newer. These coordinated
+Weft requires SimpleBroker 8.6.0 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 4.6.0 or newer. These coordinated
 floors provide backend API v9, ascending public-message-ID default selection,
 surrogate-free SQL schema v6, bounded dump watermarks, immutable
 invocation/handle configuration snapshots, typed queue result overloads,
@@ -319,24 +319,31 @@ multi-process workloads. If an external pooler is used, it must preserve the
 backend notification semantics required by `LISTEN`/`NOTIFY`; pooling modes
 that discard listener state are outside Weft's broker contract.
 
-For optional Manager admission control, Weft may call the package-root
-`simplebroker_pg.get_connection_stats(queue)` helper with an existing
-persistent Manager queue. The helper returns a dictionary with exactly
-`numbackends`, `max_connections`, `superuser_reserved_connections`, and
-`reserved_connections`; callers use those keys and do not depend on field
-order. `reserved_connections` is zero on Postgres versions that do not expose
-that setting. The helper owns its SQL and result validation inside
-`simplebroker_pg`; Weft does not duplicate backend SQL or open a
-measurement-only connection. `numbackends` is the raw server-wide backend
-count, including the probing connection and unrelated clients. It is therefore
-conservative evidence for a soft admission bound, not an exact count of Weft
-workers and not a connection lease or permit. Admission reads `numbackends` by
-key as its single Postgres usage value. The operator-configured
-`WEFT_ADMISSION_MAX_CONNECTIONS`, not the helper's `max_connections`,
-`superuser_reserved_connections`, or `reserved_connections` values, controls
-the Weft lane limits. Weft adds no prospective per-launch connection charge.
+PostgreSQL connection creation, owner labeling, and usage inspection belong to
+`simplebroker_pg`. Weft installs a stable task/context owner label before a
+dedicated runtime process opens any broker pool or listener, using the
+supported public binding capability. Both connection paths share that label
+without changing broker identity or multiplying session pools. Runtime labels
+confer no service authority. Weft consumes the public coherent total/by-owner
+usage snapshot through an existing Manager Queue; it neither issues backend SQL
+nor opens a measurement-only connection. Unknown attribution receives no
+discount. The existing four-integer `get_connection_stats()` interface remains
+available unchanged. [MA-1.8] owns prospective task budgets and admission
+decisions. The released public helpers are
+`simplebroker_pg.bind_connection_owner` and
+`simplebroker_pg.get_connection_usage`; require SimpleBroker >=8.6.0 and
+simplebroker-pg >=4.6.0. Owner labels match `[!-~]{1,54}`. Sample outside
+caller-owned transactions; absent owner counts provide zero credit, never death
+evidence.
 
 Implementation note for [SB-0.4]:
+`weft/core/runtime_identity.py::install_runtime_identity` owns public PG owner
+binding; `weft/core/launcher.py` and `weft/core/runners/host.py` install its
+transport before runtime broker resources open.
+`weft/core/manager.py::Manager._read_postgres_connection_usage` consumes the
+public coherent observation through its connected Queue. Attribution custody
+is verified in `tests/core/test_runtime_identity.py` and the actual PG
+resource-lifetime proof in `tests/system/test_admission_budget_pg.py`.
 `weft/commands/submission.py::_submit_prepared_outcome` owns or borrows the
 exact effective-context session and owns one connection operation across
 enqueue and initial availability. That connection operation ends before
@@ -846,6 +853,8 @@ connection-pooling designs are tracked in the companion doc:
 - [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
 
 ## Related Plans
+
+- [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements the released public connection-attribution prerequisite for [SB-0.4].
 
 - [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md)
 

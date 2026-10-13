@@ -2434,6 +2434,7 @@ def test_manager_admission_retains_public_while_internal_can_launch(
                 "WEFT_TASK_MONITOR_ENABLED": "0",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+                "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
         ),
@@ -2539,6 +2540,7 @@ def test_manager_admission_rechecks_retained_row_on_deadline_without_activity(
                 "WEFT_TASK_MONITOR_ENABLED": "0",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+                "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
             }
         ),
     )
@@ -2605,6 +2607,7 @@ def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
                 "WEFT_TASK_MONITOR_ENABLED": "0",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+                "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
         ),
@@ -2841,22 +2844,23 @@ def pg_admission_setup(
                 "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
                 "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 60.0,
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
+                "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
         ),
     )
     evidence: dict[str, Any] = {"now": 100.0, "used": 5}
 
-    def connection_stats() -> dict[str, int]:
+    def connection_stats() -> dict[str, Any]:
         if evidence["used"] is None:
             raise ValueError("statistics unavailable")
-        return {"numbackends": int(evidence["used"])}
+        return {"total": int(evidence["used"]), "by_owner": {}}
 
     manager_clock = SimpleNamespace(
         monotonic=lambda: evidence["now"], time_ns=time.time_ns, sleep=time.sleep
     )
     monkeypatch.setattr(manager, "_admission_backend_name", lambda: "postgres")
-    monkeypatch.setattr(manager, "_read_postgres_connection_stats", connection_stats)
+    monkeypatch.setattr(manager, "_read_postgres_connection_usage", connection_stats)
     # Replace only Manager's module binding; broker/driver deadlines stay real.
     monkeypatch.setattr(manager_mod, "time", manager_clock)
     for name in manager._queues:
@@ -3062,7 +3066,7 @@ def _record_admission_source_probes(
 @pytest.mark.parametrize(
     "scan", ["empty", "later_reserved", "stopped", "error", "skipped", "partial"]
 )
-def test_pg_admission_idle_reset_requires_two_successful_unstopped_source_probes(
+def test_pg_admission_idle_reset_requires_all_successful_unstopped_source_probes(
     pg_admission_setup: tuple[Manager, Callable[[str], Any], dict[str, Any]],
     scan: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -3098,7 +3102,13 @@ def test_pg_admission_idle_reset_requires_two_successful_unstopped_source_probes
         assert manager._has_pending_messages() is (
             scan in {"partial", "later_reserved"}
         )
-    assert len(probed) == (1 if scan in {"skipped", "partial"} else 2)
+    assert len(probed) == (
+        len(sources) - 1
+        if scan == "skipped"
+        else 1
+        if scan == "partial"
+        else len(sources)
+    )
     if scan == "stopped":
         # Stopping is one-way. Inspect the real policy's next decision rather
         # than restarting a stopped Manager merely to expose its history.
@@ -3183,7 +3193,7 @@ def test_postgres_admission_fails_closed_on_expected_observer_errors(
     )
     monkeypatch.setattr(
         manager,
-        "_read_postgres_connection_stats",
+        "_read_postgres_connection_usage",
         lambda: (_ for _ in ()).throw(failure),
     )
 
@@ -3912,6 +3922,7 @@ def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
         {
             "WEFT_AUTOSTART_TASKS": "0",
             WEFT_ADMISSION_MAX_CONNECTIONS: 2,
+            "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
             WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             "WEFT_TASK_MONITOR_ENABLED": "0",
             "WEFT_LIVENESS_MONITOR_ENABLED": "0",
@@ -3978,6 +3989,8 @@ def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
 
 
 def _prime_manager_next_wait_baseline(manager: Manager, now_ns: int) -> None:
+    # These cases isolate steady-state deadlines, not the initial PG bootstrap.
+    manager._refresh_postgres_admission_evidence()
     manager.should_stop = False
     manager._draining = False
     manager._drain_immediate_work_pending = False

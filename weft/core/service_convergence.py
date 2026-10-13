@@ -2,6 +2,7 @@
 
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-1], [MA-3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-6]
 - docs/specifications/07-System_Invariants.md [MANAGER.3], [MANAGER.8], [MANAGER.12]
 """
 
@@ -524,7 +525,7 @@ def project_manager_service_record(
     timestamp: int,
     service_key: str | None = None,
 ) -> dict[str, Any] | None:
-    """Project a manager service-owner row into the manager command shape."""
+    """Project a manager owner and its three source/reserved routes [MF-6]."""
 
     record = parse_service_owner_record(payload, timestamp=timestamp)
     if record is None or record.service_type != SERVICE_TYPE_MANAGER:
@@ -545,6 +546,8 @@ def project_manager_service_record(
         "ctrl_in": queues.get("ctrl_in"),
         "ctrl_out": queues.get("ctrl_out"),
         "outbox": queues.get("outbox"),
+        "children_requests": queues.get("children_requests"),
+        "children_reserved": queues.get("children_reserved"),
         "internal_requests": queues.get("internal_requests"),
         "internal_reserved": queues.get("internal_reserved"),
         "role": payload["role"],

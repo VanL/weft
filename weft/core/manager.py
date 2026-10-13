@@ -18,17 +18,19 @@ import multiprocessing
 import os
 import queue as thread_queue
 import signal
+import socket
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from heapq import nsmallest
+from itertools import islice
 from multiprocessing.connection import Connection
 from multiprocessing.connection import wait as wait_for_connections
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import ValidationError
 
@@ -61,6 +63,7 @@ from weft._constants import (
     MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_ADMISSION_RECHECK_SECONDS,
+    MANAGER_ADMISSION_REFRESH_BATCH_SIZE,
     MANAGER_CHILD_INBOX_SEED_ATTEMPTS,
     MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS,
     MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT,
@@ -87,11 +90,14 @@ from weft._constants import (
     MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_QUEUE_LIMIT,
     MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS,
     MANAGER_STALLED_CONTROL_RETRY_SECONDS,
+    QUEUE_CHILDREN_RESERVED_SUFFIX,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
+    QUEUE_PRIORITY_CHILD,
     QUEUE_PRIORITY_INTERNAL,
     QUEUE_PRIORITY_NORMAL,
+    QUEUE_RESERVED_SUFFIX,
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_DRAINING,
     SERVICE_STATUS_STOPPED,
@@ -106,6 +112,8 @@ from weft._constants import (
     TERMINAL_EVENT_WRITE_RETRIES,
     TERMINAL_EVENT_WRITE_RETRY_INTERVAL,
     TERMINAL_TASK_STATUSES,
+    WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT,
+    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
@@ -124,7 +132,7 @@ from weft.core.endpoints import (
     latest_tid_state_entries_for_endpoint_resolution,
 )
 from weft.core.manager_runtime import manager_registry_record_liveness
-from weft.core.task_state import read_task_state_snapshot
+from weft.core.task_state import latest_task_state_rows, read_task_state_snapshot
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -140,9 +148,16 @@ from weft.helpers import (
     redact_taskspec_dump,
     terminate_process_tree,
 )
+from weft.helpers.message_ids import is_task_tid
+from weft.liveness import analyze_liveness
 from weft.liveness.policy import mapping_row_is_live
 
-from .admission import AdmissionController, AdmissionDecision, AdmissionLane
+from .admission import (
+    AdmissionController,
+    AdmissionDecision,
+    AdmissionLane,
+    postgres_accounted_usage,
+)
 from .control_messages import (
     ControlRequest,
     encode_control_message,
@@ -169,6 +184,11 @@ from .pipelines import (
     PipelineCompilationContext,
     compile_linear_pipeline,
     load_pipeline_spec_payload,
+)
+from .runtime_identity import (
+    AdmissionRecord,
+    canonical_runtime_context,
+    connection_owner_label,
 )
 from .serve_log import (
     build_serve_log_record,
@@ -210,6 +230,10 @@ from .taskspec import (
     encode_taskspec_transport_payload,
     validate_taskspec_payload,
 )
+
+if TYPE_CHECKING:
+    from simplebroker_pg import ConnectionUsage
+
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +296,8 @@ class _ManagerChildLaunchRequest:
     source_queue: str | None = None
     reserved_queue: str | None = None
     message_timestamp: int | None = None
+    admission: AdmissionRecord | None = None
+    submitter_tid: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,6 +600,18 @@ class Manager(ServiceTask):
         self._admission_reserve_fraction = float(
             self._weft_config.get("ADMISSION_RESERVE_FRACTION", 0.1)
         )
+        self._admission_task_connection_budget = int(
+            self._weft_config.get(
+                "ADMISSION_TASK_CONNECTION_BUDGET",
+                WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT,
+            )
+        )
+        # A derived cache of existing task/Manager runtime evidence, not permits.
+        self._admission_launches: dict[str, dict[str, Any]] = {}
+        self._admission_bootstrapped = False
+        self._admission_refresh_after = 0.0
+        self._admission_evidence_unavailable = False
+        self._admission_observation: dict[str, int] = {}
         self._admission_blocked_lanes: set[AdmissionLane] = set()
         self._admission_retry_after_ns = 0
         self._admission_last_decision_state: tuple[str, str | None] = ("open", None)
@@ -638,6 +676,7 @@ class Manager(ServiceTask):
             self._admission_max_connections,
             self._admission_reserve_fraction,
             self._liveness_monitor_enabled,
+            self._admission_task_connection_budget,
         )
         self._task_monitor_restart_backoff_ns = int(
             float(
@@ -950,6 +989,9 @@ class Manager(ServiceTask):
             roles["internal_inbox"] = internal_inbox
         if internal_reserved is not None:
             roles["internal_reserved"] = internal_reserved
+        for role in ("children_inbox", "children_reserved"):
+            if role in self._queue_names:
+                roles[role] = self._queue_names[role]
         return roles
 
     def _reactor_support_routes(self) -> dict[str, str]:
@@ -968,6 +1010,10 @@ class Manager(ServiceTask):
         queue_names = super()._resolve_queue_names()
         if queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
             tid_prefix = f"T{self.taskspec.tid}"
+            queue_names["children_inbox"] = WEFT_CHILD_SPAWN_REQUESTS_QUEUE
+            queue_names["children_reserved"] = (
+                f"{tid_prefix}.{QUEUE_CHILDREN_RESERVED_SUFFIX}"
+            )
             queue_names["internal_inbox"] = WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
             queue_names["internal_reserved"] = (
                 f"{tid_prefix}.{QUEUE_INTERNAL_RESERVED_SUFFIX}"
@@ -981,17 +1027,19 @@ class Manager(ServiceTask):
 
     def _spawn_inbox_queue_names(self) -> tuple[str, ...]:
         queue_names = [self._queue_names["inbox"]]
-        internal_inbox = self._queue_names.get("internal_inbox")
-        if internal_inbox is not None:
-            queue_names.insert(0, internal_inbox)
+        for role in ("children_inbox", "internal_inbox"):
+            inbox = self._queue_names.get(role)
+            if inbox is not None:
+                queue_names.insert(0, inbox)
         return tuple(dict.fromkeys(queue_names))
 
     def _spawn_reserved_queue_pairs(self) -> tuple[tuple[str, str], ...]:
         pairs = [(self._queue_names["reserved"], self._queue_names["inbox"])]
-        internal_reserved = self._queue_names.get("internal_reserved")
-        internal_inbox = self._queue_names.get("internal_inbox")
-        if internal_reserved is not None and internal_inbox is not None:
-            pairs.insert(0, (internal_reserved, internal_inbox))
+        for prefix in ("children", "internal"):
+            reserved = self._queue_names.get(f"{prefix}_reserved")
+            inbox = self._queue_names.get(f"{prefix}_inbox")
+            if reserved is not None and inbox is not None:
+                pairs.insert(0, (reserved, inbox))
         return tuple(dict.fromkeys(pairs))
 
     @staticmethod
@@ -1049,6 +1097,18 @@ class Manager(ServiceTask):
                 priority=QUEUE_PRIORITY_INTERNAL,
             )
 
+        child_inbox = self._queue_names.get("children_inbox")
+        child_reserved = self._queue_names.get("children_reserved")
+        if child_inbox is not None and child_reserved is not None:
+            configs[child_inbox] = self._reserve_queue_config(
+                self._handle_work_message,
+                reserved_queue=child_reserved,
+                priority=QUEUE_PRIORITY_CHILD,
+            )
+            configs[child_reserved] = self._peek_queue_config(
+                self._handle_reserved_message
+            )
+
         configs.update(
             {
                 self._queue_names["inbox"]: self._reserve_queue_config(
@@ -1090,6 +1150,9 @@ class Manager(ServiceTask):
         payload = super()._build_tid_state_payload()
         # Manager role is structural, not advisory metadata.
         payload["role"] = "manager"
+        payload["admission_launches"] = copy.deepcopy(
+            getattr(self, "_admission_launches", {})
+        )
         return payload
 
     def _control_snapshot_fields(self) -> dict[str, Any]:
@@ -1131,6 +1194,8 @@ class Manager(ServiceTask):
         if self._internal_spawn_queue_attached():
             payload["internal_requests"] = self._queue_names["internal_inbox"]
             payload["internal_reserved"] = self._queue_names["internal_reserved"]
+            payload["children_requests"] = self._queue_names["children_inbox"]
+            payload["children_reserved"] = self._queue_names["children_reserved"]
         weft_context = getattr(self.taskspec.spec, "weft_context", None)
         if weft_context is not None:
             payload["weft_context"] = str(weft_context)
@@ -1306,6 +1371,7 @@ class Manager(ServiceTask):
         source_queue: str | None = None,
         reserved_queue: str | None = None,
         message_timestamp: int | None = None,
+        submitter_tid: str | None = None,
     ) -> bool:
         """Seed child inbox and submit broker-free child launch work.
 
@@ -1381,6 +1447,7 @@ class Manager(ServiceTask):
             service_key = autostart_source
 
         assert child_spec.tid is not None
+        admission = self._new_child_admission(child_spec.tid, submitter_tid)
         request = _ManagerChildLaunchRequest(
             child_spec=child_spec,
             task_cls=task_cls,
@@ -1394,11 +1461,14 @@ class Manager(ServiceTask):
             source_queue=source_queue,
             reserved_queue=reserved_queue,
             message_timestamp=message_timestamp,
+            admission=admission,
+            submitter_tid=submitter_tid,
         )
         self._active_child_launches[child_spec.tid] = request
         self._child_launch_started_ns[child_spec.tid] = time.time_ns()
         self._child_launch_started_this_turn = True
         try:
+            self._checkpoint_admission_launch(request)
             self._start_service_worker(
                 MANAGER_CHILD_LAUNCH_WORKER_LANE,
                 request_id=child_spec.tid,
@@ -1411,6 +1481,53 @@ class Manager(ServiceTask):
             )
             return False
         return True
+
+    def _new_child_admission(
+        self, tid: str, submitter_tid: str | None
+    ) -> AdmissionRecord | None:
+        """Select immutable launch cost even when the gate is disabled [MA-1.8]."""
+        if self._admission_backend_name() != "postgres":
+            return None
+        return AdmissionRecord(
+            self._admission_task_connection_budget,
+            connection_owner_label(tid, canonical_runtime_context(self._db_path)),
+            submitter_tid,
+        )
+
+    def _checkpoint_admission_launch(self, request: _ManagerChildLaunchRequest) -> None:
+        """Persist pending custody before starting the broker-free launch [MA-1.8]."""
+        if request.admission is None:
+            return
+        assert request.child_spec.tid is not None
+        self._admission_launches[request.child_spec.tid] = {
+            "admission": request.admission.to_dict(),
+            "hostname": socket.gethostname(),
+        }
+        if not self._register_tid_state():
+            raise RuntimeError("unable to publish admission launch evidence")
+
+    def _checkpoint_spawned_admission(
+        self, result: _ManagerChildLaunchResult
+    ) -> dict[str, Any]:
+        """Retain exact wrapper identity in Manager and task_spawned evidence [MF-5]."""
+        request = result.request
+        if request.admission is None:
+            return {}
+        assert request.child_spec.tid is not None and result.process is not None
+        launch = self._admission_launches[request.child_spec.tid]
+        pid = result.process.pid
+        if isinstance(pid, int):
+            processes = self._admission_host_processes(launch)
+            created = process_create_time(pid)
+            if created is not None or pid not in processes:
+                processes[pid] = {"pid": pid, "create_time": created}
+            launch["host_processes"] = list(processes.values())
+        self._register_tid_state()
+        return {
+            "admission": request.admission.to_dict(),
+            "hostname": launch["hostname"],
+            "host_processes": launch.get("host_processes", []),
+        }
 
     def _run_child_launch_service_worker(
         self,
@@ -1452,6 +1569,7 @@ class Manager(ServiceTask):
                     )
                 return _ManagerChildLaunchResult(
                     request=item,
+                    process=process,
                     error=RuntimeError("manager stopped while child launch completed"),
                 )
             return result
@@ -1470,6 +1588,8 @@ class Manager(ServiceTask):
                 request.child_spec,
                 config=self._weft_config,
                 detach_stdio=request.detach_stdio,
+                admission=request.admission,
+                submitter_tid=request.submitter_tid,
             )
         except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-347] exception
             return _ManagerChildLaunchResult(request=request, error=exc)
@@ -1544,6 +1664,8 @@ class Manager(ServiceTask):
         if request.service_key:
             event_payload["service_key"] = request.service_key
 
+        event_payload["submitter_tid"] = request.submitter_tid
+        event_payload.update(self._checkpoint_spawned_admission(result))
         self._report_state_change(event="task_spawned", **event_payload)
         self._emit_serve_log(
             "child_launch_result",
@@ -1567,6 +1689,12 @@ class Manager(ServiceTask):
         request = result.request
         child_spec = request.child_spec
         error = result.error or RuntimeError("child launch failed")
+        if request.admission is not None:
+            if result.process is None:
+                self._admission_launches.pop(str(child_spec.tid), None)
+                self._register_tid_state()
+            else:
+                self._checkpoint_spawned_admission(result)
         self._schedule_admission_retry_for_source(request.source_queue)
         logger.warning("Child launch failed for %s: %s", child_spec.tid, error)
         self._report_state_change(
@@ -1930,6 +2058,8 @@ class Manager(ServiceTask):
 
         if queue_name == self._queue_names.get("internal_inbox"):
             return "internal"
+        if queue_name == self._queue_names.get("children_inbox"):
+            return "child"
         if queue_name == self._queue_names.get("inbox"):
             return "public"
         return None
@@ -1965,8 +2095,31 @@ class Manager(ServiceTask):
         """
 
         if self._admission_backend_name() == "postgres":
+            self._admission_observation.clear()
+            if not self._admission_bootstrapped:
+                self._refresh_postgres_admission_evidence()
+            if self._admission_evidence_unavailable:
+                return None
             try:
-                return self._read_postgres_connection_stats()["numbackends"]
+                usage = self._read_postgres_connection_usage()
+                obligations = [
+                    AdmissionRecord.from_mapping(evidence["admission"])
+                    for evidence in self._admission_launches.values()
+                ]
+                accounted = postgres_accounted_usage(
+                    usage["total"],
+                    usage["by_owner"],
+                    (
+                        (record.connection_owner, record.connection_budget)
+                        for record in obligations
+                    ),
+                )
+                self._admission_observation = {
+                    "observed": usage["total"],
+                    "prospective": accounted - usage["total"],
+                    "accounted": accounted,
+                }
+                return accounted
             except (DatabaseError, ValueError):
                 return None
 
@@ -1990,6 +2143,235 @@ class Manager(ServiceTask):
             return len(live_tids)
         except (BrokerError, OSError, RuntimeError):
             return None
+
+    def _adopt_admission_evidence(self, tid: str, evidence: Mapping[str, Any]) -> None:
+        """Merge existing launch/task evidence without dropping worker identities [MA-1.8]."""
+        raw = evidence.get("admission")
+        if raw is None:
+            return
+        if not isinstance(raw, Mapping):
+            raise TypeError("invalid admission runtime record")
+        record = AdmissionRecord.from_mapping(raw)
+        if record.connection_owner != connection_owner_label(
+            tid, canonical_runtime_context(self._db_path)
+        ):
+            raise ValueError("admission owner does not match the task context")
+        previous = self._admission_launches.get(tid, {})
+        if previous.get("admission", raw) != raw:
+            raise ValueError("admission evidence changed during a task lifetime")
+        merged = dict(previous)
+        merged["admission"] = record.to_dict()
+        if "hostname" in evidence:
+            merged["hostname"] = evidence["hostname"]
+        processes = self._admission_host_processes(previous)
+        processes.update(self._admission_host_processes(evidence))
+        handle_payload = evidence.get("runtime_handle")
+        if isinstance(handle_payload, Mapping):
+            handle = RunnerHandle.from_dict(handle_payload)
+            for pid, create_time in handle.scoped_host_processes():
+                processes[pid] = {"pid": pid, "create_time": create_time}
+        merged["host_processes"] = list(processes.values())
+        self._admission_launches[tid] = merged
+
+    @staticmethod
+    def _admission_host_processes(
+        evidence: Mapping[str, Any],
+    ) -> dict[int, dict[str, Any]]:
+        """Validate retained exact process evidence at the runtime boundary [MF-5]."""
+        raw = evidence.get("host_processes", [])
+        if not isinstance(raw, list):
+            raise TypeError("admission host_processes must be a list")
+        processes = {}
+        for item in raw:
+            if (
+                not isinstance(item, Mapping)
+                or type(item.get("pid")) is not int
+                or item["pid"] <= 0
+            ):
+                raise ValueError("admission host process requires a positive PID")
+            create_time = item.get("create_time")
+            if create_time is not None and type(create_time) not in (int, float):
+                raise ValueError("admission create_time must be numeric or unknown")
+            processes[item["pid"]] = {"pid": item["pid"], "create_time": create_time}
+        return processes
+
+    def _record_reaped_admission(self, tid: str) -> None:
+        """Refresh one exited wrapper; evidence failure retains debt without blocking reap [MA-1.8]."""
+        # While unhealthy, bounded maintenance owns recovery. Later reaps keep
+        # their debt and cannot displace the first failed record from retry.
+        if self._admission_evidence_unavailable or tid not in self._admission_launches:
+            return
+        try:
+            latest = read_task_state_snapshot(self._manager_context(), tid)
+            if latest is not None:
+                self._adopt_admission_evidence(tid, latest[1])
+        except (BrokerError, OSError, RuntimeError, ValueError, TypeError):
+            self._admission_evidence_unavailable = True
+            self._admission_launches = {
+                tid: self._admission_launches[tid],
+                **self._admission_launches,
+            }
+            self._admission_refresh_after = 0.0
+            logger.debug(
+                "Unable to refresh reaped task admission evidence", exc_info=True
+            )
+            return
+        self._retire_admission_launches((tid,))
+
+    def _refresh_postgres_admission_evidence(self) -> None:
+        """Bootstrap once, then reconcile a bounded round-robin batch [MA-1.8].
+
+        Launch/reap events update exact tasks immediately. Ordinary admission
+        never calls this after bootstrap. Failed items remain first for retry;
+        only a successful maintenance pass clears the unavailable observation.
+        Missing rows preserve cached identities for the shared liveness probe.
+        """
+        if (
+            self._admission_backend_name() != "postgres"
+            or time.monotonic() < self._admission_refresh_after
+        ):
+            return
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                if not self._admission_bootstrapped:
+                    snapshots = latest_task_state_rows(
+                        self._manager_context(), broker=broker
+                    )
+                    self._bootstrap_postgres_admission_evidence(snapshots, broker)
+                    for tid, (_stamp, payload) in snapshots.items():
+                        self._adopt_admission_evidence(tid, payload)
+                    selected = tuple(self._admission_launches)
+                else:
+                    selected = tuple(
+                        islice(
+                            self._admission_launches,
+                            MANAGER_ADMISSION_REFRESH_BATCH_SIZE,
+                        )
+                    )
+                    for tid in selected:
+                        latest = read_task_state_snapshot(
+                            self._manager_context(), tid, broker=broker
+                        )
+                        if latest is not None:
+                            self._adopt_admission_evidence(tid, latest[1])
+                        # Rotate only successful reads, so a failed item remains
+                        # first and cannot be hidden by a different good batch.
+                        evidence = self._admission_launches.pop(tid)
+                        self._admission_launches[tid] = evidence
+            self._retire_admission_launches(selected)
+        except (BrokerError, OSError, RuntimeError, ValueError, TypeError):
+            self._admission_evidence_unavailable = True
+            logger.debug("Unable to reconcile admission evidence", exc_info=True)
+        else:
+            self._admission_bootstrapped = True
+            self._admission_evidence_unavailable = False
+        finally:
+            self._admission_refresh_after = (
+                time.monotonic() + MANAGER_ADMISSION_RECHECK_SECONDS
+            )
+
+    def _bootstrap_postgres_admission_evidence(
+        self, snapshots: Mapping[str, tuple[int, dict[str, Any]]], broker: Any
+    ) -> None:
+        """Reconstruct obligations from existing Manager/task snapshots [MA-1.8]."""
+        manager_tids = {self.tid}
+        for manager_tid, (_stamp, payload) in snapshots.items():
+            launches = payload.get("admission_launches")
+            if payload.get("role") == "manager" and isinstance(launches, Mapping):
+                manager_tids.add(manager_tid)
+                for tid, evidence in launches.items():
+                    if (
+                        isinstance(tid, str)
+                        and is_task_tid(tid)
+                        and isinstance(evidence, Mapping)
+                    ):
+                        self._adopt_admission_evidence(tid, evidence)
+        owners = collect_service_owner_records(
+            iter_queue_json_entries(
+                self._queue(WEFT_SERVICES_REGISTRY_QUEUE), strict=True
+            ),
+            service_key=self._manager_service_key,
+            service_type=SERVICE_TYPE_MANAGER,
+        )
+        manager_tids.update(record.owner_tid for record in owners.records)
+        spawn_events: list[dict[str, Any]] = []
+        for event, _stamp in iter_queue_json_entries(
+            self._queue(WEFT_GLOBAL_LOG_QUEUE), strict=True
+        ):
+            if event.get("event") == "task_spawned" and is_task_tid(event.get("tid")):
+                manager_tids.add(event["tid"])
+                if event.get("admission") is not None:
+                    # The event's runtime_handle belongs to the reporting
+                    # Manager. Recover only child-owned launch evidence, and
+                    # avoid retaining historical TaskSpecs during bootstrap.
+                    spawn_events.append(
+                        {
+                            key: event[key]
+                            for key in (
+                                "child_tid",
+                                "admission",
+                                "hostname",
+                                "host_processes",
+                            )
+                            if key in event
+                        }
+                    )
+        reserved_tids = self._reserved_admission_tids(broker, manager_tids)
+        for event in spawn_events:
+            tid = event.get("child_tid")
+            if isinstance(tid, str) and tid in reserved_tids:
+                self._adopt_admission_evidence(tid, event)
+
+    @staticmethod
+    def _reserved_admission_tids(broker: Any, manager_tids: Iterable[str]) -> set[str]:
+        """Consult Manager reservations, never task work or source backlog [MA-1.8]."""
+        tids: set[str] = set()
+        for manager_tid in manager_tids:
+            for suffix in (
+                QUEUE_RESERVED_SUFFIX,
+                QUEUE_CHILDREN_RESERVED_SUFFIX,
+                QUEUE_INTERNAL_RESERVED_SUFFIX,
+            ):
+                with closing_queue_iterator(
+                    broker.peek_generator(
+                        f"T{manager_tid}.{suffix}", with_timestamps=True
+                    )
+                ) as rows:
+                    for _body, timestamp in cast(Iterator[tuple[str, int]], rows):
+                        if is_task_tid(str(timestamp)):
+                            tids.add(str(timestamp))
+        return tids
+
+    def _retire_admission_launches(self, tids: Iterable[str] | None = None) -> None:
+        """Reuse LivenessMonitor's process judgment for local budgets [MA-1.8].
+
+        Terminal publication is unnecessary after a crash. Omit terminal hints
+        from the analysis so unresolved process identity never becomes credit.
+        This grants no authority to delete task state.
+        """
+        retired = []
+        for tid in tuple(self._admission_launches if tids is None else tids):
+            evidence = self._admission_launches.get(tid)
+            if tid in self._active_child_launches or evidence is None:
+                continue
+            processes = evidence.get("host_processes")
+            if not processes or evidence.get("hostname") != socket.gethostname():
+                continue
+            handle = RunnerHandle(
+                runner="host",
+                kind="process",
+                id=str(processes[0]["pid"]),
+                control={"authority": "host-pid"},
+                observations={"host_processes": processes},
+            )
+            observation = analyze_liveness(tid, {"runtime_handle": handle.to_dict()})
+            if observation.evidence == "stale":
+                retired.append(tid)
+        for tid in retired:
+            self._admission_launches.pop(tid)
+        if retired:
+            self._register_tid_state()
+            self._clear_admission_retry()
 
     def _admission_mapping_is_live(
         self,
@@ -2059,6 +2441,13 @@ class Manager(ServiceTask):
             "lane": lane,
         }
         fields = dict(identity)
+        fields["reason"] = (
+            "usage_unavailable"
+            if decision.capacity is None
+            else "candidate_budget_does_not_fit"
+            if blocked_lanes
+            else "capacity_available"
+        )
         if decision.wait_phase is not None:
             identity["wait_phase"] = decision.wait_phase
             fields.update(
@@ -2073,6 +2462,11 @@ class Manager(ServiceTask):
                 public_limit=decision.capacity["public_limit"],
                 internal_limit=decision.capacity["internal_limit"],
             )
+        if backend == "postgres":
+            fields.update(self._admission_observation)
+            fields["candidate_budget"] = self._admission_task_connection_budget
+            if decision.capacity is not None:
+                fields["child_limit"] = decision.capacity["child_limit"]
         if unavailable:
             fields["error"] = "admission_usage_unavailable"
         self._emit_serve_log_rate_limited(
@@ -2100,7 +2494,7 @@ class Manager(ServiceTask):
         if lane is None:
             return
         if lane == "internal":
-            self._admission_blocked_lanes.update(("public", "internal"))
+            self._admission_blocked_lanes.update(("public", "child", "internal"))
         else:
             self._admission_blocked_lanes.add(lane)
         self._admission_retry_after_ns = time.time_ns() + int(
@@ -2116,13 +2510,12 @@ class Manager(ServiceTask):
         ):
             self._clear_admission_retry()
 
-    def _read_postgres_connection_stats(self) -> dict[str, int]:
-        """Read connection pressure through the optional PostgreSQL extension."""
+    def _read_postgres_connection_usage(self) -> ConnectionUsage:
+        """Use the released coherent population, outside a caller transaction [SB-0.4]."""
+        # PostgreSQL is an optional backend on SQLite-only installations.
+        from simplebroker_pg import get_connection_usage
 
-        # The backend extension is optional on non-PostgreSQL installations.
-        from simplebroker_pg import get_connection_stats
-
-        return get_connection_stats(self._get_connected_queue())
+        return get_connection_usage(self._get_connected_queue())
 
     def _admission_allows_queue(self, queue_name: str) -> bool:
         """Evaluate one spawn lane before broker reservation.
@@ -2200,6 +2593,8 @@ class Manager(ServiceTask):
         if self._internal_spawn_queue_attached():
             queues["internal_requests"] = self._queue_names["internal_inbox"]
             queues["internal_reserved"] = self._queue_names["internal_reserved"]
+            queues["children_requests"] = self._queue_names["children_inbox"]
+            queues["children_reserved"] = self._queue_names["children_reserved"]
         payload = build_manager_service_payload(
             context=self._manager_context(),
             tid=self.tid,
@@ -2558,6 +2953,8 @@ class Manager(ServiceTask):
         if self._internal_spawn_queue_attached():
             queues["internal_requests"] = self._queue_names["internal_inbox"]
             queues["internal_reserved"] = self._queue_names["internal_reserved"]
+            queues["children_requests"] = self._queue_names["children_inbox"]
+            queues["children_reserved"] = self._queue_names["children_reserved"]
         payload = build_manager_service_payload(
             context=self._manager_context(),
             tid=self.tid,
@@ -3044,6 +3441,8 @@ class Manager(ServiceTask):
             "outbox",
             "internal_requests",
             "internal_reserved",
+            "children_requests",
+            "children_reserved",
         ):
             value = record.get(key)
             if isinstance(value, str) and value:
@@ -3791,6 +4190,7 @@ class Manager(ServiceTask):
                 finally:
                     self._child_processes.pop(tid, None)
                     self._child_sentinel_adapter.remove(tid)
+                    self._record_reaped_admission(tid)
                 if (
                     child.reserved_queue is not None
                     and child.message_timestamp is not None
@@ -4261,7 +4661,10 @@ class Manager(ServiceTask):
                 return True
             if lane is not None:
                 empty_spawn_lanes.add(lane)
-                if len(empty_spawn_lanes) == 2 and not self._stop_event.is_set():
+                if (
+                    len(empty_spawn_lanes) == len(self._spawn_inbox_queue_names())
+                    and not self._stop_event.is_set()
+                ):
                     # Reuse only this scan's successful probes. A retry wake
                     # alone cannot prove an idle gap ([MANAGER.18]).
                     self._admission_controller.reset_wait()
@@ -4710,6 +5113,19 @@ class Manager(ServiceTask):
             )
             return
 
+        try:
+            submitter_tid = self._spawn_submitter_tid(payload, source_queue)
+        except (TypeError, ValueError) as exc:
+            self._report_state_change(
+                event="task_spawn_rejected", child_tid=str(timestamp), error=str(exc)
+            )
+            self._apply_spawn_reserved_policy(
+                self.taskspec.spec.reserved_policy_on_error,
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+            )
+            return
         child_spec = self._build_child_spec(payload, timestamp)
         if child_spec is None:
             self._emit_serve_log(
@@ -4751,6 +5167,7 @@ class Manager(ServiceTask):
             source_queue=source_queue,
             reserved_queue=reserved_queue,
             message_timestamp=timestamp,
+            submitter_tid=submitter_tid,
         )
         if not launched:
             if self._draining or self.should_stop:
@@ -4830,6 +5247,31 @@ class Manager(ServiceTask):
             reason=reason,
         )
 
+    def _spawn_submitter_tid(
+        self, payload: Mapping[str, Any], source_queue: str
+    ) -> str | None:
+        """Validate runtime custody independently from ancestry tags [MF-6]."""
+        if not isinstance(payload, Mapping):
+            raise TypeError("spawn request must be a JSON object")
+        submitted_by = payload.get("submitted_by")
+        if source_queue != self._queue_names.get("children_inbox"):
+            if submitted_by is not None:
+                raise ValueError("submitted_by is only valid on the child spawn source")
+            return None
+        if not isinstance(submitted_by, Mapping) or set(submitted_by) != {
+            "tid",
+            "context",
+        }:
+            raise ValueError(
+                "child spawn requests require a runtime submitter envelope"
+            )
+        tid = submitted_by.get("tid")
+        if not isinstance(tid, str) or not is_task_tid(tid):
+            raise ValueError("child submitter must be a full task TID")
+        if submitted_by.get("context") != canonical_runtime_context(self._db_path):
+            raise ValueError("child submitter context does not match the Manager")
+        return tid
+
     def _build_child_spec(
         self, payload: dict[str, Any], timestamp: int
     ) -> TaskSpec | None:
@@ -4887,7 +5329,11 @@ class Manager(ServiceTask):
             if isinstance(internal_endpoint_name, str) and internal_endpoint_name:
                 metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = internal_endpoint_name
 
-            metadata.setdefault("parent_tid", self.tid)
+            submitted_by = payload.get("submitted_by")
+            parent_tid = (
+                submitted_by.get("tid") if isinstance(submitted_by, Mapping) else None
+            )
+            metadata.setdefault("parent_tid", parent_tid or self.tid)
 
             child_spec = validate_taskspec_payload(
                 candidate,
@@ -7146,16 +7592,20 @@ class Manager(ServiceTask):
             raise failures[0]
 
     def _admission_retry_timeouts(self, *, now_ns: int) -> list[float]:
-        """Return the optional admission deadline as a timeout list."""
+        """Return dispatch retry and bounded evidence-maintenance deadlines."""
 
-        if self._admission_retry_after_ns <= 0:
-            return []
-        return [
-            self._timeout_until_ns(
-                self._admission_retry_after_ns,
-                now_ns=now_ns,
+        timeouts = []
+        if self._admission_retry_after_ns > 0:
+            timeouts.append(
+                self._timeout_until_ns(self._admission_retry_after_ns, now_ns=now_ns)
             )
-        ]
+        if self._admission_backend_name() == "postgres" and (
+            not self._admission_bootstrapped
+            or self._admission_launches
+            or self._admission_evidence_unavailable
+        ):
+            timeouts.append(max(0.0, self._admission_refresh_after - time.monotonic()))
+        return timeouts
 
     def next_wait_timeout(self) -> float | None:
         """Return the next manager due timer for the shared task loop."""
@@ -7369,6 +7819,7 @@ class Manager(ServiceTask):
             self._continue_shutdown_drain()
             self._drain_worker_results()
             return
+        self._refresh_postgres_admission_evidence()
         self._emit_manager_loop_summary()
         self._refresh_manager_registration()
         self._cleanup_stale_internal_reserved_queues()
@@ -7395,9 +7846,23 @@ class Manager(ServiceTask):
             not self._has_active_child_launches()
             and not self._child_launch_started_this_turn
             and public_inbox == WEFT_SPAWN_REQUESTS_QUEUE
-            and public_inbox in self._active_queues
+            and any(
+                name in self._active_queues for name in self._spawn_inbox_queue_names()
+            )
         ):
-            public_drained = self._drain_public_spawn_requests()
+            child_inbox = self._queue_names.get("children_inbox")
+            if child_inbox is not None:
+                public_drained = self._drain_spawn_requests_from_queue(
+                    queue_name=child_inbox,
+                    max_messages=MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES,
+                    event="child_spawn_drain",
+                    component="spawn",
+                )
+            if (
+                not self._has_active_child_launches()
+                and not self._child_launch_started_this_turn
+            ):
+                public_drained += self._drain_public_spawn_requests()
         if public_drained:
             self._last_activity_ns = time.time_ns()
         if self._draining:

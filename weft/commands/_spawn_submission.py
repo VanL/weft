@@ -18,9 +18,13 @@ from typing import Any, Final, Literal
 from simplebroker import Queue
 from weft._constants import (
     CONTROL_SURFACE_WAIT_INTERVAL,
+    QUEUE_CHILDREN_RESERVED_SUFFIX,
+    QUEUE_INTERNAL_RESERVED_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
     SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
+    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
@@ -36,6 +40,8 @@ from weft.helpers.message_ids import is_task_tid
 _spawn_reconciliation_static_queue_specs: Final[tuple[tuple[str, bool], ...]] = (
     (WEFT_GLOBAL_LOG_QUEUE, True),
     (WEFT_SPAWN_REQUESTS_QUEUE, True),
+    (WEFT_CHILD_SPAWN_REQUESTS_QUEUE, True),
+    (WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, True),
     (WEFT_SERVICES_REGISTRY_QUEUE, True),
 )
 
@@ -153,17 +159,7 @@ def _find_reserved_spawn_request_queue(
     message_timestamp: int,
     broker: Any | None = None,
 ) -> str | None:
-    for record in manager_runtime.list_manager_records(
-        context,
-        include_stopped=True,
-        canonical_only=True,
-        prune_stale=False,
-        broker=broker,
-    ):
-        manager_tid = record.get("tid")
-        if not isinstance(manager_tid, str) or not manager_tid:
-            continue
-        reserved_queue = f"T{manager_tid}.{QUEUE_RESERVED_SUFFIX}"
+    for reserved_queue in _reserved_spawn_request_queue_names(context, broker=broker):
         if _queue_contains_exact_message(
             context,
             reserved_queue,
@@ -188,7 +184,14 @@ def _reserved_spawn_request_queue_names(
         manager_tid = record.get("tid")
         if not isinstance(manager_tid, str) or not manager_tid:
             continue
-        queue_names.append(f"T{manager_tid}.{QUEUE_RESERVED_SUFFIX}")
+        queue_names.extend(
+            f"T{manager_tid}.{suffix}"
+            for suffix in (
+                QUEUE_RESERVED_SUFFIX,
+                QUEUE_CHILDREN_RESERVED_SUFFIX,
+                QUEUE_INTERNAL_RESERVED_SUFFIX,
+            )
+        )
     return tuple(sorted(set(queue_names)))
 
 
@@ -244,13 +247,18 @@ def _reconcile_submitted_spawn_once(
     if log_result is not None:
         return log_result
 
-    if _queue_contains_exact_message(
-        context,
+    for source_queue in (
         WEFT_SPAWN_REQUESTS_QUEUE,
-        message_timestamp=message_timestamp,
-        broker=broker,
+        WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
+        WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     ):
-        return SpawnSubmissionReconciliation(outcome="queued", tid=tid)
+        if _queue_contains_exact_message(
+            context,
+            source_queue,
+            message_timestamp=message_timestamp,
+            broker=broker,
+        ):
+            return SpawnSubmissionReconciliation(outcome="queued", tid=tid)
 
     reserved_queue = _find_reserved_spawn_request_queue(
         context,

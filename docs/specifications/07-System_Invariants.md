@@ -347,28 +347,51 @@ _Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py
   snapshot validity nor process liveness. Malformed suffixes are ignored.
   Implementation plans: [Short TID derivation](../plans/2026-08-31-short-tid-derivation-plan.md),
   [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
-- **OBS.6**: Each task owns a runtime-state queue, `weft.state.tasks.<tid>`,
-  containing complete runtime-observability snapshots. Its suffix is the
-  canonical 19-ASCII-decimal full TID. A valid row is a JSON object with
-  nonempty string `full` and `short` fields, and `full` must equal the suffix.
-  Current-state readers select the greatest-message-ID valid row: peek
-  newest-first, then paginate before the last observed ID until a valid row
-  or exhaustion. No fixed malformed-row ceiling may hide valid evidence.
-  Multiple rows, including equivalent snapshots, are ordered history, not
-  an invariant violation. Names-only discovery and short-ID resolution read
-  no payloads; all runtime evidence consumers require a valid snapshot.
-  A known-TID read visits only that task's queue. Candidate reads deduplicate
-  TIDs, read only those queues, and perform no state I/O for an empty set.
-  Noncanonical TIDs encountered in candidate evidence contribute no runtime
-  snapshot and are ignored by bulk reads; direct queue-name construction
-  rejects a noncanonical TID. Invalid-only candidates perform no state I/O.
-  Full-TID spelling validation is shared through
-  `weft.helpers.message_ids.is_task_tid`; exact message-ID range validation
-  remains in `normalize_exact_message_id`, and TaskSpec additionally rejects zero.
-  Bulk reads share one broker scope and short-lived queue facades. Broker acquisition and read failures propagate to callers; existing caller-level
-  failure policies remain unchanged. Non-task point selectors return absent
-  without broker I/O; queue-name construction rejects them. Names alone
-  never substitute for valid state, lifecycle evidence, or live process proof.
+### Task-owned runtime snapshots [OBS.6]
+
+Each task owns a runtime-state queue, `weft.state.tasks.<tid>`,
+containing complete runtime-observability snapshots. Its suffix is the
+canonical 19-ASCII-decimal full TID. A valid row is a JSON object with
+nonempty string `full` and `short` fields, and `full` must equal the suffix.
+Current-state readers select the greatest-message-ID valid row: peek
+newest-first, then paginate before the last observed ID until a valid row
+or exhaustion. No fixed malformed-row ceiling may hide valid evidence.
+Multiple rows, including equivalent snapshots, are ordered history, not
+an invariant violation. Names-only discovery and short-ID resolution read
+no payloads; all runtime evidence consumers require a valid snapshot.
+A known-TID read visits only that task's queue. Candidate reads deduplicate
+TIDs, read only those queues, and perform no state I/O for an empty set.
+Noncanonical TIDs encountered in candidate evidence contribute no runtime
+snapshot and are ignored by bulk reads; direct queue-name construction
+rejects a noncanonical TID. Invalid-only candidates perform no state I/O.
+Full-TID spelling validation is shared through
+`weft.helpers.message_ids.is_task_tid`; exact message-ID range validation
+remains in `normalize_exact_message_id`, and TaskSpec additionally rejects zero.
+Bulk reads share one broker scope and short-lived queue facades. Broker acquisition and read failures propagate to callers; existing caller-level
+failure policies remain unchanged. Non-task point selectors return absent
+without broker I/O; queue-name construction rejects them. Names alone
+never substitute for valid state, lifecycle evidence, or live process proof.
+Each new PostgreSQL launch carries the Manager-authored `admission` record
+with positive integer `connection_budget`, opaque string `connection_owner`,
+and nullable full-TID `submitter_tid`, including when admission is disabled.
+The record crosses wrapper and worker launch transport, appears in the
+existing Manager `task_spawned` event and every task-owned runtime snapshot,
+and is immutable for that task lifetime. Caller metadata cannot replace it.
+It does not add a TaskSpec `spec`/`io` field or an independently retained
+queue. Runtime snapshot retirement continues to use existing liveness
+ownership. Runtime submitter identity and child routing also operate with
+SQLite or a disabled gate, without importing PostgreSQL inspection or
+applying its connection-budget model to SQLite.
+
+_Implementation mapping_: `weft/core/runtime_identity.py`,
+`weft/core/tasks/base.py::BaseTask._build_tid_state_payload`,
+`weft/core/manager.py::Manager._build_tid_state_payload`, and
+`tests/system/test_admission_budget_pg.py`.
+
+PostgreSQL host_processes snapshots retain wrapper plus worker identities
+independently of the runner handle. The live PostgreSQL test verifies the
+snapshot and Manager launch-event contract.
+
 - **OBS.6a**: Task-state publication is edge-triggered: every write is a
   new fact — a state transition or a report — so a producer appends its
   complete current snapshot to its own `weft.state.tasks.<tid>` without
@@ -618,10 +641,12 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   ephemeral process-local state. No verdict queue, table, replay log, or
   persisted deadline exists. Monitor restart resets every timeout; indefinite
   postponement under repeated restart is accepted.
-- **LIVENESS.R2**: Liveness evidence never synthesizes, reverses, or authorizes
-  a TaskSpec transition, task-log verdict, Manager ownership decision,
-  admission change, process signal, or any deletion other than
-  `weft.state.tasks.<tid>` rows.
+- **LIVENESS.R2**: LivenessMonitor does not synthesize TaskSpec transitions,
+  task-log verdicts, Manager ownership, process signals, or deletions outside
+  `weft.state.tasks.<tid>` rows. Manager may reuse its broker-free liveness
+  analysis to retire connection obligations under [MA-1.8]; this grants no
+  task-state deletion authority and does not reuse the monitor's age or
+  unknown-timeout deletion policy.
 - **LIVENESS.R3**: `LivenessMonitor` is the sole component deleter within
   `weft.state.tasks.*`; one policy module owns malformed, superseded, and
   newest-row deletability. The existing 2,400-second minimum-age fences apply
@@ -959,10 +984,10 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   visible until normal expiry or owner cleanup so the target manager can observe
   its `superseded` row.
 - **MANAGER.9**: public spawn dispatch is work-stealing. Atomic reservation of
-  a `weft.spawn.requests` message authorizes that manager to attempt the child
+  a `weft.spawn.requests` or `weft.spawn.children` message authorizes that manager to attempt the child
   launch for that exact message; registry `self`, `other`, `none`, or
   `unknown` ownership is not launch authority for public work.
-- **MANAGER.10**: after a manager reserves a public or internal spawn request,
+- **MANAGER.10**: after a manager reserves a root, child, or internal spawn request,
   STOP/KILL control and drain state are the pre-launch safety fence. A draining
   or stopped manager must not launch the reserved child.
 - **MANAGER.11**: a successful manager child launch deletes exactly the
@@ -970,12 +995,12 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   handling, pre-launch failure, and shutdown continue to use the manager's
   reserved-queue policy and visible reserved queues.
 - **MANAGER.12**: registry leadership must not block a manager from draining
-  already-reserved public or manager-owned internal spawn work. Leadership
+  already-reserved root, child, or manager-owned internal spawn work. Leadership
   yield is advisory and idle-biased: it must not preempt actionable control,
   spawn, reserved, or child-supervision work.
 - **MANAGER.12a**: pending public spawn backlog is not owned manager work. A
   manager may service a public spawn request it successfully reserved, but
-  unreserved messages still in `weft.spawn.requests` must not by themselves
+  unreserved messages in `weft.spawn.requests` or `weft.spawn.children` must not
   prevent a higher-TID manager from yielding to the lower-TID live canonical
   manager.
 - **MANAGER.13**: manager-owned singleton service correctness is enforced at
@@ -1017,9 +1042,10 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   same-service registry proof shows that owner is non-live or replaced and no
   active runtime evidence protects the TID; that disposition is cleanup
   authority, not terminal lifecycle truth.
-- **MANAGER.16**: managers must drain manager-owned internal spawn work before
-  ordinary public spawn work whenever both are pending and launch is otherwise
-  authorized by local control/drain state. Manager-authored singleton-service
+- **MANAGER.16**: Managers dispatch eligible internal work before ordinary task
+  children, and eligible children before roots. All lanes remain subordinate to
+  control/drain state and the existing bounded dispatch turn. Manager-authored
+  singleton-service
   spawn requests must
   force the next scheduler drain to probe inactive queues and must advance to a
   launch attempt in the same manager turn without consuming ordinary public
@@ -1029,58 +1055,57 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   monotonically through reap, reduce, enqueue, and internal-drain side effects.
 - **MANAGER.17**: manager wait scheduling must distinguish local due timers
   from queue evidence. `next_wait_timeout() == 0.0` authorizes due local work;
-  it does not authorize probing `weft.spawn.requests` or manager `.reserved`
-  queues. Public spawn work advances only after the shared watcher marks the
-  public spawn queue active through native activity, fallback polling evidence,
+  it does not authorize probing any spawn source or manager reserved queue. Public spawn work advances only after the shared watcher marks its
+  source queue active through native activity, fallback polling evidence,
   or bounded periodic discovery.
-- **MANAGER.18**: configured admission control is a lane-specific,
-  pre-reservation soft guard over one backend-selected usage observation. For
-  maximum `N` and reserve fraction `f`, reserve is
-  `max(ceil(N * f), 3 + int(liveness_monitor_enabled))`, public limit is
-  `max(0, N - reserve)`, and internal limit is `N`. The three-slot floor models
-  internal-lane room for Manager, TaskMonitor, and Heartbeat, with one
-  additional modeled slot while LivenessMonitor is enabled; it is not a set
-  of dedicated service permits.
-  Public admits only below its limit; internal admits only below `N`. When
-  `N <= reserve`, public work is disabled but internal work remains eligible
-  below `N`. SQLite context-scoped usage counts the latest mapping rows per
-  full TID whose payloads the shared liveness probe reports live or
-  undecidable, unioned with the Manager's in-flight child launches and
-  committed child processes, each full TID once. Positive scoped host-process
-  liveness keeps a mapping counted; without it, a task-owned `terminal: true`
-  mapping probes dead. Other dead rows release immediately and undecidable
-  non-terminal rows remain counted. The Manager-local liveness memo
-  fingerprints both the runtime handle and normalized terminal hint. Postgres
-  uses raw server-wide `numbackends`. Both observations are best effort and
-  non-atomic. Admission owns no separate liveness probe, durable/shared cache,
-  index, cleanup, permit, or freshness lifecycle. Existing history callers
-  remain best effort; admission requests strict task-state snapshot failure
-  propagation and fails closed on its listed ordinary exceptions. Pipelines
-  receive no special accounting or production branch. A blocked lane must not
-  block control handling, cleanup, child reaping, leadership convergence,
-  service reconciliation, or shutdown. Native and fallback waits suppress
-  only blocked spawn sources; reserved recovery remains actionable. One
-  universal retry deadline must reconsider denied/failed observations and
-  failed-launch restoration without unrelated queue activity.
-  PostgreSQL drain-wait history survives lane retry-cache clearing. Only a
-  strict new episode-low usage value or confirmed child reap refreshes drain
-  progress. Retry expiry, failed or successful process launch and observation
-  success alone cannot do so. An episode starts at first observed lane denial,
-  also on an unavailable observation, never on launch-failure restoration alone.
-  It ends when a fresh observation opens both lanes or an existing pending-work
-  scan successfully proves both spawn sources empty and the post-probe stop
-  flag is unset. This best-effort reset retains history across unobserved idle
-  gaps. No extra probes or cached emptiness state are introduced. Unknown
-  samples preserve its clocks and prior
-  known low. Idle 30-second or total 180-second assessment expiry marks the
-  wait stalled but
-  neither consumes nor fails queued requests nor stops rechecking. Real
-  progress can resume an idle-stalled assessment below the absolute cap;
-  fresh open capacity always ends it. Wall-clock changes cannot renew budgets.
-  This is resource-drain evidence, not task-success proof or a launch permit.
-  A proven non-primary Manager does not reserve shared public or internal backlog;
-  shared unreserved internal rows are not owned work. Admission adds no
-  PING/STATUS schema.
+### Connection admission [MANAGER.18]
+
+Configured admission is a pre-reservation soft guard governed
+by [MA-1.8]. PostgreSQL accounted usage includes actual server pressure and
+each admitted task's not-yet-open connection budget without double-counting.
+Root admission cannot spend the ordinary-child headroom, and ordinary
+children cannot spend the internal reserve. Every candidate must fit its
+complete budget before launch. Startup state or elapsed grace cannot release
+a live obligation. SQLite retains its live-TID accounting and shared public
+capacity for roots and children. Admission reuses existing runtime evidence,
+liveness, and recovery owners. Stale local process evidence from the shared
+liveness API releases crash obligations without a terminal publication;
+live/unknown evidence remains charged. After bootstrap, decisions use cached
+obligations, with exact reap refreshes and bounded reactor reconciliation
+under [MA-1.8], not per-decision task-state scans. It adds no durable permit store or distributed
+quota service. Child routing does not imply unlimited nested-dependency
+progress. A blocked lane must not
+block control handling, cleanup, child reaping, leadership convergence,
+service reconciliation, or shutdown. Native and fallback waits suppress
+only blocked spawn sources; reserved recovery remains actionable. One
+universal retry deadline must reconsider denied/failed observations and
+failed-launch restoration without unrelated queue activity.
+PostgreSQL drain-wait history survives lane retry-cache clearing. Only a
+strict new episode-low usage value or confirmed child reap refreshes drain
+progress. Retry expiry, failed or successful process launch and observation
+success alone cannot do so. An episode starts at first observed lane denial,
+also on an unavailable observation, never on launch-failure restoration alone.
+It ends when a fresh observation opens all configured lanes or an existing pending-work
+scan successfully proves all configured spawn sources empty and the post-probe stop
+flag is unset. This best-effort reset retains history across unobserved idle
+gaps. No extra probes or cached emptiness state are introduced. Unknown
+samples preserve its clocks and prior
+known low. Idle 30-second or total 180-second assessment expiry marks the
+wait stalled but
+neither consumes nor fails queued requests nor stops rechecking. Real
+progress can resume an idle-stalled assessment below the absolute cap;
+fresh open capacity always ends it. Wall-clock changes cannot renew budgets.
+This is resource-drain evidence, not task-success proof or a launch permit.
+A proven non-primary Manager does not reserve shared root, child, or internal backlog;
+shared unreserved internal rows are not owned work. Admission adds no
+PING/STATUS schema.
+
+_Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`,
+`tests/core/test_admission.py`, and `tests/system/test_admission_budget_pg.py`.
+
+The PostgreSQL test exercises actual connection reopening, saturated-root
+parent/leaf progress, and normal record retirement with the gate disabled.
+
 
 _Plan backlinks_: [AdmissionController: Progress-Aware Admission Waiting](../plans/2026-10-06-admission-controller-plan.md) ([MANAGER.18]).
 
@@ -1267,6 +1292,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements revisions to [MANAGER.16], [MANAGER.18], and [OBS.6].
 
 - [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements queue-based local completion and matching retention.
 

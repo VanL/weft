@@ -1,7 +1,7 @@
 """Shared spawn-request helpers for manager-launched task processes.
 
 Spec references:
-- docs/specifications/05-Message_Flow_and_State.md [MF-5], [MF-6]
+- docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-5], [MF-6]
 - docs/specifications/07-System_Invariants.md [MANAGER.4]
 """
 
@@ -21,12 +21,14 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     PUBLIC_RESERVED_SERVICE_METADATA_KEYS,
+    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WORK_ENVELOPE_START,
     resolve_runtime_config,
 )
 from weft.core.endpoints import is_reserved_internal_endpoint_name
+from weft.core.runtime_identity import canonical_runtime_context, get_runtime_identity
 from weft.core.taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
@@ -271,10 +273,25 @@ def _submit_spawn_request_with_payload(
             allow_internal_runtime=allow_internal_runtime,
         )
 
+    # Route at the shared writer, even when a retained client lends a root
+    # queue facade. Explicit internal pipeline/service routing keeps its owner.
+    identity = get_runtime_identity()
+    submitter = None
+    if (
+        spawn_queue_name == WEFT_SPAWN_REQUESTS_QUEUE
+        and identity is not None
+        and canonical_runtime_context(_normalize_broker_target(broker_target))
+        == identity.context
+    ):
+        spawn_queue_name = WEFT_CHILD_SPAWN_REQUESTS_QUEUE
+        submitter = {"tid": identity.tid, "context": identity.context}
+
     message = {
         "taskspec": taskspec_payload,
         "inbox_message": inbox_message,
     }
+    if submitter is not None:
+        message["submitted_by"] = submitter
     if allow_internal_runtime:
         if isinstance(internal_runtime_task_class, str) and internal_runtime_task_class:
             message[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY] = (

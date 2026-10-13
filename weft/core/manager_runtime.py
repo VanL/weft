@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.4], [MA-3]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-3.1], [MF-7]
+- docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-3], [MF-3.1], [MF-7]
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 """
 
@@ -44,6 +44,7 @@ from weft._constants import (
     SERVICE_STATUS_STOPPED,
     SERVICE_STATUS_SUPERSEDED,
     TASK_POLL_INTERVAL_NONE_TOKEN,
+    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -399,22 +400,11 @@ def _select_uncertain_active_manager_from_snapshot(
 def _public_spawn_backlog_pending(
     context: WeftContext, *, broker: Any | None = None
 ) -> bool:
-    with ExitStack() as scope:
-        queue = (
-            scope.enter_context(
-                context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True)
-            )
-            if broker is None
-            else None
-        )
-        try:
-            if queue is not None:
-                return bool(queue.has_pending())
-            assert broker is not None
-            return bool(broker.has_pending_messages(WEFT_SPAWN_REQUESTS_QUEUE))
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to inspect public spawn backlog", exc_info=True)
-            return False
+    try:
+        return _read_public_spawn_backlog(context, broker=broker)
+    except (BrokerError, OSError, RuntimeError):
+        logger.debug("Failed to inspect public spawn backlog", exc_info=True)
+        return False
 
 
 def _namespace_ambiguous_incumbent_should_block_start(
@@ -467,20 +457,22 @@ def _read_recovery_snapshot(
 
 
 def _read_public_spawn_backlog(context: WeftContext, *, broker: Any | None) -> bool:
-    """Read pending public work without converting I/O failure to absence."""
+    """Read root and ordinary-child backlog without hiding I/O failure [MF-1]."""
 
-    with ExitStack() as scope:
-        queue = (
-            scope.enter_context(
-                context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True)
-            )
-            if broker is None
-            else None
-        )
-        if queue is not None:
-            return bool(queue.has_pending())
-        assert broker is not None
-        return bool(broker.has_pending_messages(WEFT_SPAWN_REQUESTS_QUEUE))
+    if broker is None:
+        # Keep the original standalone facade owner. A nested session close
+        # would recycle a caller's still-active same-key broker operation.
+        with (
+            context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as queue,
+            queue.get_connection() as opened,
+        ):
+            return _read_public_spawn_backlog(context, broker=opened)
+    # Child acceptance has the same public manager-availability recovery owner.
+    # Internal service backlog does not grant ordinary callers startup authority.
+    return any(
+        bool(broker.has_pending_messages(queue_name))
+        for queue_name in (WEFT_SPAWN_REQUESTS_QUEUE, WEFT_CHILD_SPAWN_REQUESTS_QUEUE)
+    )
 
 
 def _probe_recovery_candidate(

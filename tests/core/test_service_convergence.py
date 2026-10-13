@@ -278,6 +278,8 @@ def test_manager_service_payload_is_strict_v2_and_projection_derives_queues(
         status="stopped",
         queues={
             "requests": "weft.spawn.requests",
+            "children_requests": "weft.spawn.children",
+            "children_reserved": "T1.children_reserved",
             "ctrl_in": "old.ctrl_in",
             "ctrl_out": "old.ctrl_out",
             "outbox": "weft.manager.outbox",
@@ -308,6 +310,8 @@ def test_manager_service_payload_is_strict_v2_and_projection_derives_queues(
     assert projected["tid"] == "1"
     assert projected["ctrl_in"] == "old.ctrl_in"
     assert projected["inbox"] == "weft.spawn.requests"
+    assert projected["children_requests"] == "weft.spawn.children"
+    assert projected["children_reserved"] == "T1.children_reserved"
 
 
 def test_generic_service_payload_has_only_required_v2_keys() -> None:

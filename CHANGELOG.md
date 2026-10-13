@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## [0.9.110] - 2026-10-13
+
+### Added
+
+- PostgreSQL admission now accounts for unopened task connection budgets using
+  SimpleBroker's owner-attributed usage snapshot, so admitted tasks keep their
+  future connection obligation until process/liveness evidence proves it can be
+  released.
+- Same-context submissions from built-in host workers now route through a
+  dedicated child spawn lane. Managers dispatch internal work, child work, then
+  root work, preserving child headroom under root backlog saturation.
+
+### Changed
+
+- Weft now requires `simplebroker>=8.6.0` and `simplebroker-pg>=4.6.0` for the
+  connection attribution APIs used by PostgreSQL admission.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.45`, `weft-docker 0.9.85`,
+  `weft-macos-sandbox 0.6.14`, and `weft-microsandbox 0.5.15`.
+
 ## [0.9.109] - 2026-10-12
 
 ### Changed

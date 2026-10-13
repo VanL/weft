@@ -86,6 +86,7 @@ from weft.core.endpoints import (
     build_endpoint_record_payload,
     validate_endpoint_claim_name,
 )
+from weft.core.runtime_identity import get_runtime_identity
 from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
@@ -2498,9 +2499,10 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._register_tid_state()
 
     def _build_tid_state_payload(self) -> dict[str, Any]:
+        """Publish task-owned process evidence and immutable admission debt [MF-5]."""
         runtime_handle = self._runtime_handle or self._task_process_runtime_handle()
         role = self.taskspec.metadata.get("role")
-        payload = {
+        payload: dict[str, Any] = {
             "short": self.tid_short,
             "full": self.tid,
             "runner": self._current_runner_name(),
@@ -2513,6 +2515,29 @@ class BaseTask(MultiQueueWatcher, ABC):
             "started": time.time_ns(),
             "hostname": socket.gethostname(),
         }
+        identity = get_runtime_identity()
+        if identity is not None and identity.tid == self.tid:
+            payload["submitter_tid"] = identity.submitter_tid
+        if (
+            identity is not None
+            and identity.tid == self.tid
+            and identity.admission is not None
+        ):
+            payload["admission"] = identity.admission.to_dict()
+            scoped_processes = (
+                runtime_handle.scoped_host_processes()
+                if runtime_handle is not None
+                else ()
+            )
+            recorded_processes = dict(self._managed_pids)
+            recorded_processes[self._task_pid] = self._task_pid_create_time
+            payload["host_processes"] = _merge_host_process_observations(
+                scoped_processes,
+                set(recorded_processes).union(
+                    pid for pid, _created in scoped_processes
+                ),
+                recorded_processes,
+            )
         if (
             self._activity is not None
             and self.taskspec.state.status not in TERMINAL_TASK_STATUSES

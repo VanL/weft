@@ -79,6 +79,30 @@ TaskSpec, uses the spawn-request message ID as the task TID, seeds the initial
 inbox payload when provided, and records the lifecycle event in
 `weft.log.tasks`.
 
+Canonical Managers consume root requests from `weft.spawn.requests`, ordinary
+same-context task-child requests from `weft.spawn.children`, and existing
+internal requests from `weft.spawn.internal`, in internal, child, root priority
+order when eligible. Their respective reserved queues are
+`T{manager_tid}.reserved`, `T{manager_tid}.children_reserved`, and
+`T{manager_tid}.internal_reserved`. Each source/reserved pair uses the same
+exact-TID validation, inbox seeding, process launch, acknowledgement, and
+recovery path. A denied row stays unreserved in its source queue.
+
+The shared submission owner automatically chooses the child lane when the
+executing built-in host function/agent runtime supplies a same-context caller
+identity. Its spawn envelope contains `submitted_by: {tid, context}`; the
+Manager validates the full TID and canonical same-context identity.
+Caller-authored ancestry tags alone do not select the child lane. The actual
+submitter is retained in runtime evidence independently of
+`metadata.parent_tid`; absent an explicit ancestry tag, the tag defaults to the
+submitter for children and to the Manager for roots. Foreign-context
+submissions and submissions without runtime caller identity remain roots.
+Existing manager/internal and pipeline submissions preserve their explicit
+routing. Queued children remain accepted work if their parent later exits; this
+routing adds no cancellation or garbage-collection policy. Result readers and
+submission reconciliation recognize all three source/reserved pairs without
+resubmitting accepted work.
+
 Queue-first ordering is deliberate. A successful spawn-request write commits
 acceptance under its returned TID before manager bootstrap proof completes.
 Manager discovery and bootstrap are post-acceptance availability work. A later
@@ -105,10 +129,20 @@ consistent with [MF-5].
 _Implementation mapping_: `weft/commands/run.py::_enqueue_taskspec`;
 `weft/commands/submission.py::ensure_manager_after_submission`;
 `weft/commands/_spawn_submission.py::reconcile_submitted_spawn`;
-`weft/core/spawn_requests.py` `submit_spawn_request`,
-`delete_spawn_request`;
+`weft/core/spawn_requests.py` `submit_spawn_request`;
 `weft/core/manager.py` `Manager._handle_work_message`,
 `Manager._build_child_spec`, `Manager._launch_child_task`.
+`weft/core/runtime_identity.py` owns immutable same-context caller identity;
+`weft/core/launcher.py` and `weft/core/runners/host.py` install and transport it.
+The shared spawn writer selects the source, and
+`weft/commands/_spawn_submission.py` reconciles every source/reserved pair.
+`weft/core/manager_runtime.py::_read_public_spawn_backlog` recognizes root and
+child backlog for the existing manager-availability recovery owner.
+`tests/core/test_child_spawn_validation.py` covers submitter validation and
+accepted-child custody after parent exit; `tests/core/test_runtime_identity.py`
+covers wrapper/worker transport.
+`tests/system/test_child_admission.py` covers the public host-worker route;
+`tests/system/test_admission_budget_pg.py` proves progress under PG root saturation.
 
 Implementation resource-ownership note: the initial availability check borrows
 from the prepared submission's session. An explicitly retained client may lend
@@ -896,6 +930,17 @@ a permanent normal-cycle compatibility lane.
   valid snapshot, paginating past malformed tails. Point and candidate reads
   stay local to requested TIDs; names-only discovery is not valid state or
   process proof. Publication remains best-effort and never lifecycle authority.
+- Each new PostgreSQL launch carries the Manager-authored `admission` record
+  with positive integer `connection_budget`, opaque string `connection_owner`,
+  and nullable full-TID `submitter_tid`, including when admission is disabled.
+  The record crosses wrapper and worker launch transport, appears in the
+  existing Manager `task_spawned` event and every task-owned runtime snapshot,
+  and is immutable for that task lifetime. Caller metadata cannot replace it.
+  It does not add a TaskSpec `spec`/`io` field or an independently retained
+  queue. Runtime snapshot retirement continues to use existing liveness
+  ownership. Runtime submitter identity and child routing also operate with
+  SQLite or a disabled gate, without importing PostgreSQL inspection or
+  applying its connection-budget model to SQLite.
 - shared task evidence classification lives in
   `weft/core/task_evidence.py`; status, task inspection, known-TID terminal
   snapshots, result helpers, and realtime event iteration reuse that
@@ -1117,6 +1162,21 @@ Related plan: [Result observation simplification](../plans/2026-10-10-result-obs
 Earlier implementation work: [Burst result observation](../plans/2026-10-09-burst-result-observation-plan.md).
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
+`weft/core/tasks/base.py::BaseTask._build_tid_state_payload` preserves immutable
+admission and scoped process identities. Its PostgreSQL snapshots add a
+host_processes list containing wrapper PID/create-time identity, active worker
+identities, and retained managed process identities; runtime_handle keeps
+its existing runner meaning. `weft/core/runtime_identity.py`
+validates launch records and transports them through `weft/core/launcher.py`
+and `weft/core/runners/host.py`. `weft/core/manager.py` records pending and
+committed admission evidence. Its bootstrap projection uses only child-specific
+launch fields from task_spawned: a reporting Manager's runtime_handle is never
+child process identity. `tests/system/test_admission_budget_pg.py`
+checks equality between the actual task snapshot and Manager launch event;
+`tests/core/test_admission_recovery.py` exercises retained pending launches,
+older-manager reservations, shared liveness judgment for crash recovery,
+bounded evidence refresh, and failure containment;
+`tests/core/test_runtime_identity.py` verifies the wrapper/worker handoff;
 `weft/core/monitor/task_monitor.py` foreground monitor scan primitive and
 supervised monitor task;
 `weft/core/monitor/runtime.py` task-monitor runtime config, candidate, and
@@ -1161,44 +1221,51 @@ the waiter. Preserve dynamic manager-reserved subscriptions, route rebuilds,
 valid snapshot/log/queued/reserved/unknown precedence, and resource cleanup.
 A names-only entry is not spawn evidence.
 
-Managers consume `weft.spawn.requests` and, for canonical managers,
-`weft.spawn.internal`. Internal spawn requests are manager-owned service work
-and are drained before public spawn requests whenever both queues are pending.
-Both queues share the same validation, TaskSpec expansion, child launch, initial
-inbox seeding, and acknowledgement path.
+Canonical Managers consume root requests from `weft.spawn.requests`, ordinary
+same-context task-child requests from `weft.spawn.children`, and existing
+internal requests from `weft.spawn.internal`, in internal, child, root priority
+order when eligible. Their respective reserved queues are
+`T{manager_tid}.reserved`, `T{manager_tid}.children_reserved`, and
+`T{manager_tid}.internal_reserved`. Each source/reserved pair uses the same
+exact-TID validation, inbox seeding, process launch, acknowledgement, and
+recovery path. A denied row stays unreserved in its source queue.
 
-When admission control is configured, the Manager checks the lane before it
-reserves a spawn request. A denied public or internal request stays in its
-source queue and does not enter the reserved-message lifecycle. A blocked
-source that is already known active is suppressed as ordinary wait activity
-so retained backlog cannot create a zero-timeout loop. One backend-specific
-observation supplies `used`: SQLite context-scoped observation reduces to the
-newest valid snapshot per task-state queue, counts the rows the shared payload-only liveness
-probe reports live or undecidable, and unions the Manager's in-flight child
-launches and committed child processes, each full TID once; Postgres reads raw server-wide
-`numbackends` through the public helper on the Manager's existing persistent
-Queue. Positive scoped host-process liveness keeps a latest mapping counted.
-Without that positive proof, a task-owned `terminal: true` mapping probes dead;
-other dead rows are released immediately and undecidable non-terminal rows
-remain counted. Probe verdicts are memoized against the runtime handle and
-normalized terminal hint (dead permanent per unchanged fingerprint, live for
-the recheck interval). Admission propagates task-state snapshot read errors so a
-broker acquisition, read, reduction, or filtering failure reaches its exact
-fail-closed exception boundary. Other callers retain their own recovery policy;
-the shared task-state reader never converts backend errors into empty state. Admission does not add a liveness, cleanup, or
-freshness policy beyond the shared probe.
+The shared submission owner automatically chooses the child lane when the
+executing built-in host function/agent runtime supplies a same-context caller
+identity. Its spawn envelope contains `submitted_by: {tid, context}`; the
+Manager validates the full TID and canonical same-context identity.
+Caller-authored ancestry tags alone do not select the child lane. The actual
+submitter is retained in runtime evidence independently of
+`metadata.parent_tid`; absent an explicit ancestry tag, the tag defaults to the
+submitter for children and to the Manager for roots. Foreign-context
+submissions and submissions without runtime caller identity remain roots.
+Existing manager/internal and pipeline submissions preserve their explicit
+routing. Queued children remain accepted work if their parent later exits; this
+routing adds no cancellation or garbage-collection policy. Result readers and
+submission reconciliation recognize all three source/reserved pairs without
+resubmitting accepted work.
+
+Admission capacity, PostgreSQL prospective accounting, and SQLite live-TID
+observation follow [MA-1.8]. A blocked source that is already known active is
+suppressed as ordinary wait activity so retained backlog cannot create a
+zero-timeout loop. Admission propagates task-state snapshot read errors to its
+listed fail-closed exception boundary. Other callers retain their own recovery
+policy; the shared reader never converts backend errors into empty state.
+
 Denial or observation failure remains suppressed until its universal
 one-second retry deadline; child reap or launch-worker progress may wake it
 earlier. A failed child launch cannot leave a restored or retained source
-suppressed past that deadline. PostgreSQL catches only `DatabaseError` and
-`ValueError`; SQLite catches only `BrokerError`, `OSError`, and `RuntimeError`;
+suppressed past that deadline. The public PostgreSQL usage observation catches
+only `DatabaseError` and `ValueError`; its separate runtime/recovery evidence
+refresh catches `BrokerError`, `OSError`, `RuntimeError`, `TypeError`, and
+`ValueError` and fails closed. SQLite catches only `BrokerError`, `OSError`, and `RuntimeError`;
 shutdown/control `BaseException` subclasses propagate. While dispatch is blocked, the Manager continues control
 handling, cleanup, child reaping, leadership convergence, service
 reconciliation, and shutdown. Admission does not change launch acknowledgement,
 recovery, or reserved-queue policy because it runs before reservation. Native
 and fallback waits suppress only the blocked spawn source; reserved queues
 remain actionable recovery work. A Manager that has proved another live
-lower-TID primary reserves no new work from either shared spawn inbox. Shared
+lower-TID primary reserves no new work from any shared spawn inbox. Shared
 unreserved internal backlog does not veto that yield; already-reserved rows,
 active launches, locally tracked children, and actionable control retain their
 existing ownership behavior.
@@ -1240,7 +1307,8 @@ Current submission-reconciliation rules:
   the submission is treated as spawned
 - if a manager has already emitted `task_spawn_rejected` for that child TID,
   the submission is treated as rejected
-- if the exact message is still in `weft.spawn.requests`, it remains accepted
+- if the exact message is still in `weft.spawn.requests`, `weft.spawn.children`,
+  or `weft.spawn.internal`, it remains accepted
   under its original TID; post-acceptance recovery does not delete or requeue it
 - if the exact message has moved into a manager reserved queue, it remains
   accepted and ends further manager-start attempts for that submission;
@@ -1255,12 +1323,13 @@ Current submission-reconciliation rules:
 Current manager-dispatch rules:
 
 - public spawn dispatch is work-stealing: a manager that atomically reserves a
-  message from `weft.spawn.requests` owns that exact launch attempt
+  message from `weft.spawn.requests` or `weft.spawn.children` owns that exact
+  launch attempt
 - manager-owned internal spawn dispatch uses the same launch path and remains
-  strict-priority over public spawn work
+  strict-priority over children and roots
 - registry leadership is advisory for status, startup selection, and voluntary
   duplicate-manager convergence; stale or ambiguous registry proof must not
-  block a manager that already reserved public or internal spawn work
+  block a manager that already reserved root, child, or internal spawn work
 - after a successful launch, the manager deletes the exact reserved message; if
   child launch fails before that point, the message remains governed by the
   manager's reserved-queue policy and visible reserved state
@@ -1333,8 +1402,15 @@ _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_messa
 `weft/core/spawn_requests.py`;
 `weft/cli/run.py`; `weft/commands/submission.py::ensure_manager_after_submission`;
 `weft/commands/_spawn_submission.py` —
-`_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`;
-`tests/core/test_manager.py`.
+`_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`,
+`weft/commands/_spawn_submission.py` static reconciliation queue inventory,
+`weft/commands/_spawn_submission.py::_find_reserved_spawn_request_queue`,
+and `weft/commands/_spawn_submission.py::_reserved_spawn_request_queue_names` recognize every source/reserved pair;
+`weft/core/runtime_identity.py` supplies the runtime submitter and launch record;
+`weft/core/service_convergence.py::project_manager_service_record` preserves
+the source/reserved routes in projected Manager ownership records;
+`tests/core/test_manager.py`; `tests/core/test_child_spawn_validation.py`;
+`tests/system/test_child_admission.py`; `tests/system/test_admission_budget_pg.py`.
 
 Implementation plan backlinks:
 [`2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md);
@@ -1629,6 +1705,10 @@ self-maintenance, and explicit operator commands for force and compaction:
   archived forced pruning. With
   terminal proof, existing retention and cleanup gates continue to govern the
   standard task-local family.
+  Manager-owned `T{manager_tid}.children_reserved` queues are not standard
+  task-local cleanup candidates. Their accepted child work remains governed
+  by the Manager reserved policy and recovery path; the internal-only immediate
+  deletion authority below does not apply to child reservations.
   Manager-owned `T{manager_tid}.internal_reserved` queues are not standard
   task-local queues and are not selected by `task_local.dead_tid`. The active
   Manager owns those internal spawn reservations: it deletes its own
@@ -1846,6 +1926,8 @@ management live in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 ## Related Plans
+
+- [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements child routing and runtime admission evidence under [MF-1], [MF-5], and [MF-6].
 
 - [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements completion routing, retention, incremental spawn observation, and candidate-scoped endpoint evidence.
 

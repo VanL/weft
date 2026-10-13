@@ -10,7 +10,7 @@ Spec references:
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -18,9 +18,23 @@ from weft._constants import (
     ADMISSION_SERVICE_RESERVE_SLOTS,
     MANAGER_ADMISSION_PROGRESS_TIMEOUT_SECONDS,
     MANAGER_ADMISSION_WAIT_MAX_SECONDS,
+    WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT,
 )
 
-AdmissionLane = Literal["public", "internal"]
+AdmissionLane = Literal["public", "child", "internal"]
+
+
+def postgres_accounted_usage(
+    total: int, by_owner: Mapping[str, int], obligations: Iterable[tuple[str, int]]
+) -> int:
+    """Charge unopened budget once, retaining actual over-budget pressure.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8].
+    Manager deduplicates admitted full TIDs before supplying obligations.
+    """
+    return total + sum(
+        max(0, budget - by_owner.get(owner, 0)) for owner, budget in obligations
+    )
 
 
 def _admission_capacity(
@@ -59,8 +73,10 @@ def _admission_blocked_lanes_for_capacity(
     blocked: set[AdmissionLane] = set()
     if not capacity["public_allowed"]:
         blocked.add("public")
+    if not capacity.get("child_allowed", capacity["public_allowed"]):
+        blocked.add("child")
     if not capacity["internal_allowed"]:
-        blocked.update(("public", "internal"))
+        blocked.update(("public", "child", "internal"))
     return blocked
 
 
@@ -83,7 +99,11 @@ class AdmissionController:
         max_connections: int,
         reserve_fraction: float,
         liveness_monitor_enabled: bool,
+        task_connection_budget: int = WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT,
     ) -> None:
+        if type(task_connection_budget) is not int or task_connection_budget <= 0:
+            raise ValueError("task_connection_budget must be a positive integer")
+        self._task_connection_budget = task_connection_budget
         self._max_connections = max_connections
         self._reserve_fraction = reserve_fraction
         self._liveness_monitor_enabled = liveness_monitor_enabled
@@ -106,8 +126,22 @@ class AdmissionController:
                 liveness_monitor_enabled=self._liveness_monitor_enabled,
             )
         )
+        if capacity is not None and backend == "postgres":
+            assert used is not None
+            budget = self._task_connection_budget
+            child_limit = capacity["public_limit"]
+            capacity.update(
+                public_limit=max(0, child_limit - budget),
+                child_limit=child_limit,
+                candidate_budget=budget,
+            )
+            capacity.update(
+                public_allowed=used + budget <= capacity["public_limit"],
+                child_allowed=used + budget <= child_limit,
+                internal_allowed=used + budget <= capacity["internal_limit"],
+            )
         blocked = (
-            frozenset[AdmissionLane](("public", "internal"))
+            frozenset[AdmissionLane](("public", "child", "internal"))
             if capacity is None
             else frozenset(_admission_blocked_lanes_for_capacity(capacity))
         )

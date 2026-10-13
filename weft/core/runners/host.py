@@ -5,6 +5,8 @@ Spec references:
 - docs/specifications/02-TaskSpec.md [TS-1.3]
 - docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1], [RM-5.2]
 - docs/specifications/07-System_Invariants.md [EXEC.5]-[EXEC.10]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
+- docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-5]
 """
 
 from __future__ import annotations
@@ -44,6 +46,11 @@ from weft.core.runners.outcome import RunnerOutcome
 from weft.core.runners.subprocess_runner import (
     prepare_command_invocation,
     run_monitored_subprocess,
+)
+from weft.core.runtime_identity import (
+    RuntimeIdentity,
+    get_runtime_identity,
+    install_runtime_identity,
 )
 from weft.core.targets import execute_function_target
 from weft.core.tasks.agent_session_protocol import (
@@ -136,6 +143,7 @@ def _worker_entry(
     spec_data: Mapping[str, Any],
     work_item: Any,
     result_sender: Connection,
+    runtime_identity: Mapping[str, Any] | None = None,
 ) -> None:
     """Execute a single function or agent work item in a spawned process.
 
@@ -155,6 +163,7 @@ def _worker_entry(
     diagnostics: dict[str, Any] | None
 
     try:
+        _install_worker_runtime_identity(runtime_identity)
         with _worker_runtime_context(spec_data):
             if spec_data["type"] == "function":
                 value = execute_function_target(
@@ -272,15 +281,23 @@ def _worker_runtime_context(
                     os.environ[key_text] = previous_value
 
 
+def _install_worker_runtime_identity(payload: Mapping[str, Any] | None) -> None:
+    """Restore wrapper-owned identity before worker startup code [SB-0.4]."""
+    if payload is not None:
+        install_runtime_identity(RuntimeIdentity.from_mapping(payload))
+
+
 def _agent_session_worker_entry(
     spec_data: Mapping[str, Any],
     request_queue: MPQueue[dict[str, Any]],
     response_sender: Connection,
+    runtime_identity: Mapping[str, Any] | None = None,
 ) -> None:
     """Run a long-lived agent session in a spawned subprocess."""
     session = None
     ready_sent = False
     try:
+        _install_worker_runtime_identity(runtime_identity)
         send_terminal_payload(response_sender, make_booted_response())
         with _worker_runtime_context(spec_data):
             agent = AgentSection.model_validate(spec_data["agent"])
@@ -424,6 +441,10 @@ class HostTaskRunner:
         monitor_interval: float | None,
         bundle_root: str | None = None,
     ) -> None:
+        identity = get_runtime_identity()
+        self._runtime_identity_transport = (
+            identity.to_dict() if identity is not None and identity.tid == tid else None
+        )
         self._spec_data = {
             "type": target_type,
             "tid": tid,
@@ -476,7 +497,12 @@ class HostTaskRunner:
         response_receiver, response_sender = self._ctx.Pipe(duplex=False)
         process = self._ctx.Process(
             target=_worker_entry,
-            args=(self._spec_data, work_item, response_sender),
+            args=(
+                self._spec_data,
+                work_item,
+                response_sender,
+                self._runtime_identity_transport,
+            ),
             daemon=True,
         )
         process_started = False
@@ -1130,7 +1156,12 @@ class HostTaskRunner:
         response_receiver, response_sender = self._ctx.Pipe(duplex=False)
         process = self._ctx.Process(
             target=_agent_session_worker_entry,
-            args=(self._spec_data, request_queue, response_sender),
+            args=(
+                self._spec_data,
+                request_queue,
+                response_sender,
+                self._runtime_identity_transport,
+            ),
             daemon=True,
         )
         try:

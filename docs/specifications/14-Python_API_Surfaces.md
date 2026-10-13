@@ -42,6 +42,13 @@ transport helpers remain runtime internals. Template validation uses
 "auto_expand": False})`; normal construction retains resolved expansion.
 Submission remains responsible for committing the task and its TID.
 
+Ordinary `WeftClient` submission from a built-in host function/agent task uses
+that runtime's same-context caller identity for child routing. It does not
+require a Django adapter or a new submission method. Opening or retaining a
+client session does not change ancestry, admission authority, result semantics,
+or task execution limits. Submission outside such a runtime, including another
+context, remains root work.
+
 `build_context` retains its existing arguments and side effects: by default
 it resolves configuration and creates the metadata directories and broker;
 `create_dirs=False` and `create_database=False` disable those respective
@@ -495,6 +502,8 @@ tests enforce the graph, facade inventory/laziness, CLI bijection, no command
 stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
+
+- [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements automatic same-context child routing under [PY-1].
 
 - [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md)
 

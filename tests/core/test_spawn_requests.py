@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from simplebroker import Queue
+from simplebroker import BrokerTarget, Queue
 from tests.helpers.typing import BrokerEnv
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
@@ -16,6 +16,7 @@ from weft._constants import (
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft.core import runtime_identity
 from weft.core.spawn_requests import (
     _submit_spawn_request_with_payload,
     _write_spawn_request_with_timestamp,
@@ -187,3 +188,91 @@ def test_exact_id_writer_reports_missing_broker_capability_as_runtime_error() ->
         "exact-ID spawn request writes require a broker connection with "
         "insert_messages support"
     )
+
+
+@pytest.mark.parametrize("explicit_tid", [None, 1777000000000000234])
+def test_runtime_origin_routes_same_context_child_with_submitter_envelope(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_tid: int | None,
+) -> None:
+    """Only runtime origin selects child capacity, for both ID write paths."""
+    context = weft_harness.context
+    identity = runtime_identity.RuntimeIdentity(
+        tid="1777000000000000123",
+        context=runtime_identity.canonical_runtime_context(context.broker_target),
+        backend_name=context.backend_name,
+    )
+    monkeypatch.setattr(runtime_identity, "_runtime_identity", identity)
+    submitted_tid = submit_spawn_request(
+        context.broker_target,
+        taskspec=_template_taskspec(context.root),
+        work_payload="child",
+        config=context.broker_config,
+        tid=explicit_tid,
+        inherited_weft_context=str(context.root),
+    )
+    with context.queue("weft.spawn.children", persistent=True) as child_queue:
+        row = child_queue.peek_one(exact_timestamp=submitted_tid, with_timestamps=True)
+    assert row is not None
+    assert row[1] == submitted_tid
+    request = json.loads(row[0])
+    assert request["submitted_by"] == {"tid": identity.tid, "context": identity.context}
+    assert request["inbox_message"] == "child"
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as root_queue:
+        assert root_queue.peek_one(exact_timestamp=submitted_tid) is None
+
+
+@pytest.mark.parametrize("origin", ["external-ancestry", "foreign", "internal"])
+def test_submission_origin_preserves_root_and_explicit_internal_routing(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    origin: str,
+) -> None:
+    """Ancestry cannot buy child capacity; internal routing keeps precedence."""
+    context = weft_harness.context
+    identity = None
+    if origin != "external-ancestry":
+        foreign_target = (
+            str(context.root / "foreign.db")
+            if context.backend_name == "sqlite"
+            else BrokerTarget(
+                backend_name=context.backend_name,
+                target=context.broker_target.target,
+                backend_options={
+                    **context.broker_target.backend_options,
+                    "schema": "weft_foreign_context",
+                },
+            )
+        )
+        identity = runtime_identity.RuntimeIdentity(
+            tid="1777000000000000123",
+            context=(
+                runtime_identity.canonical_runtime_context(foreign_target)
+                if origin == "foreign"
+                else runtime_identity.canonical_runtime_context(context.broker_target)
+            ),
+            backend_name=context.backend_name,
+        )
+    monkeypatch.setattr(runtime_identity, "_runtime_identity", identity)
+    taskspec = _template_taskspec(context.root)
+    taskspec.metadata["parent_tid"] = "1777000000000000456"
+    taskspec.metadata["submitted_by"] = {"tid": "1777000000000000123"}
+    queue_name = (
+        "weft.spawn.internal" if origin == "internal" else WEFT_SPAWN_REQUESTS_QUEUE
+    )
+    submitted_tid = submit_spawn_request(
+        context.broker_target,
+        taskspec=taskspec,
+        work_payload="root-or-internal",
+        config=context.broker_config,
+        spawn_queue_name=queue_name,
+    )
+    with context.queue(queue_name, persistent=True) as queue:
+        row = queue.peek_one(exact_timestamp=submitted_tid)
+    assert row is not None
+    request = json.loads(row)
+    assert "submitted_by" not in request
+    assert request["taskspec"]["metadata"]["parent_tid"] == "1777000000000000456"
+    with context.queue("weft.spawn.children", persistent=True) as child_queue:
+        assert child_queue.peek_one(exact_timestamp=submitted_tid) is None

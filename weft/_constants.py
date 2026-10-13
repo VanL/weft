@@ -49,7 +49,7 @@ from simplebroker import (
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.109"
+__version__: Final[str] = "0.9.110"
 """Current version of Weft."""
 
 # ==============================================================================
@@ -798,6 +798,9 @@ ADMISSION_SERVICE_RESERVE_SLOTS: Final[int] = 3
 MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
 """Delay before rechecking a blocked Manager admission source."""
 
+MANAGER_ADMISSION_REFRESH_BATCH_SIZE: Final[int] = 16
+"""Maximum task snapshots reconciled per admission maintenance tick [MA-1.8]."""
+
 MANAGER_ADMISSION_PROGRESS_TIMEOUT_SECONDS: Final[float] = 30.0
 """PG drain-idle assessment budget, not a task timeout ([MA-1.8])."""
 
@@ -960,6 +963,9 @@ QUEUE_CTRL_OUT_SUFFIX: Final[str] = "ctrl_out"
 QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
 """Suffix for reserved queue names (T{tid}.reserved) used for WIP and recovery."""
 
+QUEUE_CHILDREN_RESERVED_SUFFIX: Final[str] = "children_reserved"
+"""Manager reservation lane for ordinary runtime-originated child requests."""
+
 QUEUE_INTERNAL_RESERVED_SUFFIX: Final[str] = "internal_reserved"
 """Suffix for manager-owned internal spawn reserved queues."""
 
@@ -974,6 +980,9 @@ STANDARD_TASK_QUEUE_SUFFIXES: Final[tuple[str, ...]] = (
 
 QUEUE_PRIORITY_INTERNAL: Final[int] = 0
 """Queue watcher priority for manager-owned internal work. Lower runs first."""
+
+QUEUE_PRIORITY_CHILD: Final[int] = 50
+"""Ordinary task children dispatch after internal work and before roots."""
 
 QUEUE_PRIORITY_NORMAL: Final[int] = 100
 """Default queue watcher priority for ordinary task work."""
@@ -1515,6 +1524,9 @@ RETENTION_PRUNE_REPORT_ONLY_CLASSES: Final[frozenset[str]] = frozenset(
 WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
 """Global queue for manager-consumed task spawn requests."""
 
+WEFT_CHILD_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.children"
+"""Same-context submissions carrying a built-in runtime caller identity."""
+
 WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.internal"
 """Global queue for manager-owned internal spawn requests."""
 
@@ -1817,6 +1829,14 @@ WEFT_ADMISSION_MAX_CONNECTIONS: Final[str] = "WEFT_ADMISSION_MAX_CONNECTIONS"
 
 WEFT_ADMISSION_MAX_CONNECTIONS_DEFAULT: Final[int] = 0
 """Default disabled backend-specific admission maximum."""
+
+WEFT_ADMISSION_TASK_CONNECTION_BUDGET: Final[str] = (
+    "WEFT_ADMISSION_TASK_CONNECTION_BUDGET"
+)
+"""Per-launch prospective PostgreSQL connection budget ([MA-1.8])."""
+
+WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT: Final[int] = 8
+"""Wrapper plus worker, each with three pooled connections and one listener."""
 
 WEFT_ADMISSION_RESERVE_FRACTION: Final[str] = "WEFT_ADMISSION_RESERVE_FRACTION"
 """Config key for the public-lane admission reserve fraction."""
@@ -2718,6 +2738,17 @@ WEFT_CONFIG_FIELDS: Final[Mapping[str, ConfigField]] = {
             _normalize_integer_or_string_override,
             "WEFT_ADMISSION_MAX_CONNECTIONS",
             parser=_parse_admission_max_connections,
+        ),
+    ),
+    "ADMISSION_TASK_CONNECTION_BUDGET": ConfigField(
+        WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT,
+        "a positive integer",
+        partial(
+            _normalize_integer_or_string_override,
+            WEFT_ADMISSION_TASK_CONNECTION_BUDGET,
+            parser=partial(
+                _parse_positive_int, name=WEFT_ADMISSION_TASK_CONNECTION_BUDGET
+            ),
         ),
     ),
     "ADMISSION_RESERVE_FRACTION": ConfigField(

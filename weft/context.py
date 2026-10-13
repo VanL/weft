@@ -75,6 +75,7 @@ from weft._constants import (
     get_weft_directory_name,
     resolve_runtime_config,
 )
+from weft.core.runtime_identity import get_runtime_identity
 from weft.helpers import ensure_owner_only_dir, write_json_atomically
 
 __all__ = [
@@ -277,12 +278,28 @@ def build_context(
     Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3];
     docs/specifications/14-Python_API_Surfaces.md [PY-1].
     """
+    identity = get_runtime_identity()
+    inherit_runtime = (
+        identity is not None
+        and spec_context is None
+        and fallback_root is None
+        and config is None
+        and identity.broker_target is not None
+        and identity.context_root is not None
+    )
+    if inherit_runtime:
+        assert identity is not None
+        config = identity.config
+        spec_context = identity.context_root
     resolved_config = resolve_runtime_config(config)
     root, broker_target, discovered = _resolve_root_and_target(
         spec_context,
         resolved_config,
         fallback_root=fallback_root,
     )
+    if inherit_runtime:
+        assert identity is not None and isinstance(identity.broker_target, BrokerTarget)
+        broker_target = identity.broker_target
     database_path = broker_target.target_path
     weft_dir_name = get_weft_directory_name(resolved_config)
     weft_dir = (root / weft_dir_name).resolve(strict=False)

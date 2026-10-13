@@ -1245,17 +1245,20 @@ index is not a dated section and does not count toward the coalescing trigger.
   denial and observation failure; event-driven early wakes are an optimization,
   not the only recovery path. Control, cleanup, reconciliation, and shutdown
   remain independent of dispatch capacity.
-- Keep the usage model singular. Select one backend-specific observation:
-  live-filtered latest mappings per full TID unioned with the Manager's
-  in-flight launches for SQLite, or raw server-wide `numbackends` for
-  Postgres. Filter mapping rows only through the shared `mapping_row_is_live`
-  probe so admission reads a row exactly the way cleanup and endpoint
-  resolution do — counting unconditionally made `used` track recent task
-  history (rows persist through the age-gated cleanup window after task exit)
-  and rate-limited dispatch. Undecidable rows stay counted; dead rows release
-  immediately. Both observations are best-effort, non-atomic snapshots, so
-  document admission as a soft guard rather than inventing a lease or
-  conjoining a second Manager-local counter.
+- Keep the usage model singular (revised 2026-10-13; was: raw PostgreSQL
+  `numbackends` alone supplies usage). That observation omitted connections
+  already-admitted tasks had not opened yet. Follow [MA-1.8](specifications/03-Manager_Architecture.md):
+  PostgreSQL accounts for coherent observed pressure plus positive deficits
+  between each distinct admitted task's recorded budget and attributed actual
+  use. Opening budgeted connections replaces prospective cost; closing them
+  restores it until the shared LivenessMonitor process analysis reports stale
+  retained local identities. Do not require a crashed task to publish its own
+  terminal proof; live/unknown evidence still retains debt. Terminal hints and
+  absent owner counts are not process proof. Keep admission decisions on cached
+  obligations with bounded reconciliation, not a task-set read per candidate.
+  SQLite retains the live-filtered latest-TID union with local launches
+  through the shared `mapping_row_is_live` probe. Both backends remain soft,
+  non-atomic guards; neither adds a permit or distributed quota service.
 
 ## 2026-09-07 Preserve Resolved Context Through Client Adapters
 

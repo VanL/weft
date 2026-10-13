@@ -28,6 +28,12 @@ from weft._constants import (
 )
 from weft.helpers import reload_config
 
+from .runtime_identity import (
+    AdmissionRecord,
+    RuntimeIdentity,
+    canonical_runtime_context,
+    install_runtime_identity,
+)
 from .taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
@@ -118,6 +124,7 @@ def _task_process_entry(
     poll_interval: float | None,
     hard_exit_on_return: bool = False,
     detach_stdio: bool = False,
+    runtime_identity: Mapping[str, Any] | None = None,
 ) -> None:
     """Construct the task, install signal/parent-loss adapters, delegate once.
 
@@ -134,6 +141,8 @@ def _task_process_entry(
 
     resolved_config = resolve_runtime_config(config)
     reload_config(resolved_config)
+    if runtime_identity is not None:
+        install_runtime_identity(RuntimeIdentity.from_mapping(runtime_identity))
     task_cls = _load_task_class(task_cls_path)
     spec = decode_taskspec_transport_payload(json.loads(spec_json))
     task = task_cls(db_path, spec, config=resolved_config)
@@ -161,6 +170,8 @@ def launch_task_process(
     config: Mapping[str, Any] | None = None,
     poll_interval: float | None = None,
     detach_stdio: bool = True,
+    admission: AdmissionRecord | None = None,
+    submitter_tid: str | None = None,
 ) -> BaseProcess:
     """Launch *task_cls* in a new spawn-process and return the Process object.
 
@@ -170,6 +181,20 @@ def launch_task_process(
     Spec: [MA-1.2], [MA-3], [SB-0.4]
     """
 
+    resolved_config = resolve_runtime_config(config)
+    assert spec.tid is not None
+    identity = RuntimeIdentity(
+        tid=spec.tid,
+        context=canonical_runtime_context(db_path),
+        backend_name=(
+            db_path.backend_name if isinstance(db_path, BrokerTarget) else "sqlite"
+        ),
+        admission=admission,
+        broker_target=db_path,
+        context_root=spec.spec.weft_context,
+        config=resolved_config,
+        submitter_tid=submitter_tid,
+    )
     ctx = multiprocessing.get_context("spawn")
     ctx.set_executable(sys.executable)
     task_cls_path = f"{task_cls.__module__}.{task_cls.__qualname__}"
@@ -179,10 +204,11 @@ def launch_task_process(
             task_cls_path,
             db_path,
             json.dumps(encode_taskspec_transport_payload(spec)),
-            serialize_config(resolve_runtime_config(config)),
+            serialize_config(resolved_config),
             poll_interval,
             True,
             detach_stdio,
+            identity.to_dict(),
         ),
         daemon=False,
     )

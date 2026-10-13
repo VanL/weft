@@ -66,8 +66,8 @@ uv add 'weft[all]'
 Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
 selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
-Weft requires SimpleBroker 8.5.1 or newer; the Postgres extra requires the
-paired `simplebroker-pg` 4.5.1 or newer. Broker message IDs stay integers in
+Weft requires SimpleBroker 8.6.0 or newer; the Postgres extra requires the
+paired `simplebroker-pg` 4.6.0 or newer. Broker message IDs stay integers in
 Python and relational storage, while external JSON and owned exact-ID fields
 inside Monitor table JSON render them as 19-digit strings.
 
@@ -658,10 +658,16 @@ public work cannot consume and defaults to `0.1`. The effective reserve is the
 greater of the rounded-up fraction and four slots of modeled internal-lane
 room for Manager, TaskMonitor, LivenessMonitor, and Heartbeat while
 LivenessMonitor is enabled (three when it is disabled). These are not
-dedicated service permits. Public work admits below
-`max(0, maximum - reserve)`; internal work admits below the full maximum. If
-the maximum is no greater than the reserve, public work is disabled while
-internal work can still run below the maximum.
+dedicated service permits. SQLite root and ordinary child work share the public
+limit `max(0, maximum - reserve)`; internal work uses the full maximum.
+PostgreSQL admission also budgets connections a launched task may open later.
+`WEFT_ADMISSION_TASK_CONNECTION_BUDGET` is a positive integer, defaulting to
+eight (a host wrapper and worker, each with three pooled connections and one
+listener). A candidate must fit its entire budget. Root, ordinary-child and
+internal ceilings are respectively `maximum - reserve - budget`,
+`maximum - reserve`, and `maximum`, with negative ceilings clamped to zero.
+At maximum 300, reserve fraction 0.1 and budget eight, the ceilings are
+262, 270 and 300.
 
 The backend supplies one best-effort usage value. SQLite is context-scoped: it
 takes one latest mapping for each full TID, keeps the ones whose recorded
@@ -675,20 +681,45 @@ evidence stay counted, favoring overcounting over undercounting live tasks.
 Probe verdicts are memoized against both the runtime handle and terminal hint,
 so repeated decisions do not re-probe unchanged rows. Admission adds no
 liveness policy beyond that shared probe.
-Postgres reads raw server-wide `numbackends` through
-`simplebroker_pg.get_connection_stats()` on the Manager's existing persistent
-Queue. The configured maximum, not the server's returned maximum, controls the
-limit. Both observations are non-atomic soft guards rather than connection
-leases, so races can still overshoot and conservative evidence can pause early.
+PostgreSQL reads one coherent total/by-owner connection snapshot through
+`simplebroker_pg.get_connection_usage()` on the existing Manager Queue.
+Accounted usage is observed total plus each admitted task's unopened budget:
+`total + sum(max(0, task_budget - observed_owner_connections))`. Opening an
+already-budgeted connection transfers its cost; closing it restores the deficit.
+Unrelated and over-budget use stays fully counted. Budgets survive restart
+through existing launch evidence and task snapshots. The shared LivenessMonitor
+process-analysis API releases budgets when retained local wrapper/worker
+identities are stale, including crashes without a final task snapshot. Live or
+unknown processes remain charged; terminal hints and absent owner labels alone
+do not release budgets. Admission uses cached obligations: exact child-reap
+checks and round-robin maintenance of at most 16 tasks per second refresh them,
+rather than rereading every task on each decision. The configured maximum
+controls limits. This remains a sampled soft guard against outside clients,
+additional targets and application-created processes, not a server-wide lease.
+
+Built-in host function and agent runtimes automatically route same-context
+submissions through `weft.spawn.children`. Dispatch order is internal work,
+ordinary children, then roots. Runtime caller identity selects this route;
+ancestry tags alone do not. Foreign-context and external submissions remain
+roots. Protected headroom lets ordinary leaf children progress when roots are
+saturated. It does not guarantee arbitrary nested synchronous waits or joins
+that require all siblings to run at once; another waiting descendant can occupy
+the last child budget. Internal work and outside clients can consume capacity.
+
+Upgrade by draining old-version active tasks and in-flight launches before
+replacing the runtime. Install the coordinated dependencies and Weft, then
+restart Managers and clients together. Existing unreserved root backlog keeps
+its TIDs. Before rollback, drain all child source/reserved queues using the new
+version; an older Manager cannot see that pending child work.
 
 Denied messages remain in their source queue and are retried after one second;
 child or launch-worker events may wake the Manager earlier. Both native and
 fallback waits suppress only a blocked spawn source, not reserved recovery.
 Once another live lower-TID primary is proven, a non-primary Manager reserves
-no new shared public or internal work. The settings are read when the Manager
+no new shared root, child or internal work. The settings are read when the Manager
 starts, so changes require a restart. Admission assumes ordinary task churn and
-does not preempt persistent work. Pipelines need no separate setting or runtime
-branch; their runnable tasks use the same lanes as all other work. Admission
+does not preempt persistent work. Pipeline stage/edge work keeps its existing
+internal route and the same per-launch accounting. Admission
 adds no PING/STATUS fields; rate-limited transition and observation-failure
 logs are non-normative operational evidence.
 
@@ -700,17 +731,19 @@ continue. Actual capacity recovery permits dispatch. Run
 `weft manager serve --level info` to see waiting/stalled/recovery evidence
 through existing foreground serve logging. `WEFT_MANAGER_SERVE_LOG_LEVEL=info`
 also sets the level in serve mode; detached Managers do not emit this stream.
-These are assessment budgets, not task or broker-call timeouts. Child startup
-can precede its connections being counted, so this remains a soft guard.
+These are assessment budgets, not task or broker-call timeouts. Pending launches
+are budgeted before their connections open; external usage and observation/launch
+races still make this a soft guard.
 
 Child reaps can refresh the idle budget even when short internal tasks or
 crashing children leave aggregate usage high; the absolute cap still applies.
 Episode age tracks blocked lane capacity, even if no request in that lane was
-queued; it is not a request wait time. Fresh capacity opening both lanes ends
-an episode, as does a best-effort existing activity scan proving both spawn
-sources empty. Unobserved idle gaps retain history, so a later burst can inherit
+queued; it is not a request wait time. Fresh capacity opening all lanes ends
+an episode, as does a best-effort existing activity scan proving all configured
+spawn sources empty. Unobserved idle gaps retain history, so a later burst can inherit
 that age. Empty-source reset is silent; an `open` log requires observed capacity.
-SQLite admission and disabled admission retain their existing behavior.
+SQLite retains its live-TID capacity model. Child routing operates even with
+admission disabled; PostgreSQL launches still record their immutable budget.
 
 ### Task IDs (TIDs)
 
@@ -1407,6 +1440,9 @@ Environment variables:
 - `WEFT_MANAGER_LIFETIME_TIMEOUT` - Manager idle timeout (default: 600s)
 - `WEFT_ADMISSION_MAX_CONNECTIONS` - Optional backend-specific admission
   maximum; unset or `0` disables it, and enabled values are positive integers
+- `WEFT_ADMISSION_TASK_CONNECTION_BUDGET` - Positive per-task PostgreSQL
+  connection budget (default: 8); recorded for each launch and retained until
+  exact process-tree retirement
 - `WEFT_ADMISSION_RESERVE_FRACTION` - Fraction withheld from public work;
   defaults to `0.1` and must be finite with `0 <= value < 1`; the effective
   reserve is never below four slots for Manager, TaskMonitor,

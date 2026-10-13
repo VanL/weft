@@ -25,11 +25,17 @@ from weft._exceptions import (
     SubmissionManagerError,
     SubmissionValidationError,
 )
-from weft.client import normalize_taskspec_payload
-from weft.commands._spawn_submission import SpawnSubmissionReconciliation
+from weft.client import WeftClient, normalize_taskspec_payload
+from weft.commands._spawn_submission import (
+    SpawnSubmissionReconciliation,
+    _spawn_reconciliation_queue_specs,
+    reconcile_submitted_spawn,
+)
 from weft.commands.types import PreparedSubmissionRequest
 from weft.context import WeftContext
 from weft.core import manager_runtime as core_manager_runtime
+from weft.core import runtime_identity
+from weft.core.service_convergence import build_manager_service_payload
 from weft.core.taskspec import (
     TaskSpec,
     resolve_taskspec_payload,
@@ -1530,3 +1536,129 @@ def test_submit_prepared_programmer_error_names_committed_tid(
 def test_normalize_tid_uses_exact_message_id_validation(raw_tid: str) -> None:
     with pytest.raises(InvalidTID):
         submission_mod.normalize_tid(raw_tid)
+
+
+@pytest.mark.parametrize(
+    ("source", "reserved_suffix"),
+    [
+        ("weft.spawn.children", "children_reserved"),
+        ("weft.spawn.internal", "internal_reserved"),
+    ],
+)
+@pytest.mark.parametrize("reserved", [False, True])
+def test_reconciliation_locates_accepted_child_and_internal_lane_requests(
+    weft_harness: WeftTestHarness,
+    source: str,
+    reserved_suffix: str,
+    reserved: bool,
+) -> None:
+    """Accepted work in each added pair keeps its TID through claim transfer.
+
+    Real broker moves prove custody; log/mapping fixtures would bypass the
+    source/reserved discovery decision this regression guards.
+    """
+    context = weft_harness.context
+    manager_tid = "1776000000000000001"
+    reserved_queue = f"T{manager_tid}.{reserved_suffix}"
+    with context.queue(source, persistent=True) as queue:
+        tid = str(queue.write(json.dumps({"taskspec": {"name": "accepted-child"}})))
+        if reserved:
+            assert queue.move_one(reserved_queue, exact_timestamp=int(tid)) is not None
+    if reserved:
+        payload = build_manager_service_payload(
+            context=context,
+            tid=manager_tid,
+            name="manager",
+            status="stopped",
+            queues={"requests": WEFT_SPAWN_REQUESTS_QUEUE},
+            runtime_handle={},
+        )
+        with context.queue("weft.state.services", persistent=True) as registry:
+            registry.write(json.dumps(payload))
+    # The waiter must also subscribe to custody locations before publication;
+    # finding an already present row does not protect wakeup routing.
+    subscribed = {
+        name for name, _persistent in _spawn_reconciliation_queue_specs(context, tid)
+    }
+    assert source in subscribed
+    if reserved:
+        assert reserved_queue in subscribed
+    outcome = reconcile_submitted_spawn(context, tid, timeout=0.0)
+    assert outcome == SpawnSubmissionReconciliation(
+        outcome="reserved" if reserved else "queued",
+        tid=tid,
+        reserved_queue=reserved_queue if reserved else None,
+    )
+
+
+def test_retained_client_facade_routes_runtime_children_on_every_submission(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A warmed root facade supplies a broker, never a cached scheduling lane."""
+    context = weft_harness.context
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "observe_manager_availability",
+        lambda *_args, **_kwargs: core_manager_runtime.ManagerAvailabilityObservation(
+            outcome="ready",
+            manager_record=None,
+            first_uncertain_at=None,
+            backlog_pending=None,
+            reason="test-ready",
+        ),
+    )
+    taskspec = {
+        "name": "retained-child",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    monkeypatch.setattr(runtime_identity, "_runtime_identity", None)
+    with WeftClient(context=context) as client:
+        root = client.submit(taskspec, payload="root")
+        identity = runtime_identity.RuntimeIdentity(
+            tid=root.tid,
+            context=runtime_identity.canonical_runtime_context(context.broker_target),
+            backend_name=context.backend_name,
+        )
+        monkeypatch.setattr(runtime_identity, "_runtime_identity", identity)
+        children = [client.submit(taskspec, payload=value) for value in ("one", "two")]
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as queue:
+        assert queue.peek_one(exact_timestamp=int(root.tid)) is not None
+        for child in children:
+            assert queue.peek_one(exact_timestamp=int(child.tid)) is None
+    with context.queue("weft.spawn.children", persistent=True) as queue:
+        for child, value in zip(children, ("one", "two"), strict=True):
+            row = queue.peek_one(exact_timestamp=int(child.tid))
+            assert row is not None
+            request = json.loads(row)
+            assert request["inbox_message"] == value
+            assert request["submitted_by"] == {
+                "tid": root.tid,
+                "context": identity.context,
+            }
+
+
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_manager_availability_backlog_includes_child_only_accepted_work(
+    weft_harness: WeftTestHarness,
+    borrowed: bool,
+) -> None:
+    """A quiet root queue cannot hide accepted children from startup recovery."""
+    context = weft_harness.context
+    with context.queue("weft.spawn.children", persistent=True) as child_queue:
+        tid = child_queue.write(json.dumps({"taskspec": {"name": "accepted-child"}}))
+        with context.session() as session, session.connection() as broker:
+            lent_broker = broker if borrowed else None
+            assert core_manager_runtime._read_public_spawn_backlog(
+                context, broker=lent_broker
+            )
+            assert core_manager_runtime._public_spawn_backlog_pending(
+                context, broker=lent_broker
+            )
+            child_queue.delete(message_id=tid)
+            assert not core_manager_runtime._read_public_spawn_backlog(
+                context, broker=lent_broker
+            )

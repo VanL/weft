@@ -33,6 +33,8 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements connection budgets and child headroom under [MA-1.8].
+
 - [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements local completion proof, incremental sentinel membership, and exact pending service-request references.
 
 - [AdmissionController: Progress-Aware Admission Waiting](../plans/2026-10-06-admission-controller-plan.md) - isolates admission policy and tracks bounded PG resource-drain diagnostics.
@@ -112,9 +114,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
 
 1. **Spawn queue consumption** – Managers bind their public inbox to
    `weft.spawn.requests`, and canonical public managers also monitor
+   `weft.spawn.children` for ordinary same-context task submissions and
    `weft.spawn.internal` for manager-owned internal service spawn requests.
-   Internal spawn work has strict priority: when internal and public work are
-   both pending, the manager drains internal spawn work before public work.
+   Eligible internal work precedes children, and eligible children precede roots.
    Each message contains a serialized child TaskSpec and an optional
    `inbox_message`. Messages are reserved into source-specific reserved queues,
    parsed, launched, and acknowledged via the standard manager launch path.
@@ -123,12 +125,12 @@ Key responsibilities implemented in `weft/core/manager.py`:
    message once the broker moves it into that manager's reserved queue. A
    manager may service public work it has successfully reserved, regardless of
    advisory registry leadership. Pending messages still sitting in
-   `weft.spawn.requests` are unowned backlog and must not by themselves block a
+   `weft.spawn.requests` or `weft.spawn.children` are unowned backlog and must not by themselves block a
    superseded manager from yielding to the lower-TID live canonical manager.
    A live public manager advances public backlog only after the shared
-   `BaseTask`/`MultiQueueWatcher` path has identified the public spawn queue as
+   `BaseTask`/`MultiQueueWatcher` path has identified the relevant public spawn queue as
    active. The optional bounded per-turn drain may continue draining an already
-   active spawn queue, but it must not probe `weft.spawn.requests` with an empty
+   active spawn queue, but it must not probe either public source with an empty
    reservation attempt merely to discover whether work exists. Once a queue is
    active, atomic reservation remains the dispatch authority for the specific
    public spawn message. Manager `.reserved` queues are not ordinary wait or
@@ -418,22 +420,76 @@ Key responsibilities implemented in `weft/core/manager.py`:
   `weft_context`) so external selection code can validate the
   responding task without importing command-layer helpers.
 
-**Admission control [MA-1.8]**: A configured Manager applies admission control
-before reserving a spawn request. A denied request remains in its source queue.
-`WEFT_ADMISSION_MAX_CONNECTIONS` supplies one positive operator maximum; unset
-or `0` disables admission. `WEFT_ADMISSION_RESERVE_FRACTION` is finite in
-`[0, 1)` and defaults to `0.1`. For maximum `N` and fraction `f`, the reserve is
-`max(ceil(N * f), 3 + int(liveness_monitor_enabled))`, the public limit is
-`max(0, N - reserve)`, and the internal limit is `N`. The three-slot floor
-models internal-lane room for Manager, TaskMonitor, and Heartbeat, even though
-the Manager is usually already represented in observed usage. It does not
-create dedicated per-service permits; the fourth modeled slot exists only
-while LivenessMonitor is enabled. Public work admits exactly when
-`used < public_limit`; internal work admits exactly when
-`used < internal_limit`. If `N <= reserve`, public work is disabled while
-internal work remains eligible below `N`.
+**Admission control [MA-1.8]**: A configured Manager checks capacity before
+reserving a spawn request. Unset or zero `WEFT_ADMISSION_MAX_CONNECTIONS`
+disables admission. Reserve fraction remains finite in `[0,1)` and defaults to
+`0.1`; reserve `R` is `max(ceil(N*f), 3 + int(liveness_monitor_enabled))`.
+SQLite retains its existing live-TID usage calculation and existing
+public/internal limits; ordinary child requests use its public capacity while
+retaining child-before-root dispatch order.
 
-The active backend supplies the single `used` value. SQLite is context-scoped:
+PostgreSQL uses one coherent backend observation containing total usage `O` and
+usage `o[t]` attributed to each admitted task.
+`WEFT_ADMISSION_TASK_CONNECTION_BUDGET` is a positive integer, defaults to
+eight, and supplies the budget recorded for each new task launch. Accounted
+usage is `O + sum(max(0, B[t] - o[t]))` over distinct admitted TIDs that remain
+live, pending, or undecidable. Actual over-budget and unrelated connections
+stay counted in `O`. A candidate admits only when its whole budget fits:
+`accounted + candidate_budget <= lane_limit`.
+
+PostgreSQL root, ordinary-child, and internal ceilings are respectively
+`max(0,N-R-B)`, `max(0,N-R)`, and `N`, where `B` is the current configured task
+budget. A lane whose remaining capacity is smaller than the candidate budget
+cannot admit it. The root ceiling protects one child-sized headroom
+independently of the internal reserve. All launched task kinds use this
+accounting; existing internal pipeline routing is unchanged.
+
+Add the candidate's obligation before launching it. Opening a connection
+replaces prospective cost rather than adding another charge. Closing
+connections while a task is live restores its deficit. Manager retires an
+obligation when the shared `analyze_liveness` API used by LivenessMonitor
+reports stale for retained local wrapper/worker identities. A task-owned
+terminal snapshot is not required, and its terminal hint is not supplied to
+the process probe. Live or unknown evidence, foreign-host scope, and locally
+in-flight launches retain their budgets. Missing owner labels, missing
+task-state rows, and elapsed time alone grant no credit. This accepts the
+existing sampled liveness judgment rather than requiring proof of unpublished
+descendants. Preserve selected budget/owner identity through launch evidence
+and task runtime snapshots. On reconstruction, include pending/reserved
+launches and manager launch evidence as well as live or undecidable task
+snapshots. Count each TID once. Use existing recovery and liveness authority,
+not a new permit store or expiry rule.
+Bootstrap reservation evidence is scoped to Manager owners identified by
+structural runtime snapshots, canonical service records, or retained Manager
+launch reports. Ordinary task input reservations and unadmitted source backlog
+cannot resurrect a historical launch obligation.
+
+Bootstrap reconstructs admitted obligations once. New launches are charged
+immediately and reaped children receive an exact-task refresh. Steady-state
+admission uses cached obligations plus a fresh connection-usage snapshot,
+without rereading task-state queues. On the existing one-second admission
+recheck cadence, reactor maintenance refreshes at most 16 obligations in
+round-robin order, including with the gate disabled and while idle. The next
+wait deadline includes this maintenance. Retained stale evidence may delay
+credit until its batch is checked. Read or validation failures retain debt and
+fail admission closed until reconciliation succeeds. A failed item stays at
+the front for retry; only successful batch reconciliation clears this failure.
+While evidence is unavailable, later reaps retain their budgets and defer
+refresh to that maintenance owner.
+No new config, background service, per-task watcher, expiry policy, or durable
+verdict is introduced.
+
+This protects leaf-child progress against root saturation within the configured
+budgets. It does not guarantee arbitrary nested synchronous dependencies,
+all-siblings-at-once joins, or progress when other clients/internal work
+consume the available capacity. Application-created processes, additional
+targets, and concurrent recovery can exceed the modeled budget. Observation and
+launch are not globally atomic; the policy remains a soft guard, not a
+server-wide connection lease. Unknown observations fail closed. Configuration
+is fixed for each Manager lifetime; an older live task keeps its recorded
+launch budget.
+
+SQLite is context-scoped:
 it reads the newest valid snapshot from each `weft.state.tasks.<tid>` queue
 in one shared broker scope, keeps the rows
 whose payloads the shared `weft/liveness/policy.py::mapping_row_is_live`
@@ -450,22 +506,17 @@ permanent while that fingerprint is unchanged, and a live verdict expires on
 the admission recheck interval. Admission adds no second liveness policy,
 durable cache, index, cleanup, or freshness lifecycle beyond that shared
 probe.
-Postgres reads raw server-wide `numbackends` from the public
-`simplebroker_pg.get_connection_stats()` helper through the Manager's existing
-persistent Queue. The configured maximum, not the returned server maximum or
-reserved-connection settings, controls both lane limits. Neither observation
-and its following launch are atomic, so admission is a soft guard, not a
-permit. Denial or observation failure leaves the row unreserved until the
+Denial or observation failure leaves the row unreserved until the
 existing one-second retry deadline or an earlier child/launch-worker wake.
 Enabled
 PostgreSQL admission also tracks one Manager-local drain-wait episode while
-either lane is blocked. Its progress clock advances only for a strict new
+any configured lane is blocked. Its progress clock advances only for a strict new
 episode-low usage observation or an actual child reap; probe success, launch
 completion and retry expiry are not drain progress. An unavailable initial
 observation retains its start clock when a first valid baseline arrives.
 Thirty seconds without drain progress or 180 seconds since episode start
-marks the wait stalled. Fresh capacity that opens both lanes ends the
-episode, as does an existing hint-driven scan proving both spawn sources
+marks the wait stalled. Fresh capacity that opens all configured lanes ends the
+episode, as does an existing hint-driven scan proving all configured spawn sources
 empty without extra reads; skipped, failed or stopped probes cannot establish
 emptiness. Unobserved idle gaps conservatively retain episode age. Internal
 admission alone does not end it. Progress may clear an idle stall
@@ -474,15 +525,19 @@ changes bounded operational diagnostics only: queued work and the same
 periodic/early recovery checks remain. It never grants capacity, fails work,
 or blocks control and cleanup. These deadlines are monotonic assessment
 budgets, not broker-call or task execution timeouts. SQLite policy is unchanged.
-PostgreSQL observation catches only `DatabaseError` and `ValueError`;
-SQLite catches only `BrokerError`, `OSError`, and `RuntimeError`. Shutdown or
-control `BaseException` subclasses propagate.
+The public PostgreSQL usage observation catches only `DatabaseError` and
+`ValueError`. Its separate runtime/recovery evidence refresh catches
+`BrokerError`, `OSError`, `RuntimeError`, `TypeError`, and `ValueError`;
+these failures also produce an unknown observation and deny admission. SQLite catches only
+`BrokerError`, `OSError`, and `RuntimeError`. Shutdown or control
+`BaseException` subclasses propagate.
 Configuration is fixed for one Manager lifetime and takes effect after restart.
-Pipelines use the ordinary lanes without special accounting or a separate
-production branch. Both native and fallback waits suppress only a blocked
+Pipeline-generated stage/edge work keeps its existing internal routing and the
+same per-launch accounting; no separate pipeline scheduling policy is added.
+Both native and fallback waits suppress only a blocked
 spawn source as ordinary queue activity; reserved recovery remains actionable.
 Once another live lower-TID primary is proven, a non-primary Manager reserves
-no new public or internal work. Shared unreserved internal backlog is not work
+no new root, child, or internal work. Shared unreserved internal backlog is not work
 that the non-primary owns; existing reservations, active launches, locally
 tracked children, and actionable control remain owned work.
 
@@ -495,7 +550,32 @@ _Implementation mapping_:
 - [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. `weft/core/manager_services.py::ManagedServiceState` is the sole launch/restart/backoff state owner for autostarts and built-ins; `weft/core/manager.py` retains autostart source identity only, while `reduce_managed_service_state` owns transition selection.
 - [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._build_liveness_monitor_spawn_payload`, `Manager._liveness_monitor_service_spec`, `Manager._pending_service_keys`, `weft/core/manager.py::Manager._pending_request_reference_is_valid`, `weft/core/manager.py::Manager._recover_pending_service_requests`, `weft/core/manager.py::Manager._tracked_service_terminal_proof_visible`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `weft/core/manager.py::Manager._child_terminal_proof_visible`, `weft/core/manager.py::Manager._write_manager_terminal_envelope`, `weft/core/manager.py::Manager._manager_child_timeouts`, `Manager._drain_child_sentinel_events`, `weft/core/manager.py::Manager._register_child_sentinel`, `Manager._retire_expired_unvisited_probes`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; `_ManagerChildSentinelAdapter` is the broker-free local child-exit source; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, LivenessMonitor runtime behavior lives in `weft/core/tasks/liveness_monitor.py` with pure evidence and policy in `weft/liveness/`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
-- [MA-1.8] Admission control — `weft/core/admission.py::AdmissionController` owns pure lane decisions and PG drain-wait budgets; `Manager` configuration loading, backend-specific pre-reservation usage observation, actual-reap notifications, best-effort empty-source reset, universal retry scheduling, child/launch-worker wakes, fallback pending-work suppression, duplicate-manager owned-work checks, and rate-limited operational transition/failure logs in `weft/core/manager.py`; constants and environment keys in `weft/_constants.py`; SQLite current-state collection propagates read failures from `weft/core/task_state.py::latest_task_state_rows` filtered through the shared `weft/liveness/policy.py::mapping_row_is_live` probe (memoized in `Manager._admission_mapping_is_live`) and unioned with `Manager._active_child_launches` plus `Manager._child_processes`. `BaseTask` owns the additive terminal mapping publication. Admission adds no Manager PING/STATUS field and no liveness policy beyond the shared probe.
+- [MA-1.8] Admission control: `weft/core/admission.py::AdmissionController`
+  owns pure lane decisions and PG drain-wait budgets;
+  `weft/core/admission.py::postgres_accounted_usage` reconciles actual pressure
+  and unopened obligations. `weft/core/manager.py` owns pre-reservation
+  observation, `weft/core/manager.py::Manager._adopt_admission_evidence`, `weft/core/manager.py::Manager._refresh_postgres_admission_evidence`,
+  recorded launch budgets, `weft/core/manager.py::Manager._retire_admission_launches`, source suppression,
+  retry/early progress wakes, leadership checks, and operational logging.
+  `weft/_constants.py` owns configuration and defaults. SQLite current-state
+  reads use `weft/core/task_state.py::latest_task_state_rows` and the shared
+  `weft/liveness/policy.py::mapping_row_is_live` probe, memoized in
+  `Manager._admission_mapping_is_live` and unioned with local pending launches
+  and committed children. PostgreSQL retirement uses the shared tri-state
+  `weft/liveness/analysis.py::analyze_liveness` with retained same-host identities
+  and no terminal hint;
+  `weft/core/manager.py::Manager._record_reaped_admission` refreshes and
+  retires stale launches from the child-reap owner even with the gate disabled.
+  Bounded reactor refresh covers crashes without a terminal snapshot and tasks
+  adopted during bootstrap; unavailable evidence retains debt without blocking
+  reap. `weft/core/tasks/base.py` owns task snapshots and
+  terminal publication. Real PG attribution/reopen, saturated-root leaf
+  progress, and disabled-gate retirement are exercised by
+  `tests/system/test_admission_budget_pg.py`. Boundary, malformed-child, and
+  recovery proofs live in `tests/core/test_connection_admission.py`,
+  `tests/core/test_child_spawn_validation.py`, and
+  `tests/core/test_admission_recovery.py`.
+  Admission adds no Manager PING/STATUS field or separate liveness authority.
 
 Implementation plan backlink for [MA-1.4]:
 [Registry Selection And Pruning Authority Refactor Plan](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)
@@ -626,7 +706,7 @@ Current leadership-view rules:
 ## TID Correlation [MA-2]
 
 Task IDs are the message IDs assigned when spawn requests are written to
-`weft.spawn.requests` or `weft.spawn.internal`. The Manager copies that ID into
+`weft.spawn.requests`, `weft.spawn.children`, or `weft.spawn.internal`. The Manager copies that ID into
 the expanded TaskSpec `tid`, enabling correlation across registry entries,
 task logs, and outbox/control messages.
 
