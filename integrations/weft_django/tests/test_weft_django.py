@@ -2355,7 +2355,11 @@ class _IdleFollowProbe:
             await self._start_channels()
 
     async def _start_channels(self) -> None:
-        module = importlib.import_module("weft_django.channels")
+        sys.modules.pop("weft_django.channels", None)
+        try:
+            module = importlib.import_module("weft_django.channels")
+        except ImproperlyConfigured:
+            pytest.skip("Channels extra is not installed")
         self.monkeypatch.setattr(module, "get_core_client", lambda: self.client)
         self.monkeypatch.setattr(module, "get_realtime_transport", lambda: "channels")
         self.monkeypatch.setattr(module, "_authorize_scope", lambda *a: True)
