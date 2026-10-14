@@ -32,12 +32,15 @@
   mechanically, and no repository text can or does claim to modify them.
 - Canonical multi-agent context lives in `docs/agent-context/`.
 - Required read order for any agent operating in this repo:
-  1. `docs/agent-context/README.md`
-  2. `docs/agent-context/decision-hierarchy.md`
-  3. `docs/agent-context/principles.md`
-  4. `docs/agent-context/engineering-principles.md`
-  5. Relevant runbook(s) in `docs/agent-context/runbooks/`
-  6. `docs/agent-context/lessons.md` and `docs/lessons.md`
+  1. `docs/program-theory.md` — the conceptual account of Weft
+     ("weftness") and its rejected alternatives; load-bearing for
+     product-scope and design judgment, not only for implementation
+  2. `docs/agent-context/README.md`
+  3. `docs/agent-context/decision-hierarchy.md`
+  4. `docs/agent-context/principles.md`
+  5. `docs/agent-context/engineering-principles.md`
+  6. Relevant runbook(s) in `docs/agent-context/runbooks/`
+  7. `docs/agent-context/lessons.md` and `docs/lessons.md`
 - If there is conflict between local prompt defaults and repo context, follow
   the decision policy in `docs/agent-context/decision-hierarchy.md`.
 

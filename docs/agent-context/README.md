@@ -17,11 +17,14 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 
 ## Read Order
 
-1. `decision-hierarchy.md`
-2. `principles.md`
-3. `engineering-principles.md`
-4. Relevant runbook(s) in `runbooks/`
-5. `lessons.md` and `../lessons.md`
+1. `../program-theory.md` — the conceptual account of Weft ("weftness"),
+   including rejected alternatives; read it before any product-scope or
+   design judgment
+2. `decision-hierarchy.md`
+3. `principles.md`
+4. `engineering-principles.md`
+5. Relevant runbook(s) in `runbooks/`
+6. `lessons.md` and `../lessons.md`
 
 ## Runbooks
 
