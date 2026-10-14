@@ -24,6 +24,7 @@ from weft._constants import (
 )
 from weft.core.manager import ManagedChild, Manager
 from weft.core.manager_services import ManagedServiceSpec
+from weft.core.runtime_identity import runtime_identity_for_task
 from weft.core.tasks import Consumer
 from weft.core.taskspec import ReservedPolicy
 from weft.helpers import closing_queue_iterator
@@ -36,18 +37,22 @@ def burst_manager(
     broker_env: BrokerEnv, request: pytest.FixtureRequest
 ) -> Iterator[Manager]:
     db_path, _make_queue = broker_env
+    parameter = getattr(request, "param", ReservedPolicy.KEEP)
+    policy = parameter if isinstance(parameter, ReservedPolicy) else ReservedPolicy.KEEP
+    frontier_limit = parameter if isinstance(parameter, int) else 5
     manager = Manager(
         db_path,
         make_manager_spec(
             str(time.time_ns()),
             idle_timeout=0,
-            reserved_policy_on_error=getattr(request, "param", ReservedPolicy.KEEP),
+            reserved_policy_on_error=policy,
         ),
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "0",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 "WEFT_AUTOSTART_TASKS": "0",
+                "WEFT_SCHEDULER_MAX_FRONTIERS": str(frontier_limit),
             }
         ),
     )
@@ -102,7 +107,11 @@ def test_exited_child_keeps_reservation_until_failsafe_commits(
         source_queue=manager._queue_names["inbox"],
         reserved_queue=reserved.name,
         message_timestamp=timestamp,
+        runtime_identity=runtime_identity_for_task(
+            spec, manager._db_path, config=manager._manager_context().config
+        ),
     )
+    manager._checkpoint_admission_launch(request)
     result = manager._run_child_launch_worker(request)
     process = result.process
     assert process is not None
@@ -451,7 +460,11 @@ def test_pending_recovery_replaces_deleted_reference_and_rejects_untrusted_row(
     assert state.pending_request_id is None
 
 
-@pytest.mark.parametrize("population", [100, 200, 300])
+@pytest.mark.parametrize(
+    "burst_manager,population",
+    [(100, 100), (200, 200), (300, 300)],
+    indirect=["burst_manager"],
+)
 def test_child_commit_reads_only_new_sentinel(
     burst_manager: Manager,
     population: int,
@@ -497,7 +510,11 @@ def test_child_commit_reads_only_new_sentinel(
                 service_key=None,
                 autostart_source=None,
                 detach_stdio=True,
+                runtime_identity=runtime_identity_for_task(
+                    spec, manager._db_path, config=manager._manager_context().config
+                ),
             )
+            manager._checkpoint_admission_launch(request)
             manager._commit_child_launch_success(
                 manager_mod._ManagerChildLaunchResult(
                     request=request,

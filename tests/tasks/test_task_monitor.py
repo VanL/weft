@@ -94,6 +94,7 @@ from weft.core.service_convergence import (
     manager_service_key,
 )
 from weft.core.task_state import task_state_queue_name
+from weft.core.tasks.liveness_monitor import LivenessMonitor
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_entries, tid_short_form
 
@@ -4898,9 +4899,14 @@ def test_task_monitor_reserved_cleanup_marks_absent_reserved_probe_checked(
         task.stop()
 
 
-def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
+@pytest.mark.parametrize("checkpointed", [False, True])
+@pytest.mark.parametrize("mode", ["delete", "jsonl_then_delete"])
+def test_task_monitor_reserved_cleanup_retains_launch_custody_until_checkpoint_retirement(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    tmp_path: Path,
+    checkpointed: bool,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -4910,13 +4916,39 @@ def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_MODE": mode,
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": "1",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "custody.jsonl"),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
         }
     )
     tid = "1778084345905438763"
     reserved = make_queue(f"T{tid}.reserved")
-    reserved.write("failed-reserved")
+    request_id = reserved.write("failed-reserved")
+    checkpoint = make_queue(f"weft.state.tasks.{tid}")
+    checkpoint.write(
+        json.dumps(
+            {
+                "full": tid,
+                "short": tid[-8:],
+                "terminal": True,
+                "role": "manager",
+                "scheduler_frontiers": {
+                    "stacks": [],
+                    "residents": {
+                        str(request_id): {
+                            "source_queue": "weft.spawn.requests",
+                            "reserved_queue": f"T{tid}.reserved",
+                            "request_id": request_id,
+                        }
+                    }
+                    if checkpointed
+                    else {},
+                },
+            }
+        )
+    )
     task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999963"),
@@ -4935,7 +4967,14 @@ def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
                         "tid": tid,
                         "version": "1.0",
                         "name": "sample",
-                        "io": {},
+                        "io": {
+                            "inputs": {"inbox": f"T{tid}.inbox"},
+                            "outputs": {"outbox": f"T{tid}.outbox"},
+                            "control": {
+                                "ctrl_in": f"T{tid}.ctrl_in",
+                                "ctrl_out": f"T{tid}.ctrl_out",
+                            },
+                        },
                         "state": {"status": "failed"},
                         "metadata": {},
                     },
@@ -4950,6 +4989,53 @@ def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
             )
             store.mark_summary_emitted(tid, int(tid) + 1)
 
+            external = tmp_path / "custody.jsonl"
+            before_archive = external.read_bytes() if external.exists() else b""
+            blocked = worker._run_reserved_cleanup_slice(store, now_ns=time.time_ns())
+            assert blocked.reserved_queues_deleted == 0
+            assert blocked.pending
+            held = store.get_task(tid)
+            assert held is not None
+            assert held.reserved_cleanup_checked_at_ns is None
+            assert reserved.peek() == "failed-reserved"
+            # Both terminal-family and archived dead-TID disposal can otherwise
+            # delete queues owned by a retired Manager with no live registry.
+            control = make_queue(f"T{tid}.ctrl_in")
+            control.write("retained control")
+            names = {f"T{tid}.ctrl_in", f"T{tid}.reserved"}
+            terminal = worker._delete_terminal_control_queues(
+                held, store=store, existing_queue_names=names, now_ns=time.time_ns()
+            )
+            assert terminal.pending
+            dead = worker._delete_dead_task_control_queues(
+                tid,
+                store=store,
+                existing_queue_names=names,
+                active_tids=set(),
+                now_ns=time.time_ns(),
+            )
+            assert dead.pending
+            assert control.peek() == "retained control"
+            assert reserved.peek() == "failed-reserved"
+            assert (
+                external.read_bytes() if external.exists() else b""
+            ) == before_archive
+            # Exact ACK releases custody, then its sole deletion owner retires
+            # the old Manager checkpoint before later residue becomes ordinary.
+            reserved.delete(message_id=request_id)
+            liveness = LivenessMonitor(
+                db_path,
+                make_task_monitor_taskspec(str(time.time_ns())),
+                config=config,
+                mapping_min_age_seconds=0.0,
+            )
+            try:
+                liveness._reconcile_mapping_rows(full=True)
+                assert liveness._retire_mapping_row(liveness._latest_rows[tid])
+            finally:
+                liveness.stop(join=False)
+                liveness.cleanup()
+            reserved.write("later-residue")
             cleanup = worker._run_reserved_cleanup_slice(
                 store,
                 now_ns=time.time_ns(),

@@ -577,7 +577,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         error_handler: Callable[[Exception, str, int], bool | None] | None = None,
         priority: int = QUEUE_PRIORITY_NORMAL,
     ) -> None:
-        """Reject runtime mutation of a task's construction-fixed topology."""
+        """Reject runtime mutation of construction-fixed delivery topology."""
 
         del queue_name, handler, mode, reserved_queue, error_handler, priority
         raise RuntimeError(
@@ -586,7 +586,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         )
 
     def remove_queue(self, queue_name: str) -> None:
-        """Reject runtime mutation of a task's construction-fixed topology."""
+        """Reject runtime mutation of construction-fixed delivery topology."""
 
         del queue_name
         raise RuntimeError(
@@ -2499,7 +2499,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._register_tid_state()
 
     def _build_tid_state_payload(self) -> dict[str, Any]:
-        """Publish task-owned process evidence and immutable admission debt [MF-5]."""
+        """Publish task-owned process evidence and immutable finite ancestry [MF-5]."""
         runtime_handle = self._runtime_handle or self._task_process_runtime_handle()
         role = self.taskspec.metadata.get("role")
         payload: dict[str, Any] = {
@@ -2517,13 +2517,12 @@ class BaseTask(MultiQueueWatcher, ABC):
         }
         identity = get_runtime_identity()
         if identity is not None and identity.tid == self.tid:
+            payload["context"] = identity.context
+            payload["root_tid"] = identity.root_tid
             payload["submitter_tid"] = identity.submitter_tid
-        if (
-            identity is not None
-            and identity.tid == self.tid
-            and identity.admission is not None
-        ):
-            payload["admission"] = identity.admission.to_dict()
+            payload["ancestry_tids"] = list(identity.ancestry_tids)
+            payload["scheduling_class"] = identity.scheduling_class
+            payload["connection_owner"] = identity.connection_owner
             scoped_processes = (
                 runtime_handle.scoped_host_processes()
                 if runtime_handle is not None

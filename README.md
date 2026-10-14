@@ -651,77 +651,71 @@ Postgres, make sure its mode preserves the notification behavior required by
 `LISTEN`/`NOTIFY`; transaction-pooling modes that do not preserve listener
 state are not a substitute for listener headroom.
 
-Managers can optionally delay new work before reservation. Set
+Managers can delay new work before reservation. Set
 `WEFT_ADMISSION_MAX_CONNECTIONS` to a positive integer. Unset or `0` disables
-admission. `WEFT_ADMISSION_RESERVE_FRACTION` controls how much of that maximum
-public work cannot consume and defaults to `0.1`. The effective reserve is the
-greater of the rounded-up fraction and four slots of modeled internal-lane
-room for Manager, TaskMonitor, LivenessMonitor, and Heartbeat while
-LivenessMonitor is enabled (three when it is disabled). These are not
-dedicated service permits. SQLite root and ordinary child work share the public
-limit `max(0, maximum - reserve)`; internal work uses the full maximum.
-PostgreSQL admission also budgets connections a launched task may open later.
-`WEFT_ADMISSION_TASK_CONNECTION_BUDGET` is a positive integer, defaulting to
-eight (a host wrapper and worker, each with three pooled connections and one
-listener). A candidate must fit its entire budget. Root, ordinary-child and
-internal ceilings are respectively `maximum - reserve - budget`,
-`maximum - reserve`, and `maximum`, with negative ceilings clamped to zero.
-At maximum 300, reserve fraction 0.1 and budget eight, the ceilings are
-262, 270 and 300.
+only the resource gate. `WEFT_ADMISSION_RESERVE_FRACTION` defaults to `0.1`.
+The effective reserve is the larger of the rounded-up fraction and four slots
+of internal operating room for Manager, TaskMonitor, LivenessMonitor, and
+Heartbeat (three with LivenessMonitor disabled). These are no dedicated permits.
+On PostgreSQL, `available = max(0, maximum - reserve - measured_total)`.
+Positive available capacity permits one eligible ordinary launch. Internal
+runtime work may use the reserve, while its use remains in measured total.
+External and unattributed connections remain counted. No task has an eight-slot
+charge or a future child-count declaration. Remove the old
+`WEFT_ADMISSION_TASK_CONNECTION_BUDGET` setting: it raises a configuration error.
 
-The backend supplies one best-effort usage value. SQLite is context-scoped: it
-takes one latest mapping for each full TID, keeps the ones whose recorded
-runtime evidence probes live or undecidable (the same shared probe cleanup and
-endpoint resolution use), and unions that set with this Manager's in-flight
-launches and committed children, counting each full TID once. Task-owned
-mappings carry a terminal liveness hint: positive scoped host-process liveness
-still wins, but otherwise a terminal mapping is released even when an external
-runner handle cannot be probed. Non-terminal mappings without probeable
-evidence stay counted, favoring overcounting over undercounting live tasks.
-Probe verdicts are memoized against both the runtime handle and terminal hint,
-so repeated decisions do not re-probe unchanged rows. Admission adds no
-liveness policy beyond that shared probe.
-PostgreSQL reads one coherent total/by-owner connection snapshot through
-`simplebroker_pg.get_connection_usage()` on the existing Manager Queue.
-Accounted usage is observed total plus each admitted task's unopened budget:
-`total + sum(max(0, task_budget - observed_owner_connections))`. Opening an
-already-budgeted connection transfers its cost; closing it restores the deficit.
-Unrelated and over-budget use stays fully counted. Budgets survive restart
-through existing launch evidence and task snapshots. The shared LivenessMonitor
-process-analysis API releases budgets when retained local wrapper/worker
-identities are stale, including crashes without a final task snapshot. Live or
-unknown processes remain charged; terminal hints and absent owner labels alone
-do not release budgets. Admission uses cached obligations: exact child-reap
-checks and round-robin maintenance of at most 16 tasks per second refresh them,
-rather than rereading every task on each decision. The configured maximum
-controls limits. This remains a sampled soft guard against outside clients,
-additional targets and application-created processes, not a server-wide lease.
+PostgreSQL reads one coherent total/by-owner observation through SimpleBroker's
+public `get_connection_usage()` on the existing Manager Queue. Owner labels
+provide attribution, not discounts. SQLite retains its actual live/unknown TID
+accounting unioned with local launches. Failed observations defer new launches;
+accepted requests remain queued. Both backends are sampled soft guards, not
+global connection leases. A task may open more connections after its first
+startup feedback, and outside clients may change pressure at any time.
 
-Built-in host function and agent runtimes automatically route same-context
-submissions through `weft.spawn.children`. Dispatch order is internal work,
-ordinary children, then roots. Runtime caller identity selects this route;
-ancestry tags alone do not. Foreign-context and external submissions remain
-roots. Protected headroom lets ordinary leaf children progress when roots are
-saturated. It does not guarantee arbitrary nested synchronous waits or joins
-that require all siblings to run at once; another waiting descendant can occupy
-the last child budget. Internal work and outside clients can consume capacity.
+All ordinary submissions use `weft.spawn.requests`, including submissions from
+running tasks. `WEFT_SCHEDULER_MAX_FRONTIERS` is a positive integer, default `5`,
+that bounds open finite branches per Manager independently of resource admission.
+Independent families enter FIFO; active branches take round-robin turns and
+descend through newest eligible children. A task keeps its place while working
+before submitting a child. That child extends the same branch; a sibling needs
+a spare place. Persistent and interactive tasks release their startup place
+after startup feedback while their measured resource use remains counted.
+Trusted pipeline stage and edge bootstrap keeps its existing internal route.
 
-Upgrade by draining old-version active tasks and in-flight launches before
-replacing the runtime. Install the coordinated dependencies and Weft, then
-restart Managers and clients together. Existing unreserved root backlog keeps
-its TIDs. Before rollback, drain all child source/reserved queues using the new
-version; an older Manager cannot see that pending child work.
+Lineage travels in runtime identity rather than application metadata. Rebuildable
+`weft.state.labels.<root_tid>.pending.<parent_tid>` queues index pending request
+IDs and disappear as their tokens are consumed. Task snapshots and Manager
+frontier checkpoints retain detached-task ancestry. A missing initial task
+snapshot does not freeze dispatch: after bounded retry, durable Manager
+checkpoint evidence permits startup-gate release. The original reservation is
+retained until validated task-snapshot handoff or positive settlement. Cleanup
+preserves that reservation/checkpoint pair, so a cold successor can adopt the
+live branch before admitting fresh roots.
 
-Denied messages remain in their source queue and are retried after one second;
-child or launch-worker events may wake the Manager earlier. Both native and
-fallback waits suppress only a blocked spawn source, not reserved recovery.
-Once another live lower-TID primary is proven, a non-primary Manager reserves
-no new shared root, child or internal work. The settings are read when the Manager
-starts, so changes require a restart. Admission assumes ordinary task churn and
-does not preempt persistent work. Pipeline stage/edge work keeps its existing
-internal route and the same per-launch accounting. Admission
-adds no PING/STATUS fields; rate-limited transition and observation-failure
-logs are non-normative operational evidence.
+Finite independent-subtree workloads such as rollup → enrichment → LLM make
+progress when leaves terminate, descendant submission or completion occurs,
+broker maintenance succeeds fairly, and the resource envelope fits. If P bounds
+aggregate retained finite branches, H bounds one path's simultaneous sessions,
+and E/I/B bound external/internal/background use, a sufficient condition is
+`E + I + B + P * H <= maximum - reserve`. These are proof parameters, not
+reservations. Arbitrary cross-family waits, infinite work, permanent external
+saturation, or unbounded orphan accumulation have no such guarantee.
+
+Upgrade from 0.9.110 at a coordinated quiescence point: stop old producers and
+Managers, inventory exact source/reserved IDs, resolve launched or ambiguous
+child reservations through existing launch evidence, and migrate positively
+unlaunched child-source rows into the primary source without rewriting TIDs.
+Normalize their old submission envelopes using the migration adapter described
+in the [implementation plan](docs/plans/2026-10-14-measured-admission-family-scheduling.md).
+Verify no old producer or child-source/reserved row remains before starting the
+new scheduler. Rollback also requires quiescence and preservation of accepted
+requests, results, and reservation evidence; never bulk-replay ambiguous work.
+
+Denied requests stay unreserved and retry after one second; child or launch
+progress may wake the Manager sooner. Controls, cleanup, reaping, classification
+and shutdown continue under pressure. Custody-retained reservations do not
+cause pending-work or PEEK spin. Settings take effect after Manager restart.
+Admission adds no PING/STATUS schema.
 
 For PostgreSQL, the Manager also assesses whether a capacity wait is draining.
 A new episode-low connection count or confirmed child reap counts as resource
@@ -731,9 +725,8 @@ continue. Actual capacity recovery permits dispatch. Run
 `weft manager serve --level info` to see waiting/stalled/recovery evidence
 through existing foreground serve logging. `WEFT_MANAGER_SERVE_LOG_LEVEL=info`
 also sets the level in serve mode; detached Managers do not emit this stream.
-These are assessment budgets, not task or broker-call timeouts. Pending launches
-are budgeted before their connections open; external usage and observation/launch
-races still make this a soft guard.
+These are assessment budgets, not task or broker-call timeouts. External usage
+and observation/launch races keep admission a soft guard.
 
 Child reaps can refresh the idle budget even when short internal tasks or
 crashing children leave aggregate usage high; the absolute cap still applies.
@@ -742,8 +735,8 @@ queued; it is not a request wait time. Fresh capacity opening all lanes ends
 an episode, as does a best-effort existing activity scan proving all configured
 spawn sources empty. Unobserved idle gaps retain history, so a later burst can inherit
 that age. Empty-source reset is silent; an `open` log requires observed capacity.
-SQLite retains its live-TID capacity model. Child routing operates even with
-admission disabled; PostgreSQL launches still record their immutable budget.
+SQLite retains its live-TID capacity model. Family classification and its
+frontier bound remain active with resource admission disabled.
 
 ### Task IDs (TIDs)
 
@@ -1440,9 +1433,8 @@ Environment variables:
 - `WEFT_MANAGER_LIFETIME_TIMEOUT` - Manager idle timeout (default: 600s)
 - `WEFT_ADMISSION_MAX_CONNECTIONS` - Optional backend-specific admission
   maximum; unset or `0` disables it, and enabled values are positive integers
-- `WEFT_ADMISSION_TASK_CONNECTION_BUDGET` - Positive per-task PostgreSQL
-  connection budget (default: 8); recorded for each launch and retained until
-  exact process-tree retirement
+- `WEFT_SCHEDULER_MAX_FRONTIERS` - Positive finite branch bound per Manager
+  (default: 5), independent of the resource gate
 - `WEFT_ADMISSION_RESERVE_FRACTION` - Fraction withheld from public work;
   defaults to `0.1` and must be finite with `0 <= value < 1`; the effective
   reserve is never below four slots for Manager, TaskMonitor,

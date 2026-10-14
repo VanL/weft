@@ -765,9 +765,6 @@ MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS: Final[float] = 300.0
 MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 """Throttle for repeated PID-liveness probes during stop-if-absent manager waits."""
 
-MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT: Final[int] = 1
-"""Retries for a child-launch worker that disappears before returning a result."""
-
 MANAGER_CHILD_INBOX_SEED_ATTEMPTS: Final[int] = 3
 """Attempts to durably seed a child inbox before rejecting child launch."""
 
@@ -797,6 +794,9 @@ ADMISSION_SERVICE_RESERVE_SLOTS: Final[int] = 3
 
 MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
 """Delay before rechecking a blocked Manager admission source."""
+
+MANAGER_FAMILY_CLASSIFY_PAGE_SIZE: Final[int] = 64
+"""Bound source discovery and repair work per reactor turn [MF-6]."""
 
 MANAGER_ADMISSION_REFRESH_BATCH_SIZE: Final[int] = 16
 """Maximum task snapshots reconciled per admission maintenance tick [MA-1.8]."""
@@ -963,9 +963,6 @@ QUEUE_CTRL_OUT_SUFFIX: Final[str] = "ctrl_out"
 QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
 """Suffix for reserved queue names (T{tid}.reserved) used for WIP and recovery."""
 
-QUEUE_CHILDREN_RESERVED_SUFFIX: Final[str] = "children_reserved"
-"""Manager reservation lane for ordinary runtime-originated child requests."""
-
 QUEUE_INTERNAL_RESERVED_SUFFIX: Final[str] = "internal_reserved"
 """Suffix for manager-owned internal spawn reserved queues."""
 
@@ -980,9 +977,6 @@ STANDARD_TASK_QUEUE_SUFFIXES: Final[tuple[str, ...]] = (
 
 QUEUE_PRIORITY_INTERNAL: Final[int] = 0
 """Queue watcher priority for manager-owned internal work. Lower runs first."""
-
-QUEUE_PRIORITY_CHILD: Final[int] = 50
-"""Ordinary task children dispatch after internal work and before roots."""
 
 QUEUE_PRIORITY_NORMAL: Final[int] = 100
 """Default queue watcher priority for ordinary task work."""
@@ -1524,9 +1518,6 @@ RETENTION_PRUNE_REPORT_ONLY_CLASSES: Final[frozenset[str]] = frozenset(
 WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
 """Global queue for manager-consumed task spawn requests."""
 
-WEFT_CHILD_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.children"
-"""Same-context submissions carrying a built-in runtime caller identity."""
-
 WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.internal"
 """Global queue for manager-owned internal spawn requests."""
 
@@ -1830,13 +1821,14 @@ WEFT_ADMISSION_MAX_CONNECTIONS: Final[str] = "WEFT_ADMISSION_MAX_CONNECTIONS"
 WEFT_ADMISSION_MAX_CONNECTIONS_DEFAULT: Final[int] = 0
 """Default disabled backend-specific admission maximum."""
 
-WEFT_ADMISSION_TASK_CONNECTION_BUDGET: Final[str] = (
-    "WEFT_ADMISSION_TASK_CONNECTION_BUDGET"
-)
-"""Per-launch prospective PostgreSQL connection budget ([MA-1.8])."""
+WEFT_SCHEDULER_MAX_FRONTIERS_DEFAULT: Final[int] = 5
+"""Maximum simultaneously open finite ancestry branches per Manager [MA-1.8]."""
 
-WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT: Final[int] = 8
-"""Wrapper plus worker, each with three pooled connections and one listener."""
+WEFT_FAMILY_PENDING_PREFIX: Final[str] = "weft.state.labels."
+"""Runtime consume-on-dispatch family index namespace [OBS.6b]."""
+
+WEFT_FAMILY_PENDING_SCHEMA: Final[str] = "weft.family.pending.v1"
+"""Compact pending-reference wire version [OBS.6b]."""
 
 WEFT_ADMISSION_RESERVE_FRACTION: Final[str] = "WEFT_ADMISSION_RESERVE_FRACTION"
 """Config key for the public-lane admission reserve fraction."""
@@ -2740,15 +2732,13 @@ WEFT_CONFIG_FIELDS: Final[Mapping[str, ConfigField]] = {
             parser=_parse_admission_max_connections,
         ),
     ),
-    "ADMISSION_TASK_CONNECTION_BUDGET": ConfigField(
-        WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT,
+    "SCHEDULER_MAX_FRONTIERS": ConfigField(
+        WEFT_SCHEDULER_MAX_FRONTIERS_DEFAULT,
         "a positive integer",
         partial(
             _normalize_integer_or_string_override,
-            WEFT_ADMISSION_TASK_CONNECTION_BUDGET,
-            parser=partial(
-                _parse_positive_int, name=WEFT_ADMISSION_TASK_CONNECTION_BUDGET
-            ),
+            "WEFT_SCHEDULER_MAX_FRONTIERS",
+            parser=partial(_parse_positive_int, name="WEFT_SCHEDULER_MAX_FRONTIERS"),
         ),
     ),
     "ADMISSION_RESERVE_FRACTION": ConfigField(
@@ -2938,6 +2928,7 @@ WEFT_CONFIG_DEFAULTS: Final[Mapping[str, ConfigField]] = {
     **WEFT_CONFIG_FIELDS,
 }
 REMOVED_WEFT_CONFIG: Final[Mapping[str, str]] = {
+    "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": "WEFT_ADMISSION_TASK_CONNECTION_BUDGET was removed; use measured admission and WEFT_SCHEDULER_MAX_FRONTIERS",
     "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED was removed; "
     "the collation store is always enabled; use "
     "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup",

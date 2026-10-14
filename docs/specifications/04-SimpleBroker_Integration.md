@@ -235,7 +235,7 @@ fresh task evidence over a borrowed observation broker.
 `tests/core/test_task_history_reader.py` verifies filtered history ownership.
 Standalone fallback scopes are owned by `weft/core/control_probe.py`,
 `manager_runtime.py`, `pruning/apply.py`, `queue_window.py`, and
-`spawn_requests.py`.
+`weft/core/spawn_requests.py`.
 
 - Tasks use persistent SimpleBroker `BrokerSession` ownership by default.
   Shared task infrastructure owns fixed queue leases and the executing thread's
@@ -328,13 +328,14 @@ confer no service authority. Weft consumes the public coherent total/by-owner
 usage snapshot through an existing Manager Queue; it neither issues backend SQL
 nor opens a measurement-only connection. Unknown attribution receives no
 discount. The existing four-integer `get_connection_stats()` interface remains
-available unchanged. [MA-1.8] owns prospective task budgets and admission
-decisions. The released public helpers are
+available unchanged. [MA-1.8] owns measured admission and bounded family selection. There are no prospective task budgets. The released public helpers are
 `simplebroker_pg.bind_connection_owner` and
 `simplebroker_pg.get_connection_usage`; require SimpleBroker >=8.6.0 and
 simplebroker-pg >=4.6.0. Owner labels match `[!-~]{1,54}`. Sample outside
 caller-owned transactions; absent owner counts provide zero credit, never death
 evidence.
+
+_Implementation mapping_: `weft/core/runtime_identity.py`, `weft/core/spawn_requests.py`, `tests/system/test_measured_admission_pg.py`.
 
 Implementation note for [SB-0.4]:
 `weft/core/runtime_identity.py::install_runtime_identity` owns public PG owner
@@ -343,7 +344,7 @@ transport before runtime broker resources open.
 `weft/core/manager.py::Manager._read_postgres_connection_usage` consumes the
 public coherent observation through its connected Queue. Attribution custody
 is verified in `tests/core/test_runtime_identity.py` and the actual PG
-resource-lifetime proof in `tests/system/test_admission_budget_pg.py`.
+resource-lifetime proof in `tests/system/test_measured_admission_pg.py`.
 `weft/commands/submission.py::_submit_prepared_outcome` owns or borrows the
 exact effective-context session and owns one connection operation across
 enqueue and initial availability. That connection operation ends before
@@ -853,6 +854,8 @@ connection-pooling designs are tracked in the companion doc:
 - [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
 
 ## Related Plans
+
+- [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements the released public connection-attribution prerequisite for [SB-0.4].
 

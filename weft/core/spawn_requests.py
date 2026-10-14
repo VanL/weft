@@ -21,14 +21,17 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     PUBLIC_RESERVED_SERVICE_METADATA_KEYS,
-    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WORK_ENVELOPE_START,
     resolve_runtime_config,
 )
 from weft.core.endpoints import is_reserved_internal_endpoint_name
-from weft.core.runtime_identity import canonical_runtime_context, get_runtime_identity
+from weft.core.runtime_identity import (
+    canonical_runtime_context,
+    get_runtime_identity,
+    submission_lineage,
+)
 from weft.core.taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
@@ -273,18 +276,16 @@ def _submit_spawn_request_with_payload(
             allow_internal_runtime=allow_internal_runtime,
         )
 
-    # Route at the shared writer, even when a retained client lends a root
-    # queue facade. Explicit internal pipeline/service routing keeps its owner.
+    # Lineage belongs to the shared writer, including trusted internal participants.
+    # All ordinary work keeps primary custody even when a client lends its facade.
     identity = get_runtime_identity()
     submitter = None
     if (
-        spawn_queue_name == WEFT_SPAWN_REQUESTS_QUEUE
-        and identity is not None
+        identity is not None
         and canonical_runtime_context(_normalize_broker_target(broker_target))
         == identity.context
     ):
-        spawn_queue_name = WEFT_CHILD_SPAWN_REQUESTS_QUEUE
-        submitter = {"tid": identity.tid, "context": identity.context}
+        submitter = submission_lineage(identity)
 
     message = {
         "taskspec": taskspec_payload,

@@ -31,8 +31,8 @@ Global queues:
 | Name | Purpose | Persisted in dump? |
 |------|---------|--------------------|
 | `weft.log.tasks` | Runtime task lifecycle evidence / state events | Yes |
+| `weft.state.labels.<root_tid>.pending.<parent_tid>` | Rebuildable consume-on-dispatch family request references | No |
 | `weft.spawn.requests` | Root spawn requests | Yes |
-| `weft.spawn.children` | Ordinary same-context task-child spawn requests | Yes |
 | `weft.spawn.internal` | Manager-owned internal service spawn requests | Yes |
 | `weft.manager.outbox` | Manager informational output | Yes |
 | `weft.state.services` | Runtime service-owner registry, including managers | No (runtime state) |
@@ -41,8 +41,7 @@ Global queues:
 | `weft.state.streaming` | Active streaming sessions | No (runtime state) |
 | `weft.state.pipelines` | Active pipeline registry | No (runtime state) |
 
-Manager spawn reserved queues are `T{manager_tid}.reserved` for roots,
-`T{manager_tid}.children_reserved` for children, and
+Manager spawn reserved queues are `T{manager_tid}.reserved` for all ordinary work,
 `T{manager_tid}.internal_reserved` for internal work. See [MF-6].
 
 Manager control queues are task-local: a manager is addressed through its own
@@ -186,8 +185,8 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS` | Throttle interval for repeated foreground manager operational-log events. Defaults to 5 seconds. |
 | `WEFT_REDACT_TASKSPEC_FIELDS` | Comma-separated TaskSpec field paths redacted from task-log events. |
 | `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
-| `WEFT_ADMISSION_MAX_CONNECTIONS` | Backend-specific admission maximum. Unset or `0` disables admission; enabled values are positive integers. SQLite compares this with the set of live-or-undecidable latest mappings per full TID (a terminal hint without positive scoped host-process proof is dead), unioned with the Manager's active launches and committed children. Postgres compares it with coherent observed usage plus unopened admitted-task budget deficits, without double-counting. Root admission also preserves one child-sized headroom. See [CC-2.4], [MA-1.8], [OBS.13.7], and [MANAGER.18]. |
-| `WEFT_ADMISSION_TASK_CONNECTION_BUDGET` | Positive integer PostgreSQL budget per new task launch, default `8`. Each candidate must fit its full budget; live tasks retain the budget selected at launch. Does not apply the PostgreSQL budget model to SQLite. See [MA-1.8] and [MANAGER.18]. |
+| `WEFT_ADMISSION_MAX_CONNECTIONS` | Unset or `0` disables the resource gate only. PostgreSQL ordinary admission requires ceiling minus reserve minus coherent measured total to be positive; internal requests retain reserve eligibility. SQLite uses actual live/unknown TIDs unioned with local launches. No task budget or child headroom. See [MA-1.8], [MANAGER.18]. |
+| `WEFT_SCHEDULER_MAX_FRONTIERS` | Positive integer finite branch places per Manager, default `5`. Bounds process growth, independently of resource admission. See [MA-1.8]. |
 | `WEFT_ADMISSION_RESERVE_FRACTION` | Fraction withheld from public work. Must be finite with `0 <= value < 1`; defaults to `0.1`. Effective reserve is the greater of `ceil(maximum * fraction)` and four slots of modeled internal-lane room for Manager, TaskMonitor, LivenessMonitor, and Heartbeat while LivenessMonitor is enabled (three when disabled); these are not dedicated permits. See [MA-1.8] and [MANAGER.18]. |
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
@@ -245,6 +244,8 @@ indexed here; `WEFT_MANAGER_RUNTIME_HANDLE_JSON` is documented in
 _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* fields), `weft/core/targets.py` (argv construction).
 
 ## Related Plans
+
+- [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md)
 

@@ -44,7 +44,6 @@ from weft._constants import (
     SERVICE_STATUS_STOPPED,
     SERVICE_STATUS_SUPERSEDED,
     TASK_POLL_INTERVAL_NONE_TOKEN,
-    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -471,7 +470,7 @@ def _read_public_spawn_backlog(context: WeftContext, *, broker: Any | None) -> b
     # Internal service backlog does not grant ordinary callers startup authority.
     return any(
         bool(broker.has_pending_messages(queue_name))
-        for queue_name in (WEFT_SPAWN_REQUESTS_QUEUE, WEFT_CHILD_SPAWN_REQUESTS_QUEUE)
+        for queue_name in (WEFT_SPAWN_REQUESTS_QUEUE,)
     )
 
 

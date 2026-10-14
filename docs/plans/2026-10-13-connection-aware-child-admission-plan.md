@@ -2,7 +2,7 @@
 
 Status: draft
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/07-System_Invariants.md [MANAGER.16], [MANAGER.18], [OBS.6]; docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-5], [MF-6]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]; docs/specifications/14-Python_API_Surfaces.md [PY-1]
-Superseded by: none
+Superseded by: [Measured admission and bounded family scheduling](./2026-10-14-measured-admission-family-scheduling.md)
 
 Class: 5. Admission policy, spawn routing, and runtime connection ownership change. Hardening applies because this crosses the Manager/worker/broker execution path.
 

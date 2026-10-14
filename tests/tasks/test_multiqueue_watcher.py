@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -112,6 +113,172 @@ class TimeoutWaiter(FakeWaiter):
         self.wait_entered.set()
         threading.Event().wait(timeout=timeout)
         return False
+
+
+class ObservationWatcher(MultiQueueWatcher):
+    """Use real queue publications without adding a delivery route [QUEUE.7]."""
+
+    def __init__(self, db: Any, observation: Queue) -> None:
+        self.observation: Queue | None = observation
+        self.observed_timestamp = 0
+        super().__init__(
+            queue_configs={
+                "observation.delivery": {"handler": self._unexpected_delivery}
+            },
+            db=db,
+        )
+
+    @staticmethod
+    def _unexpected_delivery(*_args: Any) -> None:
+        raise AssertionError("notification interest must not dispatch")
+
+    def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
+        return False
+
+    def _activity_wait_queues(self) -> list[Queue]:
+        return [] if self.observation is None else [self.observation]
+
+    def _has_pending_observation(self) -> bool:
+        if self.observation is None:
+            return False
+        with self.observation.get_connection() as broker:
+            latest = broker.latest_pending_timestamp(self.observation.name)
+        if latest is None or latest <= self.observed_timestamp:
+            return False
+        self.observed_timestamp = latest
+        return True
+
+
+@pytest.mark.parametrize("publish_before_registration", [False, True])
+def test_notification_only_publication_returns_owner_without_delivery(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    publish_before_registration: bool,
+) -> None:
+    db, make_queue = broker_env
+    observation = make_queue("observation.state")
+    registrations: list[list[str]] = []
+
+    def create(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
+        registrations.append([queue.name for queue in queues])
+        return real_create_activity_waiter(queues, stop_event=stop_event)
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues", create
+    )
+    if publish_before_registration:
+        observation.write("snapshot")
+    watcher = ObservationWatcher(db, observation)
+    try:
+        if publish_before_registration:
+            watcher.wait_for_activity(timeout=0.1)
+        else:
+            watcher._ensure_wait_strategy_started()
+            observation.write("snapshot")
+            assert watcher._activity_hint_action(deadline=None) == "return"
+        assert registrations == [[observation.name]]
+        assert watcher.observed_timestamp > 0
+        assert observation.peek_one() == "snapshot"
+        assert observation.name not in watcher._queues
+        assert not watcher._has_pending_messages()
+        # The retained row is evidence, not recurring work.
+        watcher.wait_for_activity(timeout=0.01)
+        assert not watcher._has_pending_observation()
+    finally:
+        watcher.stop(join=False)
+        observation.close()
+
+
+@pytest.mark.parametrize("replacement", ["success", "failure", "empty"])
+def test_notification_subscription_replacement_preserves_waiter_custody(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    db, make_queue = broker_env
+    old_queue, new_queue = make_queue("interest.old"), make_queue("interest.new")
+    old, new = TimeoutWaiter(), TimeoutWaiter()
+    registrations: list[list[str]] = []
+
+    def create(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
+        registrations.append([queue.name for queue in queues])
+        if len(registrations) == 1:
+            return old
+        assert old.close_calls == 0
+        if replacement == "failure":
+            raise RuntimeError("injected subscription registration failure")
+        return new
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues", create
+    )
+    watcher = ObservationWatcher(db, old_queue)
+    try:
+        watcher.wait_for_activity(timeout=0.01)
+        watcher.observation = None if replacement == "empty" else new_queue
+        watcher._strategy.notify_activity()
+        watcher.wait_for_activity(timeout=0.01)
+        assert old.close_calls == 1
+        assert registrations == (
+            [[old_queue.name]]
+            if replacement == "empty"
+            else [[old_queue.name], [new_queue.name]]
+        )
+        assert watcher._strategy.uses_native_activity() is (replacement == "success")
+        assert new.close_calls == 0
+        assert list(watcher._queues) == ["observation.delivery"]
+    finally:
+        watcher.stop(join=False)
+        old_queue.close()
+        new_queue.close()
+
+
+@pytest.mark.parametrize("interrupt_at", ["factory", "replacement"])
+def test_notification_replacement_defers_sigint_until_resources_are_owned(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch, interrupt_at: str
+) -> None:
+    db, make_queue = broker_env
+    old_queue, new_queue = make_queue("interrupt.old"), make_queue("interrupt.new")
+    old, new = TimeoutWaiter(), TimeoutWaiter()
+    calls = 0
+
+    def create(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return old
+        if interrupt_at == "factory":
+            watcher._sigint_handler(signal.SIGINT, None)
+        return new
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues", create
+    )
+    watcher = ObservationWatcher(db, old_queue)
+    try:
+        watcher.wait_for_activity(timeout=0.01)
+        original_replace = watcher._strategy.replace_activity_waiter
+
+        def replace(candidate: ActivityWaiter | None) -> ActivityWaiter | None:
+            if candidate is new and interrupt_at == "replacement":
+                watcher._sigint_handler(signal.SIGINT, None)
+            return original_replace(candidate)
+
+        monkeypatch.setattr(watcher._strategy, "replace_activity_waiter", replace)
+        watcher.observation = new_queue
+        with pytest.raises(KeyboardInterrupt):
+            watcher.wait_for_activity(timeout=0.01)
+        assert old.close_calls == new.close_calls == 1
+        assert watcher._stop_event.is_set()
+        assert watcher._multi_activity_waiter is None
+    finally:
+        watcher.stop(join=False)
+        old_queue.close()
+        new_queue.close()
 
 
 class RaisingCloseWaiter(BlockingWaiter):

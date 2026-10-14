@@ -13,20 +13,9 @@ from typing import Any
 
 import pytest
 
-
-def _load_pytest_pg_module() -> ModuleType:
-    script_path = Path(__file__).resolve().parents[2] / "bin" / "pytest-pg"
-    loader = importlib.machinery.SourceFileLoader(
-        "weft_pytest_pg_script",
-        str(script_path),
-    )
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    if spec is None:
-        raise AssertionError(f"Unable to load pytest-pg script: {script_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    loader.exec_module(module)
-    return module
+from tests.helpers.pytest_pg_runtime import (
+    load_pytest_pg_module as _load_pytest_pg_module,
+)
 
 
 def _load_worker_count_module() -> ModuleType:
@@ -503,10 +492,12 @@ def test_build_pytest_command_defaults_to_full_tests_tree() -> None:
     assert command[command.index("-m") + 1] == "shared"
 
 
+@pytest.mark.parametrize("readiness_failure", [False, True])
 def test_start_postgres_container_keeps_container_until_cleanup(
     monkeypatch: pytest.MonkeyPatch,
+    readiness_failure: bool,
 ) -> None:
-    """The wrapper should not erase failed container logs via docker --rm."""
+    """Retain usable containers; clean owned resources if readiness fails."""
 
     pytest_pg = _load_pytest_pg_module()
     commands: list[list[str]] = []
@@ -516,12 +507,34 @@ def test_start_postgres_container_keeps_container_until_cleanup(
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(pytest_pg, "_run", fake_run)
-    monkeypatch.setattr(pytest_pg, "_wait_for_postgres", lambda _name: "54321")
+    disposition: list[tuple[str, str]] = []
 
-    container_name, dsn = pytest_pg._start_postgres_container()
+    def readiness(_name: str) -> str:
+        if readiness_failure:
+            raise RuntimeError("readiness failed")
+        return "54321"
 
+    monkeypatch.setattr(pytest_pg, "_wait_for_postgres", readiness)
+    monkeypatch.setattr(
+        pytest_pg,
+        "_print_container_logs",
+        lambda name: disposition.append(("logs", name)),
+    )
+    monkeypatch.setattr(
+        pytest_pg,
+        "_cleanup_container",
+        lambda name: disposition.append(("cleanup", name)),
+    )
+    if readiness_failure:
+        with pytest.raises(RuntimeError, match="readiness failed"):
+            pytest_pg._start_postgres_container()
+        container_name = commands[0][commands[0].index("--name") + 1]
+        assert disposition == [("logs", container_name), ("cleanup", container_name)]
+    else:
+        container_name, dsn = pytest_pg._start_postgres_container()
+        assert dsn == "postgresql://postgres:postgres@127.0.0.1:54321/weft_test"
+        assert disposition == []
     assert container_name.startswith("weft-pg-test-")
-    assert dsn == "postgresql://postgres:postgres@127.0.0.1:54321/weft_test"
     docker_run = commands[0]
     assert docker_run[:3] == ["docker", "run", "--detach"]
     assert "--rm" not in docker_run

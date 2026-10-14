@@ -25,6 +25,8 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (`TaskSpec`, `SpecSectio
 
 ## JSON Schema v1.0 [TS-1]
 
+Validated persistent or interactive tasks use the ordinary primary source and measured admission. Their startup temporarily occupies a frontier; after the startup gate clears through positive startup evidence or the bounded missing-snapshot fallback, they become background residents and release that place while their actual usage remains measured. Their validated scheduling class and lineage remain in the retained Manager checkpoint until task-owned snapshot handoff or positive settlement. Releasing the frontier does not acknowledge the reservation. Background ancestry is transparent when locating a finite child's scheduling parent. A child with no active finite ancestor requires a free frontier. Activity snapshots or timeouts cannot infer this lifecycle class. Unmarked long-running one-shot tasks retain their place. The finite frontier bound excludes background residents; their measured resource demand must be included separately in any progress claim.
+
 _Implementation mapping_: Field validation and defaults correspond to Pydantic
 models in `weft/core/taskspec/model.py`; strict full-payload validation and
 bundle-aware wire encoding live in
@@ -681,6 +683,8 @@ predicate live in `weft/core/taskspec/model.py`; `validate_taskspec()` and
 its internal spawn-request `requeue` policy.
 
 ## Related Plans
+
+- [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
 - [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
 

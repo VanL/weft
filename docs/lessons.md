@@ -1245,20 +1245,24 @@ index is not a dated section and does not count toward the coalescing trigger.
   denial and observation failure; event-driven early wakes are an optimization,
   not the only recovery path. Control, cleanup, reconciliation, and shutdown
   remain independent of dispatch capacity.
-- Keep the usage model singular (revised 2026-10-13; was: raw PostgreSQL
-  `numbackends` alone supplies usage). That observation omitted connections
-  already-admitted tasks had not opened yet. Follow [MA-1.8](specifications/03-Manager_Architecture.md):
-  PostgreSQL accounts for coherent observed pressure plus positive deficits
-  between each distinct admitted task's recorded budget and attributed actual
-  use. Opening budgeted connections replaces prospective cost; closing them
-  restores it until the shared LivenessMonitor process analysis reports stale
-  retained local identities. Do not require a crashed task to publish its own
-  terminal proof; live/unknown evidence still retains debt. Terminal hints and
-  absent owner counts are not process proof. Keep admission decisions on cached
-  obligations with bounded reconciliation, not a task-set read per candidate.
-  SQLite retains the live-filtered latest-TID union with local launches
-  through the shared `mapping_row_is_live` probe. Both backends remain soft,
-  non-atomic guards; neither adds a permit or distributed quota service.
+- Keep the usage model singular (revised 2026-10-14). Follow
+  [MA-1.8](specifications/03-Manager_Architecture.md): PostgreSQL uses coherent
+  measured total, including external and unattributed pressure. Do not add
+  prospective task budgets or an ordinary child lane. Queued work consumes no
+  processes. Bound live finite branches, preserve a branch during delayed child
+  submission, and descend within that branch so children do not queue behind all
+  parents. Attribution does not establish death or refund capacity. SQLite
+  retains its live/unknown TID union with local launches. Both are soft,
+  non-atomic guards, with no permit service or declared future fanout.
+- Separate startup feedback from launch acknowledgement. If initial snapshot
+  publication fails, an existing durable Manager checkpoint can release the
+  bounded startup gate. Retain the exact reservation until task-snapshot handoff
+  or positive settlement. LivenessMonitor and TaskMonitor must preserve this
+  custody before deletion. Cold adoption itself changes owned state and needs a
+  new successor checkpoint before fresh work. The real missing-snapshot plus
+  Manager-SIGKILL regression exposed that missing publication edge; see
+  `tests/system/test_family_recovery.py` and the
+  [family scheduling plan](plans/2026-10-14-measured-admission-family-scheduling.md).
 
 ## 2026-09-07 Preserve Resolved Context Through Client Adapters
 
@@ -1493,3 +1497,53 @@ and `tests/system/test_config_transport.py`.
   parent loss must share the existing finalizer. Testing only queued STOP/KILL
   missed early signal publication. See [MF-3](specifications/05-Message_Flow_and_State.md)
   and the [burst plan](plans/2026-10-12-burst-submission-complexity-plan.md).
+
+
+## 2026-10-14 Reducing Contention Is a Theory-Possession Stop Condition
+
+The urge to reduce contention to make tests pass is an immediate stop condition,
+not a routine test-running choice. An automated failure under load is a
+counterexample to the investigator's current explanatory model. Preserve the
+original command, concurrency, load, and evidence; re-read the program theory;
+then identify the causal flaw or false premise and its owner. It may lie in the
+runtime, harness, test expectation, substrate, or assumptions about the
+execution environment. Do not guess which, or dismiss it as "flaky" or
+"pre-existing" without evidence.
+
+A lower-load pass cannot explain or close the original failure. After the stop
+and re-derivation, a declared falsifiable hypothesis may use a lower-load probe
+as diagnostic evidence only. Verify the justified correction under the original
+pressure and standard concurrency, including when the correction changes a
+proved-wrong oracle. This applies to worker reductions and new serialization;
+extra resources or longer waits are not substitutes for the explanation.
+
+Owner correction, 2026-10-14, after an agent tried lowering PostgreSQL test
+workers to reduce contention. This lesson does not diagnose that failure.
+The operating rule is [Testing Strategy TS-0](specifications/08-Testing_Strategy.md),
+with rationale in program theory [WT-7]/[ALT-WT-017] and the procedure in
+[testing-patterns Pattern 1](agent-context/runbooks/testing-patterns.md).
+
+## 2026-10-14 Observation Tests Must Own Publication and Pressure
+
+A producer must publish independently of an observer entering its wait call.
+Publishing only inside a patched wait makes setup latency look like a lost
+notification. Suspend the public iterator at a real state event, publish from
+the caller, then resume with the original deadline. The late-metadata test
+exposed this circular protocol at 12 workers with a 0.5-second deadline.
+
+A sampled external connection population is not a sustained pressure actor.
+Other clients can close or open sessions after the sample. Own the held
+population through its explicit release; a bounded progress proof also needs
+an owned physical server so unrelated clients cannot violate its stated
+envelope. Keep genuine labeled and unlabeled pressure, standard parallelism,
+and the original deadlines. Prepare large pending backlogs before starting
+fixture processes whose lifetime bounds the measured execution phase.
+
+Positive startup publication and the absence fallback are separate events.
+The fallback interval must not delay positive evidence. Keep a bounded notification-only interest in the existing reactor waiter.
+Delivery routes stay fixed; observation interests may change. The reactor
+reads publication cursors, validates evidence, and retains custody. A separate
+broker-reading helper worker violates the worker boundary and duplicates the
+wake arbiter. Register before reading and retain interest after rejected
+publication; a retained unchanged row is not recurring work. See [MA-1.8](specifications/03-Manager_Architecture.md) and the
+[measured admission plan](plans/2026-10-14-measured-admission-family-scheduling.md).

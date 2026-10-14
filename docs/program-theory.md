@@ -12,10 +12,11 @@ design decision. Obey it, or propose a theory revision as a class-5 change.
 Governing process: None adopted in this repository yet. SimpleBroker uses
 `[DOM-16]` in its operating-model specification for the same purpose.
 
-This document uses ASD-STE100 Simplified Technical English. Sentences are
-short and in the active voice. The words "must" and "must not" give a
-requirement. The word "can" gives a possibility. Quotations from the owner
-keep their original words.
+This document uses direct, active-voice prose. It states causal relationships
+explicitly—why a boundary exists, which classical model a mechanism realizes,
+and how primitives compose—while avoiding opaque abstraction. The words "must"
+and "must not" state requirements. Quotations from the owner keep their
+original words.
 
 ## Technical names
 
@@ -27,44 +28,58 @@ that the Weft specifications give them.
 - reactor, wake arbiter, turn, timer, hint, event, source adapter
 - owner, custody, lease, session, broker target, backend
 - evidence, terminal, liveness, supersession, admission, reap, sentinel
-- runtime-state queue (`weft.state.*`), family, label
+- runtime-state queue (`weft.state.*`), family, frontier, label
 - durable, hybrid timestamp, spawn request
 
 ## What "program theory" means [WT-0]
 
 Weft uses the meaning of "theory" from Peter Naur, "Programming as Theory
 Building" (1985).[^naur] A program theory is not a formal theory and not a
-list of requirements. It is the working model that connects the problem to
-the concepts, the owners, and the limits of the program.
+list of requirements. It is the working explanatory model that connects the
+problem to the concepts, ownership boundaries, and limits of the program.
 
-A person has the theory when the person can do four things:
+A person or agent possesses the theory when they can do four things:
 
 - connect a problem in the world to the shape of the program
-- explain why the shape is what it is
+- explain and justify why the shape is what it is
 - add a new demand and keep the program coherent
-- find the place for a proposal, and refuse a proposal that does not fit
+- place a proposal in the right owner, and refuse a proposal that does not fit
 
-A person who can only repeat this document does not have the theory.
+Repeating this document from memory is not possession.
 
-The owner gave this theory a name on 2026-09-08: "weftness". The owner
-defined it as "the conceptual core of the program". SimpleBroker has the
-same type of document, `../simplebroker/docs/program-theory.md`, and the
-owner uses "simplebrokerness" and "tautness" for the sibling projects.
+The friction is the point. A change or review finding that looks locally
+optimal in a single file—adding a second queue lane to bypass a backlog,
+charging a guessed resource budget per task, clamping a reactor loop with a
+50 ms polling cap, splitting a cohesive state machine by line count, or using
+a queue as an unconsumed relational table—regularly contradicts an earlier
+empirical failure, a cross-process ownership boundary, or the program's
+conceptual unity. In particular, a frequent source of bad designs is applying
+Weft's tools in a blunt, ad-hoc fashion to patch an immediate symptom rather
+than starting from the right computer-science model (event-driven reactor
+demultiplexing, bounded depth-first task scheduling, measured admission
+backpressure, custody handoff, multicast notification) and asking how Weft's
+existing queue and process primitives realize that well-studied algorithm.
 
-Each surface answers one question:
+The owner gave this theory a name on 2026-09-08: "weftness", defined as "the
+conceptual core of the program". SimpleBroker has the companion account in
+`../simplebroker/docs/program-theory.md` ("simplebrokerness"), and Taut has
+`../taut/docs/program-theory.md` ("tautness").
+
+Each documentation surface answers one question:
 
 | Surface | Question it answers |
 |---------|---------------------|
-| Program theory (this file) | What kind of system is Weft? Why do its concepts and limits exist? |
+| Program theory (this file) | What kind of system is Weft? Why do its concepts, algorithms, and boundaries exist? |
 | Specifications (`docs/specifications/`) | What is the exact intended behavior now? |
-| Plans (`docs/plans/`) | What change was made, under what evidence and premises? |
-| Code and tests | How is the behavior realized? What evidence fires against each claim? |
-| Lessons (`docs/lessons.md`) | What correction did a repeated failure cause? |
+| Plans (`docs/plans/`) | What change was made or proposed, under what evidence and premises? |
+| Code and tests | How is the behavior realized, and what executable evidence fires against each claim? |
+| Lessons (`docs/lessons.md`) | What durable rule did a surprise or repeated failure establish? |
 
-The owner gave the rule for the first two rows on 2026-10-09: "The specs
-describe what we have. The theory describes what we are building toward.
-We are not trying to reify bad decisions." If a specification is wrong, the
-specification changes. The theory does not bend to it.
+The owner stated the rule governing the first two rows on 2026-10-09: "The
+specs describe what we have. The theory describes what we are building toward.
+We are not trying to reify bad decisions." If a specification contradicts the
+theory, the specification is revised through a planned change; the theory does
+not bend to ratify an accidental or flawed implementation.
 
 [^naur]: Peter Naur, "Programming as Theory Building" (1985); reprinted in
     *Computing: A Human Activity* (1992).
@@ -72,120 +87,191 @@ specification changes. The theory does not bend to it.
 ## Purpose and desired feel [WT-1]
 
 Weft is "the durable task substrate for agent systems". It runs commands,
-Python callables, and agent-backed work that can take milliseconds or
-minutes. The work can outlive the shell session that started it.
+Python callables, pipelines, and agent-backed work that can take milliseconds
+or hours and can outlive the shell session or parent process that submitted it.
 
-Weft must feel like a small set of Unix tools, not like a platform. A user
-can see all of its state with `ps` and a queue peek. Failures stay visible.
-The system does nothing in the background that the project did not ask for.
+Weft must feel like a small set of composable Unix tools, not a heavyweight
+orchestration platform. An operator can inspect all live state with standard OS
+tools (`ps`) and a queue peek. Failures remain visible where they happened. The
+system performs no background magic that the caller or context configuration
+did not ask for.
 
-"Simple" means a small number of concepts at the use surface. It does not
-mean a small number of source lines. A large file is correct when its parts
-share state and must change together. See `CLAUDE.md` section 1.1.
+"Simple" means a small number of orthogonal concepts and a predictable operational
+model at the use surface—not a small number of source lines. A large file is
+right when its responsibilities share state and must coordinate across failure
+and lifecycle boundaries (`AGENTS.md` §1.1).
 
 ## Whole-program mental model [WT-2]
 
-Everything is a task. A Manager is a task that starts other tasks. An agent
-is a task. A dangerous command in a container is a task. The owner stated
-the rule on 2026-09-17: "In weft, everything is a task" and "There is no
-code without a task identity."
+Weft is an operating-system-style task and process scheduler built strictly out
+of SimpleBroker queues and OS processes:
 
-Queues are the only durable record of a fact. If a fact about a task
-lifecycle is true, it is true because a row is in a queue. A process can
-hold a copy of a fact. That copy is a hint or an owned process handle. It
-is never a second lifecycle database.
+1. **Everything is a task (`T{tid}.*`)**:
+   A Manager is a task that spawns and supervises other tasks. An agent is a
+   task. A pipeline is a task. Even a short-lived CLI requester (`weft status`,
+   `PING`, result waiter) mints a TID and receives replies on its own
+   `T{tid}.ctrl_in`. The owner stated this invariant on 2026-09-17: "In weft,
+   everything is a task" and "There is no code without a task identity."
 
-Each task is a reactor. One wake arbiter, the SimpleBroker `PollingStrategy`,
-waits for a small, closed set of inputs. On SQLite the backend input is the
-`data_version` hint, confirmed against real queue state. On PostgreSQL the
-backend input is the listener for this task's queues. Local events and
-timers enter the same arbiter. If no input arrives and no timer is due, the
-task has nothing to do, and it must not run a turn.
+2. **Queues carry durable facts; processes carry ephemeral hints; consumed queues disappear**:
+   If a lifecycle fact is durable, it is durable because a message sits in a
+   SimpleBroker queue. In-memory structures inside a Manager or Consumer are
+   performance hints or local process handles—never a second lifecycle database.
+   Crucially, SimpleBroker queues are **auto-created on first write and
+   auto-disappear when emptied** (`move_one` or `delete`). Weft uses per-task
+   and per-branch queues (`T{tid}.*`, `weft.state.labels.<root_tid>.pending.<parent_tid>`)
+   freely because consuming messages as work progresses cleans up the queue
+   namespace automatically. Treating a SimpleBroker queue as an unconsumed,
+   append-only relational table that requires tombstones and manual garbage
+   collection violates the substrate model.
 
-Ownership is explicit at every level:
+3. **Detached process topology bridged by task-owned runtime state (`weft.state.tasks.<tid>`)**:
+   When task $A$ submits child task $B$, $A$ does not `fork` or `exec` $B$; $A$
+   enqueues a spawn request in `weft.spawn.requests` and the Manager launches
+   $B$ in an isolated `spawn`-context process. Furthermore, ordinary user tasks
+   are launched detached from the Manager (`stop_with_parent=False`) so running
+   tasks survive Manager drain, idle timeout, crash, or supersession. Because
+   neither the submitting parent nor a replacement Manager holds the child in
+   its OS `ppid` tree or `self._child_processes` map, `weft.state.tasks.<tid>`
+   is the authoritative bridge between scoped OS process identity
+   (`(pid, create_time)`) and logical task lineage (`root_tid`, `submitter_tid`,
+   `ancestry_tids`, `scheduling_class`). `LivenessMonitor` is the sole component
+   that deletes `weft.state.tasks.<tid>` once the OS process is proven dead.
 
-- SimpleBroker owns queue operations, message identity, delivery, and
-  transactions. Weft does not re-implement them.
-- The backend owns storage.
-- The Manager owns the start of tasks, admission, and child supervision.
-- A task owns its inbox, outbox, reserved queue, `ctrl_in`, and `ctrl_out`.
-  Nobody else speaks for the task.
-- The operating system reports child exit. Weft uses sentinels and
-  `multiprocessing.connection.wait`, not a heartbeat.
+4. **Each task is a single-arbiter event reactor**:
+   One wake arbiter—SimpleBroker's `PollingStrategy`—waits on a small, closed
+   set of inputs: backend queue activity (`PRAGMA data_version` on SQLite;
+   `LISTEN`/`NOTIFY` on PostgreSQL), local thread/adapter completions via
+   `notify_activity()`, and explicit clock or absence deadlines via
+   `next_wait_timeout()`. Blocking OS waits (such as `multiprocessing.connection.wait`
+   on child process sentinels) run in dedicated source-adapter threads that
+   publish one immutable completion fact and wake the arbiter. If no input
+   arrives and no timer is due, a quiet task runs zero turns.
 
-Higher-level intelligence is above Weft. Weft makes execution reliable,
-visible, and easy to validate. It does not manage the agents, the
-providers, or the policy of the system that embeds it.
+5. **Classical CS algorithms over existing primitives**:
+   Weft solves scheduling, overload, and coordination problems by mapping them
+   to well-understood computer science algorithms over its existing primitives:
+   - *Overload and resource protection* is **measured admission control** on
+     process creation (`available = ceiling - reserve - measured_usage`) with
+     non-blocking startup feedback, while queue-first submission remains
+     unbounded and free of process/connection charges.
+   - *Nested parent/child progress under finite capacity* is **bounded
+     depth-first scheduling with work sharing** (FIFO across independent
+     families, round-robin across $W$ active branch frontiers, LIFO descent
+     along a frontier tip's children, and spare-frontier sibling stealing),
+     backed by consume-on-dispatch per-parent pending queues.
+   - *Crash-safe launch handoff* is **two-phase reservation custody** between
+     `T{manager}.reserved` and `weft.state.tasks.<manager_tid>` until
+     task-owned `weft.state.tasks.<tid>` evidence or whole-process settlement
+     is observed.
+   - *Result and completion waiting* is **observer-addressed multicast** (one
+     atomic broadcast to `weft.log.tasks` and `T{tid}.ctrl_out`) rather than
+     $O(W \cdot E)$ shared-log polling.
+
+6. **Explicit layer ownership**:
+   - **SimpleBroker** owns queue semantics, hybrid-timestamp message IDs,
+     atomic reservation moves, delivery claims, and connection attribution.
+   - **The backend** (SQLite, PostgreSQL) owns storage durability and
+     concurrency primitives.
+   - **The Manager** owns admission, frontier selection, task launch, and
+     direct child supervision.
+   - **Each Task** owns its `inbox`, `reserved`, `outbox`, `ctrl_in`,
+     `ctrl_out`, and `weft.state.tasks.<tid>` publication.
+   - **The operating system** reports process exit through kernel sentinels and
+     scoped `(pid, create_time)` identity, never via application heartbeats.
+   - **Higher-level intelligence** sits above Weft; Weft is the execution
+     substrate, not the agent planner or policy engine.
 
 ## Core concepts and ownership [WT-3]
 
 | Concept | Meaning | Owner | Exact contract owner |
 |---------|---------|-------|----------------------|
-| Task | One unit of work with a TID, a TaskSpec, and a set of queues | The task process | `01-Core_Components.md` [CC-2.1], [CC-2.2.1] |
-| TID | A 64-bit SimpleBroker hybrid timestamp. The spawn-request message ID becomes the TID | SimpleBroker gives the ID; Weft keeps it | `04-SimpleBroker_Integration.md` [SB-0.2]; `07-System_Invariants.md` IMMUT.3 |
-| TaskSpec | The frozen execution configuration plus mutable runtime state | The resolution path | `02-TaskSpec.md` [TS-1]; IMMUT.1, IMMUT.2 |
-| Lifecycle state | A forward-only state machine | The task that publishes the fact | `07-System_Invariants.md` STATE.1, STATE.2 |
-| Manager | A task that reserves spawn requests, starts children, and supervises them | The Manager process | `03-Manager_Architecture.md` [MA-1], [MA-1.6a], [MA-3] |
-| Reactor and wake arbiter | One wait point for each task, with a closed set of inputs | The task driver thread | [CC-2.2.1]; `07-System_Invariants.md` IMPL.8 to IMPL.11 |
-| Source adapter | A thread that owns one blocking operation and publishes one immutable result | The task that created it | [CC-2.2.1]; `2026-09-17-watcher-reactor-restoration-plan.md` |
-| Control message | A row on `ctrl_in`; a reply is a row on the requester's own `ctrl_in` | The task that reads the queue | `05-Message_Flow_and_State.md` [MF-3]; `2026-09-18-event-routed-manager-pong-plan.md` |
-| Completion fact | One serialized record, published to the task log and to `ctrl_out` in one atomic broadcast | The task | [MF-3], [MF-5]; `07-System_Invariants.md` OBS.1 |
-| Runtime-state queue | `weft.state.*`, runtime only, not in dumps, read with peek-latest | The service that writes it | `07-System_Invariants.md` OBS.6; `05-Message_Flow_and_State.md` [MF-5] |
-| Broker session | A lease on the process-shared backend resources, with one owner thread | The task or command that opened it | `04-SimpleBroker_Integration.md` [SB-0.4]; `01-Core_Components.md` [CC-2.2.1] |
-| Admission | A measured gate on process creation, never on submission | The Manager | `03-Manager_Architecture.md` [MA-1.8]; `2026-10-14-measured-admission-family-scheduling.md` (draft) |
-| Evidence | A queue row, a process identity, or a runtime handle that supports one claim about a task | The reader that classifies it | [MF-5]; `01-Core_Components.md` LIVENESS.R3 |
+| Task | One unit of work with a TID, a TaskSpec, and a per-task queue set | The task process | `01-Core_Components.md` [CC-2.1], [CC-2.2.1] |
+| TID | A 64-bit SimpleBroker hybrid timestamp; the spawn-request message ID becomes the task's immutable TID | SimpleBroker mints the ID; Weft preserves it | `04-SimpleBroker_Integration.md` [SB-0.2]; `07-System_Invariants.md` IMMUT.3 |
+| TaskSpec | Frozen execution specification (`spec`, `io`) plus forward-only runtime state (`state`) | The resolution and task lifecycle path | `02-TaskSpec.md` [TS-1]; IMMUT.1, IMMUT.2 |
+| Lifecycle state | Forward-only state machine (`created` → `spawning` → `running` → terminal) | The task that publishes the transition | `07-System_Invariants.md` STATE.1, STATE.2 |
+| Manager | A task that classifies requests, enforces measured admission and branch frontiers, reserves and spawns children, and reaps exits | The Manager process | `03-Manager_Architecture.md` [MA-1], [MA-1.8], [MA-3] |
+| Branch frontier | One of $W$ bounded Manager places for progressing an active finite ancestry branch depth-first (LIFO descent, FIFO root admission) | The Manager process (checkpointed in `weft.state.tasks.<manager_tid>`) | `03-Manager_Architecture.md` [MA-1.8]; `2026-10-14-measured-admission-family-scheduling.md` (draft) |
+| Pending family bucket | Consume-on-dispatch queue `weft.state.labels.<root_tid>.pending.<parent_tid>` indexing accepted child requests by parent; auto-disappears when emptied | The Manager process | `05-Message_Flow_and_State.md` [MF-5]; `2026-10-14-measured-admission-family-scheduling.md` (draft) |
+| Reactor and wake arbiter | Single wait point (`PollingStrategy`) per task over a closed set of queue, event, and deadline inputs | The task driver thread | [CC-2.2.1]; `07-System_Invariants.md` IMPL.8 to IMPL.11 |
+| Source adapter | Dedicated helper thread that owns one blocking OS or worker wait and wakes the reactor with one immutable result | The task that created it | [CC-2.2.1]; `2026-09-17-watcher-reactor-restoration-plan.md` |
+| Control message | A request row on `T{target}.ctrl_in`; replies are pushed to the requester's own `T{requester}.ctrl_in` (`reply_to`) | The task reading `ctrl_in` | `05-Message_Flow_and_State.md` [MF-3]; `2026-09-18-event-routed-manager-pong-plan.md` |
+| Completion fact | One serialized terminal record published atomically to `weft.log.tasks` and `T{tid}.ctrl_out` | The completing task | [MF-3], [MF-5]; `07-System_Invariants.md` OBS.1 |
+| Runtime-state queue | `weft.state.*` ephemeral operational state (excluded from dumps, read via peek-latest; `weft.state.tasks.*` deleted only by `LivenessMonitor`) | The publishing task or service; `LivenessMonitor` for task-state deletion | `07-System_Invariants.md` OBS.6, LIVENESS.R3; `05-Message_Flow_and_State.md` [MF-5] |
+| Broker session | Process-local lease over shared backend runner/pool resources with single-thread caller cache | The task or command that opened it | `04-SimpleBroker_Integration.md` [SB-0.4]; `01-Core_Components.md` [CC-2.2.1] |
+| Admission | Measured gate on process creation (`available = C - R - U`), never on queue-first submission | The Manager | `03-Manager_Architecture.md` [MA-1.8]; `2026-10-14-measured-admission-family-scheduling.md` (draft) |
+| Evidence | Queue row, scoped `(pid, create_time)` process identity, or runtime handle supporting a liveness or custody claim | The reader classifying it under liveness policy | [MF-5]; `07-System_Invariants.md` LIVENESS.R3–R7 |
 
 ## Design principles [WT-4]
 
-The "Evidence" column names the owner session or document in which the
-owner stated the principle. The "Contract" column names where the current
-specifications hold it. A principle with no contract row lives only in this
-document and in plan prose.
+The "Evidence" column names the owner session or plan in which the principle
+was established. The "Contract" column names the governing specification or
+engineering rule.
+
+### 4.1 Ontology and Queue Mechanics
 
 | Principle | Design consequence | Evidence | Contract |
 |-----------|--------------------|----------|----------|
-| Everything is a task | No caller gets a special path. A short-lived requester mints a TID and uses `T{tid}.ctrl_in`. | Owner, 2026-09-17 | [MF-3]; `2026-09-18` PONG plan |
-| It is just a message | A protocol is ordinary rows on ordinary queues. The only special code recognizes the message at each end. Replies go to a queue the requester already watches. Push, not pull. | Owner, 2026-09-17: "this should not be a special case. It is just a message." | [MF-3] |
-| One reactor, one arbiter, a closed set of inputs | Inputs are a backend hint, a local event, a timer, or an operating-system source through an adapter. A timer exists only for clock work or for absence. No wait caps. | Owner, 2026-09-17: "we are all event driven, with just a limited number of types of events" | [CC-2.2.1]; IMPL.8 to IMPL.11 |
-| A quiet task does nothing | A wait of one second or five seconds with no work is correct. The first wake after quiet is in the SimpleBroker bound, about 100 ms. | Owner, 2026-09-17 | [CC-2.2.1] |
-| Queues carry facts; processes carry hints | No in-memory lifecycle database. Runtime state goes in `weft.state.*` and holds only what is necessary. | Owner, 2026-09-23; `2026-10-12` burst plan | OBS.1, OBS.6; [MF-5] |
-| Address a fact to its observers | A completion fact goes to `ctrl_out` in the same write as the task log. A waiter does not scan everybody's history. | `2026-10-12` burst plan; owner, 2026-10-09 | [MF-3], [MF-5], OBS.1 |
-| Keep an identity you already have | An owner that wrote a row keeps the returned ID. A caller that made a TaskSpec does not rediscover it from the log. Queue names follow from the TID. | Owner, 2026-10-09: "We don't need to re-discover it from the taskspec that we just created" | [MF-5]; [SB-0.2] |
-| Shared function, shared code | Two code paths for one function is an error. A new subclass must show why the shared code cannot serve. | Owner, 2026-10-09 and 2026-09-21 | Engineering principles 1 and 4.2 |
-| As few concepts as possible | A change consolidates. It does not add a lane, a store, a bus, a scheduler, or a cache subsystem. | Owner, 2026-09-21: "We want to have as few concepts as possible"; 2026-10-14 | `00-Overview_and_Architecture.md`, Product Boundary |
-| No over-armoring | Code is correct for real use paths, not for failures that do not occur. A best-effort path tries, then catches and reports. An unreasonable case gets a sentence in the documentation, not a mechanism. | Owner, 2026-09-07, 2026-09-15, 2026-10-13 | Engineering principles, Secondary Rules |
-| Availability and death are different questions | A missing registry row, an expired window, or a failed read is "unknown", not death. Task-owned terminal proof wins over a Manager `wrapper_lost` record. | Owner, 2026-09-08; `2026-09-17` discovery plan | [MA-1.6a], [MA-3], [MF-5] |
-| Ask who owns this lifetime | A shared Manager, a submitted task, and a client that watches the task have different owners and different reasons to stop. Supersession changes who takes future work. It does not move existing work. | Owner, 2026-09-08 | [MA-1], [MA-3]; `14-Python_API_Surfaces.md` [PY-2] |
-| One owner for each resource | A session, a queue lease, a file descriptor, and a worker result each have one owner. A user of the API gets a connection through the API and never sees the pool. | Owner, 2026-09-15 | [SB-0.4]; [CC-2.2.1]; QUEUE.7, QUEUE.8 |
-| Process concurrency, short transactions | Weft uses processes, not threads, for concurrency. Every broker transaction is short. When a pool is full, callers wait and make progress. On PostgreSQL the limit that matters is the connection count. | Owner, 2026-09-15 | [SB-0.4] |
-| Queued work costs nothing; live processes cost | Admission limits process creation. Submission is queue-first and never blocked. A task does not tell the Manager how many children it will make. | Owner, 2026-10-14: "Tasks sitting waiting to be spawned do not consume processes. Only live processes do" | [MF-1]; [MA-1.8] |
-| Use the primitives you have | Labels, bounded queues, FIFO and LIFO order, exact-ID moves, and runtime-state queues are the building blocks. Well-known computer science answers apply. | Owner, 2026-10-14; 2026-09-17: "We already have the primitives we need in the multiqueue watcher" | [SB-0.1], [SB-0.4] |
-| Push a concern down when it belongs lower | Connection attribution lives in SimpleBroker because SimpleBroker opens the connections. Admission policy lives in Weft. SimpleBroker never waits for Weft. | Owner, 2026-10-06, 2026-10-13, 2026-09-17 | [SB-0.4] |
-| Measure; do not bake in inefficiency | A performance claim needs a measurement on SQLite and on PostgreSQL. A fixed small deadline is suspect until measured. | Owner, 2026-09-11, 2026-09-17, 2026-10-09 | `2026-10-12` burst plan, final evidence |
-| Tests prove correctness, nothing else | A test that pins a version, a process step, or an implementation detail is suspect. Green tests after a cleanup prove nothing by themselves. Reduced test concurrency is never a gate. | Owner, 2026-09-16, 2026-10-06, 2026-09-10, 2026-09-15 | `08-Testing_Strategy.md`; engineering principle 4 |
-| The expert Python developer test | A design must be one that an expert Python developer calls correct, simple, and elegant for a system with these principles. A normally constructed object with explicit inputs beats a copied and reset task. | Owner, 2026-10-09, 2026-10-14, 2026-09-21 | `2026-09-22` MaintenanceWorker plan |
-| No capability diminution | A simplification must not remove an observable function or add latency. Each plan keeps a difference register. Added latency counts as a diminution. | Owner, 2026-09-07; review rule in the 2026-09-08 plans | Hardening runbook |
-| No compatibility code | A contract change updates all producers and consumers in one release. No legacy decoders. The CHANGELOG records the break. | Owner, 2026-09-17: "No need for backwards compat" | `00-Overview_and_Architecture.md`, Single current contract |
-| One path on all platforms | Windows, macOS, and Linux use the same cleanup and lifecycle path. Platform code is the exception, not the rule. | Owner, 2026-10-07, 2026-09-09 | `2026-09-10` process-title plan |
-| The client mirrors the CLI | The Python surface and the CLI express one model. Stable verbs stay at the center. | Owner, 2026-09-23 | `11-CLI_Architecture_Crosswalk.md`; [PY-1] |
-| Specs are what is; theory is where we go | A wrong specification changes. A plan records implementation status. The specification does not. | Owner, 2026-10-09 | `docs/agent-context/decision-hierarchy.md` |
+| Everything is a task | No caller gets a privileged side-channel. Even a short-lived CLI requester mints a TID and receives control replies on `T{tid}.ctrl_in`. | Owner, 2026-09-17 | [MF-3]; `2026-09-18` PONG plan |
+| It is just a message | Protocols are ordinary messages on ordinary queues. Replies are pushed to a queue the requester's reactor already watches—push, never pull-scan. | Owner, 2026-09-17: "this should not be a special case. It is just a message." | [MF-3] |
+| Queues carry facts; processes carry hints | No in-memory lifecycle database. Detached task lineage and process evidence live in `weft.state.tasks.<tid>`; local Manager tables are caches/hints rebuilt from queues. | Owner, 2026-09-23; `2026-10-12` burst plan | OBS.1, OBS.6; [MF-5] |
+| Consume-to-disappear queues, not relational tables | SimpleBroker queues auto-create on write and auto-disappear when emptied. Consume tokens as work is dispatched (`delete`/`move_one`) instead of accumulating unconsumed event logs that require tombstones and manual GC sweeps. | Owner & architectural review, 2026-10-14 | [SB-0.1]; `2026-10-14` family scheduling plan |
+| Address a fact to its observers | Terminal completion is broadcast atomically to `weft.log.tasks` and `T{tid}.ctrl_out` so task waiters watch only their target's queue instead of scanning global history in $O(W \cdot E)$. | `2026-10-12` burst plan; owner, 2026-10-09 | [MF-3], [MF-5], OBS.1 |
+| Keep an identity you already have | An owner that wrote a row retains the returned ID; a caller that created a TaskSpec derives queue names from its TID rather than scanning logs to rediscover it. | Owner, 2026-10-09: "We don't need to re-discover it from the taskspec that we just created" | [MF-5]; [SB-0.2] |
+
+### 4.2 Classical Algorithms and Resource Control
+
+| Principle | Design consequence | Evidence | Contract |
+|-----------|--------------------|----------|----------|
+| Classical CS models over blunt ad-hoc fixes | Start from the well-studied CS formulation (reactor demultiplexing, bounded DFS/work-sharing, measured admission control, two-phase custody handoff) and realize it with existing primitives rather than inventing lanes, heuristics, or magic budgets. | Owner, 2026-10-14 | [MA-1.8]; `2026-10-14` family scheduling plan |
+| Queued work costs nothing; live processes cost | Submission is always queue-first and unblocked. Admission gates process creation using measured pressure (`C - R - U`), never prospective per-task connection debt or predeclared child counts. | Owner, 2026-10-14: "Tasks sitting waiting to be spawned do not consume processes. Only live processes do" | [MF-1]; [MA-1.8] |
+| Use the primitives you have | Compose labels, bounded queues, FIFO/LIFO reads, atomic exact-ID moves, and `weft.state.tasks.*` snapshots before proposing new infrastructure. | Owner, 2026-10-14; 2026-09-17: "We already have the primitives we need in the multiqueue watcher" | [SB-0.1], [SB-0.4] |
+| Push a concern down when it belongs lower | Connection attribution belongs in SimpleBroker because SimpleBroker opens connections; admission and scheduling policy belong in Weft. SimpleBroker never depends on Weft. | Owner, 2026-10-06, 2026-10-13, 2026-09-17 | [SB-0.4] |
+| Process concurrency, short transactions | Weft isolates work in OS processes (`spawn` context), not worker threads, and keeps broker transactions short. On PostgreSQL the scarce resource is connection count. | Owner, 2026-09-15 | [SB-0.4] |
+| One owner for each resource | Each `BrokerSession`, queue lease, file descriptor, `weft.state.tasks.*` deleter (`LivenessMonitor`), and worker result has a single explicit owner. | Owner, 2026-09-15 | [SB-0.4]; [CC-2.2.1]; QUEUE.7, QUEUE.8; LIVENESS.R3 |
+
+### 4.3 Reactor, Liveness, and Process Topology
+
+| Principle | Design consequence | Evidence | Contract |
+|-----------|--------------------|----------|----------|
+| One reactor, one arbiter, a closed set of inputs | Every task waits at one `PollingStrategy` arbiter driven by backend hints/notifications, local `notify_activity()` events, OS sentinel adapters, and explicit deadlines—never defensive polling wait-caps. | Owner, 2026-09-17: "we are all event driven, with just a limited number of types of events" | [CC-2.2.1]; IMPL.8 to IMPL.11 |
+| A quiet task does nothing | When no event arrives and no deadline is due, a reactor sleeps without running turns. First wake after quiet is bounded by one SimpleBroker pass (~100 ms), followed by burst mode. | Owner, 2026-09-17 | [CC-2.2.1] |
+| Availability and death are different questions | A missing snapshot, an expired window, or a failed probe is `unknown`, never proof of death. Task-owned terminal proof wins over a Manager `wrapper_lost` record, and reservation/checkpoint custody survives until task-snapshot handoff or positive settlement. | Owner, 2026-09-08; `2026-09-17` discovery plan; `2026-10-14` family scheduling plan | [MA-1.6a], [MA-3], [MF-5], LIVENESS.R3–R7 |
+| Ask who owns this lifetime | A shared Manager, a detached child task (`stop_with_parent=False`), and a waiting client have independent lifetimes. Manager supersession changes who takes future work; it never kills or moves running children. | Owner, 2026-09-08 | [MA-1], [MA-3]; `14-Python_API_Surfaces.md` [PY-2] |
+
+### 4.4 Simplicity, Evolution, and Verification
+
+| Principle | Design consequence | Evidence | Contract |
+|-----------|--------------------|----------|----------|
+| As few concepts as possible | Changes consolidate onto existing concepts rather than introducing a second spawn lane, state store, event bus, scheduler daemon, or cache subsystem. | Owner, 2026-09-21: "We want to have as few concepts as possible"; 2026-10-14 | `00-Overview_and_Architecture.md`, Product Boundary |
+| Shared function, shared code | Two code paths for one responsibility is a design defect. A subclass must justify why the shared base path cannot serve. | Owner, 2026-10-09 and 2026-09-21 | Engineering principles 1 and 4.2 |
+| The expert Python developer test | A design must look clean, direct, and idiomatic to an expert Python systems engineer—e.g., constructing a helper with explicit immutable inputs rather than shallow-copying and mutating a live Task instance. | Owner, 2026-10-09, 2026-10-14, 2026-09-21 | `2026-09-22` MaintenanceWorker plan |
+| No over-armoring | Engineer for real execution and failure boundaries, not impossible or adversary-invented states. Best-effort paths try, catch, and log diagnostics; operator-precondition violations belong in documentation, not in-band heuristics. | Owner, 2026-09-07, 2026-09-15, 2026-10-13 | Engineering principles, Secondary Rules |
+| Measure; do not bake in inefficiency | Performance claims require measurements on both SQLite and PostgreSQL (including broker-operation counts across completion-to-next-launch intervals). | Owner, 2026-09-11, 2026-09-17, 2026-10-09 | `2026-10-12` burst plan; `2026-10-14` family scheduling plan |
+| Tests prove correctness, nothing else | Tests verify observable behavior and state-machine transitions with real queues and processes—never pinned dependency versions, CI script order, or reduced concurrency (`-n 0`) to mask load bugs. | Owner, 2026-09-16, 2026-10-06, 2026-09-10, 2026-09-15 | `08-Testing_Strategy.md`; engineering principle 4 |
+| No capability diminution | Simplifications must preserve observable capabilities and latency bounds; each hardening plan maintains an explicit difference register. | Owner, 2026-09-07; review rule in the 2026-09-08 plans | Hardening runbook |
+| No compatibility code | Contract changes update all producers and consumers in one coordinated release with a bounded forward migration for durable queue data—no permanent dual decoders or silent fallback lanes. | Owner, 2026-09-17: "No need for backwards compat" | `00-Overview_and_Architecture.md`, Single current contract |
+| One path on all platforms | Windows, macOS, and Linux share the same lifecycle and cleanup architecture; platform-specific branches are narrow adapter leaves. | Owner, 2026-10-07, 2026-09-09 | `2026-09-10` process-title plan |
+| The client mirrors the CLI | The Python client and the CLI expose the same mental model and verbs over shared `weft/commands/` capabilities. | Owner, 2026-09-23 | `11-CLI_Architecture_Crosswalk.md`; [PY-1] |
+| Specs are what is; theory is where we go | When a spec reflects a flawed design, revise the spec through a class-5 plan; plans record execution status, while specs state intended behavior. | Owner, 2026-10-09 | `docs/agent-context/decision-hierarchy.md` |
 
 ## What Weft is not [WT-5]
 
-Weft is not a workflow engine, a job platform, an agent-management layer, a
-provider-health system, or a second control plane. It does not keep a
-separate database of task state. It does not probe the environment before
-an ordinary `weft run`. It does not author project policy by itself. See
-`00-Overview_and_Architecture.md`, Product Boundary.
+Weft is not a distributed workflow engine, a general DAG/join compiler, an
+agent-management or prompt-orchestration layer, a provider-health monitor, or a
+second control plane. It does not maintain a sidecar relational database of
+task state, probe external tools before an ordinary `weft run`, or invent
+application policy. See `00-Overview_and_Architecture.md`, Product Boundary.
 
-Weft does not own queue mechanics. It does not own message IDs, ordering,
-delivery, or transactions. Those belong to SimpleBroker. If a fix seems to
-need a queue-level change, the fix belongs in SimpleBroker.
+Weft does not own queue mechanics. Message IDs, ordering, atomic moves,
+delivery claims, and storage transactions belong to SimpleBroker. If a problem
+requires a queue-level primitive, that primitive belongs in SimpleBroker.
 
-Weft assumes user-level trust. It is not a hostile multi-tenant system. The
-operating system and the filesystem are the security boundary, not a Weft
-input filter. The owner stated on 2026-09-17 that a hand-made PING "is not
-going to be a threat we are going to worry about".
+Weft operates within a single user/operator trust domain. The operating system,
+filesystem permissions, and database grants are the security boundary—not
+in-band command sanitizers or authenticated control messages. The owner stated
+on 2026-09-17 that a hand-crafted `PING` "is not going to be a threat we are
+going to worry about".
 
 ## Negative knowledge: rejected alternatives [WT-6]
 
@@ -197,24 +283,34 @@ alternative. An agent must not propose the alternative again unless the
 ### [ALT-WT-001] A child lane and per-task connection budgets
 
 - Disposition: rejected
-- Candidate: A separate `weft.spawn.children` queue, a fixed connection charge
-  for each new task (eight slots for `weft run ls`), and lifetime connection
-  debt.
-- Why plausible: A large burst exhausted PostgreSQL connections. Children were
-  queued behind all parents in one FIFO. A second lane and a reservation
-  looked like a direct fix.
-- Reason: The lane was a special case. The charge was a guess, not a
-  measurement. No child tasks started. The owner, 2026-10-14: "this creates a
-  special case when we really should not have one. What we need is better
-  admission control over our existing primary lane, not adding a new lane."
-- Current consequence: The decision is made. The implementation is not. Release
-  0.9.110 still ships `weft.spawn.children` (`weft/_constants.py`,
-  `WEFT_CHILD_SPAWN_REQUESTS_QUEUE`) and the budget arithmetic. The intended
-  state is: ordinary work stays on `weft.spawn.requests`; admission is
-  `available = ceiling - reserve - measured use`; family order uses
-  `weft.state.labels.*` and bounded FIFO/LIFO selection.
-- Reconsider when: Never as a second public lane. Reconsider the selection
-  rule if measured admission cannot keep a known workload in progress.
+- Candidate: A separate `weft.spawn.children` queue, a fixed prospective
+  connection charge for each new task (eight slots even for `weft run ls`),
+  and lifetime connection debt.
+- Why plausible: A large nested burst (`rollup → enrichment → LLM`) exhausted
+  PostgreSQL connections when all parents and children sat in one FIFO queue. A
+  second lane for children plus a per-task connection reservation looked like a
+  direct local fix.
+- Reason: It applied a blunt ad-hoc patch instead of framing the problem as
+  classical admission control + bounded depth-first task scheduling. The child
+  lane recreated the same FIFO starvation one level deeper (enrichments starved
+  LLMs), while the guessed eight-slot budget charged queued/lightweight work for
+  connections it never opened. The owner, 2026-10-14: "this creates a special
+  case when we really should not have one. What we need is better admission
+  control over our existing primary lane, not adding a new lane."
+- Current consequence: The decision is made; implementation is specified in the
+  draft plan below. Release 0.9.110 still ships `weft.spawn.children`
+  (`weft/_constants.py`, `WEFT_CHILD_SPAWN_REQUESTS_QUEUE`) and budget
+  arithmetic. The target state keeps all ordinary work on `weft.spawn.requests`,
+  uses measured admission (`available = ceiling - reserve - measured_usage`),
+  tracks detached lineage in `weft.state.tasks.<tid>`, indexes pending children
+  in consume-on-dispatch `weft.state.labels.<root_tid>.pending.<parent_tid>`
+  queues, and schedules up to $W$ active branch frontiers depth-first (FIFO
+  roots, round-robin frontiers, LIFO child descent, spare-frontier sibling
+  stealing).
+- Reconsider when: Never as a second public lane or guessed per-task connection
+  charge. Reconsider the frontier selection rule if measured admission and
+  bounded DFS cannot keep a known finite workload in progress under its stated
+  resource envelope.
 - Evidence: `2026-10-13-connection-aware-child-admission-plan.md` (superseded);
   `2026-10-14-measured-admission-family-scheduling.md`.
 
@@ -410,35 +506,50 @@ alternative. An agent must not propose the alternative again unless the
 - Reconsider when: Weft stops using argv-only execution.
 - Evidence: `CLAUDE.md` section 4.11.
 
-### [ALT-WT-015] Manager-local child tracking as the liveness source
+### [ALT-WT-015] Manager-local child tracking or OS `ppid` as the liveness/lineage source
 
 - Disposition: rejected
-- Candidate: The Manager's in-memory child table decides whether a task is
-  alive.
-- Why plausible: The Manager started the child and holds its handle.
-- Reason: Children survive Manager death by design. The in-memory table is a
-  hint. TID mappings and runtime handles, now `weft.state.tasks.*`, are the
-  liveness source.
-- Current consequence: Task status reads `weft.state.tasks.<tid>`
-  (`weft/commands/tasks.py`, `read_task_state_snapshot`). A projection of
-  status and list from only those queues is a draft plan
-  (`2026-09-23-task-state-current-view-plan.md`). A terminal event alone
-  never proves process exit.
+- Candidate: Use the Manager's in-memory `self._child_processes` table or OS
+  parent-PID trees to decide whether a task is alive and which branch it
+  belongs to.
+- Why plausible: The Manager started the child and holds its `BaseProcess`
+  handle while the Manager remains alive.
+- Reason: Submitted children are never forked by their submitting parent task,
+  and ordinary user tasks are launched with `stop_with_parent=False` so they
+  survive Manager drain, idle exit, crash, or replacement by design ([MA-1],
+  [MA-3]). The Manager's in-memory table is only a local hint. Task-owned
+  `weft.state.tasks.<tid>` snapshots (with pre-handoff custody in
+  `T{manager}.reserved` + `weft.state.tasks.<manager_tid>`) are the durable
+  bridge between scoped `(pid, create_time)` process identity and task lineage
+  (`root_tid`, `submitter_tid`, `ancestry_tids`, `scheduling_class`).
+- Current consequence: Task status and recovery read `weft.state.tasks.*`
+  (`weft/commands/tasks.py`, `read_task_state_snapshot`). A terminal event
+  alone never proves process exit, and `LivenessMonitor` is the sole component
+  deleter of `weft.state.tasks.*`.
 - Reconsider when: Never.
-- Evidence: Owner, 2026-09-23; `01-Core_Components.md` LIVENESS.R3.
+- Evidence: Owner, 2026-09-23 and 2026-10-14; `07-System_Invariants.md`
+  OBS.6, LIVENESS.R3–R7.
 
-### [ALT-WT-016] Re-derive the task graph on each dispatch
+### [ALT-WT-016] Re-derive the task graph on each dispatch or bulk-move pending tokens on parent exit
 
 - Disposition: rejected
-- Candidate: The Manager reads all TaskSpecs and reconstructs family
-  ancestry each time it selects the next launch.
-- Why plausible: The information is in the queues.
-- Reason: "Sounds like a lot of re-work" (owner, 2026-10-14). Family
-  membership changes incrementally, so the record must change incrementally.
-- Current consequence: `weft.state.labels.*` holds incremental family
-  membership and pending-request indexes (draft plan).
-- Reconsider when: Never for each dispatch. A full reconciliation can run for
-  final projection retirement.
+- Candidate: Have the Manager scan all `TaskSpec`s or `weft.state.tasks.*`
+  snapshots to reconstruct family ancestry on every dispatch, or move every
+  queued child token out of a parent's pending bucket when that parent exits.
+- Why plausible: All lineage information exists in the queues, and moving
+  remaining tokens to a grandparent bucket on parent exit keeps bucket names
+  aligned with live parents.
+- Reason: "Sounds like a lot of re-work" (owner, 2026-10-14). Scanning all
+  queued requests on dispatch or moving $N$ pending tokens when a parent exits
+  makes completion-to-next-launch work $O(N)$ in backlog size.
+- Current consequence: Pending requests are indexed incrementally once into
+  `weft.state.labels.<root_tid>.pending.<parent_tid>`, carrying immutable
+  `ancestry_tids`. When `<parent_tid>` exits, the Manager updates the bucket's
+  contracted scheduling-parent pointer in $O(1)$ in memory and continues
+  consuming `.pending.<parent_tid>` directly as children are dispatched.
+- Reconsider when: Never for per-dispatch scans or $O(N)$ exit moves. Bounded,
+  resumable reconciliation runs amortized across maintenance turns to heal
+  cursor holes.
 - Evidence: `2026-10-14-measured-admission-family-scheduling.md`.
 
 ### [ALT-WT-017] Reduced test concurrency as an acceptance gate
@@ -448,11 +559,23 @@ alternative. An agent must not propose the alternative again unless the
   result.
 - Why plausible: Load causes some failures.
 - Reason: "If load causes failures, that is in itself a signal of problems"
-  (owner, 2026-09-09). A low-concurrency run hides the signal.
-- Current consequence: All acceptance runs use the standard concurrency. A
-  lower setting is for debugging one issue only.
-- Reconsider when: Never.
-- Evidence: Owner, 2026-09-15; `docs/lessons.md`.
+  (owner, 2026-09-09). The urge to relieve contention to obtain green means the
+  investigator's explanatory model has not accounted for the observed behavior.
+  Lower load hides that counterexample; it does not restore possession of the
+  theory. The conceptual gap may be in the product, harness, oracle, substrate,
+  or assumptions about the environment. It must be located, not presumed.
+- Current consequence (revised 2026-10-14; was: lower concurrency allowed for
+  debugging without an explicit stop): Stop corrective work and acceptance
+  reruns immediately, preserve the original failure and load conditions, and
+  re-derive the expected behavior and its causal owner. Only then may a stated
+  falsifiable hypothesis use lower load as a diagnostic experiment. Its pass
+  never closes the original failure. Verify the justified correction at the
+  original pressure and standard concurrency, against the corrected contract
+  if the oracle was wrong. See Testing Strategy [TS-0] and testing-patterns
+  Pattern 1 for the operating rule.
+- Reconsider when: Never as a weaker acceptance gate.
+- Evidence: Owner, 2026-09-15 and 2026-10-14; `docs/lessons.md`;
+  `docs/specifications/08-Testing_Strategy.md` [TS-0].
 
 ### [ALT-WT-018] Tests that pin process or dependency versions
 
@@ -467,32 +590,80 @@ alternative. An agent must not propose the alternative again unless the
   below it. Then the floor lives in `pyproject.toml`, not in a test.
 - Evidence: Owner, 2026-10-06, 2026-09-16; test-audit skill.
 
+### [ALT-WT-019] Using SimpleBroker queues as unconsumed relational tables or event logs
+
+- Disposition: rejected
+- Candidate: Store family membership lifecycle events (`accepted`, `launched`,
+  `snapshot`, `terminal` with foreign-key `source_ref` pointers) and versioned
+  `frontier` / `state: "released"` tombstone records in an append-only
+  `weft.state.labels.<root_tid>` queue, while leaving `pending` rows unconsumed
+  in `.pending.<submitter_tid>` until a four-condition family retirement fence
+  manually deletes them via `exact-delete`.
+- Why plausible: Detached child processes outlive their Manager, so the
+  scheduler needed durable cross-Manager lineage and frontier state; an
+  event-sourced family log in `weft.state.labels.*` appeared self-contained.
+- Reason: In SimpleBroker, queues are created on write and **automatically
+  disappear when emptied**. Leaving rows unconsumed until a post-completion
+  garbage-collection sweep turned queues into manual relational tables, and
+  duplicated state already owned by `weft.state.tasks.<tid>` (deleted by
+  `LivenessMonitor` on process exit) and `weft.state.tasks.<manager_tid>`.
+- Current consequence: Detached task lineage (`root_tid`, `submitter_tid`,
+  `ancestry_tids`, `scheduling_class`, `connection_owner`) lives in
+  `weft.state.tasks.<tid>`; active frontier checkpoints (`scheduler_frontiers`)
+  live in `weft.state.tasks.<manager_tid>`; and
+  `weft.state.labels.<root_tid>.pending.<parent_tid>` is a true
+  consume-on-dispatch queue whose tokens are deleted as soon as the referenced
+  `weft.spawn.requests` row is reserved, so pending queues empty and vanish
+  automatically in SimpleBroker.
+- Reconsider when: Never. Runtime queues must either be consumed as work
+  advances or be owned by `LivenessMonitor`'s single-deleter lifecycle.
+- Evidence: Owner & architectural review, 2026-10-14;
+  `2026-10-14-measured-admission-family-scheduling.md`.
+
 ## Tensions and falsifiers [WT-7]
 
-- Possession probe. One time for each release or class-5 plan, ask an
+- **Possession probe:** One time for each release or class-5 plan, ask an
   agent to place a hypothetical feature, refuse a category error, and
   predict the class of bug an audit will find. Record the result in the
   plan or in the lessons. A failed probe means the account or its
   possession has drifted.
-- Simplicity against ambition. Weft adds agent runtimes, restricted
-  runners, pipelines, and admission policy. Each addition must still look
-  like a task. If a feature needs a second control plane, the theory or the
-  feature is wrong.
-- Event-driven against absence. Timers exist only for clock work or for
-  absence. Each new timer is a question: which event cannot arrive?
-- Measured admission is a soft guard. PostgreSQL enforces its own limit.
-  External clients share the server. The theory does not promise exact
-  per-task connection counts.
-- A repeated use of private internals by an embedder (Engram, taut,
-  weft_django) is evidence that a public seam is missing, not evidence that
-  the embedder is wrong.
-- A repeated proposal for a lane, a cache, a flag, or a shim is evidence
-  that a principle in [WT-4] is not clear enough to agents. Tighten the
-  principle; do not accept the proposal.
-- The "expert Python developer" test and the "as few concepts as possible"
-  rule can conflict with a measured cost. The burst plan shows the
-  resolution: pay a fixed cost to remove a repeated cost, and keep one
-  durable fact.
+- **Contention failures test possession of the theory:** Wanting fewer workers,
+  serialization, or another reduction in contention to make tests pass is an
+  immediate stop condition. State the behavior the theory predicted and locate
+  the conceptual flaw or false premise before accommodating the failure. A pass
+  alone does not explain a failure under load; calling it "flaky" or
+  "infrastructure contention" does not supply the missing model. This is a
+  falsifier of the investigator's current possession, not proof that a specific
+  runtime component is broken. [ALT-WT-017] and Testing Strategy [TS-0] define
+  the diagnostic and acceptance boundaries.
+- **Blunt local mechanism vs. classical CS model:** When a proposal invents a
+  new queue lane, a guessed per-task resource charge, a polling timer, or an
+  unconsumed state table to fix a local symptom, treat that as a falsifier
+  signal: the author has not yet named the underlying CS problem (scheduling,
+  admission backpressure, event demultiplexing, custody handoff) or mapped it
+  onto Weft's existing queue and process primitives.
+- **Simplicity against ambition:** Weft adds agent runtimes, restricted
+  runners, pipelines, and bounded family scheduling. Each addition must still
+  compose as tasks and queues. If a feature requires a second control plane or
+  a sidecar database, the theory or the feature is wrong.
+- **Event-driven against absence:** Timers exist only for clock work or for
+  absence detection (such as missing best-effort startup snapshots). Each new
+  timer must answer: *which event cannot arrive, and why?*
+- **Measured admission is a soft guard:** PostgreSQL enforces its own server
+  and role connection limits, and external clients share the server. The theory
+  does not promise exact per-task connection forecasting; it bounds active
+  branches ($W$) and measures real pressure ($U$).
+- **Embedder friction as a missing-seam signal:** Repeated use of private
+  internals by an embedder (`engram`, `taut`, `weft_django`) is evidence that a
+  public capability seam is missing, not evidence that the embedder is wrong.
+- **Repeated rejected proposals as a transfer failure:** A repeated proposal
+  for a lane, a cache, a compatibility shim, or an unconsumed queue table is
+  evidence that a principle in `[WT-4]` or an `[ALT-WT-*]` record is not clear
+  enough. Sharpen the theory rather than accepting the proposal.
+- **The "expert Python developer" test vs. measured cost:** When naive
+  simplicity causes $O(W \cdot E)$ or $O(N^2)$ burst amplification, resolve the
+  tension by choosing the right algorithm (atomic observer broadcast, $O(1)$
+  consume-on-dispatch buckets) while keeping one durable source of truth.
 
 ## Founding continuity [WT-8]
 
@@ -505,21 +676,91 @@ application of that line.
 | Current principle | Founding text | Maintained | Evolved |
 |-------------------|---------------|------------|---------|
 | Everything is a task | "Everything is a Task" | Still the first rule | Agents, pipelines, services, and short-lived requesters are tasks too |
-| Queues carry facts | "State lives in queues, not databases" | Still the only durable record | Runtime-state queues (`weft.state.*`) hold liveness and bookkeeping; a completion fact is addressed to its observers |
+| Queues carry facts; consumed queues disappear | "State lives in queues, not databases" | Still the only durable record | Runtime-state queues (`weft.state.tasks.*`) hold detached process/lineage snapshots deleted by `LivenessMonitor`; pending family queues (`weft.state.labels.*.pending.*`) are consumed on dispatch so they vanish automatically; completion facts broadcast to `ctrl_out` |
 | Specs are the contract | "The specs are the source of truth. Code must align to them." | Still the contract | The theory now sits above the specs for design judgment; a wrong spec changes |
-| Small observable substrate | "the durable task substrate for agent systems" (`CLAUDE.md`) | Still the product boundary | Admission, labels, and sessions were added without a second control plane |
+| Small observable substrate | "the durable task substrate for agent systems" (`CLAUDE.md`) | Still the product boundary | Measured admission, bounded branch frontiers, labels, and sessions were added as classical algorithms over existing primitives without a second control plane |
 
 ## Revisions [WT-9]
 
-None. This is the first draft. A later revision adds a `[REV-WT-nnn]`
-record with the current account first and the superseded account as
-evidence.
+Revision records put the current account first so historical material serves as
+evidence of why the theory evolved rather than a competing model.
+
+### [REV-WT-001] Single-arbiter event reactor replaced defensive polling wait-caps
+
+- Current account: Every task is an event-driven reactor waiting on one
+  SimpleBroker `PollingStrategy` arbiter over a closed set of inputs (backend
+  queue notifications/hints, local `notify_activity()` completions, OS sentinel
+  adapters, and explicit service deadlines). A quiet task does zero turns and
+  uses no defensive 25 ms/50 ms polling caps.
+- Supersedes: Earlier watcher and control paths clamped wait timeouts with
+  short 25 ms and 50 ms polling caps so missed local transitions would still be
+  noticed on the next tick.
+- Pressure: Polling caps masked missing event notifications, burned CPU and
+  broker reads while idle, and obscured which local sources failed to notify
+  the wake arbiter.
+- Evidence:
+  - contemporaneous: `docs/plans/2026-09-17-watcher-reactor-restoration-plan.md`
+    and `docs/plans/2026-09-18-event-routed-manager-pong-plan.md`
+  - contemporaneous: `docs/specifications/01-Core_Components.md` `[CC-2.2.1]`
+    and `docs/specifications/07-System_Invariants.md` `IMPL.8`–`IMPL.11`
+  - owner-recalled: owner sessions 2026-09-17 ("we are all event driven, with
+    just a limited number of types of events")
+
+### [REV-WT-002] Observer-addressed completion broadcast replaced shared task-log scanning
+
+- Current account: A completing task publishes its terminal record atomically to
+  `weft.log.tasks` and `T{tid}.ctrl_out` in a single broadcast. Result and
+  completion waiters watch their target task's own queues (`T{tid}.outbox`,
+  `T{tid}.ctrl_out`) rather than scanning `weft.log.tasks`.
+- Supersedes: Waiters previously followed the global `weft.log.tasks` stream and
+  filtered every task's lifecycle event by TID.
+- Pressure: Under burst load, $W$ concurrent waiters scanning $E$ shared log
+  events caused $O(W \cdot E)$ read amplification and connection contention
+  precisely when capacity was tightest.
+- Evidence:
+  - contemporaneous: `docs/plans/2026-10-12-burst-submission-complexity-plan.md`
+  - contemporaneous: `docs/specifications/05-Message_Flow_and_State.md`
+    `[MF-3]`, `[MF-5]` and `docs/specifications/07-System_Invariants.md` `OBS.1`
+  - owner-recalled: owner session 2026-10-09
+
+### [REV-WT-003] Measured admission and bounded depth-first family scheduling replaced child lanes and prospective connection budgets
+
+- Current account: All ordinary root and child submissions enter
+  `weft.spawn.requests` with zero prospective connection charge while queued.
+  The Manager gates process creation on measured capacity
+  (`available = C - R - U`) and schedules up to $W$ active branch frontiers
+  depth-first (FIFO across roots, round-robin across active frontiers, LIFO
+  descent along a frontier tip's children, spare-frontier sibling stealing).
+  Detached running task lineage (`root_tid`, `submitter_tid`, `ancestry_tids`,
+  `scheduling_class`) lives in `weft.state.tasks.<tid>` (protected before
+  handoff by `T{manager}.reserved` + `weft.state.tasks.<manager_tid>`), while
+  per-parent pending indexes in
+  `weft.state.labels.<root_tid>.pending.<parent_tid>` are consumed on dispatch
+  so they empty and auto-disappear in SimpleBroker.
+- Supersedes: The 0.9.110 experiment routed same-context child submissions to a
+  separate `weft.spawn.children` FIFO queue and charged each launched task a
+  prospective per-task connection budget (`WEFT_ADMISSION_TASK_CONNECTION_BUDGET`,
+  defaulting to 8 slots) with lifetime deficit accounting; an initial
+  replacement draft also proposed storing unconsumed `member`/`frontier` event
+  logs in `weft.state.labels.<root_tid>`.
+- Pressure: In production (`rollup → enrichment → LLM`), the shared children
+  FIFO recreated parent/child starvation one level deeper (43 enrichments
+  launched ahead of 60 queued LLMs) while prospective budget deficits inflated
+  accounted connections to 267 against 130 actual sessions. Subsequent
+  architectural review showed that unconsumed `weft.state.labels.<root_tid>`
+  event logs defeated SimpleBroker's auto-disappearing queues and duplicated
+  `weft.state.tasks.*`.
+- Evidence:
+  - contemporaneous: `docs/plans/2026-10-14-measured-admission-family-scheduling.md`
+    (draft, superseding `docs/plans/2026-10-13-connection-aware-child-admission-plan.md`)
+  - owner-recalled: owner session 2026-10-14 on classical queuing/scheduling
+    primitives and auto-disappearing SimpleBroker queues
 
 ## Sources
 
-- Owner sessions with Codex, 2026-09-01 to 2026-10-14, in the weft and
-  simplebroker working directories. Dates in this document name the
-  session in which the owner stated the rule.
+- Owner sessions with coding agents, 2026-09-01 to 2026-10-14, in the
+  `weft` and `simplebroker` working directories. Dates in this document name
+  the session in which the owner stated the rule.
 - `docs/plans/2026-10-12-burst-submission-complexity-plan.md`, the first
   written use of "weftness".
 - `docs/plans/2026-09-17-watcher-reactor-restoration-plan.md`, Design Rule.

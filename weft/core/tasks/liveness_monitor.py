@@ -40,6 +40,7 @@ from weft.core.queue_window import is_old_enough
 from weft.core.task_state import (
     iter_task_state_rows,
     list_task_state_tids,
+    manager_launch_custody_pending,
     read_task_state_snapshot,
     task_state_queue_name,
 )
@@ -518,6 +519,8 @@ class LivenessMonitor(ServiceTask):
                 if snapshot is None or snapshot[0] != row.message_id:
                     self._adopt_mapping_snapshot(row.tid, snapshot)
                     return False
+                if manager_launch_custody_pending(snapshot[1], broker=broker):
+                    return False
                 if retained_ids:
                     return False
                 for message_id in sorted(retire_ids):
@@ -528,7 +531,7 @@ class LivenessMonitor(ServiceTask):
                 return self._delete_mapping_message(
                     row.tid, row.message_id, broker=broker
                 )
-        except (BrokerError, OSError, RuntimeError):
+        except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
             logger.debug(
                 "Failed to reread task state before retiring %s",
                 row.tid,

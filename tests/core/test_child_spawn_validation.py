@@ -13,10 +13,8 @@ import pytest
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
-    QUEUE_CHILDREN_RESERVED_SUFFIX,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
-    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -77,6 +75,8 @@ def _envelope(context_identity: str) -> dict[str, Any]:
         "submitted_by": {
             "tid": "1777000000000000123",
             "context": context_identity,
+            "root_tid": "1777000000000000123",
+            "ancestry_tids": ["1777000000000000123"],
         },
     }
 
@@ -117,10 +117,10 @@ def test_child_spawn_requires_a_valid_same_context_submitter(
     weft_harness: WeftTestHarness,
     malformation: str,
 ) -> None:
-    """Malformed origin cannot enter the child lane or escape CLEAR disposition."""
+    """Malformed runtime lineage cannot bypass canonical rejection/CLEAR."""
     payload = _envelope(canonical_runtime_context(weft_harness.context.broker_target))
     if malformation == "missing":
-        payload.pop("submitted_by")
+        payload["submitted_by"].pop("ancestry_tids")
     elif malformation == "short-tid":
         payload["submitted_by"]["tid"] = "123"
     elif malformation == "foreign-context":
@@ -130,8 +130,8 @@ def test_child_spawn_requires_a_valid_same_context_submitter(
     _assert_rejected_and_cleared(
         validating_manager,
         weft_harness,
-        WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
-        QUEUE_CHILDREN_RESERVED_SUFFIX,
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        QUEUE_RESERVED_SUFFIX,
         payload,
     )
 
@@ -143,19 +143,21 @@ def test_child_spawn_requires_a_valid_same_context_submitter(
         (WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, QUEUE_INTERNAL_RESERVED_SUFFIX),
     ],
 )
-def test_other_spawn_lanes_reject_a_forged_runtime_submitter(
+def test_primary_and_internal_sources_reject_malformed_lineage(
     validating_manager: Manager,
     weft_harness: WeftTestHarness,
     source: str,
     suffix: str,
 ) -> None:
-    """Only an automatically routed child request carries submitter authority."""
+    """Both source validators reject a malformed system lineage envelope."""
+    payload = _envelope(canonical_runtime_context(weft_harness.context.broker_target))
+    payload["submitted_by"]["extra"] = "not-supported"
     _assert_rejected_and_cleared(
         validating_manager,
         weft_harness,
         source,
         suffix,
-        _envelope(canonical_runtime_context(weft_harness.context.broker_target)),
+        payload,
     )
 
 
@@ -169,8 +171,8 @@ def test_child_spawn_nonobject_envelope_is_rejected_and_cleared(
     _assert_rejected_and_cleared(
         validating_manager,
         weft_harness,
-        WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
-        QUEUE_CHILDREN_RESERVED_SUFFIX,
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        QUEUE_RESERVED_SUFFIX,
         payload,
     )
 
@@ -219,7 +221,7 @@ def test_accepted_child_executes_after_its_submitter_process_exits(
         parent.join(20.0)
         assert not parent.is_alive() and parent.exitcode == 0
         weft_harness.register_tid(tid)
-        with context.queue(WEFT_CHILD_SPAWN_REQUESTS_QUEUE, persistent=True) as source:
+        with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as source:
             assert source.peek_one(exact_timestamp=int(tid)) is not None
         with context.queue(f"T{tid}.outbox", persistent=True) as outbox:
             result = drive_until(

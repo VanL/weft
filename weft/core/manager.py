@@ -22,6 +22,7 @@ import socket
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from heapq import nsmallest
@@ -66,7 +67,6 @@ from weft._constants import (
     MANAGER_ADMISSION_REFRESH_BATCH_SIZE,
     MANAGER_CHILD_INBOX_SEED_ATTEMPTS,
     MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS,
-    MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT,
     MANAGER_CHILD_LAUNCH_WORKER_LANE,
     MANAGER_CHILD_SENTINEL_OBSERVER_CLOSE_TIMEOUT_SECONDS,
     MANAGER_CHILD_SENTINEL_WINDOWS_WAIT_SLICE_SECONDS,
@@ -76,6 +76,7 @@ from weft._constants import (
     MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
     MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
+    MANAGER_FAMILY_CLASSIFY_PAGE_SIZE,
     MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
     MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS,
     MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS,
@@ -90,14 +91,11 @@ from weft._constants import (
     MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_QUEUE_LIMIT,
     MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS,
     MANAGER_STALLED_CONTROL_RETRY_SECONDS,
-    QUEUE_CHILDREN_RESERVED_SUFFIX,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
-    QUEUE_PRIORITY_CHILD,
     QUEUE_PRIORITY_INTERNAL,
     QUEUE_PRIORITY_NORMAL,
-    QUEUE_RESERVED_SUFFIX,
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_DRAINING,
     SERVICE_STATUS_STOPPED,
@@ -112,8 +110,8 @@ from weft._constants import (
     TERMINAL_EVENT_WRITE_RETRIES,
     TERMINAL_EVENT_WRITE_RETRY_INTERVAL,
     TERMINAL_TASK_STATUSES,
-    WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT,
-    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
+    WEFT_FAMILY_PENDING_PREFIX,
+    WEFT_FAMILY_PENDING_SCHEMA,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
@@ -132,7 +130,11 @@ from weft.core.endpoints import (
     latest_tid_state_entries_for_endpoint_resolution,
 )
 from weft.core.manager_runtime import manager_registry_record_liveness
-from weft.core.task_state import latest_task_state_rows, read_task_state_snapshot
+from weft.core.task_state import (
+    latest_task_state_rows,
+    read_task_state_snapshot,
+    task_state_queue_name,
+)
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -148,7 +150,6 @@ from weft.helpers import (
     redact_taskspec_dump,
     terminate_process_tree,
 )
-from weft.helpers.message_ids import is_task_tid
 from weft.liveness import analyze_liveness
 from weft.liveness.policy import mapping_row_is_live
 
@@ -156,7 +157,6 @@ from .admission import (
     AdmissionController,
     AdmissionDecision,
     AdmissionLane,
-    postgres_accounted_usage,
 )
 from .control_messages import (
     ControlRequest,
@@ -167,6 +167,7 @@ from .control_probe import (
     coerce_pong_response,
     pong_proves_dispatch_eligible,
 )
+from .family_scheduling import FamilyScheduler, PendingRequest
 from .launcher import launch_task_process
 from .manager_services import (
     ManagedServiceDecision,
@@ -186,9 +187,10 @@ from .pipelines import (
     load_pipeline_spec_payload,
 )
 from .runtime_identity import (
-    AdmissionRecord,
+    RuntimeIdentity,
     canonical_runtime_context,
-    connection_owner_label,
+    runtime_identity_for_task,
+    validate_submission_lineage,
 )
 from .serve_log import (
     build_serve_log_record,
@@ -296,7 +298,7 @@ class _ManagerChildLaunchRequest:
     source_queue: str | None = None
     reserved_queue: str | None = None
     message_timestamp: int | None = None
-    admission: AdmissionRecord | None = None
+    runtime_identity: RuntimeIdentity | None = None
     submitter_tid: str | None = None
 
 
@@ -589,6 +591,10 @@ class Manager(ServiceTask):
                 target=self._run_child_launch_service_worker,
             )
         )
+        self._startup_notification_tid: str | None = None
+        self._startup_notification_queue: Queue | None = None
+        self._startup_publication_id: int | None = None
+        self._startup_publication_pending = False
         self._child_processes: dict[str, ManagedChild] = {}
         self._child_sentinel_adapter = _ManagerChildSentinelAdapter(
             self._strategy.notify_activity
@@ -600,14 +606,24 @@ class Manager(ServiceTask):
         self._admission_reserve_fraction = float(
             self._weft_config.get("ADMISSION_RESERVE_FRACTION", 0.1)
         )
-        self._admission_task_connection_budget = int(
-            self._weft_config.get(
-                "ADMISSION_TASK_CONNECTION_BUDGET",
-                WEFT_ADMISSION_TASK_CONNECTION_BUDGET_DEFAULT,
-            )
-        )
         # A derived cache of existing task/Manager runtime evidence, not permits.
-        self._admission_launches: dict[str, dict[str, Any]] = {}
+        self._scheduler_residents: dict[str, dict[str, Any]] = {}
+        self._family_scheduler = FamilyScheduler(
+            int(self._weft_config.get("SCHEDULER_MAX_FRONTIERS", 5))
+        )
+        self._scheduler_checkpoint_dirty = False
+        self._scheduler_undurable: set[str] = set()
+        self._family_index_retry_after = 0.0
+        self._startup_feedback_tid: str | None = None
+        self._family_classify_after = 0
+        self._family_repair_after = 0
+        self._family_repair_due = 0.0
+        self._family_classification_pending = False
+        self._family_invalid: dict[int, None] = {}
+        self._family_candidate: PendingRequest | None = None
+        self._family_label_names: deque[str] = deque()
+        self._family_label_after = 0
+        self._orphan_reserved: dict[str, tuple[str, int]] = {}
         self._admission_bootstrapped = False
         self._admission_refresh_after = 0.0
         self._admission_evidence_unavailable = False
@@ -617,7 +633,6 @@ class Manager(ServiceTask):
         self._admission_last_decision_state: tuple[str, str | None] = ("open", None)
         self._admission_probe_memo: dict[str, tuple[str, bool, float]] = {}
         self._child_launch_started_ns: dict[str, int] = {}
-        self._child_launch_stale_retries: dict[str, int] = {}
         self._child_launch_started_this_turn = False
         self._active_cleanup_deadline: float | None = None
         self._last_child_cleanup_survivors: tuple[dict[str, Any], ...] = ()
@@ -676,7 +691,6 @@ class Manager(ServiceTask):
             self._admission_max_connections,
             self._admission_reserve_fraction,
             self._liveness_monitor_enabled,
-            self._admission_task_connection_budget,
         )
         self._task_monitor_restart_backoff_ns = int(
             float(
@@ -989,9 +1003,6 @@ class Manager(ServiceTask):
             roles["internal_inbox"] = internal_inbox
         if internal_reserved is not None:
             roles["internal_reserved"] = internal_reserved
-        for role in ("children_inbox", "children_reserved"):
-            if role in self._queue_names:
-                roles[role] = self._queue_names[role]
         return roles
 
     def _reactor_support_routes(self) -> dict[str, str]:
@@ -1010,10 +1021,6 @@ class Manager(ServiceTask):
         queue_names = super()._resolve_queue_names()
         if queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
             tid_prefix = f"T{self.taskspec.tid}"
-            queue_names["children_inbox"] = WEFT_CHILD_SPAWN_REQUESTS_QUEUE
-            queue_names["children_reserved"] = (
-                f"{tid_prefix}.{QUEUE_CHILDREN_RESERVED_SUFFIX}"
-            )
             queue_names["internal_inbox"] = WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
             queue_names["internal_reserved"] = (
                 f"{tid_prefix}.{QUEUE_INTERNAL_RESERVED_SUFFIX}"
@@ -1027,7 +1034,7 @@ class Manager(ServiceTask):
 
     def _spawn_inbox_queue_names(self) -> tuple[str, ...]:
         queue_names = [self._queue_names["inbox"]]
-        for role in ("children_inbox", "internal_inbox"):
+        for role in ("internal_inbox",):
             inbox = self._queue_names.get(role)
             if inbox is not None:
                 queue_names.insert(0, inbox)
@@ -1035,7 +1042,7 @@ class Manager(ServiceTask):
 
     def _spawn_reserved_queue_pairs(self) -> tuple[tuple[str, str], ...]:
         pairs = [(self._queue_names["reserved"], self._queue_names["inbox"])]
-        for prefix in ("children", "internal"):
+        for prefix in ("internal",):
             reserved = self._queue_names.get(f"{prefix}_reserved")
             inbox = self._queue_names.get(f"{prefix}_inbox")
             if reserved is not None and inbox is not None:
@@ -1066,20 +1073,15 @@ class Manager(ServiceTask):
         return tuple(dict.fromkeys(queue_names))
 
     def _manager_owned_work_pending(self) -> bool:
-        """Return whether manager-owned inbox or reserved queues still have work."""
-
+        """Launch worker activity is owned work; retained custody is maintenance."""
         if self._has_active_child_launches():
             return True
-        for queue_name in self._idle_activity_queue_names():
+        for queue_name in self._spawn_inbox_queue_names():
             try:
-                if self._queue(queue_name).has_pending():
+                if self._queue_has_pending(self._queue(queue_name)):
                     return True
             except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to inspect manager-owned queue %s for pending work",
-                    queue_name,
-                    exc_info=True,
-                )
+                logger.debug("Unable to inspect manager-owned work", exc_info=True)
         return False
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
@@ -1095,18 +1097,6 @@ class Manager(ServiceTask):
                 self._handle_work_message,
                 reserved_queue=internal_reserved,
                 priority=QUEUE_PRIORITY_INTERNAL,
-            )
-
-        child_inbox = self._queue_names.get("children_inbox")
-        child_reserved = self._queue_names.get("children_reserved")
-        if child_inbox is not None and child_reserved is not None:
-            configs[child_inbox] = self._reserve_queue_config(
-                self._handle_work_message,
-                reserved_queue=child_reserved,
-                priority=QUEUE_PRIORITY_CHILD,
-            )
-            configs[child_reserved] = self._peek_queue_config(
-                self._handle_reserved_message
             )
 
         configs.update(
@@ -1145,14 +1135,19 @@ class Manager(ServiceTask):
         return super()._queue_counts_as_wait_activity(config)
 
     def _build_tid_state_payload(self) -> dict[str, Any]:
-        """Publish manager identity in tid mappings even without explicit metadata."""
-
+        """Checkpoint unresolved launches and finite paths [MF-5], [MANAGER.11]."""
         payload = super()._build_tid_state_payload()
-        # Manager role is structural, not advisory metadata.
         payload["role"] = "manager"
-        payload["admission_launches"] = copy.deepcopy(
-            getattr(self, "_admission_launches", {})
-        )
+        scheduler = getattr(self, "_family_scheduler", None)
+        payload["scheduler_frontiers"] = {
+            "stacks": [list(stack) for stack in scheduler.frontiers]
+            if scheduler
+            else [],
+            "residents": copy.deepcopy(getattr(self, "_scheduler_residents", {})),
+            "startup_feedback_tid": getattr(self, "_startup_feedback_tid", None),
+            "source_queue": self._queue_names["inbox"],
+            "reserved_queue": self._queue_names["reserved"],
+        }
         return payload
 
     def _control_snapshot_fields(self) -> dict[str, Any]:
@@ -1182,10 +1177,6 @@ class Manager(ServiceTask):
                 "started_ns": self._child_launch_started_ns.get(
                     str(request.child_spec.tid)
                 ),
-                "stale_retries": self._child_launch_stale_retries.get(
-                    str(request.child_spec.tid),
-                    0,
-                ),
             }
             for request in self._active_child_launches.values()
         ]
@@ -1194,8 +1185,6 @@ class Manager(ServiceTask):
         if self._internal_spawn_queue_attached():
             payload["internal_requests"] = self._queue_names["internal_inbox"]
             payload["internal_reserved"] = self._queue_names["internal_reserved"]
-            payload["children_requests"] = self._queue_names["children_inbox"]
-            payload["children_reserved"] = self._queue_names["children_reserved"]
         weft_context = getattr(self.taskspec.spec, "weft_context", None)
         if weft_context is not None:
             payload["weft_context"] = str(weft_context)
@@ -1206,96 +1195,38 @@ class Manager(ServiceTask):
 
         return bool(self._active_child_launches)
 
-    def _child_launch_runtime_evidence_seen(self, tid: str) -> bool:
-        """Return whether a child launch produced durable runtime evidence."""
-
-        if self._latest_tid_runtime_handle(tid) is not None:
-            return True
-        log_queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
-        since_timestamp = int(tid) - 1 if tid.isdigit() else None
-        for payload, _timestamp in iter_queue_json_entries(
-            log_queue,
-            since_timestamp=since_timestamp,
-        ):
-            if payload.get("tid") == tid:
-                return True
-            if (
-                payload.get("child_tid") == tid
-                and payload.get("event") == "task_spawned"
-            ):
-                return True
-        return False
-
     def _clear_active_child_launch(self, tid: str) -> _ManagerChildLaunchRequest | None:
         """Remove active child-launch bookkeeping for one TID."""
 
         self._child_launch_started_ns.pop(tid, None)
-        self._child_launch_stale_retries.pop(tid, None)
         self._clear_admission_retry()
         return self._active_child_launches.pop(tid, None)
 
     def _retry_stale_child_launches(self) -> bool:
-        """Recover child-launch requests whose worker vanished without a result."""
-
+        """Missing launch results are ambiguous; reconcile without duplicate spawn [MF-6]."""
         if not self._active_child_launches or self._has_worker_activity():
             return False
-
         now_ns = time.time_ns()
-        grace_ns = int(MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS * 1_000_000_000)
         recovered = False
-        for child_tid, request in tuple(self._active_child_launches.items()):
-            started_ns = self._child_launch_started_ns.get(child_tid, now_ns)
-            if now_ns - started_ns < grace_ns:
+        for tid in tuple(self._active_child_launches):
+            started = self._child_launch_started_ns.get(tid, now_ns)
+            if now_ns - started < int(
+                MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS * 1e9
+            ):
                 continue
-
-            if self._child_launch_runtime_evidence_seen(child_tid):
-                self._clear_active_child_launch(child_tid)
+            request = self._clear_active_child_launch(tid)
+            if request is not None:
+                self._scheduler_undurable.add(tid)
                 if (
-                    request.reserved_queue is not None
-                    and request.message_timestamp is not None
+                    request.runtime_identity is not None
+                    and request.runtime_identity.scheduling_class != "internal"
                 ):
-                    try:
-                        self._queue(request.reserved_queue).delete(
-                            message_id=request.message_timestamp
-                        )
-                    except (BrokerError, OSError, RuntimeError):
-                        logger.debug(
-                            "Failed to acknowledge stale child launch %s",
-                            child_tid,
-                            exc_info=True,
-                        )
-                recovered = True
-                continue
-
-            retries = self._child_launch_stale_retries.get(child_tid, 0)
-            if retries >= MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT:
-                self._clear_active_child_launch(child_tid)
-                self._handle_child_launch_failure(
-                    _ManagerChildLaunchResult(
-                        request=request,
-                        error=RuntimeError(
-                            "child launch worker exited without returning a result"
-                        ),
-                    )
-                )
-                recovered = True
-                continue
-
-            self._child_launch_stale_retries[child_tid] = retries + 1
-            self._child_launch_started_ns[child_tid] = now_ns
-            try:
-                self._start_service_worker(
-                    MANAGER_CHILD_LAUNCH_WORKER_LANE,
-                    request_id=child_tid,
-                    initial_items=(request,),
-                )
-            except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-346] exception
-                self._clear_active_child_launch(child_tid)
-                self._handle_child_launch_failure(
-                    _ManagerChildLaunchResult(request=request, error=exc)
-                )
-            else:
-                self._child_launch_started_this_turn = True
+                    self._startup_feedback_tid = tid
+            self._reconcile_launch_now(tid)
+            logger.warning(
+                "Launch result missing for %s; retained reservation requires reconciliation",
+                tid,
+            )
             recovered = True
         return recovered
 
@@ -1372,6 +1303,7 @@ class Manager(ServiceTask):
         reserved_queue: str | None = None,
         message_timestamp: int | None = None,
         submitter_tid: str | None = None,
+        runtime_identity: RuntimeIdentity | None = None,
     ) -> bool:
         """Seed child inbox and submit broker-free child launch work.
 
@@ -1447,7 +1379,13 @@ class Manager(ServiceTask):
             service_key = autostart_source
 
         assert child_spec.tid is not None
-        admission = self._new_child_admission(child_spec.tid, submitter_tid)
+        identity = runtime_identity or runtime_identity_for_task(
+            child_spec,
+            self._db_path,
+            internal=source_queue == self._queue_names.get("internal_inbox")
+            or (source_queue is None and internal_role is not None),
+            config=self._manager_context().config,
+        )
         request = _ManagerChildLaunchRequest(
             child_spec=child_spec,
             task_cls=task_cls,
@@ -1461,7 +1399,7 @@ class Manager(ServiceTask):
             source_queue=source_queue,
             reserved_queue=reserved_queue,
             message_timestamp=message_timestamp,
-            admission=admission,
+            runtime_identity=identity,
             submitter_tid=submitter_tid,
         )
         self._active_child_launches[child_spec.tid] = request
@@ -1482,51 +1420,65 @@ class Manager(ServiceTask):
             return False
         return True
 
-    def _new_child_admission(
-        self, tid: str, submitter_tid: str | None
-    ) -> AdmissionRecord | None:
-        """Select immutable launch cost even when the gate is disabled [MA-1.8]."""
-        if self._admission_backend_name() != "postgres":
-            return None
-        return AdmissionRecord(
-            self._admission_task_connection_budget,
-            connection_owner_label(tid, canonical_runtime_context(self._db_path)),
-            submitter_tid,
-        )
+    def _publish_scheduler_checkpoint(self) -> bool:
+        """Publish all current obligations; retry failures without releasing custody."""
+        written = self._register_tid_state()
+        self._scheduler_checkpoint_dirty = not written
+        if written:
+            self._scheduler_undurable.difference_update(
+                tid
+                for tid, evidence in self._scheduler_residents.items()
+                if evidence.get("host_processes")
+            )
+        return written
 
     def _checkpoint_admission_launch(self, request: _ManagerChildLaunchRequest) -> None:
-        """Persist pending custody before starting the broker-free launch [MA-1.8]."""
-        if request.admission is None:
-            return
-        assert request.child_spec.tid is not None
-        self._admission_launches[request.child_spec.tid] = {
-            "admission": request.admission.to_dict(),
+        """Persist reservation custody before OS process creation [MANAGER.11]."""
+        identity = request.runtime_identity
+        assert identity is not None
+        evidence: dict[str, Any] = {
+            "context": identity.context,
+            "root_tid": identity.root_tid,
+            "submitter_tid": identity.submitter_tid,
+            "ancestry_tids": list(identity.ancestry_tids),
+            "scheduling_class": identity.scheduling_class,
+            "connection_owner": identity.connection_owner,
             "hostname": socket.gethostname(),
         }
-        if not self._register_tid_state():
-            raise RuntimeError("unable to publish admission launch evidence")
+        if request.reserved_queue is not None and request.message_timestamp is not None:
+            evidence.update(
+                source_queue=request.source_queue,
+                reserved_queue=request.reserved_queue,
+                request_id=request.message_timestamp,
+            )
+        self._scheduler_residents[identity.tid] = evidence
+        if not self._publish_scheduler_checkpoint():
+            self._scheduler_residents.pop(identity.tid)
+            raise RuntimeError("unable to publish launch custody checkpoint")
 
     def _checkpoint_spawned_admission(
         self, result: _ManagerChildLaunchResult
     ) -> dict[str, Any]:
-        """Retain exact wrapper identity in Manager and task_spawned evidence [MF-5]."""
-        request = result.request
-        if request.admission is None:
-            return {}
-        assert request.child_spec.tid is not None and result.process is not None
-        launch = self._admission_launches[request.child_spec.tid]
+        """Retain exact process identity before startup feedback releases [MF-5]."""
+        identity = result.request.runtime_identity
+        assert identity is not None and result.process is not None
+        evidence = self._scheduler_residents[identity.tid]
         pid = result.process.pid
         if isinstance(pid, int):
-            processes = self._admission_host_processes(launch)
+            processes = self._admission_host_processes(evidence)
             created = process_create_time(pid)
             if created is not None or pid not in processes:
                 processes[pid] = {"pid": pid, "create_time": created}
-            launch["host_processes"] = list(processes.values())
-        self._register_tid_state()
+            evidence["host_processes"] = list(processes.values())
+        evidence["launched_ns"] = result.launched_ns or time.time_ns()
+        self._scheduler_undurable.add(identity.tid)
+        if identity.scheduling_class != "internal":
+            self._startup_feedback_tid = identity.tid
+        self._publish_scheduler_checkpoint()
         return {
-            "admission": request.admission.to_dict(),
-            "hostname": launch["hostname"],
-            "host_processes": launch.get("host_processes", []),
+            key: copy.deepcopy(value)
+            for key, value in evidence.items()
+            if key not in {"source_queue", "reserved_queue", "request_id"}
         }
 
     def _run_child_launch_service_worker(
@@ -1588,8 +1540,7 @@ class Manager(ServiceTask):
                 request.child_spec,
                 config=self._weft_config,
                 detach_stdio=request.detach_stdio,
-                admission=request.admission,
-                submitter_tid=request.submitter_tid,
+                runtime_identity=request.runtime_identity,
             )
         except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-347] exception
             return _ManagerChildLaunchResult(request=request, error=exc)
@@ -1598,6 +1549,33 @@ class Manager(ServiceTask):
             process=process,
             launched_ns=time.time_ns(),
         )
+
+    def _register_launched_frontier(self, identity: RuntimeIdentity) -> None:
+        """Late results preserve adopted paths and released background places [MF-5]."""
+        evidence = self._scheduler_residents.get(identity.tid, {})
+        if evidence.get("full") == identity.tid and (
+            identity.scheduling_class != "finite"
+            or not self._scheduler_evidence_live(identity.tid, evidence)
+        ):
+            return
+        self._family_scheduler.launched(
+            PendingRequest(
+                int(identity.tid),
+                identity.root_tid or identity.tid,
+                identity.submitter_tid,
+                identity.ancestry_tids,
+            ),
+            identity.scheduling_class,
+        )
+
+    def _child_launch_already_committed(self, tid: str, process: BaseProcess) -> bool:
+        """Recognize one replayed local result without replacing process custody."""
+        existing = self._child_processes.get(tid)
+        if existing is None:
+            return False
+        if existing.process is not process:
+            raise RuntimeError("child launch result conflicts with its owned process")
+        return True
 
     def _commit_child_launch_success(
         self,
@@ -1611,6 +1589,8 @@ class Manager(ServiceTask):
         if process is None:
             raise RuntimeError("child launch worker returned no process")
         assert child_spec.tid is not None
+        if self._child_launch_already_committed(child_spec.tid, process):
+            return
         self._child_processes[child_spec.tid] = ManagedChild(
             process=process,
             ctrl_queue=child_spec.io.control.get("ctrl_in"),
@@ -1624,6 +1604,10 @@ class Manager(ServiceTask):
             message_timestamp=request.message_timestamp,
             launched_ns=result.launched_ns or time.time_ns(),
         )
+        identity = request.runtime_identity
+        assert identity is not None
+        self._register_launched_frontier(identity)
+        self._family_candidate = None
         self._register_child_sentinel(
             child_spec.tid, self._child_processes[child_spec.tid]
         )
@@ -1689,9 +1673,14 @@ class Manager(ServiceTask):
         request = result.request
         child_spec = request.child_spec
         error = result.error or RuntimeError("child launch failed")
-        if request.admission is not None:
+        if request.runtime_identity is not None:
             if result.process is None:
-                self._admission_launches.pop(str(child_spec.tid), None)
+                tid = str(child_spec.tid)
+                self._scheduler_residents.pop(tid, None)
+                self._scheduler_undurable.discard(tid)
+                if self._startup_feedback_tid == tid:
+                    self._startup_feedback_tid = None
+                    self._clear_startup_notification_interest()
                 self._register_tid_state()
             else:
                 self._checkpoint_spawned_admission(result)
@@ -1745,55 +1734,73 @@ class Manager(ServiceTask):
                     if row is None:
                         state.pending_request_id = None
 
-    def _handle_child_launch_result(
-        self,
-        result: _ManagerChildLaunchResult,
-    ) -> None:
-        """Commit one child-launch worker result on the manager reactor."""
-
-        child_tid = result.request.child_spec.tid
-        if child_tid is not None:
-            self._clear_active_child_launch(child_tid)
+    def _handle_child_launch_result(self, result: _ManagerChildLaunchResult) -> None:
+        """Commit launch, preserving reservation until task-state handoff [MANAGER.11]."""
+        tid = result.request.child_spec.tid
+        if tid is not None:
+            self._clear_active_child_launch(tid)
         self._child_launch_started_this_turn = True
         if result.error is not None:
             self._handle_child_launch_failure(result)
             return
-
         self._commit_child_launch_success(result)
-        request = result.request
-        if request.reserved_queue is None or request.message_timestamp is None:
-            return
+        self._reconcile_launch_now(str(tid))
+
+    def _clear_startup_notification_interest(self) -> None:
+        """Release the one transient reactor-owned observation handle [MA-1.8]."""
+        queue = getattr(self, "_startup_notification_queue", None)
+        self._startup_notification_tid = None
+        self._startup_notification_queue = None
+        self._startup_publication_id = None
+        self._startup_publication_pending = False
+        if queue is not None:
+            queue.close()
+
+    def _activity_wait_queues(self) -> list[Queue]:
+        """Include startup observation without adding a delivery route [MA-1.8]."""
+        queues = super()._activity_wait_queues()
+        tid = getattr(self, "_startup_feedback_tid", None)
+        if tid != getattr(self, "_startup_notification_tid", None):
+            self._clear_startup_notification_interest()
+            if tid is not None:
+                self._startup_notification_queue = self._manager_context().queue(
+                    task_state_queue_name(tid)
+                )
+                self._startup_notification_tid = tid
+        queue = getattr(self, "_startup_notification_queue", None)
+        if queue is not None:
+            queues.append(queue)
+        return queues
+
+    def _has_pending_observation(self) -> bool:
+        """Read a publication cursor on the reactor, never consume task state.
+
+        The waiter installs interest before this check. A rejected publication
+        advances only the cursor, retaining interest in subsequent evidence.
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
+        """
+        tid = getattr(self, "_startup_notification_tid", None)
+        if tid is None or tid != self._startup_feedback_tid:
+            return False
+        if self._startup_publication_pending:
+            return True
         try:
-            self._queue(request.reserved_queue).delete(
-                message_id=request.message_timestamp
-            )
-            self._emit_serve_log(
-                "spawn_ack_result",
-                component="spawn",
-                required_level="trace",
-                source_queue=request.source_queue,
-                reserved_queue=request.reserved_queue,
-                message_timestamp=request.message_timestamp,
-                child_tid=child_tid,
-                success=True,
-            )
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to acknowledge manager message %s",
-                request.message_timestamp,
-                exc_info=True,
-            )
-            self._emit_serve_log(
-                "spawn_ack_result",
-                component="spawn",
-                required_level="debug",
-                severity="warning",
-                source_queue=request.source_queue,
-                reserved_queue=request.reserved_queue,
-                message_timestamp=request.message_timestamp,
-                child_tid=child_tid,
-                success=False,
-            )
+            with self._get_connected_queue().get_connection() as broker:
+                rows = broker.peek_many(
+                    task_state_queue_name(tid),
+                    limit=1,
+                    order="newest",
+                    with_timestamps=True,
+                    after_timestamp=self._startup_publication_id,
+                )
+        except (BrokerError, OSError, RuntimeError, ValueError):
+            logger.debug("Startup publication observation deferred", exc_info=True)
+            return False
+        if not rows:
+            return False
+        self._startup_publication_id = int(rows[0][1])
+        self._startup_publication_pending = True
+        return True
 
     def _handle_service_worker_event(self, event: ServiceWorkerEvent) -> None:
         """Route child-launch service-worker events on the manager reactor."""
@@ -2058,8 +2065,6 @@ class Manager(ServiceTask):
 
         if queue_name == self._queue_names.get("internal_inbox"):
             return "internal"
-        if queue_name == self._queue_names.get("children_inbox"):
-            return "child"
         if queue_name == self._queue_names.get("inbox"):
             return "public"
         return None
@@ -2086,43 +2091,15 @@ class Manager(ServiceTask):
         return str(self._get_connected_queue().backend_name)
 
     def _observe_admission_usage(self) -> int | None:
-        """Return one backend-specific usage observation, or ``None`` on failure.
-
-        SQLite counts the union of live latest TID mappings (the shared
-        ``mapping_row_is_live`` probe, memoized), this Manager's in-flight
-        child launches, and its committed child processes. Each TID counts
-        once.
-        """
-
+        """Measure global actual PG pressure or SQLite live/unknown TIDs [MA-1.8]."""
         if self._admission_backend_name() == "postgres":
             self._admission_observation.clear()
-            if not self._admission_bootstrapped:
-                self._refresh_postgres_admission_evidence()
-            if self._admission_evidence_unavailable:
-                return None
             try:
                 usage = self._read_postgres_connection_usage()
-                obligations = [
-                    AdmissionRecord.from_mapping(evidence["admission"])
-                    for evidence in self._admission_launches.values()
-                ]
-                accounted = postgres_accounted_usage(
-                    usage["total"],
-                    usage["by_owner"],
-                    (
-                        (record.connection_owner, record.connection_budget)
-                        for record in obligations
-                    ),
-                )
-                self._admission_observation = {
-                    "observed": usage["total"],
-                    "prospective": accounted - usage["total"],
-                    "accounted": accounted,
-                }
-                return accounted
-            except (DatabaseError, ValueError):
+                self._admission_observation = {"observed": usage["total"]}
+                return usage["total"]
+            except (BrokerError, DatabaseError, OSError, RuntimeError, ValueError):
                 return None
-
         try:
             with self._get_connected_queue().get_connection() as broker:
                 mappings = latest_tid_state_entries_for_endpoint_resolution(
@@ -2133,45 +2110,183 @@ class Manager(ServiceTask):
                 for tid, payload in mappings.items()
                 if self._admission_mapping_is_live(tid, payload)
             }
-            self._admission_probe_memo = {
-                tid: memo
-                for tid, memo in self._admission_probe_memo.items()
-                if tid in mappings
-            }
             live_tids.update(self._active_child_launches)
             live_tids.update(self._child_processes)
+            live_tids.update(self._scheduler_residents)
             return len(live_tids)
         except (BrokerError, OSError, RuntimeError):
             return None
 
-    def _adopt_admission_evidence(self, tid: str, evidence: Mapping[str, Any]) -> None:
-        """Merge existing launch/task evidence without dropping worker identities [MA-1.8]."""
-        raw = evidence.get("admission")
-        if raw is None:
+    def _adopt_scheduler_evidence(self, tid: str, evidence: Mapping[str, Any]) -> None:
+        """Merge immutable lineage and scoped wrapper/worker evidence [OBS.6]."""
+        if evidence.get("root_tid") is None or evidence.get("role") == "manager":
             return
-        if not isinstance(raw, Mapping):
-            raise TypeError("invalid admission runtime record")
-        record = AdmissionRecord.from_mapping(raw)
-        if record.connection_owner != connection_owner_label(
-            tid, canonical_runtime_context(self._db_path)
+        identity = RuntimeIdentity(
+            tid=tid,
+            context=evidence["context"],
+            backend_name=self._admission_backend_name(),
+            root_tid=evidence["root_tid"],
+            submitter_tid=evidence.get("submitter_tid"),
+            ancestry_tids=tuple(evidence["ancestry_tids"]),
+            scheduling_class=evidence["scheduling_class"],
+            connection_owner=evidence["connection_owner"],
+        )
+        if identity.context != canonical_runtime_context(self._db_path):
+            raise ValueError("scheduler evidence belongs to another context")
+        previous = self._scheduler_residents.get(tid, {})
+        for key in (
+            "root_tid",
+            "submitter_tid",
+            "ancestry_tids",
+            "scheduling_class",
+            "connection_owner",
+            "context",
         ):
-            raise ValueError("admission owner does not match the task context")
-        previous = self._admission_launches.get(tid, {})
-        if previous.get("admission", raw) != raw:
-            raise ValueError("admission evidence changed during a task lifetime")
-        merged = dict(previous)
-        merged["admission"] = record.to_dict()
-        if "hostname" in evidence:
-            merged["hostname"] = evidence["hostname"]
+            if key in previous and previous[key] != evidence.get(key):
+                raise ValueError("task scheduling identity changed")
+        merged = {**previous, **evidence}
         processes = self._admission_host_processes(previous)
         processes.update(self._admission_host_processes(evidence))
         handle_payload = evidence.get("runtime_handle")
         if isinstance(handle_payload, Mapping):
             handle = RunnerHandle.from_dict(handle_payload)
-            for pid, create_time in handle.scoped_host_processes():
-                processes[pid] = {"pid": pid, "create_time": create_time}
+            for pid, created in handle.scoped_host_processes():
+                processes[pid] = {"pid": pid, "create_time": created}
         merged["host_processes"] = list(processes.values())
-        self._admission_launches[tid] = merged
+        if processes:
+            merged.setdefault("launched_ns", time.time_ns())
+        self._scheduler_residents[tid] = merged
+        if merged["host_processes"] != previous.get("host_processes"):
+            self._scheduler_checkpoint_dirty = True
+        if (
+            self._admission_bootstrapped
+            and processes
+            and identity.scheduling_class == "finite"
+            and tid not in self._active_child_launches
+            and tid not in self._family_scheduler.resident_tids
+            and self._scheduler_evidence_live(tid, merged)
+        ):
+            self._family_scheduler.recover(
+                tid, identity.root_tid or tid, identity.ancestry_tids
+            )
+            self._family_candidate = None
+
+    def _scheduler_evidence_live(self, tid: str, evidence: Mapping[str, Any]) -> bool:
+        """Unknown identity remains resident; only scoped staleness permits pop."""
+        processes = evidence.get("host_processes")
+        if not processes or evidence.get("hostname") != socket.gethostname():
+            return True
+        handle = RunnerHandle(
+            runner="host",
+            kind="process",
+            id=str(processes[0]["pid"]),
+            control={"authority": "host-pid"},
+            observations={"host_processes": processes},
+        )
+        return (
+            analyze_liveness(tid, {"runtime_handle": handle.to_dict()}).evidence
+            != "stale"
+        )
+
+    def _snapshot_hands_off_launch(
+        self, evidence: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> bool:
+        """Require self-contained task lineage and exact process identity [MANAGER.11]."""
+        for key in (
+            "context",
+            "root_tid",
+            "submitter_tid",
+            "ancestry_tids",
+            "scheduling_class",
+            "connection_owner",
+        ):
+            if evidence.get(key) != payload.get(key):
+                return False
+        expected = self._admission_host_processes(evidence)
+        observed = self._admission_host_processes(payload)
+        return bool(expected) and all(
+            pid in observed
+            and process["create_time"] is not None
+            and process["create_time"] == observed[pid]["create_time"]
+            for pid, process in expected.items()
+        )
+
+    def _ack_launch_custody(self, tid: str, *, broker: Any) -> None:
+        """Exact ACK before dropping its checkpoint reference [MANAGER.11]."""
+        evidence = self._scheduler_residents.get(tid)
+        self._scheduler_undurable.discard(tid)
+        if evidence is None or evidence.get("reserved_queue") is None:
+            return
+        queue_name, request_id = evidence["reserved_queue"], evidence["request_id"]
+        broker.delete_message_ids(queue_name, [request_id])
+        if (
+            broker.peek_one(
+                queue_name, exact_timestamp=request_id, include_claimed=True
+            )
+            is not None
+        ):
+            raise RuntimeError("launch acknowledgement not confirmed")
+        for key in ("source_queue", "reserved_queue", "request_id"):
+            evidence.pop(key, None)
+        self._scheduler_checkpoint_dirty = True
+
+    def _advance_launch_custody(
+        self, tid: str, payload: Mapping[str, Any] | None, *, broker: Any
+    ) -> None:
+        """Startup release and durable handoff are separate transitions [MA-1.8]."""
+        evidence = self._scheduler_residents.get(tid)
+        if evidence is None:
+            return
+        handoff = payload is not None and self._snapshot_hands_off_launch(
+            evidence, payload
+        )
+        if handoff:
+            # A result can be lost before local frontier commit. Snapshot handoff
+            # must restore that path in both immediate and periodic reconciliation.
+            if (
+                evidence["scheduling_class"] == "finite"
+                and tid not in self._family_scheduler.resident_tids
+                and self._scheduler_evidence_live(tid, evidence)
+            ):
+                self._family_scheduler.recover(
+                    tid, evidence["root_tid"], tuple(evidence["ancestry_tids"])
+                )
+                self._family_candidate = None
+            self._ack_launch_custody(tid, broker=broker)
+        if self._startup_feedback_tid != tid:
+            return
+        elapsed = (time.time_ns() - evidence.get("launched_ns", time.time_ns())) / 1e9
+        ready = handoff
+        if not ready and self._admission_backend_name() == "postgres":
+            ready = (
+                self._read_postgres_connection_usage()["by_owner"].get(
+                    evidence["connection_owner"], 0
+                )
+                > 0
+            )
+        if not ready and elapsed >= MANAGER_ADMISSION_RECHECK_SECONDS:
+            latest = read_task_state_snapshot(
+                self._manager_context(), tid, broker=broker
+            )
+            if latest and self._snapshot_hands_off_launch(evidence, latest[1]):
+                self._ack_launch_custody(tid, broker=broker)
+                handoff = True
+            self._emit_serve_log_rate_limited(
+                "startup_feedback_snapshot_missing",
+                component="spawn",
+                required_level="info",
+                severity="warning",
+                key="startup_feedback_snapshot_missing",
+                state={"child_tid": tid},
+                log_fields={"child_tid": tid},
+            )
+            ready = bool(evidence.get("host_processes"))
+        if ready and (handoff or tid not in self._scheduler_undurable):
+            self._startup_feedback_tid = None
+            self._clear_startup_notification_interest()
+            self._family_scheduler.release_background(tid)
+            self._family_candidate = None
+            self._scheduler_checkpoint_dirty = True
 
     @staticmethod
     def _admission_host_processes(
@@ -2196,40 +2311,31 @@ class Manager(ServiceTask):
         return processes
 
     def _record_reaped_admission(self, tid: str) -> None:
-        """Refresh one exited wrapper; evidence failure retains debt without blocking reap [MA-1.8]."""
+        """Refresh one exited wrapper; evidence failure retains custody without blocking reap [MA-1.8]."""
         # While unhealthy, bounded maintenance owns recovery. Later reaps keep
-        # their debt and cannot displace the first failed record from retry.
-        if self._admission_evidence_unavailable or tid not in self._admission_launches:
+        # their custody and cannot displace the first failed record from retry.
+        if self._admission_evidence_unavailable or tid not in self._scheduler_residents:
             return
         try:
             latest = read_task_state_snapshot(self._manager_context(), tid)
             if latest is not None:
-                self._adopt_admission_evidence(tid, latest[1])
+                self._adopt_scheduler_evidence(tid, latest[1])
         except (BrokerError, OSError, RuntimeError, ValueError, TypeError):
             self._admission_evidence_unavailable = True
-            self._admission_launches = {
-                tid: self._admission_launches[tid],
-                **self._admission_launches,
+            self._scheduler_residents = {
+                tid: self._scheduler_residents[tid],
+                **self._scheduler_residents,
             }
             self._admission_refresh_after = 0.0
             logger.debug(
                 "Unable to refresh reaped task admission evidence", exc_info=True
             )
             return
-        self._retire_admission_launches((tid,))
+        self._retire_scheduler_residents((tid,))
 
-    def _refresh_postgres_admission_evidence(self) -> None:
-        """Bootstrap once, then reconcile a bounded round-robin batch [MA-1.8].
-
-        Launch/reap events update exact tasks immediately. Ordinary admission
-        never calls this after bootstrap. Failed items remain first for retry;
-        only a successful maintenance pass clears the unavailable observation.
-        Missing rows preserve cached identities for the shared liveness probe.
-        """
-        if (
-            self._admission_backend_name() != "postgres"
-            or time.monotonic() < self._admission_refresh_after
-        ):
+    def _refresh_scheduler_evidence(self) -> None:
+        """Bootstrap once, then reconcile a bounded round-robin batch [MF-5]."""
+        if time.monotonic() < self._admission_refresh_after:
             return
         try:
             with self._get_connected_queue().get_connection() as broker:
@@ -2237,31 +2343,34 @@ class Manager(ServiceTask):
                     snapshots = latest_task_state_rows(
                         self._manager_context(), broker=broker
                     )
-                    self._bootstrap_postgres_admission_evidence(snapshots, broker)
-                    for tid, (_stamp, payload) in snapshots.items():
-                        self._adopt_admission_evidence(tid, payload)
-                    selected = tuple(self._admission_launches)
+                    self._bootstrap_scheduler_evidence(snapshots, broker)
+                    selected = tuple(self._scheduler_residents)
                 else:
                     selected = tuple(
                         islice(
-                            self._admission_launches,
+                            self._scheduler_residents,
                             MANAGER_ADMISSION_REFRESH_BATCH_SIZE,
                         )
                     )
-                    for tid in selected:
-                        latest = read_task_state_snapshot(
-                            self._manager_context(), tid, broker=broker
-                        )
-                        if latest is not None:
-                            self._adopt_admission_evidence(tid, latest[1])
-                        # Rotate only successful reads, so a failed item remains
-                        # first and cannot be hidden by a different good batch.
-                        evidence = self._admission_launches.pop(tid)
-                        self._admission_launches[tid] = evidence
-            self._retire_admission_launches(selected)
-        except (BrokerError, OSError, RuntimeError, ValueError, TypeError):
+                self._maintain_orphan_reservations(broker)
+                for tid in selected:
+                    latest = read_task_state_snapshot(
+                        self._manager_context(), tid, broker=broker
+                    )
+                    if latest is not None:
+                        self._adopt_scheduler_evidence(tid, latest[1])
+                    self._advance_launch_custody(
+                        tid, latest[1] if latest else None, broker=broker
+                    )
+                    if tid in self._scheduler_residents:
+                        evidence = self._scheduler_residents.pop(tid)
+                        self._scheduler_residents[tid] = evidence
+            self._retire_scheduler_residents(selected)
+            if self._scheduler_checkpoint_dirty:
+                self._publish_scheduler_checkpoint()
+        except (BrokerError, OSError, RuntimeError, ValueError, TypeError, KeyError):
             self._admission_evidence_unavailable = True
-            logger.debug("Unable to reconcile admission evidence", exc_info=True)
+            logger.debug("Unable to reconcile scheduler evidence", exc_info=True)
         else:
             self._admission_bootstrapped = True
             self._admission_evidence_unavailable = False
@@ -2270,107 +2379,263 @@ class Manager(ServiceTask):
                 time.monotonic() + MANAGER_ADMISSION_RECHECK_SECONDS
             )
 
-    def _bootstrap_postgres_admission_evidence(
+    def _bootstrap_scheduler_evidence(
         self, snapshots: Mapping[str, tuple[int, dict[str, Any]]], broker: Any
     ) -> None:
-        """Reconstruct obligations from existing Manager/task snapshots [MA-1.8]."""
-        manager_tids = {self.tid}
+        """Adopt orphan paths from task snapshots and reservation checkpoints [MF-5]."""
+        covered: set[str] = set()
         for manager_tid, (_stamp, payload) in snapshots.items():
-            launches = payload.get("admission_launches")
-            if payload.get("role") == "manager" and isinstance(launches, Mapping):
-                manager_tids.add(manager_tid)
-                for tid, evidence in launches.items():
-                    if (
-                        isinstance(tid, str)
-                        and is_task_tid(tid)
-                        and isinstance(evidence, Mapping)
-                    ):
-                        self._adopt_admission_evidence(tid, evidence)
-        owners = collect_service_owner_records(
-            iter_queue_json_entries(
-                self._queue(WEFT_SERVICES_REGISTRY_QUEUE), strict=True
-            ),
-            service_key=self._manager_service_key,
-            service_type=SERVICE_TYPE_MANAGER,
-        )
-        manager_tids.update(record.owner_tid for record in owners.records)
-        spawn_events: list[dict[str, Any]] = []
-        for event, _stamp in iter_queue_json_entries(
-            self._queue(WEFT_GLOBAL_LOG_QUEUE), strict=True
-        ):
-            if event.get("event") == "task_spawned" and is_task_tid(event.get("tid")):
-                manager_tids.add(event["tid"])
-                if event.get("admission") is not None:
-                    # The event's runtime_handle belongs to the reporting
-                    # Manager. Recover only child-owned launch evidence, and
-                    # avoid retaining historical TaskSpecs during bootstrap.
-                    spawn_events.append(
-                        {
-                            key: event[key]
-                            for key in (
-                                "child_tid",
-                                "admission",
-                                "hostname",
-                                "host_processes",
-                            )
-                            if key in event
-                        }
-                    )
-        reserved_tids = self._reserved_admission_tids(broker, manager_tids)
-        for event in spawn_events:
-            tid = event.get("child_tid")
-            if isinstance(tid, str) and tid in reserved_tids:
-                self._adopt_admission_evidence(tid, event)
-
-    @staticmethod
-    def _reserved_admission_tids(broker: Any, manager_tids: Iterable[str]) -> set[str]:
-        """Consult Manager reservations, never task work or source backlog [MA-1.8]."""
-        tids: set[str] = set()
-        for manager_tid in manager_tids:
-            for suffix in (
-                QUEUE_RESERVED_SUFFIX,
-                QUEUE_CHILDREN_RESERVED_SUFFIX,
-                QUEUE_INTERNAL_RESERVED_SUFFIX,
+            checkpoint = payload.get("scheduler_frontiers")
+            if payload.get("role") != "manager" or not isinstance(checkpoint, Mapping):
+                continue
+            residents = checkpoint.get("residents", {})
+            if not isinstance(residents, Mapping):
+                raise TypeError("invalid Manager resident checkpoint")
+            if manager_tid != self.tid and self._admission_mapping_is_live(
+                manager_tid, payload
             ):
-                with closing_queue_iterator(
-                    broker.peek_generator(
-                        f"T{manager_tid}.{suffix}", with_timestamps=True
-                    )
-                ) as rows:
-                    for _body, timestamp in cast(Iterator[tuple[str, int]], rows):
-                        if is_task_tid(str(timestamp)):
-                            tids.add(str(timestamp))
-        return tids
-
-    def _retire_admission_launches(self, tids: Iterable[str] | None = None) -> None:
-        """Reuse LivenessMonitor's process judgment for local budgets [MA-1.8].
-
-        Terminal publication is unnecessary after a crash. Omit terminal hints
-        from the analysis so unresolved process identity never becomes credit.
-        This grants no authority to delete task state.
-        """
-        retired = []
-        for tid in tuple(self._admission_launches if tids is None else tids):
-            evidence = self._admission_launches.get(tid)
-            if tid in self._active_child_launches or evidence is None:
+                covered.update(residents)
                 continue
-            processes = evidence.get("host_processes")
-            if not processes or evidence.get("hostname") != socket.gethostname():
+            for tid, evidence in residents.items():
+                if isinstance(tid, str) and isinstance(evidence, Mapping):
+                    self._adopt_scheduler_evidence(tid, evidence)
+        for tid, (_stamp, payload) in snapshots.items():
+            if tid not in covered:
+                self._adopt_scheduler_evidence(tid, payload)
+        self._recover_scheduler_paths()
+        self._restore_family_pending(broker)
+        self._recover_unlaunched_reservations(snapshots, broker)
+        if not self._publish_scheduler_checkpoint():
+            raise RuntimeError("unable to checkpoint adopted scheduler responsibility")
+
+    def _recover_unlaunched_reservations(
+        self,
+        snapshots: Mapping[str, tuple[int, dict[str, Any]]],
+        broker: Any,
+    ) -> None:
+        """A retained current-protocol checkpoint proves pre-fence custody [MF-6.2]."""
+        for owner_tid, (_stamp, payload) in snapshots.items():
+            checkpoint = payload.get("scheduler_frontiers")
+            if (
+                owner_tid == self.tid
+                or payload.get("role") != "manager"
+                or not isinstance(checkpoint, Mapping)
+                or self._admission_mapping_is_live(owner_tid, payload)
+            ):
                 continue
-            handle = RunnerHandle(
-                runner="host",
-                kind="process",
-                id=str(processes[0]["pid"]),
-                control={"authority": "host-pid"},
-                observations={"host_processes": processes},
+            source = checkpoint.get("source_queue")
+            reserved = checkpoint.get("reserved_queue")
+            if source == self._queue_names["inbox"] and isinstance(reserved, str):
+                self._orphan_reserved[reserved] = (source, 0)
+        self._maintain_orphan_reservations(broker)
+
+    def _maintain_orphan_reservations(self, broker: Any) -> None:
+        """Retry one exact, bounded dead-Manager reservation page [MF-6.2]."""
+        if not self._orphan_reserved:
+            return
+        queue_name = next(iter(self._orphan_reserved))
+        source, cursor = self._orphan_reserved[queue_name]
+        with closing_queue_iterator(
+            broker.peek_generator(
+                queue_name,
+                with_timestamps=True,
+                after_timestamp=cursor,
+                include_claimed=True,
             )
-            observation = analyze_liveness(tid, {"runtime_handle": handle.to_dict()})
-            if observation.evidence == "stale":
-                retired.append(tid)
-        for tid in retired:
-            self._admission_launches.pop(tid)
-        if retired:
-            self._register_tid_state()
+        ) as rows:
+            page = list(
+                islice(
+                    cast(Iterator[tuple[str, int]], rows),
+                    MANAGER_FAMILY_CLASSIFY_PAGE_SIZE,
+                )
+            )
+        protected = {
+            (entry.get("reserved_queue"), entry.get("request_id"))
+            for entry in self._scheduler_residents.values()
+        }
+        for _body, request_id in page:
+            cursor = request_id
+            if (queue_name, request_id) in protected:
+                continue
+            snapshot = read_task_state_snapshot(
+                self._manager_context(), str(request_id), broker=broker
+            )
+            if snapshot is not None:
+                continue
+            # Broker moves preserve the original ID/body and claim eligibility.
+            broker.move_one(queue_name, source, exact_timestamp=request_id)
+        self._orphan_reserved.pop(queue_name)
+        if page:
+            self._orphan_reserved[queue_name] = (
+                source,
+                cursor if len(page) == MANAGER_FAMILY_CLASSIFY_PAGE_SIZE else 0,
+            )
+
+    def _recover_scheduler_paths(self) -> None:
+        """Build maximal live ancestry paths once during bootstrap [MF-5]."""
+        for tid, evidence in self._scheduler_residents.items():
+            if not evidence.get("host_processes"):
+                # Process.start may have succeeded after the durable pre-launch
+                # fence. Without a receipt, neither replay nor new admission is safe.
+                self._scheduler_undurable.add(tid)
+            if self._scheduler_evidence_live(tid, evidence):
+                self._family_scheduler.recover(
+                    tid,
+                    evidence["root_tid"],
+                    tuple(evidence["ancestry_tids"]),
+                    evidence["scheduling_class"],
+                    defer=True,
+                )
+        self._family_scheduler.finish_recovery()
+
+    def _family_request_identity(self, body: str, request_id: int) -> RuntimeIdentity:
+        """Reuse canonical transport validation for classification and restored hints."""
+        payload = json.loads(body)
+        self._spawn_submitter_tid(payload, self._queue_names["inbox"])
+        spec = self._build_child_spec(payload, request_id)
+        if spec is None:
+            raise ValueError("invalid task spec")
+        return runtime_identity_for_task(
+            spec,
+            self._db_path,
+            submitted_by=payload.get("submitted_by"),
+            config=self._manager_context().config,
+        )
+
+    def _read_family_hint(
+        self, queue_name: str, body: str, label_id: int, *, broker: Any
+    ) -> PendingRequest | None:
+        """A pending hint grants no ancestry or launch authority independently of source."""
+        try:
+            token = json.loads(body)
+            if (
+                not isinstance(token, Mapping)
+                or set(token)
+                != {
+                    "schema",
+                    "request_id",
+                    "root_tid",
+                    "submitter_tid",
+                    "ancestry_tids",
+                }
+                or token["schema"] != WEFT_FAMILY_PENDING_SCHEMA
+            ):
+                return None
+            request_id = token["request_id"]
+            if type(request_id) is not int or not isinstance(
+                token["ancestry_tids"], list
+            ):
+                return None
+            source = broker.peek_one(
+                self._queue_names["inbox"],
+                exact_timestamp=request_id,
+                with_timestamps=False,
+            )
+            if source is None:
+                return None
+            identity = self._family_request_identity(source, request_id)
+            request = PendingRequest(
+                request_id,
+                identity.root_tid or str(request_id),
+                identity.submitter_tid,
+                identity.ancestry_tids,
+                label_id,
+            )
+            if (
+                request.queue_name != queue_name
+                or token["root_tid"] != request.root_tid
+                or token["submitter_tid"] != request.submitter_tid
+                or tuple(token["ancestry_tids"]) != request.ancestry_tids
+            ):
+                return None
+            return request
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    def _repair_family_pending(self, broker: Any) -> None:
+        """Remove orphan/duplicate hints in bounded resumable pages, not per leaf."""
+        if not self._family_label_names:
+            self._family_label_names.extend(
+                name
+                for name in broker.list_queues(prefix=WEFT_FAMILY_PENDING_PREFIX)
+                if ".pending." in name
+            )
+        if not self._family_label_names:
+            return
+        queue_name = self._family_label_names[0]
+        with closing_queue_iterator(
+            broker.peek_generator(
+                queue_name,
+                with_timestamps=True,
+                after_timestamp=self._family_label_after,
+            )
+        ) as rows:
+            page = list(
+                islice(
+                    cast(Iterator[tuple[str, int]], rows),
+                    MANAGER_FAMILY_CLASSIFY_PAGE_SIZE,
+                )
+            )
+        for body, label_id in page:
+            request = self._read_family_hint(queue_name, body, label_id, broker=broker)
+            cached = (
+                self._family_scheduler.pending(request.request_id) if request else None
+            )
+            if request is None or (
+                cached is not None and cached.label_message_id != label_id
+            ):
+                broker.delete_message_ids(queue_name, [label_id])
+            elif cached is None:
+                self._family_scheduler.add_pending(request)
+                self._family_candidate = None
+            self._family_label_after = label_id
+        if len(page) < MANAGER_FAMILY_CLASSIFY_PAGE_SIZE:
+            self._family_label_names.popleft()
+            self._family_label_after = 0
+
+    def _restore_family_pending(self, broker: Any) -> None:
+        """Restore validated source-backed hints once, never trusting a projection [OBS.6b]."""
+        for queue_name in broker.list_queues(prefix=WEFT_FAMILY_PENDING_PREFIX):
+            if ".pending." not in queue_name:
+                continue
+            with closing_queue_iterator(
+                broker.peek_generator(queue_name, with_timestamps=True)
+            ) as rows:
+                tokens = list(cast(Iterator[tuple[str, int]], rows))
+            for body, label_id in tokens:
+                request = self._read_family_hint(
+                    queue_name, body, label_id, broker=broker
+                )
+                if (
+                    request is None
+                    or self._family_scheduler.pending(request.request_id) is not None
+                ):
+                    broker.delete_message_ids(queue_name, [label_id])
+                else:
+                    self._family_scheduler.add_pending(request)
+
+    def _retire_scheduler_residents(self, tids: Iterable[str] | None = None) -> None:
+        """Retire paths only with positive scoped process exit [MF-5]."""
+        changed = False
+        for tid in tuple(self._scheduler_residents if tids is None else tids):
+            evidence = self._scheduler_residents.get(tid)
+            if evidence is None or tid in self._active_child_launches:
+                continue
+            if not evidence.get("host_processes") or self._scheduler_evidence_live(
+                tid, evidence
+            ):
+                continue
+            with self._get_connected_queue().get_connection() as broker:
+                self._ack_launch_custody(tid, broker=broker)
+            self._family_scheduler.retire(tid)
+            self._scheduler_residents.pop(tid, None)
+            if self._startup_feedback_tid == tid:
+                self._startup_feedback_tid = None
+                self._clear_startup_notification_interest()
+            changed = True
+        if changed:
+            self._publish_scheduler_checkpoint()
+            self._family_candidate = None
             self._clear_admission_retry()
 
     def _admission_mapping_is_live(
@@ -2444,7 +2709,7 @@ class Manager(ServiceTask):
         fields["reason"] = (
             "usage_unavailable"
             if decision.capacity is None
-            else "candidate_budget_does_not_fit"
+            else "measured_capacity_exhausted"
             if blocked_lanes
             else "capacity_available"
         )
@@ -2464,9 +2729,6 @@ class Manager(ServiceTask):
             )
         if backend == "postgres":
             fields.update(self._admission_observation)
-            fields["candidate_budget"] = self._admission_task_connection_budget
-            if decision.capacity is not None:
-                fields["child_limit"] = decision.capacity["child_limit"]
         if unavailable:
             fields["error"] = "admission_usage_unavailable"
         self._emit_serve_log_rate_limited(
@@ -2494,7 +2756,7 @@ class Manager(ServiceTask):
         if lane is None:
             return
         if lane == "internal":
-            self._admission_blocked_lanes.update(("public", "child", "internal"))
+            self._admission_blocked_lanes.update(("public", "internal"))
         else:
             self._admission_blocked_lanes.add(lane)
         self._admission_retry_after_ns = time.time_ns() + int(
@@ -2593,8 +2855,6 @@ class Manager(ServiceTask):
         if self._internal_spawn_queue_attached():
             queues["internal_requests"] = self._queue_names["internal_inbox"]
             queues["internal_reserved"] = self._queue_names["internal_reserved"]
-            queues["children_requests"] = self._queue_names["children_inbox"]
-            queues["children_reserved"] = self._queue_names["children_reserved"]
         payload = build_manager_service_payload(
             context=self._manager_context(),
             tid=self.tid,
@@ -2953,8 +3213,6 @@ class Manager(ServiceTask):
         if self._internal_spawn_queue_attached():
             queues["internal_requests"] = self._queue_names["internal_inbox"]
             queues["internal_reserved"] = self._queue_names["internal_reserved"]
-            queues["children_requests"] = self._queue_names["children_inbox"]
-            queues["children_reserved"] = self._queue_names["children_reserved"]
         payload = build_manager_service_payload(
             context=self._manager_context(),
             tid=self.tid,
@@ -3441,8 +3699,6 @@ class Manager(ServiceTask):
             "outbox",
             "internal_requests",
             "internal_reserved",
-            "children_requests",
-            "children_reserved",
         ):
             value = record.get(key)
             if isinstance(value, str) and value:
@@ -3884,63 +4140,14 @@ class Manager(ServiceTask):
             return True
 
     def _requeue_public_reserved_spawn_requests_before_yield(
-        self,
-        *,
-        leader_tid: str,
+        self, *, leader_tid: str
     ) -> bool:
-        """Return public reserved spawn requests before a no-child leadership yield.
-
-        A manager that loses leadership may have already moved public spawn
-        requests into its reserved queue. If no child launch is active, those
-        rows are not in progress. Requeue them before yielding so the elected
-        leader can dispatch them.
-
-        Spec: [MA-1.4], [MF-6]
-        """
-
-        reserved_queue = self._queue_names["reserved"]
-        source_queue = self._queue_names["inbox"]
-        moved_count = 0
-        reserved = self._queue(reserved_queue)
-        while True:
-            try:
-                batch = reserved.move_many(
-                    source_queue,
-                    limit=64,
-                    require_unclaimed=False,
-                    with_timestamps=False,
-                )
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to requeue public reserved spawn messages before "
-                    "leadership yield",
-                    exc_info=True,
-                )
-                self._emit_serve_log(
-                    "manager_leadership_reserved_requeue_failed",
-                    component="manager",
-                    required_level="debug",
-                    severity="warning",
-                    leader_tid=leader_tid,
-                    reserved_queue=reserved_queue,
-                    source_queue=source_queue,
-                )
-                return not self._reserved_queue_has_any_message(reserved_queue)
-            if not batch:
-                break
-            moved_count += len(batch)
-
-        if moved_count:
-            self._invalidate_leadership_work_cache()
-            self._emit_serve_log(
-                "manager_leadership_reserved_requeued",
-                component="manager",
-                required_level="debug",
-                leader_tid=leader_tid,
-                reserved_queue=reserved_queue,
-                source_queue=source_queue,
-                moved_count=moved_count,
-            )
+        """Yield unlaunched public reservations without replaying live custody [MF-6]."""
+        self._apply_spawn_reserved_policy(
+            ReservedPolicy.REQUEUE,
+            source_queue=self._queue_names["inbox"],
+            reserved_queue=self._queue_names["reserved"],
+        )
         return True
 
     # ------------------------------------------------------------------
@@ -4634,9 +4841,26 @@ class Manager(ServiceTask):
         return not self._stalled_control_retry_active(timestamp)
 
     def _queue_has_pending(self, queue: Queue) -> bool:
-        ctrl_name = self._queue_names.get("ctrl_in")
-        if ctrl_name and getattr(queue, "name", None) == ctrl_name:
+        """Retained launch custody and full frontiers are not reactor work [MF-6]."""
+        name = getattr(queue, "name", None)
+        if name == self._queue_names.get("ctrl_in"):
             return self._manager_control_pending_is_actionable()
+        if name in {
+            reserved for reserved, _source in self._spawn_reserved_queue_pairs()
+        }:
+            return False
+        if name == self._queue_names.get("inbox"):
+            if (
+                self._startup_feedback_tid is not None
+                or self._admission_evidence_unavailable
+                or self._scheduler_undurable
+            ):
+                return self._family_classification_pending
+            return (
+                self._family_classification_pending
+                or bool(self._family_invalid)
+                or self._peek_family_candidate() is not None
+            )
         return super()._queue_has_pending(queue)
 
     def _has_pending_messages(self) -> bool:
@@ -4645,7 +4869,8 @@ class Manager(ServiceTask):
         This is a scheduler precheck as well as a predicate. When it proves
         non-control work exists, the next queue drain must probe all queues so
         pending public work cannot wait behind the periodic active-queue scan.
-        Reserved queues remain actionable while their source lane is blocked.
+        Retained reserved custody never counts as actionable work.
+        An empty eligible set alone does not prove the source itself is empty.
         """
 
         ctrl_name = self._queue_names.get("ctrl_in")
@@ -4659,7 +4884,9 @@ class Manager(ServiceTask):
             if self._queue_has_pending(config.queue):
                 self._mark_pending_messages_prechecked()
                 return True
-            if lane is not None:
+            if lane is not None and (
+                name != self._queue_names["inbox"] or not config.queue.has_pending()
+            ):
                 empty_spawn_lanes.add(lane)
                 if (
                     len(empty_spawn_lanes) == len(self._spawn_inbox_queue_names())
@@ -4763,28 +4990,33 @@ class Manager(ServiceTask):
         return not self._draining and not self.should_stop
 
     def _process_queue_message(
-        self,
-        queue_name: str,
-        inactive_candidates: set[str],
+        self, queue_name: str, inactive_candidates: set[str]
     ) -> bool:
-        """Stop spawn-source draining once one child launch is in flight.
-
-        ``MultiQueueWatcher`` can process more than one active queue in a
-        scheduling pass. Manager child launch is intentionally single-flight,
-        so spawn sources must not reserve another row after the first launch
-        starts. Leaving the source row unreserved lets the next reactor turn
-        claim it after the child-launch worker reports back.
-        """
-
-        if queue_name in self._spawn_inbox_queue_names() and (
-            self._has_active_child_launches() or self._child_launch_started_this_turn
-        ):
-            inactive_candidates.add(queue_name)
+        """Single-flight selection, validation under pressure, and no custody PEEK spin."""
+        reserved_names = {name for name, _source in self._spawn_reserved_queue_pairs()}
+        if queue_name in reserved_names:
             return False
-        if queue_name in self._spawn_inbox_queue_names() and not (
-            self._admission_allows_queue(queue_name)
-        ):
-            return False
+        if queue_name in self._spawn_inbox_queue_names():
+            if (
+                self._has_active_child_launches()
+                or self._child_launch_started_this_turn
+            ):
+                inactive_candidates.add(queue_name)
+                return False
+            if queue_name == self._queue_names["inbox"]:
+                if (
+                    self._startup_feedback_tid is not None
+                    or self._admission_evidence_unavailable
+                    or self._scheduler_undurable
+                ):
+                    return False
+                if not self._family_invalid and self._peek_family_candidate() is None:
+                    return False
+            invalid_only = queue_name == self._queue_names["inbox"] and bool(
+                self._family_invalid
+            )
+            if not invalid_only and not self._admission_allows_queue(queue_name):
+                return False
         return super()._process_queue_message(queue_name, inactive_candidates)
 
     def _read_broker_timestamp(self, *, force: bool = False) -> int:
@@ -4967,7 +5199,7 @@ class Manager(ServiceTask):
                 protected_tids=sorted(protected_tids),
             )
 
-    def _apply_spawn_reserved_policy(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-010] exception
+    def _apply_spawn_reserved_policy(
         self,
         policy: ReservedPolicy,
         *,
@@ -4975,62 +5207,43 @@ class Manager(ServiceTask):
         reserved_queue: str,
         message_timestamp: int | None = None,
     ) -> None:
-        """Apply a reserved policy to one manager spawn source/reserved pair."""
-
+        """Exact disposition of positively unlaunched rows only [MF-6], [MANAGER.11]."""
         if policy is ReservedPolicy.KEEP:
             return
-
         reserved = self._queue(reserved_queue)
-
-        if policy is ReservedPolicy.CLEAR:
-            if message_timestamp is not None:
-                try:
-                    reserved.delete(message_id=message_timestamp)
-                except (BrokerError, OSError, RuntimeError):
-                    logger.warning(
-                        "Failed to clear reserved spawn message %s in %s; residue retained",
-                        message_timestamp,
-                        reserved_queue,
-                        exc_info=True,
+        if message_timestamp is None:
+            with closing_queue_iterator(
+                reserved.peek_generator(with_timestamps=True, include_claimed=True)
+            ) as rows:
+                ids = [stamp for _body, stamp in cast(Iterator[tuple[str, int]], rows)]
+        else:
+            ids = [message_timestamp]
+        protected = {
+            entry.get("request_id")
+            for entry in self._scheduler_residents.values()
+            if entry.get("reserved_queue") == reserved_queue
+        }
+        for stamp in ids:
+            if stamp in protected:
+                continue
+            try:
+                if policy is ReservedPolicy.CLEAR:
+                    reserved.delete(message_id=stamp)
+                elif policy is ReservedPolicy.REQUEUE:
+                    moved = reserved.move_one(
+                        source_queue, exact_timestamp=stamp, with_timestamps=True
                     )
-            else:
-                while reserved.read_many(64):
-                    continue
-            return
-
-        if policy is ReservedPolicy.REQUEUE:
-            if message_timestamp is not None:
-                try:
-                    reserved.move_one(
-                        source_queue,
-                        exact_timestamp=message_timestamp,
-                        require_unclaimed=True,
-                        with_timestamps=False,
-                    )
-                    return
-                except (BrokerError, OSError, RuntimeError):
-                    logger.debug(
-                        "Failed to requeue reserved spawn message %s",
-                        message_timestamp,
-                        exc_info=True,
-                    )
-            while True:
-                try:
-                    batch = reserved.move_many(
-                        source_queue,
-                        limit=64,
-                        require_unclaimed=True,
-                        with_timestamps=False,
-                    )
-                except (BrokerError, OSError, RuntimeError):
-                    logger.debug(
-                        "Failed moving reserved spawn messages back to %s",
-                        source_queue,
-                        exc_info=True,
-                    )
-                    break
-                if not batch:
-                    break
+                    if moved is not None and source_queue == self._queue_names["inbox"]:
+                        body, request_id = moved
+                        with self._get_connected_queue().get_connection() as broker:
+                            self._index_family_request(body, request_id, broker=broker)
+            except (BrokerError, OSError, RuntimeError):
+                logger.warning(
+                    "Reserved spawn disposition failed on %s for request %s; custody retained",
+                    reserved_queue,
+                    stamp,
+                    exc_info=True,
+                )
 
     def _apply_reserved_policy(
         self,
@@ -5168,6 +5381,13 @@ class Manager(ServiceTask):
             reserved_queue=reserved_queue,
             message_timestamp=timestamp,
             submitter_tid=submitter_tid,
+            runtime_identity=runtime_identity_for_task(
+                child_spec,
+                self._db_path,
+                submitted_by=payload.get("submitted_by"),
+                internal=source_queue == self._queue_names.get("internal_inbox"),
+                config=self._manager_context().config,
+            ),
         )
         if not launched:
             if self._draining or self.should_stop:
@@ -5191,33 +5411,7 @@ class Manager(ServiceTask):
         ):
             return
 
-        try:
-            self._queue(reserved_queue).delete(message_id=timestamp)
-            self._emit_serve_log(
-                "spawn_ack_result",
-                component="spawn",
-                required_level="trace",
-                source_queue=source_queue,
-                reserved_queue=reserved_queue,
-                message_timestamp=timestamp,
-                child_tid=child_spec.tid,
-                success=True,
-            )
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to acknowledge manager message %s", timestamp, exc_info=True
-            )
-            self._emit_serve_log(
-                "spawn_ack_result",
-                component="spawn",
-                required_level="debug",
-                severity="warning",
-                source_queue=source_queue,
-                reserved_queue=reserved_queue,
-                message_timestamp=timestamp,
-                child_tid=child_spec.tid,
-                success=False,
-            )
+        self._reconcile_launch_now(str(child_spec.tid))
 
     def _release_unlaunched_spawn_request(
         self,
@@ -5247,30 +5441,186 @@ class Manager(ServiceTask):
             reason=reason,
         )
 
+    def _reconcile_launch_now(self, tid: str) -> None:
+        """Exact handoff observation without namespace replay on launch completion."""
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                latest = read_task_state_snapshot(
+                    self._manager_context(), tid, broker=broker
+                )
+                if latest is not None:
+                    self._adopt_scheduler_evidence(tid, latest[1])
+                self._advance_launch_custody(
+                    tid, latest[1] if latest else None, broker=broker
+                )
+            if self._scheduler_checkpoint_dirty:
+                self._publish_scheduler_checkpoint()
+        except (
+            BrokerError,
+            DatabaseError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+        ):
+            logger.debug("Launch evidence handoff deferred", exc_info=True)
+
+    def _peek_family_candidate(self) -> PendingRequest | None:
+        if self._family_candidate is None:
+            self._family_candidate = self._family_scheduler.select()
+        return self._family_candidate
+
+    def _index_family_request(self, body: str, request_id: int, *, broker: Any) -> None:
+        """Canonical classification writes only a compact secondary reference [OBS.6b]."""
+        if (
+            self._family_scheduler.pending(request_id) is not None
+            or request_id in self._family_invalid
+        ):
+            return
+        try:
+            identity = self._family_request_identity(body, request_id)
+        except (ValueError, TypeError, KeyError):
+            if len(self._family_invalid) < MANAGER_FAMILY_CLASSIFY_PAGE_SIZE:
+                self._family_invalid[request_id] = None
+            return
+        request = PendingRequest(
+            request_id,
+            identity.root_tid or str(request_id),
+            identity.submitter_tid,
+            identity.ancestry_tids,
+        )
+        token = {
+            "schema": WEFT_FAMILY_PENDING_SCHEMA,
+            "request_id": request_id,
+            "root_tid": request.root_tid,
+            "submitter_tid": request.submitter_tid,
+            "ancestry_tids": list(request.ancestry_tids),
+        }
+        label_id = int(broker.write(request.queue_name, json.dumps(token)))
+        self._family_scheduler.add_pending(
+            PendingRequest(
+                request_id,
+                request.root_tid,
+                request.submitter_tid,
+                request.ancestry_tids,
+                label_id,
+            )
+        )
+        self._family_candidate = None
+
+    def _classify_family_requests(self) -> None:
+        """Advance bounded discovery even when admission/frontiers are closed [MF-6]."""
+        if (
+            not self._admission_bootstrapped
+            or time.monotonic() < self._family_index_retry_after
+        ):
+            return
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                queue_name = self._queue_names["inbox"]
+                with closing_queue_iterator(
+                    broker.peek_generator(
+                        queue_name,
+                        with_timestamps=True,
+                        after_timestamp=self._family_classify_after,
+                    )
+                ) as rows:
+                    page = list(
+                        islice(
+                            cast(Iterator[tuple[str, int]], rows),
+                            MANAGER_FAMILY_CLASSIFY_PAGE_SIZE,
+                        )
+                    )
+                for body, stamp in page:
+                    self._index_family_request(body, stamp, broker=broker)
+                    self._family_classify_after = stamp
+                self._family_classification_pending = (
+                    len(page) == MANAGER_FAMILY_CLASSIFY_PAGE_SIZE
+                )
+                if time.monotonic() >= self._family_repair_due:
+                    with closing_queue_iterator(
+                        broker.peek_generator(
+                            queue_name,
+                            with_timestamps=True,
+                            after_timestamp=self._family_repair_after,
+                        )
+                    ) as rows:
+                        repair = list(
+                            islice(
+                                cast(Iterator[tuple[str, int]], rows),
+                                MANAGER_FAMILY_CLASSIFY_PAGE_SIZE,
+                            )
+                        )
+                    for body, stamp in repair:
+                        self._index_family_request(body, stamp, broker=broker)
+                        self._family_repair_after = stamp
+                    if len(repair) < MANAGER_FAMILY_CLASSIFY_PAGE_SIZE:
+                        self._family_repair_after = 0
+                    self._repair_family_pending(broker)
+                    self._family_repair_due = (
+                        time.monotonic() + MANAGER_ADMISSION_RECHECK_SECONDS
+                    )
+        except (BrokerError, OSError, RuntimeError):
+            self._family_classification_pending = False
+            self._family_index_retry_after = (
+                time.monotonic() + MANAGER_ADMISSION_RECHECK_SECONDS
+            )
+            self._family_repair_due = self._family_index_retry_after
+            logger.debug(
+                "Family index repair deferred; primary acceptance retained",
+                exc_info=True,
+            )
+
+    def _fetch_next_message(self, config: QueueRuntimeConfig) -> tuple[str, int] | None:
+        """Reserve the exact eligible primary ID, consuming only its pending hint [MF-6]."""
+        if config.name != self._queue_names["inbox"]:
+            return super()._fetch_next_message(config)
+        request = None if self._family_invalid else self._peek_family_candidate()
+        stamp = (
+            next(iter(self._family_invalid))
+            if self._family_invalid
+            else (request.request_id if request else None)
+        )
+        if stamp is None:
+            return None
+        assert config.reserved_queue_name is not None
+        result = config.queue.move_one(
+            config.reserved_queue_name, exact_timestamp=stamp, with_timestamps=True
+        )
+        # A concurrent return can make the exact request pending again. Claimed
+        # rows are consumed/deletion-pending, so they cannot retain a candidate.
+        if result is None and config.queue.peek_one(exact_timestamp=stamp) is not None:
+            return None
+        self._family_invalid.pop(stamp, None)
+        if request is not None:
+            try:
+                with self._get_connected_queue().get_connection() as broker:
+                    broker.delete_message_ids(
+                        request.queue_name, [request.label_message_id]
+                    )
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Pending hint cleanup deferred after durable reservation",
+                    exc_info=True,
+                )
+            self._family_scheduler.remove_pending(stamp)
+        self._family_candidate = None
+        return result
+
     def _spawn_submitter_tid(
         self, payload: Mapping[str, Any], source_queue: str
     ) -> str | None:
-        """Validate runtime custody independently from ancestry tags [MF-6]."""
+        """Validate same-context lineage on the primary or trusted internal source [MF-6]."""
         if not isinstance(payload, Mapping):
             raise TypeError("spawn request must be a JSON object")
         submitted_by = payload.get("submitted_by")
-        if source_queue != self._queue_names.get("children_inbox"):
-            if submitted_by is not None:
-                raise ValueError("submitted_by is only valid on the child spawn source")
+        if submitted_by is None:
             return None
-        if not isinstance(submitted_by, Mapping) or set(submitted_by) != {
-            "tid",
-            "context",
-        }:
-            raise ValueError(
-                "child spawn requests require a runtime submitter envelope"
-            )
-        tid = submitted_by.get("tid")
-        if not isinstance(tid, str) or not is_task_tid(tid):
-            raise ValueError("child submitter must be a full task TID")
-        if submitted_by.get("context") != canonical_runtime_context(self._db_path):
-            raise ValueError("child submitter context does not match the Manager")
-        return tid
+        if not isinstance(submitted_by, Mapping):
+            raise TypeError("submitted_by must be a runtime lineage record")
+        return validate_submission_lineage(
+            submitted_by, canonical_runtime_context(self._db_path)
+        )[1]
 
     def _build_child_spec(
         self, payload: dict[str, Any], timestamp: int
@@ -7549,6 +7899,7 @@ class Manager(ServiceTask):
 
         self._draining = True
         self._active_cleanup_deadline = deadline
+        self._clear_startup_notification_interest()
         failures: list[BaseException] = []
 
         def attempt(operation: Callable[[], None]) -> None:
@@ -7577,6 +7928,7 @@ class Manager(ServiceTask):
     def _abort_partial_initialization(self) -> None:
         """Close Manager-owned adapters during constructor unwind."""
 
+        self._clear_startup_notification_interest()
         failures: list[BaseException] = []
         adapter = getattr(self, "_child_sentinel_adapter", None)
         if adapter is not None:
@@ -7595,13 +7947,17 @@ class Manager(ServiceTask):
         """Return dispatch retry and bounded evidence-maintenance deadlines."""
 
         timeouts = []
+        if self._admission_bootstrapped:
+            timeouts.append(max(0.0, self._family_repair_due - time.monotonic()))
+        if self._family_classification_pending:
+            timeouts.append(0.0)
         if self._admission_retry_after_ns > 0:
             timeouts.append(
                 self._timeout_until_ns(self._admission_retry_after_ns, now_ns=now_ns)
             )
-        if self._admission_backend_name() == "postgres" and (
+        if (
             not self._admission_bootstrapped
-            or self._admission_launches
+            or self._scheduler_residents
             or self._admission_evidence_unavailable
         ):
             timeouts.append(max(0.0, self._admission_refresh_after - time.monotonic()))
@@ -7810,6 +8166,11 @@ class Manager(ServiceTask):
         self._leader_actionable_work_cache = None
         self._leader_check_turn = None
         self._drain_worker_results()
+        if self._startup_publication_pending:
+            tid = self._startup_notification_tid
+            self._startup_publication_pending = False
+            if tid is not None and tid == self._startup_feedback_tid:
+                self._reconcile_launch_now(tid)
         self._retry_stale_child_launches()
         self._drain_control_queue_first()
         if self._draining:
@@ -7819,7 +8180,8 @@ class Manager(ServiceTask):
             self._continue_shutdown_drain()
             self._drain_worker_results()
             return
-        self._refresh_postgres_admission_evidence()
+        self._refresh_scheduler_evidence()
+        self._classify_family_requests()
         self._emit_manager_loop_summary()
         self._refresh_manager_registration()
         self._cleanup_stale_internal_reserved_queues()
@@ -7850,19 +8212,7 @@ class Manager(ServiceTask):
                 name in self._active_queues for name in self._spawn_inbox_queue_names()
             )
         ):
-            child_inbox = self._queue_names.get("children_inbox")
-            if child_inbox is not None:
-                public_drained = self._drain_spawn_requests_from_queue(
-                    queue_name=child_inbox,
-                    max_messages=MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES,
-                    event="child_spawn_drain",
-                    component="spawn",
-                )
-            if (
-                not self._has_active_child_launches()
-                and not self._child_launch_started_this_turn
-            ):
-                public_drained += self._drain_public_spawn_requests()
+            public_drained += self._drain_public_spawn_requests()
         if public_drained:
             self._last_activity_ns = time.time_ns()
         if self._draining:

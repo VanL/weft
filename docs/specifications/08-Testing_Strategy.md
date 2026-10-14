@@ -59,13 +59,48 @@ assertions require a named producer-closure boundary, meaning proof that the
 relevant producer can no longer emit the event being counted, before ordered
 history is asserted.
 
-_Implementation mapping_: `tests/helpers/reactor_driver.py::drive_until` owns
+_Implementation mapping_: `tests/helpers/pytest_pg_runtime.py` owns isolated physical PostgreSQL proof fixtures through the canonical `bin/pytest-pg` lifecycle. `tests/helpers/reactor_driver.py::drive_until` owns
 the shared timing engine; `tests/system/test_reactor_driver.py` owns its direct
 contract tests.
 
 The point is not to maximize suite count. The point is to keep the current
 contract exercised where it matters and to make backend-sensitive drift easy to
 see.
+
+### Contention is a theory-possession stop condition
+
+If an investigator wants to reduce contention to make tests pass, they must
+stop corrective work and acceptance reruns immediately. Treat the failure as
+evidence of a gap in their possession of the program theory, not as a reason
+to weaken the load. This applies to reducing workers, serializing tests, or
+otherwise relieving pressure to obtain green. It does not by itself prove
+that the runtime implementation is the faulty layer.
+
+Preserve the original command, backend, concurrency, load, and failure
+evidence. Re-read the relevant program theory and governing contract; state
+what ownership, resource lifetime, progress, or cost behavior the model
+predicted, and identify where the observed behavior contradicts it. Locate
+the causal flaw or false premise in the implementation, harness, test
+contract, substrate, environment assumptions, or investigator's model before
+choosing a correction. Labels such as "contention", "flaky", "pre-existing",
+or "shared resource" are not causal explanations. Adding resources or time
+cannot substitute for that explanation either.
+
+Only after this stop and re-derivation may a lower-load experiment test a
+stated falsifiable hypothesis. Label it diagnostic; a pass does not resolve
+the original failure or count as acceptance. Verify the justified correction
+under the original load and standard concurrency, using the governing
+expectation if a faulty oracle was corrected. A predeclared shared-resource
+test protocol is not a workaround; introducing or expanding one to obtain a
+pass triggers the same stop.
+
+Owner: the investigator; reviewers check the causal explanation and rerun
+evidence. Boundary: load-sensitive investigation and acceptance, not a
+promise of success under unbounded load. Required action: keep the original
+failure open until the conceptual gap and correction are evidenced.
+
+Theory: [WT-7] and [ALT-WT-017] in `docs/program-theory.md`. Operational
+guidance: engineering principle 4.3 and testing-patterns Pattern 1.
 
 ### Staged CI and Release Proof [TS-4]
 
@@ -380,6 +415,8 @@ bug evidence.
   mixed into this canonical file.
 
 ## Related Plans
+
+- [Contention theory stop condition](../plans/2026-10-14-contention-theory-stop-condition.md) records the owner correction and its investigation rule.
 
 - [Xdist Title Contention Investigation](../plans/2026-09-14-xdist-title-contention-plan.md) records native evidence and the infrastructure-only title boundary.
 - [Load-Sensitive Test Lifecycle Fixes](../plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) records harness driver closure, owned CLI contexts, readiness barriers, and optional run diagnostics.

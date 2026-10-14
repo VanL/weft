@@ -152,11 +152,29 @@ real concurrency bug.
 
 **What to do**
 
-- Use the existing fixtures instead of rolling your own isolated broker setup.
-- Do not add blanket xdist serialization for broker-heavy fixtures. Fix the
-  isolation leak or implementation race, and only use a narrow test-local
-  serialization marker if the test is explicitly about a shared external
-  resource that cannot be isolated.
+Apply Testing Strategy [TS-0]'s contention stop condition before trying to
+obtain green. This also applies to the urge to reduce load before a rerun.
+
+- **Stop and keep the counterexample.** Pause corrective work and acceptance
+  reruns. Record the original command, backend, worker count, workload, and
+  failure artifacts; a passing isolated run does not resolve it.
+- **Re-derive the model.** Read program theory [WT-7] and [ALT-WT-017], the
+  governing spec, and the actual path. State the ownership, lifetime, progress,
+  or cost behavior that should hold under this load. Locate the causal flaw or
+  false premise before choosing a fix. Use real broker/process evidence and
+  the existing fixtures; read SimpleBroker when the concern belongs there.
+- **Keep experiments distinct from acceptance.** Only after that stop may a
+  lower-load probe test a stated falsifiable hypothesis. Label it diagnostic
+  and retain the original failure as open. Correct the identified boundary or
+  faulty oracle, then verify the governing expectation under the original
+  pressure and normal concurrency.
+
+A predeclared test protocol for a shared external resource that cannot be
+isolated is valid. Adding or expanding serialization after a failure to make
+it pass triggers this same stop; saying "shared resource" is not sufficient.
+Do not relieve the symptom with more resources or longer waits without the
+causal explanation either. The operational contract lives in
+`docs/specifications/08-Testing_Strategy.md` [TS-0].
 
 ### Pattern 2: Mocked Queues Hide the Real Bug
 
@@ -328,12 +346,14 @@ last live PID; locked paths may also surface through 8.3 short-name segments
 
 **What to do**
 
-- **Size waits for worst-case pressure, and fix it in the shared harness
-  default.** Default subprocess/completion/startup waits must survive
-  full-suite xdist and release-gate load, not just isolated local runs. When
-  several unrelated tests fail at the same fixed timeout, raise the shared
-  `WeftTestHarness` default and lock it with a regression test — do not raise
-  one flaky caller's per-test limit.
+- **Apply Pattern 1 before changing waits.** Clustered fixed-timeout failures
+  are evidence to investigate, not automatic permission to raise the shared
+  harness default. First identify the contradicted ownership, progress, or
+  timing assumption. If evidence proves a harness budget or deadline oracle
+  is wrong, correct that boundary and verify it under full-suite xdist and
+  release-gate load. Keep legitimate shared harness waits in the shared
+  default with regression proof; do not extend a caller's timeout merely to
+  hide the failure or relax a product latency contract.
 - **Assert the real terminal boundary, not the first event.** Wait for a dead
   PID (via `psutil`/`os.kill`, treating zombies as exited — `pid_exists()`
   alone is too strict cross-platform), for the TID-mapping surface to show no

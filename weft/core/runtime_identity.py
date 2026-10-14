@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from simplebroker import (
@@ -24,12 +23,20 @@ from simplebroker import (
     serialize_config,
 )
 from weft._constants import resolve_runtime_config
+from weft.core.taskspec import TaskSpec
 from weft.helpers.message_ids import normalize_exact_message_id
 
 
 def _validate_runtime_tid(tid: str) -> None:
     if not isinstance(tid, str) or normalize_exact_message_id(tid) == 0:
         raise ValueError("runtime TID must be a nonzero full TID")
+
+
+def _validate_ancestry(ancestry: tuple[str, ...]) -> None:
+    for ancestor in ancestry:
+        _validate_runtime_tid(ancestor)
+    if len(set(ancestry)) != len(ancestry):
+        raise ValueError("runtime ancestry must be acyclic")
 
 
 def _runtime_target_snapshot(target: BrokerTarget | str | None) -> BrokerTarget | None:
@@ -78,52 +85,16 @@ def connection_owner_label(tid: str, context: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class AdmissionRecord:
-    """Immutable Manager-authored PostgreSQL launch obligation [MF-5]."""
-
-    connection_budget: int
-    connection_owner: str
-    submitter_tid: str | None = None
-
-    def __post_init__(self) -> None:
-        if type(self.connection_budget) is not int or self.connection_budget <= 0:
-            raise ValueError("connection_budget must be a positive integer")
-        if (
-            not isinstance(self.connection_owner, str)
-            or re.fullmatch(r"[!-~]{1,54}", self.connection_owner) is None
-        ):
-            raise ValueError("connection_owner must be 1-54 nonspace ASCII characters")
-        if self.submitter_tid is not None:
-            _validate_runtime_tid(self.submitter_tid)
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> AdmissionRecord:
-        """Validate system launch evidence at its transport boundary [MF-5]."""
-        if set(payload) != {"connection_budget", "connection_owner", "submitter_tid"}:
-            raise ValueError("admission record has unsupported or missing fields")
-        return cls(
-            connection_budget=payload["connection_budget"],
-            connection_owner=payload["connection_owner"],
-            submitter_tid=payload["submitter_tid"],
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return detached transport/snapshot data [MF-5]."""
-        return {
-            "connection_budget": self.connection_budget,
-            "connection_owner": self.connection_owner,
-            "submitter_tid": self.submitter_tid,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeIdentity:
     """Identity installed once in a dedicated wrapper or host worker [MF-1]."""
 
     tid: str
     context: str
     backend_name: str
-    admission: AdmissionRecord | None = None
+    root_tid: str | None = None
+    ancestry_tids: tuple[str, ...] = ()
+    scheduling_class: Literal["finite", "background", "internal"] = "finite"
+    connection_owner: str | None = None
     broker_target: BrokerTarget | str | None = None
     context_root: str | None = None
     config: Config | None = None
@@ -134,8 +105,13 @@ class RuntimeIdentity:
         object.__setattr__(
             self, "broker_target", _runtime_target_snapshot(self.broker_target)
         )
-        if not self.context or not self.backend_name:
-            raise ValueError("runtime context and backend must be nonempty")
+        if (
+            not isinstance(self.context, str)
+            or not isinstance(self.backend_name, str)
+            or not self.context
+            or not self.backend_name
+        ):
+            raise ValueError("runtime context and backend must be nonempty strings")
         if not self.context.startswith(f"{self.backend_name}:"):
             raise ValueError("runtime context does not match its backend")
         if (
@@ -145,15 +121,26 @@ class RuntimeIdentity:
             raise ValueError("runtime broker target does not match its context")
         if self.submitter_tid is not None:
             _validate_runtime_tid(self.submitter_tid)
-        if self.admission is not None:
-            if self.backend_name != "postgres":
-                raise ValueError("connection admission evidence requires PostgreSQL")
-            if self.admission.connection_owner != connection_owner_label(
-                self.tid, self.context
-            ):
-                raise ValueError("admission owner does not match runtime identity")
-            if self.admission.submitter_tid != self.submitter_tid:
-                raise ValueError("admission submitter does not match runtime identity")
+        root_tid = self.tid if self.root_tid is None else self.root_tid
+        _validate_runtime_tid(root_tid)
+        object.__setattr__(self, "root_tid", root_tid)
+        if not isinstance(self.ancestry_tids, tuple):
+            raise TypeError("runtime ancestry must be an immutable tuple")
+        _validate_ancestry(self.ancestry_tids)
+        if self.tid in self.ancestry_tids:
+            raise ValueError("runtime ancestry must exclude the task itself")
+        if self.submitter_tid is None and (root_tid != self.tid or self.ancestry_tids):
+            raise ValueError("root runtime identity cannot have ancestors")
+        if not isinstance(self.scheduling_class, str) or self.scheduling_class not in {
+            "finite",
+            "background",
+            "internal",
+        }:
+            raise ValueError("unsupported runtime scheduling class")
+        owner = connection_owner_label(self.tid, self.context)
+        if self.connection_owner is not None and self.connection_owner != owner:
+            raise ValueError("connection owner does not match runtime identity")
+        object.__setattr__(self, "connection_owner", owner)
 
     def to_dict(self) -> dict[str, Any]:
         """Carry data, never a live broker resource, across spawn [SB-0.4]."""
@@ -163,7 +150,10 @@ class RuntimeIdentity:
             "tid": self.tid,
             "context": self.context,
             "backend_name": self.backend_name,
-            "admission": self.admission.to_dict() if self.admission else None,
+            "root_tid": self.root_tid,
+            "ancestry_tids": list(self.ancestry_tids),
+            "scheduling_class": self.scheduling_class,
+            "connection_owner": self.connection_owner,
             "broker_target": serialize_broker_target(target)
             if target is not None
             else None,
@@ -181,7 +171,10 @@ class RuntimeIdentity:
             "tid",
             "context",
             "backend_name",
-            "admission",
+            "root_tid",
+            "ancestry_tids",
+            "scheduling_class",
+            "connection_owner",
             "broker_target",
             "context_root",
             "submitter_tid",
@@ -194,17 +187,20 @@ class RuntimeIdentity:
         target = (
             deserialize_broker_target(raw_target) if raw_target is not None else None
         )
-        raw_admission = payload.get("admission")
-        if raw_admission is not None and not isinstance(raw_admission, Mapping):
-            raise ValueError("runtime admission must be a record")
+        raw_ancestry = payload["ancestry_tids"]
+        if not isinstance(raw_ancestry, list):
+            raise TypeError("runtime ancestry transport must be a list")
+        if payload["root_tid"] is None or payload["connection_owner"] is None:
+            raise ValueError("runtime identity requires root and owner")
         raw_config = payload.get("config")
         return cls(
             tid=payload["tid"],
             context=payload["context"],
             backend_name=payload["backend_name"],
-            admission=AdmissionRecord.from_mapping(raw_admission)
-            if raw_admission is not None
-            else None,
+            root_tid=payload["root_tid"],
+            ancestry_tids=tuple(raw_ancestry),
+            scheduling_class=payload["scheduling_class"],
+            connection_owner=payload["connection_owner"],
             broker_target=target,
             context_root=payload.get("context_root"),
             submitter_tid=payload.get("submitter_tid"),
@@ -233,10 +229,77 @@ def install_runtime_identity(identity: RuntimeIdentity) -> None:
         # Optional backend dependency: SQLite must never load PostgreSQL helpers.
         from simplebroker_pg import bind_connection_owner
 
-        owner = (
-            identity.admission.connection_owner
-            if identity.admission is not None
-            else connection_owner_label(identity.tid, identity.context)
-        )
-        bind_connection_owner(owner)
+        assert identity.connection_owner is not None
+        bind_connection_owner(identity.connection_owner)
     _runtime_identity = identity
+
+
+def submission_lineage(identity: RuntimeIdentity) -> dict[str, Any]:
+    """Carry finite ancestry through transparent background/internal callers [MF-1]."""
+    ancestry = identity.ancestry_tids
+    if identity.scheduling_class == "finite":
+        ancestry = (*ancestry, identity.tid)
+    return {
+        "tid": identity.tid,
+        "context": identity.context,
+        "root_tid": identity.root_tid,
+        "ancestry_tids": list(ancestry),
+    }
+
+
+def validate_submission_lineage(
+    payload: Mapping[str, Any], context: str
+) -> tuple[str, str, tuple[str, ...]]:
+    """Validate the single current same-context spawn-envelope contract [MF-1]."""
+    if set(payload) != {"tid", "context", "root_tid", "ancestry_tids"}:
+        raise ValueError("submission lineage has unsupported or missing fields")
+    if payload["context"] != context:
+        raise ValueError("submission lineage context does not match destination")
+    _validate_runtime_tid(payload["tid"])
+    _validate_runtime_tid(payload["root_tid"])
+    ancestry = payload["ancestry_tids"]
+    if not isinstance(ancestry, list):
+        raise TypeError("submission ancestry must be a list")
+    _validate_ancestry(tuple(ancestry))
+    return payload["root_tid"], payload["tid"], tuple(ancestry)
+
+
+def runtime_identity_for_task(
+    spec: TaskSpec,
+    target: BrokerTarget | str,
+    *,
+    submitted_by: Mapping[str, Any] | None = None,
+    internal: bool = False,
+    config: Config | None = None,
+) -> RuntimeIdentity:
+    """Derive launch identity from validated TaskSpec and trusted route [MF-1]."""
+    assert spec.tid is not None
+    context = canonical_runtime_context(target)
+    root_tid = spec.tid
+    submitter_tid: str | None = None
+    ancestry: tuple[str, ...] = ()
+    if submitted_by is not None:
+        root_tid, submitter_tid, ancestry = validate_submission_lineage(
+            submitted_by, context
+        )
+    scheduling_class: Literal["finite", "background", "internal"] = (
+        "internal"
+        if internal
+        else "background"
+        if spec.spec.persistent or spec.spec.interactive
+        else "finite"
+    )
+    return RuntimeIdentity(
+        tid=spec.tid,
+        context=context,
+        backend_name=target.backend_name
+        if isinstance(target, BrokerTarget)
+        else "sqlite",
+        root_tid=root_tid,
+        submitter_tid=submitter_tid,
+        ancestry_tids=ancestry,
+        scheduling_class=scheduling_class,
+        broker_target=target,
+        context_root=spec.spec.weft_context,
+        config=config,
+    )

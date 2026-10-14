@@ -35,6 +35,8 @@ See also:
 
 ## Related Plans
 
+- [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) specifies reactor-owned notification-only startup interests while delivery routes remain fixed.
+
 - [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements task-local completion publication and matching retention.
 
 - [Watcher SIGINT lock safety](../plans/2026-09-21-watcher-sigint-lock-safety-plan.md) - keeps deferred standalone SIGINT handling free of lock-taking operations.
@@ -430,11 +432,11 @@ scope for equivalent work.
 
 Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
-A live task reactor has fixed, declared construction topology. BaseTask declares
+A live task reactor has fixed, declared delivery topology. Notification-only interests remain reactor-owned and may change independently under [QUEUE.7–8]; they do not become delivery routes. The Manager startup interest is defined in [MA-1.8]. BaseTask declares
 `inbox`, `reserved`, `outbox`, `ctrl_in`, and `ctrl_out`, plus its fixed support
 routes for lifecycle logs, TID mappings, streaming sessions, and endpoint
 registration. A task subtype extends that inventory for every additional
-construction-fixed watched lane, reserve destination, support route, or durable
+construction-fixed delivery lane, reserve destination, support route, or durable
 route whose aliasing would change the task's meaning. Role names are pairwise
 distinct unless that subtype explicitly names and tests an intentional semantic
 alias, such as PipelineEdge `source_queue == inbox` and

@@ -26,11 +26,11 @@ from weft.core import runtime_identity as identity_module
 from weft.core.launcher import launch_task_process
 from weft.core.runners.host import HostTaskRunner
 from weft.core.runtime_identity import (
-    AdmissionRecord,
     RuntimeIdentity,
     canonical_runtime_context,
     connection_owner_label,
     install_runtime_identity,
+    runtime_identity_for_task,
 )
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
@@ -46,13 +46,27 @@ def observe_runtime_identity(_payload: Any) -> str:
     identity = identity_module.get_runtime_identity()
     if identity is None:
         return json.dumps({"tid": None})
-    return json.dumps({"tid": identity.tid, "context": identity.context})
+    return json.dumps(
+        {
+            "tid": identity.tid,
+            "context": identity.context,
+            "root_tid": getattr(identity, "root_tid", None),
+            "ancestry_tids": list(getattr(identity, "ancestry_tids", ())),
+            "scheduling_class": getattr(identity, "scheduling_class", None),
+            "connection_owner": getattr(identity, "connection_owner", None),
+            "frontier_limit": build_context(
+                create_dirs=False, create_database=False
+            ).config["SCHEDULER_MAX_FRONTIERS"],
+        }
+    )
 
 
+@pytest.mark.parametrize("lineage_only", [False, True])
 def test_spawned_function_receives_task_identity(
     broker_env: BrokerEnv,
     weft_harness: WeftTestHarness,
     workdir: Path,
+    lineage_only: bool,
 ) -> None:
     """The wrapper must transport its identity before application code runs.
 
@@ -67,8 +81,21 @@ def test_spawned_function_receives_task_identity(
         weft_context=str(workdir),
     )
     make_queue(spec.io.inputs["inbox"]).write("payload")
+    lineage = (
+        RuntimeIdentity(
+            tid=unique_tid,
+            context=service_context_key(weft_harness.context),
+            backend_name=weft_harness.context.backend_name,
+        )
+        if lineage_only
+        else None
+    )
     process = launch_task_process(
-        Consumer, target, spec, config=weft_harness.context.config
+        Consumer,
+        target,
+        spec,
+        config={**dict(weft_harness.context.config), "SCHEDULER_MAX_FRONTIERS": 7},
+        runtime_identity=lineage,
     )
     assert process.pid is not None
     weft_harness.register_pid(process.pid, unique_tid)
@@ -81,7 +108,30 @@ def test_spawned_function_receives_task_identity(
         assert json.loads(result) == {
             "tid": unique_tid,
             "context": service_context_key(weft_harness.context),
+            "root_tid": unique_tid,
+            "ancestry_tids": [],
+            "scheduling_class": "finite",
+            "connection_owner": connection_owner_label(
+                unique_tid, service_context_key(weft_harness.context)
+            ),
+            "frontier_limit": 7,
         }
+        mappings = [
+            json.loads(body)
+            for body in make_queue(task_state_queue_name(unique_tid)).peek_generator()
+        ]
+        assert mappings
+        assert all(row["root_tid"] == unique_tid for row in mappings)
+        assert all(row["ancestry_tids"] == [] for row in mappings)
+        assert all(row["scheduling_class"] == "finite" for row in mappings)
+        assert all(
+            row["context"] == service_context_key(weft_harness.context)
+            for row in mappings
+        )
+        assert all(
+            process.pid in {item["pid"] for item in row["host_processes"]}
+            for row in mappings
+        )
     finally:
         if process.is_alive():
             process.terminate()
@@ -143,6 +193,11 @@ def test_agent_workers_receive_runtime_identity(
     assert json.loads(value.aggregate_public_output()) == {
         "tid": tid,
         "context": identity.context,
+        "root_tid": tid,
+        "ancestry_tids": [],
+        "scheduling_class": "finite",
+        "connection_owner": connection_owner_label(tid, identity.context),
+        "frontier_limit": context.config["SCHEDULER_MAX_FRONTIERS"],
     }
 
 
@@ -214,27 +269,27 @@ def test_owner_label_uses_full_tid_and_context_without_credentials() -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"connection_budget": 0},
-        {"connection_budget": True},
-        {"connection_budget": "8"},
-        {"connection_owner": "contains space"},
-        {"connection_owner": "x" * 55},
-        {"connection_owner": "é"},
+        {"connection_budget": 8},
+        {"connection_owner": "forged"},
+        {"root_tid": "123"},
+        {"root_tid": None},
         {"submitter_tid": "123"},
-        {"submitter_tid": 1791919490820769000},
+        {"ancestry_tids": "not-a-list"},
+        {"ancestry_tids": ["1791919490820769000"]},
+        {"ancestry_tids": ["1791919490820769001", "1791919490820769001"]},
+        {"scheduling_class": "children"},
+        {"scheduling_class": []},
         {"unsupported": "value"},
     ],
 )
-def test_admission_record_rejects_malformed_transport(changes: dict[str, Any]) -> None:
-    """Malformed launch evidence cannot enter snapshot accounting as valid debt."""
-    payload = {
-        "connection_budget": 8,
-        "connection_owner": "owner",
-        "submitter_tid": None,
-        **changes,
-    }
-    with pytest.raises(ValueError):
-        AdmissionRecord.from_mapping(payload)
+def test_runtime_identity_rejects_malformed_transport(changes: dict[str, Any]) -> None:
+    """Malformed lineage cannot be adopted as valid live branch evidence."""
+    payload = RuntimeIdentity(
+        tid="1791919490820769000", context="sqlite:test", backend_name="sqlite"
+    ).to_dict()
+    payload.update(changes)
+    with pytest.raises((ValueError, TypeError)):
+        RuntimeIdentity.from_mapping(payload)
 
 
 def test_runtime_identity_is_immutable_and_sqlite_needs_no_pg_binding(
@@ -271,53 +326,61 @@ def observe_owned_connections(_payload: Any) -> str:
     """Open real worker resources only after its identity is installed."""
     identity = identity_module.get_runtime_identity()
     assert identity is not None
-    assert identity.admission is not None
+    assert identity.connection_owner is not None
     context = build_context(create_dirs=False, create_database=False)
     with context.queue("runtime.identity.probe", persistent=True) as queue:
         queue.write("bound")
         postgres = importlib.import_module("simplebroker_pg")
         # Idempotence after a real open proves the worker was bound early. A
         # previously unbound process is sealed at this point and must reject it.
-        postgres.bind_connection_owner(identity.admission.connection_owner)
+        postgres.bind_connection_owner(identity.connection_owner)
         usage = postgres.get_connection_usage(queue)
     return json.dumps(
         {
-            "admission": identity.admission.to_dict(),
+            "connection_owner": identity.connection_owner,
             "usage": usage,
             "worker_pid": os.getpid(),
         }
     )
 
 
-def test_postgres_wrapper_and_worker_share_owner_and_snapshot_budget(
+def test_postgres_wrapper_and_worker_share_owner_and_snapshot_lineage(
     broker_env: BrokerEnv,
     weft_harness: WeftTestHarness,
     workdir: Path,
 ) -> None:
-    """Real PG connections credit the launch owner and task snapshots retain its budget."""
+    """Real PG connections credit the launch owner and snapshots retain finite lineage."""
     context = weft_harness.context
     if context.backend_name != "postgres":
         pytest.skip("requires PostgreSQL attribution")
     target, make_queue = broker_env
     tid = str(time.time_ns())
     parent_tid = str(int(tid) - 1)
-    admission = AdmissionRecord(
-        8, connection_owner_label(tid, service_context_key(context)), parent_tid
-    )
     spec = make_function_taskspec(
         tid,
         "tests.core.test_runtime_identity:observe_owned_connections",
         weft_context=str(workdir),
     )
-    spec.metadata["admission"] = {"connection_budget": 1, "connection_owner": "forged"}
+    spec.metadata["root_tid"] = "1777000000000000123"
+    spec.metadata["scheduling_class"] = "internal"
+    identity = RuntimeIdentity(
+        tid=tid,
+        context=service_context_key(context),
+        backend_name=context.backend_name,
+        root_tid=parent_tid,
+        submitter_tid=parent_tid,
+        ancestry_tids=(parent_tid,),
+        broker_target=target,
+        context_root=str(workdir),
+        config=context.config,
+    )
     make_queue(spec.io.inputs["inbox"]).write("payload")
     process = launch_task_process(
         Consumer,
         target,
         spec,
         config=context.config,
-        admission=admission,
-        submitter_tid=parent_tid,
+        runtime_identity=identity,
     )
     assert process.pid is not None
     weft_harness.register_pid(process.pid, tid)
@@ -328,18 +391,23 @@ def test_postgres_wrapper_and_worker_share_owner_and_snapshot_budget(
         raw = make_queue(spec.io.outputs["outbox"]).read_one()
         assert raw is not None
         result = json.loads(raw)
-        assert result["admission"] == admission.to_dict()
-        assert result["usage"]["by_owner"][admission.connection_owner] >= 2
+        assert result["connection_owner"] == identity.connection_owner
+        assert result["usage"]["by_owner"][identity.connection_owner] >= 2
         mappings = [
             json.loads(row)
             for row in make_queue(task_state_queue_name(tid)).peek_generator()
         ]
         assert mappings
-        assert all(row["admission"] == admission.to_dict() for row in mappings)
+        assert all(row["root_tid"] == parent_tid for row in mappings)
+        assert all(row["ancestry_tids"] == [parent_tid] for row in mappings)
+        assert all(row["scheduling_class"] == "finite" for row in mappings)
+        assert all(
+            row["connection_owner"] == identity.connection_owner for row in mappings
+        )
         assert all(row["submitter_tid"] == parent_tid for row in mappings)
         # Runtime handles may describe only the active worker. Every PG
         # snapshot separately retains the wrapper so replacement cannot release
-        # its reopen budget while it is still finalizing after worker exit.
+        # its live residency while it is still finalizing after worker exit.
         assert all(
             process.pid in {item["pid"] for item in row["host_processes"]}
             for row in mappings
@@ -353,3 +421,35 @@ def test_postgres_wrapper_and_worker_share_owner_and_snapshot_budget(
             process.terminate()
             process.join(10.0)
         process.close()
+
+
+@pytest.mark.parametrize(
+    ("persistent", "interactive", "internal", "expected"),
+    [
+        (False, False, False, "finite"),
+        (True, False, False, "background"),
+        (False, True, False, "background"),
+        (True, False, True, "internal"),
+    ],
+)
+def test_launch_class_uses_validated_lifecycle_and_trusted_route(
+    persistent: bool,
+    interactive: bool,
+    internal: bool,
+    expected: str,
+    weft_harness: WeftTestHarness,
+) -> None:
+    """Public metadata cannot make finite work transparent to frontier scheduling."""
+    context = weft_harness.context
+    spec = make_function_taskspec(
+        "1791919490820769000",
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    payload = spec.model_dump(mode="json")
+    payload["spec"]["persistent"] = persistent
+    payload["spec"]["interactive"] = interactive
+    spec = type(spec).model_validate(payload, context={"auto_expand": False})
+    spec.metadata["role"] = "internal"
+    spec.metadata["scheduling_class"] = "internal"
+    identity = runtime_identity_for_task(spec, context.broker_target, internal=internal)
+    assert identity.scheduling_class == expected

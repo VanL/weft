@@ -1541,7 +1541,6 @@ def test_normalize_tid_uses_exact_message_id_validation(raw_tid: str) -> None:
 @pytest.mark.parametrize(
     ("source", "reserved_suffix"),
     [
-        ("weft.spawn.children", "children_reserved"),
         ("weft.spawn.internal", "internal_reserved"),
     ],
 )
@@ -1627,9 +1626,6 @@ def test_retained_client_facade_routes_runtime_children_on_every_submission(
         children = [client.submit(taskspec, payload=value) for value in ("one", "two")]
     with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as queue:
         assert queue.peek_one(exact_timestamp=int(root.tid)) is not None
-        for child in children:
-            assert queue.peek_one(exact_timestamp=int(child.tid)) is None
-    with context.queue("weft.spawn.children", persistent=True) as queue:
         for child, value in zip(children, ("one", "two"), strict=True):
             row = queue.peek_one(exact_timestamp=int(child.tid))
             assert row is not None
@@ -1638,17 +1634,21 @@ def test_retained_client_facade_routes_runtime_children_on_every_submission(
             assert request["submitted_by"] == {
                 "tid": root.tid,
                 "context": identity.context,
+                "root_tid": root.tid,
+                "ancestry_tids": [root.tid],
             }
+    with context.queue("weft.spawn.children", persistent=True) as removed_lane:
+        assert removed_lane.peek_one() is None
 
 
 @pytest.mark.parametrize("borrowed", [False, True])
-def test_manager_availability_backlog_includes_child_only_accepted_work(
+def test_manager_availability_backlog_includes_primary_accepted_work(
     weft_harness: WeftTestHarness,
     borrowed: bool,
 ) -> None:
-    """A quiet root queue cannot hide accepted children from startup recovery."""
+    """Accepted ordinary work is visible to owned and borrowed startup reads."""
     context = weft_harness.context
-    with context.queue("weft.spawn.children", persistent=True) as child_queue:
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as child_queue:
         tid = child_queue.write(json.dumps({"taskspec": {"name": "accepted-child"}}))
         with context.session() as session, session.connection() as broker:
             lent_broker = broker if borrowed else None

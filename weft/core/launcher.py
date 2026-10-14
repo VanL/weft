@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from multiprocessing.process import BaseProcess
 from typing import Any, cast
 
@@ -29,10 +30,10 @@ from weft._constants import (
 from weft.helpers import reload_config
 
 from .runtime_identity import (
-    AdmissionRecord,
     RuntimeIdentity,
     canonical_runtime_context,
     install_runtime_identity,
+    runtime_identity_for_task,
 )
 from .taskspec import (
     TaskSpec,
@@ -170,8 +171,7 @@ def launch_task_process(
     config: Mapping[str, Any] | None = None,
     poll_interval: float | None = None,
     detach_stdio: bool = True,
-    admission: AdmissionRecord | None = None,
-    submitter_tid: str | None = None,
+    runtime_identity: RuntimeIdentity | None = None,
 ) -> BaseProcess:
     """Launch *task_cls* in a new spawn-process and return the Process object.
 
@@ -183,17 +183,18 @@ def launch_task_process(
 
     resolved_config = resolve_runtime_config(config)
     assert spec.tid is not None
-    identity = RuntimeIdentity(
-        tid=spec.tid,
-        context=canonical_runtime_context(db_path),
-        backend_name=(
-            db_path.backend_name if isinstance(db_path, BrokerTarget) else "sqlite"
-        ),
-        admission=admission,
+    identity = runtime_identity or runtime_identity_for_task(
+        spec, db_path, config=resolved_config
+    )
+    if identity.tid != spec.tid or identity.context != canonical_runtime_context(
+        db_path
+    ):
+        raise ValueError("launch runtime identity does not match task or target")
+    identity = replace(
+        identity,
         broker_target=db_path,
         context_root=spec.spec.weft_context,
         config=resolved_config,
-        submitter_tid=submitter_tid,
     )
     ctx = multiprocessing.get_context("spawn")
     ctx.set_executable(sys.executable)

@@ -492,7 +492,6 @@ def test_final_stream_frame_alone_is_not_realtime_completion(tmp_path: Path) -> 
 @pytest.mark.parametrize("custom_routes", [False, True])
 def test_realtime_refreshes_late_metadata_before_final_output(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     persistent: bool,
     custom_routes: bool,
 ) -> None:
@@ -517,25 +516,28 @@ def test_realtime_refreshes_late_metadata_before_final_output(
         )
         _write_queue(ctx, outbox, {"item": "done"}, persistent=True)
 
-    original_wait = events_cmd.QueueChangeMonitor.wait
-    published = False
-
-    def wait(owner: Any, timeout: float | None) -> bool:
-        nonlocal published
-        if not published:
-            published = True
-            publish()
-        return original_wait(owner, timeout)
-
-    monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
+    # A durable created fact lets the public iterator expose an initial state event
+    # with no TaskSpec. The caller then publishes while observation is suspended,
+    # independently of whether the reactor ever enters its blocking wait.
+    _write_log(ctx, {"tid": tid, "event": "task_created", "status": "created"})
     events: list[TaskEvent] = []
     iterator = events_cmd.iter_task_realtime_events(ctx, tid, timeout=0.5)
-    if persistent:
-        with pytest.raises(CommandTimeoutError):
+    try:
+        initial = next(iterator)
+        assert initial.event_type == "state"
+        assert initial.payload["status"] == "created"
+        events.append(initial)
+        publish()
+        if persistent:
+            with pytest.raises(CommandTimeoutError):
+                events.extend(iterator)
+            assert any(event.payload.get("status") == "running" for event in events)
+        else:
             events.extend(iterator)
-        assert any(event.payload.get("status") == "running" for event in events)
-    else:
-        events.extend(iterator)
+    finally:
+        close = getattr(iterator, "close", None)
+        assert callable(close)
+        close()
     terminals = [event for event in events if event.event_type in {"result", "end"}]
     if persistent:
         assert not terminals

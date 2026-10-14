@@ -42,12 +42,7 @@ transport helpers remain runtime internals. Template validation uses
 "auto_expand": False})`; normal construction retains resolved expansion.
 Submission remains responsible for committing the task and its TID.
 
-Ordinary `WeftClient` submission from a built-in host function/agent task uses
-that runtime's same-context caller identity for child routing. It does not
-require a Django adapter or a new submission method. Opening or retaining a
-client session does not change ancestry, admission authority, result semantics,
-or task execution limits. Submission outside such a runtime, including another
-context, remains root work.
+Ordinary `WeftClient` submission uses `weft.spawn.requests`. Same-context runtime identity supplies system-owned root, submitter and finite ancestry without a future child count. Caller metadata cannot grant ancestry or internal authority. Outside that runtime or context, submissions are roots. Client sessions do not change result semantics or task limits. [MA-1.8] states the finite independent-subtree progress conditions; arbitrary cross-task waits have no such guarantee.
 
 `build_context` retains its existing arguments and side effects: by default
 it resolves configuration and creates the metadata directories and broker;
@@ -503,7 +498,9 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
 
-- [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements automatic same-context child routing under [PY-1].
+- [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
+
+- [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) is superseded by primary-source lineage under [PY-1].
 
 - [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md)
 

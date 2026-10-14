@@ -305,7 +305,9 @@ class WeftTestHarness:
             with manager.drive_scope():
                 while not stop_event.is_set() and not manager.should_stop:
                     manager.process_once()
-                    time.sleep(0.01)
+                    # Retain the embedding driver's existing 10 ms stop bound,
+                    # while exercising the real reactor notification path.
+                    manager.wait_for_activity(timeout=0.01)
 
         thread = threading.Thread(
             target=_serve_inline_manager,

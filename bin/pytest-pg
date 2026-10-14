@@ -232,7 +232,14 @@ def _start_postgres_container() -> tuple[str, str]:
         ],
         capture_output=True,
     )
-    port = _wait_for_postgres(container_name)
+    try:
+        port = _wait_for_postgres(container_name)
+    except BaseException:
+        try:
+            _print_container_logs(container_name)
+        finally:
+            _cleanup_container(container_name)
+        raise
     encoded_user = quote(POSTGRES_USER, safe="")
     encoded_password = quote(POSTGRES_PASSWORD, safe="")
     encoded_database = quote(POSTGRES_DB, safe="")

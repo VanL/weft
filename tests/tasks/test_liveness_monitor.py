@@ -1279,3 +1279,164 @@ def test_retirement_missing_queue_discards_unprobed_work(
     assert tid not in monitor._deadlines
     assert tid not in monitor._due_tids
     assert tid not in monitor._in_flight
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+def test_manager_launch_custody_retains_retirable_checkpoint(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    claimed: bool,
+) -> None:
+    """A dead Manager's only launch evidence survives until exact ACK."""
+    context, monitor, queue, tid, _now = namespace_case
+    reserved = context.queue(f"T{tid}.reserved", persistent=False)
+    try:
+        request_id = reserved.write("accepted launch")
+        if claimed:
+            with reserved.get_connection() as broker:
+                assert (
+                    broker.claim_one(reserved.name, exact_timestamp=request_id)
+                    is not None
+                )
+        payload = _mapping(tid)
+        payload["role"] = "manager"
+        payload["terminal"] = True
+        payload["scheduler_frontiers"] = {
+            "stacks": [],
+            "residents": {
+                str(request_id): {
+                    "source_queue": "weft.spawn.requests",
+                    "reserved_queue": reserved.name,
+                    "request_id": request_id,
+                }
+            },
+        }
+        queue.write(json.dumps(payload))
+        monitor._reconcile_mapping_rows(full=True)
+        row = monitor._latest_rows[tid]
+        assert monitor._retire_mapping_row(row) is False
+        assert queue.peek() is not None
+        reserved.delete(message_id=request_id)
+        assert monitor._retire_mapping_row(row) is True
+        assert queue.peek() is None
+    finally:
+        reserved.close()
+
+
+@pytest.mark.parametrize(
+    "failure", ["malformed", "null", "malformed_residents", "read_failure"]
+)
+def test_manager_launch_custody_uncertainty_preserves_checkpoint(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Malformed custody or failed exact observation must not erase launch proof."""
+    _context, monitor, queue, tid, _now = namespace_case
+    reserved_name = f"T{tid}.reserved"
+    payload = _mapping(tid)
+    payload["role"] = "manager"
+    payload["terminal"] = True
+    payload["scheduler_frontiers"] = {
+        "stacks": [],
+        "residents": {
+            tid: {
+                "reserved_queue": reserved_name,
+                "request_id": "bad" if failure == "malformed" else int(tid),
+            }
+        },
+    }
+    if failure == "null":
+        payload["scheduler_frontiers"] = None
+    elif failure == "malformed_residents":
+        payload["scheduler_frontiers"] = {"stacks": [], "residents": []}
+    queue.write(json.dumps(payload))
+    monitor._reconcile_mapping_rows(full=True)
+    row = monitor._latest_rows[tid]
+    if failure == "read_failure":
+        with queue.get_connection() as broker:
+            broker_type = type(broker)
+            original = broker_type.peek_one
+
+        def fail_reserved(self: Any, name: str, **kwargs: Any) -> Any:
+            if name == reserved_name:
+                raise OSError("reservation observation unavailable")
+            return original(self, name, **kwargs)
+
+        monkeypatch.setattr(broker_type, "peek_one", fail_reserved)
+    assert monitor._retire_mapping_row(row) is False
+    assert queue.peek() is not None
+
+
+@pytest.mark.parametrize("custom", [False, True])
+@pytest.mark.parametrize("claimed", [False, True])
+@pytest.mark.parametrize("role", ["manager", "consumer", "manager_without_protocol"])
+def test_precheckpoint_reservation_preserves_only_manager_protocol_evidence(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    claimed: bool,
+    role: str,
+    custom: bool,
+) -> None:
+    """A reserve-before-checkpoint crash must not erase safe recovery identity.
+
+    The consumer control prevents the broad queue-presence guard from shielding
+    ordinary task reservations just because a caller supplied a role-shaped row.
+    """
+    context, monitor, queue, tid, _now = namespace_case
+    reserved_name = f"custom.{tid}.reserved" if custom else f"T{tid}.reserved"
+    with context.queue(reserved_name, persistent=False) as reserved:
+        body = json.dumps(
+            {
+                "taskspec": {
+                    "name": "accepted-before-checkpoint",
+                    "spec": {"type": "command", "process_target": "true"},
+                }
+            }
+        )
+        request_id = reserved.write(body)
+        if claimed:
+            with reserved.get_connection() as broker:
+                assert (
+                    broker.claim_one(reserved.name, exact_timestamp=request_id)
+                    is not None
+                )
+        payload = _mapping(tid)
+        payload["role"] = "manager" if role == "manager_without_protocol" else role
+        payload["terminal"] = True
+        checkpoint: dict[str, Any] = {
+            "stacks": [],
+            "residents": {},
+            "startup_feedback_tid": None,
+        }
+        if custom:
+            checkpoint["reserved_queue"] = reserved_name
+        payload["scheduler_frontiers"] = checkpoint
+        if role == "manager_without_protocol":
+            payload.pop("scheduler_frontiers")
+        queue.write(json.dumps(payload))
+        monitor._reconcile_mapping_rows(full=True)
+        row = monitor._latest_rows[tid]
+        if role != "manager":
+            assert monitor._retire_mapping_row(row) is True
+            assert queue.peek() is None
+        else:
+            assert monitor._retire_mapping_row(row) is False
+            assert queue.peek() is not None
+            # Cold recovery returns only this positively unlaunched exact row.
+            with reserved.get_connection() as broker:
+                assert broker.move_one(
+                    reserved.name,
+                    "weft.spawn.requests",
+                    exact_timestamp=request_id,
+                    require_unclaimed=False,
+                ) == (body, request_id)
+                assert (
+                    broker.peek_one(
+                        "weft.spawn.requests",
+                        exact_timestamp=request_id,
+                        include_claimed=True,
+                        with_timestamps=False,
+                    )
+                    == body
+                )
+            assert monitor._retire_mapping_row(row) is True
+            assert queue.peek() is None

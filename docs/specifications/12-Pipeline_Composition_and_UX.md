@@ -105,6 +105,8 @@ with its own opaque control plane.
 - task-log and status visibility for pipeline, edge, and stage progress
 - manager-launched autostart pipeline targets using the existing manifest shape
 
+Pipeline stage and edge bootstrap retains its trusted internal route and concurrent execution. Internal participants inherit the accepted pipeline's root family. For an ordinary request submitted by such a participant, trusted internal ancestors are transparent when locating its nearest ordinary frontier ancestor. Those participants still consume measured resources. Ordinary descendants must remain eligible when all ordinary frontier places are occupied by their pipelines. User metadata cannot opt into internal ancestry treatment.
+
 ### Explicit non-goals for the initial pipeline product
 
 - a generic workflow programming platform
@@ -936,6 +938,8 @@ Weft should not implement:
 before it has a solid, first-class, linear, task-shaped pipeline run.
 
 ## Related Plans
+
+- [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
 - [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)

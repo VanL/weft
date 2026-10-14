@@ -191,12 +191,12 @@ def test_exact_id_writer_reports_missing_broker_capability_as_runtime_error() ->
 
 
 @pytest.mark.parametrize("explicit_tid", [None, 1777000000000000234])
-def test_runtime_origin_routes_same_context_child_with_submitter_envelope(
+def test_runtime_origin_keeps_same_context_child_on_primary_with_lineage(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
     explicit_tid: int | None,
 ) -> None:
-    """Only runtime origin selects child capacity, for both ID write paths."""
+    """Nested submissions retain primary custody and trusted finite ancestry."""
     context = weft_harness.context
     identity = runtime_identity.RuntimeIdentity(
         tid="1777000000000000123",
@@ -212,15 +212,22 @@ def test_runtime_origin_routes_same_context_child_with_submitter_envelope(
         tid=explicit_tid,
         inherited_weft_context=str(context.root),
     )
-    with context.queue("weft.spawn.children", persistent=True) as child_queue:
-        row = child_queue.peek_one(exact_timestamp=submitted_tid, with_timestamps=True)
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as primary_queue:
+        row = primary_queue.peek_one(
+            exact_timestamp=submitted_tid, with_timestamps=True
+        )
     assert row is not None
     assert row[1] == submitted_tid
     request = json.loads(row[0])
-    assert request["submitted_by"] == {"tid": identity.tid, "context": identity.context}
+    assert request["submitted_by"] == {
+        "tid": identity.tid,
+        "context": identity.context,
+        "root_tid": identity.tid,
+        "ancestry_tids": [identity.tid],
+    }
     assert request["inbox_message"] == "child"
-    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as root_queue:
-        assert root_queue.peek_one(exact_timestamp=submitted_tid) is None
+    with context.queue("weft.spawn.children", persistent=True) as removed_queue:
+        assert removed_queue.peek_one(exact_timestamp=submitted_tid) is None
 
 
 @pytest.mark.parametrize("origin", ["external-ancestry", "foreign", "internal"])
@@ -229,7 +236,7 @@ def test_submission_origin_preserves_root_and_explicit_internal_routing(
     monkeypatch: pytest.MonkeyPatch,
     origin: str,
 ) -> None:
-    """Ancestry cannot buy child capacity; internal routing keeps precedence."""
+    """Foreign/application ancestry grants no authority; internal lineage keeps family."""
     context = weft_harness.context
     identity = None
     if origin != "external-ancestry":
@@ -272,7 +279,54 @@ def test_submission_origin_preserves_root_and_explicit_internal_routing(
         row = queue.peek_one(exact_timestamp=submitted_tid)
     assert row is not None
     request = json.loads(row)
-    assert "submitted_by" not in request
+    if origin == "internal":
+        assert identity is not None
+        assert request["submitted_by"]["root_tid"] == identity.tid
+        assert request["submitted_by"]["ancestry_tids"] == [identity.tid]
+    else:
+        assert "submitted_by" not in request
     assert request["taskspec"]["metadata"]["parent_tid"] == "1777000000000000456"
     with context.queue("weft.spawn.children", persistent=True) as child_queue:
         assert child_queue.peek_one(exact_timestamp=submitted_tid) is None
+
+
+@pytest.mark.parametrize("scheduling_class", ["finite", "background", "internal"])
+def test_nested_submission_contracts_transparent_callers(
+    scheduling_class: str,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only finite callers append their TID; internal/background preserve the branch."""
+    context = weft_harness.context
+    root, parent, caller = (
+        "1777000000000000100",
+        "1777000000000000110",
+        "1777000000000000120",
+    )
+    identity = runtime_identity.RuntimeIdentity(
+        tid=caller,
+        context=runtime_identity.canonical_runtime_context(context.broker_target),
+        backend_name=context.backend_name,
+        root_tid=root,
+        submitter_tid=parent,
+        ancestry_tids=(root, parent),
+        scheduling_class=scheduling_class,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(runtime_identity, "_runtime_identity", identity)
+    tid = submit_spawn_request(
+        context.broker_target,
+        taskspec=_template_taskspec(context.root),
+        work_payload="nested",
+        config=context.broker_config,
+    )
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as queue:
+        row = queue.peek_one(exact_timestamp=tid)
+    assert row is not None
+    assert json.loads(row)["submitted_by"] == {
+        "tid": caller,
+        "context": identity.context,
+        "root_tid": root,
+        "ancestry_tids": [root, parent, caller]
+        if scheduling_class == "finite"
+        else [root, parent],
+    }

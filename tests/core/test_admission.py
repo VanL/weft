@@ -125,16 +125,16 @@ def test_admission_capacity_reserves_four_slots_for_liveness_monitor() -> None:
 
 @pytest.fixture
 def admission() -> AdmissionController:
-    return AdmissionController(10, 0.1, False, task_connection_budget=1)
+    return AdmissionController(10, 0.1, False)
 
 
 @pytest.mark.parametrize(
     ("used", "blocked"),
     [
         (5, frozenset()),
-        (7, frozenset({"public", "child"})),
-        (10, frozenset({"public", "child", "internal"})),
-        (None, frozenset({"public", "child", "internal"})),
+        (7, frozenset({"public"})),
+        (10, frozenset({"public", "internal"})),
+        (None, frozenset({"public", "internal"})),
     ],
 )
 def test_admission_decision_preserves_lane_policy(
@@ -167,7 +167,7 @@ def test_admission_idle_budget_expires_at_thirty_seconds(
     assert decision.wait_phase == phase
     assert decision.elapsed_seconds == pytest.approx(age)
     assert decision.idle_seconds == pytest.approx(age)
-    assert decision.blocked_lanes == frozenset({"public", "child", "internal"})
+    assert decision.blocked_lanes == frozenset({"public", "internal"})
 
 
 def test_admission_count_progress_extends_idle_but_not_absolute_budget(
@@ -194,7 +194,7 @@ def test_admission_count_progress_extends_idle_but_not_absolute_budget(
     assert decision.wait_phase == "stalled"
     assert decision.elapsed_seconds == 180.0
     assert decision.idle_seconds == 0.0
-    assert decision.blocked_lanes == frozenset({"public", "child"})
+    assert decision.blocked_lanes == frozenset({"public"})
 
 
 def test_admission_first_known_baseline_does_not_renew_unknown_wait(
@@ -296,7 +296,7 @@ def test_admission_internal_capacity_does_not_end_public_wait(
 ) -> None:
     admission.evaluate(used=10, backend="postgres", now=0.0)
     decision = admission.evaluate(used=9, backend="postgres", now=25.0)
-    assert decision.blocked_lanes == frozenset({"public", "child"})
+    assert decision.blocked_lanes == frozenset({"public"})
     decision = admission.evaluate(used=9, backend="postgres", now=55.0)
     assert decision.wait_phase == "stalled"
     assert decision.elapsed_seconds == 55.0

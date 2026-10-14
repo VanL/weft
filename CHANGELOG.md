@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed
+
+- Ordinary tasks now share `weft.spawn.requests`, with measured admission and
+  five FIFO/LIFO family frontiers per Manager by default. Remove the child lane
+  and eight-connection reservations; pending family indexes consume on dispatch.
+- Startup feedback uses one notification-only task-state interest in the
+  existing reactor waiter. Delivery routes stay fixed and worker lanes remain
+  broker-free. Native waiter replacement registers before closing the old
+  waiter and preserves stop/SIGINT custody. This changes the standalone
+  `weft/core/tasks/multiqueue_watcher.py` copy boundary; Taut should re-pin its
+  vendored file after this change is released.
+
+
 ## [0.9.110] - 2026-10-13
 
 ### Added

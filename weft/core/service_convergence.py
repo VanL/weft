@@ -546,8 +546,6 @@ def project_manager_service_record(
         "ctrl_in": queues.get("ctrl_in"),
         "ctrl_out": queues.get("ctrl_out"),
         "outbox": queues.get("outbox"),
-        "children_requests": queues.get("children_requests"),
-        "children_reserved": queues.get("children_reserved"),
         "internal_requests": queues.get("internal_requests"),
         "internal_reserved": queues.get("internal_reserved"),
         "role": payload["role"],

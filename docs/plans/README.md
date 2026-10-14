@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 241 plan files in this directory.
+There are currently 246 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,7 +23,12 @@ There are currently 241 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-10-13-connection-aware-child-admission-plan.md`](./2026-10-13-connection-aware-child-admission-plan.md) | Connection-Aware Admission and Child Progress | `draft` | none |
+| [`2026-10-14-contention-theory-stop-condition.md`](./2026-10-14-contention-theory-stop-condition.md) | Contention failures require theory re-derivation | `draft` | none |
+| [`2026-10-14-task-monitor-ingest-and-retirement-plan.md`](./2026-10-14-task-monitor-ingest-and-retirement-plan.md) | TaskMonitor Ingest and Retirement | `draft` | none |
+| [`2026-10-14-task-monitor-read-separation-and-simplification-plan.md`](./2026-10-14-task-monitor-read-separation-and-simplification-plan.md) | Task-Owned Observation and Read Separation | `draft` | none |
+| [`2026-10-14-measured-admission-family-scheduling.md`](./2026-10-14-measured-admission-family-scheduling.md) | Measured admission and bounded family scheduling | `draft` | none |
+| [`2026-10-13-supervisor-terminal-projection.md`](./2026-10-13-supervisor-terminal-projection.md) | Supervisor terminal observations in operational collations | `draft` | none |
+| [`2026-10-13-connection-aware-child-admission-plan.md`](./2026-10-13-connection-aware-child-admission-plan.md) | Connection-Aware Admission and Child Progress | `draft` | [Measured admission and bounded family scheduling](./2026-10-14-measured-admission-family-scheduling.md) |
 | [`2026-10-12-burst-submission-complexity-plan.md`](./2026-10-12-burst-submission-complexity-plan.md) | Burst Submission: Local Completion and Incremental Manager Bookkeeping | `completed` | none |
 | [`2026-10-10-result-observation-simplification-plan.md`](./2026-10-10-result-observation-simplification-plan.md) | Result Observation: Canonical History and Unified Settlement | `draft` | none |
 | [`2026-10-09-direct-result-observation-implementation-plan.md`](./2026-10-09-direct-result-observation-implementation-plan.md) | Direct Result Observation: Implementation Repair | `draft` | [Result observation simplification](./2026-10-10-result-observation-simplification-plan.md) |

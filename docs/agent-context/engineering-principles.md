@@ -105,6 +105,19 @@ verification harness is a blocker to fix, not an exception to claim.
 Invoking Rule 5 without the demonstration is skipping the test, and
 skipping the test is not permitted at any task class.
 
+## 4.3 Contention Is a Theory-Possession Stop Condition
+
+If you want to reduce contention to make tests pass, stop corrective work and
+acceptance reruns immediately. Preserve the failing command and load, re-read
+program theory [WT-7] and [ALT-WT-017], and identify the causal gap between the
+model's prediction and the evidence before choosing a correction. "Flaky",
+"shared resource", and "pre-existing" are not explanations.
+
+Follow the canonical rule in `docs/specifications/08-Testing_Strategy.md`
+[TS-0] and the procedure in testing-patterns Pattern 1. A later, explicitly
+hypothesis-driven lower-load run is diagnostic only. Acceptance must establish
+the justified contract under the original pressure and standard concurrency.
+
 ## 5. Read Specs and Code Before Inference
 
 Do not infer behavior from module names or mental models alone. Read:

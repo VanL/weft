@@ -3,14 +3,17 @@
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-2], [MA-3]
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
-- docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-6], [MF-7]
+- docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-6], [MF-6.1], [MF-7]
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
 """
 
 from __future__ import annotations
 
+import json
+import math
+import socket
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any, Final, Literal
@@ -18,11 +21,9 @@ from typing import Any, Final, Literal
 from simplebroker import Queue
 from weft._constants import (
     CONTROL_SURFACE_WAIT_INTERVAL,
-    QUEUE_CHILDREN_RESERVED_SUFFIX,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
     SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
-    WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -30,17 +31,22 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core import manager_runtime
+from weft.core.manager import Manager
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
+from weft.core.runtime_identity import RuntimeIdentity, canonical_runtime_context
 from weft.core.task_evidence import TASK_HISTORY_MAX_MESSAGE_ID
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
+from weft.core.tasks.base import QueueMessageContext
+from weft.core.taskspec import TaskSpec
+from weft.ext import RunnerHandle
 from weft.helpers import closing_queue_iterator
 from weft.helpers.message_ids import is_task_tid
+from weft.liveness import analyze_liveness
 
 _spawn_reconciliation_static_queue_specs: Final[tuple[tuple[str, bool], ...]] = (
     (WEFT_GLOBAL_LOG_QUEUE, True),
     (WEFT_SPAWN_REQUESTS_QUEUE, True),
-    (WEFT_CHILD_SPAWN_REQUESTS_QUEUE, True),
     (WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, True),
     (WEFT_SERVICES_REGISTRY_QUEUE, True),
 )
@@ -188,7 +194,6 @@ def _reserved_spawn_request_queue_names(
             f"T{manager_tid}.{suffix}"
             for suffix in (
                 QUEUE_RESERVED_SUFFIX,
-                QUEUE_CHILDREN_RESERVED_SUFFIX,
                 QUEUE_INTERNAL_RESERVED_SUFFIX,
             )
         )
@@ -249,7 +254,6 @@ def _reconcile_submitted_spawn_once(
 
     for source_queue in (
         WEFT_SPAWN_REQUESTS_QUEUE,
-        WEFT_CHILD_SPAWN_REQUESTS_QUEUE,
         WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     ):
         if _queue_contains_exact_message(
@@ -334,3 +338,251 @@ def reconcile_submitted_spawn(
                 continue
 
             monitor.wait(min(remaining, max(poll_interval, 0.0)))
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyChildMigrationEntry:
+    """An operator rollback record; accepted intent remains in broker queues."""
+
+    queue_name: str
+    request_id: int
+    body: str
+    disposition: Literal["moved", "retained", "settled"]
+    lineage: Literal["root_unknown"] = "root_unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyChildMigration:
+    """One explicit stopped-runtime cohort, rebuilt from retained queues [MF-6.1]."""
+
+    entries: tuple[LegacyChildMigrationEntry, ...]
+
+    @property
+    def cohort(self) -> frozenset[int]:
+        return frozenset(
+            row.request_id for row in self.entries if row.disposition != "settled"
+        )
+
+
+def _legacy_delivery_body(
+    body: str, request_id: int, cohort: frozenset[int], context: str
+) -> str:
+    if request_id not in cohort:
+        return body
+    payload = json.loads(body)
+    if not isinstance(payload, dict):
+        raise TypeError("legacy migration request must be a JSON object")
+    submitted_by = payload.get("submitted_by")
+    if submitted_by is None:
+        return body
+    if (
+        not isinstance(submitted_by, dict)
+        or set(submitted_by) != {"tid", "context"}
+        or not is_task_tid(submitted_by["tid"])
+        or submitted_by["context"] != context
+    ):
+        raise ValueError(
+            "legacy migration requires exact same-context submitter evidence"
+        )
+    # Unknown historical ancestry is explicitly an independent root. Only the
+    # delivery copy changes; TaskSpec/io and the accepted queue body stay intact.
+    payload.pop("submitted_by")
+    return json.dumps(payload)
+
+
+def _legacy_reserved_settled(
+    context: WeftContext, request_id: int, broker: Any
+) -> bool:
+    row = broker.peek_one(
+        task_state_queue_name(str(request_id)), order="newest", with_timestamps=False
+    )
+    if row is None:
+        return False
+    try:
+        payload = json.loads(row)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("full") != str(request_id)
+            or payload.get("terminal") is not True
+            or payload.get("hostname") != socket.gethostname()
+        ):
+            return False
+        processes = payload.get("host_processes")
+        if processes is None:
+            handle = RunnerHandle.from_dict(payload["runtime_handle"])
+            processes = [
+                {"pid": pid, "create_time": created}
+                for pid, created in handle.scoped_host_processes()
+            ]
+        if not isinstance(processes, list) or not processes:
+            return False
+        for process in processes:
+            if (
+                not isinstance(process, dict)
+                or type(process.get("pid")) is not int
+                or process["pid"] <= 0
+                or type(process.get("create_time")) not in (int, float)
+                or not math.isfinite(process["create_time"])
+            ):
+                return False
+        handle = RunnerHandle(
+            runner="host",
+            kind="process",
+            id=str(processes[0]["pid"]),
+            control={"authority": "host-pid"},
+            observations={"host_processes": processes},
+        )
+        return bool(
+            analyze_liveness(
+                str(request_id), {"runtime_handle": handle.to_dict()}
+            ).evidence
+            == "stale"
+        )
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+def _legacy_pending_inventory(
+    broker: Any, queue_names: list[str], canonical_context: str
+) -> list[LegacyChildMigrationEntry]:
+    entries: list[LegacyChildMigrationEntry] = []
+    for queue_name in queue_names:
+        with closing_queue_iterator(
+            broker.peek_generator(
+                queue_name, with_timestamps=True, include_claimed=True
+            )
+        ) as rows:
+            for body, request_id in rows:
+                payload = json.loads(body)
+                submitter = (
+                    payload.get("submitted_by") if isinstance(payload, dict) else None
+                )
+                old_shape = isinstance(submitter, dict) and set(submitter) == {
+                    "tid",
+                    "context",
+                }
+                if queue_name != "weft.spawn.children" and not old_shape:
+                    continue
+                _legacy_delivery_body(
+                    body, request_id, frozenset({request_id}), canonical_context
+                )
+                entries.append(
+                    LegacyChildMigrationEntry(
+                        queue_name,
+                        request_id,
+                        body,
+                        "moved" if queue_name == "weft.spawn.children" else "retained",
+                    )
+                )
+    return entries
+
+
+def prepare_legacy_child_migration(context: WeftContext) -> LegacyChildMigration:
+    """Prepare an explicitly quiesced runtime without rewriting accepted bodies.
+
+    Spec: [MF-6.1]. The operator must stop old producers, Managers, workers and
+    competing recovery tools first. This function does not stop processes or
+    run automatically. Ambiguous old reservations abort before any mutation.
+    Rerun after interruption: each accepted ID stays on its existing queue or
+    moves atomically to primary. Serialize the returned inventory for rollback;
+    it is diagnostic evidence and never the sole custody of accepted intent.
+    """
+    entries: list[LegacyChildMigrationEntry] = []
+    legacy_source = "weft.spawn.children"
+    canonical_context = canonical_runtime_context(context.broker_target)
+    with context.broker() as broker:
+        queues = broker.list_queues()
+        old_reserved = [
+            name
+            for name in queues
+            if name.startswith("T")
+            and name.endswith(".children_reserved")
+            and is_task_tid(name[1 : -len(".children_reserved")])
+        ]
+        for queue_name in old_reserved:
+            with closing_queue_iterator(
+                broker.peek_generator(
+                    queue_name, with_timestamps=True, include_claimed=True
+                )
+            ) as rows:
+                for body, request_id in rows:
+                    if not _legacy_reserved_settled(context, request_id, broker):
+                        raise ValueError(
+                            f"ambiguous legacy reservation {request_id} on {queue_name}; reconcile before migration"
+                        )
+                    entries.append(
+                        LegacyChildMigrationEntry(
+                            queue_name, request_id, body, "settled"
+                        )
+                    )
+        retained = [
+            WEFT_SPAWN_REQUESTS_QUEUE,
+            *(
+                name
+                for name in queues
+                if name.startswith("T")
+                and name.endswith(".reserved")
+                and is_task_tid(name[1 : -len(".reserved")])
+            ),
+        ]
+        entries.extend(
+            _legacy_pending_inventory(
+                broker, [legacy_source, *retained], canonical_context
+            )
+        )
+        for row in entries:
+            if row.disposition == "settled":
+                broker.delete_message_ids(row.queue_name, [row.request_id])
+            elif row.disposition == "moved":
+                moved = broker.move_one(
+                    row.queue_name,
+                    WEFT_SPAWN_REQUESTS_QUEUE,
+                    exact_timestamp=row.request_id,
+                    with_timestamps=True,
+                )
+                if moved != (row.body, row.request_id):
+                    raise RuntimeError(
+                        f"legacy request {row.request_id} changed during migration; runtime must remain stopped"
+                    )
+    return LegacyChildMigration(tuple(entries))
+
+
+class LegacyChildMigrationManager(Manager):
+    """Explicit delivery adapter for an inventoried legacy cohort [MF-6.1].
+
+    Use ordinary Manager lifetime. Finite work drains naturally; persistent
+    work can require continuing operator supervision. Do not STOP/cleanup just
+    because legacy snapshot handoff succeeded: normal cleanup stops children.
+    This subclass changes only delivery normalization, never execution policy.
+    """
+
+    def __init__(
+        self,
+        db: str | Any,
+        taskspec: TaskSpec,
+        *,
+        migration: LegacyChildMigration,
+        config: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._legacy_cohort = migration.cohort
+        super().__init__(db, taskspec, config=config)
+
+    def _migration_delivery(self, body: str, request_id: int) -> str:
+        return _legacy_delivery_body(
+            body,
+            request_id,
+            self._legacy_cohort,
+            canonical_runtime_context(self._db_path),
+        )
+
+    def _family_request_identity(self, body: str, request_id: int) -> RuntimeIdentity:
+        return super()._family_request_identity(
+            self._migration_delivery(body, request_id), request_id
+        )
+
+    def _handle_work_message(
+        self, message: str, timestamp: int, context: QueueMessageContext
+    ) -> None:
+        super()._handle_work_message(
+            self._migration_delivery(message, timestamp), timestamp, context
+        )

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import sys
 import threading
 import time
 import weakref
@@ -873,9 +874,13 @@ class MultiQueueWatcher(BaseWatcher):
         ]
 
     def _activity_wait_queues(self) -> list[Queue]:
-        """Return queues watched by the multi-queue activity waiter."""
+        """Return final notification interests, independent of delivery [QUEUE.7]."""
 
         return [config.queue for config in self._activity_wait_configs()]
+
+    def _has_pending_observation(self) -> bool:
+        """Return changed notification-only evidence for the owner [QUEUE.7]."""
+        return False
 
     def _reset_multi_activity_waiter(self) -> None:
         """Close the caller-owned multi-queue waiter if one is active."""
@@ -906,34 +911,53 @@ class MultiQueueWatcher(BaseWatcher):
 
     def _ensure_multi_activity_waiter(self) -> Any | None:
         """Create or return the SimpleBroker multi-queue activity waiter."""
-        wait_configs = self._activity_wait_configs()
-        signature = tuple(config.name for config in wait_configs)
+        wait_queues = self._activity_wait_queues()
+        signature = tuple(queue.name for queue in wait_queues)
         if (
             self._multi_activity_waiter_generation == self._queue_generation
             and self._multi_activity_waiter_signature == signature
         ):
             return self._multi_activity_waiter
 
-        self._reset_multi_activity_waiter()
-        self._multi_activity_waiter_generation = self._queue_generation
-        self._multi_activity_waiter_signature = signature
-        if not wait_configs:
-            return None
-
+        candidate = None
+        degraded = False
+        previous = self._multi_activity_waiter
+        displaced = None
+        installed = False
+        with self._topology_lock:
+            if self._topology_stopping or self._stop_event.is_set():
+                return previous
+            self._topology_sigint_critical = True
         try:
-            self._multi_activity_waiter = create_activity_waiter_for_queues(
-                [config.queue for config in wait_configs],
-                stop_event=self._stop_event,
-            )
-        except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
-            logger.debug(
-                "Multi-queue activity waiter unavailable; falling back to polling",
-                exc_info=True,
-            )
-            self._multi_activity_waiter = None
-            self._native_activity_degraded = True
-        else:
-            self._native_activity_degraded = False
+            try:
+                if wait_queues:
+                    candidate = create_activity_waiter_for_queues(
+                        wait_queues, stop_event=self._stop_event
+                    )
+            except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
+                logger.debug(
+                    "Multi-queue activity waiter unavailable; falling back to polling",
+                    exc_info=True,
+                )
+                degraded = True
+            with self._topology_lock:
+                if self._topology_stopping or self._stop_event.is_set():
+                    return previous
+                if self._strategy_started:
+                    displaced = self._strategy.replace_activity_waiter(candidate)
+                self._multi_activity_waiter = candidate
+                self._multi_activity_waiter_generation = self._queue_generation
+                self._multi_activity_waiter_signature = signature
+                self._native_activity_degraded = degraded
+                installed = True
+            if previous is not candidate:
+                self._close_activity_waiter_once(previous)
+            if displaced is not previous and displaced is not candidate:
+                self._close_activity_waiter_once(displaced)
+        finally:
+            if not installed and candidate is not previous:
+                self._close_candidate_resource_once(candidate)
+            self._finish_topology_sigint_critical(fatal_error=sys.exception())
         return self._multi_activity_waiter
 
     def _create_activity_waiter(self, queue: Queue) -> Any | None:
@@ -1120,6 +1144,11 @@ class MultiQueueWatcher(BaseWatcher):
 
         self._ensure_wait_strategy_started()
 
+        # Register before reading: an earlier publication is found here, while
+        # later publication wakes the retained waiter. No delivery is implied.
+        if self._has_pending_observation():
+            return
+
         deadline = None if timeout is None else time.monotonic() + timeout
         while not self._stop_event.is_set():
             remaining = None if deadline is None else deadline - time.monotonic()
@@ -1150,7 +1179,6 @@ class MultiQueueWatcher(BaseWatcher):
 
         if not self._strategy_started:
             self._start_strategy()
-            return
         waiter = self._ensure_multi_activity_waiter()
         if waiter is None or self._strategy.uses_native_activity():
             return
@@ -1169,6 +1197,9 @@ class MultiQueueWatcher(BaseWatcher):
         native_hint = self._strategy.consume_native_activity_hint()
         data_version_hint = self._data_version_activity_pending
         self._data_version_activity_pending = False
+
+        if self._has_pending_observation():
+            return "return"
 
         if local_hint:
             if self._has_pending_messages():

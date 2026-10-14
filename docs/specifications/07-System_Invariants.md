@@ -159,8 +159,10 @@ acknowledgement and shared dispatch; direct codec coverage lives in
   own spawn-request disposition — unlaunched requests return to their
   source queue on manager stop or leadership yield, and a failed child
   launch is restored per the manager's reserved policy ([MF-6]).
-- **QUEUE.7**: a live task declares every construction-fixed reactor role and
-  fixed support route that it watches, reserves into, or uses for durable task
+#### Delivery roles and notification interests [QUEUE.7]
+
+A live task declares every construction-fixed delivery role and
+  fixed support route that it consumes, peeks for delivery, reserves into, or uses for durable task
   or runtime output. The task-state support route is exactly
   `weft.state.tasks.<tid>` for that task's full TID; this canonical target is
   validated before queue wiring or broker access. The five BaseTask roles (`inbox`, `reserved`, `outbox`,
@@ -172,22 +174,25 @@ acknowledgement and shared dispatch; direct codec coverage lives in
   by [MF-3.2] ingestion validation and are not construction-fixed roles. This
   does not remove the standalone `MultiQueueWatcher` dynamic-topology API;
   standalone mutation follows the drive-owner and exact-membership contract in
-  [QUEUE.8], [CC-2.1], and [SB-0.4]. `BaseTask` remains construction-fixed and
-  rejects runtime `add_queue()` and `remove_queue()`.
+  [QUEUE.8], [CC-2.1], and [SB-0.4]. `BaseTask` delivery topology remains construction-fixed and
+  rejects runtime `add_queue()` and `remove_queue()`. Notification-only interests
+  are separate from delivery roles: the reactor owner may change them between
+  turns and waits without adding handlers, consumption, or reserve routes.
+  The Manager observes only the one task-state queue awaiting startup feedback
+  under [MA-1.8]. Registration precedes the initial read; changed publications
+  can return control even without delivery readiness. Rejected evidence retains
+  interest with a strict publication cursor; gate release, exit/failure and
+  cleanup remove it. Replacement follows the owner/stop and candidate-before-
+  close contract in [QUEUE.8]. All observation reads remain on the reactor;
+  [IMPL.8–9] are unchanged. No historical notification handles accumulate.
 
-  _Implementation mapping_: `BaseTask._reactor_queue_roles()`, its fixed support
-  route inventory, and `_allowed_reactor_queue_aliases()` define and validate
-  construction topology before queue configuration. Manager, PipelineTask,
-  PipelineEdgeTask, Monitor, and TaskMonitor extend the inventory for subtype
-  lanes, support routes, and named semantic aliases. Heartbeat validates
-  payload-directed destinations against the reserved `weft.` namespace at
-  message ingestion under [MF-3.2]. The canonical, support-route, subtype, and
-  Heartbeat dynamic-egress matrices in `tests/tasks/test_task_execution.py`,
-  `tests/core/test_manager.py`, `tests/tasks/test_pipeline_runtime.py`,
-  `tests/tasks/test_task_observer_behavior.py`, `tests/tasks/test_task_monitor.py`,
-  and `tests/tasks/test_heartbeat.py` fire this invariant.
+_Implementation mapping_:
 
-- **QUEUE.8**: a running standalone `MultiQueueWatcher` has one drive owner for
+- Fixed delivery roles and reactor-owned notification interests are implemented by `weft/core/tasks/base.py::BaseTask._reactor_queue_roles`, `weft/core/tasks/base.py::BaseTask._allowed_reactor_queue_aliases`, `weft/core/tasks/base.py::BaseTask.add_queue`, `weft/core/tasks/base.py::BaseTask.remove_queue`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._activity_wait_queues`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._has_pending_observation`, `weft/core/manager.py::Manager._activity_wait_queues`, `weft/core/manager.py::Manager._has_pending_observation`, and `weft/core/manager.py::Manager._clear_startup_notification_interest`. The canonical task-state name is owned by `weft/core/task_state.py::task_state_queue_name`. Other route owners: `weft/core/tasks/heartbeat.py`, `weft/core/tasks/pipeline.py`, `weft/core/tasks/monitor.py`, and `weft/core/monitor/task_monitor.py`. Verification: `tests/tasks/test_task_execution.py`, `tests/core/test_manager.py`, `tests/tasks/test_pipeline_runtime.py`, `tests/tasks/test_task_observer_behavior.py`, `tests/tasks/test_task_monitor.py`, `tests/tasks/test_heartbeat.py`, `tests/tasks/test_multiqueue_watcher.py`, and `tests/core/test_manager_family_maintenance.py`. Heartbeat payload-directed destinations remain governed by [MF-3.2].
+
+#### Standalone watcher membership ownership [QUEUE.8]
+
+A running standalone `MultiQueueWatcher` has one drive owner for
   dynamic topology effects. Foreign `add_queue()` and `remove_queue()` calls
   are synchronous requests applied in a deterministic linear order between
   wait and drain phases; foreign requests may queue while a topology
@@ -213,15 +218,11 @@ acknowledgement and shared dispatch; direct codec coverage lives in
   wait temporarily owns its waiter and excludes drive start and mutation; stop
   signals that wait but does not close its waiter from another thread.
 
-_Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` owns [QUEUE.8]
-through `MultiQueueWatcher._submit_topology_mutation()`,
-`_claim_owner_topology_mutation_locked()`, `_run_owner_topology_transaction()`,
-`_apply_pending_topology_mutations()`,
-`_apply_topology_mutation_on_owner()`, `run_in_thread()`, `run_forever()`,
-`wait_for_activity()`, `stop()`, `_sigint_handler()`, and
-`_finish_topology_sigint_critical()`. `tests/tasks/test_multiqueue_watcher.py`
-fires its SQLite, concurrency, cleanup, SIGINT, fallback, and real PostgreSQL
-paths.
+_Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` owns
+owner-serialized membership mutation, drive entry points, native subscription
+replacement, wait/stop serialization and deferred SIGINT cleanup under [QUEUE.8].
+`tests/tasks/test_multiqueue_watcher.py` fires its SQLite, concurrency, cleanup,
+SIGINT, fallback, notification-only interest and real PostgreSQL paths.
 
 _Downstream exact copy_: Taut vendors `weft/core/tasks/multiqueue_watcher.py`
 whole and unmodified as its scheduler block (Taut reactor restoration plan,
@@ -371,22 +372,18 @@ Bulk reads share one broker scope and short-lived queue facades. Broker acquisit
 failure policies remain unchanged. Non-task point selectors return absent
 without broker I/O; queue-name construction rejects them. Names alone
 never substitute for valid state, lifecycle evidence, or live process proof.
-Each new PostgreSQL launch carries the Manager-authored `admission` record
-with positive integer `connection_budget`, opaque string `connection_owner`,
-and nullable full-TID `submitter_tid`, including when admission is disabled.
-The record crosses wrapper and worker launch transport, appears in the
-existing Manager `task_spawned` event and every task-owned runtime snapshot,
-and is immutable for that task lifetime. Caller metadata cannot replace it.
-It does not add a TaskSpec `spec`/`io` field or an independently retained
-queue. Runtime snapshot retirement continues to use existing liveness
-ownership. Runtime submitter identity and child routing also operate with
-SQLite or a disabled gate, without importing PostgreSQL inspection or
-applying its connection-budget model to SQLite.
+Task-owned `weft.state.tasks.<tid>` snapshots ([OBS.6]) carry immutable `root_tid`, nullable `submitter_tid`, ordered finite ancestor chain `ancestry_tids`, validated `scheduling_class` (`"finite"`, `"background"`, or `"internal"`), and opaque `connection_owner` alongside existing runtime handle and scoped host-process evidence, replacing the per-task `admission` budget record. Manager-owned `weft.state.tasks.<manager_tid>` snapshots publish `scheduler_frontiers` (`stacks`, `residents`, nullable `startup_feedback_tid`, and the owning ordinary `source_queue`/`reserved_queue`): active frontier stacks, retained resident task lineage/class/process evidence, exact unresolved reservation references, and the current inter-launch startup gate. Gate release publishes the updated checkpoint before subsequent ordinary dispatch. Detached tasks that survive Manager turnover are adopted and reconciled by bounded liveness probes. Task-owned publication remains best-effort; until handoff the reservation/checkpoint pair preserves recovery evidence under the custody guard above. After handoff, surviving tasks and pending tokens reconstruct their exact live finite ancestor path from `ancestry_tids` and `scheduling_class` even after a prior Manager checkpoint or intermediate ancestor task snapshot is deleted by `LivenessMonitor`. Publication remains edge-triggered, and `LivenessMonitor`-only deletion ownership ([LIVENESS.R3]) remains unchanged.
+
+On both backends, the existing pre-launch Manager checkpoint must persist the exact source/reserved/request reference and validated runtime identity before process creation. Post-launch checkpointing adds scoped process evidence and must report publication failure. All acknowledgement paths retain the original reserved request until a valid task-owned snapshot matches its TID, context, lineage, scheduling class, and scoped runtime identity, or existing positive launch-failure/whole-process settlement evidence resolves it. Startup feedback alone is insufficient. Exact acknowledgement and confirmed absence precede removal of the checkpoint obligation; subsequent Manager snapshots retain unresolved entries. Successors may resolve old reservations but never write the old Manager's task-state queue. A post-spawn crash without durable process evidence remains ambiguous; missing evidence never authorizes replay or a claim of guaranteed drain. If a retained pre-launch reference has no durable post-launch process receipt, a successor preserves its validated identity, unresolved reservation, and finite frontier where applicable. It blocks further ordinary dispatch until a matching positive task-owned snapshot or durable scoped receipt resolves the ambiguity. Absence of a PID or snapshot does not prove the request was unlaunched once its pre-launch reference exists. This crash window can require operator resolution and is outside the conditional drain guarantee.
+
+`LivenessMonitor` remains the sole task-state deleter. Its newest-Manager-checkpoint retirement gains an exact-reservation custody guard: any referenced reservation still present, or an uncertain read, defers both stale and unknown-timeout retirement. TaskMonitor's reserved/dead-task deletion paths apply the same protection immediately before deletion and leave cleanup pending. Manager yield, shutdown, and reserved policies operate by exact `message_id` rather than bulk queue moves/reads, preserving launched or ambiguous requests so only positively unlaunched requests return through normal pre-launch policy; reserved rows retained in launch/handoff custody do not count as pending reactor work or trigger `PEEK` wakeup activity. These guards inspect checkpoint references, not descendant graphs. After acknowledgement, normal checkpoint retirement resumes with existing age, generation, and exact-delete rules. No new queue or reserved-message format is introduced.
+
 
 _Implementation mapping_: `weft/core/runtime_identity.py`,
-`weft/core/tasks/base.py::BaseTask._build_tid_state_payload`,
-`weft/core/manager.py::Manager._build_tid_state_payload`, and
-`tests/system/test_admission_budget_pg.py`.
+`weft/core/task_state.py`, `weft/core/tasks/base.py::BaseTask._build_tid_state_payload`,
+`weft/core/manager.py::Manager._build_tid_state_payload`,
+`tests/core/test_task_state.py`, `tests/core/test_runtime_identity.py`,
+`tests/core/test_admission_recovery.py`, `tests/system/test_family_recovery.py`.
 
 PostgreSQL host_processes snapshots retain wrapper plus worker identities
 independently of the runner handle. The live PostgreSQL test verifies the
@@ -414,6 +411,16 @@ snapshot and Manager launch-event contract.
   abort the remaining lifecycle publication path. Payload construction and
   serialization defects are not broker failures and remain visible internal
   errors.
+
+### Family pending indexes [OBS.6b]
+
+`weft.state.labels.<root_tid>.pending.<parent_tid>` queues (where `<parent_tid>` is `submitter_tid` or `root_tid`) are runtime-only, rebuildable consume-on-dispatch pending indexes (`schema: "weft.family.pending.v1"`, `request_id`, `root_tid`, `submitter_tid`, `ancestry_tids`). Each token references an accepted `weft.spawn.requests` row by `request_id` and uses a fresh physical SimpleBroker message ID. Primary enqueue commits acceptance independently of pending-index writes. When a Manager reserves the referenced primary row (or observes it absent from `weft.spawn.requests`), it immediately deletes the pending token so `.pending.<parent_tid>` empties and auto-disappears naturally as children are dispatched. Startup, reserved-return handling, and bounded periodic reconciliation repair missing or orphaned tokens, including explicit TIDs and returned rows below classification watermarks. When a resident parent exits with unconsumed tokens in `.pending.<exited_tid>`, the Manager attaches `.pending.<exited_tid>` directly to the nearest still-resident finite ancestor in `ancestry_tids` (`<root_tid>` if none remains) and continues consuming `.pending.<exited_tid>` directly without bulk-relocating tokens across queues. Ordered pending indexes use logarithmic worst-case in-memory maintenance; candidate selection scans only the bounded W frontiers, without backlog-sized broker reads at completion. Runtime pending queues remain excluded from dump/load; durable request lineage in `weft.spawn.requests` rebuilds them.
+
+_Implementation mapping_: `weft/core/family_scheduling.py`,
+`weft/core/manager.py::Manager._restore_family_pending`,
+`weft/core/manager.py::Manager._read_family_hint`,
+`tests/core/test_family_source_reconciliation.py`,
+`tests/core/test_family_scheduling.py`, `tests/system/test_family_scheduling.py`.
 
 ### Process title sanitation [OBS.7]
 
@@ -647,32 +654,43 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   analysis to retire connection obligations under [MA-1.8]; this grants no
   task-state deletion authority and does not reuse the monitor's age or
   unknown-timeout deletion policy.
-- **LIVENESS.R3**: `LivenessMonitor` is the sole component deleter within
-  `weft.state.tasks.*`; one policy module owns malformed, superseded, and
-  newest-row deletability. The existing 2,400-second minimum-age fences apply
-  to every category. Retirement deletes exact observed IDs, never a whole
-  queue. Before latest-row retirement, strictly reread that task's history
-  and require its newest-valid message ID to equal the probed ID. A mismatch
-  adopts the observed current row, even an older row, and rejects the stale
-  result; no valid row means discard that retirement work without deleting
-  unprobed rows. On an exact match, delete eligible observed older rows and
-  verify absence before deleting the eligible probed latest row. Already
-  absent older IDs count as success only after verification. If any older
-  valid row remains or absence cannot be verified, retain latest and retry;
-  younger malformed residue may remain. Close history iterators before
-  deletion. Concurrent unseen appends survive. Historical deletion failures
-  retry at full reconciliation; latest failures retry on probe scheduling.
-  Operator CLI deletion is an explicit human override; an emptied virtual
-  queue disappears naturally. No second deletion policy or writer trim exists.
-- **LIVENESS.R4**: Newest-row retirement requires minimum age plus either
-  definitive staleness or a consecutively attempted-`unknown` generation whose
-  in-memory deadline expired. The reducer stores generation, deadline, and an
-  optional pause time. Not-attempted degradation starts one pause and never
-  retires; the next attempted unknown shifts the deadline by the paused
-  duration before testing it. Only an attempted, completed probe can produce
-  timeout retirement. Runtime generations are sampled: unseen A→B→A
-  publications do not reset the already observed A generation deadline.
-  Deadlines refer to observed generations, not every intermediate append.
+### Task-state deletion ownership [LIVENESS.R3]
+
+`LivenessMonitor` is the sole component deleter within
+`weft.state.tasks.*`; one policy module owns malformed, superseded, and
+newest-row deletability. The existing 2,400-second minimum-age fences apply
+to every category. Retirement deletes exact observed IDs, never a whole
+queue. Before latest-row retirement, strictly reread that task's history
+and require its newest-valid message ID to equal the probed ID. A mismatch
+adopts the observed current row, even an older row, and rejects the stale
+result; no valid row means discard that retirement work without deleting
+unprobed rows. On an exact match, delete eligible observed older rows and
+verify absence before deleting the eligible probed latest row. Already
+absent older IDs count as success only after verification. If any older
+valid row remains or absence cannot be verified, retain latest and retry;
+younger malformed residue may remain. Close history iterators before
+deletion. Concurrent unseen appends survive. Historical deletion failures
+retry at full reconciliation; latest failures retry on probe scheduling.
+Operator CLI deletion is an explicit human override; an emptied virtual
+queue disappears naturally. No second deletion policy or writer trim exists.
+
+_Implementation mapping_: `weft/core/tasks/liveness_monitor.py`, `weft/core/task_state.py`, `tests/core/test_task_state.py`, `tests/tasks/test_liveness_monitor.py`.
+
+### Newest checkpoint retirement [LIVENESS.R4]
+
+Before newest Manager-checkpoint retirement, inspect its exact unresolved reservation references. A present reservation or uncertain read defers retirement, including unknown-timeout retirement. After exact acknowledgement and confirmed absence, normal age/generation rules resume.
+ Newest-row retirement requires minimum age plus either
+definitive staleness or a consecutively attempted-`unknown` generation whose
+in-memory deadline expired. The reducer stores generation, deadline, and an
+optional pause time. Not-attempted degradation starts one pause and never
+retires; the next attempted unknown shifts the deadline by the paused
+duration before testing it. Only an attempted, completed probe can produce
+timeout retirement. Runtime generations are sampled: unseen A→B→A
+publications do not reset the already observed A generation deadline.
+Deadlines refer to observed generations, not every intermediate append.
+
+_Implementation mapping_: `weft/core/tasks/liveness_monitor.py::LivenessMonitor._retire_mapping_row`, `weft/core/task_state.py::manager_launch_custody_pending`, `tests/tasks/test_liveness_monitor.py`.
+
 - **LIVENESS.R5**: Evidence authority follows
   `RunnerHandle.control.authority`; host identity requires `(pid, create_time)`
   with zombie rejection; extension probes are authoritative for `runner` and
@@ -682,22 +700,28 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   component adds read-before-write, periodic republish, or automatic requeue
   of salvaged rows. Self-healing rests on the owner's next append and the
   guaranteed terminal republish.
-- **LIVENESS.R7**: TaskMonitor destruction protection reads newest-valid
-  snapshot presence (non-terminal) in each candidate task's state queue plus
-  live service-registry evidence, with no probing. A queue name alone grants
-  no protection. Candidate discovery must still find residue whose owner has
-  no state queue and must not truncate protected candidates before policy
-  application in a way that starves later eligible work.
-  Post-disposal family activity clears `task_control_deleted_at_ns` so
-  recreated queues re-enter terminal cleanup. Post-disposal activity means a
-  broker message ID strictly newer than the record's prior
-  `last_message_id`; the wall-clock cleanup timestamp is only a completion
-  marker and is not ordering evidence. Without terminal lifecycle proof,
-  plain `delete` may remove stale control queues but preserves pending inbox,
-  reserved, and unread outbox rows; explicit archived forced task-local
-  retention pruning is their later harvest point. In `jsonl_then_delete`
-  mode, ambiguous family disposal salvages bounded copies of those rows into
-  the pre-delete report before whole-family deletion.
+### TaskMonitor destruction protection [LIVENESS.R7]
+
+Immediately before reserved or dead-task deletion, TaskMonitor checks Manager checkpoint reservation custody. Present referenced rows or uncertain reads defer deletion and retain pending cleanup.
+ TaskMonitor destruction protection reads newest-valid
+snapshot presence (non-terminal) in each candidate task's state queue plus
+live service-registry evidence, with no probing. A queue name alone grants
+no protection. Candidate discovery must still find residue whose owner has
+no state queue and must not truncate protected candidates before policy
+application in a way that starves later eligible work.
+Post-disposal family activity clears `task_control_deleted_at_ns` so
+recreated queues re-enter terminal cleanup. Post-disposal activity means a
+broker message ID strictly newer than the record's prior
+`last_message_id`; the wall-clock cleanup timestamp is only a completion
+marker and is not ordering evidence. Without terminal lifecycle proof,
+plain `delete` may remove stale control queues but preserves pending inbox,
+reserved, and unread outbox rows; explicit archived forced task-local
+retention pruning is their later harvest point. In `jsonl_then_delete`
+mode, ambiguous family disposal salvages bounded copies of those rows into
+the pre-delete report before whole-family deletion.
+
+_Implementation mapping_: `weft/core/monitor/task_monitor.py`, `weft/core/task_state.py::manager_launch_custody_pending`, `tests/tasks/test_task_monitor.py`.
+
 - **LIVENESS.R8**: Probe concurrency, cadence, retirement timeout,
   namespace refresh interval, reconciliation interval, minimum age, and salvage bounds are named constants
   in `weft/_constants.py`. At most one probe per TID is in flight; late results
@@ -984,23 +1008,20 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   visible until normal expiry or owner cleanup so the target manager can observe
   its `superseded` row.
 - **MANAGER.9**: public spawn dispatch is work-stealing. Atomic reservation of
-  a `weft.spawn.requests` or `weft.spawn.children` message authorizes that manager to attempt the child
+  a `weft.spawn.requests` message authorizes that manager to attempt the child
   launch for that exact message; registry `self`, `other`, `none`, or
   `unknown` ownership is not launch authority for public work.
-- **MANAGER.10**: after a manager reserves a root, child, or internal spawn request,
+- **MANAGER.10**: after a manager reserves a ordinary or internal spawn request,
   STOP/KILL control and drain state are the pre-launch safety fence. A draining
   or stopped manager must not launch the reserved child.
-- **MANAGER.11**: a successful manager child launch deletes exactly the
-  reserved spawn message after the launch side effect succeeds. Invalid payload
-  handling, pre-launch failure, and shutdown continue to use the manager's
-  reserved-queue policy and visible reserved queues.
+- **MANAGER.11**: successful launch retains the exact reserved request until validated task-snapshot handoff or positive whole-process settlement under [MF-6]. Pre-launch checkpoints persist identity and exact request references; post-launch checkpoints persist scoped process evidence. Failed publication gates further ordinary dispatch. Missing evidence never authorizes replay. Pre-launch policy returns only positively unlaunched requests, by exact ID.
 - **MANAGER.12**: registry leadership must not block a manager from draining
   already-reserved root, child, or manager-owned internal spawn work. Leadership
   yield is advisory and idle-biased: it must not preempt actionable control,
   spawn, reserved, or child-supervision work.
 - **MANAGER.12a**: pending public spawn backlog is not owned manager work. A
   manager may service a public spawn request it successfully reserved, but
-  unreserved messages in `weft.spawn.requests` or `weft.spawn.children` must not
+  unreserved messages in `weft.spawn.requests` must not
   prevent a higher-TID manager from yielding to the lower-TID live canonical
   manager.
 - **MANAGER.13**: manager-owned singleton service correctness is enforced at
@@ -1042,8 +1063,7 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   same-service registry proof shows that owner is non-live or replaced and no
   active runtime evidence protects the TID; that disposition is cleanup
   authority, not terminal lifecycle truth.
-- **MANAGER.16**: Managers dispatch eligible internal work before ordinary task
-  children, and eligible children before roots. All lanes remain subordinate to
+- **MANAGER.16**: Managers dispatch eligible internal work before ordinary bounded FIFO/LIFO frontier selection under [MA-1.8]. Both sources remain subordinate to
   control/drain state and the existing bounded dispatch turn. Manager-authored
   singleton-service
   spawn requests must
@@ -1060,26 +1080,14 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   or bounded periodic discovery.
 ### Connection admission [MANAGER.18]
 
-Configured admission is a pre-reservation soft guard governed
-by [MA-1.8]. PostgreSQL accounted usage includes actual server pressure and
-each admitted task's not-yet-open connection budget without double-counting.
-Root admission cannot spend the ordinary-child headroom, and ordinary
-children cannot spend the internal reserve. Every candidate must fit its
-complete budget before launch. Startup state or elapsed grace cannot release
-a live obligation. SQLite retains its live-TID accounting and shared public
-capacity for roots and children. Admission reuses existing runtime evidence,
-liveness, and recovery owners. Stale local process evidence from the shared
-liveness API releases crash obligations without a terminal publication;
-live/unknown evidence remains charged. After bootstrap, decisions use cached
-obligations, with exact reap refreshes and bounded reactor reconciliation
-under [MA-1.8], not per-decision task-state scans. It adds no durable permit store or distributed
-quota service. Child routing does not imply unlimited nested-dependency
-progress. A blocked lane must not
-block control handling, cleanup, child reaping, leadership convergence,
-service reconciliation, or shutdown. Native and fallback waits suppress
-only blocked spawn sources; reserved recovery remains actionable. One
-universal retry deadline must reconsider denied/failed observations and
-failed-launch restoration without unrelated queue activity.
+Ordinary admission uses one coherent SimpleBroker observed-usage population. Available capacity is the configured applicable ceiling minus the configured operating reserve minus observed usage. A positive available value permits consideration of one eligible launch; it is not a claim that the task will consume one connection. There is no per-task connection budget, lifetime deficit, or ordinary child admission class. Usage includes external and unattributed pressure. Failed or unknown observation defers dispatch without rejecting accepted work. Admission and launch are not globally atomic. Internal runtime requests retain their documented reserve eligibility; their measured use participates in the same population. SQLite retains its live/unknown TID accounting and local-launch union. The disabled resource gate does not disable scheduling classification or its frontier bound.
+
+Ordinary launch selection is bounded depth-first scheduling over dynamically observed ancestry. The positive `WEFT_SCHEDULER_MAX_FRONTIERS` setting defaults to five places per Manager. Independent families enter FIFO by original root ID; active frontiers receive round-robin turns; a frontier descends through newest eligible children while spare places may take older sibling subtrees. A live finite tip retains its place before and after child submission. A child extends a frontier; a sibling requires another place. On positive process exit, a frontier can immediately continue known descendants or return if it covers no live path or known unassigned work. Logical family membership remains while pending or resident descendants exist; late-discovered work reenters at the original root's FIFO position or extends a matching live tip. Queued requests incur no process or prospective connection charge. The bound is local to a Manager; public work stealing and actual cross-process usage remain in force.
+
+A Manager refreshes actual usage between ordinary launches after wrapper startup becomes observable in `weft.state.tasks.<tid>` (or attributed broker usage) or the launch exits through existing failure/reap handling. Because initial task-state publication is best-effort, if `MANAGER_ADMISSION_RECHECK_SECONDS` elapses while the launched wrapper remains alive without a visible snapshot, the Manager retries snapshot observation once and falls back to retaining the live task in local state and a successfully published Manager checkpoint from launch-time `RuntimeIdentity` and scoped process evidence, emits a rate-limited diagnostic, refreshes observed usage, and clears the inter-launch gate. Gate release does not acknowledge the reserved request. Before another ordinary dispatch, task-owned snapshot handoff/positive settlement or a successful post-launch checkpoint must preserve recovery custody; failed checkpoint publication gates dispatch and retries through bounded maintenance. Startup feedback does not certify a task's future maximum use. Admission waiting, classification, reconciliation, controls, and reaping remain non-blocking and use bounded reactor work. A bounded classification page must not become a fixed FIFO visibility window.
+
+Progress is conditional on finite accepted work and fanout/depth, terminating leaves, eventual descendant submission or completion, no waits across independent sibling subtrees/families, fair successful broker maintenance, and bounded retained Manager responsibility. If P is the aggregate retained finite frontier allowance, H bounds one complete finite path's simultaneous sessions, I bounds internal sessions, B bounds explicit background sessions, and E bounds external pressure, `E + I + B + P * H <= C - R` is a sufficient resource condition. These are proof parameters, not runtime reservations or task declarations. A branch can descend without another frontier; a terminating leaf releases real resources and lets siblings proceed. No guarantee covers permanent external saturation, unbounded orphan accumulation, arbitrary waits, or unknown unbounded per-task resource use.
+
 PostgreSQL drain-wait history survives lane retry-cache clearing. Only a
 strict new episode-low usage value or confirmed child reap refreshes drain
 progress. Retry expiry, failed or successful process launch and observation
@@ -1096,15 +1104,19 @@ neither consumes nor fails queued requests nor stops rechecking. Real
 progress can resume an idle-stalled assessment below the absolute cap;
 fresh open capacity always ends it. Wall-clock changes cannot renew budgets.
 This is resource-drain evidence, not task-success proof or a launch permit.
-A proven non-primary Manager does not reserve shared root, child, or internal backlog;
+A proven non-primary Manager does not reserve shared ordinary or internal backlog;
 shared unreserved internal rows are not owned work. Admission adds no
 PING/STATUS schema.
 
 _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`,
-`tests/core/test_admission.py`, and `tests/system/test_admission_budget_pg.py`.
+`weft/core/family_scheduling.py`, `tests/core/test_admission.py`,
+`tests/core/test_manager_family_maintenance.py`, `tests/system/test_measured_admission_pg.py`.
 
-The PostgreSQL test exercises actual connection reopening, saturated-root
-parent/leaf progress, and normal record retirement with the gate disabled.
+The measured PostgreSQL tests exercise coherent actual pressure and bounded
+parent/leaf progress. `tests/system/test_family_recovery.py` exercises missing
+snapshots, actual Manager crash, custody guards, cold adoption and eventual ACK
+on both backends. `tests/core/test_admission_recovery.py` covers scoped process
+identity and ambiguous launch preservation.
 
 
 _Plan backlinks_: [AdmissionController: Progress-Aware Admission Waiting](../plans/2026-10-06-admission-controller-plan.md) ([MANAGER.18]).
@@ -1293,6 +1305,8 @@ doc:
 
 ## Related Plans
 
+- [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
+
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements revisions to [MANAGER.16], [MANAGER.18], and [OBS.6].
 
 - [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements queue-based local completion and matching retention.
@@ -1385,6 +1399,7 @@ doc:
 
 ## Related Documents
 
+- Proposed plan: [Supervisor terminal observations in operational collations](../plans/2026-10-13-supervisor-terminal-projection.md). Existing cleanup requirements remain the governing contract until promotion.
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - [`06-Resource_Management.md`](06-Resource_Management.md)

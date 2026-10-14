@@ -1390,47 +1390,35 @@ def test_manager_child_launch_admission_failure_is_returned_locally(
     assert result.error is failure
     assert child_spec.tid not in manager._active_child_launches
     assert child_spec.tid not in manager._child_launch_started_ns
-    assert child_spec.tid not in manager._child_launch_stale_retries
 
 
-def test_manager_stale_child_launch_retry_failure_is_returned_locally(
+def test_manager_stale_child_launch_result_never_replays_ambiguous_execution(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A lost result retains custody rather than starting the accepted task twice."""
     manager, _make_queue = manager_setup
     child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
-    assert child_spec is not None
-    assert child_spec.tid is not None
-
+    assert child_spec is not None and child_spec.tid is not None
+    starts: list[object] = []
     monkeypatch.setattr(
-        manager, "_start_service_worker", lambda *_args, **_kwargs: None
+        manager, "_start_service_worker", lambda *args, **_kwargs: starts.append(args)
     )
-    assert manager._launch_child_task(child_spec, None) is True
+    identity = manager_mod.runtime_identity_for_task(
+        child_spec, manager._db_path, config=manager._manager_context().config
+    )
+    assert (
+        manager._launch_child_task(child_spec, None, runtime_identity=identity) is True
+    )
+    assert len(starts) == 1
     manager._child_launch_started_ns[child_spec.tid] = 0
-
-    failure = LookupError("child launch retry lane unavailable")
-    handled: list[manager_mod._ManagerChildLaunchResult] = []
-
-    def fail_retry(*_args: object, **_kwargs: object) -> None:
-        raise failure
-
     monkeypatch.setattr(manager, "_has_worker_activity", lambda: False)
-    monkeypatch.setattr(
-        manager, "_child_launch_runtime_evidence_seen", lambda _tid: False
-    )
-    monkeypatch.setattr(manager, "_start_service_worker", fail_retry)
-    monkeypatch.setattr(manager, "_handle_child_launch_failure", handled.append)
-
     assert manager._retry_stale_child_launches() is True
-    assert len(handled) == 1
-    result = handled[0]
-    assert result.request.child_spec is child_spec
-    assert result.process is None
-    assert result.launched_ns == 0
-    assert result.error is failure
+    assert len(starts) == 1
+    assert manager._startup_feedback_tid == child_spec.tid
     assert child_spec.tid not in manager._active_child_launches
     assert child_spec.tid not in manager._child_launch_started_ns
-    assert child_spec.tid not in manager._child_launch_stale_retries
+    assert manager._retry_stale_child_launches() is False
 
 
 def test_manager_child_launch_worker_transports_fatal_exit_identity(
@@ -1505,7 +1493,9 @@ def test_manager_launch_worker_success_commits_once_on_main_thread(
     assert len(spawn_events) == 1
     assert spawn_events[0]["child_tid"] == str(message_id)
     assert inbox_queue.peek_one(exact_timestamp=message_id) is None
-    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+    assert str(message_id) in manager._scheduler_residents
+    # A launch result alone cannot ACK without scoped task handoff or settlement.
 
     manager.process_once()
     for item in drain(log_queue):
@@ -2434,7 +2424,6 @@ def test_manager_admission_retains_public_while_internal_can_launch(
                 "WEFT_TASK_MONITOR_ENABLED": "0",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
-                "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
         ),
@@ -2463,7 +2452,8 @@ def test_manager_admission_retains_public_while_internal_can_launch(
 
         assert launched == ["child"]
         assert internal_queue.peek_one() is None
-        assert internal_reserved.peek_one() is None
+        assert internal_reserved.peek_one() is not None
+        # Mock launch success supplies no process receipt or task-owned handoff.
         assert public_queue.peek_one() is not None
         assert public_reserved.peek_one() is None
         wait_timeout = manager.next_wait_timeout()
@@ -2540,7 +2530,6 @@ def test_manager_admission_rechecks_retained_row_on_deadline_without_activity(
                 "WEFT_TASK_MONITOR_ENABLED": "0",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
-                "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
             }
         ),
     )
@@ -2583,7 +2572,7 @@ def test_manager_admission_rechecks_retained_row_on_deadline_without_activity(
         assert observed == [None, 0]
         assert launched == ["child"]
         assert public_queue.peek_one() is None
-        assert public_reserved.peek_one() is None
+        assert public_reserved.peek_one() is not None
     finally:
         manager.stop(join=False)
         manager.cleanup()
@@ -2607,7 +2596,6 @@ def test_failed_child_launch_restores_source_and_retries_on_admission_deadline(
                 "WEFT_TASK_MONITOR_ENABLED": "0",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
-                "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
         ),
@@ -2844,7 +2832,6 @@ def pg_admission_setup(
                 "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
                 "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 60.0,
                 WEFT_ADMISSION_MAX_CONNECTIONS: 5,
-                "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
                 WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             }
         ),
@@ -2874,6 +2861,15 @@ def pg_admission_setup(
         manager.cleanup()
 
 
+def process_primary_candidate(manager: Manager) -> bool:
+    """Drive the scheduler discovery boundary before isolated admission dispatch."""
+    if not manager._admission_bootstrapped:
+        manager._refresh_scheduler_evidence()
+    manager._family_repair_due = 0.0
+    manager._classify_family_requests()
+    return manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+
+
 def test_pg_admission_stall_retains_source_answers_control_and_recovers(
     pg_admission_setup: tuple[Manager, Callable[[str], Any], dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
@@ -2884,14 +2880,14 @@ def test_pg_admission_stall_retains_source_answers_control_and_recovers(
     reserved = make_queue(manager._queue_names["reserved"])
     source.write(json.dumps(make_child_spec()))
     capsys.readouterr()
-    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    assert process_primary_candidate(manager) is False
     first = serve_log_events(capsys)
     assert first[-1]["wait_phase"] == "waiting"
 
     evidence["now"] = 130.0
     manager._admission_retry_after_ns = time.time_ns() - 1
     manager._expire_admission_retry_if_due()
-    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    assert process_primary_candidate(manager) is False
     stalled = serve_log_events(capsys)
     assert stalled[-1]["wait_phase"] == "stalled"
     assert stalled[-1]["elapsed_seconds"] == 30.0
@@ -2920,10 +2916,10 @@ def test_pg_admission_stall_retains_source_answers_control_and_recovers(
     evidence.update(now=220.0, used=0)
     manager._admission_retry_after_ns = time.time_ns() - 1
     manager._expire_admission_retry_if_due()
-    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is True
+    assert process_primary_candidate(manager) is True
     assert launched == ["child"]
     assert source.peek_one() is None
-    assert reserved.peek_one() is None
+    assert reserved.peek_one() is not None
     assert any(event.get("state") == "open" for event in serve_log_events(capsys))
 
 
@@ -2937,7 +2933,7 @@ def test_pg_admission_retry_restoration_and_allowed_internal_do_not_renew_wait(
     public.write(json.dumps(make_child_spec()))
     evidence["used"] = 2
     capsys.readouterr()
-    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    assert process_primary_candidate(manager) is False
     assert serve_log_events(capsys)[-1]["wait_phase"] == "waiting"
 
     evidence["now"] = 120.0
@@ -2955,7 +2951,7 @@ def test_pg_admission_retry_restoration_and_allowed_internal_do_not_renew_wait(
     evidence["now"] = 130.0
     manager._admission_retry_after_ns = time.time_ns() - 1
     manager._expire_admission_retry_if_due()
-    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    assert process_primary_candidate(manager) is False
     events = [
         event
         for event in serve_log_events(capsys)
@@ -2980,14 +2976,14 @@ def test_pg_admission_unknown_samples_do_not_log_each_changing_elapsed_second(
         evidence["now"] = now
         manager._admission_retry_after_ns = time.time_ns() - 1
         manager._expire_admission_retry_if_due()
-        assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+        assert process_primary_candidate(manager) is False
     events = serve_log_events(capsys)
     assert len(events) == 1
     assert events[0]["state"] == "unavailable"
     assert events[0]["wait_phase"] == "waiting"
     evidence["now"] = 130.0
     manager._clear_admission_retry()
-    assert manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set()) is False
+    assert process_primary_candidate(manager) is False
     assert serve_log_events(capsys)[-1]["wait_phase"] == "stalled"
     assert source.peek_one() is not None
     assert make_queue(manager._queue_names["reserved"]).peek_one() is None
@@ -3000,11 +2996,11 @@ def test_pg_admission_real_child_reap_refreshes_progress_once(
     manager, make_queue, evidence = pg_admission_setup
     make_queue(WEFT_SPAWN_REQUESTS_QUEUE).write(json.dumps(make_child_spec()))
     capsys.readouterr()
-    manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+    process_primary_candidate(manager)
     serve_log_events(capsys)
     evidence["now"] = 130.0
     manager._clear_admission_retry()
-    manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+    process_primary_candidate(manager)
     assert serve_log_events(capsys)[-1]["wait_phase"] == "stalled"
 
     process = multiprocessing.get_context("spawn").Process(target=os._exit, args=(1,))
@@ -3016,7 +3012,7 @@ def test_pg_admission_real_child_reap_refreshes_progress_once(
             process=process, ctrl_queue=None, persistent=False
         )
         assert manager._cleanup_children() is True
-        manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+        process_primary_candidate(manager)
         events = [
             event
             for event in serve_log_events(capsys)
@@ -3027,7 +3023,7 @@ def test_pg_admission_real_child_reap_refreshes_progress_once(
         evidence["now"] = 160.0
         assert manager._cleanup_children() is False
         manager._clear_admission_retry()
-        manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+        process_primary_candidate(manager)
         assert serve_log_events(capsys)[-1]["wait_phase"] == "stalled"
     finally:
         if process.is_alive():
@@ -3076,9 +3072,11 @@ def test_pg_admission_idle_reset_requires_all_successful_unstopped_source_probes
     public = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     public.write(json.dumps(make_child_spec()))
     capsys.readouterr()
-    manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+    process_primary_candidate(manager)
     assert serve_log_events(capsys)[-1]["wait_phase"] == "waiting"
     drain(public)
+    # Resolve the missed exact source row before testing idle source probes.
+    manager._fetch_next_message(manager._queues[WEFT_SPAWN_REQUESTS_QUEUE])
     manager._clear_admission_retry()
     evidence["now"] = 140.0
     sources = [
@@ -3089,6 +3087,7 @@ def test_pg_admission_idle_reset_requires_all_successful_unstopped_source_probes
         manager._schedule_admission_retry_for_source(WEFT_SPAWN_REQUESTS_QUEUE)
     elif scan == "partial":
         make_queue(sources[0]).write(json.dumps(make_child_spec()))
+        manager._classify_family_requests()
     elif scan == "later_reserved":
         # Both spawn sources precede reserved recovery in the real scan. Its
         # early return must not discard empty evidence already established.
@@ -3099,9 +3098,7 @@ def test_pg_admission_idle_reset_requires_all_successful_unstopped_source_probes
         with pytest.raises(BrokerError, match="source probe unavailable"):
             manager._has_pending_messages()
     else:
-        assert manager._has_pending_messages() is (
-            scan in {"partial", "later_reserved"}
-        )
+        assert manager._has_pending_messages() is (scan == "partial")
     assert len(probed) == (
         len(sources) - 1
         if scan == "skipped"
@@ -3125,7 +3122,7 @@ def test_pg_admission_idle_reset_requires_all_successful_unstopped_source_probes
     # reset, exposing the next episode without requiring a synthetic open log.
     evidence["used"] = None
     manager._clear_admission_retry()
-    manager._process_queue_message(WEFT_SPAWN_REQUESTS_QUEUE, set())
+    process_primary_candidate(manager)
     events = [
         event
         for event in serve_log_events(capsys)
@@ -3922,7 +3919,6 @@ def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
         {
             "WEFT_AUTOSTART_TASKS": "0",
             WEFT_ADMISSION_MAX_CONNECTIONS: 2,
-            "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": 1,
             WEFT_ADMISSION_RESERVE_FRACTION: 0.0,
             "WEFT_TASK_MONITOR_ENABLED": "0",
             "WEFT_LIVENESS_MONITOR_ENABLED": "0",
@@ -3979,7 +3975,7 @@ def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
         assert primary._drain_internal_spawn_requests() == 1
         assert launched == ["retained-internal"]
         assert internal_queue.peek_one() is None
-        assert primary_reserved.peek_one() is None
+        assert primary_reserved.peek_one() is not None
     finally:
         if duplicate is not None:
             duplicate.stop(join=False)
@@ -3990,7 +3986,9 @@ def test_nonprimary_yields_with_capacity_blocked_shared_internal_work(
 
 def _prime_manager_next_wait_baseline(manager: Manager, now_ns: int) -> None:
     # These cases isolate steady-state deadlines, not the initial PG bootstrap.
-    manager._refresh_postgres_admission_evidence()
+    manager._refresh_scheduler_evidence()
+    # Isolate legacy reactor deadlines from the independent family repair cadence.
+    manager._family_repair_due = float("inf")
     manager.should_stop = False
     manager._draining = False
     manager._drain_immediate_work_pending = False
@@ -9004,7 +9002,7 @@ def test_manager_public_dispatch_steals_work_when_registry_ownership_is_unproved
 
     assert launched == [str(message_id)]
     assert spawn_queue.peek_one(exact_timestamp=message_id) is None
-    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
     events = [json.loads(item) for item in drain(log_queue)]
     assert not any(
         str(event.get("event", "")).startswith("manager_spawn_fence")
@@ -9201,7 +9199,7 @@ def test_manager_services_successfully_reserved_public_work(
 
     assert moved == (json.dumps(payload), message_id)
     assert launched == [str(message_id)]
-    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
 
 
 def test_manager_does_not_probe_inactive_public_spawn_queue(
@@ -9297,7 +9295,7 @@ def test_manager_pending_precheck_activates_public_spawn_queue(
 
     assert launched == [str(message_id)]
     assert spawn_queue.peek_one(exact_timestamp=message_id) is None
-    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
 
 
 def test_manager_idle_discovery_skips_reserved_queues(
@@ -10404,23 +10402,44 @@ def test_manager_idle_timeout_ignores_unrelated_broker_activity(
         manager.cleanup()
 
 
-def test_manager_idle_pending_work_includes_reserved_spawn_rows(
+def test_manager_idle_pending_work_excludes_retained_reserved_custody(
     broker_env: BrokerEnv,
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
     spec = make_manager_spec(unique_tid, idle_timeout=0.2)
-    manager = Manager(db_path, spec)
+    manager = Manager(
+        db_path,
+        spec,
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": False,
+                "WEFT_LIVENESS_MONITOR_ENABLED": False,
+                "WEFT_HEARTBEAT_ENABLED": False,
+                "WEFT_AUTOSTART_TASKS": False,
+            }
+        ),
+    )
     try:
         reserved_queue = make_queue(manager._queue_names["reserved"])
         reserved_queue.write(json.dumps({"taskspec": make_child_spec(size=1)}))
 
-        assert manager._manager_owned_work_pending() is True
+        assert manager._manager_owned_work_pending() is False
 
+        manager.process_once()
+        manager._update_idle_activity_from_broker(force=True)
         manager._last_activity_ns = time.time_ns() - 1_000_000_000
         manager.process_once()
 
-        assert manager.should_stop is False
+        assert manager.should_stop is True, {
+            "pending": manager._manager_owned_work_pending(),
+            "children": manager._user_work_children(),
+            "convergence": manager._managed_service_convergence_active_reasons(
+                include_autostart=True
+            ),
+            "idle_ns": time.time_ns() - manager._last_activity_ns,
+            "draining": manager._draining,
+        }
     finally:
         manager.cleanup()
 
@@ -11771,7 +11790,7 @@ def test_failed_launch_clear_policy_preserves_failed_delete_residue(
             record
             for record in caplog.records
             if record.levelno == logging.WARNING
-            and "clear reserved spawn message" in record.getMessage()
+            and "Reserved spawn disposition failed" in record.getMessage()
         ]
         assert len(warnings) == 1
         assert str(calls[0]["message_id"]) in warnings[0].getMessage()
@@ -11824,19 +11843,3 @@ def test_manager_leadership_unknown_expiry_controls_ping_without_changing_eviden
                 "reply_to": manager._queue_names["ctrl_in"],
             }
         ]
-
-
-@pytest.mark.parametrize("child_tid", ["unresolved", "123"])
-def test_child_launch_invalid_state_tid_still_checks_durable_log(
-    tmp_path: Path, child_tid: str
-) -> None:
-    manager = Manager(tmp_path / "manager.db", make_manager_spec(str(time.time_ns())))
-    try:
-        assert manager._latest_tid_runtime_handle(child_tid) is None
-        assert not manager._child_launch_runtime_evidence_seen(child_tid)
-        manager._queue(WEFT_GLOBAL_LOG_QUEUE).write(
-            json.dumps({"event": "task_spawned", "child_tid": child_tid})
-        )
-        assert manager._child_launch_runtime_evidence_seen(child_tid)
-    finally:
-        manager.cleanup()

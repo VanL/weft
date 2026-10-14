@@ -11,15 +11,15 @@ Spec references:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, cast
 
-from weft._constants import WEFT_TASK_STATE_QUEUE_PREFIX
+from weft._constants import QUEUE_RESERVED_SUFFIX, WEFT_TASK_STATE_QUEUE_PREFIX
 from weft.context import WeftContext
 from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
 from weft.helpers import closing_queue_iterator
-from weft.helpers.message_ids import is_task_tid
+from weft.helpers.message_ids import is_task_tid, normalize_exact_message_id
 from weft.liveness.policy import decode_tid_state_row
 
 
@@ -126,3 +126,61 @@ def iter_task_state_rows(
                 yield decode_tid_state_row(
                     QueueWindowRow(name, body, int(message_id)), expected_tid=tid
                 )
+
+
+def manager_launch_custody_pending(payload: Mapping[str, Any], *, broker: Any) -> bool:
+    """Retain a Manager checkpoint while exact launch reservations exist [OBS.6].
+
+    Both cleanup owners use this predicate after rereading the newest snapshot.
+    Malformed references and broker errors propagate so cleanup fails closed.
+    """
+    if "scheduler_frontiers" not in payload:
+        return False
+    frontiers = payload["scheduler_frontiers"]
+    if not isinstance(frontiers, Mapping):
+        raise TypeError("scheduler checkpoint must be a mapping")
+    residents = frontiers.get("residents")
+    if not isinstance(residents, Mapping):
+        raise TypeError("scheduler residents must be a mapping")
+    manager_tid = payload.get("full")
+    if (
+        payload.get("role") == "manager"
+        and is_task_tid(manager_tid)
+        and normalize_exact_message_id(manager_tid) != 0
+    ):
+        queue_name, _owner_id = _launch_reservation_reference(
+            frontiers.get("reserved_queue", f"T{manager_tid}.{QUEUE_RESERVED_SUFFIX}"),
+            manager_tid,
+        )
+        if broker.peek_one(queue_name, include_claimed=True) is not None:
+            # A real Manager can reserve before its pre-launch checkpoint update.
+            # Keep the protocol row and honor its declared queue override.
+            return True
+    for resident in residents.values():
+        if not isinstance(resident, Mapping):
+            raise TypeError("scheduler resident must be a mapping")
+        reserved_queue = resident.get("reserved_queue")
+        request_id = resident.get("request_id")
+        if reserved_queue is None and request_id is None:
+            continue
+        reserved_queue, exact_id = _launch_reservation_reference(
+            reserved_queue, request_id
+        )
+        if (
+            broker.peek_one(
+                reserved_queue, exact_timestamp=exact_id, include_claimed=True
+            )
+            is not None
+        ):
+            return True
+    return False
+
+
+def _launch_reservation_reference(queue_name: Any, request_id: Any) -> tuple[str, int]:
+    """Validate the existing exact reservation reference, without broker I/O."""
+    if not isinstance(queue_name, str) or not queue_name:
+        raise ValueError("launch reservation requires a queue name")
+    exact_id = normalize_exact_message_id(request_id)
+    if exact_id == 0:
+        raise ValueError("launch reservation requires a nonzero request ID")
+    return queue_name, exact_id

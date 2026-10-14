@@ -193,7 +193,11 @@ from weft.core.service_convergence import (
     manager_service_key,
     reduce_latest_by_service_owner,
 )
-from weft.core.task_state import latest_task_state_rows
+from weft.core.task_state import (
+    latest_task_state_rows,
+    manager_launch_custody_pending,
+    read_task_state_snapshot,
+)
 from weft.core.tasks.base import TaskWorkerResult
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
 from weft.core.tasks.service import (
@@ -2122,6 +2126,12 @@ class MaintenanceWorker:
                 skipped_nonstandard=1,
             )
 
+        try:
+            if self._launch_custody_pending(record.tid):
+                return _TaskControlCleanupResult(pending=True)
+        except (BrokerError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return _TaskControlCleanupResult(pending=True, errors=(str(exc),))
+
         errors: list[str] = []
         warnings: list[str] = []
         queue_label = ",".join(cleanup_plan.queue_names)
@@ -2136,8 +2146,10 @@ class MaintenanceWorker:
         )
         try:
             with self._connection() as broker:
+                if self._launch_custody_pending(record.tid, broker=broker):
+                    return _TaskControlCleanupResult(pending=True)
                 rows_deleted = int(broker.delete_from_queues(cleanup_plan.queue_names))
-        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+        except (BrokerError, OSError, RuntimeError, TypeError, ValueError) as exc:
             errors.append(f"{queue_label}: {exc}")
             rows_deleted = 0
 
@@ -2203,6 +2215,11 @@ class MaintenanceWorker:
         )
 
         if queue_names_to_delete:
+            try:
+                if self._launch_custody_pending(tid):
+                    return _TaskControlCleanupResult(pending=True)
+            except (BrokerError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                return _TaskControlCleanupResult(pending=True, errors=(str(exc),))
             self._handoff_inferred_runtime_report(
                 tid=tid,
                 store=store,
@@ -2214,8 +2231,10 @@ class MaintenanceWorker:
             )
             try:
                 with self._connection() as broker:
+                    if self._launch_custody_pending(tid, broker=broker):
+                        return _TaskControlCleanupResult(pending=True)
                     rows_deleted = int(broker.delete_from_queues(queue_names_to_delete))
-            except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            except (BrokerError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 queue_label = ",".join(queue_names_to_delete)
                 errors.append(f"{queue_label}: {exc}")
                 rows_deleted = 0
@@ -2274,6 +2293,16 @@ class MaintenanceWorker:
             warnings=tuple(warnings),
         )
 
+    def _launch_custody_pending(self, tid: str, *, broker: Any | None = None) -> bool:
+        """Protect exact reserved launches before destruction [LIVENESS.R7]."""
+        if broker is None:
+            with self._connection() as connected:
+                return self._launch_custody_pending(tid, broker=connected)
+        snapshot = read_task_state_snapshot(self._monitor_context(), tid, broker=broker)
+        return snapshot is not None and manager_launch_custody_pending(
+            snapshot[1], broker=broker
+        )
+
     def _delete_runtime_reserved_queue(
         self,
         queue_name: str,
@@ -2284,8 +2313,11 @@ class MaintenanceWorker:
         errors: list[str] = []
         try:
             with self._connection() as broker:
+                tid = _reserved_queue_tid(queue_name)
+                if tid is not None and self._launch_custody_pending(tid, broker=broker):
+                    return _TaskControlCleanupResult(pending=True)
                 rows_deleted = int(broker.delete_from_queues((queue_name,)))
-        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+        except (BrokerError, OSError, RuntimeError, TypeError, ValueError) as exc:
             errors.append(f"reserved queue delete ({queue_name}): {exc}")
         return _TaskControlCleanupResult(
             reserved_families_processed=0 if errors else 1,
@@ -2867,6 +2899,9 @@ class MaintenanceWorker:
             )
             if queue_name in reserved_queue_name_set and not preserve_ambiguous:
                 try:
+                    if self._launch_custody_pending(record.tid):
+                        cleanup_items_pending += 1
+                        continue
                     self._handoff_collation_runtime_report(
                         record,
                         store=store,
@@ -2877,7 +2912,13 @@ class MaintenanceWorker:
                         queue_names=(queue_name,),
                     )
                     cleanup = self._delete_runtime_reserved_queue(queue_name)
-                except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+                except (
+                    BrokerError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
                     cleanup = _TaskControlCleanupResult(
                         pending=True,
                         errors=(str(exc),),
@@ -2888,6 +2929,9 @@ class MaintenanceWorker:
                 )
                 errors.extend(cleanup.errors)
                 warnings.extend(cleanup.warnings)
+                if cleanup.pending:
+                    cleanup_items_pending += 1
+                    continue
                 if not cleanup.success:
                     continue
             reserved_checked_tids.append(record.tid)
@@ -2914,6 +2958,9 @@ class MaintenanceWorker:
                 ):
                     continue
                 if tid is not None:
+                    if self._launch_custody_pending(tid):
+                        cleanup_items_pending += 1
+                        continue
                     self._handoff_inferred_runtime_report(
                         tid=tid,
                         store=store,
@@ -2924,11 +2971,13 @@ class MaintenanceWorker:
                         queue_names=(queue_name,),
                     )
                 cleanup = self._delete_runtime_reserved_queue(queue_name)
-            except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            except (BrokerError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 cleanup = _TaskControlCleanupResult(
                     pending=True,
                     errors=(str(exc),),
                 )
+            if cleanup.pending:
+                cleanup_items_pending += 1
             reserved_families_processed += cleanup.reserved_families_processed
             reserved_queues_deleted += cleanup.reserved_queues_deleted
             reserved_rows_estimated_deleted += cleanup.reserved_rows_estimated_deleted
@@ -3092,6 +3141,8 @@ class MaintenanceWorker:
                     pending=True,
                     errors=(str(exc),),
                 )
+            if cleanup.pending:
+                cleanup_items_pending += 1
             cleanup_items_completed += 1
             dead_tids_processed += cleanup.dead_tids_processed
             dead_tid_queues_deleted += cleanup.dead_tid_queues_deleted
