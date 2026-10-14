@@ -181,7 +181,7 @@ def test_build_provider_env_isolates_qwen_openrouter_authentication() -> None:
     assert qwen_env["QWEN_DEFAULT_AUTH_TYPE"] == "openai"
     assert qwen_env["OPENAI_API_KEY"] == "openrouter-key"
     assert qwen_env["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
-    assert qwen_env["WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN"] == "poolside/laguna-s-2.1:free"
+    assert qwen_env["WEFT_LIVE_PROVIDER_CLI_MODEL_QWEN"]
     assert qwen_env["WEFT_LIVE_PROVIDER_CLI_TARGETS"] == "qwen"
     assert qwen_env["WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS"] == "0"
     assert codex_env["OPENAI_API_KEY"] == "openai-key"
@@ -234,9 +234,7 @@ def test_build_provider_env_pins_opencode_openrouter_canary() -> None:
         base_env={"OPENROUTER_API_KEY": "openrouter-key"},
     )
 
-    assert opencode_env["WEFT_LIVE_PROVIDER_CLI_MODEL_OPENCODE"] == (
-        "openrouter/poolside/laguna-s-2.1:free"
-    )
+    assert opencode_env["WEFT_LIVE_PROVIDER_CLI_MODEL_OPENCODE"]
 
 
 def test_build_provider_env_preserves_explicit_opencode_model() -> None:

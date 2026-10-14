@@ -24,7 +24,7 @@ QWEN_DEFAULT_AUTH_TYPE_ENV: Final[str] = "QWEN_DEFAULT_AUTH_TYPE"
 OPENAI_API_KEY_ENV: Final[str] = "OPENAI_API_KEY"
 OPENAI_BASE_URL_ENV: Final[str] = "OPENAI_BASE_URL"
 OPENROUTER_BASE_URL: Final[str] = "https://openrouter.ai/api/v1"
-OPENROUTER_SMOKE_MODEL: Final[str] = "poolside/laguna-s-2.1:free"
+OPENROUTER_SMOKE_MODEL: Final[str] = "meta/muse-spark-1.3-contributor"
 OPENCODE_OPENROUTER_SMOKE_MODEL: Final[str] = f"openrouter/{OPENROUTER_SMOKE_MODEL}"
 
 

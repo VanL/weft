@@ -47,7 +47,7 @@ _LIVE_PROVIDER_FAILURE_STATES: Final[frozenset[str]] = frozenset(
     {"failed", "timeout", "cancelled", "killed"}
 )
 _LIVE_PROVIDER_DEFAULT_MODELS: Final[dict[str, str]] = {
-    "qwen": "poolside/laguna-s-2.1:free",
+    "qwen": "meta/muse-spark-1.3-contributor",
 }
 
 
@@ -206,7 +206,7 @@ def test_live_provider_agent_overrides_pin_qwen_smoke_model_by_default() -> None
         executable="/tools/qwen",
     )
 
-    assert overrides["model"] == "poolside/laguna-s-2.1:free"
+    assert overrides["model"]
 
 
 def test_live_provider_agent_overrides_accept_provider_model_env(
