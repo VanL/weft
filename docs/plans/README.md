@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 246 plan files in this directory.
+There are currently 247 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 246 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-10-14-agent-theory-delta-wave-plan.md`](./2026-10-14-agent-theory-delta-wave-plan.md) | Agent-Theory Propagation Plan (2026-10-14 delta wave) | `completed` | none |
 | [`2026-10-14-contention-theory-stop-condition.md`](./2026-10-14-contention-theory-stop-condition.md) | Contention failures require theory re-derivation | `draft` | none |
 | [`2026-10-14-task-monitor-ingest-and-retirement-plan.md`](./2026-10-14-task-monitor-ingest-and-retirement-plan.md) | TaskMonitor Ingest and Retirement | `draft` | none |
 | [`2026-10-14-task-monitor-read-separation-and-simplification-plan.md`](./2026-10-14-task-monitor-read-separation-and-simplification-plan.md) | Task-Owned Observation and Read Separation | `draft` | none |

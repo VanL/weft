@@ -75,7 +75,15 @@ when relevant:
 
 ## 1. State Invariants Before Tasks
 
-Name the invariants that matter enough to cause regressions.
+Name the invariants that matter enough to cause regressions. Before drafting the
+list from memory, check the repository's standing invariants and
+refused-alternatives surfaces (`docs/program-theory.md` `[ALT-WT-*]` and
+`docs/specifications/07-System_Invariants.md`) so the plan does not quietly
+propose an already-refused shape. When a task is framed as "simplification",
+"consolidation", or "extraction" of existing code, require a **difference
+register** before the task breakdown — an explicit table listing every behavior,
+branch, guard, or error path that differs between the current paths and stating
+whether each difference is preserved, unified, or intentionally retired.
 
 Common Weft invariants:
 
@@ -220,7 +228,9 @@ changes, and identifier or storage format changes.
 Any deferred or queue-backed path introduces lifecycle questions:
 
 - where does the input live before processing?
-- what cleans it up?
+- what cleans it up, and which product cleanup contract owns it (for example,
+  `vacuum`/prune vs `delete`/purge, and what liveness preconditions must hold
+  before any unreferenced artifact is removed)?
 - what happens on restart?
 - can the same work be claimed twice?
 
@@ -235,7 +245,26 @@ For hard changes, required reading should include one or two questions such as:
 - where is the canonical TaskSpec resolution path?
 - which layer owns the public CLI or result shape?
 
-If the implementer cannot answer those, they are not ready to edit.
+If the implementer cannot answer those, they are not ready to edit. See
+`docs/agent-context/runbooks/writing-plans.md` §3 for the binding mechanics
+(expected answers recorded in the plan, implementer answers in the execution
+log before the first edit).
+
+## 15. Release Plans Carry Stop-Gates
+
+When a plan cuts or prepares a release, include explicit stop-gates before tag
+or publication:
+
+- full test suite across every test root (including slow/integration/extension
+  and fuzz suites where applicable), not only the fast default selection
+- clean worktree and branch parity with the target remote ref — re-verify
+  `git fetch` + remote-HEAD parity immediately before tagging or pushing,
+  because a long verification suite gives the remote branch time to advance and
+  invalidate the verified tree, and test the guard's failure path (diverged or
+  dirty state) before relying on it for publication
+- changelog, version metadata, and migration notes aligned with the actual diff
+- explicit stop-gate before any irreversible publication step (`git push --tags`,
+  package upload, or external announcement)
 
 ## When To Stop and Re-Plan
 

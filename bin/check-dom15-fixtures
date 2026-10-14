@@ -27,34 +27,69 @@ from pathlib import Path
 DEFAULT_SPEC = "docs/agent-context/decision-hierarchy.md"
 
 CLASS_CELL_RE = re.compile(r"^(?:[0-5]\b|Class\s+[0-5]\+P\b|Escalate to [0-5]\b)")
-NEGATIVE_FACT_MARKERS = (
-    # weft-local phrasings first; canonical bracket markers kept below
-    # because the embedded self-test corpus uses them
-    "no non-trivial or risky trigger",
-    "no risky or",
-    "not material",
-    "no [DOM-5]",
-    "no behavior change",
-    "no observable behavior",
-    "not [DOM-6]-material",
-    "nothing changes",
-    "intent evidence",
-    "spec-cited intent",
-    "the cited section is the intent evidence",
+# Adopters: this pattern tuple is repo-adapted by design. When your
+# fixtures use local phrasing (name-based triggers, different negation
+# wording), EXTEND this tuple — do not reword your fixtures back to
+# canonical brackets.
+NEGATIVE_FACT_PATTERNS = (
+    re.compile(
+        r"\bno(?: other)? \[DOM-5\][^.;,—\[]*?\btriggers?\s+fires?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno(?: other)? (?:non-trivial or risky |risky or non-trivial )?triggers?\s+fires?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bno (?:observable )?behavior change\b", re.IGNORECASE),
+    re.compile(r"\bnot \[DOM-6\]-material\b", re.IGNORECASE),
+    re.compile(r"\bnot material\b", re.IGNORECASE),
+    re.compile(r"\bnothing changes\b", re.IGNORECASE),
+)
+TRIGGER_FIRE_RE = re.compile(
+    r"(?:\[DOM-[56]\][^.;,—\[]*?|(?:non-trivial|risky)(?:\s+or\s+(?:non-trivial|risky))?\s+)\btriggers?(?:,\s*)?\s+fires?\b",
+    re.IGNORECASE,
+)
+CLAUSE_SPLIT_RE = re.compile(
+    r"[,;.—]|\b(?:but|yet|and|while|though|although|however)\b", re.IGNORECASE
 )
 
 
+def _fence_marker(line: str) -> tuple[str, int, str] | None:
+    leading_spaces = len(line) - len(line.lstrip(" "))
+    stripped = line[leading_spaces:]
+    if leading_spaces <= 3 and stripped.startswith(("```", "~~~")):
+        char = stripped[0]
+        length = len(stripped) - len(stripped.lstrip(char))
+        return (char, length, stripped[length:])
+    return None
+
+
+def _closes_fence(
+    marker: tuple[str, int, str] | None, fence: tuple[str, int]
+) -> bool:
+    return (
+        marker is not None
+        and marker[0] == fence[0]
+        and marker[1] >= fence[1]
+        and not marker[2].strip()
+    )
+
+
 def strip_fenced_blocks(text: str) -> str:
-    """Remove fenced code blocks so grammar mimicry inside them is inert."""
-    out, fenced = [], False
+    """Remove fenced blocks so grammar mimicry inside them is inert."""
+    output: list[str] = []
+    fence: tuple[str, int] | None = None
     for line in text.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith(("```", "~~~")):
-            fenced = not fenced
+        marker = _fence_marker(line)
+        if fence is None and marker is not None:
+            fence = (marker[0], marker[1])
             continue
-        if not fenced:
-            out.append(line)
-    return "\n".join(out)
+        if fence is not None:
+            if _closes_fence(marker, fence):
+                fence = None
+            continue
+        output.append(line)
+    return "\n".join(output)
 
 
 def extract_section(text: str) -> str | None:
@@ -90,6 +125,49 @@ def fixture_rows(section: str) -> list[tuple[str, str]]:
     return rows
 
 
+def states_firing_trigger(fact: str) -> bool:
+    """True when any trigger-fire clause in `fact` is not directly negated."""
+    for clause in CLAUSE_SPLIT_RE.split(fact):
+        for match in TRIGGER_FIRE_RE.finditer(clause):
+            prefix = clause[: match.start()]
+            if not re.search(r"\bno(?: other)?\s+$", prefix, re.IGNORECASE):
+                return True
+    return False
+
+
+def has_negative_fact(fact: str) -> bool:
+    """True when at least one clause states a valid negative-trigger fact."""
+    return any(
+        p.search(clause)
+        for clause in CLAUSE_SPLIT_RE.split(fact)
+        for p in NEGATIVE_FACT_PATTERNS
+    )
+
+
+def _record_row(
+    fact: str, cls: str, seen_classes: set[str], problems: list[str]
+) -> None:
+    if not CLASS_CELL_RE.match(cls):
+        problems.append(f"unknown class cell: {cls!r} (fixture: {fact[:50]}...)")
+        return
+    if "+P" in cls:
+        seen_classes.add("+P")
+        seen_classes.add(cls.split()[1].split("+")[0])
+    elif cls.startswith("Escalate to"):
+        seen_classes.add(cls.split()[-1][0])
+    else:
+        seen_classes.add(cls[0])
+    if cls[0] in ("1", "2") and not cls.startswith("Escalate"):
+        if not has_negative_fact(fact):
+            problems.append(
+                f"class-{cls[0]} fixture missing negative-trigger facts: {fact[:60]}..."
+            )
+        if states_firing_trigger(fact):
+            problems.append(
+                f"class-{cls[0]} fixture states that a trigger fires: {fact[:60]}..."
+            )
+
+
 def check(section: str) -> list[str]:
     problems: list[str] = []
     rows = fixture_rows(section)
@@ -98,24 +176,7 @@ def check(section: str) -> list[str]:
 
     seen_classes: set[str] = set()
     for fact, cls in rows:
-        if not CLASS_CELL_RE.match(cls):
-            problems.append(f"unknown class cell: {cls!r} (fixture: {fact[:50]}...)")
-            continue
-        if "+P" in cls:
-            seen_classes.add("+P")
-            seen_classes.add(cls.split()[1].split("+")[0])
-        elif cls.startswith("Escalate to"):
-            seen_classes.add(cls.split()[-1][0])
-        else:
-            seen_classes.add(cls[0])
-        if (
-            cls[0] in ("1", "2")
-            and not cls.startswith("Escalate")
-            and not any(m in fact for m in NEGATIVE_FACT_MARKERS)
-        ):
-            problems.append(
-                f"class-{cls[0]} fixture missing negative-trigger facts: {fact[:60]}..."
-            )
+        _record_row(fact, cls, seen_classes, problems)
 
     for required in ("0", "1", "2", "3", "4", "5", "+P"):
         if required not in seen_classes:
@@ -143,6 +204,71 @@ planning artifacts **subsume**: floors accumulate
 """
 
 
+def _fence_probe_failures() -> list[str]:
+    """Fence probes go through extract_section — the real invocation path
+    that strips fences; calling check() directly would bypass stripping
+    and pass or fail vacuously."""
+    failures: list[str] = []
+
+    def full_check(text: str) -> list[str]:
+        section = extract_section(text)
+        return ["no section"] if section is None else check(section)
+
+    bogus_table = (
+        "| Fixture (trigger facts stated) | Class |\n"
+        "|---------|-------|\n"
+        "| probe row | 9 |\n"
+    )
+    probes = [
+        (
+            "fenced-block fixture text was not ignored",
+            GOOD_SAMPLE + "\n```\n| bogus | 9 |\n```\n",
+            False,
+        ),
+        (
+            "nested-fence interior leaked into the fixture table",
+            GOOD_SAMPLE
+            + (
+                "\n````markdown\n```\n"
+                "| Fixture (trigger facts stated) | Class |\n"
+                "|---------|-------|\n"
+                "| nested-fence example | 9 |\n"
+                "````\n"
+            ),
+            False,
+        ),
+        (
+            "tilde-fenced fixture text was not ignored",
+            GOOD_SAMPLE + "\n~~~\n" + bogus_table + "~~~\n",
+            False,
+        ),
+        (
+            "mismatched-character line closed a fence early",
+            GOOD_SAMPLE + "\n```\n~~~\n" + bogus_table + "```\n",
+            False,
+        ),
+        (
+            "info-string line closed a fence early",
+            GOOD_SAMPLE + "\n```\n``` markdown\n" + bogus_table + "```\n",
+            False,
+        ),
+        (
+            "unclosed fence leaked its interior",
+            GOOD_SAMPLE + "\n````markdown\n```\n" + bogus_table,
+            False,
+        ),
+        (
+            "4-space-indented line was wrongly treated as a fence",
+            GOOD_SAMPLE + "\n    ```\n" + bogus_table + "    ```\n",
+            True,
+        ),
+    ]
+    for msg, sample, expect_errors in probes:
+        if bool(full_check(sample)) != expect_errors:
+            failures.append(msg)
+    return failures
+
+
 def self_test() -> int:
     failures = []
     if check(GOOD_SAMPLE):
@@ -155,15 +281,39 @@ def self_test() -> int:
         "stripped negative facts": GOOD_SAMPLE.replace(
             "typo — no behavior change", "typo"
         ),
+        "firing trigger hidden behind negative marker": GOOD_SAMPLE.replace(
+            "typo — no behavior change",
+            "typo — no behavior change; a [DOM-5] risky trigger fires",
+        ),
+        "firing trigger after negated trigger in same sentence": GOOD_SAMPLE.replace(
+            "no [DOM-5] trigger fires",
+            "no [DOM-5] non-trivial trigger fires, but a [DOM-5] risky trigger fires",
+        ),
+        "firing trigger after conjunction without comma": GOOD_SAMPLE.replace(
+            "no [DOM-5] trigger fires",
+            "no [DOM-5] non-trivial changes but a [DOM-5] risky trigger fires",
+        ),
+        "firing trigger after though without comma": GOOD_SAMPLE.replace(
+            "no [DOM-5] trigger fires",
+            "no [DOM-5] non-trivial changes though a [DOM-5] risky trigger fires",
+        ),
+        "firing trigger after although without comma": GOOD_SAMPLE.replace(
+            "no [DOM-5] trigger fires",
+            "no [DOM-5] non-trivial changes although a [DOM-5] risky trigger fires",
+        ),
+        "firing trigger after however without comma": GOOD_SAMPLE.replace(
+            "no [DOM-5] trigger fires",
+            "no [DOM-5] non-trivial changes however a [DOM-5] risky trigger fires",
+        ),
+        "intent evidence alone without negative trigger fact": GOOD_SAMPLE.replace(
+            "no [DOM-5] trigger fires", "reversible"
+        ),
         "deleted subsume rule": GOOD_SAMPLE.replace("subsume", "combine"),
     }
     for name, mutated in mutations.items():
         if not check(mutated):
             failures.append(f"mutation not caught: {name}")
-    # probe: fenced grammar mimicry must be inert
-    fenced = GOOD_SAMPLE + "\n```\n| bogus | 9 |\n```\n"
-    if check(fenced):
-        failures.append("fenced-block fixture text was not ignored")
+    failures.extend(_fence_probe_failures())
     # probe: missing target is an invocation error, not a crash
     if run(["--spec", "/nonexistent/dom15-spec.md"]) != 2:
         failures.append("missing spec file did not exit with invocation-error class")

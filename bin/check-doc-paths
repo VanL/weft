@@ -5,14 +5,18 @@ principle 9, "Enumerable Contracts Get Executable Gates"); path claims
 are the corpus's most common rot class.
 
 Adopted from agent-guidance @ 51626db via
-docs/plans/2026-07-28-agent-guidance-propagation-plan.md. Weft-local
+docs/plans/2026-07-28-agent-guidance-propagation-plan.md and updated to
+agent-theory @ 8f41a9d via
+docs/plans/2026-10-14-agent-theory-delta-wave-plan.md. Weft-local
 adaptations: the scan surfaces are weft's layout (docs/specifications,
 not docs/specs; no docs/README.md), the claim pattern covers the
 bin/ tools and tests/specs/ gates weft's guidance cites by path, and
 the hub-only --scaffold mode is dropped.
 
-Usage:
-  check-doc-paths [--root DIR]
+Modes:
+  check-doc-paths [--root DIR]   scan a tree (default: this repo)
+  check-doc-paths --self-test    firing tests for the claim scan, fenced
+                                 block stripping, and DECLARED_FUTURE_ARTIFACTS
 
 Exit 0 when every claim resolves; exit 1 listing the danglers.
 """
@@ -20,8 +24,12 @@ Exit 0 when every claim resolves; exit 1 listing the danglers.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import re
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -38,8 +46,15 @@ CLAIM_RE = re.compile(r"`((?:docs|skills|bin|tests)/[A-Za-z0-9_./-]+)`")
 # Suffixes/patterns that are templates or globs, not claims.
 NON_CLAIM = re.compile(r"[*{}<>]|YYYY|<[a-z]|\.\.\.")
 
+# Governed future-artifact allowlist. Adopters may list contractually named
+# artifacts that intentionally do not exist yet. Honesty is enforced both
+# ways in check_tree:
+#   1. A listed path that now exists on disk fails as a stale suppression.
+#   2. A listed path that no scanned document claims fails as an unused entry.
+DECLARED_FUTURE_ARTIFACTS: set[str] = set()
 
-def iter_files(root: Path):
+
+def iter_files(root: Path) -> Iterator[Path]:
     for d in SCAN_DIRS:
         p = root / d
         if p.is_dir():
@@ -51,20 +66,108 @@ def iter_files(root: Path):
             yield p
 
 
-def check_tree(root: Path) -> int:
-    failures = []
-    for f in iter_files(root):
-        text = f.read_text(errors="replace")
-        for m in CLAIM_RE.finditer(text):
+def _fence_marker(line: str) -> tuple[str, int, str] | None:
+    leading_spaces = len(line) - len(line.lstrip(" "))
+    stripped = line[leading_spaces:]
+    if leading_spaces <= 3 and stripped.startswith(("```", "~~~")):
+        char = stripped[0]
+        length = len(stripped) - len(stripped.lstrip(char))
+        return (char, length, stripped[length:])
+    return None
+
+
+def _closes_fence(
+    marker: tuple[str, int, str] | None, fence: tuple[str, int]
+) -> bool:
+    return (
+        marker is not None
+        and marker[0] == fence[0]
+        and marker[1] >= fence[1]
+        and not marker[2].strip()
+    )
+
+
+def _prose_lines(text: str) -> Iterator[tuple[int, str]]:
+    """Yield (1-indexed line_number, line) outside fenced code blocks."""
+    fence: tuple[str, int] | None = None
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        marker = _fence_marker(line)
+        if fence is None and marker is not None:
+            fence = (marker[0], marker[1])
+            continue
+        if fence is not None:
+            if _closes_fence(marker, fence):
+                fence = None
+            continue
+        yield lineno, line
+
+
+def _stale_allowlist_failures(root: Path, declared_future: set[str]) -> list[str]:
+    return [
+        f"bin/check-doc-paths: `{declared}` exists but is still "
+        "listed in DECLARED_FUTURE_ARTIFACTS — remove the stale "
+        "suppression entry"
+        for declared in sorted(declared_future)
+        if (root / declared).exists() or (root / declared).is_symlink()
+    ]
+
+
+def _scan_file_claims(
+    root: Path,
+    f: Path,
+    declared_future: set[str],
+    claimed_allowlisted: set[str],
+) -> list[str]:
+    failures: list[str] = []
+    text = f.read_text(errors="replace")
+    line_iter: Iterator[tuple[int, str]] = (
+        _prose_lines(text)
+        if f.suffix == ".md"
+        else enumerate(text.splitlines(), start=1)
+    )
+    for lineno, line in line_iter:
+        for m in CLAIM_RE.finditer(line):
             claim = m.group(1)
             if NON_CLAIM.search(claim):
                 continue
+            if claim in declared_future:
+                claimed_allowlisted.add(claim)
+                continue
             target = root / claim
             if not (target.exists() or target.is_symlink()):
-                line = text.count("\n", 0, m.start()) + 1
                 failures.append(
-                    f"{f.relative_to(root)}:{line}: `{claim}` does not resolve"
+                    f"{f.relative_to(root)}:{lineno}: `{claim}` does not resolve"
                 )
+    return failures
+
+
+def _scan_claims(root: Path, declared_future: set[str]) -> tuple[list[str], set[str]]:
+    failures: list[str] = []
+    claimed_allowlisted: set[str] = set()
+    for f in iter_files(root):
+        failures.extend(
+            _scan_file_claims(root, f, declared_future, claimed_allowlisted)
+        )
+    return failures, claimed_allowlisted
+
+
+def check_tree(
+    root: Path,
+    *,
+    declared_future: set[str] | None = None,
+) -> int:
+    active_declared = (
+        DECLARED_FUTURE_ARTIFACTS if declared_future is None else declared_future
+    )
+    failures = _stale_allowlist_failures(root, active_declared)
+    scan_failures, claimed_allowlisted = _scan_claims(root, active_declared)
+    failures.extend(scan_failures)
+    failures.extend(
+        f"bin/check-doc-paths: `{unused}` is allowlisted in "
+        "DECLARED_FUTURE_ARTIFACTS but no scanned surface claims it — "
+        "remove the unused suppression entry"
+        for unused in sorted(active_declared - claimed_allowlisted)
+    )
     if failures:
         print(f"check-doc-paths: {len(failures)} dangling path claim(s):")
         for fail in failures:
@@ -74,10 +177,134 @@ def check_tree(root: Path) -> int:
     return 0
 
 
+def _build_probe_tree(
+    tmp: str,
+    *,
+    spec_text: str,
+    materialize: str | None = None,
+) -> Path:
+    root = Path(tmp)
+    (root / "docs" / "specifications").mkdir(parents=True)
+    (root / "docs" / "specifications" / "01-sample.md").write_text(spec_text)
+    if materialize is not None:
+        target = root / materialize
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}")
+    return root
+
+
+def self_test() -> int:
+    """Firing tests for claim scanning, fenced blocks, and allowlist honesty."""
+
+    def quiet_check(root: Path, declared_future: set[str]) -> int:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return check_tree(root, declared_future=declared_future)
+
+    future_path = "docs/specifications/99-future-artifact.md"
+    probes: list[
+        tuple[str, str, set[str], str | None, tuple[str, str] | None, int]
+    ] = [
+        (
+            "unlisted missing claim was not flagged",
+            "`docs/specifications/missing.md`\n",
+            set(),
+            None,
+            None,
+            1,
+        ),
+        (
+            "fenced code block sample path was wrongly flagged",
+            "```markdown\n`docs/specifications/fenced-example-only.md`\n```\n",
+            set(),
+            None,
+            None,
+            0,
+        ),
+        (
+            "info-string fence line inside code block closed early and hid trailing prose",
+            "```\n``` markdown\n```\n`docs/specifications/missing-after-fence.md`\n",
+            set(),
+            None,
+            None,
+            1,
+        ),
+        (
+            "4-space-indented fence line hid broken path claim",
+            "    ```\n`docs/specifications/indented-missing.md`\n    ```\n",
+            set(),
+            None,
+            None,
+            1,
+        ),
+        (
+            "unclosed fence hid interior sample path",
+            "```markdown\n`docs/specifications/unclosed-fence-example.md`\n",
+            set(),
+            None,
+            None,
+            0,
+        ),
+        (
+            "allowlisted missing claim was wrongly flagged",
+            f"`{future_path}`\n",
+            {future_path},
+            None,
+            None,
+            0,
+        ),
+        (
+            "stale allowlist entry over an existing file passed",
+            f"`{future_path}`\n",
+            {future_path},
+            future_path,
+            None,
+            1,
+        ),
+        (
+            "unused allowlist entry passed",
+            "`docs/specifications/01-sample.md`\n",
+            {future_path},
+            None,
+            None,
+            1,
+        ),
+        (
+            "symlink claim target was not treated as present",
+            "`docs/specifications/link.md`\n",
+            set(),
+            None,
+            ("docs/specifications/link.md", "01-sample.md"),
+            0,
+        ),
+    ]
+    failures: list[str] = []
+    for name, spec_text, declared, materialize, symlink, expected in probes:
+        with tempfile.TemporaryDirectory() as td:
+            root = _build_probe_tree(td, spec_text=spec_text, materialize=materialize)
+            if symlink is not None:
+                (root / symlink[0]).symlink_to(symlink[1])
+            if quiet_check(root, declared) != expected:
+                failures.append(name)
+    if failures:
+        for f in failures:
+            print(f"check-doc-paths self-test FAIL: {f}")
+        return 1
+    print("check-doc-paths self-test: all claim, fence, and allowlist probes pass")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(REPO_ROOT))
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run firing self-tests for check-doc-paths",
+    )
     args = ap.parse_args()
+
+    if args.self_test:
+        return self_test()
     return check_tree(Path(args.root))
 
 

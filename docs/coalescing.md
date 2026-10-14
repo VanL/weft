@@ -12,7 +12,13 @@ implementation notes are living documents and are never coalesced.
 Verification: the run log below, `bin/coalesce-check`, plus
 `tests/specs/` doc gates. Required action: the session-start check is
 **read-only**; all writes happen only inside an authorized maintenance
-task (`skills/coalescing/SKILL.md`).
+task (`skills/coalescing/SKILL.md`). Archive-only sweeps (folding lessons,
+retiring plans with verified source SHAs, and advancing watermarks)
+default to Class 2 per `docs/agent-context/decision-hierarchy.md`
+`[DOM-15]`; any sweep slice that promotes or edits a durable rule in
+`AGENTS.md`, `docs/program-theory.md`, `docs/agent-context/`,
+`docs/specifications/`, or `skills/` is `Class 3+P` (effective Class 5)
+and requires human-owner approval or explicit session instruction.
 
 **Local derivation commands** (this file owns the repo-local format):
 - Lessons: dated H2 sections — `grep -cE '^## 20[0-9]{2}-' docs/lessons.md`
@@ -20,17 +26,25 @@ task (`skills/coalescing/SKILL.md`).
 - Plans: metadata `Status:` headers (the plan-metadata contract enforced
   by `tests/specs/test_plan_metadata.py`) — completed plans with no
   retired-ledger line.
+- Unindexed plans: plan files in `docs/plans/*.md` (excluding `README.md`)
+  with no row in `docs/plans/README.md` Status Index and no line in the
+  Retired Plans ledger (must stay `0`).
 
-**Executable check.** `bin/coalesce-check` implements the lessons
-derivation above and audits this file's retrieval contract: it resolves
-every backticked SHA (here, then in sibling repos), checks every
-`git show <sha>:<path>` cue, and reports pins that are not in
-`origin/main` as `local-only pin`. This file remains the spec — when
-the two disagree, the declared commands win and the script is the
-defect. Exit 1 means a cue is unretrievable anywhere, which is a broken
-retrieval contract; local-only pins are reported but not fatal, because
-publication is the owner's call. Adopted 2026-07-28 from agent-guidance
-@ `51626db` via
+**Executable check.** `bin/coalesce-check` is the evidence trail for the
+lessons derivation above and audits this file's retrieval contract: it
+resolves every backticked SHA (locally and against the published remote,
+or in sibling repos only when `COALESCE_SIBLING_ROOT` is explicitly set),
+checks every `git show <sha>:<path>` cue (including retired-plan cues in
+`docs/plans/README.md`), and reports pins that are not in `origin/main`
+as `local-only pin`. Once a fold or plan retirement has a verified
+`source_sha` reachable from a retained ref, git history + the cue is the
+archive and the raw lesson section or retired plan file is removed from
+ the working tree in the sweep's archive phase. This file remains the
+spec — when the two disagree, the declared commands win and the script
+is the defect. Exit 1 means a cue is unretrievable anywhere, which is a
+broken retrieval contract; local-only pins are reported but not fatal,
+because publication is the owner's call. Adopted 2026-07-28 from
+agent-guidance @ `51626db` via
 `docs/plans/2026-07-28-agent-guidance-propagation-plan.md`; weft is the
 motivating case — the 2026-07-28 field audit found this file's cues
 true locally but unverifiable from the published mirror, and the tool's
@@ -42,9 +56,9 @@ and count only cold, unfolded material — entries within the age floor or
 already folded are not eligible. The progress model must match the fold
 unit: this repo's fold unit is the **theme cluster** (not a date prefix),
 so its progress is tracked by the `## Fold Records` index in
-`docs/lessons.md`, not a date watermark — a date cursor would falsely
-claim older unfolded material behind it was folded (see the Watermarks
-note below). Adopted via
+`docs/lessons.md` and `### Noncontiguous Lesson Fold Records` below, not
+a date watermark — a date cursor would falsely claim older unfolded
+material behind it was folded (see the Watermarks note below). Adopted via
 `docs/plans/2026-07-17-agent-guidance-propagation-plan.md` from
 agent-guidance @ `b248e1c`; two independent lineages — mm's per-section
 recalibration and weft's own date-cursor failure — established the rule.
@@ -54,8 +68,21 @@ recalibration and weft's own date-cursor failure — established the rule.
 | Tier | Trigger (derived count) | Threshold | Age floor |
 |------|------------------------|-----------|-----------|
 | Lessons | dated H2 sections after the lessons watermark | 15 | 30 days, never sections cited by an active plan or in a still-accumulating theme |
-| Plans | completed plans with no retired-ledger line and no exemplar tag | 25 | none — the harvest gate and two-step retirement are the guards |
+| Plans | completed plans with no retired-ledger line and no exemplar tag | 25 | none — the harvest gate and git-backed source-SHA cue are the guards |
+| Unindexed | `docs/plans/*.md` (excluding `README.md`) absent from both the Status Index and Retired Plans ledger in `docs/plans/README.md` | > 0 (must stay 0) | none — enforced by `tests/specs/test_plan_metadata.py` |
 | Promotion | distinct citations of the same workflow theme since the promotion watermark | 3 | n/a |
+
+**Report when (one sentence to the user at session start, read-only):**
+
+- any tier's derived count ≥ its threshold and is new since `checked_through`
+- unindexed plan files > 0
+- a reconsideration condition in the Deferral State table has fired
+
+## Reporting Cues (non-gating)
+
+| Cue | Signal | Purpose |
+|-----|--------|---------|
+| Apparatus share | Share of recent commits or plans touching only `AGENTS.md`, `docs/agent-context/`, `docs/coalescing.md`, `skills/`, or doc-hygiene gates vs product/spec slices | Visibility signal when process maintenance starts crowding out product work; informs owner prioritization, never blocks a gate |
 
 ## Watermarks
 
@@ -72,11 +99,17 @@ across dates** — folding the 2026-04-07..04-09 test-timing cluster leaves
 older unfolded sections (2026-04-03, 04-04, 04-06) behind it, so advancing a
 date cursor would falsely claim they were folded. Honest accounting here comes
 from removing folded sections from the ledger (the dated-section count drops)
-plus the `## Fold Records` index in `docs/lessons.md`, not from a date
-watermark. This is the concrete evidence behind the fold-unit-denomination
-rule now stated in the model preamble above: weft's confirmed date-cursor
-failure is one of that rule's two independent lineages (see the 2026-07-15
-run-log line).
+plus the `## Fold Records` index in `docs/lessons.md` and the table below, not
+from a date watermark. This is the concrete evidence behind the
+fold-unit-denomination rule now stated in the model preamble above: weft's
+confirmed date-cursor failure is one of that rule's two independent lineages
+(see the 2026-07-15 run-log line).
+
+### Noncontiguous Lesson Fold Records
+
+| Fold date | Source SHA | Raw date range | Sections folded | Target surface |
+|-----------|------------|----------------|-----------------|----------------|
+| 2026-07-15 | `1c997978` | 2026-04-07..2026-04-09 | 4 (`Interactive TTY Tests`, `CLI Harness Timeouts`, `Spawn-Heavy Timeout Tests`, `Cancelled Task Teardown`) | `docs/agent-context/runbooks/testing-patterns.md` Pattern 10 |
 
 ## Deferral State
 

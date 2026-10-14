@@ -17,14 +17,32 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 
 ## Read Order
 
+Start with the conceptual account, then process. This list, root
+`AGENTS.md`, and `context.index.yaml` `read_order` name the same
+sequence element-for-element.
+
 1. `../program-theory.md` — the conceptual account of Weft ("weftness"),
-   including rejected alternatives; read it before any product-scope or
-   design judgment
-2. `decision-hierarchy.md`
-3. `principles.md`
-4. `engineering-principles.md`
-5. Relevant runbook(s) in `runbooks/`
-6. `lessons.md` and `../lessons.md`
+   including rejected alternatives; frames placement and refusal, and does not
+   override winning contracts. Extend local depth with **module theory** on
+   entry, not by bulking this file.
+2. This file — `README.md` (the hub overview you are reading).
+3. `decision-hierarchy.md`
+4. `principles.md`
+5. `engineering-principles.md`
+6. Relevant runbook(s) in `runbooks/`
+7. `lessons.md`
+8. `../lessons.md` — required startup reading is the **Golden Rules section
+   plus dated sections after the lessons watermark** (see `../coalescing.md`).
+   Older sections are searchable reference material, not startup context.
+
+Machine-readable order: `context.index.yaml` `read_order`.
+
+Read-order compliance is a declared-claim floor, not a gate: when you produce
+product-scope judgment — a plan, review, audit, or design opinion — declare
+which of these surfaces you consulted. Plans do this via their
+source-documents section; plan-free work declares it in its report. The
+declaration is checked by review, like task classification ([DOM-15]), not
+by tooling.
 
 ## Runbooks
 
@@ -46,6 +64,8 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 - `adversarial-acceptance-probes.md` — Black-box invariant-floor probes for
   integration readiness: exit-code honesty, no user-facing tracebacks,
   per-task failure containment, and firing tests for declared contracts.
+- `designing-agent-facing-interfaces.md` — Principles for designing APIs,
+  CLIs, and docs that agents consume.
 
 ## What Belongs Here
 
@@ -73,3 +93,8 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
   and strengthen a runbook if the fix should become reusable guidance.
 - If a plan fails at a boundary or a reviewer cannot implement it confidently,
   tighten the planning runbooks instead of treating the miss as one-off noise.
+- When `docs/coalescing.md` shows a tripped threshold, report it and
+  respond per `docs/coalescing.md` and `skills/coalescing/SKILL.md`: a
+  checked-deferred line with derived counts, or a full sweep (its own unit
+  of work) on user request, at twice the threshold, or at a completion
+  boundary. The session-start check itself is read-only.

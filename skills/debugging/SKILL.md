@@ -69,7 +69,11 @@ lands with a proof that the failure cannot silently return.
    a partial contract update (Rule 5), an unhandled error path (Rule 11).
    Fix the class where cheap; at minimum name it.
 5. **Write the failing test, watch it fail** (§4.1 here), then fix, then watch
-   it pass. Generate fixtures through production code paths. If the test
+   it pass. Generate fixtures through production code paths. When the bug is an
+   off-by-one, threshold, or validation-guard defect, test both sides of the
+   repaired boundary; for P1 regressions, verify the new test fails against a
+   one-line mutation of the production fix (`f(x) == f(x)` is a tautology, not a
+   regression test). If the test
    is hard to write, that is design information — record it, don't skip.
    The only sanctioned alternative is testing-patterns Rule 5: name what
    replaced red-green and why. This is a separate decision from step 1's
@@ -79,7 +83,11 @@ lands with a proof that the failure cannot silently return.
    proof* itself is impractical, and say so explicitly.
 6. **Stop-and-replan gates.** Stop and report instead of continuing when:
    the root cause implicates the spec (deviation path); the fix wants to
-   add a second path instead of extending the canonical one (§1); or two
+   add a second path instead of extending the canonical one (§1); the fix
+   requires lowering test concurrency (`-n 0`), padding sleeps/timeouts,
+   or adding retry loops to quiet a contention failure without naming the
+   causal gap in `docs/program-theory.md` `[WT-7]` / `[ALT-WT-017]` and
+   `docs/specifications/08-Testing_Strategy.md` `[TS-0]` (§4.3); or two
    fix attempts have failed — the third attempt without new information
    is thrashing.
 

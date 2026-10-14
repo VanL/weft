@@ -98,6 +98,17 @@ the plan as authoritative.
   the delta table"), never as descriptions of the current tree. Transient
   state belongs in the conversation, the commit message, the handoff
   report, or a status-index qualifier that is expected to clear.
+- **Every surface a plan names must exist.** Before marking a plan
+  review-ready, verify that every existing file path, symbol, spec section
+  code, CLI flag, and test target cited in the plan resolves in the current
+  worktree (and that intentionally new paths are marked as new).
+- **Counted and completeness claims are verified mechanically.** Any count or
+  completeness word (`all`, `every`, `full`, `zero`, `none`) in a plan comes
+  from a command output, never from hand-counting.
+- **Returning mid-task with falsified premises is a first-class planning
+  outcome.** If reading the code or running a probe shows the task brief's
+  premise or cited invariant does not hold, stop and return the falsified
+  premise and corrected scope rather than writing a plan around a fiction.
 - For risky work, write rollback and rollout notes early enough to shape the
   task breakdown.
 - Required reading should describe the current structure and load-bearing path,
@@ -239,7 +250,10 @@ Spell it out.
 
 For risky work, required reading should not stop at file paths. Add one or two
 comprehension questions so the implementer can verify they understand the
-load-bearing behavior before editing.
+load-bearing behavior before editing. Record the expected answers in the plan
+(under the question or in a collapsible note) and require the implementer to
+write their answers in the execution log or handoff report before the first
+edit; a wrong answer is a stop-and-re-read blocker, not a formality.
 
 ### 4. Invariants and Constraints
 
@@ -349,6 +363,10 @@ Rules:
 - every touched requirement must cite stable section codes such as `[MF-2]`
   or `[CLI-1.1.1]`
 - name the **promotion strategy** (§4d) — not merely "add to spec"
+- state the **exact paragraph or clause scope** of each replacement (quote the
+  opening and closing words of the replaced span), and when a delta removes or
+  rewrites an existing paragraph, audit every clause in the removed text so no
+  adjacent invariant or failure-mode requirement is dropped by accident
 - clarification-only deltas (behavior already matches code) still belong
   here so reviewers see the exact wording
 - when the delta codifies existing behavior as general rules, verify each
@@ -636,31 +654,42 @@ For rollout-sensitive work, also say:
 
 ### 8. Independent Review Loop
 
-Every risky plan should say how independent review will happen.
+Every risky or Class ≥3 plan must say how independent review will happen and
+record the completed review log. Writing a "Review Protocol" section is not a
+completed review — before implementation begins on Class 4/5 work (or before
+completion on Class 3), the section must contain the actual reviewer metadata
+and disposition table:
 
-At minimum, include:
-
-- which other agent or agent family should review the plan
-- which files and docs the reviewer should read — including
+- **Author family** and **Reviewer family** (must differ for Tier-1 review)
+- **Review invocation**: Tier-1 CLI command via `skills/call-agent/SKILL.md`, or
+  `same-family fallback (degraded)` only after two bounded, logged Tier-1
+  attempts failed (see `docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md`)
+- which files and docs the reviewer read — including
   **`## Proposed Spec Delta`** when the plan changes intended behavior
-- the review prompt or stance
-- how feedback will be handed back to the author
+- the review findings and the author's disposition for each finding
 
 Recommended prompt:
 
 > Read the plan at [path] and its `## Proposed Spec Delta` (if present),
 > including the named promotion strategy. Carefully examine the plan, the
-> proposed spec text, and the associated code. Look for errors, bad ideas,
-> latent ambiguities, and performative overengineering — process,
-> abstraction, or ceremony that does not address a real risk or improve
-> correctness; recommending removal is as valuable as recommending
-> additions. Don't do any implementation, but answer carefully: Could
-> you implement this confidently and correctly against the delta as promoted,
-> if asked?
+> proposed spec text, and the associated code. Verify the plan's causal
+> premise in the live code, check that every planned test is falsifiable,
+> and check `docs/program-theory.md` `[ALT-WT-*]` and
+> `docs/specifications/07-System_Invariants.md` for standing constraints or
+> refused alternatives (flag `RECONSIDERATION REQUESTED` if the plan reverses
+> one).
+> Look for errors, bad ideas, latent ambiguities, and performative
+> overengineering — process, abstraction, or ceremony that does not
+> address a real risk or improve correctness; recommending removal is as
+> valuable as recommending additions. Don't do any implementation, but
+> answer carefully: Could you implement this confidently and correctly
+> against the delta as promoted, if asked?
 
 The author must then consider each review point explicitly and either update
 the plan, explain why the current path is still the best choice, or record why
-the point is out of scope.
+the point is out of scope. Any finding marked `fixed in plan` must update the
+operative plan body (tasks, invariants, file list, or verification commands) in
+the same edit, not only the review log table.
 
 ### 9. Out of Scope
 
@@ -681,6 +710,8 @@ Check for:
 - tasks that are too large to review safely
 - hidden assumptions about local style or tool behavior
 - accidental drift away from the user's requested direction
+- performative overengineering — extra helper layers, config knobs, or ceremony
+  that could be deleted without increasing risk
 
 Fix those gaps and re-read the plan again.
 
@@ -749,6 +780,9 @@ the next bullet states the statuses this repo actually allows and gates.
   normalized three-key metadata block (`Status`, `Source specs`,
   `Superseded by`, in that order) directly under its title, every plan
   file is indexed, and the index row's status must match the file's.
+  Do not append deployment or verification qualifiers to the status token
+  (`completed — post-deploy verification pending` is invalid; put follow-up
+  notes in the notes column or plan body).
   An unknown status, a missing or misordered block, an unindexed plan,
   or a `Superseded by` pointer to a missing file all fail the gate.
   Consequences: the index is the derivation source for the coalescing
@@ -779,10 +813,21 @@ the next bullet states the statuses this repo actually allows and gates.
   changes invariants, ownership, authority, or blast radius re-enters
   classification and review — the reviewer's unit is the delta from the
   reviewed text plus the stated reason for it, never the revised text
-  standalone. (Evidence: mm's July 2026 lifecycle incident propagated
+  standalone. Record `Reviewed baseline: <sha-or-worktree-id>` in the review
+  section and append a `## Revision Log` table (`Date | Baseline | Section |
+  Change and reason | Re-review required?`) whenever an approved plan is
+  revised in place. (Evidence: mm's July 2026 lifecycle incident propagated
   entirely through in-place revisions of an approved plan; mm's revision
   re-gate, reviewed-baseline pin, and Revision Log are the upstream
   fold-up candidates.)
+- **Superseded in-plan decisions are demoted in place.** When a revision or
+  review disposition supersedes an earlier design choice inside the same plan,
+  update or strike the superseded paragraph in the task body so a zero-context
+  reader cannot execute the old instruction before reaching the bottom log.
+- **Class ≥3 completion is not claimed until the Status Index row exists and is
+  `completed`.** Creating the plan file and its `docs/plans/README.md` row at
+  plan creation, and flipping both `Status: completed` and the index row to
+  `completed` at closeout, are part of the completion gate.
 - **Completed and superseded plans are harvest candidates.** They stay in
   the tree until the coalescing sweep retires them.
 - **The harvest gate — all four before deletion, no exceptions:**
@@ -791,7 +836,9 @@ the next bullet states the statuses this repo actually allows and gates.
      doc (or explicitly judged not durable)
   3. lessons extracted to `docs/lessons.md` where applicable
   4. every spec `## Related Plans` backlink converted to the retired
-     citation form (below)
+     citation form (below) — grep `tests/` for exact backlink strings before
+     converting so any doc-hygiene test pinning the live link is updated in the
+     same change
 - **Superseded plans additionally require** the superseding plan to name
   what it inherits (open deviation rows, decided-but-unbuilt behavior)
   before the predecessor retires.
@@ -799,10 +846,16 @@ the next bullet states the statuses this repo actually allows and gates.
   the soft retirement — status flips to `retired-pending` in the index,
   backlinks convert to the retired citation form, and the ledger line is
   written (name, date range, one-sentence outcome, what absorbed it,
-  source SHA). Physical deletion happens in a dedicated follow-up change only
-  after a second agent or the user verifies the harvest gate. Never
-  soft-retire and delete in the same change, and never create a
+  source SHA). Physical deletion (`git rm`) happens after the harvest gate is
+  verified; optional second-agent verification is recommended when a sweep
+  harvests subtle architectural rationale, while routine operational
+  maintenance sweeps are git-backed and reversible. Never create a
   retired/archived plans directory — git is the archive.
+- **The recorded source SHA must be reachable from a retained ref.** Verify that
+  `<source_sha>` is an ancestor of `HEAD` and of the target remote tracking
+  branch (or note `local-only pin` until pushed) so `git show
+  <source_sha>:docs/plans/<name>.md` stays resolvable after squash merges or
+  branch cleanup.
 - **Exemplar plans are exempt.** The status index may mark a plan
   `exemplar` (bootstrap or operating-model foundation plans that serve as
   onboarding examples). Exemplars are not retirement candidates until the

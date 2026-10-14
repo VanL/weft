@@ -3,12 +3,13 @@ updated_at: 2026-10-14
 hub: docs/agent-context
 read_order:
   - docs/program-theory.md
+  - docs/agent-context/README.md
   - docs/agent-context/decision-hierarchy.md
   - docs/agent-context/principles.md
   - docs/agent-context/engineering-principles.md
   - docs/agent-context/runbooks/
   - docs/agent-context/lessons.md
-  - docs/lessons.md
+  - docs/lessons.md  # startup: Golden Rules + dated sections after the docs/coalescing.md watermark
 documents:
   - path: docs/program-theory.md
     role: program_theory

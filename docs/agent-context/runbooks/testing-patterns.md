@@ -84,6 +84,33 @@ Use the narrowest real harness that still proves the behavior:
    tests should avoid assuming a terminal log event means the result is already
    readable.
 
+7. Assert wire, serialization, and migration contracts against independent
+   literals and real release-lineage fixtures.
+   Never assert `serialize(x) == serialize(x)` or recompute the expected value
+   through the same helper under test. When a migration or compatibility reader
+   claims support for an earlier release's schema, queue message, or state record,
+   commit or construct an exact fixture from that release lineage and test both
+   the unmigrated read and the upgrade path.
+
+8. Straddle the boundary on repaired guards, and exercise wrappers with
+   non-default configuration.
+   When fixing an off-by-one, threshold, or validation guard, test both sides of
+   the boundary (the value just inside and the value just outside). When a
+   convenience wrapper forwards resolved config or `WeftContext` into an inner
+   runner, test the wrapper with a non-default config and assert the inner
+   runner observes it.
+
+9. Pair every negative assertion (`assert not ...`, `assert count == 0`, empty
+   output) with a reachable positive setup and producer closure.
+   Prove first that the producer/observer path is wired and capable of emitting
+   the event under the positive condition, and establish producer closure before
+   asserting absence — otherwise a broken observer or an unstarted worker passes
+   the negative assertion vacuously.
+
+10. Name an equivalence owner before deleting or consolidating any test.
+    Before removing a test as "redundant", name the surviving test and verify it
+    exercises the same boundary, configuration, and failure mode.
+
 ### Manual Reactor Test Drivers
 
 Use `tests.helpers.reactor_driver.drive_until` when a test owns one in-process
@@ -378,11 +405,71 @@ last live PID; locked paths may also surface through 8.3 short-name segments
 Timeout Tests", "Cancelled Task Teardown". Full raw entries:
 `git show 1c997978:docs/lessons.md`.)
 
+### Pattern 11: The Test Neutralizes the Hostile Default It Claims to Cover
+
+**Symptoms**
+
+- A test added for a default-config, env-inheritance, or cold-start bug passes,
+  heuristic review looks green, and production still fails under the real
+  default invocation.
+- The fixture or test setup explicitly passes the safe flag, sets the env var,
+  or pre-initializes the state that the production default omits.
+
+**Why it happens**
+
+Convenient test fixtures often normalize the environment so unrelated tests stay
+quiet. When a test is supposed to prove behavior under the unconfigured or
+hostile default, inheriting that fixture silently neutralizes the bug condition.
+
+**What to do**
+
+- Construct the regression test through the unconfigured default entry point and
+  assert that the hostile condition is actually active before exercising the
+  code under test.
+- Confirm falsifiability by reverting the production guard or mutating the
+  default in a one-line probe and watching the new test fail.
+
+### Pattern 12: Negative Timing Windows, Side-Effecting Polls, and Stdlib Clock Patches
+
+**Symptoms**
+
+- A test asserts `assert not event.wait(0.05)` to prove an action is blocked,
+  which passes even when the worker never reached the wait point (or fails
+  spuriously when the scheduler is slow).
+- A polling helper mutates state, consumes a queue item, or advances a cursor as
+  a side effect of checking readiness.
+- Monkeypatching `time.monotonic`, `time.sleep`, `os.getpid`, or `sys.platform`
+  causes unrelated background threads, xdist workers, or logging/SQLite calls to
+  fail or hang.
+- Multiprocess `spawn` fan-out tests fail under load because each child gets a
+  per-call timeout that ignores aggregate `spawn` startup overhead.
+
+**What to do**
+
+- Replace negative timing windows (`not event.wait(0.05)`) with a causal
+  wait-entry fence: have the worker signal that it has reached the blocking
+  boundary, assert the state while blocked, then release the gate and assert
+  completion.
+- Keep polling predicates side-effect-free (peek/read-only); consume or mutate
+  only after the predicate succeeds.
+- Patch module-owned callables (`_monotonic`, `_sleep`, `_getpid`) on the module
+  under test rather than mutating standard-library modules (`time`, `os`, `sys`)
+  shared across threads.
+- Size multiprocess `spawn` deadlines against aggregate child-startup cost and
+  bound the total wait with a single outer deadline rather than stacking
+  independent per-child timeouts.
+
 ## Verification Pattern
 
 For changes that touch queue semantics, manager behavior, or task lifecycle:
 
-1. Run the smallest targeted test that proves the change.
+1. Run the smallest targeted test that proves the change. When a subagent ran
+   the RED step, inspect the failure transcript and verify the test failed on
+   the intended assertion — not on an `ImportError`, syntax error, or fixture
+   setup failure — before accepting the GREEN step. For P1 regressions, verify
+   the new test fails against a one-line mutation of the production fix.
 2. Run the nearest neighboring suite.
-3. Run type check and lint if Python files changed.
+3. Run type check, lint, and before declaring completion the exact full CI test
+   roots (`tests/`, plus `extensions/` and `integrations/` when touched or
+   before release) if Python files changed.
 4. Call out anything you did not verify.

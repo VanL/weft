@@ -21,6 +21,10 @@ stance, disposition loop) is owned by
 - Do NOT use for delegation (write-enabled work): this skill's
   invocations are read-only by design. Delegates go through the
   harness's native subagents or agent-mcp where attached.
+- Do NOT substitute a native harness subagent for this skill's Tier-1
+  CLI review unless at least two bounded Tier-1 CLI attempts have failed
+  and been logged in the plan's review section (recorded as `same-family
+  fallback (degraded)` per `docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md`).
 
 ## Governing Spec References
 
@@ -48,16 +52,22 @@ stance, disposition loop) is owned by
 
 From the agent inventory: a **review-eligible** family ≠ the author's
 (review-eligible = liveness plus write-attempt containment verified,
-per step 6 — stronger than merely present or usable). If none is
-available, fall back per review-loops §2 (same-family separate role,
-then disclosed fresh-eyes) — do not silently self-review.
+per step 6 — stronger than merely present or usable). Calibrate the
+invocation timeout to the size of the review unit before declaring a
+CLI family unavailable. Only after two bounded, logged Tier-1 CLI
+attempts fail may you fall back to Tier 2 (`same-family fallback
+(degraded)` via a native harness subagent) or Tier 3 (disclosed author
+fresh-eyes) per `docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md` —
+never silently self-review or label a native subagent "cross-family".
 
 ### 2. Build the brief
 
 Per review-loops §3–§4: embed the plan/delta content verbatim in the
 prompt (do not assume the reviewer can find files), list the files it
 should read, include the review stance (errors, bad ideas, latent
-ambiguities, performative overengineering), and demand explicit
+ambiguities, performative overengineering, plus verifying the causal
+premise in live code and checking that planned tests are falsifiable),
+and demand explicit
 [P1]/[P2] markers plus a PASS/BLOCKED verdict when gating (for plan
 reviews, derived from the two gate questions in review-loops's Planning
 Review Prompt; scoped-change reviews use `no blocker`/`blocker: F<ids>`).
@@ -76,11 +86,16 @@ decision and never arrive as blockers (severity is the reviewer's
 claim; blocking is a disposition-time decision); (5) **prefer removing
 unnecessary work**; (6) an **observations outlet** — a separate,
 non-actionable section for out-of-scope concerns, so broad looking is
-encouraged while narrow acting is enforced. A brief missing an element
+encouraged while narrow acting is enforced; (7) **standing constraints
+and refused alternatives in force** (`docs/program-theory.md`
+`[ALT-WT-*]`, `docs/specifications/07-System_Invariants.md`, and governing spec
+invariants) — if the reviewer believes a standing constraint or refused
+alternative must be reversed, it must flag `RECONSIDERATION REQUESTED`
+for human decision rather than proposing a silent reversal. A brief missing an element
 is malformed: fix the brief, not the reviewer's output. The
 fill-every-bracket template (and its round-2 variant) is the
 Scoped Change Review Prompt section of
-`review-loops-and-agent-bootstrap.md` — filling the brackets IS the
+`docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md` — filling the brackets IS the
 scope decision; if a bracket resists filling, the scope is undecided
 and the dispatch is premature. Two named anti-patterns:
 **severity-as-mandate** (requesting "blocking findings" pre-decides

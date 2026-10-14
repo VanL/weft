@@ -31,24 +31,50 @@ If an external review is requested from a different agent, expect it to take
 
 ## Bootstrap the Available Reviewers
 
-Before choosing an external reviewer:
+Choose an independent reviewer using the three-tier hierarchy below:
 
-1. Check which other agent families or review paths are actually available in
-   the current environment.
-2. Prefer a different agent family than the author when one is usable.
-3. If only same-family review is available, note that limitation in the plan or
-   review notes.
-
-Recommended candidates to check when present:
-
-- Claude
-- Codex
-- Qwen
-- Gemini
-- Kimi
+1. **Tier 1 (default): cross-family review via `skills/call-agent/SKILL.md`.**
+   Check which other agent families are available in the current environment and
+   pick a different family from the authoring agent (Claude, Codex, Qwen,
+   Gemini, Kimi). Calibrate the command/tool timeout to the size of the diff or
+   plan so a slow reasoning pass is not misclassified as tool unavailability.
+2. **Tier 2 (degraded fallback): native harness subagent (`same-family fallback
+   (degraded)`).** Permitted **only** after at least two bounded Tier-1 CLI
+   attempts fail (for example, after trying a second installed family or a
+   trimmed prompt) and the exact commands and failure modes are recorded in the
+   plan's review log. Never invoke a native harness subagent as a shortcut for
+   Tier 1 or label it "independent cross-family review".
+3. **Tier 3 (unavailable): author fresh-eyes review only, with explicit
+   disclosure.** When both Tier 1 and Tier 2 are unavailable, record
+   `Review: unavailable — <reason>` in the plan or handoff report; on Class ≥3
+   plans, keep the plan in review-pending state until a human or external pass
+   completes.
 
 You do not need a permanent inventory file for every session, but you should
-record reviewer availability when it materially affected the review choice.
+record reviewer availability, family, and tier when it materially affected the
+review choice.
+
+**Existence-check first.** Before judging design or prose, the reviewer must
+verify every empirical identifier in the unit under review — file paths,
+function/class symbols, spec section codes, CLI flags, commit SHAs, line
+numbers, and numeric counts — by running the lookup command or reading the file,
+not by plausibility. An identifier that does not resolve is an immediate
+finding regardless of how reasonable the surrounding paragraph sounds.
+
+**Premise- and falsifiability-check second.** After identifiers resolve, verify:
+
+1. **Causal premise in code** — trace the plan's or change's claimed root cause
+   through the live functions and callers it names. Do not accept a bug story on
+   the plan's word when the code path is readable.
+2. **Falsifiable proof** — check that each planned or added test would fail if
+   the production fix were reverted or broken by a one-line mutation, and that
+   it does not assert a tautology (`f(x) == f(x)`) or neutralize the hostile
+   default it claims to cover.
+3. **Standing invariants and refused alternatives** — check `docs/program-theory.md`
+   (`[ALT-WT-*]`), the governing spec, and `docs/specifications/07-System_Invariants.md`.
+   If the work or a review suggestion reverses a standing invariant or refused
+   alternative, flag `RECONSIDERATION REQUESTED` for human decision rather than
+   treating it as a routine edit.
 
 ## Planning Review Prompt
 
@@ -61,9 +87,14 @@ Recommended prompt:
 > add ceremony without meaningfully addressing a real-world risk
 > identified in the code.
 >
-> Check specifically for invariants: what must not be changed (where
-> this repository keeps a standing-invariants registry, check the plan
-> against it). If you need to propose a new invariant, or there is a
+> Verify the plan's causal premise against the live code and check that
+> every planned test is falsifiable (would fail without the fix and does
+> not compute expected values through the same helper under test).
+> Check specifically for invariants: what must not be changed (including
+> `docs/program-theory.md` `[ALT-WT-*]` and `docs/specifications/07-System_Invariants.md`).
+> If the plan or your recommendation would reverse a standing invariant
+> or refused alternative, mark it `RECONSIDERATION REQUESTED` for human
+> review. If you need to propose a new invariant, or there is a
 > meaningful risk that would be raised by implementing this plan,
 > describe that risk with a directive to raise it for human review.
 >
@@ -131,11 +162,18 @@ scope decision.
 > **Goal of the change:** [one sentence].
 > **Explicitly accepted risks — do not re-litigate:** [list, or "none
 > declared"].
-> **Standing constraints this change must not cross:** [key invariants,
-> or the repo's invariants registry path, or "none registered"].
+> **Standing constraints and refused alternatives this change must not
+> cross:** [key invariants, `docs/program-theory.md` `[ALT-WT-*]` IDs, or
+> "none registered"]. If you believe one must be reversed, flag
+> `RECONSIDERATION REQUESTED` for human decision rather than proposing a
+> silent reversal.
 > **Pre-existing concerns** (concurrency, error shapes, validation,
 > policy, lifecycle, style) are out-of-scope observations unless THIS
 > change makes them worse.
+>
+> Verify empirical identifiers (paths, symbols, SHAs, counts) and trace
+> the causal premise in live code before judging prose. Check that tests
+> are falsifiable.
 >
 > Output: a findings table — ID | severity (P1–P3/nit) | location |
 > finding | **suggested** disposition. Severity is your claim about
@@ -157,14 +195,28 @@ Round-2 variant (after dispositions — never before):
 After review:
 
 1. Hand the findings back to the original authoring agent.
-2. Require an explicit response to each point.
-3. Update the plan, docs, or code for accepted findings.
+2. Require an explicit response to each point (`accept`, `modify`, or `reject`
+   with rationale).
+3. Update the plan, docs, or code for accepted findings. When a plan finding is
+   marked `fixed in plan`, verify that the operative plan body (task steps,
+   file list, invariants, or verification commands) changed in the same edit —
+   a disposition row that says "fixed" while the task body still gives the old
+   instruction is an unapplied disposition.
 4. If the author disagrees, record why the current path is still the best
    choice.
+5. If a finding or proposed fix would reverse a standing invariant, spec rule,
+   or refused alternative (`[ALT-*]`), mark it `RECONSIDERATION REQUESTED` and
+   stop for human decision.
 
 If the reviewer says they could not implement the plan confidently and
 correctly, treat that as a blocker until the ambiguity is fixed or explicitly
 recorded.
+
+**Guidance surfaces are reviewable and blockable.** Edits to `AGENTS.md`,
+`docs/program-theory.md`, `docs/agent-context/`, `docs/coalescing.md`, and
+`skills/` are subject to the same blocker discipline as code and specs: a
+contradictory instruction, an unverified path claim, or a weakened gate in a
+guidance file is a blocking defect, not "just prose".
 
 Review findings are claims, not facts: reproduce a finding before acting on
 it, and reproduce your own "done/passing" assertions before making them. The
@@ -175,6 +227,19 @@ defect introduced with confidence.
 
 Do not report a high-stakes or complicated plan as implementation-ready while
 external review is still pending. Report it as review-pending instead.
+
+## Audit-Response Protocol (large or systemic audits)
+
+When responding to a multi-finding audit or cross-cutting review:
+
+1. **Verify every audit claim against the current worktree first.** Audits
+   frequently cite stale plan rows or already-fixed code; classify each item as
+   `reproduced`, `already-fixed (cite SHA/test)`, `false-positive (cite code)`,
+   or `reconsideration-needed` before planning edits.
+2. **Group reproduced findings into coherent, independently verifiable slices**
+   by owning surface rather than fixing thirty unrelated items in one commit.
+3. **Close the loop with a disposition table** mapping every audit item ID to
+   its verification command, commit SHA or file diff, or rejection rationale.
 
 ## Slice-Based Review
 

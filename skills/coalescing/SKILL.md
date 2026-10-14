@@ -5,8 +5,8 @@ Status: Active — governed by the coalescing model in
 session-start trigger check is read-only; sweeps run only as authorized
 units of work. (Adopted from agent-guidance @ 2f7eff6 via
 `docs/plans/2026-07-14-agent-guidance-propagation-plan.md`; last
-re-synced from agent-guidance @ `51626db` via
-`docs/plans/2026-07-28-agent-guidance-propagation-plan.md`.)
+re-synced from agent-theory @ `8f41a9d` via
+`docs/plans/2026-10-14-agent-theory-delta-wave-plan.md`.)
 
 ## Purpose
 
@@ -42,7 +42,7 @@ everything raw.
 
 - `docs/coalescing.md` (this repo's normative state file) and the Task
   Classification section of `docs/agent-context/decision-hierarchy.md`.
-  Source model: agent-guidance [DOM-14] @ 2f7eff6.
+  Source model: agent-theory [DOM-14] @ `8f41a9d`.
 
 ## Read First
 
@@ -91,6 +91,21 @@ repair-in-sweep doctrine — its commit `3706d73` — folded up to
 agent-guidance by owner direction 2026-07-28 and landed here via
 `docs/plans/2026-07-28-agent-guidance-propagation-plan.md`. Weft is not
 a lineage for this rule.)
+
+**Stop and classify before promoting durable guidance.** An archive-only
+coalescing sweep (folding `docs/lessons.md` entries, harvesting completed
+plans into `docs/coalescing.md` and `docs/plans/README.md`, converting
+spec backlinks to `- retired:`, deleting retired plan files via `git rm`,
+and advancing watermarks) is operational maintenance under this skill and
+defaults to **Class 2** per `docs/agent-context/decision-hierarchy.md`
+`[DOM-15]`. The moment a sweep also promotes or edits a rule in
+`AGENTS.md`, `docs/program-theory.md`, `docs/agent-context/`,
+`docs/specifications/`, or `skills/`, that slice is **process- or
+spec-changing (`Class 3+P`, effective Class 5)** and requires human-owner
+approval or an explicit user instruction in the current session before
+landing. Either split the durable-guidance promotion into its own
+reviewed `Class 3+P` slice or escalate the whole unit before editing the
+guidance surface.
 
 Read the watermarks in `docs/coalescing.md`, then compute. The state
 file owns the repo-local ledger format: when it declares a derivation
@@ -144,21 +159,31 @@ a date cursor falsely claims older unfolded material behind it was folded.
      "plans tier blocked: no status source" in the run log and move on.
      Never guess plan status from file age or filename.
 
+- Unindexed plans — plan files in `docs/plans/*.md` (excluding
+  `README.md`) with no row in the `docs/plans/README.md` Status Index and
+  no entry in the Retired Plans ledger. Threshold: **> 0** (must stay `0`,
+  enforced by `tests/specs/test_plan_metadata.py`).
+
 - Skill candidates — recurring workflow themes across lesson entries and
   review dispositions. This count is an **attention signal, not a
   mechanical gate**: theme identity is a judgment call (see step 4 for
   what counts as one theme). Use grep to gather candidates, judgment to
   cluster them.
 
-Compare each count to the declared threshold. If none is tripped and you
-were not explicitly asked to sweep, stop — record nothing.
+Compare each count to the declared threshold. At session start, report in
+**one sentence** to the user when any of these hold: (a) a tier's derived
+count ≥ its threshold and is new since `checked_through`, (b) unindexed
+plan files > 0, or (c) a reconsideration condition in the Deferral State
+table has fired. If none holds and you were not explicitly asked to sweep,
+stop — record nothing.
 
-### 2. Lessons tier: distill, then retire
+### 2. Lessons tier: distill, then archive
 
-At sweep start, pin the source: `source_sha` is a commit that verifiably
+At sweep start, pin the source: `source_sha` is a commit reachable from a
+retained ref (`HEAD` and the target remote branch) that verifiably
 contains the raw material about to be folded — check with
 `git show <source_sha>:docs/lessons.md`. If the entries exist only in the
-worktree, there is no valid source yet: the destructive phase is blocked
+worktree, there is no valid source yet: the archive phase is blocked
 until the raw state is committed (or the sweep stays additive-only).
 **Cue portability:** this repository has a published mirror
 (`origin`), so a cue must resolve in the published history too — a SHA
@@ -182,51 +207,68 @@ For each tripped or requested fold:
 3. For each genuinely new cold cluster of 3+ entries, draft the
    distillation: a new or amended Golden Rule, an engineering-principles
    section, or a runbook amendment. **Verify the distillation across three
-   tiers** — text fidelity (it says what the entries said, grepped both
-   directions, not what memory says they said; memory-drafted rules
-   overclaim), symbol liveness (named functions, files, and flags still
-   exist), and — whenever the distillation is phrased as a present-tense
-   behavior claim, especially text landing in an implementation doc —
-   **behavioral parity**: reproduce that the code still does what the rule
-   claims. The first two tiers are mechanical; the third is mandatory for
-   any current-behavior claim. Verifying the incoming lessons is not
-   enough: a fold that touches a runbook or spec also **re-verifies the
-   pre-existing code examples adjacent to its edits** — those examples are
-   status claims too, and a stale one sits in the exact pattern the
-   incoming lesson warns about. When a fold changes an existing rule's
-   meaning, annotate it in place — `(revised YYYY-MM-DD; was: <gist>)` —
-   so citations to the rule stay interpretable across history.
+   tiers**:
+   - **Text fidelity** (mechanical): it says what the entries said,
+     grepped both directions, not what memory says they said;
+     memory-drafted rules overclaim.
+   - **Symbol liveness** (mechanical): named functions, files, and flags
+     still exist in the current tree.
+   - **Behavioral parity** (mandatory for any present-tense behavior
+     claim, especially text landing in an implementation note or runbook):
+     reproduce by command or code inspection that the code still does
+     what the rule claims; for docs-only rules, run the governing doc
+     gate (`bin/check-doc-paths`, `bin/check-dom15-fixtures`,
+     `bin/coalesce-check`, `tests/specs/`).
+   Verifying the incoming lessons is not enough: a fold that touches a
+   runbook or spec also **re-verifies the pre-existing code examples
+   adjacent to its edits** — those examples are status claims too, and a
+   stale one sits in the exact pattern the incoming lesson warns about.
+   When a fold changes an existing rule's meaning, annotate it in place —
+   `(revised YYYY-MM-DD; was: <gist>)` — so citations to the rule stay
+   interpretable across history. In dated-bullet ledgers where tools grep
+   `^- 20[0-9]{2}-[0-9]{2}-[0-9]{2}:`, keep the date prefix first (`-
+   YYYY-MM-DD: (revised ...) ...`) so the entry remains machine-countable.
 4. Write the distillation and its fold cue in the surviving text:
    `(distilled from N entries, YYYY-MM-DD..YYYY-MM-DD, source <source_sha>)`.
    The cue names the pre-fold commit that contains the raw material — never
    the fold commit, which cannot contain its own hash and does not contain
    the deleted entries. The fold commit may be added to the run log after
    it exists, as metadata.
-5. **Destructive phase — only with landing authorization.** Only after the
-   distillation is written, its links resolve, and `source_sha` is
-   verified, delete the folded raw entries and advance the lessons
-   watermark. In an uncommitted-review session, stop after step 4:
-   present the drafts and candidates, delete nothing, advance nothing.
+5. **Archive phase — remove raw entries from the working file once git
+   history holds the verified source cue.** Only after the distillation is
+   written, its links resolve, and `source_sha` is verified reachable
+   from a retained ref (`git show <source_sha>:docs/lessons.md`), remove
+   the folded raw entries from `docs/lessons.md` and advance the lessons
+   watermark (or append to `## Fold Records` / `### Noncontiguous Lesson
+   Fold Records`). Git history + the verified `source_sha` cue is the
+   archive. In an uncommitted-review session where the raw entries are
+   not yet in a committed `source_sha`, stop after step 4: present the
+   drafts and candidates, remove nothing, advance nothing.
 6. Decay evidence is multi-signal: absence of citation alone never
    justifies a fold — agents follow rules without citing them. Weigh
    recent incidents, test coverage, review recurrence, last validation,
    and importance class. A lesson that encodes an **upstream framework
-   fact** (not a house choice) carries a version-bound decay clock
-   instead: when the pinned dependency makes the violation loudly
-   impossible — a removed API, an import that now raises — the lesson has
-   **expired** and folds to git with the version fact as its cue, no
-   distillation target owed. A still-live framework fact is platform
-   documentation, not a convention: scatter it to the nearest topic doc,
-   never a "our conventions" home. Golden rules and safety invariants are exempt
+   or tool fact** (not a house choice) carries a version-bound decay
+   clock instead: qualify the rule in situ with the tool/library version
+   and date it was verified (for example, `codex ≤0.120.2`), and when
+   the pinned dependency makes the violation loudly impossible — a
+   removed API, an import that now raises — the lesson has **expired**
+   and folds to git with the version fact as its cue, no distillation
+   target owed. A still-live framework fact is platform documentation,
+   not a convention: scatter it to the nearest topic doc, never a "our
+   conventions" home. Golden rules and safety invariants are exempt
    from automated decay entirely (importance floor); they change only by
    explicit revision, supersession, or deprecation, always with the
    `(revised YYYY-MM-DD; was: <gist>)` marker. An uncited cold entry with
    no rule potential may be folded to a one-line summary rather than a
    rule.
 
-### 3. Plans tier: harvest gate, then soft-retire
+### 3. Plans tier: harvest gate, then soft-retire and archive
 
-For each completed or superseded plan:
+**Audit all eligible `completed` and `superseded` plans, not only the
+excess above the threshold.** When the plans tier trips (or a sweep is
+authorized), inspect every non-exemplar completed/superseded plan that
+passes the harvest gate. For each candidate:
 
 0. Skip plans marked `exemplar` in the status index — they are exempt
    until the index note says their exemplar role has been superseded.
@@ -237,17 +279,26 @@ For each completed or superseded plan:
    - lessons extracted where applicable
    - every spec backlink converted to the retired citation form:
      `- retired: <plan-name> — source <source_sha>; see docs/plans/README.md`
+     (grep `tests/` for exact backlink strings before converting so any
+     doc-hygiene test pinning the live link is updated in the same change)
 2. Superseded plans: confirm the successor names what it inherits before
    retiring the predecessor. If it does not, fix the successor first.
-3. **Soft-retire only** — the sweep never deletes plan files. Flip the
-   index status to `retired-pending`, convert the backlinks, and add the
-   ledger line to `docs/plans/README.md` Retired Plans: plan, dates,
-   one-sentence outcome, what absorbed it, source SHA (a commit verifiably
-   containing the plan file).
-4. Physical deletion is a dedicated follow-up change, made only after a
-   second agent or the user re-verifies the harvest gate for each
-   `retired-pending` plan. Never soft-retire and delete in the same
-   change.
+3. **Record the retirement in the index and ledger:** flip the index
+   status (or move the row to the Retired Plans ledger per the repo's
+   index convention), convert the backlinks, and add the ledger line to
+   `docs/plans/README.md` Retired Plans: plan, dates, one-sentence
+   outcome, what absorbed it, source SHA (a commit reachable from a
+   retained ref that verifiably contains the plan file; check with
+   `git show <source_sha>:docs/plans/<plan>.md`).
+4. **Archive deletion (`git rm`):** once the harvest gate passes and
+   `source_sha` is verified in git history, remove the retired plan file
+   from `docs/plans/` (`git rm`) so `docs/plans/` stays small and
+   `bin/coalesce-check` verifies the `git show <source_sha>:docs/plans/<plan>.md`
+   retrieval cue. Optional second-agent verification is recommended when
+   a sweep harvests subtle architectural rationale; routine operational
+   maintenance sweeps are git-backed and reversible (Class 2 when no
+   durable guidance rule is promoted). Never create a `retired/` or
+   `archive/` subdirectory — git is the archive.
 5. A plan that fails the gate stays in the tree at its current status;
    note the blocking item in the run log if the threshold keeps nagging.
 
@@ -268,8 +319,12 @@ For each completed or superseded plan:
   chronological catch-all — a dumping ground spanning many domains, not one
   theme. Its fix is reclassification: extract only the genuinely homeless
   coherent clusters to their real homes and leave the misfiled remainder
-  for its own domain's pass. Do not force a mega-runbook over unrelated
-  material just to make the count drop.
+  for its own domain's pass. When a fold extracts a noncontiguous theme
+  cluster rather than a chronological prefix, record the fold in
+  `docs/coalescing.md` under `### Noncontiguous Lesson Fold Records` (and
+  `docs/lessons.md` `## Fold Records`) instead of advancing a single date
+  watermark past older unfolded entries. Do not force a mega-runbook over
+  unrelated material just to make the count drop.
 - Presence in the always-read context is NOT promotion evidence; only
   explicit citation in work products counts.
 
@@ -282,27 +337,36 @@ candidates are tracked in its state file's fold-up tier and accepted
 only with the independence check below. Independence check first: two repos exhibiting the same
 rule counts as fold-up evidence only when the incidents or adaptations are
 independent — two descendants of one inherited/bootstrapped rule are one
-lineage, not two data points. Sibling repos re-sync from the guidance
-repo's committed SHA — never from a working tree.
+lineage, not two data points. **"Generalizes" means generalizes the
+discipline (how agent-assisted development is planned, verified, reviewed,
+or maintained across repositories), not merely "happened in two repos"**
+(`[REV-AT-004]`): domain-specific runtime mechanics (for example, SQLite
+WAL tuning, broker queue naming, or a framework-specific test fixture)
+stay in the spoke repository's engineering principles or testing runbook
+even when two sibling repos share that stack. Sibling repos re-sync from
+the guidance repo's committed SHA — never from a working tree.
 
 ### 6. Close the run
 
 1. Append one run-log line per tier touched to `docs/coalescing.md`:
    date, source SHA, and the claim ("folded 6 lesson entries → Golden Rule
-   14; soft-retired 2 plans; deferred plans tier — deviation log open on
+   14; retired 2 plans; deferred plans tier — deviation log open on
    X"). The fold commit may be added as metadata once it exists.
 2. If nothing was foldable, record the deferral with real state:
    `checked_through` (date + SHA), the derived counts, the reason ("all
    entries within age floor"), and a reconsideration condition ("recount
    when 5 more entries land" / "when plan X closes"). This is what stops
    an unchanged count from re-nagging every session.
-3. Advance watermarks only in the destructive phase (landing-authorized).
-   An additive-only session leaves watermarks untouched and says so in
-   its run-log line.
-4. Rerun the repo's traceability gate and record the result in the run-log
-   line.
+3. Advance watermarks (or append to `### Noncontiguous Lesson Fold
+   Records` / `## Fold Records`) only in the archive phase once
+   `source_sha` is verified in git history. An additive-only session
+   leaves watermarks untouched and says so in its run-log line.
+4. Rerun the repo's traceability and doc gates (`bin/check-doc-paths`,
+   `bin/check-dom15-fixtures`, `bin/coalesce-check`, `tests/specs/`) and
+   record the result in the run-log line.
 5. Commit per the session's authorization; if the sweep stays uncommitted,
-   it must have been additive-only (see step 2 of the lessons tier).
+   verify that every `source_sha` cited by an archive deletion is already
+   a committed ancestor of `HEAD`.
 6. **When the sweep runs beside live concurrent sessions**, coalesce
    defensively: defer any rule whose domain is under active rework — fold
    it at a later sweep, not now — keep edits to contested files as
@@ -317,12 +381,12 @@ When the sweep is done, these exist and are verifiable:
 
 - run-log line(s) in `docs/coalescing.md` whose claims survive a diff
   spot-check of the fold commit
-- watermarks advanced to match
+- watermarks or noncontiguous fold records advanced to match
 - every fold cue resolves: `git show <source_sha>:<path>` contains the
-  folded material — verified, not assumed
-- traceability gate rerun from current state, result recorded
-- no raw material deleted without its distillation already in the tree
-  (two-phase order visible in the diff or commit sequence)
+  folded material — verified by `bin/coalesce-check`, not assumed
+- traceability and doc gates rerun from current state, result recorded
+- no raw material removed without its distillation already in the tree
+  and its `source_sha` reachable from a retained ref
 
 ## Maintenance Notes
 
@@ -335,8 +399,8 @@ When the sweep is done, these exist and are verifiable:
 - If the harvest gate keeps blocking on the same item class, the gap is
   upstream (plans closing with open deviation logs) — fix the completion
   gate usage, not the sweep.
-- The executable checker now exists: run `bin/coalesce-check` for step
-  1's derivation and for the cue/publication audit. The commands
-  written here and in `docs/coalescing.md` remain the fallback and the
-  spec the script implements — when they disagree, the declared
-  commands win and the script is the defect.
+- `bin/coalesce-check` is the **evidence trail** for step 1's derivation
+  and for the cue/publication audit. The commands written here and in
+  `docs/coalescing.md` remain the authoritative spec the script
+  implements — when they disagree, the declared commands win and the
+  script is the defect.

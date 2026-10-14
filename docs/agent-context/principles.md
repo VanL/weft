@@ -39,10 +39,15 @@ Example:
 - Follow explicit user corrections immediately.
 - State critical assumptions before broad or irreversible changes.
 - Report blockers with precise causes and the next missing input.
-- Returning mid-task with falsified premises, newly discovered issues, or
-  reasonable uncertainty is a success path, not a failure. Bring the
-  evidence and a corrected scope, then wait for direction
-  (see `docs/lessons.md`, 2026-06-11).
+- **Report surprise; do not absorb it.** Treat planning and research as
+  experiments that may falsify their own task brief. When live inspection shows
+  that a cited invariant, file, problem statement, or architectural premise does
+  not hold, or when execution hits an anomaly or unpredicted side effect, do
+  not paper over the discrepancy with workarounds, retries, or silent scope
+  drift. Stop, preserve the evidence, and return mid-task with the falsified
+  premise and a corrected scope — returning mid-task with falsified premises,
+  newly discovered issues, or reasonable uncertainty is a first-class success
+  path, not a failure (see `docs/lessons.md`, 2026-06-11).
 - If something seems clear to a human but confusing to an agent, say so and
   propose a specific change that would make it easier to use correctly.
 
@@ -57,6 +62,10 @@ Example:
 - Preserve the current execution spine unless the task spec or plan explicitly
   changes it.
 - Update all producers and consumers together when changing a contract.
+- Negative lifecycle labels (`unused`, `dead`, `orphaned`, `stale`,
+  `superseded`) require affirmative full-tree grep evidence across code, tests,
+  `examples/`, scripts, and vendored or bootstrap consumers before anything is
+  deleted or retired.
 
 ## Verification Standards
 
