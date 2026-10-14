@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.9.111] - 2026-10-14
+
 ### Changed
 
 - Ordinary tasks now share `weft.spawn.requests`, with measured admission and
@@ -13,6 +15,12 @@
   waiter and preserves stop/SIGINT custody. This changes the standalone
   `weft/core/tasks/multiqueue_watcher.py` copy boundary; Taut should re-pin its
   vendored file after this change is released.
+- Dependency floors and the lockfile were refreshed, including
+  `simplebroker>=8.7.2` for core and `simplebroker-pg>=4.7.2` in the coordinated
+  `all` and development environments.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.46`, `weft-docker 0.9.86`,
+  `weft-macos-sandbox 0.6.15`, and `weft-microsandbox 0.5.16`.
 
 
 ## [0.9.110] - 2026-10-13
