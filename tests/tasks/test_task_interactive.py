@@ -472,8 +472,8 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
             time.sleep(0.01)
         assert delivered() is notify
     finally:
-        task.stop(join=False)
-        driver.join(timeout=5.0)
+        task.stop()
+        driver.join()
         assert not driver.is_alive()
 
 

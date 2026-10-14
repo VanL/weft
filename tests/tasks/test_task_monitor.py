@@ -134,12 +134,14 @@ def test_task_monitor_stop_survives_blocking_heartbeat_probe(
         observer=lambda _queue, _message, _timestamp: None,
     )
     heartbeat_tid = "1778089999999999398"
+    responder_ready = threading.Barrier(2)
     ping_seen = threading.Event()
     release_pong = threading.Event()
     probe_reply_to: list[str] = []
 
     def respond() -> None:
         target = make_queue(f"T{heartbeat_tid}.ctrl_in")
+        responder_ready.wait()
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             raw = target.read_one()
@@ -187,6 +189,7 @@ def test_task_monitor_stop_survives_blocking_heartbeat_probe(
     responder = threading.Thread(target=respond, daemon=True)
     registrar = threading.Thread(target=task._ensure_heartbeat_registered, daemon=True)
     responder.start()
+    responder_ready.wait()
     registrar.start()
     try:
         assert ping_seen.wait(timeout=5.0)
@@ -197,8 +200,8 @@ def test_task_monitor_stop_survives_blocking_heartbeat_probe(
         assert make_queue(task_ctrl_in).stats().pending == 1
 
         release_pong.set()
-        registrar.join(timeout=5.0)
-        responder.join(timeout=5.0)
+        registrar.join()
+        responder.join()
         assert not registrar.is_alive()
         assert not responder.is_alive()
         assert make_queue(task_ctrl_in).stats().pending == 1

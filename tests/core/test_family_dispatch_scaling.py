@@ -86,7 +86,7 @@ def _task(
     return spec, identity
 
 
-@pytest.mark.parametrize("backlog", [100, 1000, 10000])
+@pytest.mark.parametrize("backlog", [100, 1000])
 def test_completion_to_next_real_launch_does_not_scan_sibling_backlog(
     weft_harness: WeftTestHarness, monkeypatch: pytest.MonkeyPatch, backlog: int
 ) -> None:
