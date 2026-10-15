@@ -114,16 +114,22 @@ of SimpleBroker queues and OS processes:
    everything is a task" and "There is no code without a task identity."
 
 2. **Queues carry durable facts; processes carry ephemeral hints; consumed queues disappear**:
-   If a lifecycle fact is durable, it is durable because a message sits in a
-   SimpleBroker queue. In-memory structures inside a Manager or Consumer are
-   performance hints or local process handles—never a second lifecycle database.
-   Crucially, SimpleBroker queues are **auto-created on first write and
-   auto-disappear when emptied** (`move_one` or `delete`). Weft uses per-task
-   and per-branch queues (`T{tid}.*`, `weft.state.labels.<root_tid>.pending.<parent_tid>`)
-   freely because consuming messages as work progresses cleans up the queue
-   namespace automatically. Treating a SimpleBroker queue as an unconsumed,
-   append-only relational table that requires tombstones and manual garbage
-   collection violates the substrate model.
+   If a Weft lifecycle or coordination fact is durable, it is durable because a
+   message sits in a SimpleBroker queue. In-memory structures inside a Manager
+   or Consumer are performance hints or local process handles—never a second
+   lifecycle database. Individual tasks may maintain their own task-internal
+   working state to do their job—for example, `TaskMonitor` maintains private
+   collation and export cursors in sidecar tables (`MonitorStore`) via
+   SimpleBroker's `broker.sidecar()` facility so it can transform `weft.log.tasks`
+   into external JSONL logs and prune covered rows—but **Weft never depends on
+   task-internal state for its operation**. Crucially, SimpleBroker queues are
+   **auto-created on first write and auto-disappear when emptied** (`move_one`
+   or `delete`). Weft uses per-task and per-branch queues (`T{tid}.*`,
+   `weft.state.labels.<root_tid>.pending.<parent_tid>`) freely because consuming
+   messages as work progresses cleans up the queue namespace automatically.
+   Treating a SimpleBroker queue as an unconsumed, append-only relational table
+   that requires tombstones and manual garbage collection violates the substrate
+   model.
 
 3. **Detached process topology bridged by task-owned runtime state (`weft.state.tasks.<tid>`)**:
    When task $A$ submits child task $B$, $A$ does not `fork` or `exec` $B$; $A$
@@ -176,7 +182,8 @@ of SimpleBroker queues and OS processes:
    - **The Manager** owns admission, frontier selection, task launch, and
      direct child supervision.
    - **Each Task** owns its `inbox`, `reserved`, `outbox`, `ctrl_in`,
-     `ctrl_out`, and `weft.state.tasks.<tid>` publication.
+     `ctrl_out`, `weft.state.tasks.<tid>` publication, and any task-internal
+     working state private to that task.
    - **The operating system** reports process exit through kernel sentinels and
      scoped `(pid, create_time)` identity, never via application heartbeats.
    - **Higher-level intelligence** sits above Weft; Weft is the execution
@@ -198,6 +205,7 @@ of SimpleBroker queues and OS processes:
 | Control message | A request row on `T{target}.ctrl_in`; replies are pushed to the requester's own `T{requester}.ctrl_in` (`reply_to`) | The task reading `ctrl_in` | `05-Message_Flow_and_State.md` [MF-3]; `2026-09-18-event-routed-manager-pong-plan.md` |
 | Completion fact | One serialized terminal record published atomically to `weft.log.tasks` and `T{tid}.ctrl_out` | The completing task | [MF-3], [MF-5]; `07-System_Invariants.md` OBS.1 |
 | Runtime-state queue | `weft.state.*` ephemeral operational state (excluded from dumps, read via peek-latest; `weft.state.tasks.*` deleted only by `LivenessMonitor`) | The publishing task or service; `LivenessMonitor` for task-state deletion | `07-System_Invariants.md` OBS.6, LIVENESS.R3; `05-Message_Flow_and_State.md` [MF-5] |
+| Task-internal working state | Private state maintained by an individual task for its own work (such as `TaskMonitor`'s `MonitorStore` sidecar tables for log collation, JSONL export, and retention pruning); never read or depended on by Weft's execution, control, or query paths | The individual task that owns it (`TaskMonitor` for `MonitorStore`) | `07-System_Invariants.md` [OBS.13]; `04-SimpleBroker_Integration.md` [SB-0.4a] |
 | Broker session | Process-local lease over shared backend runner/pool resources with single-thread caller cache | The task or command that opened it | `04-SimpleBroker_Integration.md` [SB-0.4]; `01-Core_Components.md` [CC-2.2.1] |
 | Admission | Measured gate on process creation (`available = C - R - U`), never on queue-first submission | The Manager | `03-Manager_Architecture.md` [MA-1.8]; `2026-10-15-work-conserving-family-scheduling.md` |
 | Evidence | Queue row, scoped `(pid, create_time)` process identity, or runtime handle supporting a liveness or custody claim | The reader classifying it under liveness policy | [MF-5]; `07-System_Invariants.md` LIVENESS.R3–R7 |
@@ -215,6 +223,7 @@ engineering rule.
 | Everything is a task | No caller gets a privileged side-channel. Even a short-lived CLI requester mints a TID and receives control replies on `T{tid}.ctrl_in`. | Owner, 2026-09-17 | [MF-3]; `2026-09-18` PONG plan |
 | It is just a message | Protocols are ordinary messages on ordinary queues. Replies are pushed to a queue the requester's reactor already watches—push, never pull-scan. | Owner, 2026-09-17: "this should not be a special case. It is just a message." | [MF-3] |
 | Queues carry facts; processes carry hints | No in-memory lifecycle database. Detached task lineage and process evidence live in `weft.state.tasks.<tid>`; local Manager tables are caches/hints rebuilt from queues. | Owner, 2026-09-23; `2026-10-12` burst plan | OBS.1, OBS.6; [MF-5] |
+| Task-internal state is private; Weft never depends on it | An individual task may maintain its own internal state (`TaskMonitor` uses `broker.sidecar()` tables to collate and export `weft.log.tasks` before pruning), but Weft's execution, control, status, and result paths must not read or depend on a task's internal state. | Owner, 2026-10-14 and 2026-10-15; `2026-10-14-task-monitor-read-separation-and-simplification-plan.md` | [OBS.13], [SB-0.4a] |
 | Consume-to-disappear queues, not relational tables | SimpleBroker queues auto-create on write and auto-disappear when emptied. Consume tokens as work is dispatched (`delete`/`move_one`) instead of accumulating unconsumed event logs that require tombstones and manual GC sweeps. | Owner & architectural review, 2026-10-14 | [SB-0.1]; `2026-10-14` family scheduling plan |
 | Address a fact to its observers | Terminal completion is broadcast atomically to `weft.log.tasks` and `T{tid}.ctrl_out` so task waiters watch only their target's queue instead of scanning global history in $O(W \cdot E)$. | `2026-10-12` burst plan; owner, 2026-10-09 | [MF-3], [MF-5], OBS.1 |
 | Keep an identity you already have | An owner that wrote a row retains the returned ID; a caller that created a TaskSpec derives queue names from its TID rather than scanning logs to rediscover it. | Owner, 2026-10-09: "We don't need to re-discover it from the taskspec that we just created" | [MF-5]; [SB-0.2] |
@@ -259,9 +268,12 @@ engineering rule.
 
 Weft is not a distributed workflow engine, a general DAG/join compiler, an
 agent-management or prompt-orchestration layer, a provider-health monitor, or a
-second control plane. It does not maintain a sidecar relational database of
-task state, probe external tools before an ordinary `weft run`, or invent
-application policy. See `00-Overview_and_Architecture.md`, Product Boundary.
+second control plane. It does not maintain a shared relational database of task
+lifecycle state for Weft operations (`TaskMonitor`'s sidecar tables are private,
+task-internal working state for log export and retention pruning, never read by
+Weft's execution, control, or query paths), probe external tools before an
+ordinary `weft run`, or invent application policy. See
+`00-Overview_and_Architecture.md`, Product Boundary.
 
 Weft does not own queue mechanics. Message IDs, ordering, atomic moves,
 delivery claims, and storage transactions belong to SimpleBroker. If a problem
@@ -618,6 +630,40 @@ alternative. An agent must not propose the alternative again unless the
 - Evidence: Owner & architectural review, 2026-10-14;
   `2026-10-14-measured-admission-family-scheduling.md`.
 
+### [ALT-WT-020] Reading task-internal state (`MonitorStore`) from Weft status or result paths, or forcing stream-collation state into queues
+
+- Disposition: rejected
+- Candidate: Either (a) have `weft status`, `weft result`, or task discovery
+  query `TaskMonitor`'s sidecar collation tables (`MonitorStore`) as a fallback
+  lifecycle store when queue rows have aged out, or (b) eliminate `MonitorStore`
+  by storing `TaskMonitor`'s collation and export cursors as synthetic
+  `weft.state.*` queues.
+- Why plausible: (a) `MonitorStore` already collates `weft.log.tasks` in the
+  same SQL database; (b) "State lives in queues, not databases" can be misread
+  as forbidding any task from keeping non-queue internal working state.
+- Reason: Both options confuse **Weft substrate state** with **task-internal
+  working state**. Individual tasks may maintain their own internal state to do
+  their job (`TaskMonitor` is a task that transforms `weft.log.tasks` into
+  external JSONL logs and prunes covered queue rows, using `broker.sidecar()`
+  tables for its private stream-collation state), but **Weft must never depend
+  on task-internal state for its operation** (owner, 2026-10-15). Reaching into
+  `MonitorStore` from `status` or `result` promoted one task's private state
+  into a second system-wide lifecycle database, while forcing `TaskMonitor`'s
+  collation state into queues would turn queues into unconsumed relational
+  tables ([ALT-WT-019]).
+- Current consequence: Weft read and control paths (`status`, `result`,
+  `Manager`, `LivenessMonitor`) read only queues (`T{tid}.*`, `weft.log.tasks`,
+  `weft.state.*`) and never import or query `MonitorStore`. `MonitorStore`
+  remains strictly private to `TaskMonitor` for external log export and
+  retention pruning.
+- Reconsider when: Never. Weft operations must work identically from queues
+  alone whether `TaskMonitor` is running or disabled, and task-internal state
+  must remain encapsulated within the task that owns it.
+- Evidence: Owner, 2026-10-14 and 2026-10-15;
+  `2026-10-14-task-monitor-read-separation-and-simplification-plan.md`;
+  `2026-10-14-task-monitor-ingest-and-retirement-plan.md`;
+  `2026-10-13-supervisor-terminal-projection.md`; [OBS.13], [SB-0.4a].
+
 ## Tensions and falsifiers [WT-7]
 
 - **Possession probe:** One time for each release or class-5 plan, ask an
@@ -642,8 +688,9 @@ alternative. An agent must not propose the alternative again unless the
   onto Weft's existing queue and process primitives.
 - **Simplicity against ambition:** Weft adds agent runtimes, restricted
   runners, pipelines, and work-conserving family scheduling. Each addition must still
-  compose as tasks and queues. If a feature requires a second control plane or
-  a sidecar database, the theory or the feature is wrong.
+  compose as tasks and queues. If a Weft coordination, scheduling, or query
+  feature requires a second control plane or depends on a task's internal
+  sidecar state, the theory or the feature is wrong.
 - **Event-driven against absence:** Timers exist only for clock work or for
   absence detection (such as missing best-effort startup snapshots). Each new
   timer must answer: *which event cannot arrive, and why?*
@@ -677,7 +724,7 @@ application of that line.
 | Current principle | Founding text | Maintained | Evolved |
 |-------------------|---------------|------------|---------|
 | Everything is a task | "Everything is a Task" | Still the first rule | Agents, pipelines, services, and short-lived requesters are tasks too |
-| Queues carry facts; consumed queues disappear | "State lives in queues, not databases" | Still the only durable record | Runtime-state queues (`weft.state.tasks.*`) hold detached process/lineage snapshots deleted by `LivenessMonitor`; pending family queues (`weft.state.labels.*.pending.*`) are consumed on dispatch so they vanish automatically; completion facts broadcast to `ctrl_out` |
+| Queues carry facts; consumed queues disappear | "State lives in queues, not databases" | Still the only durable record for Weft | Runtime-state queues (`weft.state.tasks.*`) hold detached process/lineage snapshots deleted by `LivenessMonitor`; pending family queues (`weft.state.labels.*.pending.*`) are consumed on dispatch so they vanish automatically; completion facts broadcast to `ctrl_out`; individual tasks (such as `TaskMonitor`) may hold private task-internal state (`MonitorStore`), which Weft never reads or depends on |
 | Specs are the contract | "The specs are the source of truth. Code must align to them." | Still the contract | The theory now sits above the specs for design judgment; a wrong spec changes |
 | Small observable substrate | "the durable task substrate for agent systems" (`CLAUDE.md`) | Still the product boundary | Measured admission, ancestry scheduling, labels, and sessions were added as classical algorithms over existing primitives without a second control plane |
 
