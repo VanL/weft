@@ -127,7 +127,7 @@ def test_invalid_primary_settles_without_using_frontier_or_launching_valid_work(
         assert reserved.peek_one(exact_timestamp=invalid_id) is None
 
 
-def test_full_frontiers_do_not_mistake_nonempty_primary_for_idle_gap(
+def test_measured_denial_does_not_mistake_nonempty_primary_for_idle_gap(
     recovery_manager: Manager, weft_harness: WeftTestHarness
 ) -> None:
     """No eligible launch is not proof that a blocked drain episode ended."""
@@ -135,17 +135,15 @@ def test_full_frontiers_do_not_mistake_nonempty_primary_for_idle_gap(
     manager._refresh_scheduler_evidence()
     accepted = _accept(weft_harness)
     manager._classify_family_requests()
-    for offset in range(
-        int(manager._manager_context().config["SCHEDULER_MAX_FRONTIERS"])
-    ):
-        tid = str(accepted - offset - 1)
-        manager._family_scheduler.recover(tid, tid, ())
     first = manager._admission_controller.evaluate(
         used=None, backend="postgres", now=100.0
     )
     assert first.wait_phase == "waiting"
-    assert manager._peek_family_candidate() is None
+    candidate = manager._peek_family_candidate()
+    assert candidate is not None and candidate.request_id == accepted
+    manager._admission_blocked_lanes = set(first.blocked_lanes)
     assert not manager._has_pending_messages()
+    assert manager._queue(manager._queue_names["inbox"]).has_pending()
     later = manager._admission_controller.evaluate(
         used=None, backend="postgres", now=140.0
     )

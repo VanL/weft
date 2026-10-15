@@ -86,7 +86,7 @@ def _task(
     return spec, identity
 
 
-@pytest.mark.parametrize("backlog", [100, 1000])
+@pytest.mark.parametrize("backlog", [100, 1000, 10000])
 def test_completion_to_next_real_launch_does_not_scan_sibling_backlog(
     weft_harness: WeftTestHarness, monkeypatch: pytest.MonkeyPatch, backlog: int
 ) -> None:
@@ -103,7 +103,6 @@ def test_completion_to_next_real_launch_does_not_scan_sibling_backlog(
         config=load_config(
             {
                 "WEFT_ADMISSION_MAX_CONNECTIONS": 0,
-                "WEFT_SCHEDULER_MAX_FRONTIERS": 1,
                 "WEFT_HEARTBEAT_ENABLED": False,
                 "WEFT_TASK_MONITOR_ENABLED": False,
                 "WEFT_LIVENESS_MONITOR_ENABLED": False,
@@ -168,7 +167,10 @@ def test_completion_to_next_real_launch_does_not_scan_sibling_backlog(
         manager._reconcile_launch_now(str(leaf_id))
         assert manager._family_scheduler.frontiers == ((str(parent_id), str(leaf_id)),)
         assert parent.is_alive() and leaf.is_alive()
-        assert manager._peek_family_candidate() is None
+        sibling = manager._peek_family_candidate()
+        assert sibling is not None and sibling.request_id == first + 1
+        # Work sharing is already eligible while this leaf lives. The measured
+        # interval still starts at its exit and must choose the newest tip child.
         leaf_release.set()
         leaf.join(timeout=30.0)
         assert not leaf.is_alive()

@@ -328,21 +328,22 @@ confer no service authority. Weft consumes the public coherent total/by-owner
 usage snapshot through an existing Manager Queue; it neither issues backend SQL
 nor opens a measurement-only connection. Unknown attribution receives no
 discount. The existing four-integer `get_connection_stats()` interface remains
-available unchanged. [MA-1.8] owns measured admission and bounded family selection. There are no prospective task budgets. The released public helpers are
+available unchanged. [MA-1.8] owns measured admission and work-conserving family selection. Automatic PostgreSQL admission reads the current `max_connections` through public `get_connection_stats()` before each coherent usage observation; positive configured ceilings skip that metadata read. There are no prospective task budgets. The released public helpers are
 `simplebroker_pg.bind_connection_owner` and
 `simplebroker_pg.get_connection_usage`; require SimpleBroker >=8.6.0 and
 simplebroker-pg >=4.6.0. Owner labels match `[!-~]{1,54}`. Sample outside
 caller-owned transactions; absent owner counts provide zero credit, never death
 evidence.
 
-_Implementation mapping_: `weft/core/runtime_identity.py`, `weft/core/spawn_requests.py`, `tests/system/test_measured_admission_pg.py`.
+_Implementation mapping_: `weft/core/runtime_identity.py`, `weft/core/spawn_requests.py`, `weft/core/manager.py::Manager._read_postgres_connection_stats`, `weft/core/manager.py::Manager._read_postgres_connection_usage`, `tests/system/test_measured_admission_pg.py`.
 
 Implementation note for [SB-0.4]:
 `weft/core/runtime_identity.py::install_runtime_identity` owns public PG owner
 binding; `weft/core/launcher.py` and `weft/core/runners/host.py` install its
 transport before runtime broker resources open.
-`weft/core/manager.py::Manager._read_postgres_connection_usage` consumes the
-public coherent observation through its connected Queue. Attribution custody
+`weft/core/manager.py::Manager._read_postgres_connection_stats` resolves native
+capacity and `Manager._read_postgres_connection_usage` consumes the public
+coherent observation through the same connected Queue. Attribution custody
 is verified in `tests/core/test_runtime_identity.py` and the actual PG
 resource-lifetime proof in `tests/system/test_measured_admission_pg.py`.
 `weft/commands/submission.py::_submit_prepared_outcome` owns or borrows the
@@ -854,6 +855,8 @@ connection-pooling designs are tracked in the companion doc:
 - [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
 
 ## Related Plans
+
+- [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 

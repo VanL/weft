@@ -185,8 +185,7 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS` | Throttle interval for repeated foreground manager operational-log events. Defaults to 5 seconds. |
 | `WEFT_REDACT_TASKSPEC_FIELDS` | Comma-separated TaskSpec field paths redacted from task-log events. |
 | `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
-| `WEFT_ADMISSION_MAX_CONNECTIONS` | Unset or `0` disables the resource gate only. PostgreSQL ordinary admission requires ceiling minus reserve minus coherent measured total to be positive; internal requests retain reserve eligibility. SQLite uses actual live/unknown TIDs unioned with local launches. No task budget or child headroom. See [MA-1.8], [MANAGER.18]. |
-| `WEFT_SCHEDULER_MAX_FRONTIERS` | Positive integer finite branch places per Manager, default `5`. Bounds process growth, independently of resource admission. See [MA-1.8]. |
+| `WEFT_ADMISSION_MAX_CONNECTIONS` | PostgreSQL: unset or `0` uses the backend `max_connections` by default; a positive value sets an explicit ceiling. SQLite: unset or `0` disables resource admission; positive values use actual live/unknown TIDs. Ordinary admission requires ceiling minus global reserve minus coherent measured usage to be positive. No frontier cap, task budget or child count. See [MA-1.8], [MANAGER.18]. |
 | `WEFT_ADMISSION_RESERVE_FRACTION` | Fraction withheld from public work. Must be finite with `0 <= value < 1`; defaults to `0.1`. Effective reserve is the greater of `ceil(maximum * fraction)` and four slots of modeled internal-lane room for Manager, TaskMonitor, LivenessMonitor, and Heartbeat while LivenessMonitor is enabled (three when disabled); these are not dedicated permits. See [MA-1.8] and [MANAGER.18]. |
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
@@ -245,6 +244,8 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
+
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md)
@@ -269,3 +270,5 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 - [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)
 
 The collation-store toggle was retired by [Collation store toggle removal](../plans/2026-08-31-collation-store-toggle-removal-plan.md). An exported removed key is rejected; use `WEFT_TASK_MONITOR_MODE=report_only` for non-destructive operation.
+
+`WEFT_SCHEDULER_MAX_FRONTIERS` was removed. Unset it before upgrading all producers and consumers; it is an actionable configuration error.

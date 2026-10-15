@@ -2767,11 +2767,16 @@ def test_sqlite_admission_does_not_swallow_base_exception(
         manager.cleanup()
 
 
-def test_disabled_admission_dispatches_without_observing_backend(
+@pytest.mark.skipif(
+    active_test_backend() == "postgres",
+    reason="zero selects native PostgreSQL capacity; only SQLite disables admission",
+)
+def test_sqlite_disabled_admission_dispatches_without_observing_backend(
     broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """SQLite zero capacity retains the explicitly disabled resource mode."""
     db_path, make_queue = broker_env
     manager = Manager(
         db_path,

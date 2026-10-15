@@ -39,7 +39,6 @@ def burst_manager(
     db_path, _make_queue = broker_env
     parameter = getattr(request, "param", ReservedPolicy.KEEP)
     policy = parameter if isinstance(parameter, ReservedPolicy) else ReservedPolicy.KEEP
-    frontier_limit = parameter if isinstance(parameter, int) else 5
     manager = Manager(
         db_path,
         make_manager_spec(
@@ -52,7 +51,6 @@ def burst_manager(
                 "WEFT_TASK_MONITOR_ENABLED": "0",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
                 "WEFT_AUTOSTART_TASKS": "0",
-                "WEFT_SCHEDULER_MAX_FRONTIERS": str(frontier_limit),
             }
         ),
     )
@@ -460,11 +458,7 @@ def test_pending_recovery_replaces_deleted_reference_and_rejects_untrusted_row(
     assert state.pending_request_id is None
 
 
-@pytest.mark.parametrize(
-    "burst_manager,population",
-    [(100, 100), (200, 200), (300, 300)],
-    indirect=["burst_manager"],
-)
+@pytest.mark.parametrize("population", [100, 200, 300])
 def test_child_commit_reads_only_new_sentinel(
     burst_manager: Manager,
     population: int,

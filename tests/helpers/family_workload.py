@@ -42,7 +42,9 @@ def _family_event(
                     "root_tid": identity.root_tid,
                     "ancestry_tids": list(identity.ancestry_tids),
                     "context": identity.context,
-                    "frontier_limit": client.context.config["SCHEDULER_MAX_FRONTIERS"],
+                    "admission_max_connections": client.context.config[
+                        "ADMISSION_MAX_CONNECTIONS"
+                    ],
                     "connection_owner": identity.connection_owner,
                     **fields,
                 }

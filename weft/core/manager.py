@@ -608,9 +608,7 @@ class Manager(ServiceTask):
         )
         # A derived cache of existing task/Manager runtime evidence, not permits.
         self._scheduler_residents: dict[str, dict[str, Any]] = {}
-        self._family_scheduler = FamilyScheduler(
-            int(self._weft_config.get("SCHEDULER_MAX_FRONTIERS", 5))
-        )
+        self._family_scheduler = FamilyScheduler()
         self._scheduler_checkpoint_dirty = False
         self._scheduler_undurable: set[str] = set()
         self._family_index_retry_after = 0.0
@@ -1551,7 +1549,7 @@ class Manager(ServiceTask):
         )
 
     def _register_launched_frontier(self, identity: RuntimeIdentity) -> None:
-        """Late results preserve adopted paths and released background places [MF-5]."""
+        """Late results preserve adopted paths and released startup lineage [MF-5]."""
         evidence = self._scheduler_residents.get(identity.tid, {})
         if evidence.get("full") == identity.tid and (
             identity.scheduling_class != "finite"
@@ -2058,7 +2056,10 @@ class Manager(ServiceTask):
     def _admission_enabled(self) -> bool:
         """Return whether backend-specific admission is enabled."""
 
-        return self._admission_max_connections > 0
+        return (
+            self._admission_max_connections > 0
+            or self._admission_backend_name() == "postgres"
+        )
 
     def _admission_lane_for_queue(self, queue_name: str) -> AdmissionLane | None:
         """Map one Manager spawn source to its admission lane."""
@@ -2095,6 +2096,11 @@ class Manager(ServiceTask):
         if self._admission_backend_name() == "postgres":
             self._admission_observation.clear()
             try:
+                if self._admission_max_connections == 0:
+                    stats = self._read_postgres_connection_stats()
+                    self._admission_controller.set_max_connections(
+                        stats["max_connections"]
+                    )
                 usage = self._read_postgres_connection_usage()
                 self._admission_observation = {"observed": usage["total"]}
                 return usage["total"]
@@ -2771,6 +2777,13 @@ class Manager(ServiceTask):
             and time.time_ns() >= self._admission_retry_after_ns
         ):
             self._clear_admission_retry()
+
+    def _read_postgres_connection_stats(self) -> dict[str, int]:
+        """Read the current public backend ceiling on the existing Queue [SB-0.4]."""
+        # PostgreSQL is an optional backend on SQLite-only installations.
+        from simplebroker_pg import get_connection_stats
+
+        return get_connection_stats(self._get_connected_queue())
 
     def _read_postgres_connection_usage(self) -> ConnectionUsage:
         """Use the released coherent population, outside a caller transaction [SB-0.4]."""
@@ -4841,7 +4854,7 @@ class Manager(ServiceTask):
         return not self._stalled_control_retry_active(timestamp)
 
     def _queue_has_pending(self, queue: Queue) -> bool:
-        """Retained launch custody and full frontiers are not reactor work [MF-6]."""
+        """Retained launch custody does not create actionable reactor work [MF-6]."""
         name = getattr(queue, "name", None)
         if name == self._queue_names.get("ctrl_in"):
             return self._manager_control_pending_is_actionable()
@@ -5509,7 +5522,7 @@ class Manager(ServiceTask):
         self._family_candidate = None
 
     def _classify_family_requests(self) -> None:
-        """Advance bounded discovery even when admission/frontiers are closed [MF-6]."""
+        """Advance bounded discovery even when admission or custody gates close [MF-6]."""
         if (
             not self._admission_bootstrapped
             or time.monotonic() < self._family_index_retry_after

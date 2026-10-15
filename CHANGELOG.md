@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- Remove the five-family concurrency cap. Available measured capacity now
+  permits independent and sibling work while preserving child-first ordering.
+- PostgreSQL admission now defaults to its current `max_connections` minus the
+  global reserve and measured usage; a positive configured ceiling overrides
+  it. Remove `WEFT_SCHEDULER_MAX_FRONTIERS` before a coordinated process upgrade.
+
 ## [0.9.111] - 2026-10-14
 
 ### Changed

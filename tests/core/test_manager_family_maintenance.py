@@ -57,7 +57,6 @@ def manager(broker_env: BrokerEnv) -> Iterator[Manager]:
         config=load_config(
             {
                 "WEFT_ADMISSION_MAX_CONNECTIONS": 0,
-                "WEFT_SCHEDULER_MAX_FRONTIERS": 1,
                 "WEFT_TASK_MONITOR_ENABLED": False,
                 "WEFT_LIVENESS_MONITOR_ENABLED": False,
                 "WEFT_HEARTBEAT_ENABLED": False,
@@ -206,7 +205,7 @@ def test_valid_source_backed_hint_survives_restore_and_repair(
     manager._classify_family_requests()
     request = manager._family_scheduler.pending(request_id)
     assert request is not None
-    manager._family_scheduler = FamilyScheduler(1)
+    manager._family_scheduler = FamilyScheduler()
     with manager._get_connected_queue().get_connection() as broker:
         if restore:
             manager._restore_family_pending(broker)
@@ -526,9 +525,10 @@ def test_missing_launch_result_retains_finite_path_and_late_commit_is_idempotent
             else:
                 manager._refresh_scheduler_evidence()
         assert manager._family_scheduler.frontiers == ((str(parent_id),),)
-        source.write(request_body())
+        independent_id = int(source.write(request_body()))
         manager._classify_family_requests()
-        assert manager._peek_family_candidate() is None
+        independent = manager._peek_family_candidate()
+        assert independent is not None and independent.request_id == independent_id
         child_payload = json.loads(request_body())
         child_payload["submitted_by"] = submission_lineage(identity)
         child_id = int(source.write(json.dumps(child_payload)))
@@ -573,7 +573,7 @@ def test_consumed_primary_row_cannot_keep_a_cached_spawn_candidate(
     if operation == "fetch":
         assert manager._fetch_next_message(manager._queues[source.name]) is None
     else:
-        manager._family_scheduler = FamilyScheduler(1)
+        manager._family_scheduler = FamilyScheduler()
         with manager._get_connected_queue().get_connection() as broker:
             if operation == "restore":
                 manager._restore_family_pending(broker)

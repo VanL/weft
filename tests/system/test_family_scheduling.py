@@ -18,16 +18,15 @@ from weft.core.queue_wait import QueueChangeMonitor
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(180)]
 
 
-@pytest.fixture(params=[1, 5])
+@pytest.fixture(params=[6, 8])
 def family_harness(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[WeftTestHarness]:
+) -> Iterator[tuple[WeftTestHarness, int]]:
     """The public config controls both live Manager and inherited worker clients."""
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", str(request.param))
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         harness.ensure_foreground_manager()
-        yield harness
+        yield harness, int(request.param)
 
 
 def _events(harness: WeftTestHarness) -> list[dict[str, Any]]:
@@ -53,19 +52,15 @@ def _wait_events(
             monitor.wait(remaining)
 
 
-def test_early_rollup_exit_keeps_delayed_children_progressing_with_bounded_parallelism(
-    family_harness: WeftTestHarness,
+def test_entire_finite_family_and_its_leaves_overlap_beyond_five(
+    family_harness: tuple[WeftTestHarness, int],
 ) -> None:
-    """A retained branch can descend behind queued siblings; spare branches overlap.
+    """All input parents and leaves can overlap; no withheld sibling waves.
 
-    Gates make the preparation delay explicit. The whole fixture drains before
-    ordering and overlap assertions, so absence claims do not race live producers.
-    Admission is disabled here to isolate scheduling from resource accounting;
-    the PostgreSQL pressure tests exercise that separate gate with this workload.
+    Six/eight is the whole input, never an admission setting. Preparation and
+    leaf gates expose actual overlap before all peers are released together.
     """
-    harness = family_harness
-    limit = int(harness.context.config["SCHEDULER_MAX_FRONTIERS"])
-    count = limit + 4
+    harness, count = family_harness
     with WeftClient(context=harness.context) as client:
         rollup = client.submit(
             {
@@ -75,7 +70,7 @@ def test_early_rollup_exit_keeps_delayed_children_progressing_with_bounded_paral
                     "function_target": "tests.helpers.family_workload:family_rollup",
                 },
             },
-            payload={"count": count, "gated": True},
+            payload={"count": count, "gated": True, "leaf_gated": True},
         )
         harness.register_tid(rollup.tid)
         accepted = rollup.result(timeout=60.0)
@@ -84,24 +79,18 @@ def test_early_rollup_exit_keeps_delayed_children_progressing_with_bounded_paral
         tids = accepted.value
         for tid in tids:
             harness.register_tid(tid)
-        rows = _wait_events(harness, "enrichment_started", limit)
-        first_wave = [
-            row["index"] for row in rows if row["event"] == "enrichment_started"
-        ][:limit]
-        for index in first_wave:
+        _wait_events(harness, "enrichment_waiting", count)
+        for index in range(count):
             with harness.context.queue(
                 f"test.family.release.{index}", persistent=True
             ) as queue:
                 queue.write("ready-to-descend")
-        _wait_events(harness, "leaf_started", limit)
-        # Pre-fill later gates only after the first wave's descendants run. This
-        # proves preparation does not let siblings steal an occupied branch.
+        _wait_events(harness, "leaf_waiting", count)
         for index in range(count):
-            if index not in first_wave:
-                with harness.context.queue(
-                    f"test.family.release.{index}", persistent=True
-                ) as queue:
-                    queue.write("ready-to-descend")
+            with harness.context.queue(
+                f"test.family.leaf.release.{index}", persistent=True
+            ) as queue:
+                queue.write("complete")
         for tid in tids:
             result = client.task(tid).result(timeout=60.0)
             assert result.status == "completed", result.error
@@ -117,14 +106,13 @@ def test_early_rollup_exit_keeps_delayed_children_progressing_with_bounded_paral
             peak = max(peak, active)
         elif row["event"] == "enrichment_completed":
             active -= 1
-        assert active <= limit
     assert active == 0
-    assert peak == limit
+    assert peak == count
     first_leaf = next(i for i, row in enumerate(rows) if row["event"] == "leaf_started")
     assert (
-        sum(row["event"] == "enrichment_started" for row in rows[:first_leaf]) == limit
+        sum(row["event"] == "enrichment_started" for row in rows[:first_leaf]) == count
     )
-    assert all(row["frontier_limit"] == limit for row in rows)
+    assert all(row["admission_max_connections"] == 0 for row in rows)
     assert all(row["root_tid"] == rollup.tid for row in rows)
     leaves = [row for row in rows if row["event"] == "leaf_started"]
     assert len(leaves) == count

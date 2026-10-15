@@ -21,6 +21,7 @@ from simplebroker import BrokerTarget
 from tests.helpers.typing import BrokerEnv
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.test_task_execution import make_function_taskspec
+from weft._constants import resolve_runtime_config
 from weft.context import build_context, service_context_key
 from weft.core import runtime_identity as identity_module
 from weft.core.launcher import launch_task_process
@@ -54,9 +55,9 @@ def observe_runtime_identity(_payload: Any) -> str:
             "ancestry_tids": list(getattr(identity, "ancestry_tids", ())),
             "scheduling_class": getattr(identity, "scheduling_class", None),
             "connection_owner": getattr(identity, "connection_owner", None),
-            "frontier_limit": build_context(
+            "reserve_fraction": build_context(
                 create_dirs=False, create_database=False
-            ).config["SCHEDULER_MAX_FRONTIERS"],
+            ).config["ADMISSION_RESERVE_FRACTION"],
         }
     )
 
@@ -94,7 +95,10 @@ def test_spawned_function_receives_task_identity(
         Consumer,
         target,
         spec,
-        config={**dict(weft_harness.context.config), "SCHEDULER_MAX_FRONTIERS": 7},
+        config={
+            **dict(weft_harness.context.config),
+            "ADMISSION_RESERVE_FRACTION": 0.17,
+        },
         runtime_identity=lineage,
     )
     assert process.pid is not None
@@ -114,7 +118,7 @@ def test_spawned_function_receives_task_identity(
             "connection_owner": connection_owner_label(
                 unique_tid, service_context_key(weft_harness.context)
             ),
-            "frontier_limit": 7,
+            "reserve_fraction": 0.17,
         }
         mappings = [
             json.loads(body)
@@ -154,7 +158,9 @@ def test_agent_workers_receive_runtime_identity(
         backend_name=context.backend_name,
         broker_target=context.broker_target,
         context_root=str(context.root),
-        config=context.config,
+        config=resolve_runtime_config(
+            {**dict(context.config), "ADMISSION_RESERVE_FRACTION": 0.17}
+        ),
     )
     monkeypatch.setattr(identity_module, "_runtime_identity", identity)
     runner = HostTaskRunner(
@@ -197,7 +203,7 @@ def test_agent_workers_receive_runtime_identity(
         "ancestry_tids": [],
         "scheduling_class": "finite",
         "connection_owner": connection_owner_label(tid, identity.context),
-        "frontier_limit": context.config["SCHEDULER_MAX_FRONTIERS"],
+        "reserve_fraction": 0.17,
     }
 
 

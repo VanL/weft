@@ -1,4 +1,4 @@
-"""Real global PG pressure and bounded finite progress [MA-1.8], [SB-0.4]."""
+"""Real global PG pressure and whole finite-input progress [MA-1.8], [SB-0.4]."""
 
 from __future__ import annotations
 
@@ -214,7 +214,6 @@ def _pressure(harness: WeftTestHarness, owner: str | None) -> Iterator[Connectio
 def _calibrate_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise every known opening phase against the independently derived bound."""
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", "1")
     with WeftTestHarness(manager_timeout=120.0) as harness:
         harness.ensure_foreground_manager()
         with (
@@ -300,16 +299,19 @@ def _read_denial(
     )
 
 
-@pytest.mark.parametrize("frontiers", [1, 5])
+@pytest.mark.parametrize("count", [6, 8])
 def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    frontiers: int,
+    count: int,
     isolated_postgres_server: None,
     record_property: Callable[[str, Any], None],
 ) -> None:
     """Global used includes external owners and unlabeled clients; queued tasks do not.
 
+    The whole input fits its independently established topology envelope:
+    outside + four observer/Manager/holder process bounds + count complete path bounds
+    is at most C-R, below physical300. No runtime receives those bounds.
     Each case owns its physical server because schema isolation cannot bound
     unrelated pytest workers' global pressure. All pytest workers remain active;
     foreign labeled and unlabeled processes create real controlled server load.
@@ -323,7 +325,6 @@ def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
     monkeypatch.setenv("WEFT_ADMISSION_RESERVE_FRACTION", "0")
     monkeypatch.setenv("WEFT_MANAGER_SERVE_LOG_LEVEL", "info")
     _calibrate_fixture(monkeypatch)
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", str(frontiers))
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness(manager_timeout=240.0) as harness:
         with harness.context.queue(
@@ -332,8 +333,8 @@ def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
             outside = int(get_connection_usage(measurement)["total"])
             ceiling = (
                 outside
-                + 2 * FIXTURE_PROCESS_CONNECTION_BOUND
-                + frontiers * FIXTURE_PATH_CONNECTION_BOUND
+                + 4 * FIXTURE_PROCESS_CONNECTION_BOUND
+                + count * FIXTURE_PATH_CONNECTION_BOUND
                 + ADMISSION_SERVICE_RESERVE_SLOTS
             )
             assert ceiling <= int(get_connection_stats(measurement)["max_connections"])
@@ -355,7 +356,7 @@ def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
         assert harness.context.broker_target == original_target
         context = harness.context
         harness.ensure_foreground_manager()
-        owner = f"external-holder-{frontiers}"
+        owner = f"external-holder-{count}"
         with (
             _pressure(harness, owner),
             _pressure(harness, None) as unlabeled,
@@ -406,7 +407,7 @@ def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
                     },
                 },
                 payload={
-                    "count": 70,
+                    "count": count,
                     "gated": True,
                     "leaf_gated": True,
                     "measure_usage": True,
@@ -444,7 +445,7 @@ def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
             root_result = rollup.result(timeout=90.0)
             assert root_result.status == "completed", root_result.error
             tids = root_result.value
-            assert isinstance(tids, list) and len(tids) == 70
+            assert isinstance(tids, list) and len(tids) == count
             for tid in tids:
                 harness.register_tid(tid)
             _wait(
@@ -453,51 +454,36 @@ def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
                     sum(
                         row["event"] == "enrichment_waiting" for row in _events(harness)
                     )
-                    >= frontiers
+                    == count
                 ),
             )
-            first = [
-                row["index"]
-                for row in _events(harness)
-                if row["event"] == "enrichment_waiting"
-            ][:frontiers]
-            for index in first:
+            # The entire finite input is live before any preparation release.
+            # No pending sibling is withheld to simulate a concurrency bound.
+            for index in range(count):
                 _release(harness, "enrichment", index)
             _wait(
                 monitor,
                 lambda: (
                     sum(row["event"] == "leaf_waiting" for row in _events(harness))
-                    >= frontiers
+                    == count
                 ),
             )
-            assert source.peek_one() is not None
-            # The descendant lies behind >64 accepted siblings. Classifying
-            # only the next five/one page would trap these occupied paths.
-            for index in first:
+            assert not any(
+                row["event"] == "enrichment_completed" for row in _events(harness)
+            )
+            for index in range(count):
                 _release(harness, "leaf", index)
-            first_result = _collect_enrichment(harness, tids[first[0]], monitor)
-            assert first_result["value"] == f"leaf:{first[0]}"
-            assert source.peek_one() is not None
-            for index in range(70):
-                if index not in first:
-                    _release(harness, "enrichment", index)
-                    _release(harness, "leaf", index)
             completed_tids = {rollup.tid, *tids}
             for index, tid in enumerate(tids):
-                # Outbox collection consumes a result; reuse the first
-                # value already collected for the backlog progress oracle.
-                result = (
-                    first_result
-                    if index == first[0]
-                    else _collect_enrichment(harness, tid, monitor)
-                )
+                result = _collect_enrichment(harness, tid, monitor)
                 assert result["value"] == f"leaf:{index}"
                 harness.register_tid(result["child_tid"])
                 completed_tids.add(result["child_tid"])
             _require_task_completions(harness, completed_tids)
             rows = _events(harness)
-            assert sum(row["event"] == "leaf_started" for row in rows) == 70
+            assert sum(row["event"] == "leaf_started" for row in rows) == count
             assert all(row["root_tid"] == rollup.tid for row in rows)
+            assert all(row["admission_max_connections"] == ceiling for row in rows)
             assert all(
                 int(row["usage"]["by_owner"].get(row["connection_owner"], 0))
                 <= FIXTURE_TASK_CONNECTION_BOUND
@@ -532,16 +518,100 @@ def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
                 "family_progress_metrics",
                 json.dumps(
                     {
-                        "W": frontiers,
-                        "completed": 70,
+                        "input_count": count,
+                        "completed": count,
                         "configured_C": ceiling,
                         "public_limit": public_limit,
                         "saturation_U": saturated["total"],
                         "sampled_U_peak": sampled_total_peak,
                         "sampled_task_owner_peak": sampled_owner_peak,
-                        "topology_H": FIXTURE_PATH_CONNECTION_BOUND,
+                        "topology_complete_input_bound": count
+                        * FIXTURE_PATH_CONNECTION_BOUND,
                         "broker_elapsed_s": elapsed,
-                        "enrichments_per_s": 70 / elapsed,
+                        "enrichments_per_s": count / elapsed,
                     }
                 ),
             )
+
+
+@pytest.mark.parametrize("configured_ceiling", [None, 0])
+def test_native_postgres_ceiling_denies_real_pressure_and_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    configured_ceiling: int | None,
+    isolated_postgres_server: None,
+) -> None:
+    """Unset/zero uses native metadata; real external usage closes the same gate.
+
+    A large operating reserve makes saturation fit comfortably inside the
+    unchanged physical300. It changes reserve policy, never server capacity.
+    """
+    # Optional backend dependency: this module is PG-selected only.
+    from simplebroker_pg import get_connection_stats, get_connection_usage
+
+    if configured_ceiling is None:
+        monkeypatch.delenv("WEFT_ADMISSION_MAX_CONNECTIONS", raising=False)
+    else:
+        monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", str(configured_ceiling))
+    monkeypatch.setenv("WEFT_ADMISSION_RESERVE_FRACTION", "0.75")
+    with WeftTestHarness() as harness:
+        harness._context = build_context(
+            spec_context=harness.root,
+            config=resolve_runtime_config(
+                {
+                    **dict(harness.context.config),
+                    "MANAGER_SERVE_LOG_ACTIVE": True,
+                    "MANAGER_SERVE_LOG_LEVEL": "info",
+                }
+            ),
+        )
+        context = harness.context
+        assert context.config["ADMISSION_MAX_CONNECTIONS"] == 0
+        harness.ensure_foreground_manager()
+        with (
+            _pressure(harness, "native-external-holder"),
+            _pressure(harness, None) as unlabeled,
+            WeftClient(context=context) as client,
+            context.queue("test.family.measurement", persistent=True) as measurement,
+            context.queue(FAMILY_EVENTS, persistent=True) as events,
+            context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True) as source,
+            closing(QueueChangeMonitor([events, source])) as monitor,
+        ):
+            native_ceiling = int(get_connection_stats(measurement)["max_connections"])
+            assert native_ceiling == 300
+            public_limit = native_ceiling - int(native_ceiling * 0.75)
+            unlabeled.send(public_limit)
+            assert unlabeled.poll(30.0) and unlabeled.recv() == public_limit
+            assert get_connection_usage(measurement)["total"] >= public_limit
+            task = client.submit(
+                {
+                    "name": "native-pressure-leaf",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.helpers.family_workload:family_leaf",
+                    },
+                },
+                payload={"index": 1, "measure_usage": True},
+            )
+            harness.register_tid(task.tid)
+            diagnostics: list[dict[str, Any]] = []
+            _wait(monitor, lambda: _read_denial(capsys, public_limit, diagnostics))
+            denied = next(
+                row
+                for row in diagnostics
+                if row.get("event") == "admission_state"
+                and row.get("used", 0) >= public_limit
+            )
+            assert denied["internal_limit"] == native_ceiling
+            assert denied["public_limit"] == public_limit
+            assert denied["used"] == denied["observed"]
+            assert source.peek_one(exact_timestamp=int(task.tid)) is not None
+            assert not _events(harness)
+            unlabeled.send("release")
+            assert unlabeled.poll(30.0) and unlabeled.recv() == "released"
+            result = task.result(timeout=60.0)
+            assert result.status == "completed", result.error
+            assert result.value == "leaf:1"
+            rows = _events(harness)
+            assert len(rows) == 1
+            assert rows[0]["admission_max_connections"] == 0

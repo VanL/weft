@@ -40,19 +40,17 @@ def test_removed_connection_budget_is_an_actionable_configuration_error(
         load_config({"WEFT_ADMISSION_TASK_CONNECTION_BUDGET": value})
 
 
-@pytest.mark.parametrize("value", [0, -1, True, "0", "1.5", "bad"])
-def test_frontier_config_rejects_nonpositive_or_noninteger_bounds(
-    value: object,
+@pytest.mark.parametrize("origin", ["environment", "override"])
+@pytest.mark.parametrize("value", [1, 5, "bad"])
+def test_retired_frontier_setting_is_an_actionable_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, origin: str, value: object
 ) -> None:
-    with (
-        pytest.warns(UserWarning, match="SCHEDULER_MAX_FRONTIERS"),
-        pytest.raises((TypeError, ValueError), match="SCHEDULER_MAX_FRONTIERS"),
-    ):
-        load_config({"WEFT_SCHEDULER_MAX_FRONTIERS": value})
-
-
-@pytest.mark.parametrize("value", [1, 5, "7"])
-def test_frontier_config_accepts_positive_bounds(value: int | str) -> None:
-    assert load_config({"WEFT_SCHEDULER_MAX_FRONTIERS": value})[
-        "SCHEDULER_MAX_FRONTIERS"
-    ] == int(value)
+    """Both configuration boundaries reject the retired capacity policy."""
+    monkeypatch.delenv("WEFT_SCHEDULER_MAX_FRONTIERS", raising=False)
+    overrides: dict[str, object] = {}
+    if origin == "environment":
+        monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", str(value))
+    else:
+        overrides["WEFT_SCHEDULER_MAX_FRONTIERS"] = value
+    with pytest.raises(ValueError, match="WEFT_SCHEDULER_MAX_FRONTIERS.*removed"):
+        load_config(overrides)

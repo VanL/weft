@@ -2,7 +2,7 @@
 
 Status: draft
 Source specs: docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.2]; docs/specifications/02-TaskSpec.md [TS-1]; docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.8], [MA-2]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]; docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-4], [MF-5], [MF-6], [MF-6.1], [MF-6.2]; docs/specifications/07-System_Invariants.md [OBS.6], [MANAGER.9], [MANAGER.11], [MANAGER.18], [LIVENESS.R3], [LIVENESS.R4], [LIVENESS.R7], [QUEUE.7], [QUEUE.8], [IMPL.8], [IMPL.9]; docs/specifications/12-Pipeline_Composition_and_UX.md [PL-0.2]; docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-2]
-Superseded by: none
+Superseded by: [2026-10-15-work-conserving-family-scheduling.md](./2026-10-15-work-conserving-family-scheduling.md) for the frontier cap and cap-derived progress claims only; admission, lineage, custody, and notification-only watch remain in force
 
 Class: 5. Revises admission, scheduling, submission lineage, and runtime-state lifecycle contracts. Hardening applies to execution, recovery, queue contracts, and rollout.
 Plan type: implementation with spec revision. The user authorized implementation on 2026-10-14 after review. Production rollout remains a separately authorized operation.

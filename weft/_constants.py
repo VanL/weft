@@ -1816,13 +1816,10 @@ WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
 
 WEFT_ADMISSION_MAX_CONNECTIONS: Final[str] = "WEFT_ADMISSION_MAX_CONNECTIONS"
-"""Config key for the optional backend-specific admission maximum."""
+"""Config key for backend-specific admission capacity [MA-1.8]."""
 
 WEFT_ADMISSION_MAX_CONNECTIONS_DEFAULT: Final[int] = 0
-"""Default disabled backend-specific admission maximum."""
-
-WEFT_SCHEDULER_MAX_FRONTIERS_DEFAULT: Final[int] = 5
-"""Maximum simultaneously open finite ancestry branches per Manager [MA-1.8]."""
+"""Use native PostgreSQL capacity; disable the resource gate on SQLite [MA-1.8]."""
 
 WEFT_FAMILY_PENDING_PREFIX: Final[str] = "weft.state.labels."
 """Runtime consume-on-dispatch family index namespace [OBS.6b]."""
@@ -2231,7 +2228,7 @@ def _parse_manager_lifetime_timeout(value: str) -> float:
 
 
 def _parse_admission_max_connections(value: str) -> int:
-    """Parse the optional backend-specific admission maximum."""
+    """Parse capacity: zero selects native PostgreSQL capacity or SQLite off."""
 
     try:
         parsed = int(value)
@@ -2732,15 +2729,6 @@ WEFT_CONFIG_FIELDS: Final[Mapping[str, ConfigField]] = {
             parser=_parse_admission_max_connections,
         ),
     ),
-    "SCHEDULER_MAX_FRONTIERS": ConfigField(
-        WEFT_SCHEDULER_MAX_FRONTIERS_DEFAULT,
-        "a positive integer",
-        partial(
-            _normalize_integer_or_string_override,
-            "WEFT_SCHEDULER_MAX_FRONTIERS",
-            parser=partial(_parse_positive_int, name="WEFT_SCHEDULER_MAX_FRONTIERS"),
-        ),
-    ),
     "ADMISSION_RESERVE_FRACTION": ConfigField(
         WEFT_ADMISSION_RESERVE_FRACTION_DEFAULT,
         "a finite number satisfying 0 <= value < 1",
@@ -2928,7 +2916,8 @@ WEFT_CONFIG_DEFAULTS: Final[Mapping[str, ConfigField]] = {
     **WEFT_CONFIG_FIELDS,
 }
 REMOVED_WEFT_CONFIG: Final[Mapping[str, str]] = {
-    "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": "WEFT_ADMISSION_TASK_CONNECTION_BUDGET was removed; use measured admission and WEFT_SCHEDULER_MAX_FRONTIERS",
+    "WEFT_ADMISSION_TASK_CONNECTION_BUDGET": "WEFT_ADMISSION_TASK_CONNECTION_BUDGET was removed; use measured admission with WEFT_ADMISSION_MAX_CONNECTIONS and WEFT_ADMISSION_RESERVE_FRACTION",
+    "WEFT_SCHEDULER_MAX_FRONTIERS": "WEFT_SCHEDULER_MAX_FRONTIERS was removed; unset it and use measured admission with WEFT_ADMISSION_MAX_CONNECTIONS and WEFT_ADMISSION_RESERVE_FRACTION",
     "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED was removed; "
     "the collation store is always enabled; use "
     "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup",

@@ -651,9 +651,10 @@ Postgres, make sure its mode preserves the notification behavior required by
 `LISTEN`/`NOTIFY`; transaction-pooling modes that do not preserve listener
 state are not a substitute for listener headroom.
 
-Managers can delay new work before reservation. Set
-`WEFT_ADMISSION_MAX_CONNECTIONS` to a positive integer. Unset or `0` disables
-only the resource gate. `WEFT_ADMISSION_RESERVE_FRACTION` defaults to `0.1`.
+Managers delay new work before reservation when measured capacity is exhausted.
+On PostgreSQL, unset or `0` `WEFT_ADMISSION_MAX_CONNECTIONS` uses the backend
+`max_connections`; a positive value sets an explicit ceiling. On SQLite, unset
+or `0` disables the resource gate and positive values count live/unknown TIDs. `WEFT_ADMISSION_RESERVE_FRACTION` defaults to `0.1`.
 The effective reserve is the larger of the rounded-up fraction and four slots
 of internal operating room for Manager, TaskMonitor, LivenessMonitor, and
 Heartbeat (three with LivenessMonitor disabled). These are no dedicated permits.
@@ -664,8 +665,10 @@ External and unattributed connections remain counted. No task has an eight-slot
 charge or a future child-count declaration. Remove the old
 `WEFT_ADMISSION_TASK_CONNECTION_BUDGET` setting: it raises a configuration error.
 
-PostgreSQL reads one coherent total/by-owner observation through SimpleBroker's
-public `get_connection_usage()` on the existing Manager Queue. Owner labels
+In automatic mode PostgreSQL reads the current ceiling through SimpleBroker's
+public `get_connection_stats()` on each admission observation, then reads one
+coherent total/by-owner observation through public `get_connection_usage()` on
+the existing Manager Queue. Explicit positive ceilings skip the metadata read. Owner labels
 provide attribution, not discounts. SQLite retains its actual live/unknown TID
 accounting unioned with local launches. Failed observations defer new launches;
 accepted requests remain queued. Both backends are sampled soft guards, not
@@ -673,14 +676,14 @@ global connection leases. A task may open more connections after its first
 startup feedback, and outside clients may change pressure at any time.
 
 All ordinary submissions use `weft.spawn.requests`, including submissions from
-running tasks. `WEFT_SCHEDULER_MAX_FRONTIERS` is a positive integer, default `5`,
-that bounds open finite branches per Manager independently of resource admission.
-Independent families enter FIFO; active branches take round-robin turns and
-descend through newest eligible children. A task keeps its place while working
-before submitting a child. That child extends the same branch; a sibling needs
-a spare place. Persistent and interactive tasks release their startup place
+running tasks. Scheduling is work-conserving: active branches take round-robin
+turns and offer newest eligible tip children first. Without a ready tip child,
+the oldest independent family enters FIFO, followed by oldest unassigned sibling
+work from active families. Ancestry paths retain lineage, without limiting family
+concurrency. Persistent and interactive tasks release their startup lineage
 after startup feedback while their measured resource use remains counted.
 Trusted pipeline stage and edge bootstrap keeps its existing internal route.
+Remove `WEFT_SCHEDULER_MAX_FRONTIERS`: it raises an actionable configuration error.
 
 Lineage travels in runtime identity rather than application metadata. Rebuildable
 `weft.state.labels.<root_tid>.pending.<parent_tid>` queues index pending request
@@ -692,14 +695,19 @@ retained until validated task-snapshot handoff or positive settlement. Cleanup
 preserves that reservation/checkpoint pair, so a cold successor can adopt the
 live branch before admitting fresh roots.
 
-Finite independent-subtree workloads such as rollup → enrichment → LLM make
-progress when leaves terminate, descendant submission or completion occurs,
-broker maintenance succeeds fairly, and the resource envelope fits. If P bounds
-aggregate retained finite branches, H bounds one path's simultaneous sessions,
-and E/I/B bound external/internal/background use, a sufficient condition is
-`E + I + B + P * H <= maximum - reserve`. These are proof parameters, not
-reservations. Arbitrary cross-family waits, infinite work, permanent external
-saturation, or unbounded orphan accumulation have no such guarantee.
+Finite independent-subtree workloads such as rollup → enrichment → LLM can drain
+when leaves terminate, descendants are eventually submitted, broker maintenance
+is fair, and measured headroom eventually permits each required launch. Known
+descendants take priority over independent parent backlogs. Waiting parents
+still hold resources: ordering cannot guarantee progress if they consume all
+capacity before submitting children. There is no prospective path reservation
+or child-count declaration.
+
+For this change, remove the retired frontier setting before installing new code.
+Drain or quiesce and stop all old-code Managers, workers and clients that can
+initiate launches; start fresh processes after installation. Queued requests and
+checkpoint wire formats stay unchanged. Mixed in-memory code versions are not
+supported. See the [current implementation plan](docs/plans/2026-10-15-work-conserving-family-scheduling.md).
 
 Upgrade from 0.9.110 at a coordinated quiescence point: stop old producers and
 Managers, inventory exact source/reserved IDs, resolve launched or ambiguous
@@ -735,8 +743,9 @@ queued; it is not a request wait time. Fresh capacity opening all lanes ends
 an episode, as does a best-effort existing activity scan proving all configured
 spawn sources empty. Unobserved idle gaps retain history, so a later burst can inherit
 that age. Empty-source reset is silent; an `open` log requires observed capacity.
-SQLite retains its live-TID capacity model. Family classification and its
-frontier bound remain active with resource admission disabled.
+SQLite retains its live-TID capacity model. Family classification and launch
+custody remain active when its resource gate is disabled; that mode provides no
+implicit process-count bound.
 
 ### Task IDs (TIDs)
 
@@ -1431,10 +1440,9 @@ Environment variables:
 
 - `WEFT_ENV_FILE` - Bootstrap dotenv-style file loaded before full CLI import
 - `WEFT_MANAGER_LIFETIME_TIMEOUT` - Manager idle timeout (default: 600s)
-- `WEFT_ADMISSION_MAX_CONNECTIONS` - Optional backend-specific admission
-  maximum; unset or `0` disables it, and enabled values are positive integers
-- `WEFT_SCHEDULER_MAX_FRONTIERS` - Positive finite branch bound per Manager
-  (default: 5), independent of the resource gate
+- `WEFT_ADMISSION_MAX_CONNECTIONS` - PostgreSQL: unset or `0` uses the current
+  backend maximum; positive values override it. SQLite: unset or `0` disables
+  resource admission; positive values count actual live/unknown TIDs
 - `WEFT_ADMISSION_RESERVE_FRACTION` - Fraction withheld from public work;
   defaults to `0.1` and must be finite with `0 <= value < 1`; the effective
   reserve is never below four slots for Manager, TaskMonitor,

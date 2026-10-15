@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import threading
 import time
 from collections.abc import Callable
 from contextlib import closing
@@ -13,6 +14,7 @@ from typing import Any
 import psutil
 import pytest
 
+from simplebroker import Queue
 from tests.helpers.family_matrix import PostlaunchCheckpointFaultManager
 from tests.helpers.family_workload import FAMILY_EVENTS
 from tests.helpers.weft_harness import WeftTestHarness
@@ -116,11 +118,10 @@ def _empty_reservation(harness: WeftTestHarness, tid: str) -> bool:
         return queue.peek_one(include_claimed=True) is None
 
 
-def test_more_background_residents_than_window_recover_without_manager_checkpoint(
+def test_background_residents_recover_without_manager_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Three live backgrounds survive a cold W1 Manager and let finite work run."""
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", "1")
+    """Live backgrounds survive a cold Manager and let finite work run."""
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         process, manager_tid = _start(harness)
@@ -196,8 +197,7 @@ def test_more_background_residents_than_window_recover_without_manager_checkpoin
 def test_cold_chain_contracts_removed_intermediate_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R/A remain live when B exits; C's full ancestry reconstructs the W1 branch."""
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", "1")
+    """R/A remain live when B exits; C's full ancestry reconstructs the branch."""
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         process, manager_tid = _start(harness)
@@ -260,11 +260,10 @@ def test_cold_chain_contracts_removed_intermediate_snapshot(
             process.join(timeout=10.0)
 
 
-def test_public_pipelines_fill_window_and_internal_stages_descend(
+def test_public_pipelines_and_internal_stages_descend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two occupied public branches permit transparent stages and ordinary leaves."""
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", "2")
+    """Concurrent public pipelines retain transparent stages and ordinary leaves."""
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         tasks = harness.context.weft_dir / "tasks"
@@ -331,15 +330,10 @@ def test_public_pipelines_fill_window_and_internal_stages_descend(
             }
 
 
-def test_w1_sibling_rendezvous_is_stalled_outside_descendant_progress_assumption(
+def test_sibling_rendezvous_completes_with_measured_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A peer dependency is a stalled state, never reported as successful progress.
-
-    Neither peer is released or cancelled to obtain a completion assertion.
-    Harness teardown alone stops the still-live fixture and cleans its queues.
-    """
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", "1")
+    """Both peers launch and finish without a family-cap deadlock."""
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         harness.ensure_foreground_manager()
@@ -362,41 +356,30 @@ def test_w1_sibling_rendezvous_is_stalled_outside_descendant_progress_assumption
             assert len(peers) == 2
             for tid in peers:
                 harness.register_tid(tid)
-            rows = _wait(
-                harness,
-                lambda: (
-                    _events(harness)
-                    if any(r["event"] == "rendezvous_waiting" for r in _events(harness))
-                    else None
-                ),
-            )
-            waiter = next(r for r in rows if r["event"] == "rendezvous_waiting")
-            blocked = next(tid for tid in peers if tid != waiter["tid"])
-            with harness.context.queue(
-                "weft.spawn.requests", persistent=True
-            ) as source:
-                assert source.peek_one(exact_timestamp=int(blocked)) is not None
-                assert source.peek_one(exact_timestamp=int(waiter["tid"])) is None
-            snapshot = read_task_state_snapshot(harness.context, waiter["tid"])
-            assert snapshot is not None and snapshot[1]["terminal"] is False
-            with harness.context.queue(f"T{blocked}.outbox", persistent=True) as outbox:
-                assert outbox.peek_one() is None
-            with harness.context.queue(
-                f"test.sibling.ready.{1 - waiter['index']}", persistent=True
-            ) as readiness:
-                assert readiness.peek_one() is None
+            for tid in peers:
+                peer = client.task(tid).result(timeout=60.0)
+                assert peer.status == "completed", peer.error
+                assert peer.value == "rendezvous-completed"
+                with harness.context.queue(
+                    "weft.spawn.requests", persistent=True
+                ) as source:
+                    assert source.peek_one(exact_timestamp=int(tid)) is None
+            waiting = [
+                row for row in _events(harness) if row["event"] == "rendezvous_waiting"
+            ]
+            assert {row["tid"] for row in waiting} == set(peers)
+            assert {row["index"] for row in waiting} == {0, 1}
 
 
 def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live orphan lacking durable process identity cannot release its W1 place.
+    """Unknown post-spawn process custody blocks ordinary work without a family cap.
 
     Fault only the publication boundary after actual process creation. The
     successor must retain uncertainty; teardown alone stops fixture processes.
     No release, cancellation, or timeout obtains a claimed successful drain.
     """
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", "1")
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         process, old_tid = _start(harness, PostlaunchCheckpointFaultManager)
@@ -460,6 +443,33 @@ def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_r
                 assert not recovered["scheduler_frontiers"]["residents"][
                     parent.tid
                 ].get("host_processes")
+                successor_task = next(
+                    manager
+                    for manager, _thread, _stop in harness._inline_managers
+                    if manager.tid == successor_tid
+                )
+                target_request_id: int | None = None
+                considered = threading.Event()
+                readiness: list[bool] = []
+                original_pending = successor_task._queue_has_pending
+
+                def observe_primary_gate(queue: Queue) -> bool:
+                    ready = original_pending(queue)
+                    if (
+                        queue.name == successor_task._queue_names["inbox"]
+                        and target_request_id is not None
+                        and successor_task._family_scheduler.pending(target_request_id)
+                        is not None
+                    ):
+                        readiness.append(ready)
+                        considered.set()
+                    return ready
+
+                # Observe the real owner's eligibility decision, not merely
+                # publication earlier in a turn that may not dispatch yet.
+                monkeypatch.setattr(
+                    successor_task, "_queue_has_pending", observe_primary_gate
+                )
                 independent = client.submit(
                     {
                         "name": "must-remain-pending",
@@ -471,12 +481,18 @@ def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_r
                     payload={"index": 100},
                 )
                 harness.register_tid(independent.tid)
+                target_request_id = int(independent.tid)
+                assert considered.wait(timeout=60.0), (
+                    "successor did not consider request"
+                )
+                assert readiness and not any(readiness), (
+                    "unknown custody permitted dispatch"
+                )
                 with harness.context.queue(
                     "weft.spawn.requests", persistent=True
                 ) as source:
                     assert (
-                        source.peek_one(exact_timestamp=int(independent.tid))
-                        is not None
+                        source.peek_one(exact_timestamp=target_request_id) is not None
                     )
                     assert source.peek_one(exact_timestamp=int(parent.tid)) is None
                 with harness.context.queue(

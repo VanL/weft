@@ -156,16 +156,13 @@ class _Resident:
 
 
 class FamilyScheduler:
-    """Bounded FIFO family entry, round-robin branches and LIFO descent.
+    """Work-conserving FIFO family entry, round-robin branches and LIFO descent.
 
     Spec: [MA-1.8]. Only the caller can declare a resident positively exited.
     No method performs broker I/O or infers death from a missing observation.
     """
 
-    def __init__(self, max_frontiers: int) -> None:
-        if type(max_frontiers) is not int or max_frontiers <= 0:
-            raise ValueError("max_frontiers must be a positive integer")
-        self.max_frontiers = max_frontiers
+    def __init__(self) -> None:
         self._pending: dict[int, PendingRequest] = {}
         self._parents: dict[str, _PendingIndex] = {}
         self._family_pending: dict[str, _FamilyPending] = {}
@@ -264,12 +261,10 @@ class FamilyScheduler:
             if candidate is not None:
                 self._turn = (index + 1) % count
                 return candidate
-        if count >= self.max_frontiers:
-            return None
         candidate = self._oldest_independent()
         if candidate is not None:
             return candidate
-        # At most W resident frontiers supply sibling-borrow candidates.
+        # Live paths supply sibling candidates when no independent family waits.
         for offset in range(count):
             index = (self._turn + offset) % count
             root = self._residents[self._stacks[index][-1]].root_tid
@@ -283,7 +278,7 @@ class FamilyScheduler:
     def launched(
         self, request: PendingRequest, scheduling_class: SchedulingClass = "finite"
     ) -> None:
-        """Register a successful launch; background retains its startup place."""
+        """Register a successful launch; background retains its startup lineage."""
         if scheduling_class == "internal":
             return
         tid = str(request.request_id)
@@ -304,9 +299,6 @@ class FamilyScheduler:
             if parent is not None and stack[-1] == parent:
                 stack.append(tid)
                 return
-        if len(self._stacks) >= self.max_frontiers:
-            self._residents.pop(tid)
-            raise ValueError("launch requires a spare frontier")
         self._stacks.append([*path, tid])
 
     def release_background(self, tid: str) -> None:

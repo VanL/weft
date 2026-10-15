@@ -1547,3 +1547,21 @@ broker-reading helper worker violates the worker boundary and duplicates the
 wake arbiter. Register before reading and retain interest after rejected
 publication; a retained unchanged row is not recurring work. See [MA-1.8](specifications/03-Manager_Architecture.md) and the
 [measured admission plan](plans/2026-10-14-measured-admission-family-scheduling.md).
+
+## 2026-10-15: Scheduling order must not become a second resource ceiling
+
+The five-frontier setting survived a discarded lookahead-reservation design and
+withheld the sixth eligible family while measured admission reported ample room.
+Keep capacity and order separate: measured `C - R - U` decides whether a launch
+fits, while child-first/RR/FIFO family selection decides which request to offer.
+Ancestry checkpoints preserve lineage and custody, never concurrency permits.
+On PostgreSQL, unset capacity must use the public backend maximum rather than
+silently bypassing the gate. Refreshing C must preserve drain-wait history.
+
+A gated workload that counts on a hidden concurrency cap is not an independent
+progress proof. Use a complete finite input whose whole fixture topology fits
+measured headroom; release all preparation and leaf gates without dispatch waves.
+Waiting parents still retain resources, so arbitrary future descendants have no
+unconditional progress guarantee. See the [plan](plans/2026-10-15-work-conserving-family-scheduling.md),
+[MA-1.8](specifications/03-Manager_Architecture.md), and
+`tests/system/test_measured_admission_pg.py`.

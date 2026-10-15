@@ -76,7 +76,7 @@ def sibling_rendezvous_root(_payload: dict[str, Any]) -> list[str]:
 
 
 def sibling_rendezvous(payload: dict[str, Any]) -> str:
-    """An honest cross-branch dependency exceeds the W1 progress assumptions."""
+    """Two sibling branches must both start before either can complete."""
     index = int(payload["index"])
     with connect() as client:
         with client.context.queue(

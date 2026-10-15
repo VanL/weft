@@ -755,7 +755,7 @@ class TestLoadConfig:
             config = load_config()
             assert config["LIVENESS_MONITOR_ENABLED"] is True
 
-    def test_admission_config_defaults_are_disabled(self) -> None:
+    def test_admission_config_defaults_select_backend_policy(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             config = load_config()
 

@@ -80,7 +80,6 @@ def test_missing_snapshot_crash_preserves_custody_and_descendant_progress(
     monkeypatch: pytest.MonkeyPatch, background: bool
 ) -> None:
     """A real orphan survives eligible cleanup and cold admission without replay."""
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", "1")
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         context = harness.context
@@ -311,7 +310,6 @@ def test_reservation_before_checkpoint_crash_requeues_exact_request_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Actual reservation survives an interrupted mandatory publication fence."""
-    monkeypatch.setenv("WEFT_SCHEDULER_MAX_FRONTIERS", "1")
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         context = harness.context

@@ -91,6 +91,11 @@ class AdmissionController:
         self._last_progress: float | None = None
         self._lowest_usage: int | None = None
 
+    def set_max_connections(self, max_connections: int) -> None:
+        """Update backend capacity without resetting drain history [MA-1.8]."""
+
+        self._max_connections = max_connections
+
     def evaluate(
         self, *, used: int | None, backend: str, now: float
     ) -> AdmissionDecision:

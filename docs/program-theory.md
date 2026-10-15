@@ -155,10 +155,10 @@ of SimpleBroker queues and OS processes:
      process creation (`available = ceiling - reserve - measured_usage`) with
      non-blocking startup feedback, while queue-first submission remains
      unbounded and free of process/connection charges.
-   - *Nested parent/child progress under finite capacity* is **bounded
-     depth-first scheduling with work sharing** (FIFO across independent
-     families, round-robin across $W$ active branch frontiers, LIFO descent
-     along a frontier tip's children, and spare-frontier sibling stealing),
+   - *Nested parent/child scheduling under finite capacity* is **work-conserving
+     depth-first preference with work sharing** (FIFO across independent
+     families, round-robin across active ancestry paths, LIFO descent along a
+     tip's children, and oldest-sibling sharing),
      backed by consume-on-dispatch per-parent pending queues.
    - *Crash-safe launch handoff* is **two-phase reservation custody** between
      `T{manager}.reserved` and `weft.state.tasks.<manager_tid>` until
@@ -191,15 +191,15 @@ of SimpleBroker queues and OS processes:
 | TaskSpec | Frozen execution specification (`spec`, `io`) plus forward-only runtime state (`state`) | The resolution and task lifecycle path | `02-TaskSpec.md` [TS-1]; IMMUT.1, IMMUT.2 |
 | Lifecycle state | Forward-only state machine (`created` → `spawning` → `running` → terminal) | The task that publishes the transition | `07-System_Invariants.md` STATE.1, STATE.2 |
 | Manager | A task that classifies requests, enforces measured admission and branch frontiers, reserves and spawns children, and reaps exits | The Manager process | `03-Manager_Architecture.md` [MA-1], [MA-1.8], [MA-3] |
-| Branch frontier | One of $W$ bounded Manager places for progressing an active finite ancestry branch depth-first (LIFO descent, FIFO root admission) | The Manager process (checkpointed in `weft.state.tasks.<manager_tid>`) | `03-Manager_Architecture.md` [MA-1.8]; `2026-10-14-measured-admission-family-scheduling.md` (draft) |
-| Pending family bucket | Consume-on-dispatch queue `weft.state.labels.<root_tid>.pending.<parent_tid>` indexing accepted child requests by parent; auto-disappears when emptied | The Manager process | `05-Message_Flow_and_State.md` [MF-5]; `2026-10-14-measured-admission-family-scheduling.md` (draft) |
+| Branch frontier | A live finite ancestry path retained for child-first scheduling, without a family concurrency permit (LIFO descent, FIFO root entry) | The Manager process (checkpointed in `weft.state.tasks.<manager_tid>`) | `03-Manager_Architecture.md` [MA-1.8]; `2026-10-15-work-conserving-family-scheduling.md` |
+| Pending family bucket | Consume-on-dispatch queue `weft.state.labels.<root_tid>.pending.<parent_tid>` indexing accepted child requests by parent; auto-disappears when emptied | The Manager process | `05-Message_Flow_and_State.md` [MF-5]; `2026-10-15-work-conserving-family-scheduling.md` |
 | Reactor and wake arbiter | Single wait point (`PollingStrategy`) per task over a closed set of queue, event, and deadline inputs | The task driver thread | [CC-2.2.1]; `07-System_Invariants.md` IMPL.8 to IMPL.11 |
 | Source adapter | Dedicated helper thread that owns one blocking OS or worker wait and wakes the reactor with one immutable result | The task that created it | [CC-2.2.1]; `2026-09-17-watcher-reactor-restoration-plan.md` |
 | Control message | A request row on `T{target}.ctrl_in`; replies are pushed to the requester's own `T{requester}.ctrl_in` (`reply_to`) | The task reading `ctrl_in` | `05-Message_Flow_and_State.md` [MF-3]; `2026-09-18-event-routed-manager-pong-plan.md` |
 | Completion fact | One serialized terminal record published atomically to `weft.log.tasks` and `T{tid}.ctrl_out` | The completing task | [MF-3], [MF-5]; `07-System_Invariants.md` OBS.1 |
 | Runtime-state queue | `weft.state.*` ephemeral operational state (excluded from dumps, read via peek-latest; `weft.state.tasks.*` deleted only by `LivenessMonitor`) | The publishing task or service; `LivenessMonitor` for task-state deletion | `07-System_Invariants.md` OBS.6, LIVENESS.R3; `05-Message_Flow_and_State.md` [MF-5] |
 | Broker session | Process-local lease over shared backend runner/pool resources with single-thread caller cache | The task or command that opened it | `04-SimpleBroker_Integration.md` [SB-0.4]; `01-Core_Components.md` [CC-2.2.1] |
-| Admission | Measured gate on process creation (`available = C - R - U`), never on queue-first submission | The Manager | `03-Manager_Architecture.md` [MA-1.8]; `2026-10-14-measured-admission-family-scheduling.md` (draft) |
+| Admission | Measured gate on process creation (`available = C - R - U`), never on queue-first submission | The Manager | `03-Manager_Architecture.md` [MA-1.8]; `2026-10-15-work-conserving-family-scheduling.md` |
 | Evidence | Queue row, scoped `(pid, create_time)` process identity, or runtime handle supporting a liveness or custody claim | The reader classifying it under liveness policy | [MF-5]; `07-System_Invariants.md` LIVENESS.R3–R7 |
 
 ## Design principles [WT-4]
@@ -223,7 +223,7 @@ engineering rule.
 
 | Principle | Design consequence | Evidence | Contract |
 |-----------|--------------------|----------|----------|
-| Classical CS models over blunt ad-hoc fixes | Start from the well-studied CS formulation (reactor demultiplexing, bounded DFS/work-sharing, measured admission control, two-phase custody handoff) and realize it with existing primitives rather than inventing lanes, heuristics, or magic budgets. | Owner, 2026-10-14 | [MA-1.8]; `2026-10-14` family scheduling plan |
+| Classical CS models over blunt ad-hoc fixes | Start from the well-studied CS formulation (reactor demultiplexing, work-conserving DFS/work-sharing, measured admission control, two-phase custody handoff) and realize it with existing primitives rather than inventing lanes, heuristics, or magic budgets. | Owner, 2026-10-14 | [MA-1.8]; `2026-10-14` family scheduling plan |
 | Queued work costs nothing; live processes cost | Submission is always queue-first and unblocked. Admission gates process creation using measured pressure (`C - R - U`), never prospective per-task connection debt or predeclared child counts. | Owner, 2026-10-14: "Tasks sitting waiting to be spawned do not consume processes. Only live processes do" | [MF-1]; [MA-1.8] |
 | Use the primitives you have | Compose labels, bounded queues, FIFO/LIFO reads, atomic exact-ID moves, and `weft.state.tasks.*` snapshots before proposing new infrastructure. | Owner, 2026-10-14; 2026-09-17: "We already have the primitives we need in the multiqueue watcher" | [SB-0.1], [SB-0.4] |
 | Push a concern down when it belongs lower | Connection attribution belongs in SimpleBroker because SimpleBroker opens connections; admission and scheduling policy belong in Weft. SimpleBroker never depends on Weft. | Owner, 2026-10-06, 2026-10-13, 2026-09-17 | [SB-0.4] |
@@ -297,22 +297,20 @@ alternative. An agent must not propose the alternative again unless the
   connections it never opened. The owner, 2026-10-14: "this creates a special
   case when we really should not have one. What we need is better admission
   control over our existing primary lane, not adding a new lane."
-- Current consequence: The decision is made; implementation is specified in the
-  draft plan below. Release 0.9.110 still ships `weft.spawn.children`
-  (`weft/_constants.py`, `WEFT_CHILD_SPAWN_REQUESTS_QUEUE`) and budget
-  arithmetic. The target state keeps all ordinary work on `weft.spawn.requests`,
-  uses measured admission (`available = ceiling - reserve - measured_usage`),
-  tracks detached lineage in `weft.state.tasks.<tid>`, indexes pending children
-  in consume-on-dispatch `weft.state.labels.<root_tid>.pending.<parent_tid>`
-  queues, and schedules up to $W$ active branch frontiers depth-first (FIFO
-  roots, round-robin frontiers, LIFO child descent, spare-frontier sibling
-  stealing).
+- Current consequence: All ordinary work uses `weft.spawn.requests`, with
+  measured admission (`available = ceiling - reserve - measured_usage`), detached
+  lineage in `weft.state.tasks.<tid>`, and consume-on-dispatch pending queues in
+  `weft.state.labels.<root_tid>.pending.<parent_tid>`. Active paths offer newest
+  tip children first; independent families enter FIFO and sibling work may start
+  another path. The owner rejected the replacement's five-path cap on
+  2026-10-15 because it withheld work despite ample measured capacity.
 - Reconsider when: Never as a second public lane or guessed per-task connection
-  charge. Reconsider the frontier selection rule if measured admission and
-  bounded DFS cannot keep a known finite workload in progress under its stated
-  resource envelope.
+  charge. If waiting parents exhaust capacity before descendants are submitted,
+  investigate resource lifetime and scheduling evidence. Ordering alone cannot
+  release their connections; do not silently reinstate a family cap.
 - Evidence: `2026-10-13-connection-aware-child-admission-plan.md` (superseded);
-  `2026-10-14-measured-admission-family-scheduling.md`.
+  `2026-10-14-measured-admission-family-scheduling.md`;
+  `2026-10-15-work-conserving-family-scheduling.md`.
 
 ### [ALT-WT-002] Fixed polling caps as a fallback
 
@@ -643,7 +641,7 @@ alternative. An agent must not propose the alternative again unless the
   admission backpressure, event demultiplexing, custody handoff) or mapped it
   onto Weft's existing queue and process primitives.
 - **Simplicity against ambition:** Weft adds agent runtimes, restricted
-  runners, pipelines, and bounded family scheduling. Each addition must still
+  runners, pipelines, and work-conserving family scheduling. Each addition must still
   compose as tasks and queues. If a feature requires a second control plane or
   a sidecar database, the theory or the feature is wrong.
 - **Event-driven against absence:** Timers exist only for clock work or for
@@ -651,8 +649,11 @@ alternative. An agent must not propose the alternative again unless the
   timer must answer: *which event cannot arrive, and why?*
 - **Measured admission is a soft guard:** PostgreSQL enforces its own server
   and role connection limits, and external clients share the server. The theory
-  does not promise exact per-task connection forecasting; it bounds active
-  branches ($W$) and measures real pressure ($U$).
+  does not promise exact per-task connection forecasting. It measures real
+  pressure ($U$) against the backend ceiling minus a global reserve, without a
+  separate family cap. On PostgreSQL, automatic native capacity is the default.
+  Waiting parents retain connections, so arbitrary delayed descendants have no
+  unconditional progress guarantee.
 - **Embedder friction as a missing-seam signal:** Repeated use of private
   internals by an embedder (`engram`, `taut`, `weft_django`) is evidence that a
   public capability seam is missing, not evidence that the embedder is wrong.
@@ -678,7 +679,7 @@ application of that line.
 | Everything is a task | "Everything is a Task" | Still the first rule | Agents, pipelines, services, and short-lived requesters are tasks too |
 | Queues carry facts; consumed queues disappear | "State lives in queues, not databases" | Still the only durable record | Runtime-state queues (`weft.state.tasks.*`) hold detached process/lineage snapshots deleted by `LivenessMonitor`; pending family queues (`weft.state.labels.*.pending.*`) are consumed on dispatch so they vanish automatically; completion facts broadcast to `ctrl_out` |
 | Specs are the contract | "The specs are the source of truth. Code must align to them." | Still the contract | The theory now sits above the specs for design judgment; a wrong spec changes |
-| Small observable substrate | "the durable task substrate for agent systems" (`CLAUDE.md`) | Still the product boundary | Measured admission, bounded branch frontiers, labels, and sessions were added as classical algorithms over existing primitives without a second control plane |
+| Small observable substrate | "the durable task substrate for agent systems" (`CLAUDE.md`) | Still the product boundary | Measured admission, ancestry scheduling, labels, and sessions were added as classical algorithms over existing primitives without a second control plane |
 
 ## Revisions [WT-9]
 
@@ -723,14 +724,16 @@ evidence of why the theory evolved rather than a competing model.
     `[MF-3]`, `[MF-5]` and `docs/specifications/07-System_Invariants.md` `OBS.1`
   - owner-recalled: owner session 2026-10-09
 
-### [REV-WT-003] Measured admission and bounded depth-first family scheduling replaced child lanes and prospective connection budgets
+### [REV-WT-003] Measured admission and work-conserving family scheduling replaced child lanes and prospective connection budgets
 
 - Current account: All ordinary root and child submissions enter
   `weft.spawn.requests` with zero prospective connection charge while queued.
   The Manager gates process creation on measured capacity
-  (`available = C - R - U`) and schedules up to $W$ active branch frontiers
-  depth-first (FIFO across roots, round-robin across active frontiers, LIFO
-  descent along a frontier tip's children, spare-frontier sibling stealing).
+  (`available = C - R - U`), using the backend maximum by default on PostgreSQL.
+  Active paths offer newest tip children first, followed by FIFO independent
+  families and oldest unassigned siblings. Round-robin path turns provide work
+  sharing without a family-count cap. Progress requires eventual real headroom
+  for each necessary launch, since waiting parents can retain resources.
   Detached running task lineage (`root_tid`, `submitter_tid`, `ancestry_tids`,
   `scheduling_class`) lives in `weft.state.tasks.<tid>` (protected before
   handoff by `T{manager}.reserved` + `weft.state.tasks.<manager_tid>`), while
@@ -749,8 +752,10 @@ evidence of why the theory evolved rather than a competing model.
   accounted connections to 267 against 130 actual sessions. Subsequent
   architectural review showed that unconsumed `weft.state.labels.<root_tid>`
   event logs defeated SimpleBroker's auto-disappearing queues and duplicated
-  `weft.state.tasks.*`.
+  `weft.state.tasks.*`. The replacement initially retained five active paths,
+  but that cap left resource capacity idle. The owner removed it on 2026-10-15.
 - Evidence:
+  - current correction: `docs/plans/2026-10-15-work-conserving-family-scheduling.md`
   - contemporaneous: `docs/plans/2026-10-14-measured-admission-family-scheduling.md`
     (draft, superseding `docs/plans/2026-10-13-connection-aware-child-admission-plan.md`)
   - owner-recalled: owner session 2026-10-14 on classical queuing/scheduling
